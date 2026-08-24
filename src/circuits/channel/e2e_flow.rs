@@ -169,6 +169,7 @@ fn channel_record(
         delegate_count: 0,
         member_pk_gs: pad_hashes(&active_member_pubkey_hashes),
         member_pubkeys_root: bytes32_word(100 + channel_id.as_u64() as u32),
+        set_version: 0,
         bp_member_slot,
         special_close_penalty: U256::from(9u32),
         close_freeze_nonce: 0,

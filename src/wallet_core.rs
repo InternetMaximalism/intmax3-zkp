@@ -922,6 +922,10 @@ pub fn build_record(
         delegate_count,
         member_pk_gs: hashes,
         member_pubkeys_root: Bytes32::default(),
+        // §Q: build_record constructs the set at ITS CURRENT composition; the caller that applies
+        // a MemberSetUpdate (or preserves an existing record's version, e.g. delegate join) is
+        // responsible for carrying `set_version` forward — see `advance_member_set`.
+        set_version: 0,
         bp_member_slot,
         special_close_penalty: U256::from(0u32),
         close_freeze_nonce: 0,
@@ -3107,6 +3111,488 @@ pub fn verify_aggregate_manifest(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// detail2 §Q — dynamic co-signer membership: AddCosigner / RotateKey (stage Q1, channel layer)
+// ---------------------------------------------------------------------------------------------
+
+use crate::common::channel::{hash_words, split_u64};
+use crate::constants::MAX_COSIGNERS;
+
+/// The REGISTERED co-signer root (16-slot `MemberTree`, the tree the validity circuit freezes in
+/// `ChannelLeaf.member_pubkeys_root`): slots `0..member_count` from the authenticated member list.
+/// Distinct from the wallet-tree `record.member_pubkeys_root` (1024 slots, cosigners + delegates).
+pub fn registered_cosigner_root(
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+) -> WResult<Bytes32> {
+    let mut tree = MemberTree::init();
+    for slot in 0..record.member_count as usize {
+        let m = member_at(members, slot)?;
+        if m.pk_g != record.member_pk_gs[slot] {
+            return bail(format!(
+                "registered_cosigner_root: member list slot {slot} does not match the record"
+            ));
+        }
+        tree.push(MemberLeaf {
+            pk_g: m.pk_g.reduce_to_hash_out(),
+            pk_b: m.pk_b.reduce_to_hash_out(),
+            regev_pk_digest: PoseidonHashOut::from(m.regev_pk.poseidon_digest()),
+        });
+    }
+    Ok(Bytes32::from(tree.get_root()))
+}
+
+/// detail2 §Q-1 `MemberSetOp`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemberSetOp {
+    /// New co-signer at slot == prev member_count (left-packed prefix preserved; delegates shift
+    /// up by one slot, §Q-4b — the state-row shift happens at apply).
+    AddCosigner {
+        pk_g: Bytes32,
+        pk_b: Bytes32,
+        regev_pk: RegevPk,
+        recipient: Address,
+        /// IMJC joiner consent, signed by the NEW Falcon key.
+        consent_sig: Vec<u8>,
+    },
+    /// Replace the SIGNING identity at `slot`; the Regev key (and thus every balance ciphertext)
+    /// is preserved.
+    RotateKey {
+        slot: u8,
+        new_pk_g: Bytes32,
+        new_pk_b: Bytes32,
+        /// IMKR self-consent, signed by the slot's CURRENT Falcon key.
+        self_sig: Vec<u8>,
+    },
+}
+
+impl MemberSetOp {
+    /// Canonical op digest folded into the IMMS preimage.
+    fn digest(&self) -> Bytes32 {
+        match self {
+            MemberSetOp::AddCosigner { pk_g, pk_b, regev_pk, recipient, .. } => hash_words(
+                &[
+                    vec![1u32],
+                    pk_g.to_u32_vec(),
+                    pk_b.to_u32_vec(),
+                    Bytes32::from(regev_pk.poseidon_digest()).to_u32_vec(),
+                    recipient.to_u32_vec(),
+                ]
+                .concat(),
+            ),
+            MemberSetOp::RotateKey { slot, new_pk_g, new_pk_b, .. } => hash_words(
+                &[
+                    vec![2u32, *slot as u32],
+                    new_pk_g.to_u32_vec(),
+                    new_pk_b.to_u32_vec(),
+                ]
+                .concat(),
+            ),
+        }
+    }
+}
+
+/// detail2 §Q-1 `MemberSetUpdate` — the one canonical object all three layers verify.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberSetUpdate {
+    pub channel_id: ChannelId,
+    /// Strictly `trusted.set_version + 1`.
+    pub set_version: u64,
+    /// REGISTERED co-signer root before the update (16-slot tree).
+    pub prev_member_root: Bytes32,
+    /// After.
+    pub new_member_root: Bytes32,
+    pub op: MemberSetOp,
+    /// N-of-N of the PREVIOUS set over the IMMS digest.
+    pub member_signatures: Vec<MemberSignature>,
+}
+
+impl MemberSetUpdate {
+    /// IMMS digest — what the previous set's N-of-N signs. Consent sigs are excluded (they sign
+    /// their own IMKR/IMJC digests; including them here would make the N-of-N target depend on
+    /// signature bytes).
+    pub fn signing_digest(&self) -> Bytes32 {
+        hash_words(
+            &[
+                vec![crate::constants::MEMBER_SET_UPDATE_DOMAIN],
+                self.channel_id.to_u32_vec(),
+                split_u64(self.set_version),
+                self.prev_member_root.to_u32_vec(),
+                self.new_member_root.to_u32_vec(),
+                self.op.digest().to_u32_vec(),
+            ]
+            .concat(),
+        )
+    }
+
+    /// IMKR digest for a RotateKey op (what the slot's CURRENT key must have signed).
+    pub fn rotation_consent_digest(
+        &self,
+        slot: u8,
+        old_pk_g: Bytes32,
+        new_pk_g: Bytes32,
+        new_pk_b: Bytes32,
+    ) -> Bytes32 {
+        hash_words(
+            &[
+                vec![crate::constants::KEY_ROTATION_CONSENT_DOMAIN],
+                self.channel_id.to_u32_vec(),
+                split_u64(self.set_version),
+                vec![slot as u32],
+                old_pk_g.to_u32_vec(),
+                new_pk_g.to_u32_vec(),
+                new_pk_b.to_u32_vec(),
+                self.prev_member_root.to_u32_vec(),
+            ]
+            .concat(),
+        )
+    }
+
+    /// IMJC digest for an AddCosigner op (what the NEW key must have signed).
+    pub fn joiner_consent_digest(
+        &self,
+        pk_g: Bytes32,
+        pk_b: Bytes32,
+        regev_pk_digest: Bytes32,
+        recipient: Address,
+    ) -> Bytes32 {
+        hash_words(
+            &[
+                vec![crate::constants::JOINER_CONSENT_DOMAIN],
+                self.channel_id.to_u32_vec(),
+                split_u64(self.set_version),
+                pk_g.to_u32_vec(),
+                pk_b.to_u32_vec(),
+                regev_pk_digest.to_u32_vec(),
+                recipient.to_u32_vec(),
+                self.prev_member_root.to_u32_vec(),
+            ]
+            .concat(),
+        )
+    }
+}
+
+/// detail2 §Q-2: the member-set-update gate. Verifies the full §Q-1 authorization and structural
+/// delta against the caller's TRUSTED (record, members), and returns the advanced pair. The
+/// caller replaces its trusted record ONLY with this function's output (`load/save_state`,
+/// `advance_member_set` for chains).
+///
+/// Fail-closed on: version != trusted+1; prev root mismatch; channel id mismatch; missing/invalid
+/// consent sig; any structural delta beyond the op (rotation may change exactly one slot's
+/// signing keys; add may only append at slot member_count); missing or invalid N-of-N of the
+/// PREVIOUS set over the IMMS digest.
+pub fn verify_member_set_update(
+    trusted_record: &ChannelRecord,
+    trusted_members: &[MemberInfo],
+    update: &MemberSetUpdate,
+) -> WResult<(ChannelRecord, Vec<MemberInfo>)> {
+    if update.channel_id != trusted_record.channel_id {
+        return bail("member-set update: channel id mismatch");
+    }
+    if update.set_version != trusted_record.set_version + 1 {
+        return bail(format!(
+            "member-set update: set_version {} is not trusted {} + 1",
+            update.set_version, trusted_record.set_version
+        ));
+    }
+    let prev_root = registered_cosigner_root(trusted_record, trusted_members)?;
+    if update.prev_member_root != prev_root {
+        return bail("member-set update: prev_member_root does not match the trusted set");
+    }
+
+    // ---- structural delta + consent, per op ----
+    let mut new_members = trusted_members.to_vec();
+    let mut new_delegate_count = trusted_record.delegate_count;
+    match &update.op {
+        MemberSetOp::RotateKey { slot, new_pk_g, new_pk_b, self_sig } => {
+            let slot = *slot as usize;
+            if slot >= trusted_record.member_count as usize {
+                return bail("member-set update: rotation slot is not a co-signer slot");
+            }
+            let old = member_at(trusted_members, slot)?.clone();
+            if *new_pk_g == old.pk_g && *new_pk_b == old.pk_b {
+                return bail("member-set update: rotation to the identical keys");
+            }
+            // §Q-1 IMKR: the CURRENT key at the slot consents to its own replacement.
+            let consent = update.rotation_consent_digest(
+                slot as u8,
+                old.pk_g,
+                *new_pk_g,
+                *new_pk_b,
+            );
+            verify_state_sig(old.pk_g, &consent, self_sig)
+                .map_err(|e| we(format!("member-set update: rotation self-consent invalid: {e}")))?;
+            let m = &mut new_members[slot];
+            m.pk_g = *new_pk_g;
+            m.pk_b = *new_pk_b;
+            // regev_pk preserved (§Q-6: Regev rotation out of scope — balances stay decryptable).
+        }
+        MemberSetOp::AddCosigner { pk_g, pk_b, regev_pk, recipient, consent_sig } => {
+            let mc = trusted_record.member_count as usize;
+            if mc + 1 > MAX_COSIGNERS {
+                return bail("member-set update: co-signer set is full (MAX_COSIGNERS)");
+            }
+            if trusted_members.iter().any(|m| m.pk_g == *pk_g) {
+                return bail("member-set update: joining pk_g is already a participant");
+            }
+            let regev_digest = Bytes32::from(regev_pk.poseidon_digest());
+            if regev_digest == Bytes32::default() {
+                return bail("member-set update: joiner Regev key hashes to the padding digest");
+            }
+            // §Q-1 IMJC: the NEW key consents (possession + intent; no rogue-key enrollment).
+            let consent =
+                update.joiner_consent_digest(*pk_g, *pk_b, regev_digest, *recipient);
+            verify_state_sig(*pk_g, &consent, consent_sig)
+                .map_err(|e| we(format!("member-set update: joiner consent invalid: {e}")))?;
+            // §Q-4b: insert at slot member_count; delegates shift up by one.
+            new_members.insert(
+                mc,
+                MemberInfo {
+                    slot: mc as u16,
+                    pk_g: *pk_g,
+                    pk_b: *pk_b,
+                    regev_pk: regev_pk.clone(),
+                },
+            );
+            for m in new_members.iter_mut().skip(mc + 1) {
+                m.slot += 1;
+            }
+            new_delegate_count = trusted_record.delegate_count;
+        }
+    }
+
+    // ---- rebuild the advanced record; the op determines the whole delta ----
+    let new_member_count = match &update.op {
+        MemberSetOp::AddCosigner { .. } => trusted_record.member_count + 1,
+        MemberSetOp::RotateKey { .. } => trusted_record.member_count,
+    };
+    let mut new_record = build_record(
+        trusted_record.channel_id.as_u64() as u32,
+        &new_members,
+        trusted_record.bp_member_slot,
+        new_delegate_count,
+    )?;
+    if new_record.member_count != new_member_count {
+        return bail("member-set update: rebuilt record member_count mismatch");
+    }
+    new_record.set_version = update.set_version;
+    new_record.close_freeze_nonce = trusted_record.close_freeze_nonce;
+    new_record.special_close_penalty = trusted_record.special_close_penalty;
+    new_record.status = trusted_record.status;
+
+    let new_root = registered_cosigner_root(&new_record, &new_members)?;
+    if update.new_member_root != new_root {
+        return bail("member-set update: new_member_root does not match the advanced set");
+    }
+
+    // ---- N-of-N of the PREVIOUS set over the IMMS digest ----
+    let digest = update.signing_digest();
+    for slot in 0..trusted_record.member_count as usize {
+        let expected_pk_g = trusted_record.member_pk_gs[slot];
+        let sig = update
+            .member_signatures
+            .iter()
+            .find(|s| s.member_slot as usize == slot)
+            .ok_or_else(|| {
+                we(format!("member-set update: missing signature for previous-set slot {slot}"))
+            })?;
+        if sig.pk_g != expected_pk_g {
+            return bail(format!(
+                "member-set update: slot {slot} signature pk_g is not the previous set's member"
+            ));
+        }
+        verify_state_sig(expected_pk_g, &digest, &sig.signature)?;
+    }
+
+    Ok((new_record, new_members))
+}
+
+/// detail2 §Q-2 `advance_trusted_record`: fold a CHAIN of updates onto the trusted set — how a
+/// peer (or channel B holding A's record) accepts a record whose IMCR digest no longer equals its
+/// stored one. Each hop is fully re-verified; any invalid hop fails the whole chain closed.
+pub fn advance_member_set(
+    trusted_record: &ChannelRecord,
+    trusted_members: &[MemberInfo],
+    updates: &[MemberSetUpdate],
+) -> WResult<(ChannelRecord, Vec<MemberInfo>)> {
+    let mut record = trusted_record.clone();
+    let mut members = trusted_members.to_vec();
+    for update in updates {
+        let (r, m) = verify_member_set_update(&record, &members, update)?;
+        record = r;
+        members = m;
+    }
+    Ok((record, members))
+}
+
+/// Build a RotateKey update for OWN slot, self-consented (§Q-1 IMKR). The returned update still
+/// needs the previous set's full N-of-N (`cosign_member_set_update` per member).
+pub fn propose_rotate_key(
+    current_keys: &MemberKeys,
+    new_keys: &MemberKeys,
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+    slot: u8,
+) -> WResult<MemberSetUpdate> {
+    let old = member_at(members, slot as usize)?;
+    if old.pk_g != current_keys.pk_g() {
+        return bail("propose_rotate_key: current_keys are not the member at this slot");
+    }
+    let prev_root = registered_cosigner_root(record, members)?;
+    let mut new_members = members.to_vec();
+    new_members[slot as usize].pk_g = new_keys.pk_g();
+    new_members[slot as usize].pk_b = new_keys.pk_b();
+    let mut probe = build_record(
+        record.channel_id.as_u64() as u32,
+        &new_members,
+        record.bp_member_slot,
+        record.delegate_count,
+    )?;
+    probe.set_version = record.set_version + 1;
+    let new_root = registered_cosigner_root(&probe, &new_members)?;
+    let mut update = MemberSetUpdate {
+        channel_id: record.channel_id,
+        set_version: record.set_version + 1,
+        prev_member_root: prev_root,
+        new_member_root: new_root,
+        op: MemberSetOp::RotateKey {
+            slot,
+            new_pk_g: new_keys.pk_g(),
+            new_pk_b: new_keys.pk_b(),
+            self_sig: Vec::new(),
+        },
+        member_signatures: Vec::new(),
+    };
+    let consent =
+        update.rotation_consent_digest(slot, old.pk_g, new_keys.pk_g(), new_keys.pk_b());
+    if let MemberSetOp::RotateKey { self_sig, .. } = &mut update.op {
+        *self_sig = sign_digest(current_keys.falcon_key(), &consent);
+    }
+    Ok(update)
+}
+
+/// Build an AddCosigner update, joiner-consented (§Q-1 IMJC). Needs the previous set's N-of-N.
+pub fn propose_add_cosigner(
+    joiner_keys: &MemberKeys,
+    recipient: Address,
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+) -> WResult<MemberSetUpdate> {
+    let prev_root = registered_cosigner_root(record, members)?;
+    let mc = record.member_count as usize;
+    let mut new_members = members.to_vec();
+    new_members.insert(
+        mc,
+        MemberInfo {
+            slot: mc as u16,
+            pk_g: joiner_keys.pk_g(),
+            pk_b: joiner_keys.pk_b(),
+            regev_pk: joiner_keys.regev_pk.clone(),
+        },
+    );
+    for m in new_members.iter_mut().skip(mc + 1) {
+        m.slot += 1;
+    }
+    let mut probe = build_record(
+        record.channel_id.as_u64() as u32,
+        &new_members,
+        record.bp_member_slot,
+        record.delegate_count,
+    )?;
+    probe.set_version = record.set_version + 1;
+    let new_root = registered_cosigner_root(&probe, &new_members)?;
+    let regev_digest = Bytes32::from(joiner_keys.regev_pk.poseidon_digest());
+    let mut update = MemberSetUpdate {
+        channel_id: record.channel_id,
+        set_version: record.set_version + 1,
+        prev_member_root: prev_root,
+        new_member_root: new_root,
+        op: MemberSetOp::AddCosigner {
+            pk_g: joiner_keys.pk_g(),
+            pk_b: joiner_keys.pk_b(),
+            regev_pk: joiner_keys.regev_pk.clone(),
+            recipient,
+            consent_sig: Vec::new(),
+        },
+        member_signatures: Vec::new(),
+    };
+    let consent = update.joiner_consent_digest(
+        joiner_keys.pk_g(),
+        joiner_keys.pk_b(),
+        regev_digest,
+        recipient,
+    );
+    if let MemberSetOp::AddCosigner { consent_sig, .. } = &mut update.op {
+        *consent_sig = sign_digest(joiner_keys.falcon_key(), &consent);
+    }
+    Ok(update)
+}
+
+/// detail2 §Q-2/§Q-4b: advance the CHANNEL STATE for an applied member-set update. Returns the
+/// unsigned next state (sigs cleared, `state_version + 1`, `prev_digest` chained) — the caller
+/// collects the NEW set's N-of-N over it, exactly as at delegate join.
+///
+/// RotateKey: signing identities live in the record, not the balance state — no row changes; the
+/// head is re-signed so `verify_all_signatures(new_record, head)` holds under the rotated set.
+///
+/// AddCosigner (§Q-4b slot shift): the joiner's row is INSERTED at slot member_count with the
+/// canonical zero ciphertext (adds no balance — the A-1 conservation argument of delegate join),
+/// its Regev digest and B-1b recipient bound into the slot leaf; every delegate row above shifts
+/// up by one, MOVED not altered (ciphertexts, pending_adds, digests, recipients travel together).
+pub fn apply_member_set_update_to_state(
+    prev_state: &ChannelState,
+    prev_record: &ChannelRecord,
+    update: &MemberSetUpdate,
+) -> WResult<ChannelState> {
+    let mut state = prev_state.clone();
+    state.prev_digest = state.digest;
+    state.member_signatures = Vec::new();
+    state.balance_state.state_version += 1;
+    if let MemberSetOp::AddCosigner { regev_pk, recipient, .. } = &update.op {
+        let mc = prev_record.member_count as usize;
+        let active =
+            prev_record.member_count as usize + prev_record.delegate_count as usize;
+        if active + 1 > MAX_CHANNEL_MEMBERS {
+            return bail("apply member-set update: channel is full");
+        }
+        let bs = &mut state.balance_state;
+        // Shift the delegate region [mc..active) up by one, top-down so nothing is overwritten.
+        for i in (mc..active).rev() {
+            bs.enc_balances[i + 1] = bs.enc_balances[i].clone();
+            bs.pending_adds[i + 1] = bs.pending_adds[i].clone();
+            bs.regev_pk_digests[i + 1] = bs.regev_pk_digests[i];
+            bs.recipients[i + 1] = bs.recipients[i];
+        }
+        // The joiner's row: canonical zero (adds no balance), own digest + recipient.
+        bs.enc_balances[mc] = crate::common::balance_state::zero_token_row();
+        bs.pending_adds[mc] = Default::default();
+        let digest = Bytes32::from(regev_pk.poseidon_digest());
+        if digest == Bytes32::default() {
+            return bail("apply member-set update: joiner Regev digest is the padding value");
+        }
+        bs.regev_pk_digests[mc] = digest;
+        bs.recipients[mc] = *recipient;
+        bs.member_count = prev_record.member_count + 1;
+    }
+    Ok(state)
+}
+
+/// One previous-set member's N-of-N vote over the update (IMMS digest).
+pub fn cosign_member_set_update(
+    keys: &MemberKeys,
+    slot: u8,
+    update: &MemberSetUpdate,
+) -> MemberSignature {
+    MemberSignature {
+        member_slot: slot,
+        pk_g: keys.pk_g(),
+        signature: sign_digest(keys.falcon_key(), &update.signing_digest()),
+    }
+}
+
+
 /// Reconstruct the base-layer objects that an inter-channel debit claims to have committed.
 ///
 /// This is the F-AUX-1 fail-closed bridge between the channel layer and the native INTMAX layer:
@@ -4392,6 +4878,8 @@ fn source_record_placeholder(
         delegate_count: 0,
         member_pk_gs,
         member_pubkeys_root: Bytes32::default(),
+        // Structural stub (see delegate_count above) — never a trust anchor.
+        set_version: 0,
         bp_member_slot: msg.bp_member_slot,
         special_close_penalty: U256::from(0u32),
         close_freeze_nonce: msg.close_freeze_nonce,
@@ -10000,5 +10488,358 @@ mod aggregated_tx_tree_tests {
                 .expect("each leaf verifies at its channel-id index under the aggregated root");
         }
         assert!(build_aggregated_tx_v2_tree(&[]).is_err(), "empty window refused");
+    }
+}
+
+
+#[cfg(test)]
+mod member_set_update_tests {
+    use super::*;
+    use rand010::SeedableRng as _;
+    type WalletRng = rand010::rngs::StdRng;
+
+    fn three_member_channel(seed: u64) -> (Vec<MemberKeys>, ChannelRecord, Vec<MemberInfo>) {
+        let mut rng = WalletRng::seed_from_u64(seed);
+        let keys: Vec<MemberKeys> = (0..3).map(|_| MemberKeys::generate(&mut rng)).collect();
+        let members: Vec<MemberInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| MemberInfo {
+                slot: i as u16,
+                pk_g: k.pk_g(),
+                pk_b: k.pk_b(),
+                regev_pk: k.regev_pk.clone(),
+            })
+            .collect();
+        let record = build_record(77, &members, 0, 0).expect("record");
+        (keys, record, members)
+    }
+
+    fn full_nofn(update: &mut MemberSetUpdate, keys: &[MemberKeys]) {
+        update.member_signatures = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| cosign_member_set_update(k, i as u8, update))
+            .collect();
+    }
+
+    #[test]
+    fn rotate_own_key_with_self_consent_and_nofn_is_accepted() {
+        let (keys, record, members) = three_member_channel(0x51);
+        let mut rng = WalletRng::seed_from_u64(0x52);
+        let new_keys = MemberKeys::generate(&mut rng);
+        let mut update =
+            propose_rotate_key(&keys[1], &new_keys, &record, &members, 1).expect("propose");
+        full_nofn(&mut update, &keys);
+
+        let (new_record, new_members) =
+            verify_member_set_update(&record, &members, &update).expect("rotation accepted");
+        assert_eq!(new_record.set_version, 1);
+        assert_eq!(new_record.member_count, 3, "rotation never changes the count");
+        assert_eq!(new_members[1].pk_g, new_keys.pk_g());
+        assert_eq!(new_members[1].pk_b, new_keys.pk_b());
+        assert_eq!(
+            Bytes32::from(new_members[1].regev_pk.poseidon_digest()),
+            Bytes32::from(members[1].regev_pk.poseidon_digest()),
+            "§Q-6: the Regev key must be preserved (balances stay decryptable)"
+        );
+        assert_eq!(new_record.member_pk_gs[1], new_keys.pk_g());
+        // The OLD key is no longer the registered member: a state signed by it under the NEW
+        // record fails the standard N-of-N gate (the rotation is effective).
+        assert_ne!(new_record.member_pk_gs[1], keys[1].pk_g());
+    }
+
+    #[test]
+    fn rotation_without_self_consent_is_refused() {
+        let (keys, record, members) = three_member_channel(0x53);
+        let mut rng = WalletRng::seed_from_u64(0x54);
+        let new_keys = MemberKeys::generate(&mut rng);
+        let mut update =
+            propose_rotate_key(&keys[1], &new_keys, &record, &members, 1).expect("propose");
+        if let MemberSetOp::RotateKey { self_sig, .. } = &mut update.op {
+            self_sig.clear();
+        }
+        full_nofn(&mut update, &keys);
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "a rotation stripped of the member's own consent must be refused — even with full \
+             N-of-N (the §Q-1 IMKR obligation is independent)"
+        );
+    }
+
+    #[test]
+    fn rotation_self_consent_by_a_different_key_is_refused() {
+        let (keys, record, members) = three_member_channel(0x55);
+        let mut rng = WalletRng::seed_from_u64(0x56);
+        let new_keys = MemberKeys::generate(&mut rng);
+        // The ATTACKER (slot 0) proposes rotating slot 1's key, consenting with ITS OWN key.
+        assert!(
+            propose_rotate_key(&keys[0], &new_keys, &record, &members, 1).is_err(),
+            "propose refuses a proposer whose keys are not the slot's"
+        );
+        // Forge the object directly: consent signed by slot 0's key over the right digest.
+        let mut update =
+            propose_rotate_key(&keys[1], &new_keys, &record, &members, 1).expect("propose");
+        let consent = update.rotation_consent_digest(
+            1,
+            members[1].pk_g,
+            new_keys.pk_g(),
+            new_keys.pk_b(),
+        );
+        if let MemberSetOp::RotateKey { self_sig, .. } = &mut update.op {
+            *self_sig = sign_digest(keys[0].falcon_key(), &consent);
+        }
+        full_nofn(&mut update, &keys);
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "consent must verify under the ROTATED slot's current key, not any member's"
+        );
+    }
+
+    #[test]
+    fn missing_or_foreign_nofn_signature_is_refused() {
+        let (keys, record, members) = three_member_channel(0x57);
+        let mut rng = WalletRng::seed_from_u64(0x58);
+        let new_keys = MemberKeys::generate(&mut rng);
+        let mut update =
+            propose_rotate_key(&keys[2], &new_keys, &record, &members, 2).expect("propose");
+
+        // Only 2 of 3 previous-set signatures.
+        update.member_signatures = vec![
+            cosign_member_set_update(&keys[0], 0, &update),
+            cosign_member_set_update(&keys[1], 1, &update),
+        ];
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "N-of-N means ALL previous-set members — a missing vote refuses the update"
+        );
+
+        // A non-member key voting in slot 1's place.
+        let outsider = MemberKeys::generate(&mut rng);
+        update.member_signatures = vec![
+            cosign_member_set_update(&keys[0], 0, &update),
+            cosign_member_set_update(&outsider, 1, &update),
+            cosign_member_set_update(&keys[2], 2, &update),
+        ];
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "a vote from a key that is not the previous set's slot member is refused"
+        );
+    }
+
+    #[test]
+    fn wrong_set_version_or_stale_root_is_refused() {
+        let (keys, record, members) = three_member_channel(0x59);
+        let mut rng = WalletRng::seed_from_u64(0x5a);
+        let new_keys = MemberKeys::generate(&mut rng);
+        let mut update =
+            propose_rotate_key(&keys[0], &new_keys, &record, &members, 0).expect("propose");
+        update.set_version = 2; // trusted is 0, so only 1 is acceptable
+        full_nofn(&mut update, &keys);
+        assert!(verify_member_set_update(&record, &members, &update).is_err());
+
+        let mut update2 =
+            propose_rotate_key(&keys[0], &new_keys, &record, &members, 0).expect("propose");
+        update2.prev_member_root = Bytes32::from_u32_slice(&[9; 8]).unwrap();
+        full_nofn(&mut update2, &keys);
+        assert!(verify_member_set_update(&record, &members, &update2).is_err());
+    }
+
+    #[test]
+    fn add_cosigner_with_consent_is_accepted_and_reslots_delegates() {
+        let (keys, record0, members0) = three_member_channel(0x5b);
+        let mut rng = WalletRng::seed_from_u64(0x5c);
+        // Give the channel one delegate at slot 3 first (the §Q-4b shift subject).
+        let delegate = MemberKeys::generate(&mut rng);
+        let mut members = members0.clone();
+        members.push(MemberInfo {
+            slot: 3,
+            pk_g: delegate.pk_g(),
+            pk_b: delegate.pk_b(),
+            regev_pk: delegate.regev_pk.clone(),
+        });
+        let mut record = build_record(77, &members, 0, 1).expect("record+delegate");
+        record.set_version = record0.set_version;
+
+        let joiner = MemberKeys::generate(&mut rng);
+        let recipient = Address::from_u32_slice(&[7, 7, 7, 7, 7]).unwrap();
+        let mut update =
+            propose_add_cosigner(&joiner, recipient, &record, &members).expect("propose add");
+        full_nofn(&mut update, &keys);
+
+        let (new_record, new_members) =
+            verify_member_set_update(&record, &members, &update).expect("add accepted");
+        assert_eq!(new_record.member_count, 4);
+        assert_eq!(new_record.delegate_count, 1);
+        assert_eq!(new_record.set_version, 1);
+        assert_eq!(new_members[3].pk_g, joiner.pk_g(), "joiner sits at slot member_count");
+        assert_eq!(
+            new_members[4].pk_g,
+            delegate.pk_g(),
+            "§Q-4b: the delegate shifted up by one slot"
+        );
+        assert_eq!(new_members[4].slot, 4);
+    }
+
+    #[test]
+    fn add_without_joiner_consent_or_duplicate_key_is_refused() {
+        let (keys, record, members) = three_member_channel(0x5d);
+        let mut rng = WalletRng::seed_from_u64(0x5e);
+        let joiner = MemberKeys::generate(&mut rng);
+        let recipient = Address::from_u32_slice(&[8, 8, 8, 8, 8]).unwrap();
+
+        let mut update =
+            propose_add_cosigner(&joiner, recipient, &record, &members).expect("propose");
+        if let MemberSetOp::AddCosigner { consent_sig, .. } = &mut update.op {
+            consent_sig.clear();
+        }
+        full_nofn(&mut update, &keys);
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "an enrollment the joining key never consented to must be refused"
+        );
+
+        // Enrolling an EXISTING member's key again.
+        let mut dup =
+            propose_add_cosigner(&joiner, recipient, &record, &members).expect("propose");
+        if let MemberSetOp::AddCosigner { pk_g, .. } = &mut dup.op {
+            *pk_g = members[0].pk_g;
+        }
+        full_nofn(&mut dup, &keys);
+        assert!(verify_member_set_update(&record, &members, &dup).is_err());
+    }
+
+    #[test]
+    fn advance_member_set_folds_a_chain_and_fails_closed_on_a_broken_hop() {
+        let (keys, record, members) = three_member_channel(0x5f);
+        let mut rng = WalletRng::seed_from_u64(0x60);
+
+        // Hop 1: slot 0 rotates.
+        let rot_keys = MemberKeys::generate(&mut rng);
+        let mut u1 = propose_rotate_key(&keys[0], &rot_keys, &record, &members, 0).unwrap();
+        full_nofn(&mut u1, &keys);
+        let (r1, m1) = verify_member_set_update(&record, &members, &u1).unwrap();
+
+        // Hop 2: add a cosigner — the N-of-N is the POST-ROTATION set (rot_keys at slot 0).
+        let joiner = MemberKeys::generate(&mut rng);
+        let recipient = Address::from_u32_slice(&[9, 9, 9, 9, 9]).unwrap();
+        let mut u2 = propose_add_cosigner(&joiner, recipient, &r1, &m1).unwrap();
+        let hop2_signers = [&rot_keys, &keys[1], &keys[2]];
+        u2.member_signatures = hop2_signers
+            .iter()
+            .enumerate()
+            .map(|(i, k)| cosign_member_set_update(k, i as u8, &u2))
+            .collect();
+
+        let (r2, m2) = advance_member_set(&record, &members, &[u1.clone(), u2.clone()])
+            .expect("two-hop chain folds");
+        assert_eq!(r2.set_version, 2);
+        assert_eq!(r2.member_count, 4);
+        assert_eq!(m2[0].pk_g, rot_keys.pk_g());
+        assert_eq!(m2[3].pk_g, joiner.pk_g());
+
+        // The chain with hop 1 SKIPPED (u2 alone) must fail: its N-of-N references the rotated
+        // set which the trusted record does not yet contain.
+        assert!(advance_member_set(&record, &members, &[u2]).is_err());
+
+        // Hop 2 signed by the OLD slot-0 key (pre-rotation) must fail against r1.
+        let mut u2_bad = propose_add_cosigner(&joiner, recipient, &r1, &m1).unwrap();
+        u2_bad.member_signatures = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| cosign_member_set_update(k, i as u8, &u2_bad))
+            .collect();
+        assert!(
+            verify_member_set_update(&r1, &m1, &u2_bad).is_err(),
+            "after a rotation the OLD key's vote is worthless — the new set signs"
+        );
+    }
+
+    #[test]
+    fn apply_add_shifts_delegate_rows_intact_and_rotation_leaves_rows_untouched() {
+        let (keys, record0, members0) = three_member_channel(0x61);
+        let mut rng = WalletRng::seed_from_u64(0x62);
+        // Channel with one delegate at slot 3 carrying a DISTINCT recognizable row.
+        let delegate = MemberKeys::generate(&mut rng);
+        let mut members = members0.clone();
+        members.push(MemberInfo {
+            slot: 3,
+            pk_g: delegate.pk_g(),
+            pk_b: delegate.pk_b(),
+            regev_pk: delegate.regev_pk.clone(),
+        });
+        let mut record = build_record(77, &members, 0, 1).unwrap();
+        record.set_version = record0.set_version;
+        let mut state = ChannelState {
+            channel_id: record.channel_id,
+            epoch: 1,
+            small_block_number: 0,
+            close_freeze_nonce: 0,
+            channel_fund: ChannelFund {
+                channel_id: record.channel_id,
+                amounts: ChannelFund::single_token_amounts(U256::from(0u32)),
+                intmax_state_root: Bytes32::default(),
+            },
+            balance_state: BalanceState {
+                channel_id: record.channel_id,
+                member_count: 3,
+                delegate_count: 1,
+                enc_balances: BalanceState::pad_enc_balances_token0(&[]),
+                regev_pk_digests: BalanceState::pad_regev_pk_digests(&[]),
+                recipients: BalanceState::pad_recipients(&[]),
+                settled_tx_chain: Bytes32::default(),
+                settled_tx_accumulator_root: Bytes32::default(),
+                state_version: 5,
+                pending_adds: BalanceState::pad_pending_adds_token0(&[]),
+                token_registry: BalanceState::single_token_registry(0),
+                token_count: 1,
+            },
+            h2_tag: Bytes32::default(),
+            shared_native_nullifier_root: Bytes32::default(),
+            unallocated_confirmed_incoming: U256::zero(),
+            prev_digest: Bytes32::default(),
+            digest: Bytes32::default(),
+            member_signatures: Vec::new(),
+        };
+        state.balance_state.regev_pk_digests[3] =
+            Bytes32::from(delegate.regev_pk.poseidon_digest());
+        state.balance_state.recipients[3] = Address::from_u32_slice(&[3, 3, 3, 3, 3]).unwrap();
+        let delegate_row_digest = state.balance_state.regev_pk_digests[3];
+
+        let joiner = MemberKeys::generate(&mut rng);
+        let recipient = Address::from_u32_slice(&[7, 7, 7, 7, 7]).unwrap();
+        let mut update = propose_add_cosigner(&joiner, recipient, &record, &members).unwrap();
+        full_nofn(&mut update, &keys);
+        verify_member_set_update(&record, &members, &update).expect("gate ok");
+
+        let next = apply_member_set_update_to_state(&state, &record, &update).unwrap();
+        assert_eq!(next.balance_state.member_count, 4);
+        assert_eq!(
+            next.balance_state.regev_pk_digests[4], delegate_row_digest,
+            "§Q-4b: the delegate row MOVED to slot 4, unaltered"
+        );
+        assert_eq!(
+            next.balance_state.recipients[4],
+            Address::from_u32_slice(&[3, 3, 3, 3, 3]).unwrap()
+        );
+        assert_eq!(
+            next.balance_state.regev_pk_digests[3],
+            Bytes32::from(joiner.regev_pk.poseidon_digest()),
+            "the joiner's digest sits at the inserted slot"
+        );
+        assert_eq!(next.balance_state.recipients[3], recipient);
+        assert!(next.member_signatures.is_empty(), "sigs cleared for the re-sign round");
+        assert_eq!(
+            next.balance_state.state_version,
+            state.balance_state.state_version + 1
+        );
+
+        // Rotation: rows untouched.
+        let rot = MemberKeys::generate(&mut rng);
+        let mut u_rot = propose_rotate_key(&keys[1], &rot, &record, &members, 1).unwrap();
+        full_nofn(&mut u_rot, &keys);
+        let next_rot = apply_member_set_update_to_state(&state, &record, &u_rot).unwrap();
+        assert_eq!(next_rot.balance_state.regev_pk_digests, state.balance_state.regev_pk_digests);
+        assert_eq!(next_rot.balance_state.member_count, 3);
     }
 }

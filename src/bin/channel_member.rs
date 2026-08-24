@@ -4351,8 +4351,10 @@ fn join_delegate(
     members.push(nd);
     members.sort_by_key(|m| m.slot);
     let new_delegate_count = (existing + 1) as u16;
-    let record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count)
+    let mut record = build_record(channel_id_env(), &members, BP_SLOT, new_delegate_count)
         .unwrap_or_else(|e| die(e));
+    // §Q: a delegate join does not change the registered co-signer set — carry the version.
+    record.set_version = prev.snapshot.record.set_version;
 
     // Membership add: keep the CURRENT balance state (preserving every slot's ciphertext + any
     // sends), add the new delegate's slot, bump delegate_count + state_version, clear sigs,

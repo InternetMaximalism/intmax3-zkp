@@ -251,6 +251,20 @@ pub const INTER_CHANNEL_TX_DOMAIN_V4: u32 = 0x494d4934;
 /// preimage layout is v4's but under a fresh domain: a v4 digest must never verify as the message
 /// of a v5 sender signature (and vice versa). v3-reset policy: no dual-format acceptance window.
 pub const INTER_CHANNEL_TX_DOMAIN_V5: u32 = 0x494d4935;
+
+/// "IMMS" (detail2 §Q-1): the member-set-update digest — the message the PREVIOUS co-signer set's
+/// N-of-N signs to authorize an AddCosigner / RotateKey transition. The single canonical update
+/// commitment all three layers (channel gate, validity transition, L1 apply) verify.
+pub const MEMBER_SET_UPDATE_DOMAIN: u32 = 0x494d4d53;
+
+/// "IMKR" (detail2 §Q-1): rotation self-consent — signed by the rotated slot's CURRENT Falcon
+/// key. Redundant with the member's own N-of-N vote today (N-of-N gives every member a veto) but
+/// explicit, and survives any future sub-N threshold.
+pub const KEY_ROTATION_CONSENT_DOMAIN: u32 = 0x494d4b52;
+
+/// "IMJC" (detail2 §Q-1): joiner consent for AddCosigner — signed by the NEW member's Falcon key;
+/// proves possession of the enrolled key and intent to join (no rogue-key enrollment).
+pub const JOINER_CONSENT_DOMAIN: u32 = 0x494d4a43;
 /// "IMTF" — token-funds digest domain (detail2 §N-6, TM-11). Domain of
 /// `token_funds_digest = keccak([IMTF, registry(10 x u32, zero-padded), token_count,
 /// amounts(10 x U256, zero-padded)])` — ALWAYS full width.
@@ -281,6 +295,9 @@ mod tests {
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V3, u32::from_be_bytes(*b"IMI3"));
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V4, u32::from_be_bytes(*b"IMI4"));
         assert_eq!(INTER_CHANNEL_TX_DOMAIN_V5, u32::from_be_bytes(*b"IMI5"));
+        assert_eq!(MEMBER_SET_UPDATE_DOMAIN, u32::from_be_bytes(*b"IMMS"));
+        assert_eq!(KEY_ROTATION_CONSENT_DOMAIN, u32::from_be_bytes(*b"IMKR"));
+        assert_eq!(JOINER_CONSENT_DOMAIN, u32::from_be_bytes(*b"IMJC"));
         assert_eq!(TOKEN_FUNDS_DIGEST_DOMAIN, u32::from_be_bytes(*b"IMTF"));
     }
 
@@ -420,6 +437,9 @@ mod tests {
                 "IMI3 INTER_CHANNEL_TX_DOMAIN_V3",
                 INTER_CHANNEL_TX_DOMAIN_V3,
             ),
+            ("IMMS MEMBER_SET_UPDATE_DOMAIN", MEMBER_SET_UPDATE_DOMAIN),
+            ("IMKR KEY_ROTATION_CONSENT_DOMAIN", KEY_ROTATION_CONSENT_DOMAIN),
+            ("IMJC JOINER_CONSENT_DOMAIN", JOINER_CONSENT_DOMAIN),
             (
                 "IMI5 INTER_CHANNEL_TX_DOMAIN_V5",
                 INTER_CHANNEL_TX_DOMAIN_V5,

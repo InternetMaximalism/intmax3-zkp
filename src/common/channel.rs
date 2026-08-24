@@ -242,6 +242,12 @@ pub struct ChannelRecord {
     /// the genesis COSIGNERS and never changes; the two are different trees and are never
     /// compared. This root anchors the off-chain P4-1/A11 member set that peers verify.
     pub member_pubkeys_root: Bytes32,
+    /// detail2 §Q: strictly monotone member-set version — genesis registration = 0, +1 per
+    /// applied `MemberSetUpdate` (AddCosigner / RotateKey). Delegate joins do NOT bump it (they
+    /// change only the wallet-tree membership, not the registered co-signer set). serde-default
+    /// so pre-§Q records parse as version 0.
+    #[serde(default)]
+    pub set_version: u64,
     /// The slot whose member acts as block-proposer (replaces `bp_key_id`). Must be `<
     /// member_count`.
     ///
@@ -355,6 +361,9 @@ impl ChannelRecord {
                 self.channel_id.to_u32_vec(),
                 vec![self.bp_member_slot as u32],
                 split_u64(self.close_freeze_nonce),
+                // §Q: the member-set version is part of the record identity (native-only digest —
+                // this preimage has no circuit/Solidity twin, see the note above this fn).
+                split_u64(self.set_version),
                 vec![
                     self.status as u32,
                     self.member_count as u32,
@@ -1849,6 +1858,7 @@ mod tests {
             delegate_count: 0,
             member_pk_gs: pad_hashes(&[pubkey_hash(10), pubkey_hash(11), pubkey_hash(12)]),
             member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            set_version: 0,
             bp_member_slot: 0,
             special_close_penalty: U256::from(5u32),
             close_freeze_nonce: 0,
@@ -2031,6 +2041,7 @@ mod tests {
             delegate_count: 0,
             member_pk_gs: pad_hashes(&active),
             member_pubkeys_root: Bytes32::from_u32_slice(&[7, 7, 7, 7, 0, 0, 0, 0]).unwrap(),
+            set_version: 0,
             bp_member_slot: 0,
             special_close_penalty: U256::from(5u32),
             close_freeze_nonce: 0,

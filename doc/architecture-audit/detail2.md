@@ -1634,6 +1634,17 @@ gather N-of-N on-chain because the affected member refuses).
 - `IntmaxRollup.channelMemberSetCommitment` stays the GENESIS anchor (historical registration);
   the Manager's storage is the live head. The constructor pin (item 23) still checks genesis.
 
+### Q-4b. AddCosigner reslots delegates (slot-shift rule)
+
+Delegates occupy the left-packed suffix starting at slot `member_count`, so adding a co-signer
+inserts at that boundary and SHIFTS every delegate slot up by one. The update's apply step must
+move the per-slot state rows together — `enc_balances`, `pending_adds`, `regev_pk_digests`,
+`recipients` — and the H1 slot tree is rebuilt over the shifted rows before the re-sign, so the
+signed state and the record agree on every slot. Delegate-facing artifacts keyed by slot
+(withdrawal-claim `member_index`) use the post-shift slot from then on; pre-shift claims against a
+pre-shift signed H1 remain valid against THAT state. The gate enforces the shift structurally
+(rows moved, not altered).
+
 ### Q-5. Ordering / consistency
 
 set_version totally orders updates; every layer checks strict +1 monotonicity, so the channel
