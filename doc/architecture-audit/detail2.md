@@ -1676,3 +1676,41 @@ design); sub-N thresholds.
   Falcon aggregate), so the full fixture set must be regenerated (regen runbook Step 1) and the
   contracts redeployed before any fixture-backed Forge test or deployment is meaningful again.
   Channel capacity beyond 8 signers is delegates' job (`MAX_CHANNEL_MEMBERS = 1024` unchanged).
+
+## R. Proving-locus invariants: what proves where (2026-08-24)
+
+Two invariants, verified against the code and now normative:
+
+### R-1. The sig-cluster never proves (or signs) in the browser
+
+All sig-cluster work — Falcon signing, signature verification, and every plonky2 proof — runs in
+Rust on the OS (`channel_member` CLI / the daemon). The WASM wallet builds NO plonky2 circuit and
+generates NO plonky2 proof; the only proving on WASM is the DELEGATE's own plonky3
+(`p3-batch-stark`, BabyBear) STARKs:
+
+| proof | backend | where |
+|---|---|---|
+| E-1 channel-tx (`prove_channel_tx`) | plonky3 | WASM (delegate) |
+| E-2 channelUpdateZKP (`prove_channel_update`) | plonky3 | WASM (delegate, inter-channel send) |
+| A11 sender hash-sig (`prove_hash_sig`) | plonky3 | WASM (delegate) |
+| Falcon sign / N-of-N verify | native Rust | OS only |
+| Falcon batch aggregate (plonky2, §R-2) | plonky2 | OS only |
+| balance / validity / close / MLE wrap | plonky2 | OS only |
+
+Consequence: sig-cluster sizing (8 slots, §O) has ZERO effect on browser-side latency — the
+browser cost is the delegate's own transfer proving, invariant in the cluster.
+
+### R-2. The cluster's N/N plonky2 proof is a settlement artifact
+
+The sig-cluster's N-of-N is collected as NATIVE Falcon signatures on each co-signed state — cheap,
+per-transfer, no ZKP. The plonky2 aggregate proof (`FalconBatchAggCircuit` over all N signatures,
+one proof) is built ONLY when settlement needs it: `close`, `cancel-close`, and the
+partial-withdrawal submit each obtain it via `cache_falcon_aggregate`, which proves on a cache
+miss. Order is always: aggregate the Falcon signatures first, THEN feed them into plonky2 — the
+close/PW circuits recursively verify that one aggregate proof (its pk-list public inputs are the
+member keys the close commitment is computed from).
+
+Per-finalization pre-warming of the artifact is OPT-IN (`INTMAX_FALCON_AGG_PRECOMPUTE=1`,
+detached + digest-keyed + idempotent); the default is lazy — outside the settlement paths no
+plonky2 proving happens at all. (Flipped 2026-08-24: the previous default precomputed at every
+N-of-N finalization.)

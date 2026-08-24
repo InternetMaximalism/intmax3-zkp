@@ -1363,11 +1363,17 @@ fn save_state(state: &CliState) {
     // close/PW/cancel race. The digest-keyed cache makes repeat saves idempotent. A deployment may
     // disable this only when its long-lived prover service has taken responsibility for invoking
     // `precompute-falcon-aggregate` asynchronously; silently disabling it is not the default.
+    // detail2 §R invariant (2): the sig-cluster's N/N plonky2 aggregate proof is a SETTLEMENT
+    // artifact — close / cancel-close / partial-withdrawal build it (via `cache_falcon_aggregate`,
+    // which proves on a cache miss), and nothing else needs it. The per-finalization precompute
+    // below is therefore OPT-IN (a deployment that wants the artifact pre-warmed sets
+    // INTMAX_FALCON_AGG_PRECOMPUTE=1; it runs detached, digest-keyed, idempotent). The default is
+    // LAZY: no plonky2 proving happens outside the settlement paths.
     let is_finalized =
         state.snapshot.state.member_signatures.len() == state.snapshot.record.member_count as usize;
-    let externally_managed =
-        std::env::var("INTMAX_DISABLE_FALCON_AGG_PRECOMPUTE").as_deref() == Ok("1");
-    if is_finalized && !externally_managed {
+    let prewarm_opted_in =
+        std::env::var("INTMAX_FALCON_AGG_PRECOMPUTE").as_deref() == Ok("1");
+    if is_finalized && prewarm_opted_in {
         spawn_detached_falcon_precompute(state.snapshot.state.digest);
     }
 }
