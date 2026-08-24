@@ -1,7 +1,7 @@
 //! Falcon-512/Poseidon signature AGGREGATE VERIFICATION — one flat circuit, batched algebra.
 //!
 //! Replaces the binary-tree recursion of [`super::agg`] (16 leaf proofs + 4 recursion levels =
-//! up to 31 proofs for a full close) with ONE proof that verifies all `MAX_COSIGNERS` signatures
+//! up to 31 proofs for a full close) with ONE proof that verifies all `MAX_SIG_CLUSTER` signatures
 //! directly. The tree existed because the old FLAT circuit verified each signature with an
 //! in-circuit NTT (~14.8k range-checked mod-q reductions per signature) and therefore needed a
 //! degree-2^20 circuit (~22 GB peak RSS). This module removes the NTT itself, so the flat form
@@ -121,7 +121,7 @@ use super::{
     gadget::{CenterBitGenerator, FalconSigGadgetWitness, pk_digest_circuit},
 };
 use crate::{
-    constants::MAX_COSIGNERS,
+    constants::MAX_SIG_CLUSTER,
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait as _,
@@ -493,11 +493,11 @@ struct BatchSlotTarget {
     pi: Vec<Target>,
 }
 
-/// Flat aggregate-verification circuit for up to [`MAX_COSIGNERS`] Falcon-512/Poseidon
+/// Flat aggregate-verification circuit for up to [`MAX_SIG_CLUSTER`] Falcon-512/Poseidon
 /// signatures over one shared message digest, exposing the tree's exact 137-element top-level
 /// contract. Consumer-facing API mirrors [`super::agg::FalconAggCircuit`]: `new()`,
 /// `verifier_data()`, `data()`, `prove(&FalconAggWitness)`.
-pub struct FalconBatchAggCircuit<F, C, const D: usize, const SLOTS: usize = MAX_COSIGNERS>
+pub struct FalconBatchAggCircuit<F, C, const D: usize, const SLOTS: usize = MAX_SIG_CLUSTER>
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -528,8 +528,8 @@ where
 {
     pub fn new() -> Self {
         assert!(
-            (1..=MAX_COSIGNERS).contains(&SLOTS),
-            "Falcon batch circuit SLOTS must be in 1..={MAX_COSIGNERS}"
+            (1..=MAX_SIG_CLUSTER).contains(&SLOTS),
+            "Falcon batch circuit SLOTS must be in 1..={MAX_SIG_CLUSTER}"
         );
         // D >= 2 keeps the Schwartz-Zippel error at n/p^D <= 2^-117; a base-field tau (D = 1)
         // would leave a ~2^-54 forgery margin, far below the scheme's security level.
@@ -562,7 +562,7 @@ where
         let transcript_elems = SLOTS * TRANSCRIPT_ELEMS_PER_SLOT;
         let mut slots: Vec<BatchSlotTarget> = Vec::with_capacity(SLOTS);
         let mut transcript: Vec<Target> = Vec::with_capacity(transcript_elems);
-        let mut gated_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_COSIGNERS * 8);
+        let mut gated_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_SIG_CLUSTER * 8);
         let beta_sq = builder.constant(F::from_canonical_u64(FALCON_SIG_L2_BOUND));
         let zero = builder.zero();
 
@@ -684,7 +684,7 @@ where
         // Consumer layout remains the fixed 16-slot/137-PI contract. A sized circuit constrains
         // only its SLOTS prefix and exposes a constant-zero suffix, so close/cancel parsing does
         // not change; only the verifier key does.
-        gated_pk_limbs.resize(MAX_COSIGNERS * 8, zero);
+        gated_pk_limbs.resize(MAX_SIG_CLUSTER * 8, zero);
         builder.register_public_inputs(&gated_pk_limbs);
 
         let num_gates_before_padding = builder.num_gates();
@@ -866,7 +866,7 @@ mod tests {
         message: Bytes32,
         slots: &[(bool, FalconSigGadgetWitness, Vec<u64>)],
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
-        assert_eq!(slots.len(), MAX_COSIGNERS);
+        assert_eq!(slots.len(), MAX_SIG_CLUSTER);
         let mut pw = PartialWitness::<F>::new();
         BATCH.message.set_witness::<F, Bytes32>(&mut pw, message);
         for (slot, (flag, gw, pi)) in BATCH.slots.iter().zip(slots.iter()) {
@@ -948,12 +948,12 @@ mod tests {
         assert_eq!(p1.public_inputs[FALCON_AGG_COUNT_OFFSET], F::ONE);
     }
 
-    /// Happy path, N = MAX_COSIGNERS = 16 (no padding slot anywhere).
+    /// Happy path, N = MAX_SIG_CLUSTER (no padding slot anywhere).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn batch_happy_n16() {
         let msg = digest(2);
-        let (hs, sigs) = signers(MAX_COSIGNERS, msg, 30);
+        let (hs, sigs) = signers(MAX_SIG_CLUSTER, msg, 30);
         let pks: Vec<Bytes32> = hs.iter().map(falcon_pk_digest).collect();
         let proof = BATCH
             .prove(&witness_for(&hs, &sigs, msg))
@@ -995,7 +995,7 @@ mod tests {
         let msg = digest(7);
         let (hs, sigs) = signers(1, msg, 70);
         let w = witness_for(&hs, &sigs, msg);
-        let mut slots = vec![padding_slot(msg); MAX_COSIGNERS];
+        let mut slots = vec![padding_slot(msg); MAX_SIG_CLUSTER];
         slots[0] = active_slot(&w.active[0]);
         // Slot 1: padding witness, flag forced ACTIVE.
         slots[1] = (
@@ -1015,7 +1015,7 @@ mod tests {
     #[test]
     fn zero_signers_rejected() {
         let msg = digest(11);
-        let slots = vec![padding_slot(msg); MAX_COSIGNERS];
+        let slots = vec![padding_slot(msg); MAX_SIG_CLUSTER];
         assert_rejected(
             || raw_prove(msg, &slots),
             "an aggregate with signer_count = 0 must be rejected",
@@ -1040,7 +1040,7 @@ mod tests {
         let msg = digest(0x78);
         let (hs, sigs) = signers(2, msg, 130);
         let w = witness_for(&hs, &sigs, msg);
-        let mut slots = vec![padding_slot(msg); MAX_COSIGNERS];
+        let mut slots = vec![padding_slot(msg); MAX_SIG_CLUSTER];
         slots[0] = active_slot(&w.active[0]);
         // GAP at slot 1; real signature flagged active at slot 2.
         slots[2] = active_slot(&w.active[1]);
@@ -1064,7 +1064,7 @@ mod tests {
         let (hs, sigs) = signers(1, msg, 140);
         let w = witness_for(&hs, &sigs, msg);
         for delta in [1u64, Q, 1 << 45] {
-            let mut slots = vec![padding_slot(msg); MAX_COSIGNERS];
+            let mut slots = vec![padding_slot(msg); MAX_SIG_CLUSTER];
             let (flag, gw, mut pi) = active_slot(&w.active[0]);
             pi[0] += delta;
             slots[0] = (flag, gw, pi);
@@ -1114,7 +1114,7 @@ mod tests {
         let w = witness_for(&hs, &sigs, msg);
         let mut gw = w.active[0].clone();
         gw.s2[0] = Q; // same residue class as 0, non-canonical encoding
-        let mut slots = vec![padding_slot(msg); MAX_COSIGNERS];
+        let mut slots = vec![padding_slot(msg); MAX_SIG_CLUSTER];
         slots[0] = (true, gw.clone(), integer_product(&gw.h, &gw.s2));
         assert_rejected(
             || raw_prove(msg, &slots),
@@ -1142,7 +1142,7 @@ mod tests {
         }
     }
 
-    /// Measurement (the deliverable): build + prove times for N = 2 and N = 16 in the ONE flat
+    /// Measurement (the deliverable): build + prove times for N = 2 and N = MAX_SIG_CLUSTER in the ONE flat
     /// circuit, to compare against the tree's leaf/level chain. Run with --nocapture.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -1158,7 +1158,7 @@ mod tests {
         );
 
         let msg = digest(9);
-        for n in [2usize, 16] {
+        for n in [2usize, MAX_SIG_CLUSTER] {
             let (hs, sigs) = signers(n, msg, 150);
             let w = witness_for(&hs, &sigs, msg);
             let t = std::time::Instant::now();

@@ -23,7 +23,7 @@ use crate::{
     common::channel::{ChannelError, ChannelId, hash_words, split_u64},
     constants::{
         BALANCE_SLOT_LEAF_DOMAIN_V2, BALANCE_SLOT_TREE_HEIGHT, BALANCE_STATE_DOMAIN_V2,
-        MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS, MAX_COSIGNERS,
+        MAX_CHANNEL_MEMBERS, MAX_CHANNEL_TOKENS, MAX_SIG_CLUSTER,
     },
     ethereum_types::{
         address::Address,
@@ -604,14 +604,14 @@ impl BalanceState {
                 )));
             }
         }
-        // member_count = COSIGNERS (the N-of-N close signers), capped at MAX_COSIGNERS — NOT the
+        // member_count = COSIGNERS (the N-of-N close signers), capped at MAX_SIG_CLUSTER — NOT the
         // balance-slot capacity MAX_CHANNEL_MEMBERS. Mirrors ChannelRecord::validate /
         // ChannelRegRecord::validate; the close/cancel circuits enforce the same cap in-circuit
-        // via the MAX_COSIGNERS-bit unary decomposition.
+        // via the MAX_SIG_CLUSTER-bit unary decomposition.
         let count = self.member_count as usize;
-        if count < 2 || count > MAX_COSIGNERS {
+        if count < 2 || count > MAX_SIG_CLUSTER {
             return Err(ChannelError::InvalidBalanceState(format!(
-                "member_count {count} out of range (must be 2..={MAX_COSIGNERS} cosigners)"
+                "member_count {count} out of range (must be 2..={MAX_SIG_CLUSTER} cosigners)"
             )));
         }
         // Delegate account regions: members occupy `0..member_count`, delegates occupy
@@ -1086,11 +1086,11 @@ mod tests {
             Err(ChannelError::InvalidBalanceState(_))
         ));
 
-        // member_count > MAX_COSIGNERS rejected (cosigner cap, NOT the 1024 balance-slot
+        // member_count > MAX_SIG_CLUSTER rejected (cosigner cap, NOT the 1024 balance-slot
         // capacity — the old `(MAX_CHANNEL_MEMBERS + 1) as u8` truncated to 1 at MAX=1024 and
         // passed for the wrong reason).
         let mut too_many = state_with_members(16);
-        too_many.member_count = (MAX_COSIGNERS + 1) as u8;
+        too_many.member_count = (MAX_SIG_CLUSTER + 1) as u8;
         assert!(matches!(
             too_many.validate(),
             Err(ChannelError::InvalidBalanceState(_))
@@ -1155,22 +1155,22 @@ mod tests {
             .validate()
             .expect("members + delegates + padding must validate");
 
-        // The cosigner cap binds: member_count > MAX_COSIGNERS is rejected even with delegates.
+        // The cosigner cap binds: member_count > MAX_SIG_CLUSTER is rejected even with delegates.
         let mut overflow = state_with_members(16);
-        overflow.member_count = (MAX_COSIGNERS + 1) as u8;
+        overflow.member_count = (MAX_SIG_CLUSTER + 1) as u8;
         overflow.delegate_count = 1;
         assert!(
             matches!(
                 overflow.validate(),
                 Err(ChannelError::InvalidBalanceState(_))
             ),
-            "member_count > MAX_COSIGNERS must be rejected"
+            "member_count > MAX_SIG_CLUSTER must be rejected"
         );
         // Slot-capacity check: with u16 delegate_count (2026-07-18 slot widening) the
         // `member_count + delegate_count > MAX_CHANNEL_MEMBERS` boundary is now REACHABLE
         // (it was dead code with u8 counts: 16 + 255 = 271 < 1024). Exercise it.
         let mut over_capacity = state_with_members(16);
-        over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_COSIGNERS + 1) as u16;
+        over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_SIG_CLUSTER + 1) as u16;
         assert!(
             matches!(
                 over_capacity.validate(),
@@ -1228,9 +1228,9 @@ mod tests {
     /// cannot be silently reinterpreted under the all-member signatures.
     #[test]
     fn h1_binds_member_count_multi_n() {
-        // Cosigner range 2..=MAX_COSIGNERS (the old `..MAX_CHANNEL_MEMBERS as u8` became an EMPTY
+        // Cosigner range 2..=MAX_SIG_CLUSTER (the old `..MAX_CHANNEL_MEMBERS as u8` became an EMPTY
         // range at MAX=1024 — `1024 as u8 == 0` — silently testing nothing).
-        for count in 2u8..MAX_COSIGNERS as u8 {
+        for count in 2u8..MAX_SIG_CLUSTER as u8 {
             assert_ne!(
                 state_with_members(count).h1(),
                 state_with_members(count + 1).h1(),

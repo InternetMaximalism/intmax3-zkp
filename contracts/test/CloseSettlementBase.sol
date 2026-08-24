@@ -29,7 +29,7 @@ contract MockRollupRegistry is IChannelRegistry {
     }
 
     function register(uint32 channelId, uint8 bpMemberSlot, bytes32[] memory activeHashes) external {
-        bytes32[16] memory padded;
+        bytes32[8] memory padded;
         for (uint256 i = 0; i < activeHashes.length; i++) {
             padded[i] = activeHashes[i];
         }

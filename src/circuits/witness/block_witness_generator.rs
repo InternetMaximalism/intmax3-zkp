@@ -28,7 +28,7 @@ use crate::{
         tx::TxV2,
         u63::{BlockNumber, BlockNumberError, U63},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_TOKENS, MAX_COSIGNERS, SEND_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_TOKENS, MAX_SIG_CLUSTER, SEND_TREE_HEIGHT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -136,7 +136,7 @@ pub enum BlockWitnessGeneratorError {
 }
 
 /// Active member count for test channels (pad-to-MAX D6): these fixtures register 3 active members
-/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_COSIGNERS = 16 slots) with
+/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_SIG_CLUSTER = 16 slots) with
 /// slots 3..16 left as empty leaves (padding). Kept at 3 so existing validity/balance tests are
 /// unchanged.
 pub const TEST_ACTIVE_MEMBERS: usize = 3;
@@ -152,7 +152,7 @@ pub fn deterministic_member_falcon_keys(channel_id: u32, n: usize) -> Vec<Falcon
         .map(|slot| {
             // SECURITY (Phase-3 review MINOR): the slot rides one byte, so two slots >= 255 apart
             // would collide into ONE identity — and this repo has already shipped and fixed a
-            // u8-slot-256 bug once (project_option_b_1024). Unreachable at MAX_COSIGNERS = 16,
+            // u8-slot-256 bug once (project_option_b_1024). Unreachable at MAX_SIG_CLUSTER = 16,
             // but assert rather than rely on that staying true.
             assert!(
                 slot < 255,
@@ -398,14 +398,14 @@ impl ChannelMemberKeys {
         let mut member_tree = MemberTree::init();
         let (mut baby_keys, mut regev_pks) = (Vec::new(), Vec::new());
         // SECURITY (Option B): this is the REGISTERED member tree — cosigners only, at most
-        // `MAX_COSIGNERS` slots. Callers MUST pass exactly the co-signing member set (delegates
+        // `MAX_SIG_CLUSTER` slots. Callers MUST pass exactly the co-signing member set (delegates
         // are NOT registered on L1; they are authenticated by the cosigner-signed H1 slot tree
-        // and never enter this tree). The `MemberTree::init()` height caps at `MAX_COSIGNERS`
+        // and never enter this tree). The `MemberTree::init()` height caps at `MAX_SIG_CLUSTER`
         // leaves, so passing more panics loudly rather than silently truncating.
         assert!(
-            keys.len() <= MAX_COSIGNERS,
+            keys.len() <= MAX_SIG_CLUSTER,
             "from_member_keys: {} keys exceed the cosigner-only registered tree capacity \
-             ({MAX_COSIGNERS}); delegates must not be registered (Option B)",
+             ({MAX_SIG_CLUSTER}); delegates must not be registered (Option B)",
             keys.len()
         );
         for (k, falcon) in keys.iter().zip(falcon_keys.iter()) {
@@ -442,7 +442,7 @@ impl ChannelMemberKeys {
     /// Like [`Self::to_reg_record`] but with an explicit `member_count` / `delegate_count` split.
     /// `active = member_count + delegate_count` entries are emitted from the member tree.
     ///
-    /// SECURITY (Option B): the reg record has only `MAX_COSIGNERS` slots — registration is
+    /// SECURITY (Option B): the reg record has only `MAX_SIG_CLUSTER` slots — registration is
     /// cosigners-only, and registration-producing paths emit `delegate_count = 0`. A nonzero
     /// `delegate_count` is accepted only within the 16-slot capacity (legacy 16-slot channels);
     /// anything beyond is rejected here (and by `ChannelRegRecord::validate`).
@@ -458,11 +458,11 @@ impl ChannelMemberKeys {
     ) -> ChannelRegRecord {
         let active = (member_count + delegate_count) as usize;
         assert!(
-            active <= MAX_COSIGNERS,
-            "active participants {active} exceed the reg record's MAX_COSIGNERS slots (Option B: \
+            active <= MAX_SIG_CLUSTER,
+            "active participants {active} exceed the reg record's MAX_SIG_CLUSTER slots (Option B: \
              registration carries cosigners only)"
         );
-        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
+        let mut members: [MemberRegEntry; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| MemberRegEntry::default());
         for (i, entry) in members.iter_mut().enumerate().take(active) {
             let leaf = self.member_tree.get_leaf(i as u64);
@@ -1289,7 +1289,7 @@ impl BlockWitnessGenerator {
             // `h2_tag` IS this block's tx root (channel.rs: "the own small block's tx_tree_root
             // for an inter-channel send"), which is the entire point of the binding.
             let digest = fields.signing_digest(channel_id, tx_tree_root);
-            let leaves: Vec<MemberLeaf> = (0..MAX_COSIGNERS)
+            let leaves: Vec<MemberLeaf> = (0..MAX_SIG_CLUSTER)
                 .map(|slot| public.member_tree.get_leaf(slot as u64))
                 .collect();
             (fields, Some(leaves), Some(digest))

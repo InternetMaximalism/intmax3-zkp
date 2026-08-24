@@ -550,7 +550,7 @@ contract IntmaxRollupTest is Test {
             fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
 
             // Pad the active hashes to the fixed-16 form the verifier consumes.
-            bytes32[16] memory padded;
+            bytes32[8] memory padded;
             for (uint256 i = 0; i < memberCount; i++) {
                 padded[i] = sphincs[i];
             }

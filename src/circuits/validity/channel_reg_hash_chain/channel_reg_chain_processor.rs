@@ -112,7 +112,7 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     fn make_record(channel_id: u32, member_count: u32) -> ChannelRegRecord {
-        let mut members: [MemberRegEntry; crate::constants::MAX_COSIGNERS] =
+        let mut members: [MemberRegEntry; crate::constants::MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(channel_tree_after1.get_root(), first_pis.channel_tree_root);
 
         // Step 2: register channel 9, chaining from step 1's proof.
-        let record2 = make_record(9, 16);
+        let record2 = make_record(9, crate::constants::MAX_SIG_CLUSTER as u32);
         let idx2 = record2.channel_id.as_u64();
         let proof2_merkle = channel_tree_after1.prove(idx2);
 

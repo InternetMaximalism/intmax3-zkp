@@ -59,7 +59,7 @@ use crate::{
         },
         u63::{BlockNumber, BlockNumberTarget, U63, U63Target},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, MEMBER_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_SIG_CLUSTER, MEMBER_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -97,12 +97,12 @@ pub enum ChannelRegStepError {
 /// Build the native REGISTERED `MemberTree` root for `record`'s active slots, with the remaining
 /// slots empty. Mirrors the in-circuit root computation.
 ///
-/// SECURITY (Option B): this is the COSIGNER-scoped registered root (`MAX_COSIGNERS` slots,
+/// SECURITY (Option B): this is the COSIGNER-scoped registered root (`MAX_SIG_CLUSTER` slots,
 /// height `MEMBER_TREE_HEIGHT`). L1 registration is cosigners-only, and `delegate_count == 0` is
 /// now a CIRCUIT CONSTRAINT (`ChannelRegStepTarget::new`), not a convention — so for every record
 /// this step can prove, `active == member_count`. This helper still reads `delegate_count` so it
 /// stays a faithful native mirror of the in-circuit root for the general shape (`validate` only
-/// bounds `member_count + delegate_count <= MAX_COSIGNERS`); a record with a nonzero
+/// bounds `member_count + delegate_count <= MAX_SIG_CLUSTER`); a record with a nonzero
 /// `delegate_count` gets a native root here that the circuit will refuse to reproduce.
 ///
 /// This root is NOT the wallet's live membership root (`wallet_core::member_pubkeys_root`, height
@@ -250,12 +250,12 @@ pub struct ChannelRegStepTarget<const D: usize> {
     pub delegate_count: Target,
     /// The 16 members' Poseidon identity components, witnessed ONCE and reused for both the keccak
     /// preimage and the Poseidon member-tree leaves (R2 cross-binding).
-    pub member_pk_ges: [PoseidonHashOutTarget; MAX_COSIGNERS],
+    pub member_pk_ges: [PoseidonHashOutTarget; MAX_SIG_CLUSTER],
     /// The 16 members' BabyBear hash-sig public keys (`pk_b`), witnessed once and reused for both
     /// the keccak preimage and the 3-field Poseidon member-tree leaves (R2 cross-binding, P3).
-    pub member_pk_bs: [PoseidonHashOutTarget; MAX_COSIGNERS],
-    pub member_regev_pk_digests: [PoseidonHashOutTarget; MAX_COSIGNERS],
-    pub member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_COSIGNERS],
+    pub member_pk_bs: [PoseidonHashOutTarget; MAX_SIG_CLUSTER],
+    pub member_regev_pk_digests: [PoseidonHashOutTarget; MAX_SIG_CLUSTER],
+    pub member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_SIG_CLUSTER],
     pub channel_merkle_proof: ChannelMerkleProofTarget,
     pub block_number: BlockNumberTarget,
 
@@ -293,7 +293,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // §9 Phase 1): L1 registration is COSIGNERS-ONLY, so `delegate_count` MUST be zero. This
         // used to be policy only — a convention of the registration-producing paths, documented at
         // `common/channel_registration.rs:85` and `ChannelSettlementManager.sol:1612` — and
-        // `validate()` accepted any `member_count + delegate_count <= MAX_COSIGNERS`. It is now a
+        // `validate()` accepted any `member_count + delegate_count <= MAX_SIG_CLUSTER`. It is now a
         // constraint.
         //
         // WHY: the `member_pubkeys_root` this step writes into the `ChannelLeaf` is the root over
@@ -316,13 +316,13 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.assert_zero(delegate_count);
 
         // -- Member identity components (witnessed once; R2 cross-binding) --
-        let member_pk_ges: [PoseidonHashOutTarget; MAX_COSIGNERS] =
+        let member_pk_ges: [PoseidonHashOutTarget; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_pk_bs: [PoseidonHashOutTarget; MAX_COSIGNERS] =
+        let member_pk_bs: [PoseidonHashOutTarget; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_regev_pk_digests: [PoseidonHashOutTarget; MAX_COSIGNERS] =
+        let member_regev_pk_digests: [PoseidonHashOutTarget; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| PoseidonHashOutTarget::new(builder));
-        let member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_COSIGNERS] =
+        let member_recipients: [crate::ethereum_types::address::AddressTarget; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| {
                 crate::ethereum_types::address::AddressTarget::new(builder, true)
             });
@@ -395,7 +395,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── member_count ∈ [2, 16] range check ──
         // member_count - 2 in [0, 14] and 16 - member_count in [0, 14].
         let two = builder.constant(F::from_canonical_u64(2));
-        let max = builder.constant(F::from_canonical_u64(MAX_COSIGNERS as u64));
+        let max = builder.constant(F::from_canonical_u64(MAX_SIG_CLUSTER as u64));
         let mc_minus_two = builder.sub(member_count, two);
         builder.range_check(mc_minus_two, 4); // [0, 15] ⊇ [0, 14]
         let max_minus_mc = builder.sub(max, member_count);
@@ -408,7 +408,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         builder.range_check(slot_diff, 4);
 
         // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 16] ──
-        // SECURITY: `active <= MAX_COSIGNERS` (no over-allocation past the fixed 16 slots);
+        // SECURITY: `active <= MAX_SIG_CLUSTER` (no over-allocation past the fixed 16 slots);
         // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
         // thermometer mask below uses `active` as the threshold, so padding begins at `active`.
         //
@@ -424,16 +424,16 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         // ── is_active thermometer mask: is_active[i] = (i < active_count) ──
         // `active_count` is a single threshold, so the mask is monotonic non-increasing by
         // construction; `lt_const_threshold` pins each bit uniquely against the range-checked
-        // `active_count` (range [2, MAX_COSIGNERS]).
-        let is_active: Vec<BoolTarget> = (0..MAX_COSIGNERS)
+        // `active_count` (range [2, MAX_SIG_CLUSTER]).
+        let is_active: Vec<BoolTarget> = (0..MAX_SIG_CLUSTER)
             .map(|i| lt_const_threshold(builder, i, active_count))
             .collect();
 
         // ── Build MemberLeaf targets + member_pubkeys_root (Poseidon) ──
         // Padding slots forced empty: when !is_active, sphincs==0 && regev==0.
         let zero_hash = PoseidonHashOutTarget::constant(builder, PoseidonHashOut::default());
-        let mut leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_COSIGNERS);
-        for i in 0..MAX_COSIGNERS {
+        let mut leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        for i in 0..MAX_SIG_CLUSTER {
             let not_active = builder.not(is_active[i]);
             // Force pk_g == 0, pk_b == 0 and regev == 0 on inactive slots (empty-leaf padding).
             member_pk_ges[i].conditional_assert_eq(builder, zero_hash, not_active);
@@ -450,7 +450,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         let member_pubkeys_root = compute_member_tree_root::<F, C, D>(builder, &leaf_hashes);
 
         // ── keccak preimage: build 32-byte forms from the SAME Poseidon targets (R2) ──
-        let members_reg_entries: [MemberRegEntryTarget; MAX_COSIGNERS] =
+        let members_reg_entries: [MemberRegEntryTarget; MAX_SIG_CLUSTER] =
             std::array::from_fn(|i| MemberRegEntryTarget {
                 pk_g: Bytes32Target::from_hash_out(builder, member_pk_ges[i]),
                 pk_b: Bytes32Target::from_hash_out(builder, member_pk_bs[i]),
@@ -576,7 +576,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             F::from_canonical_u32(value.record.delegate_count),
         );
         // Members: split each 32-byte digest to its reduced PoseidonHashOut (the witnessed value).
-        for i in 0..MAX_COSIGNERS {
+        for i in 0..MAX_SIG_CLUSTER {
             let m = &value.record.members[i];
             self.member_pk_ges[i].set_witness(witness, m.pk_g.reduce_to_hash_out());
             self.member_pk_bs[i].set_witness(witness, m.pk_b.reduce_to_hash_out());
@@ -593,17 +593,17 @@ impl<const D: usize> ChannelRegStepTarget<D> {
 }
 
 /// `is_active = (i < member_count)` as a BoolTarget, for the small constant `i` and a
-/// range-checked `member_count` (in `[2, MAX_COSIGNERS]`).
+/// range-checked `member_count` (in `[2, MAX_SIG_CLUSTER]`).
 ///
 /// `pub(crate)` (small-block N-of-N design §5.4 item 1): `update_channel_tree` builds the SAME
 /// thermometer over its `signer_count`. It CALLS this one rather than restating it — a second
 /// derivation that agrees only by luck is the recurring failure mode this repo is trying to stop.
 ///
 /// DETERMINISTIC (no free witness): `member_count` takes exactly one value in
-/// `[2, MAX_COSIGNERS]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
+/// `[2, MAX_SIG_CLUSTER]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
 /// Exactly one `is_equal` fires (when `member_count == t`), and it is in the sum iff `t > i`, i.e.
 /// iff `i < member_count`. The sum is therefore 0 or 1 and has standard generators (no unfilled
-/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_COSIGNERS = 16), so
+/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_SIG_CLUSTER = 16), so
 /// unrolling is cheap.
 pub(crate) fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
@@ -611,7 +611,7 @@ pub(crate) fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     member_count: Target,
 ) -> BoolTarget {
     let mut sum = builder.zero();
-    for t in (i + 1)..=MAX_COSIGNERS {
+    for t in (i + 1)..=MAX_SIG_CLUSTER {
         let t_const = builder.constant(F::from_canonical_u64(t as u64));
         let eq = builder.is_equal(member_count, t_const);
         sum = builder.add(sum, eq.target);
@@ -734,7 +734,7 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
 
     fn make_record(channel_id: u32, member_count: u32) -> ChannelRegRecord {
-        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
+        let mut members: [MemberRegEntry; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             let s = (i as u32) + 1;
@@ -878,7 +878,7 @@ mod tests {
     /// SECURITY — what this test is intended to prove: that cosigner-only L1 registration is an
     /// enforced circuit property and not merely a convention of the construction sites. The test
     /// deliberately builds a record that passes EVERY native check — `ChannelRegRecord::validate`
-    /// still permits `member_count + delegate_count <= MAX_COSIGNERS`, and the delegate slot is a
+    /// still permits `member_count + delegate_count <= MAX_SIG_CLUSTER`, and the delegate slot is a
     /// well-formed, nonzero, distinct member entry — and asserts native
     /// `to_public_inputs` SUCCEEDS on it before asserting that proving FAILS. Without that first
     /// assertion the test could pass for the wrong reason (an early native rejection), which would

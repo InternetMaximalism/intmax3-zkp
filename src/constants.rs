@@ -40,12 +40,12 @@ pub const SENT_TX_TREE_HEIGHT: usize = 32;
 
 // Per-channel REGISTERED member tree (one Goldilocks signing key per member).
 // `ChannelLeaf.member_pubkeys_root` commits the ordered member leaves
-// `MemberLeaf { pk_g, pk_b, regev_pk_digest }`, indexed by member slot 0..MAX_COSIGNERS.
+// `MemberLeaf { pk_g, pk_b, regev_pk_digest }`, indexed by member slot 0..MAX_SIG_CLUSTER.
 //
 // SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration covers ONLY the
-// <= MAX_COSIGNERS cosigners, so this tree — the root written at `channel_reg_step` and the root
+// <= MAX_SIG_CLUSTER cosigners, so this tree — the root written at `channel_reg_step` and the root
 // the validity `update_channel_tree` bp-slot inclusion opens against — holds exactly the
-// MAX_COSIGNERS cosigner slots. A channel's `member_count` active COSIGNERS occupy slots
+// MAX_SIG_CLUSTER cosigner slots. A channel's `member_count` active COSIGNERS occupy slots
 // 0..member_count; the remaining slots are empty leaves. Delegates are NOT in this tree: they are
 // authenticated by the cosigner-signed H1 balance-slot tree (BALANCE_SLOT_TREE_HEIGHT), never by
 // prior L1 registration. The bp is always a cosigner (`bp_member_slot < member_count`), so the
@@ -55,14 +55,14 @@ pub const SENT_TX_TREE_HEIGHT: usize = 32;
 // [`WALLET_MEMBER_TREE_HEIGHT`]) — do not conflate them: their roots are equal only for a channel
 // with zero delegates.
 //
-// SECURITY/INVARIANT: 1 << MEMBER_TREE_HEIGHT == MAX_COSIGNERS (const-asserted below).
+// SECURITY/INVARIANT: 1 << MEMBER_TREE_HEIGHT == MAX_SIG_CLUSTER (const-asserted below).
 // `channel_reg_step` asserts `leaf_hashes.len() == 1 << MEMBER_TREE_HEIGHT`. If this height were
-// smaller than log2(MAX_COSIGNERS), the incremental Merkle tree panics on the first slot index
+// smaller than log2(MAX_SIG_CLUSTER), the incremental Merkle tree panics on the first slot index
 // >= 2^height (incremental_merkle_tree.rs:72) — it never silently truncates.
-pub const MEMBER_TREE_HEIGHT: usize = 4;
+pub const MEMBER_TREE_HEIGHT: usize = 3;
 const _: () = assert!(
-    1 << MEMBER_TREE_HEIGHT == MAX_COSIGNERS,
-    "MEMBER_TREE_HEIGHT must be log2(MAX_COSIGNERS)"
+    1 << MEMBER_TREE_HEIGHT == MAX_SIG_CLUSTER,
+    "MEMBER_TREE_HEIGHT must be log2(MAX_SIG_CLUSTER)"
 );
 
 /// Height of the WALLET-side LIVE membership tree (`wallet_core::member_pubkeys_root`): the
@@ -123,37 +123,40 @@ const _: () = assert!(
 /// H1 arrays stay sized by `MAX_CHANNEL_MEMBERS`.
 ///
 /// SECURITY: this is a STATIC ZK-circuit size — the close/cancel circuits verify exactly
-/// `MAX_COSIGNERS` SPHINCS+ cosigner slots (gating padding slots off via the active-bits unary
-/// decomposition). `member_count` is range-checked `2..=MAX_COSIGNERS`; the invariant `member_count
+/// `MAX_SIG_CLUSTER` SPHINCS+ cosigner slots (gating padding slots off via the active-bits unary
+/// decomposition). `member_count` is range-checked `2..=MAX_SIG_CLUSTER`; the invariant `member_count
 /// + delegate_count <= MAX_CHANNEL_MEMBERS` still bounds the total active balance participants.
-/// Sizing the SIGNATURE work to 16 (rather than 1024) is what keeps the close/cancel circuit degree
+/// Sizing the SIGNATURE work to 8 (rather than 1024) is what keeps the close/cancel circuit degree
 /// tractable — the H1 / balance-state work legitimately stays 1024 (delegates have balances).
-pub const MAX_COSIGNERS: usize = 16;
+// TERMINOLOGY (2026-08-24): the channel's co-signing member set is the SIG-CLUSTER; its members
+// occupy slots 0..member_count. Delegates are NOT in the cluster. Legacy identifiers/CLI verbs
+// ("cosign", `member_signatures`) remain for interface stability; new code says sig-cluster.
+pub const MAX_SIG_CLUSTER: usize = 8;
 
 /// Height of the in-circuit indexed-Merkle tree used to prove A5 pk_g distinctness over the active
 /// COSIGNER set (close / cancel-close circuits). The close/cancel circuits insert each ACTIVE
 /// cosigner's `pk_g` (as a U256 key) IN SLOT ORDER into an initially-empty `IndexedMerkleTree`; the
 /// existing audited insertion gadget proves `prev_low.key < key < next_key` per insert =
 /// non-membership = distinctness, so a duplicate key makes an insertion UNSATISFIABLE. This
-/// replaces the former O(MAX_COSIGNERS^2) all-pairs equality loop with an O(MAX·height)
+/// replaces the former O(MAX_SIG_CLUSTER^2) all-pairs equality loop with an O(MAX·height)
 /// chain that proves the SAME property (no two active cosigner slots share a pk_g) without touching
 /// slot order, the member_set_commitment, or the C' signature fold.
 ///
 /// SIZING: the tree starts with ONE sentinel leaf (`IndexedMerkleTree::new` pushes
-/// `IndexedMerkleLeaf::default()` at index 0) and then pushes up to `MAX_COSIGNERS` active
-/// leaves, for at most `MAX_COSIGNERS + 1` occupied leaf slots. `IncrementalMerkleTree::push`
-/// asserts `index < 2^height`, so we need `2^height >= MAX_COSIGNERS + 1`, i.e.
-/// `height >= ceil(log2(MAX_COSIGNERS + 1))`. Derived from `MAX_COSIGNERS` (the distinctness tree
+/// `IndexedMerkleLeaf::default()` at index 0) and then pushes up to `MAX_SIG_CLUSTER` active
+/// leaves, for at most `MAX_SIG_CLUSTER + 1` occupied leaf slots. `IncrementalMerkleTree::push`
+/// asserts `index < 2^height`, so we need `2^height >= MAX_SIG_CLUSTER + 1`, i.e.
+/// `height >= ceil(log2(MAX_SIG_CLUSTER + 1))`. Derived from `MAX_SIG_CLUSTER` (the distinctness tree
 /// only holds COSIGNER keys now, not balance slots) so a later cap bump stays correct without a
-/// manual edit. For MAX_COSIGNERS=16: `ceil(log2(17)) = 5` → 32 leaf slots.
+/// manual edit. For MAX_SIG_CLUSTER=16: `ceil(log2(17)) = 5` → 32 leaf slots.
 ///
 /// SECURITY: the height only bounds tree CAPACITY; it does not affect WHICH keys are checked
 /// (the active gating and key sourcing do). Over-sizing the tree is sound (it only adds unused
 /// capacity); under-sizing it would panic at witness-generation time (`push` assert), never
 /// silently skip a check.
 pub const MEMBER_DISTINCTNESS_TREE_HEIGHT: usize = {
-    // ceil(log2(MAX_COSIGNERS + 1)): smallest `height` with `2^height >= MAX_COSIGNERS+1`.
-    let needed_leaves = (MAX_COSIGNERS + 1) as u64;
+    // ceil(log2(MAX_SIG_CLUSTER + 1)): smallest `height` with `2^height >= MAX_SIG_CLUSTER+1`.
+    let needed_leaves = (MAX_SIG_CLUSTER + 1) as u64;
     let mut height = 0usize;
     let mut capacity = 1u64;
     while capacity < needed_leaves {

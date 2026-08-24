@@ -896,11 +896,11 @@ pub fn build_record(
     // Cosigner cap: member_count must fit the N-of-N close signer space. Checked EXPLICITLY here
     // (before the `as u8` narrowing below) so an oversized cosigner count fails loudly instead of
     // truncating — e.g. 258 would otherwise wrap to 2 and pass `record.validate()`.
-    if member_count > crate::constants::MAX_COSIGNERS {
+    if member_count > crate::constants::MAX_SIG_CLUSTER {
         return bail(format!(
-            "member_count {member_count} exceeds MAX_COSIGNERS ({}); extra participants must join \
+            "member_count {member_count} exceeds MAX_SIG_CLUSTER ({}); extra participants must join \
              as delegates",
-            crate::constants::MAX_COSIGNERS
+            crate::constants::MAX_SIG_CLUSTER
         ));
     }
     // bp must be a co-signing member, not a delegate.
@@ -1052,7 +1052,7 @@ pub fn assemble_genesis_state_backed(
 /// native Falcon-512/Poseidon signature over the IMCH digest, wire-encoded with the signer's
 /// public polynomial `h` so any holder of the registered `pk_g` can verify it).
 ///
-/// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_COSIGNERS = 16`), so u8 is
+/// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_SIG_CLUSTER = 16`), so u8 is
 /// sufficient — delegates never co-sign state (audited 2026-07-18, u16 slot widening).
 pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<MemberSignature> {
     let digest = state.signing_digest();
@@ -1416,7 +1416,7 @@ pub fn build_send_token(
     // co-sign the resulting state. (A delegate signature would be ignored by verify_all_signatures
     // anyway, but emitting it would contradict the send-only model and waste a proof.)
     if (sender_slot as usize) < prev.balance_state.member_count as usize {
-        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
         let sender_sig = sign_state(keys, sender_slot as u8, &proposed)?;
         add_signature(&mut proposed, sender_sig);
     }
@@ -1962,7 +1962,7 @@ pub fn build_refresh(
     let mut proposed = next_state;
     if (slot as usize) < prev.balance_state.member_count as usize {
         // A co-signing MEMBER self-signs (N-of-N). A DELEGATE is send-only — no state signature.
-        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
         let sig = sign_state(keys, slot as u8, &proposed)?;
         add_signature(&mut proposed, sig);
     }
@@ -2679,7 +2679,7 @@ pub fn build_inter_channel_send_token_at_base_nonce(
     // If the building participant is a co-signing MEMBER (slot < member_count) it self-signs the
     // post-debit state (one of the N-of-N). A DELEGATE sender does NOT co-sign state.
     if (sender_slot as usize) < record.member_count as usize {
-        // Cosigner space (guarded above): slot < member_count <= MAX_COSIGNERS, so u8 fits.
+        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
         let sender_sig = sign_state(keys, sender_slot as u8, &a_send)?;
         add_signature(&mut a_send, sender_sig);
     }
@@ -3116,7 +3116,7 @@ pub fn verify_aggregate_manifest(
 // ---------------------------------------------------------------------------------------------
 
 use crate::common::channel::{hash_words, split_u64};
-use crate::constants::MAX_COSIGNERS;
+use crate::constants::MAX_SIG_CLUSTER;
 
 /// The REGISTERED co-signer root (16-slot `MemberTree`, the tree the validity circuit freezes in
 /// `ChannelLeaf.member_pubkeys_root`): slots `0..member_count` from the authenticated member list.
@@ -3331,8 +3331,8 @@ pub fn verify_member_set_update(
         }
         MemberSetOp::AddCosigner { pk_g, pk_b, regev_pk, recipient, consent_sig } => {
             let mc = trusted_record.member_count as usize;
-            if mc + 1 > MAX_COSIGNERS {
-                return bail("member-set update: co-signer set is full (MAX_COSIGNERS)");
+            if mc + 1 > MAX_SIG_CLUSTER {
+                return bail("member-set update: co-signer set is full (MAX_SIG_CLUSTER)");
             }
             if trusted_members.iter().any(|m| m.pk_g == *pk_g) {
                 return bail("member-set update: joining pk_g is already a participant");
@@ -8921,7 +8921,7 @@ mod delegate_send_tests {
             use crate::common::channel::close_member_set_commitment;
             let lc: serde_json::Value =
                 serde_json::from_str(&artifacts.lifecycle_json).expect("lifecycle json");
-            let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
+            let mut close_hashes: [Bytes32; crate::constants::MAX_SIG_CLUSTER] =
                 std::array::from_fn(|_| Bytes32::default());
             for (i, m) in cli_members.iter().enumerate() {
                 close_hashes[i] = m.pk_g();
@@ -9023,7 +9023,7 @@ mod delegate_send_tests {
         // key. REG side: the `MemberLeaf.pk_g` of the member tree the registration path BUILDS.
         // Two independent paths to the same quantity; if `from_member_keys` ever committed
         // anything other than the member's own signing identity, this fails.
-        let mut close_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
+        let mut close_hashes: [Bytes32; crate::constants::MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| Bytes32::default());
         for (i, k) in cli_members.iter().enumerate() {
             close_hashes[i] = k.pk_g();
@@ -9032,7 +9032,7 @@ mod delegate_send_tests {
             close_member_set_commitment(&close_hashes, TEST_ACTIVE_MEMBERS as u8);
 
         let cmk = ChannelMemberKeys::from_member_keys(&cli_members);
-        let mut reg_hashes: [Bytes32; crate::constants::MAX_COSIGNERS] =
+        let mut reg_hashes: [Bytes32; crate::constants::MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| Bytes32::default());
         for i in 0..TEST_ACTIVE_MEMBERS {
             reg_hashes[i] = Bytes32::from(cmk.member_tree.get_leaf(i as u64).pk_g);

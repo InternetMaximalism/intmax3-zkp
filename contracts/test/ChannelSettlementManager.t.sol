@@ -35,7 +35,7 @@ contract MockChannelRegistry is IChannelRegistry {
         uint8 bpMemberSlot,
         bytes32[] memory activeHashes
     ) external {
-        bytes32[16] memory padded;
+        bytes32[8] memory padded;
         for (uint256 i = 0; i < activeHashes.length; i++) {
             padded[i] = activeHashes[i];
         }
@@ -809,12 +809,12 @@ contract ChannelSettlementManagerTest is Test {
     bytes32 internal constant MEMBER_SET_VECTOR_H2 =
         0x0000001100000012000000130000001400000015000000160000001700000018;
     bytes32 internal constant MEMBER_SET_COMMITMENT_VECTOR =
-        0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc;
+        0x826fa6c83e36ef8f4537ce2bdd5873faa8e861dd7a4d3b072b77990cbfd7b886;
 
     function test_member_set_commitment_matches_rust_shared_vector() external view {
         // The shape is locked to this constant via the Rust counterpart; we recompute it here over
         // the FIXED 16-slot array (3 active hashes + 13 zero padding slots) and memberCount = 3.
-        bytes32[16] memory hashes;
+        bytes32[8] memory hashes;
         hashes[0] = MEMBER_SET_VECTOR_H0;
         hashes[1] = MEMBER_SET_VECTOR_H1;
         hashes[2] = MEMBER_SET_VECTOR_H2;
@@ -824,7 +824,7 @@ contract ChannelSettlementManagerTest is Test {
         // Padding slots (>= memberCount) are zeroed INTERNALLY (mirrors Rust + the in-circuit
         // gadget), so a nonzero padding slot in the input array does NOT change the commitment —
         // the value depends only on memberCount and the active hashes (injective on the active set).
-        bytes32[16] memory tampered = hashes;
+        bytes32[8] memory tampered = hashes;
         tampered[3] = bytes32(uint256(1));
         assertEq(verifier.closeMemberSetCommitment(tampered, 3), MEMBER_SET_COMMITMENT_VECTOR);
 
@@ -867,7 +867,7 @@ contract ChannelSettlementManagerTest is Test {
         // setUp) rather than deploying a new contract here, so the ONLY call after a caller's
         // `vm.expectRevert` is the manager constructor itself (Foundry requires the reverting call
         // immediately after the cheatcode).
-        if (b.length >= 2 && b.length <= 16 && bpSlot < b.length) {
+        if (b.length >= 2 && b.length <= 8 && bpSlot < b.length) {
             bytes32[] memory activeHashes = new bytes32[](b.length);
             for (uint256 i = 0; i < b.length; i++) {
                 activeHashes[i] = b[i].pkG;
@@ -889,24 +889,25 @@ contract ChannelSettlementManagerTest is Test {
         );
     }
 
-    function test_variable_member_count_2_and_16() external {
+    function test_variable_member_count_2_and_8() external {
         ChannelSettlementManager m2 = _newManager(2, 0);
         assertEq(uint256(m2.activeMemberCount()), 2);
         assertEq(m2.memberCount(), 2);
-        // registeredMemberSetCommitment uses the FIXED 16-slot form with the active count.
-        bytes32[16] memory h2;
+        // registeredMemberSetCommitment uses the FIXED 8-slot (MAX_MEMBER_COUNT) form with the
+        // active count.
+        bytes32[8] memory h2;
         h2[0] = keccak256(abi.encodePacked("member", uint256(0)));
         h2[1] = keccak256(abi.encodePacked("member", uint256(1)));
         assertEq(m2.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h2, 2));
 
-        ChannelSettlementManager m16 = _newManager(16, 5);
-        assertEq(uint256(m16.activeMemberCount()), 16);
-        assertEq(uint256(m16.bpMemberSlot()), 5);
-        bytes32[16] memory h16;
-        for (uint256 i = 0; i < 16; i++) {
-            h16[i] = keccak256(abi.encodePacked("member", i));
+        ChannelSettlementManager m8 = _newManager(8, 5);
+        assertEq(uint256(m8.activeMemberCount()), 8);
+        assertEq(uint256(m8.bpMemberSlot()), 5);
+        bytes32[8] memory h8;
+        for (uint256 i = 0; i < 8; i++) {
+            h8[i] = keccak256(abi.encodePacked("member", i));
         }
-        assertEq(m16.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h16, 16));
+        assertEq(m8.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h8, 8));
     }
 
     function test_member_count_out_of_range_reverts() external {
@@ -916,9 +917,10 @@ contract ChannelSettlementManagerTest is Test {
         vm.expectRevert(ChannelSettlementManager.InvalidMemberCount.selector);
         _newManagerFrom(one, 0);
 
-        ChannelSettlementManager.MemberBinding[] memory seventeen = _bindings(17);
+        // One past the sig-cluster cap (MAX_MEMBER_COUNT = 8).
+        ChannelSettlementManager.MemberBinding[] memory nine = _bindings(9);
         vm.expectRevert(ChannelSettlementManager.InvalidMemberCount.selector);
-        _newManagerFrom(seventeen, 0);
+        _newManagerFrom(nine, 0);
 
         // bpMemberSlot >= activeMemberCount reverts.
         ChannelSettlementManager.MemberBinding[] memory three = _bindings(3);

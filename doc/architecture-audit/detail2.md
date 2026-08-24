@@ -174,7 +174,7 @@ Legend: **[New]** = new type / **[Chg]** = change to existing type / **[Keep]** 
 /// abstract2.md: BalanceState { encBalances, settledTxChain, stateVersion }
 pub struct BalanceState {
     pub channel_id: ChannelId,
-    pub member_count: u8,                                  // co-signing COSIGNERS = slot 0..member_count (2..=MAX_COSIGNERS = 16, D6/D12)
+    pub member_count: u8,                                  // co-signing COSIGNERS = slot 0..member_count (2..=MAX_SIG_CLUSTER = 8 (2026-08-24, was MAX_COSIGNERS = 16), D6/D12)
     pub delegate_count: u8,                                // DELEGATES = slot member_count..member_count+delegate_count (§L, D9)
     pub enc_balances: [RegevCiphertext; MAX_CHANNEL_MEMBERS],   // 1024 balance slots; active = cosigners+delegates, padding default/zero
     pub regev_pk_digests: [Bytes32; MAX_CHANNEL_MEMBERS],  // per-slot Regev pk Poseidon digests (decryption Stage 1); padding = default
@@ -209,7 +209,7 @@ pub fn balance_state_hash(h1: Bytes32, h2: Bytes32) -> Bytes32 {
 }
 ```
 
-- **Balance-slot capacity vs cosigners (`MAX_CHANNEL_MEMBERS = 1024`, `MAX_COSIGNERS = 16`; pad-to-MAX,
+- **Balance-slot capacity vs cosigners (`MAX_CHANNEL_MEMBERS = 1024`, `MAX_SIG_CLUSTER = 8` (was `MAX_COSIGNERS = 16`); pad-to-MAX,
   §G, D6 → D12).** The two roles D6's single `MAX_CHANNEL_MEMBERS = 16` conflated are now separate
   constants: `MAX_CHANNEL_MEMBERS = 1024` is the BALANCE-SLOT capacity (cosigners + delegates +
   padding) sizing `enc_balances` / `regev_pk_digests` / `pending_adds` / `ChannelRecord.member_pk_gs`
@@ -1658,3 +1658,21 @@ the record digest changes).
 Regev-key rotation (requires re-encrypting the slot under the new key — a separate value-moving
 operation); member REMOVAL (changes quorum semantics and stranded-balance rules; needs its own
 design); sub-N thresholds.
+
+## R. Terminology + sig-cluster cap (2026-08-24)
+
+- **The co-signing member set is henceforth the SIG-CLUSTER** (its members: sig-cluster members;
+  delegates remain outside it). New identifiers use the term (`MAX_SIG_CLUSTER`); legacy CLI verbs
+  (`cosign`, `cosign-batch`, …) and wire field names (`member_signatures`) are unchanged for
+  interface stability.
+- **`MAX_SIG_CLUSTER = 8`** (was `MAX_COSIGNERS = 16`). Derived shapes halve:
+  `MEMBER_TREE_HEIGHT = 3`, Falcon aggregation `AGG_LEVELS = 3` (8-slot batch circuit — the
+  aggregate proof covers 8 signature slots instead of 16), registration pad-to-MAX preimages are
+  8-wide on BOTH the Rust and Solidity mirrors (IntmaxRollup `MAX_CHANNEL_MEMBERS = 8`, Manager
+  `MAX_MEMBER_COUNT = 8`, Verifier `MAX_CHANNEL_MEMBERS = 8`), and the IMCM close member-set
+  commitment is `keccak([IMCM, member_count, h_0..h_7])` (66 u32 words; shared cross-language
+  vector re-pinned, both sides independently agree).
+- **This is a circuit-shape change**: every VK rotates (validity, close family, withdrawal,
+  Falcon aggregate), so the full fixture set must be regenerated (regen runbook Step 1) and the
+  contracts redeployed before any fixture-backed Forge test or deployment is meaningful again.
+  Channel capacity beyond 8 signers is delegates' job (`MAX_CHANNEL_MEMBERS = 1024` unchanged).

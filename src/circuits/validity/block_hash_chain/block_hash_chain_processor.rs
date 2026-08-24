@@ -45,7 +45,7 @@ use crate::{
         },
         tx::{ChannelAction, TxV2},
     },
-    constants::{MAX_COSIGNERS, TX_TREE_HEIGHT},
+    constants::{MAX_SIG_CLUSTER, TX_TREE_HEIGHT},
     regev::{REGEV_N, RegevPk},
     utils::conversion::ToU64,
 };
@@ -91,7 +91,7 @@ pub struct BlockHashChainProcessorWitness {
     pub user_merkle_proofs: Vec<ChannelMerkleProof>,
     pub send_merkle_proofs: Vec<SendMerkleProof>,
     pub public_state_merkle_proof: PublicStateMerkleProof,
-    /// Optional channel member set — ALL `MAX_COSIGNERS` leaves in slot order (see
+    /// Optional channel member set — ALL `MAX_SIG_CLUSTER` leaves in slot order (see
     /// `UpdateUserTree::member_leaves`) together with the number that signed. If None, an empty
     /// set with `signer_count = 0` is used, valid only when every slot is non-updating (the whole
     /// N-of-N binding is gated on a block actually applying a signature).
@@ -321,7 +321,7 @@ where
             member_leaves: witness
                 .member_leaves
                 .clone()
-                .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_COSIGNERS]),
+                .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_SIG_CLUSTER]),
             signer_count: witness.signer_count.unwrap_or(0),
             member_regev_pks: witness
                 .member_regev_pks

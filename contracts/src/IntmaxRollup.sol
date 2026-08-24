@@ -496,7 +496,7 @@ contract IntmaxRollup {
     /// @notice Bounds on members per channel (one SPHINCS+ key per member, D6 pad-to-MAX; mirrors
     /// the Rust `MAX_CHANNEL_MEMBERS` constant in src/constants.rs). A channel registers between
     /// `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot order.
-    uint32 internal constant MAX_CHANNEL_MEMBERS = 16;
+    uint32 internal constant MAX_CHANNEL_MEMBERS = 8;
     uint32 internal constant MIN_CHANNEL_MEMBERS = 2;
 
     /// @notice Reserved channel id for the partial-withdrawal burn destination (abstract2-1 §2.6;

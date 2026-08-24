@@ -241,7 +241,7 @@ pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValu
             )
             .map_err(|e| js_err(format!("cannot decrypt own slot {slot} token {t}: {e}")))?;
         }
-        // Cosigner space: slot < member_count <= MAX_COSIGNERS (checked above), so u8 fits.
+        // Cosigner space: slot < member_count <= MAX_SIG_CLUSTER (checked above), so u8 fits.
         let sig: MemberSignature = sign_state(&session.keys, slot as u8, &state).map_err(js_err)?;
         serde_json::to_string(&sig).map_err(js_err)
     })

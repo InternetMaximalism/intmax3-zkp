@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::channel_id::{ChannelId, ChannelIdTarget},
-    constants::MAX_COSIGNERS,
+    constants::MAX_SIG_CLUSTER,
     ethereum_types::{
         address::{Address, AddressTarget},
         bytes32::{Bytes32, Bytes32Target},
@@ -79,7 +79,7 @@ pub struct MemberRegEntryTarget {
 /// count, and a FIXED 16-slot member array (active first, padding zeroed).
 ///
 /// SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration covers ONLY the
-/// <= [`MAX_COSIGNERS`] cosigners, so the record has exactly `MAX_COSIGNERS` slots — matching the
+/// <= [`MAX_SIG_CLUSTER`] cosigners, so the record has exactly `MAX_SIG_CLUSTER` slots — matching the
 /// DEPLOYED contract's fixed-16 `_channelRegHashChain` byte-for-byte. Delegates are authenticated
 /// by the cosigner-signed H1 balance-slot tree, never by prior L1 registration; registration-
 /// producing paths emit `delegate_count = 0`.
@@ -93,18 +93,18 @@ pub struct ChannelRegRecord {
     /// is cosigners-only, so new registrations emit `delegate_count = 0`. The field STAYS in the
     /// record and the keccak preimage because the DEPLOYED contract hashes it (byte-compat), and
     /// nonzero values remain accepted for legacy 16-slot channels — bounded by the record's
-    /// capacity: `member_count + delegate_count <= MAX_COSIGNERS` (the record only HAS 16 slots).
+    /// capacity: `member_count + delegate_count <= MAX_SIG_CLUSTER` (the record only HAS 16 slots).
     /// Committed into the reg-chain keccak preimage IMMEDIATELY AFTER `member_count` so the
     /// member/delegate/padding split is bound to the L1 registration chain.
     pub delegate_count: u32,
-    pub members: [MemberRegEntry; MAX_COSIGNERS],
+    pub members: [MemberRegEntry; MAX_SIG_CLUSTER],
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelRegRecordError {
-    #[error("member_count {0} out of range (must be 2..={MAX_COSIGNERS})")]
+    #[error("member_count {0} out of range (must be 2..={MAX_SIG_CLUSTER})")]
     MemberCountOutOfRange(u32),
-    #[error("member_count {0} + delegate_count {1} exceeds MAX_COSIGNERS ({MAX_COSIGNERS})")]
+    #[error("member_count {0} + delegate_count {1} exceeds MAX_SIG_CLUSTER ({MAX_SIG_CLUSTER})")]
     DelegateCountOutOfRange(u32, u32),
     #[error("active member {0} has a zero pk_g")]
     ZeroActivePkG(usize),
@@ -122,23 +122,23 @@ impl ChannelRegRecord {
     /// chain binds the exact bytes); this native helper keeps the same checks so test fixtures and
     /// the witness builder cannot silently construct an invalid record.
     pub fn validate(&self) -> Result<(), ChannelRegRecordError> {
-        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_COSIGNERS. The total
+        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_SIG_CLUSTER. The total
         // active balance participants (members + delegates) are separately bounded by
         // MAX_CHANNEL_MEMBERS below.
-        if self.member_count < 2 || self.member_count as usize > MAX_COSIGNERS {
+        if self.member_count < 2 || self.member_count as usize > MAX_SIG_CLUSTER {
             return Err(ChannelRegRecordError::MemberCountOutOfRange(
                 self.member_count,
             ));
         }
         let mc = self.member_count as usize;
         // Regions: members `0..mc`, delegates `mc..mc+dc` (legacy 16-slot channels only; Option B
-        // registrations emit dc = 0), padding `mc+dc..MAX_COSIGNERS`. Active = members +
+        // registrations emit dc = 0), padding `mc+dc..MAX_SIG_CLUSTER`. Active = members +
         // delegates; both must be nonzero + pairwise distinct (no shared-key forgery across the
-        // WHOLE active set). Under Option B the record only HAS `MAX_COSIGNERS` slots, so
-        // `member_count + delegate_count <= MAX_COSIGNERS` bounds the active region.
+        // WHOLE active set). Under Option B the record only HAS `MAX_SIG_CLUSTER` slots, so
+        // `member_count + delegate_count <= MAX_SIG_CLUSTER` bounds the active region.
         let active = mc
             .checked_add(self.delegate_count as usize)
-            .filter(|&a| a <= MAX_COSIGNERS)
+            .filter(|&a| a <= MAX_SIG_CLUSTER)
             .ok_or(ChannelRegRecordError::DelegateCountOutOfRange(
                 self.member_count,
                 self.delegate_count,
@@ -153,7 +153,7 @@ impl ChannelRegRecord {
                 }
             }
         }
-        for i in active..MAX_COSIGNERS {
+        for i in active..MAX_SIG_CLUSTER {
             if self.members[i] != MemberRegEntry::default() {
                 return Err(ChannelRegRecordError::NonZeroPaddingSlot(i));
             }
@@ -203,7 +203,7 @@ impl ChannelRegRecord {
 
 /// Word count of the R3 registration preimage (excluding the keccak output): see
 /// [`ChannelRegRecord::hash_with_prev_hash`].
-pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + 1 + MAX_COSIGNERS * (8 + 8 + 8 + 5);
+pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + 1 + MAX_SIG_CLUSTER * (8 + 8 + 8 + 5);
 
 impl MemberRegEntryTarget {
     /// The u32-limb stream for one member slot: pk_g(8) || pk_b(8) || regev_pk_digest(8) ||
@@ -233,7 +233,7 @@ pub fn channel_reg_hash_with_prev_hash_circuit<F, C, const D: usize>(
     bp_member_slot: Target,
     member_count: Target,
     delegate_count: Target,
-    members: &[MemberRegEntryTarget; MAX_COSIGNERS],
+    members: &[MemberRegEntryTarget; MAX_SIG_CLUSTER],
 ) -> Bytes32Target
 where
     F: RichField + Extendable<D>,
@@ -287,7 +287,7 @@ mod tests {
     /// Build a deterministic test record with `member_count` active members. The pinned-constant
     /// differential test (Rust ↔ Solidity) uses these exact values.
     fn make_record(member_count: u32) -> ChannelRegRecord {
-        let mut members: [MemberRegEntry; MAX_COSIGNERS] =
+        let mut members: [MemberRegEntry; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| MemberRegEntry::default());
         for i in 0..(member_count as usize) {
             // pk_g = 0x11..11 * (i+1) pattern, regev = 0x22.., recipient = 0x33..

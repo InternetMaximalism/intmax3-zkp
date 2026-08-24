@@ -99,7 +99,7 @@ use crate::{
         tx::{Tx, TxClass, TxV2},
         u63::BlockNumber,
     },
-    constants::MAX_COSIGNERS,
+    constants::MAX_SIG_CLUSTER,
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
@@ -461,7 +461,7 @@ fn the_2_1_attack_is_dead() {
     // ---- A1: `signer_count = 1` over the channel's real member set. ---------------------------
     //
     // The literal §2.1 block, restated in the post-change witness shape: ONE signature, the
-    // channel's own registered members. NAMED CONSTRAINT: the `2 <= signer_count <= MAX_COSIGNERS`
+    // channel's own registered members. NAMED CONSTRAINT: the `2 <= signer_count <= MAX_SIG_CLUSTER`
     // floor (`update_channel_tree.rs`, design §5.4 item 2) — asserted IN-CIRCUIT rather than
     // natively precisely so that the 1-of-N aggregate, which `FalconAggCircuit` itself permits, is
     // inapplicable to a block.
@@ -521,7 +521,7 @@ fn the_2_1_attack_is_dead() {
         !member_root_matches(&a2),
         "A2's whole point: a member set the attacker controls is not the REGISTERED set"
     );
-    assert!((2..=MAX_COSIGNERS as u32).contains(&a2.signer_count));
+    assert!((2..=MAX_SIG_CLUSTER as u32).contains(&a2.signer_count));
     for (slot, leaf) in a2.member_leaves.iter().enumerate() {
         if slot < a2.signer_count as usize {
             assert_ne!(
@@ -579,7 +579,7 @@ fn the_2_1_attack_is_dead() {
     // A3b. A genuine 1-of-N aggregate over the SAME digest (design §9 Phase 5 step 4).
     //
     // HONEST FINDING, and it is why this case is stated at the CONSUMER: the aggregate itself IS
-    // provable. `FalconAggCircuit` accepts `1..=MAX_COSIGNERS` signers by design, and so does the
+    // provable. `FalconAggCircuit` accepts `1..=MAX_SIG_CLUSTER` signers by design, and so does the
     // `AggListCircuit` step. Nothing in the signature stack refuses a 1-of-N statement. What
     // refuses it is that no BLOCK can fold such a statement: `update_channel_tree`'s floor (A1)
     // stops the block from committing to it, and the commitment a 1-of-N aggregate carries is a

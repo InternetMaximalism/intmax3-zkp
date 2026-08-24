@@ -22,7 +22,7 @@ use crate::{
         tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target},
         u63::{BlockNumber, BlockNumberTarget, U63Target},
     },
-    constants::{CHANNEL_TREE_HEIGHT, MAX_COSIGNERS, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
+    constants::{CHANNEL_TREE_HEIGHT, MAX_SIG_CLUSTER, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -112,7 +112,7 @@ pub struct UpdateUserTree {
     // is surfaced as `new_bp_sig_chain`.
     pub prev_bp_sig_chain: Bytes32,
 
-    /// ALL `MAX_COSIGNERS` registered member leaves in slot order, padding slots empty (design
+    /// ALL `MAX_SIG_CLUSTER` registered member leaves in slot order, padding slots empty (design
     /// §4 M2′). The circuit recomputes `member_pubkeys_root` from these and connects it to the
     /// channel leaf's committed root, which is what turns "some registered key signed" into
     /// "exactly the registered set signed":
@@ -123,7 +123,7 @@ pub struct UpdateUserTree {
     ///   * an empty slot below `signer_count`, or a non-empty slot at or above it, is refused — so
     ///     `occupancy == signer_count` is a theorem, not a premise about left-packing.
     pub member_leaves: Vec<MemberLeaf>,
-    /// N — how many members signed. Constrained `2 <= signer_count <= MAX_COSIGNERS` in-circuit
+    /// N — how many members signed. Constrained `2 <= signer_count <= MAX_SIG_CLUSTER` in-circuit
     /// (design §5.4 item 2: the registration floor is repeated here IN-CIRCUIT rather than
     /// natively, deliberately not repeating `close_circuit`'s `>= 1` in-circuit / `>= 2` native
     /// split), and equal to the channel's registered `member_count` by the root recompute above.
@@ -174,16 +174,16 @@ impl UpdateUserTree {
         // The bp posts from a member slot, so a block slot beyond the member tree cannot sign.
         // (Before the rewire this was implied by opening a height-MEMBER_TREE_HEIGHT inclusion
         // proof at index `i`; it is now stated directly.)
-        if i >= MAX_COSIGNERS {
+        if i >= MAX_SIG_CLUSTER {
             return Err(UpdateUserTreeError::InvalidLength(format!(
-                "signing block slot {i} is outside the {MAX_COSIGNERS} member slots"
+                "signing block slot {i} is outside the {MAX_SIG_CLUSTER} member slots"
             )));
         }
 
         // design §5.4 item 2 — the registration floor, restated where the signature is applied.
-        if !(2..=MAX_COSIGNERS as u32).contains(&self.signer_count) {
+        if !(2..=MAX_SIG_CLUSTER as u32).contains(&self.signer_count) {
             return Err(UpdateUserTreeError::InvalidLength(format!(
-                "signer_count {} out of range 2..={MAX_COSIGNERS}",
+                "signer_count {} out of range 2..={MAX_SIG_CLUSTER}",
                 self.signer_count
             )));
         }
@@ -292,9 +292,9 @@ impl UpdateUserTree {
         // update hash chain
         let new_block_hash_chain = self.block.hash_with_prev_hash(self.prev_block_hash_chain)?;
 
-        if self.member_leaves.len() != MAX_COSIGNERS {
+        if self.member_leaves.len() != MAX_SIG_CLUSTER {
             return Err(UpdateUserTreeError::InvalidLength(format!(
-                "member_leaves must cover all {MAX_COSIGNERS} slots, got {}",
+                "member_leaves must cover all {MAX_SIG_CLUSTER} slots, got {}",
                 self.member_leaves.len()
             )));
         }
@@ -312,7 +312,7 @@ impl UpdateUserTree {
             .channel_state_fields
             .signing_digest(channel_id, self.block.tx_tree_root);
         // The block's folded statement: `(digest, signer_count, pk_list_digest)` over all
-        // MAX_COSIGNERS slots. SHARED formula with the aggregate-list step that proves the
+        // MAX_SIG_CLUSTER slots. SHARED formula with the aggregate-list step that proves the
         // signatures (`falcon_sig::agg_list`) — called, never restated.
         //
         // The digest covers ALL slots, padding included — NOT `[0..signer_count]`. For a witness
@@ -828,14 +828,14 @@ pub struct UpdateUserTreeTarget {
     /// The N-of-N signature list accumulator BEFORE this block (witnessed; surfaced as the
     /// `prev_bp_sig_chain` PI and folded into `new_bp_sig_chain`).
     pub prev_bp_sig_chain: Bytes32Target,
-    /// All `MAX_COSIGNERS` witnessed member leaves in slot order — see
+    /// All `MAX_SIG_CLUSTER` witnessed member leaves in slot order — see
     /// `UpdateUserTree::member_leaves`. Block-level, NOT per block slot: every slot of a block
     /// references the same channel leaf and therefore the same member set.
     pub member_leaf_targets: Vec<MemberLeafTarget>,
     /// Witnessed `signer_count` (N).
     pub signer_count: Target,
     /// Per-block-slot witnessed Regev public-key coefficient targets (`a` then `b`, each
-    /// `REGEV_N`), for block slots below `MAX_COSIGNERS` — the only slots that can sign.
+    /// `REGEV_N`), for block slots below `MAX_SIG_CLUSTER` — the only slots that can sign.
     pub member_regev_pk_targets: Vec<Vec<Target>>,
     /// Per-block IMCH channel-state message fields — see `UpdateUserTree::channel_state_fields`.
     pub channel_state_fields: ChannelStateMessageFieldsTarget,
@@ -922,7 +922,7 @@ impl UpdateUserTreeTarget {
         // once and enforce it per slot whenever a signature is applied.
         let tx_tree_root_is_zero = block.tx_tree_root.is_zero::<F, D, Bytes32>(builder);
 
-        // ── The signer set: all MAX_COSIGNERS member leaves, thermometered by `signer_count` ──
+        // ── The signer set: all MAX_SIG_CLUSTER member leaves, thermometered by `signer_count` ──
         //
         // design §5.4 items 1-5 (M2′). This is block-level, not per block slot: all slots of a
         // block reference the same channel leaf, hence the same member set.
@@ -931,15 +931,15 @@ impl UpdateUserTreeTarget {
         // over its own `active_count` — called, not restated. (Well-defined for ANY witnessed
         // `signer_count`: at most one of its equality terms can fire, so the result is boolean
         // even before the range bound below pins the value.)
-        let is_signer: Vec<BoolTarget> = (0..MAX_COSIGNERS)
+        let is_signer: Vec<BoolTarget> = (0..MAX_SIG_CLUSTER)
             .map(|i| lt_const_threshold(builder, i, signer_count))
             .collect();
 
-        let mut member_leaf_targets: Vec<MemberLeafTarget> = Vec::with_capacity(MAX_COSIGNERS);
-        let mut member_leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_COSIGNERS);
-        let mut member_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_COSIGNERS * BYTES32_LEN);
-        let mut member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_COSIGNERS);
-        for _ in 0..MAX_COSIGNERS {
+        let mut member_leaf_targets: Vec<MemberLeafTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        let mut member_leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        let mut member_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_SIG_CLUSTER * BYTES32_LEN);
+        let mut member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        for _ in 0..MAX_SIG_CLUSTER {
             let leaf = MemberLeafTarget::new(builder);
             // The pk-list slot as the aggregate exposes it: the canonical 8-limb form of the
             // member identity, zero for padding — byte-identical to the zero padding
@@ -972,7 +972,7 @@ impl UpdateUserTreeTarget {
         let mut bp_sig_chain = prev_bp_sig_chain.clone();
 
         let mut member_regev_pk_targets: Vec<Vec<Target>> =
-            Vec::with_capacity((num_users as usize).min(MAX_COSIGNERS));
+            Vec::with_capacity((num_users as usize).min(MAX_SIG_CLUSTER));
         // Does this block apply a member signature at all? COMPUTED from the per-slot
         // `should_update` flags below (never a prover flag — the same rule the validity circuit's
         // list gate follows), and used to gate the block-level well-formedness of the signer set:
@@ -1125,11 +1125,11 @@ impl UpdateUserTreeTarget {
                 zero,
             );
 
-            if i >= MAX_COSIGNERS {
+            if i >= MAX_SIG_CLUSTER {
                 // SECURITY: a block slot beyond the member tree has no member leaf to bind its
                 // Regev key to, so it must not be able to sign. Before the rewire this was implied
                 // rather than stated: the slot opened a height-MEMBER_TREE_HEIGHT inclusion proof
-                // at index `i`, and no such index exists for `i >= MAX_COSIGNERS`. That opening
+                // at index `i`, and no such index exists for `i >= MAX_SIG_CLUSTER`. That opening
                 // was built UNCONDITIONALLY (the index decomposition is outside the
                 // `should_update` gate), so it also constrained non-signing out-of-range slots —
                 // i.e. the old form refused at least as much as this one. Stating the rule
@@ -1201,21 +1201,21 @@ impl UpdateUserTreeTarget {
         // witness to invent one (padding blocks do not know the channel's members). On a signing
         // block all of it is mandatory.
         //
-        // design §5.4 item 2: `2 <= signer_count <= MAX_COSIGNERS`. The registration floor is 2
+        // design §5.4 item 2: `2 <= signer_count <= MAX_SIG_CLUSTER`. The registration floor is 2
         // (`channel_reg_step`), and a 1-of-N "aggregate" is exactly the defect this whole change
         // exists to remove, so the floor is asserted IN-CIRCUIT — the in-circuit `>= 1` / native
         // `>= 2` split in `close_circuit` is a gap not to repeat. The range check is applied to a
         // value that falls back to the constant 2 when the block does not sign, so gating it costs
         // one select rather than a conditional decomposition.
         let two = builder.constant(F::from_canonical_u64(2));
-        let max_cosigners = builder.constant(F::from_canonical_u64(MAX_COSIGNERS as u64));
+        let max_cosigners = builder.constant(F::from_canonical_u64(MAX_SIG_CLUSTER as u64));
         let checked_signer_count = builder.select(any_sign, signer_count, two);
         let sc_minus_two = builder.sub(checked_signer_count, two);
         builder.range_check(sc_minus_two, 4); // [0, 15] ⊇ [0, 14]
         let max_minus_sc = builder.sub(max_cosigners, checked_signer_count);
         builder.range_check(max_minus_sc, 4);
 
-        for i in 0..MAX_COSIGNERS {
+        for i in 0..MAX_SIG_CLUSTER {
             let not_signer = builder.not(is_signer[i]);
             // design §5.4 item 3: slots at or above `signer_count` are the EMPTY leaf. A real
             // member parked in such a slot changes the recomputed root, so "sign with all but one
@@ -1350,7 +1350,7 @@ impl UpdateUserTreeTarget {
         self.prev_bp_sig_chain
             .set_witness(witness, value.prev_bp_sig_chain);
 
-        // Set the channel's MAX_COSIGNERS member leaves (slot order, padding included).
+        // Set the channel's MAX_SIG_CLUSTER member leaves (slot order, padding included).
         assert_eq!(
             value.member_leaves.len(),
             self.member_leaf_targets.len(),
@@ -1367,7 +1367,7 @@ impl UpdateUserTreeTarget {
         witness.set_target(self.signer_count, F::from_canonical_u32(value.signer_count));
 
         // Set per-slot Regev pubkey coefficient witnesses (a then b), mirroring the
-        // `RegevPk::poseidon_digest` preimage order. Only block slots below MAX_COSIGNERS have
+        // `RegevPk::poseidon_digest` preimage order. Only block slots below MAX_SIG_CLUSTER have
         // targets (the others cannot sign), so the zip is deliberately shorter than the witness.
         for (targets, pk) in self
             .member_regev_pk_targets
@@ -1540,14 +1540,14 @@ mod tests {
     }
 
     /// A channel exactly as REGISTRATION leaves it: `n` members left-packed into the
-    /// `MAX_COSIGNERS`-slot member tree, the rest empty. Everything a signing block must witness
+    /// `MAX_SIG_CLUSTER`-slot member tree, the rest empty. Everything a signing block must witness
     /// is derived from here, so a test can only diverge from the registered set on purpose.
     struct RegisteredChannel {
         /// Real Falcon signing keys, slot order. Not `Clone` on purpose (it is what stops a test
         /// from silently duplicating a signer).
         keys: Vec<FalconKeys>,
         regev: Vec<RegevPk>,
-        /// ALL `MAX_COSIGNERS` leaves in slot order — what the circuit witnesses.
+        /// ALL `MAX_SIG_CLUSTER` leaves in slot order — what the circuit witnesses.
         leaves: Vec<MemberLeaf>,
         /// The committed `member_pubkeys_root`.
         root: PoseidonHashOut,
@@ -1570,7 +1570,7 @@ mod tests {
                 regev.push(pk);
             }
             let root = tree.get_root();
-            let leaves = (0..MAX_COSIGNERS)
+            let leaves = (0..MAX_SIG_CLUSTER)
                 .map(|slot| tree.get_leaf(slot as u64))
                 .collect();
             Self {
@@ -1786,16 +1786,16 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    /// Positive 2: a FULL 16-of-16 block — every member slot active, no padding anywhere — proves
+    /// Positive 2: a FULL full-cluster block — every member slot active, no padding anywhere — proves
     /// and verifies. The extreme the thermometer and the pk-list padding agreement are most likely
     /// to get wrong.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn a_real_16_of_16_signing_block_proves() {
         let _heavy = heavy();
-        let channel = RegisteredChannel::new(MAX_COSIGNERS, 0x30);
+        let channel = RegisteredChannel::new(MAX_SIG_CLUSTER, 0x30);
         let (tree, digest) = signing_block(&channel, TEST_CHANNEL_ID);
-        assert_eq!(channel.sign_all(digest).len(), MAX_COSIGNERS);
+        assert_eq!(channel.sign_all(digest).len(), MAX_SIG_CLUSTER);
 
         let public_inputs = tree.to_public_inputs().unwrap();
         assert_eq!(
@@ -1805,7 +1805,7 @@ mod tests {
         let t = std::time::Instant::now();
         let proof = CIRCUIT.prove(&tree).unwrap();
         println!(
-            "MEASURE update_channel_tree prove(16-of-16)={:?}",
+            "MEASURE update_channel_tree prove(full-cluster)={:?}",
             t.elapsed()
         );
         CIRCUIT.data.verify(proof).unwrap();
@@ -1888,7 +1888,7 @@ mod tests {
             user_merkle_proofs,
             send_merkle_proofs,
             prev_bp_sig_chain,
-            member_leaves: vec![MemberLeaf::default(); MAX_COSIGNERS],
+            member_leaves: vec![MemberLeaf::default(); MAX_SIG_CLUSTER],
             signer_count: 0,
             member_regev_pks: vec![dummy_regev_pk(); num_users as usize],
             channel_state_fields: ChannelStateMessageFields::default(),
@@ -2049,7 +2049,7 @@ mod tests {
             tree.prev_account_leaves[0].member_pubkeys_root,
             "the isolation this case depends on: only the floor may refuse this witness"
         );
-        assert_refused(&tree, "out of range 2..=16");
+        assert_refused(&tree, "out of range 2..=8");
     }
 
     /// (f) `tx_tree_root == 0` with a signature applied (detail2 §C-2: H2 = 0 is reserved for

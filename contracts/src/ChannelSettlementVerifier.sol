@@ -42,14 +42,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// D6 pad-to-MAX: the close circuit is sized for this many member slots (mirrors Rust
     /// `MAX_CHANNEL_MEMBERS`, src/constants.rs). Active members occupy slots `0..memberCount`;
     /// padding slots are zero.
-    uint256 internal constant MAX_CHANNEL_MEMBERS = 16;
+    uint256 internal constant MAX_CHANNEL_MEMBERS = 8;
     /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the BALANCE-SLOT capacity — the total
     /// number of active PARTICIPANTS (cosigning members + delegates) a channel's balance state can
     /// hold. MUST equal Rust `MAX_CHANNEL_MEMBERS` (src/constants.rs:96 = 1024), which is the bound
     /// the withdrawal-claim / post-close-claim circuits enforce IN-CIRCUIT on
     /// `active = member_count + delegate_count` (withdrawal_claim_circuit.rs:353-371,
     /// post_close_claim_circuit.rs:428-443). DISTINCT from `MAX_CHANNEL_MEMBERS` above, which is the
-    /// COSIGNER cap (Rust `MAX_COSIGNERS` = 16) — the close circuit's signature loop is sized by
+    /// SIG-CLUSTER cap (Rust `MAX_SIG_CLUSTER` = 8) — the close circuit's signature loop is sized by
     /// that one.
     uint256 internal constant MAX_CHANNEL_PARTICIPANTS = 1024;
     /// B-2: close-PI limb index of `delegateCount` (see the `_expectedCloseLimbs` layout table).

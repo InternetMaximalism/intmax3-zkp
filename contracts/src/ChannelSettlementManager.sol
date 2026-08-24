@@ -126,7 +126,7 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function closeMemberSetCommitment(
-        bytes32[16] memory memberPkGs,
+        bytes32[8] memory memberPkGs,
         uint8 memberCount
     ) external pure returns (bytes32);
 }
@@ -175,7 +175,7 @@ contract ChannelSettlementManager {
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
     /// order 0..memberCount. Slots `memberCount..MAX_MEMBER_COUNT` are zero padding. Mirrors the
     /// Rust `MAX_CHANNEL_MEMBERS` constant (src/constants.rs).
-    uint256 internal constant MAX_MEMBER_COUNT = 16;
+    uint256 internal constant MAX_MEMBER_COUNT = 8;
     uint256 internal constant MIN_MEMBER_COUNT = 2;
     /// Fixed per-channel token capacity — the width of every `channelFundAmounts` / `tokenRegistry`
     /// array here. MUST equal Rust `MAX_CHANNEL_TOKENS` (src/constants.rs) and

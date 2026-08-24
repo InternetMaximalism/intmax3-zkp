@@ -1053,7 +1053,7 @@ mod tests {
             // whole N-of-N binding is gated off (should_update == false).
             member_leaves: vec![
                 crate::common::trees::key_tree::MemberLeaf::default();
-                crate::constants::MAX_COSIGNERS
+                crate::constants::MAX_SIG_CLUSTER
             ],
             signer_count: 0,
             member_regev_pks: vec![

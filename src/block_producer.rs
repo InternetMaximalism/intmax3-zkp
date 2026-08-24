@@ -25,7 +25,7 @@ use crate::{
         public_state::get_num_users,
         tx::TxV2,
     },
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS},
+    constants::{MAX_CHANNEL_MEMBERS, MAX_SIG_CLUSTER},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
     falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
     regev::RegevPk,
@@ -66,7 +66,7 @@ impl ProductionChannelRegistration {
         })?;
 
         let member_count = snapshot.record.member_count as usize;
-        let mut entries: [MemberRegEntry; MAX_COSIGNERS] =
+        let mut entries: [MemberRegEntry; MAX_SIG_CLUSTER] =
             std::array::from_fn(|_| MemberRegEntry::default());
         let mut regev_pks = Vec::with_capacity(member_count);
         for slot in 0..member_count {
@@ -782,4 +782,4 @@ impl ProductionBlockProducer {
 
 // Compile-time guard against accidentally shrinking the public member array assumptions used by
 // `from_snapshot` while the wallet record remains wider for delegates.
-const _: () = assert!(MAX_CHANNEL_MEMBERS >= MAX_COSIGNERS);
+const _: () = assert!(MAX_CHANNEL_MEMBERS >= MAX_SIG_CLUSTER);

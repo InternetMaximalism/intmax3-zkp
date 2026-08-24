@@ -8,7 +8,7 @@
 //!
 //! This module restores the RETIRED `poseidon_sig::aggregate` binary-tree aggregator
 //! (`git show e0dec8b:src/poseidon_sig/aggregate.rs`), instantiated for Falcon-512/Poseidon. It
-//! replaces the Phase-2 FLAT `FalconAggCircuit`, which verified all `MAX_COSIGNERS` signatures in
+//! replaces the Phase-2 FLAT `FalconAggCircuit`, which verified all `MAX_SIG_CLUSTER` signatures in
 //! ONE degree-2^20 circuit and therefore needed ~22 GB peak RSS just to build and prove.
 //!
 //! Memory is (roughly) linear in circuit DEGREE — every polynomial is stored at 8x its degree
@@ -21,7 +21,7 @@
 //!   level 1: 2 leaves                -> 2 slots
 //!   level 2: 2 level-1 nodes         -> 4 slots
 //!   level 3: 2 level-2 nodes         -> 8 slots
-//!   level 4: 2 level-3 nodes         -> 16 slots   == MAX_COSIGNERS
+//!   level 4: 2 level-3 nodes         -> 16 slots   == MAX_SIG_CLUSTER
 //! ```
 //!
 //! # Public-input layout (canonical, level `k`, `0 <= k <= AGG_LEVELS`)
@@ -133,7 +133,7 @@ use super::{
     gadget::{FalconSigGadgetWitness, FalconSigVerifyTarget},
 };
 use crate::{
-    constants::MAX_COSIGNERS,
+    constants::MAX_SIG_CLUSTER,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32},
         u32limb_trait::U32LimbTargetTrait as _,
@@ -151,11 +151,11 @@ use crate::{
 // `poseidon_sig::aggregate` at level 4)
 // ================================================================================================
 
-/// Number of aggregation levels above the leaf (level 4 => 16 slots == `MAX_COSIGNERS`).
-pub const AGG_LEVELS: usize = 4;
+/// Number of aggregation levels above the leaf (level 3 => 8 slots == `MAX_SIG_CLUSTER`).
+pub const AGG_LEVELS: usize = 3;
 const _: () = assert!(
-    MAX_COSIGNERS == 1 << AGG_LEVELS,
-    "AGG_LEVELS must be log2(MAX_COSIGNERS)"
+    MAX_SIG_CLUSTER == 1 << AGG_LEVELS,
+    "AGG_LEVELS must be log2(MAX_SIG_CLUSTER)"
 );
 
 /// Offset of the 8 message limbs (the shared IMCH/IMSB digest all signers sign).
@@ -164,8 +164,8 @@ pub const FALCON_AGG_MSG_OFFSET: usize = 0;
 pub const FALCON_AGG_COUNT_OFFSET: usize = BYTES32_LEN;
 /// Offset of the first pk_g slot; slot `i` begins at `FALCON_AGG_PK_LIST_OFFSET + i * BYTES32_LEN`.
 pub const FALCON_AGG_PK_LIST_OFFSET: usize = BYTES32_LEN + 1;
-/// Total public-input length of the TOP-level proof: `message(8) + count(1) + 16 * pk_g(8)` = 137.
-pub const FALCON_AGG_PUBLIC_INPUTS_LEN: usize = BYTES32_LEN + 1 + MAX_COSIGNERS * BYTES32_LEN;
+/// Total public-input length of the TOP-level proof: `message(8) + count(1) + 8 * pk_g(8)` = 73.
+pub const FALCON_AGG_PUBLIC_INPUTS_LEN: usize = BYTES32_LEN + 1 + MAX_SIG_CLUSTER * BYTES32_LEN;
 
 /// Public-input length of a level-`k` proof (`k = 0` is the LEAF layout, 17 elements).
 pub const fn falcon_agg_public_inputs_len(level: usize) -> usize {
@@ -200,7 +200,7 @@ pub fn falcon_agg_expected_public_inputs<F: RichField>(
 
 /// Prover witness for [`FalconAggCircuit`]: the shared message digest and the ACTIVE signers'
 /// per-slot gadget witnesses (salt / h / s2), in slot order. `active.len()` = `signer_count`, which
-/// must be in `1..=MAX_COSIGNERS`; the remaining slots become ABSENT subtrees (their exposed pk_g
+/// must be in `1..=MAX_SIG_CLUSTER`; the remaining slots become ABSENT subtrees (their exposed pk_g
 /// is provably zero and they contribute 0 to `signer_count`).
 #[derive(Debug, Clone)]
 pub struct FalconAggWitness {
@@ -508,7 +508,7 @@ where
 // FACADE: the consumer-facing aggregation circuit
 // ================================================================================================
 
-/// Binary-tree aggregation of up to [`MAX_COSIGNERS`] Falcon-512/Poseidon signatures over one
+/// Binary-tree aggregation of up to [`MAX_SIG_CLUSTER`] Falcon-512/Poseidon signatures over one
 /// shared message digest.
 ///
 /// The consumer-facing API is unchanged from the flat Phase-2 circuit — `new()`,
@@ -574,7 +574,7 @@ where
     /// belongs to a DIFFERENT circuit than the one consumers verify.
     pub fn top_level_for(n: usize) -> usize {
         assert!(
-            (1..=MAX_COSIGNERS).contains(&n),
+            (1..=MAX_SIG_CLUSTER).contains(&n),
             "signer count out of range"
         );
         let mut k = 1;
@@ -598,8 +598,8 @@ where
     ) -> Result<(ProofWithPublicInputs<F, C, D>, usize)> {
         let n = leaf_proofs.len();
         anyhow::ensure!(
-            (1..=MAX_COSIGNERS).contains(&n),
-            "signer count must be in 1..={MAX_COSIGNERS}, got {n}"
+            (1..=MAX_SIG_CLUSTER).contains(&n),
+            "signer count must be in 1..={MAX_SIG_CLUSTER}, got {n}"
         );
         let msg0 = &leaf_proofs[0].public_inputs
             [FALCON_AGG_MSG_OFFSET..FALCON_AGG_MSG_OFFSET + BYTES32_LEN];
@@ -662,8 +662,8 @@ where
     /// ONE small circuit rather than one 2^20 monolith.
     pub fn prove(&self, witness: &FalconAggWitness) -> Result<ProofWithPublicInputs<F, C, D>> {
         anyhow::ensure!(
-            (1..=MAX_COSIGNERS).contains(&witness.active.len()),
-            "FalconAggCircuit: active signer count {} out of range 1..={MAX_COSIGNERS}",
+            (1..=MAX_SIG_CLUSTER).contains(&witness.active.len()),
+            "FalconAggCircuit: active signer count {} out of range 1..={MAX_SIG_CLUSTER}",
             witness.active.len()
         );
         // Prover-side convenience only (see `aggregate`): the binding checks are in-circuit.
@@ -749,7 +749,7 @@ mod tests {
             active_pks.len() as u64,
             "signer_count"
         );
-        for i in 0..MAX_COSIGNERS {
+        for i in 0..MAX_SIG_CLUSTER {
             let start = FALCON_AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
             let got: Vec<u64> = pis[start..start + BYTES32_LEN]
                 .iter()
@@ -814,12 +814,12 @@ mod tests {
         assert_ne!(falcon_padding_pk_g(), Bytes32::default());
     }
 
-    /// Happy path, N = MAX_COSIGNERS = 16 (a full tree, no absent subtree anywhere).
+    /// Happy path, N = MAX_SIG_CLUSTER = 16 (a full tree, no absent subtree anywhere).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn agg_happy_n16() {
         let msg = digest(2);
-        let (hs, sigs) = signers(MAX_COSIGNERS, msg, 30);
+        let (hs, sigs) = signers(MAX_SIG_CLUSTER, msg, 30);
         let pks: Vec<Bytes32> = hs.iter().map(falcon_pk_digest).collect();
         let w = witness_for(&hs, &sigs, msg);
         let proof = AGG.prove(&w).expect("prove n16");
@@ -1167,7 +1167,7 @@ mod tests {
         );
 
         let msg = digest(9);
-        let (hs, sigs) = signers(MAX_COSIGNERS, msg, 150);
+        let (hs, sigs) = signers(MAX_SIG_CLUSTER, msg, 150);
         let w = witness_for(&hs, &sigs, msg);
 
         let t_leaf = std::time::Instant::now();

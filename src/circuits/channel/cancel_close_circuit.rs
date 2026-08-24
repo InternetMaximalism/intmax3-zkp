@@ -45,7 +45,7 @@ use crate::{
         h1_gadget::recompute_h1,
     },
     common::channel::close_member_set_commitment,
-    constants::{MAX_CHANNEL_TOKENS, MAX_COSIGNERS, MEMBER_DISTINCTNESS_TREE_HEIGHT},
+    constants::{MAX_CHANNEL_TOKENS, MAX_SIG_CLUSTER, MEMBER_DISTINCTNESS_TREE_HEIGHT},
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::U32LimbTargetTrait,
@@ -177,9 +177,9 @@ where
 }
 
 /// Native mirror of the in-circuit member-set commitment (byte-identical to the close path).
-/// Cosigners only (pad to MAX_COSIGNERS) — delegates never enter the member set.
+/// Cosigners only (pad to MAX_SIG_CLUSTER) — delegates never enter the member set.
 fn member_set_commitment_for_auth(member_auth: &[MemberCancelAuth]) -> Bytes32 {
-    let hashes: [Bytes32; MAX_COSIGNERS] =
+    let hashes: [Bytes32; MAX_SIG_CLUSTER] =
         std::array::from_fn(|i| member_auth.get(i).map(|a| a.pk_g).unwrap_or_default());
     close_member_set_commitment(&hashes, member_auth.len() as u8)
 }
@@ -243,7 +243,7 @@ where
     /// in-circuit member key vector (no separate witnessed `pk_g` targets).
     agg_proof: ProofWithPublicInputsTarget<D>,
     active_bits: Vec<plonky2::iop::target::BoolTarget>,
-    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_COSIGNERS).
+    /// A5 pk_g distinctness: per-slot indexed-Merkle insertion proofs (length MAX_SIG_CLUSTER).
     /// Filled in `fill_witness` by inserting active pk_g in slot order into a fresh tree (padding
     /// slots get a dummy proof). The in-circuit chain asserts each active key's non-membership.
     member_insertion_proofs: Vec<IndexedInsertionProofTarget>,
@@ -320,14 +320,14 @@ where
         let one = builder.one();
 
         // ── Per-slot COSIGNER activeness flags for the revived member set (mirror of the close
-        // path; length MAX_COSIGNERS — only cosigners sign, delegates never enter the member set;
-        // the sum-binding enforces member_count <= MAX_COSIGNERS in-circuit) ──
+        // path; length MAX_SIG_CLUSTER — only cosigners sign, delegates never enter the member set;
+        // the sum-binding enforces member_count <= MAX_SIG_CLUSTER in-circuit) ──
         let mut active_bits: Vec<plonky2::iop::target::BoolTarget> =
-            Vec::with_capacity(MAX_COSIGNERS);
-        for _ in 0..MAX_COSIGNERS {
+            Vec::with_capacity(MAX_SIG_CLUSTER);
+        for _ in 0..MAX_SIG_CLUSTER {
             active_bits.push(builder.add_virtual_bool_target_safe());
         }
-        for i in 0..MAX_COSIGNERS - 1 {
+        for i in 0..MAX_SIG_CLUSTER - 1 {
             let one_minus_prev = builder.sub(one, active_bits[i].target);
             let prod = builder.mul(active_bits[i + 1].target, one_minus_prev);
             builder.connect(prod, zero_t);
@@ -498,7 +498,7 @@ where
         );
 
         // (g-iii) the member key vector := the verified pk-list PI slices, slot for slot.
-        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_COSIGNERS)
+        let member_pk_g_targets: Vec<Bytes32Target> = (0..MAX_SIG_CLUSTER)
             .map(|i| {
                 let start = FALCON_AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
                 Bytes32Target::from_slice(&agg_proof.public_inputs[start..start + BYTES32_LEN])
@@ -529,7 +529,7 @@ where
         // `prev_low.key < key < next_key (or 0)` per active insert = non-membership = distinctness,
         // so a duplicate active pk_g is UNSATISFIABLE. The final root is intentionally discarded.
         // INTENTIONALLY SIMPLE: inserted `value` is a constant 1 (irrelevant to distinctness).
-        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_COSIGNERS)
+        let member_insertion_proofs: Vec<IndexedInsertionProofTarget> = (0..MAX_SIG_CLUSTER)
             .map(|_| {
                 IndexedInsertionProofTarget::new::<F, D>(
                     &mut builder,
@@ -609,9 +609,9 @@ where
         let revived = &witness_value.cancel.revived_state;
         let close = &witness_value.cancel.close_intent;
         let member_count = revived.balance_state.member_count as usize;
-        if !(2..=MAX_COSIGNERS).contains(&member_count) {
+        if !(2..=MAX_SIG_CLUSTER).contains(&member_count) {
             return Err(CancelCloseCircuitError::InvalidMemberAuth(format!(
-                "member_count {member_count} out of range (must be 2..={MAX_COSIGNERS} cosigners)"
+                "member_count {member_count} out of range (must be 2..={MAX_SIG_CLUSTER} cosigners)"
             )));
         }
         if witness_value.member_auth.len() != member_count {

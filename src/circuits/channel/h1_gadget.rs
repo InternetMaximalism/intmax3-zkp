@@ -259,12 +259,12 @@ mod tests {
 
         let mut rng = rand::thread_rng();
         for _ in 0..5 {
-            // member_count over the FULL cosigner range 2..=MAX_COSIGNERS; delegate_count 0..=16;
+            // member_count over the FULL cosigner range 2..=MAX_SIG_CLUSTER; delegate_count 0..=16;
             // token_count over the FULL 1..=MAX_CHANNEL_TOKENS range with a random INJECTIVE
             // active registry prefix (zero-padded beyond). The padding suffix exercises the
             // memoized padding leaf; per-token ciphertexts populate a random subset of the
             // active token positions (inactive positions stay the canonical zero ct, TM-8).
-            let member_count = rng.gen_range(2usize..=crate::constants::MAX_COSIGNERS);
+            let member_count = rng.gen_range(2usize..=crate::constants::MAX_SIG_CLUSTER);
             let delegate_count = rng.gen_range(0usize..=16);
             let active = member_count + delegate_count;
             let token_count = rng.gen_range(1usize..=MAX_CHANNEL_TOKENS);
@@ -329,7 +329,7 @@ mod tests {
             let slot = if rng.r#gen::<bool>() {
                 rng.gen_range(0..active)
             } else {
-                MAX_CHANNEL_MEMBERS - 1 // always padding: active <= MAX_COSIGNERS + 16 < 1023
+                MAX_CHANNEL_MEMBERS - 1 // always padding: active <= MAX_SIG_CLUSTER + 16 < 1023
             };
             let slot_ct_digests = BalanceState::token_ct_digests(&state.enc_balances[slot]);
             let expected_leaf = balance_slot_leaf_hash(

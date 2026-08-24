@@ -72,7 +72,7 @@ use intmax3_zkp::{
         u63::U63,
         withdrawal::Withdrawal,
     },
-    constants::{MAX_CHANNEL_MEMBERS, MAX_COSIGNERS, TOKEN_UNIT},
+    constants::{MAX_CHANNEL_MEMBERS, MAX_SIG_CLUSTER, TOKEN_UNIT},
     ethereum_types::{
         address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
     },
@@ -164,8 +164,8 @@ const POST_CLOSE_CLAIM_MLE_FILE: &str = "post_close_claim_mle.json";
 // Delegate demo: slots 0..cli_cosigner_count() = CLI-controlled CO-SIGNING MEMBERS (with genesis
 // balances); the next slot = the browser, a send-only DELEGATE (delegate_count = 1).
 //
-// The cosigner count is env-configurable (`INTMAX_CLI_COSIGNERS`, default 3, max MAX_COSIGNERS) so
-// a stress box can exercise a full 16-of-16 co-sign round. Slots 0..2 keep their historical
+// The cosigner count is env-configurable (`INTMAX_CLI_COSIGNERS`, default 3, max MAX_SIG_CLUSTER) so
+// a stress box can exercise a full 8-of-8 co-sign round (MAX_SIG_CLUSTER). Slots 0..2 keep their historical
 // genesis balances and any EXTRA cosigner slot holds 0, so Σ(genesis balances) — and therefore the
 // deposit-backing `fund` reconciliation — is IDENTICAL for every cosigner count.
 fn cli_cosigner_count() -> u16 {
@@ -173,8 +173,8 @@ fn cli_cosigner_count() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
-    if n < 1 || n as usize > MAX_COSIGNERS {
-        die(format!("INTMAX_CLI_COSIGNERS must be 1..={MAX_COSIGNERS}"));
+    if n < 1 || n as usize > MAX_SIG_CLUSTER {
+        die(format!("INTMAX_CLI_COSIGNERS must be 1..={MAX_SIG_CLUSTER}"));
     }
     n
 }
@@ -4215,7 +4215,7 @@ fn create_channel(
     for c in &controlled {
         let sig = sign_state_if_backed(
             &keys_for(c.keygen_seed),
-            c.slot as u8, // CLI cosigners occupy slots 0..cli_cosigner_count() ≤ 16 (fits u8)
+            c.slot as u8, // CLI cosigners occupy slots 0..cli_cosigner_count() ≤ MAX_SIG_CLUSTER (fits u8)
             &record,
             &state,
             &att,

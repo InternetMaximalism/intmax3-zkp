@@ -9,7 +9,7 @@
 //!
 //! Two DISTINCT instantiations share this leaf type (Option B,
 //! tasks/reg-chain-1024-threat-model.md) — do not conflate them:
-//! * [`MemberTree::init`] — the REGISTERED tree (height `MEMBER_TREE_HEIGHT`, `MAX_COSIGNERS`
+//! * [`MemberTree::init`] — the REGISTERED tree (height `MEMBER_TREE_HEIGHT`, `MAX_SIG_CLUSTER`
 //!   slots). Active COSIGNERS occupy slots `0..member_count`; the rest are empty leaves. Its root
 //!   is stored in `ChannelLeaf.member_pubkeys_root` and is the trusted on-chain-bound root against
 //!   which the validity circuit proves bp-slot inclusion of the signing pubkey (see
@@ -174,7 +174,7 @@ pub type MemberMerkleProof = IncrementalMerkleProof<MemberLeaf>;
 pub type MemberMerkleProofTarget = IncrementalMerkleProofTarget<MemberLeafTarget>;
 
 impl MemberTree {
-    /// The REGISTERED member tree: `MAX_COSIGNERS` slots (Option B — registration covers only the
+    /// The REGISTERED member tree: `MAX_SIG_CLUSTER` slots (Option B — registration covers only the
     /// cosigners). This is the tree whose root `channel_reg_step` writes into
     /// `ChannelLeaf.member_pubkeys_root` and `update_channel_tree` opens the bp slot against.
     pub fn init() -> Self {

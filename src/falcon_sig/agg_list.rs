@@ -19,7 +19,7 @@
 //! ```
 //!
 //! The pk list is read from the aggregation proof's public inputs VERBATIM, all
-//! `MAX_COSIGNERS` slots including the zero padding suffix — the padding slots are *constrained*
+//! `MAX_SIG_CLUSTER` slots including the zero padding suffix — the padding slots are *constrained*
 //! zero inside `FalconAggCircuit` (`agg.rs` `is_right_present * limb`), so both sides agree on
 //! padding without extra work.
 //!
@@ -66,7 +66,7 @@ use super::agg::{
     FALCON_AGG_PUBLIC_INPUTS_LEN,
 };
 use crate::{
-    constants::MAX_COSIGNERS,
+    constants::MAX_SIG_CLUSTER,
     ethereum_types::{
         bytes32::{BYTES32_LEN, Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
@@ -93,7 +93,7 @@ pub const AGG_LIST_LEAF_DOMAIN: u32 = 0x494d_414c;
 pub const AGG_PK_LIST_DOMAIN: u32 = 0x494d_504c;
 
 /// Number of field elements the pk-list digest hashes (excluding the domain constant).
-pub const AGG_PK_LIST_LIMBS: usize = MAX_COSIGNERS * BYTES32_LEN;
+pub const AGG_PK_LIST_LIMBS: usize = MAX_SIG_CLUSTER * BYTES32_LEN;
 
 // FORMAT — native reference (must match the in-circuit gadgets bit-for-bit)
 // ================================================================================================
@@ -105,8 +105,8 @@ pub const AGG_PK_LIST_LIMBS: usize = MAX_COSIGNERS * BYTES32_LEN;
 /// `MemberLeaf` slots the consumer will recompute from (Phase 3).
 pub fn agg_pk_list_digest(signer_pks: &[Bytes32]) -> PoseidonHashOut {
     assert!(
-        signer_pks.len() <= MAX_COSIGNERS,
-        "more signers ({}) than slots ({MAX_COSIGNERS})",
+        signer_pks.len() <= MAX_SIG_CLUSTER,
+        "more signers ({}) than slots ({MAX_SIG_CLUSTER})",
         signer_pks.len()
     );
     let mut inputs = Vec::with_capacity(1 + AGG_PK_LIST_LIMBS);
@@ -156,7 +156,7 @@ impl AggListEntry {
     /// PROVER-SIDE CONVENIENCE ONLY: this is how a caller computes the native `prev_chain` it feeds
     /// [`AggListStepCircuit::prove`], and how tests state the expected commitment. It carries NO
     /// security weight — the binding is the in-circuit fold over the RECURSIVELY VERIFIED proof's
-    /// public inputs. The structural checks below (arity, `1 <= signer_count <= MAX_COSIGNERS`,
+    /// public inputs. The structural checks below (arity, `1 <= signer_count <= MAX_SIG_CLUSTER`,
     /// 32-bit limbs, zero-suffix padding) exist so a malformed input fails here with a clear error
     /// instead of silently producing a chain value no circuit can reproduce.
     pub fn from_agg_public_inputs<F: RichField>(pis: &[F]) -> Result<Self> {
@@ -178,11 +178,11 @@ impl AggListEntry {
         )?;
         let count = pis[FALCON_AGG_COUNT_OFFSET].to_canonical_u64() as usize;
         anyhow::ensure!(
-            (1..=MAX_COSIGNERS).contains(&count),
-            "signer_count {count} out of range 1..={MAX_COSIGNERS}"
+            (1..=MAX_SIG_CLUSTER).contains(&count),
+            "signer_count {count} out of range 1..={MAX_SIG_CLUSTER}"
         );
         let mut signer_pks = Vec::with_capacity(count);
-        for slot in 0..MAX_COSIGNERS {
+        for slot in 0..MAX_SIG_CLUSTER {
             let start = FALCON_AGG_PK_LIST_OFFSET + slot * BYTES32_LEN;
             let pk = Bytes32::from_u32_slice(
                 &pis[start..start + BYTES32_LEN]
@@ -219,8 +219,8 @@ pub fn agg_list_commitment(entries: &[AggListEntry]) -> Bytes32 {
 // FORMAT — in-circuit gadgets (shared with the Phase-3 consumer fold in `update_channel_tree`)
 // ================================================================================================
 
-/// In-circuit [`agg_pk_list_digest`]. `pk_limbs` MUST be all `MAX_COSIGNERS` slots in slot order
-/// (`MAX_COSIGNERS * BYTES32_LEN` limbs), padding included.
+/// In-circuit [`agg_pk_list_digest`]. `pk_limbs` MUST be all `MAX_SIG_CLUSTER` slots in slot order
+/// (`MAX_SIG_CLUSTER * BYTES32_LEN` limbs), padding included.
 pub(crate) fn agg_pk_list_digest_target<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     pk_limbs: &[Target],
@@ -228,7 +228,7 @@ pub(crate) fn agg_pk_list_digest_target<F: RichField + Extendable<D>, const D: u
     assert_eq!(
         pk_limbs.len(),
         AGG_PK_LIST_LIMBS,
-        "pk list must cover all {MAX_COSIGNERS} slots"
+        "pk list must cover all {MAX_SIG_CLUSTER} slots"
     );
     let dom = builder.constant(F::from_canonical_u32(AGG_PK_LIST_DOMAIN));
     let mut inputs = Vec::with_capacity(1 + AGG_PK_LIST_LIMBS);
@@ -293,7 +293,7 @@ where
     /// `agg_top_vd` MUST be `FalconAggCircuit::verifier_data()` — the TOP (level
     /// `AGG_LEVELS`) verifier data, whose statement is the 137-element contract.
     ///
-    /// SECURITY (arity gate): the 137-element layout is asserted BEFORE any target is added, in a
+    /// SECURITY (arity gate): the 73-element (MAX_SIG_CLUSTER=8) layout is asserted BEFORE any target is added, in a
     /// RELEASE-mode `assert_eq!`. Every offset below is positional, so a verifier key for a
     /// DIFFERENT aggregation level (level 2 exposes 41 elements, the leaf 17) would otherwise
     /// silently produce a step that folds a shorter pk list — a circuit that builds, proves and
@@ -318,7 +318,7 @@ where
         );
         // signer_count = PI[8].
         let signer_count = agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET];
-        // SECURITY (defence in depth): `1 <= signer_count <= MAX_COSIGNERS` is STRUCTURAL in
+        // SECURITY (defence in depth): `1 <= signer_count <= MAX_SIG_CLUSTER` is STRUCTURAL in
         // `FalconAggCircuit` (unconditional left child; leaf count is the constant 1; 16 slots), so
         // this range check is redundant TODAY. It is kept because it costs one gate and because
         // this circuit reads the count as an opaque field element: were the aggregator ever to
@@ -500,12 +500,12 @@ mod tests {
         proof
     }
 
-    /// Proving a 16-of-16 aggregation is the heaviest thing in this module; each cached proof is
+    /// Proving a full-cluster aggregation is the heaviest thing in this module; each cached proof is
     /// built at most once and reused by every case that needs it.
     static AGG_2: Lazy<ProofWithPublicInputs<F, C, D>> =
         Lazy::new(|| real_agg_proof(2, digest(0x02), 10));
     static AGG_16: Lazy<ProofWithPublicInputs<F, C, D>> =
-        Lazy::new(|| real_agg_proof(MAX_COSIGNERS, digest(0x10), 30));
+        Lazy::new(|| real_agg_proof(MAX_SIG_CLUSTER, digest(0x10), 30));
 
     /// Measurement hygiene / memory: circuit builds and 16-signature aggregations are the heaviest
     /// operations in the repo. Cases that build or prove hold this lock so the suite never runs two
@@ -582,7 +582,7 @@ mod tests {
         );
     }
 
-    /// Acceptance 2: a step over a REAL 16-of-16 aggregation proof verifies (a FULL tree, no absent
+    /// Acceptance 2: a step over a REAL full-cluster aggregation proof verifies (a FULL tree, no absent
     /// subtree anywhere) and again matches the native fold — so the padding-slot agreement between
     /// the aggregation circuit and this fold is exercised at both extremes.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
@@ -597,7 +597,7 @@ mod tests {
         step.data.verify(proof.clone()).expect("step verifies");
 
         let entry = AggListEntry::from_agg_public_inputs(&agg_proof.public_inputs).unwrap();
-        assert_eq!(entry.signer_pks, pks_of(30, MAX_COSIGNERS));
+        assert_eq!(entry.signer_pks, pks_of(30, MAX_SIG_CLUSTER));
         assert_eq!(
             Bytes32::from_u32_slice(
                 &proof.public_inputs[BYTES32_LEN..2 * BYTES32_LEN]
@@ -617,7 +617,7 @@ mod tests {
     /// must fire before any expensive work, and this keeps the case cheap.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    #[should_panic(expected = "TOP-level 137-element layout")]
+    #[should_panic(expected = "TOP-level 73-element layout")]
     fn wrong_arity_aggregation_vd_fails_the_build_assert() {
         let _heavy = heavy();
         let leaf = FalconLeafCircuit::<F, C, D>::new();
@@ -683,7 +683,7 @@ mod tests {
     /// Acceptance 5: the cyclic wrapper builds over this step (the design §5.2 watch item — the
     /// `CommonCircuitData` template is a release-mode byte assert inside `CyclicChainCircuit::new`,
     /// so merely constructing `AGG_LIST` is the check) and the list round-trips exactly as
-    /// `ListCircuit` does: append two REAL statements (2-of-2 then 16-of-16), each step's
+    /// `ListCircuit` does: append two REAL statements (2-of-2 then full-cluster), each step's
     /// commitment equals the native chain, and the final proof verifies at the wrapper's VK.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -829,21 +829,13 @@ mod tests {
         );
         // The empty chain is zero — the value the validity circuit gates on.
         assert_eq!(agg_list_commitment(&[]), Bytes32::zero());
-        // Padding is a zero SUFFIX: the 16-slot digest of n signers is the digest of the same n
+        // Padding is a zero SUFFIX: the MAX_SIG_CLUSTER-slot digest of n signers is the digest of the same n
         // signers followed by explicit zero slots.
         assert_eq!(
             agg_pk_list_digest(&[pk(0xa1), pk(0xa2)]),
             agg_pk_list_digest(&[
                 pk(0xa1),
                 pk(0xa2),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
-                Bytes32::default(),
                 Bytes32::default(),
                 Bytes32::default(),
                 Bytes32::default(),
@@ -903,10 +895,10 @@ mod tests {
         );
 
         let mut too_many = ok.clone();
-        too_many[FALCON_AGG_COUNT_OFFSET] = F::from_canonical_usize(MAX_COSIGNERS + 1);
+        too_many[FALCON_AGG_COUNT_OFFSET] = F::from_canonical_usize(MAX_SIG_CLUSTER + 1);
         assert!(
             AggListEntry::from_agg_public_inputs(&too_many).is_err(),
-            "signer_count > MAX_COSIGNERS"
+            "signer_count > MAX_SIG_CLUSTER"
         );
 
         let mut dirty_padding = ok.clone();

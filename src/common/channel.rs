@@ -12,7 +12,7 @@ use crate::{
     },
     constants::{
         INTER_CHANNEL_TX_DOMAIN_V5, L1_DEPOSIT_IMPORT_DOMAIN_V2, MAX_CHANNEL_MEMBERS,
-        MAX_CHANNEL_TOKENS, MAX_COSIGNERS, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
+        MAX_CHANNEL_TOKENS, MAX_SIG_CLUSTER, PAY_DOMAIN_V2, TOKEN_FUNDS_DIGEST_DOMAIN,
         WITHDRAWAL_CLAIM_DOMAIN_V2,
     },
     ethereum_types::{
@@ -251,7 +251,7 @@ pub struct ChannelRecord {
     /// The slot whose member acts as block-proposer (replaces `bp_key_id`). Must be `<
     /// member_count`.
     ///
-    /// WIDTH: u8 is sufficient — this is COSIGNER-slot space (`< member_count <= MAX_COSIGNERS =
+    /// WIDTH: u8 is sufficient — this is COSIGNER-slot space (`< member_count <= MAX_SIG_CLUSTER =
     /// 16`), never a delegate/balance slot (audited 2026-07-18, u16 slot widening).
     pub bp_member_slot: u8,
     pub special_close_penalty: U256,
@@ -282,13 +282,13 @@ impl ChannelRecord {
                     .to_string(),
             ));
         }
-        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_COSIGNERS. The total
+        // member_count = COSIGNERS (N-of-N close signers), capped at MAX_SIG_CLUSTER. The total
         // active participants (members + delegates) are separately bounded by MAX_CHANNEL_MEMBERS
         // below.
         let count = self.member_count as usize;
-        if count < 2 || count > MAX_COSIGNERS {
+        if count < 2 || count > MAX_SIG_CLUSTER {
             return Err(ChannelError::InvalidChannelRecord(format!(
-                "member_count {count} out of range (must be 2..={MAX_COSIGNERS})"
+                "member_count {count} out of range (must be 2..={MAX_SIG_CLUSTER})"
             )));
         }
         if (self.bp_member_slot as usize) >= count {
@@ -433,7 +433,7 @@ pub struct MemberSignature {
     /// Member slot (0..member_count) — array index into the channel's active member list.
     ///
     /// WIDTH: u8 is sufficient — state co-signing is COSIGNER-only (`member_count <=
-    /// MAX_COSIGNERS = 16`); delegates never produce a `MemberSignature` (audited 2026-07-18).
+    /// MAX_SIG_CLUSTER = 16`); delegates never produce a `MemberSignature` (audited 2026-07-18).
     pub member_slot: u8,
     /// The signing member's SPHINCS+ pubkey hash (their identity).
     pub pk_g: Bytes32,
@@ -544,7 +544,7 @@ pub struct ChannelBalance {
 pub struct ChannelMember {
     pub pk_g: Bytes32,
     /// BALANCE-SLOT index (`0..member_count+delegate_count`, up to `MAX_CHANNEL_MEMBERS = 1024`) —
-    /// delegates withdraw at close too, so this is NOT bounded by `MAX_COSIGNERS`; u16.
+    /// delegates withdraw at close too, so this is NOT bounded by `MAX_SIG_CLUSTER`; u16.
     pub member_slot: u16,
     pub l1_withdrawal_recipient: Address,
 }
@@ -1631,8 +1631,8 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 
 /// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding; pad-to-MAX D6).
 ///
-/// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX_COSIGNERS-1}(8)])` over
-/// `member_count` (single u32 limb right after the domain) and ALL `MAX_COSIGNERS` COSIGNER pubkey
+/// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX_SIG_CLUSTER-1}(8)])` over
+/// `member_count` (single u32 limb right after the domain) and ALL `MAX_SIG_CLUSTER` COSIGNER pubkey
 /// hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
 /// `Bytes32::default()` (zero) limbs. This preimage is FIXED-LENGTH.
 ///
@@ -1644,24 +1644,24 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// L1 matches it against the channel's registered cosigner set, so a prover cannot substitute
 /// non-member signing keys.
 ///
-/// SIZING (cosigner cap): the array holds the COSIGNERS only (`MAX_COSIGNERS`), NOT the full
+/// SIZING (cosigner cap): the array holds the COSIGNERS only (`MAX_SIG_CLUSTER`), NOT the full
 /// balance slot capacity (`MAX_CHANNEL_MEMBERS`). Delegates hold balances but do NOT co-sign the
 /// close, so they never enter this commitment.
 ///
-/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_COSIGNERS hashes,
+/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_SIG_CLUSTER hashes,
 /// padding zeroed) rather than the "active-only" variable-length form, because the in-circuit
 /// keccak gadget takes a build-time-fixed input length and cannot hash a `member_count`-dependent
 /// number of words. The fixed form is cryptographically equivalent (member_count + zeroed padding
 /// is injective on the active set). This native helper MUST agree byte-for-byte with the in-circuit
 /// keccak (`ChannelCloseCircuit::new`).
 ///
-/// PENDING PHASE-2 CONTRACT MAX_COSIGNERS SPLIT: the L1 Solidity mirror
+/// PENDING PHASE-2 CONTRACT MAX_SIG_CLUSTER SPLIT: the L1 Solidity mirror
 /// (`ChannelSettlementVerifier.sol`) still pads to `MAX_CHANNEL_MEMBERS`, so this now MISMATCHES
 /// the contract. The coordinated contract-side split is a separate follow-up task; until then the
 /// Rust↔Solidity cross-check vector is `#[ignore]`d.
-pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_COSIGNERS], member_count: u8) -> Bytes32 {
+pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_SIG_CLUSTER], member_count: u8) -> Bytes32 {
     let count = member_count as usize;
-    let mut words = Vec::with_capacity(2 + MAX_COSIGNERS * 8);
+    let mut words = Vec::with_capacity(2 + MAX_SIG_CLUSTER * 8);
     words.push(CLOSE_MEMBER_SET_DOMAIN);
     words.push(member_count as u32);
     for (i, hash) in hashes.iter().enumerate() {
@@ -1845,9 +1845,9 @@ mod tests {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
-    /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_COSIGNERS array (the cosigner cap,
+    /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_SIG_CLUSTER array (the cosigner cap,
     /// used for `close_member_set_commitment`).
-    fn pad_cosigner_hashes(active: &[Bytes32]) -> [Bytes32; MAX_COSIGNERS] {
+    fn pad_cosigner_hashes(active: &[Bytes32]) -> [Bytes32; MAX_SIG_CLUSTER] {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
@@ -1959,9 +1959,9 @@ mod tests {
     #[test]
     fn close_member_set_commitment_matches_solidity_shared_vector() {
         let words = |base: u32| -> Vec<u32> { (base..base + 8).collect() };
-        // 3 ACTIVE member hashes padded to MAX_CHANNEL_MEMBERS. The commitment is the FIXED 16-slot
-        // form (pad-to-MAX D6): keccak([IMCM, member_count, h_0..h_15]) with padding slots zeroed
-        // (130 u32 words). This pinned constant is mirrored by the Foundry test
+        // 3 ACTIVE member hashes padded to MAX_SIG_CLUSTER. The commitment is the FIXED 8-slot
+        // form (pad-to-MAX D6): keccak([IMCM, member_count, h_0..h_7]) with padding slots zeroed
+        // (66 u32 words). This pinned constant is mirrored by the Foundry test
         // `test_member_set_commitment_matches_rust_shared_vector` in
         // contracts/test/ChannelSettlementManager.t.sol — if they disagree, fix Solidity, not this
         // digest.
@@ -1973,7 +1973,7 @@ mod tests {
         let hashes = pad_cosigner_hashes(&active);
         let committed = close_member_set_commitment(&hashes, 3);
         let expected =
-            Bytes32::from_hex("0x12450612c5f67b7ff613b705f6e5efccf4bdd43e647570fcb207076f447236cc")
+            Bytes32::from_hex("0x826fa6c83e36ef8f4537ce2bdd5873faa8e861dd7a4d3b072b77990cbfd7b886")
                 .unwrap();
         assert_eq!(committed, expected);
         // Padding slots (>= member_count) are zeroed INTERNALLY, so a nonzero padding slot in the
@@ -2071,11 +2071,11 @@ mod tests {
             Err(ChannelError::InvalidChannelRecord(_))
         ));
 
-        // member_count > MAX_COSIGNERS is rejected (the old `(MAX_CHANNEL_MEMBERS + 1) as u8`
+        // member_count > MAX_SIG_CLUSTER is rejected (the old `(MAX_CHANNEL_MEMBERS + 1) as u8`
         // truncated to 1 at MAX=1024 and passed for the wrong reason — count 1 fails the `>= 2`
         // check, not the cap).
         let mut too_many = record_with_members(16);
-        too_many.member_count = (MAX_COSIGNERS + 1) as u8;
+        too_many.member_count = (MAX_SIG_CLUSTER + 1) as u8;
         assert!(matches!(
             too_many.validate(),
             Err(ChannelError::InvalidChannelRecord(_))
@@ -2132,7 +2132,7 @@ mod tests {
         // array. `hashes` above only fills 4 active slots, so counts beyond 4 hash extra zero
         // slots — still distinct preimages because `member_count` (the limb after the domain)
         // differs.
-        for count in 2u8..MAX_COSIGNERS as u8 {
+        for count in 2u8..MAX_SIG_CLUSTER as u8 {
             assert_ne!(
                 close_member_set_commitment(&hashes, count),
                 close_member_set_commitment(&hashes, count + 1),
