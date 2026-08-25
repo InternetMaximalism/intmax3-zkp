@@ -10,3 +10,4 @@ lean_lib ChannelSafety21
 lean_lib ChannelSafetyMT
 lean_lib ChannelSafetyQ
 lean_lib ChannelSafetyClose
+lean_lib ChannelSafetyPW
