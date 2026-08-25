@@ -442,7 +442,8 @@ fn main() -> anyhow::Result<()> {
             internal_tx_v2_merkle_proof.clone(),
             internal_tx_v2_merkle_proof.clone(),
         ],
-    };
+        new_member_leaves: None,
+            };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
@@ -569,7 +570,8 @@ fn main() -> anyhow::Result<()> {
             withdrawal_tx_v2_merkle_proof.clone(),
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
-    };
+        new_member_leaves: None,
+            };
 
     {
         let mut generator = block_witness_generator.borrow_mut();

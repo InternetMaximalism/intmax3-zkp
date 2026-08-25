@@ -24,10 +24,10 @@ use crate::{
         ProductionBlockProducer, ProductionBlockProducerError, ProductionChannelHead,
         ProductionDepositRequest,
     },
-    common::channel::ChannelState,
+    common::channel::{ChannelRecord, ChannelState},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     utils::poseidon_hash_out::PoseidonHashOut,
-    wallet_core::{ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor},
+    wallet_core::{ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo},
 };
 
 pub const PRODUCTION_JOURNAL_MAGIC: &str = "INTMAX_KEYLESS_BLOCK_PRODUCER";
@@ -88,6 +88,14 @@ enum ProductionJournalAction {
         descriptor: InterChannelTransferDescriptor,
         timestamp: u64,
     },
+    /// detail2 §Q-3: one member-set-update block (rotate / add on the registered cluster).
+    PostMemberSetUpdate {
+        signed_state: ChannelState,
+        old_members: Vec<MemberInfo>,
+        new_record: ChannelRecord,
+        new_members: Vec<MemberInfo>,
+        timestamp: u64,
+    },
 }
 
 impl ProductionJournalAction {
@@ -96,7 +104,8 @@ impl ProductionJournalAction {
             Self::Register { timestamp, .. }
             | Self::PostDeposit { timestamp, .. }
             | Self::SyncOffchainHeads { timestamp, .. }
-            | Self::PostInterChannel { timestamp, .. } => *timestamp,
+            | Self::PostInterChannel { timestamp, .. }
+            | Self::PostMemberSetUpdate { timestamp, .. } => *timestamp,
         }
     }
 }
@@ -258,6 +267,13 @@ pub enum BlockProducerCommand {
         debit_payload: InterChannelDebitPayload,
         descriptor: InterChannelTransferDescriptor,
     },
+    PostMemberSetUpdate {
+        request_id: String,
+        signed_state: ChannelState,
+        old_members: Vec<MemberInfo>,
+        new_record: ChannelRecord,
+        new_members: Vec<MemberInfo>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -370,6 +386,21 @@ impl BlockProducerService {
             } => Ok(BlockProducerCommandResult::Receipt(
                 self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
             )),
+            BlockProducerCommand::PostMemberSetUpdate {
+                request_id,
+                signed_state,
+                old_members,
+                new_record,
+                new_members,
+            } => Ok(BlockProducerCommandResult::Receipt(
+                self.post_member_set_update(
+                    request_id,
+                    signed_state,
+                    old_members,
+                    new_record,
+                    new_members,
+                )?,
+            )),
         }
     }
 
@@ -440,6 +471,59 @@ impl BlockProducerService {
                 signed_state,
                 debit_payload,
                 descriptor,
+                timestamp,
+            },
+        )
+    }
+
+    /// detail2 §Q-3: journaled admission of one member-set-update block. Same durability shape
+    /// as `post_inter_channel`: idempotent by request id + fingerprint, refused when a state with
+    /// the same digest was already admitted, applied through the journal so a crash replays it.
+    pub fn post_member_set_update(
+        &mut self,
+        request_id: String,
+        signed_state: ChannelState,
+        old_members: Vec<MemberInfo>,
+        new_record: ChannelRecord,
+        new_members: Vec<MemberInfo>,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        validate_request_id(&request_id)?;
+        let fingerprint = request_fingerprint(
+            "postMemberSetUpdate",
+            &MemberSetUpdateFingerprint {
+                signed_state: &signed_state,
+                old_members: &old_members,
+                new_record: &new_record,
+                new_members: &new_members,
+            },
+        )?;
+        if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
+            return Ok(receipt);
+        }
+        for entry in &self.disk.entries {
+            if let ProductionJournalAction::PostMemberSetUpdate {
+                signed_state: accepted,
+                ..
+            } = &entry.action
+            {
+                if accepted.digest == signed_state.digest {
+                    return Err(BlockProducerServiceError::Conflict(format!(
+                        "member-set update state {} was already admitted by request {}",
+                        signed_state.digest, entry.request_id
+                    )));
+                }
+            }
+        }
+        let timestamp = self.next_timestamp()?;
+        self.apply_and_persist(
+            request_id,
+            fingerprint,
+            ProductionJournalAction::PostMemberSetUpdate {
+                signed_state,
+                old_members,
+                new_record,
+                new_members,
                 timestamp,
             },
         )
@@ -750,6 +834,21 @@ fn apply_action(
                 *timestamp,
             )?;
         }
+        ProductionJournalAction::PostMemberSetUpdate {
+            signed_state,
+            old_members,
+            new_record,
+            new_members,
+            timestamp,
+        } => {
+            producer.produce_member_set_update_block(
+                signed_state,
+                old_members,
+                new_record,
+                new_members,
+                *timestamp,
+            )?;
+        }
     }
     Ok(())
 }
@@ -936,7 +1035,30 @@ fn fingerprint_for_action(
                 descriptor,
             },
         ),
+        ProductionJournalAction::PostMemberSetUpdate {
+            signed_state,
+            old_members,
+            new_record,
+            new_members,
+            ..
+        } => request_fingerprint(
+            "postMemberSetUpdate",
+            &MemberSetUpdateFingerprint {
+                signed_state,
+                old_members,
+                new_record,
+                new_members,
+            },
+        ),
     }
+}
+
+#[derive(Serialize)]
+struct MemberSetUpdateFingerprint<'a> {
+    signed_state: &'a ChannelState,
+    old_members: &'a [MemberInfo],
+    new_record: &'a ChannelRecord,
+    new_members: &'a [MemberInfo],
 }
 
 fn hash_serializable<T: Serialize>(value: &T) -> Result<Bytes32, BlockProducerServiceError> {

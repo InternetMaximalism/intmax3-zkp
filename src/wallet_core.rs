@@ -3125,21 +3125,36 @@ pub fn registered_cosigner_root(
     record: &ChannelRecord,
     members: &[MemberInfo],
 ) -> WResult<Bytes32> {
+    let leaves = registered_cosigner_leaves(record, members)?;
     let mut tree = MemberTree::init();
+    for l in leaves.iter().take(record.member_count as usize) {
+        tree.push(l.clone());
+    }
+    Ok(Bytes32::from(tree.get_root()))
+}
+
+/// The registered co-signer MemberLeaf array, PADDED to `MAX_COSIGNERS` with empty leaves — the
+/// exact shape `update_channel_tree` witnesses (`member_leaves` / `new_member_leaves`). Each
+/// occupied slot is cross-checked against the record's `member_pk_gs`.
+pub fn registered_cosigner_leaves(
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+) -> WResult<Vec<MemberLeaf>> {
+    let mut leaves = vec![<MemberLeaf as crate::utils::leafable::Leafable>::empty_leaf(); MAX_SIG_CLUSTER];
     for slot in 0..record.member_count as usize {
         let m = member_at(members, slot)?;
         if m.pk_g != record.member_pk_gs[slot] {
             return bail(format!(
-                "registered_cosigner_root: member list slot {slot} does not match the record"
+                "registered_cosigner_leaves: member list slot {slot} does not match the record"
             ));
         }
-        tree.push(MemberLeaf {
+        leaves[slot] = MemberLeaf {
             pk_g: m.pk_g.reduce_to_hash_out(),
             pk_b: m.pk_b.reduce_to_hash_out(),
             regev_pk_digest: PoseidonHashOut::from(m.regev_pk.poseidon_digest()),
-        });
+        };
     }
-    Ok(Bytes32::from(tree.get_root()))
+    Ok(leaves)
 }
 
 /// detail2 §Q-1 `MemberSetOp`.
@@ -3577,6 +3592,74 @@ pub fn apply_member_set_update_to_state(
         bs.member_count = prev_record.member_count + 1;
     }
     Ok(state)
+}
+
+/// detail2 §Q-3: the CANONICAL member-set-update block artifacts — the ONE construction of the
+/// `ChannelAction` / `TxV2` / tx tree a MemberSetUpdate block carries (the F-AUX-1 "exactly one
+/// construction" doctrine: the producer, the CLI's pre-sign h2 computation, and every verifier
+/// reconstruct byte-identical objects through here or not at all).
+pub fn canonical_member_set_update_block(
+    channel: ChannelId,
+    prev_member_root: crate::utils::poseidon_hash_out::PoseidonHashOut,
+    new_member_root: crate::utils::poseidon_hash_out::PoseidonHashOut,
+) -> (
+    crate::common::tx::ChannelAction,
+    TxV2,
+    crate::common::trees::tx_v2_tree::TxV2Tree,
+    Bytes32,
+) {
+    use crate::common::trees::tx_v2_tree::{ChannelActionTree, TxV2Tree};
+    let action = crate::common::tx::ChannelAction {
+        kind: crate::common::tx::ChannelActionKind::MemberSetUpdate,
+        source_channel_id: channel,
+        destination_channel_id: channel,
+        tx_hash: Bytes32::default(),
+        seal: Bytes32::default(),
+        payload_hash: crate::common::tx::member_set_update_payload(
+            prev_member_root,
+            new_member_root,
+        ),
+    };
+    let mut action_tree = ChannelActionTree::init();
+    action_tree.update(0, action);
+    let tx_v2 = TxV2 {
+        tx_class: crate::common::tx::TxClass::ChannelAction,
+        transfer_tree_root: crate::utils::poseidon_hash_out::PoseidonHashOut::default(),
+        nonce: 0,
+        channel_action_root: action_tree.get_root(),
+    };
+    let mut tree = TxV2Tree::init();
+    tree.update(channel.as_u64(), tx_v2);
+    let root = Bytes32::from(tree.get_root());
+    (action, tx_v2, tree, root)
+}
+
+/// The registered co-signer tree root as a `PoseidonHashOut` (the circuit-facing form).
+pub fn registered_cosigner_root_hash(
+    record: &ChannelRecord,
+    members: &[MemberInfo],
+) -> WResult<crate::utils::poseidon_hash_out::PoseidonHashOut> {
+    let leaves = registered_cosigner_leaves(record, members)?;
+    let mut tree = MemberTree::init();
+    for l in leaves.iter() {
+        tree.push(l.clone());
+    }
+    Ok(tree.get_root())
+}
+
+/// The h2_tag / tx-tree root a member-set-update block will carry for the (old → new) transition —
+/// what the OLD set must sign into its state BEFORE the producer can post the block.
+pub fn member_set_update_block_root(
+    old_record: &ChannelRecord,
+    old_members: &[MemberInfo],
+    new_record: &ChannelRecord,
+    new_members: &[MemberInfo],
+) -> WResult<Bytes32> {
+    let prev_root = registered_cosigner_root_hash(old_record, old_members)?;
+    let new_root = registered_cosigner_root_hash(new_record, new_members)?;
+    let (_a, _t, _tree, root) =
+        canonical_member_set_update_block(old_record.channel_id, prev_root, new_root);
+    Ok(root)
 }
 
 /// One previous-set member's N-of-N vote over the update (IMMS digest).
@@ -6546,6 +6629,7 @@ pub fn build_channel_withdrawal(
             withdrawal_tx_v2_merkle_proof.clone(),
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
+        new_member_leaves: None,
     };
 
     {

@@ -23,7 +23,8 @@ use crate::{
         channel_registration::{ChannelRegRecord, MemberRegEntry},
         deposit::Deposit,
         public_state::get_num_users,
-        tx::TxV2,
+        tx::{ChannelAction, ChannelActionKind, TxClass, TxV2, member_set_update_payload},
+        trees::{key_tree::MemberTree, tx_v2_tree::{ChannelActionTree, TxV2Tree}},
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_SIG_CLUSTER},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
@@ -31,8 +32,8 @@ use crate::{
     regev::RegevPk,
     wallet_core::{
         C, ChannelSnapshot, D, F, InterChannelDebitPayload, InterChannelTransferDescriptor,
-        attach_small_block_signatures, verify_all_signatures,
-        verify_inter_channel_descriptor_matches_debit, verify_snapshot,
+        MemberInfo, attach_small_block_signatures, registered_cosigner_leaves,
+        verify_all_signatures, verify_inter_channel_descriptor_matches_debit, verify_snapshot,
     },
 };
 use plonky2::plonk::proof::ProofWithPublicInputs;
@@ -379,6 +380,113 @@ impl ProductionBlockProducer {
         )
     }
 
+    /// detail2 §Q-3: admit one MEMBER-SET-UPDATE block — the single transition that may advance a
+    /// channel's registered co-signer root in the validity chain. Server-derived like the
+    /// descriptor path: one active key slot, the action/TxV2/tree built HERE from the two member
+    /// sets, and the signed state pinned to the derived root.
+    ///
+    /// The caller supplies the OLD and NEW member lists plus the NEW record (the wallet layer's
+    /// `verify_member_set_update` output). This function re-derives everything it signs off on:
+    ///   * the old leaves must fold to the producer's REGISTERED record for the channel;
+    ///   * the (old → new) delta must satisfy `validate_member_set_delta` (one slot; rotate
+    ///     preserves regev; add at the boundary) — the same rule the circuit enforces;
+    ///   * `new_record` must carry version + 1 and member_count consistent with the delta;
+    ///   * the signed state's `h2_tag` must equal the derived tx-tree root, so the OLD set's
+    ///     N-of-N (verified by `produce_cosigned_block` against the still-registered old record)
+    ///     authorizes exactly this transition.
+    /// On success the producer's channel registry ADVANCES to `new_record` — every later block for
+    /// this channel verifies against the new set.
+    pub fn produce_member_set_update_block(
+        &mut self,
+        signed_state: &ChannelState,
+        old_members: &[MemberInfo],
+        new_record: &ChannelRecord,
+        new_members: &[MemberInfo],
+        timestamp: u64,
+    ) -> Result<Bytes32, ProductionBlockProducerError> {
+        let channel = signed_state.channel_id;
+        let auth = |m: String| ProductionBlockProducerError::WalletAuthorization(m);
+        let old_record = self
+            .channel_records
+            .get(&channel)
+            .ok_or_else(|| auth(format!(
+                "channel {} is not registered in this producer",
+                channel.as_u64()
+            )))?
+            .clone();
+        if new_record.channel_id != channel {
+            return Err(auth("new record is for a different channel".to_string()));
+        }
+        if new_record.set_version != old_record.set_version + 1 {
+            return Err(auth(format!(
+                "member-set update must advance set_version by one (old {}, new {})",
+                old_record.set_version, new_record.set_version
+            )));
+        }
+        let old_leaves = registered_cosigner_leaves(&old_record, old_members)
+            .map_err(|e| auth(format!("old member list does not match the registered record: {e}")))?;
+        let new_leaves = registered_cosigner_leaves(new_record, new_members)
+            .map_err(|e| auth(format!("new member list does not match the new record: {e}")))?;
+        crate::circuits::validity::block_hash_chain::update_channel_tree::validate_member_set_delta(
+            &old_leaves,
+            &new_leaves,
+        )
+        .map_err(|e| auth(format!("member-set delta refused: {e}")))?;
+
+        let fold = |leaves: &[crate::common::trees::key_tree::MemberLeaf]| {
+            let mut t = MemberTree::init();
+            for l in leaves.iter() {
+                t.push(l.clone());
+            }
+            t.get_root()
+        };
+        let prev_root = fold(&old_leaves);
+        let new_root = fold(&new_leaves);
+
+        // The ONE canonical construction (wallet_core::canonical_member_set_update_block) — the
+        // same objects the CLI derived to compute the h2 the members signed.
+        let (_action, tx_v2, tx_v2_tree, tx_tree_root) =
+            crate::wallet_core::canonical_member_set_update_block(channel, prev_root, new_root);
+        let tx_v2_proof = tx_v2_tree.prove(channel.as_u64());
+
+        if signed_state.h2_tag != tx_tree_root {
+            return Err(auth(format!(
+                "signed state h2_tag {} does not commit the member-set update block root {tx_tree_root}",
+                signed_state.h2_tag
+            )));
+        }
+
+        let num_users = get_num_users(1, &self.witness.supported_user_counts).ok_or_else(|| {
+            auth("producer supports no circuit arity capable of one active channel".to_string())
+        })? as usize;
+        let mut tx_v2_indices = vec![0u64; num_users];
+        let mut tx_v2s = vec![TxV2::default(); num_users];
+        let tx_v2_merkle_proofs = vec![tx_v2_proof; num_users];
+        tx_v2_indices[0] = channel.as_u64();
+        tx_v2s[0] = tx_v2;
+
+        let mut candidate = self.clone();
+        candidate.produce_cosigned_block(
+            signed_state,
+            &[1],
+            timestamp,
+            tx_tree_root,
+            BlockTxV2Witness {
+                tx_v2_indices,
+                tx_v2s,
+                tx_v2_merkle_proofs,
+                new_member_leaves: Some(new_leaves),
+            },
+        )?;
+        // The block is in: the producer's registry advances — every later block for this channel
+        // verifies its N-of-N against the NEW set (ChannelSafetyQ.rotate_sets_new_key's effect).
+        candidate
+            .channel_records
+            .insert(channel, new_record.clone());
+        *self = candidate;
+        Ok(tx_tree_root)
+    }
+
     /// Admit one canonical inter-channel descriptor. All server-controlled block fields are
     /// derived here: one active key slot, deterministic padding, the descriptor's proved TxV2
     /// opening, and the already selected service timestamp. Caller-supplied key-id arrays are not
@@ -474,6 +582,7 @@ impl ProductionBlockProducer {
                 tx_v2_indices,
                 tx_v2s,
                 tx_v2_merkle_proofs,
+                new_member_leaves: None,
             },
         )?;
         candidate

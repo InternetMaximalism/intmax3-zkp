@@ -24,8 +24,9 @@ use intmax3_zkp::{
     regev::RegevCiphertext,
     wallet_core::{
         ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
-        MemberKeys, assemble_genesis_state, build_record, default_settled_tx_accumulator,
-        inter_channel_base_transfer, inter_channel_tx_v2, sign_state,
+        MemberKeys, assemble_genesis_state, build_record, cosign_member_set_update,
+        default_settled_tx_accumulator, inter_channel_base_transfer, inter_channel_tx_v2,
+        member_set_update_block_root, propose_rotate_key, sign_state, verify_member_set_update,
     },
 };
 use rand010::SeedableRng as _;
@@ -528,4 +529,154 @@ fn a_second_daemon_cannot_share_the_journal() {
     ));
     drop(first);
     BlockProducerService::open(&journal, &[2]).expect("lock released on drop");
+}
+
+
+/// detail2 §Q-3 end to end at the SERVICE layer: a rotate update — proposed, self-consented,
+/// N-of-N-signed at the wallet layer, its block root signed into the state's h2_tag — is admitted
+/// as a durable MemberSetUpdate block, and the producer's registry ADVANCES: afterwards the OLD
+/// set's signatures no longer authorize this channel's blocks, the NEW set's do.
+#[test]
+fn member_set_update_rotates_the_registry_and_retires_the_old_key() {
+    let directory = TestDirectory::new("member-set-update");
+    let journal = directory.journal();
+    let (keys, snapshot) = signed_snapshot(21);
+    let mut service = BlockProducerService::open(&journal, &[2]).expect("new service");
+    service
+        .register("register-21".to_string(), snapshot.clone())
+        .expect("register");
+
+    // Wallet layer: slot 1 rotates to a fresh key — IMKR self-consent + the OLD set's full
+    // N-of-N over IMMS, exactly the ChannelSafetyQ-verified gate.
+    let mut rng = rand010::rngs::StdRng::seed_from_u64(0xEE21);
+    let new_keys = MemberKeys::generate(&mut rng);
+    let mut update = propose_rotate_key(
+        &keys[1],
+        &new_keys,
+        &snapshot.record,
+        &snapshot.members,
+        1,
+    )
+    .expect("propose");
+    update.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| cosign_member_set_update(k, slot as u8, &update))
+        .collect();
+    let (new_record, new_members) =
+        verify_member_set_update(&snapshot.record, &snapshot.members, &update)
+            .expect("wallet gate accepts the rotation");
+
+    // The OLD set signs a state whose h2_tag commits the canonical update-block root.
+    let root = member_set_update_block_root(
+        &snapshot.record,
+        &snapshot.members,
+        &new_record,
+        &new_members,
+    )
+    .expect("canonical block root");
+    let mut state = snapshot.state.clone();
+    state.epoch += 1;
+    state.small_block_number += 1;
+    state.balance_state.state_version += 1;
+    state.h2_tag = root;
+    state.prev_digest = snapshot.state.digest;
+    state.member_signatures.clear();
+    state = state.with_computed_digest();
+    state.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| sign_state(k, slot as u8, &state).expect("old set signs the update"))
+        .collect();
+
+    let receipt = service
+        .post_member_set_update(
+            "msu-21-0".to_string(),
+            state.clone(),
+            snapshot.members.clone(),
+            new_record.clone(),
+            new_members.clone(),
+        )
+        .expect("the member-set update block is admitted");
+
+    // Idempotency: replaying the same request returns the SAME receipt, no second block.
+    let replay = service
+        .post_member_set_update(
+            "msu-21-0".to_string(),
+            state.clone(),
+            snapshot.members.clone(),
+            new_record.clone(),
+            new_members.clone(),
+        )
+        .expect("idempotent replay");
+    assert_eq!(
+        serde_json::to_string(&receipt).unwrap(),
+        serde_json::to_string(&replay).unwrap()
+    );
+
+    // The registry ADVANCED: a second rotation authorized by the OLD set (stale record) is
+    // refused — its N-of-N no longer matches the registered cluster.
+    let stale_keys2 = MemberKeys::generate(&mut rng);
+    let mut stale_update = propose_rotate_key(
+        &keys[0],
+        &stale_keys2,
+        &snapshot.record,
+        &snapshot.members,
+        0,
+    )
+    .expect("propose against the stale record");
+    stale_update.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| cosign_member_set_update(k, slot as u8, &stale_update))
+        .collect();
+    let stale_root = member_set_update_block_root(
+        &snapshot.record,
+        &snapshot.members,
+        &new_record,
+        &new_members,
+    )
+    .expect("root");
+    let mut stale_state = state.clone();
+    stale_state.epoch += 1;
+    stale_state.small_block_number += 1;
+    stale_state.balance_state.state_version += 1;
+    stale_state.h2_tag = stale_root;
+    stale_state.prev_digest = state.digest;
+    stale_state.member_signatures.clear();
+    stale_state = stale_state.with_computed_digest();
+    stale_state.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| sign_state(k, slot as u8, &stale_state).expect("stale signs"))
+        .collect();
+    let refused = service.post_member_set_update(
+        "msu-21-stale".to_string(),
+        stale_state,
+        snapshot.members.clone(),
+        new_record.clone(),
+        new_members.clone(),
+    );
+    assert!(
+        refused.is_err(),
+        "after the rotation the OLD slot-1 key's signature must no longer authorize a block \
+         (ChannelSafetyQ.rotate_sets_new_key made effective in the producer registry)"
+    );
+
+    // Durability: reopening the journal replays the update and lands on the SAME advanced state.
+    drop(service);
+    let mut reopened = BlockProducerService::open(&journal, &[2]).expect("reopen");
+    let replayed = reopened
+        .post_member_set_update(
+            "msu-21-0".to_string(),
+            state,
+            snapshot.members.clone(),
+            new_record,
+            new_members,
+        )
+        .expect("recovered journal still answers idempotently");
+    assert_eq!(
+        serde_json::to_string(&receipt).unwrap(),
+        serde_json::to_string(&replayed).unwrap()
+    );
 }

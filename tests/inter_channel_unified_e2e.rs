@@ -514,7 +514,8 @@ fn unified_inter_channel_transfer_e2e() {
         tx_v2_indices: vec![a_id.as_u64(), 0],
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
-    };
+        new_member_leaves: None,
+            };
     {
         let mut g = bwgen.borrow_mut();
         g.next_imsb_state_commitment_root = Some(h1_prime);

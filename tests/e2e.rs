@@ -207,7 +207,8 @@ fn e2e_deposit_validity_withdrawal() {
             internal_tx_v2_merkle_proof.clone(),
             internal_tx_v2_merkle_proof.clone(),
         ],
-    };
+        new_member_leaves: None,
+            };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
@@ -336,7 +337,8 @@ fn e2e_deposit_validity_withdrawal() {
             withdrawal_tx_v2_merkle_proof.clone(),
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
-    };
+        new_member_leaves: None,
+            };
 
     {
         let mut generator = block_witness_generator.borrow_mut();

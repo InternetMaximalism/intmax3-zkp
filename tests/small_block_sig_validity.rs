@@ -164,7 +164,8 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         tx_v2_indices: vec![channel_id.as_u64(), 0],
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
-    };
+        new_member_leaves: None,
+            };
     {
         let mut g = bwgen.borrow_mut();
         // B-2: bind the REAL H1' into the IMSB the bp signs (hash(H1', tx_tree_root)).
@@ -397,7 +398,8 @@ fn block_producer_consumes_real_member_cosignatures() {
         tx_v2_indices: vec![channel_id.as_u64(), 0],
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
-    };
+        new_member_leaves: None,
+            };
 
     // THE WALLET'S OWN STATE. `h2_tag` IS this block's tx_tree_root — that equality is what makes
     // the members' signatures an authorization of THIS block. `small_block_number` is the block

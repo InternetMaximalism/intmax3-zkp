@@ -1479,7 +1479,10 @@ impl BlockWitnessGenerator {
                 .as_ref()
                 .and_then(|_| member_keys.as_ref().map(|k| k.member_count as u32)),
             member_leaves: signer_leaves,
-            new_member_leaves: None,
+            // §Q-3: present only when the block's TxV2 witness carries a member-set transition.
+            new_member_leaves: tx_v2_witness
+                .as_ref()
+                .and_then(|w| w.new_member_leaves.clone()),
             member_regev_pks: Some(member_regev_pks),
             channel_state_fields: Some(channel_state_fields),
             tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
@@ -1722,6 +1725,9 @@ pub struct BlockTxV2Witness {
     pub tx_v2_indices: Vec<u64>,
     pub tx_v2s: Vec<TxV2>,
     pub tx_v2_merkle_proofs: Vec<TxV2MerkleProof>,
+    /// detail2 §Q-3: the NEW registered member leaves when this block carries a
+    /// `MemberSetUpdate` channel action; `None` for every other block.
+    pub new_member_leaves: Option<Vec<MemberLeaf>>,
 }
 
 #[derive(Debug, Clone)]

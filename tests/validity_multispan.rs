@@ -82,7 +82,8 @@ fn tx_v2_witness(nonce: u32) -> (Bytes32, BlockTxV2Witness) {
             // The padding slot is gated off; retaining the real proof there matches the existing
             // fixture convention and avoids an unrelated synthetic tree opening.
             tx_v2_merkle_proofs: vec![proof.clone(), proof],
-        },
+            new_member_leaves: None,
+            },
     )
 }
 

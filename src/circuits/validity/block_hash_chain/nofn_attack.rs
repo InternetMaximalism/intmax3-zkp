@@ -351,6 +351,7 @@ fn the_2_1_attack_is_dead() {
                 tx_v2_indices: vec![channel_id.as_u64(), 0],
                 tx_v2s: vec![tx_v2, TxV2::default()],
                 tx_v2_merkle_proofs: vec![tx_v2_merkle_proof.clone(), tx_v2_merkle_proof.clone()],
+                new_member_leaves: None,
             }),
         )
         .expect("the theft block");
