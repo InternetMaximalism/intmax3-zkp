@@ -8,3 +8,4 @@ lean_lib ChannelSafety2
 @[default_target]
 lean_lib ChannelSafety21
 lean_lib ChannelSafetyMT
+lean_lib ChannelSafetyQ
