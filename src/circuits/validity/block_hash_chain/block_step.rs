@@ -1051,6 +1051,7 @@ mod tests {
             prev_bp_sig_chain: initial_state.bp_sig_chain,
             // No member set / no signature: this test path keeps every slot non-updating, so the
             // whole N-of-N binding is gated off (should_update == false).
+            new_member_leaves: Vec::new(),
             member_leaves: vec![
                 crate::common::trees::key_tree::MemberLeaf::default();
                 crate::constants::MAX_SIG_CLUSTER

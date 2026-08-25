@@ -96,6 +96,8 @@ pub struct BlockHashChainProcessorWitness {
     /// set with `signer_count = 0` is used, valid only when every slot is non-updating (the whole
     /// N-of-N binding is gated on a block actually applying a signature).
     pub member_leaves: Option<Vec<MemberLeaf>>,
+    /// detail2 §Q-3: the NEW registered member leaves for a MemberSetUpdate block (None otherwise).
+    pub new_member_leaves: Option<Vec<MemberLeaf>>,
     pub signer_count: Option<u32>,
     /// Optional per-block-slot Regev public keys. If None, default (empty/dummy) keys are used
     /// (valid only for non-updating slots).
@@ -322,6 +324,8 @@ where
                 .member_leaves
                 .clone()
                 .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_SIG_CLUSTER]),
+            // detail2 §Q-3: present only on a MemberSetUpdate block; empty ⇒ the leaf root copies.
+            new_member_leaves: witness.new_member_leaves.clone().unwrap_or_default(),
             signer_count: witness.signer_count.unwrap_or(0),
             member_regev_pks: witness
                 .member_regev_pks

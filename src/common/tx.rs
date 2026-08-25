@@ -203,6 +203,11 @@ pub enum ChannelActionKind {
     #[default]
     InterChannelSend = 0,
     ChannelClose = 1,
+    /// detail2 §Q-3: the block that advances the channel's registered co-signer set. The action's
+    /// `payload_hash` commits the (prev_root, new_root) transition via
+    /// `member_set_update_payload`, so the OLD set's N-of-N over this block's signed digest
+    /// (tx_tree_root → channel_action_root → payload) authorizes exactly this transition.
+    MemberSetUpdate = 2,
 }
 
 impl ChannelActionKind {
@@ -214,6 +219,7 @@ impl ChannelActionKind {
         match value {
             0 => Ok(Self::InterChannelSend),
             1 => Ok(Self::ChannelClose),
+            2 => Ok(Self::MemberSetUpdate),
             _ => Err(crate::common::error::CommonError::InvalidData(format!(
                 "invalid channel action kind: {value}"
             ))),
@@ -230,6 +236,22 @@ pub struct ChannelAction {
     pub tx_hash: Bytes32,
     pub seal: Bytes32,
     pub payload_hash: PoseidonHashOut,
+}
+
+/// detail2 §Q-3: the canonical `payload_hash` of a `MemberSetUpdate` channel action — a Poseidon
+/// commitment to the (prev registered root, new registered root) transition, domain-separated by
+/// `MEMBER_SET_UPDATE_DOMAIN` ("IMMS"). The block's signed digest reaches this through
+/// tx_tree_root → TxV2.channel_action_root → this payload, so the OLD set's N-of-N on the block
+/// authorizes EXACTLY this root transition and no other (update_channel_tree re-derives and
+/// asserts it, natively and in-circuit).
+pub fn member_set_update_payload(
+    prev_member_root: PoseidonHashOut,
+    new_member_root: PoseidonHashOut,
+) -> PoseidonHashOut {
+    let mut inputs: Vec<u64> = vec![crate::constants::MEMBER_SET_UPDATE_DOMAIN as u64];
+    inputs.extend(prev_member_root.to_u64_vec());
+    inputs.extend(new_member_root.to_u64_vec());
+    PoseidonHashOut::hash_inputs_u64(&inputs)
 }
 
 impl ChannelAction {

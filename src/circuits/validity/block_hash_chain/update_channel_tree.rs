@@ -19,7 +19,8 @@ use crate::{
                 TxV2MerkleProofTarget,
             },
         },
-        tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target},
+        tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target,
+            member_set_update_payload},
         u63::{BlockNumber, BlockNumberTarget, U63Target},
     },
     constants::{CHANNEL_TREE_HEIGHT, MAX_SIG_CLUSTER, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
@@ -123,6 +124,12 @@ pub struct UpdateUserTree {
     ///   * an empty slot below `signer_count`, or a non-empty slot at or above it, is refused — so
     ///     `occupancy == signer_count` is a theorem, not a premise about left-packing.
     pub member_leaves: Vec<MemberLeaf>,
+    /// detail2 §Q-3: the NEW registered member leaves when this block carries a
+    /// `MemberSetUpdate` channel action — empty otherwise. When present the strict mirror (and
+    /// the circuit) validates the single-slot delta against `member_leaves` (the OLD set, which
+    /// this block's N-of-N is verified against), re-derives the action `payload_hash` from the
+    /// two folded roots, and writes the NEW root into the channel leaf instead of copying.
+    pub new_member_leaves: Vec<MemberLeaf>,
     /// N — how many members signed. Constrained `2 <= signer_count <= MAX_SIG_CLUSTER` in-circuit
     /// (design §5.4 item 2: the registration floor is repeated here IN-CIRCUIT rather than
     /// natively, deliberately not repeating `close_circuit`'s `>= 1` in-circuit / `>= 2` native
@@ -149,6 +156,58 @@ pub struct UpdateUserTree {
     pub channel_action_indices: Vec<u64>,
     pub channel_actions: Vec<ChannelAction>,
     pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProof>,
+}
+
+/// detail2 §Q-3: the structural delta a `MemberSetUpdate` block may apply to the registered
+/// member leaves — EXACTLY one slot changes, and that change is one of:
+///   * ROTATE — the slot was occupied and stays occupied, `regev_pk_digest` is PRESERVED (§Q-6:
+///     balances stay decryptable), and the signing identity (pk_g/pk_b) actually changes;
+///   * ADD — the slot was the left-packed boundary's first EMPTY slot and becomes occupied.
+/// Anything else — two slots changed, a removal, a regev swap, an add off the boundary — is
+/// refused. Mirrors `wallet_core::verify_member_set_update`'s structural half (the consent /
+/// N-of-N halves live at the co-sign gate and in the block's signature chain respectively).
+pub fn validate_member_set_delta(
+    old: &[MemberLeaf],
+    new: &[MemberLeaf],
+) -> Result<(), String> {
+    if old.len() != MAX_SIG_CLUSTER || new.len() != MAX_SIG_CLUSTER {
+        return Err(format!(
+            "member leaf arrays must be exactly MAX_SIG_CLUSTER ({MAX_SIG_CLUSTER}) long, got old {} new {}",
+            old.len(),
+            new.len()
+        ));
+    }
+    let empty = MemberLeaf::empty_leaf();
+    let changed: Vec<usize> = (0..MAX_SIG_CLUSTER).filter(|&i| old[i] != new[i]).collect();
+    let [j] = changed[..] else {
+        return Err(format!(
+            "exactly one slot may change, got {} changed slots",
+            changed.len()
+        ));
+    };
+    if old[j] == empty {
+        // ADD: must be at the left-packed boundary (every slot below occupied), new occupied.
+        if new[j] == empty {
+            return Err("add: new leaf is empty".to_string());
+        }
+        if (0..j).any(|i| old[i] == empty) {
+            return Err(format!(
+                "add at slot {j} is not at the left-packed boundary (an earlier slot is empty)"
+            ));
+        }
+        Ok(())
+    } else {
+        // ROTATE: stays occupied, regev preserved, signing identity actually changes.
+        if new[j] == empty {
+            return Err(format!("slot {j}: removal is not a supported member-set op (§Q-6)"));
+        }
+        if new[j].regev_pk_digest != old[j].regev_pk_digest {
+            return Err(format!(
+                "slot {j}: rotation must preserve regev_pk_digest (§Q-6 — Regev rotation is out of scope)"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl UpdateUserTree {
@@ -440,10 +499,78 @@ impl UpdateUserTree {
                         match channel_action.kind {
                             ChannelActionKind::InterChannelSend
                             | ChannelActionKind::ChannelClose => {}
+                            ChannelActionKind::MemberSetUpdate => {
+                                // detail2 §Q-3, strict half: the delta and the payload binding.
+                                // (The root override itself is computed OUTSIDE `strict` below so
+                                // the account root advances identically in both modes.)
+                                validate_member_set_delta(
+                                    &self.member_leaves,
+                                    &self.new_member_leaves,
+                                )
+                                .map_err(|e| {
+                                    UpdateUserTreeError::InvalidLength(format!(
+                                        "member-set update delta at i {i}: {e}"
+                                    ))
+                                })?;
+                                let prev_root = {
+                                    let mut t = MemberTree::init();
+                                    for l in self.member_leaves.iter() {
+                                        t.push(l.clone());
+                                    }
+                                    t.get_root()
+                                };
+                                let new_root = {
+                                    let mut t = MemberTree::init();
+                                    for l in self.new_member_leaves.iter() {
+                                        t.push(l.clone());
+                                    }
+                                    t.get_root()
+                                };
+                                // The signed block commits EXACTLY this transition: the action's
+                                // payload_hash must be the canonical Poseidon commitment of the
+                                // two folded roots (reached from the signed digest via
+                                // tx_tree_root → channel_action_root → payload).
+                                if channel_action.payload_hash
+                                    != member_set_update_payload(prev_root, new_root)
+                                {
+                                    return Err(UpdateUserTreeError::InvalidLength(format!(
+                                        "member-set update payload_hash at i {i} does not commit \
+                                         the (prev_root, new_root) transition"
+                                    )));
+                                }
+                                // And it must be THIS channel's own set the block advances.
+                                if prev_root != prev_user_leaf.member_pubkeys_root {
+                                    return Err(UpdateUserTreeError::InvalidLength(format!(
+                                        "member-set update at i {i}: old leaves do not fold to \
+                                         the channel's committed member root"
+                                    )));
+                                }
+                            }
                         }
                     }
                 }
             }
+
+            // detail2 §Q-3: the ONLY transition that may advance the channel leaf's registered
+            // member root. Computed unconditionally (both strict and non-strict modes) so the
+            // account tree root is mode-independent; the strict arm above is what VALIDATES the
+            // transition, exactly as every other strict/circuit split in this file.
+            let is_member_update = tx_v2.tx_class == TxClass::ChannelAction
+                && self
+                    .channel_actions
+                    .get(i)
+                    .map(|a| a.kind == ChannelActionKind::MemberSetUpdate)
+                    .unwrap_or(false)
+                && !self.new_member_leaves.is_empty();
+            let member_root_for_leaf = if is_member_update {
+                let mut t = MemberTree::init();
+                for l in self.new_member_leaves.iter() {
+                    t.push(l.clone());
+                }
+                t.get_root()
+            } else {
+                prev_user_leaf.member_pubkeys_root
+            };
 
             // verify the inclusion of empty leaf in the send tree
             if strict {
@@ -471,12 +598,14 @@ impl UpdateUserTree {
                 send_merkle_proof.get_root(&new_send_leaf, prev_user_leaf.index.into());
 
             // create new account leaf and compute new user tree root
-            // member_pubkeys_root preserved from previous leaf across state transitions
+            // member_pubkeys_root preserved from previous leaf across state transitions —
+            // UNLESS this block is an authorized MemberSetUpdate (detail2 §Q-3), the one
+            // transition that may advance it (ChannelSafetyQ.member_set_changes_iff_update).
             let new_user_leaf = ChannelLeaf {
                 index: prev_user_leaf.index + 1,
                 prev: self.block_number,
                 send_tree_root: new_send_tree_root,
-                member_pubkeys_root: prev_user_leaf.member_pubkeys_root,
+                member_pubkeys_root: member_root_for_leaf,
             };
             account_tree_root = user_merkle_proof.get_root(&new_user_leaf, channel_id.as_u64());
         }
@@ -832,6 +961,10 @@ pub struct UpdateUserTreeTarget {
     /// `UpdateUserTree::member_leaves`. Block-level, NOT per block slot: every slot of a block
     /// references the same channel leaf and therefore the same member set.
     pub member_leaf_targets: Vec<MemberLeafTarget>,
+    /// detail2 §Q-3: the NEW member leaves for a MemberSetUpdate block (all-empty padding on any
+    /// other block — the delta/payload gates below are conditioned off and the leaf-root select
+    /// falls back to the copy). Block-level like `member_leaf_targets`.
+    pub new_member_leaf_targets: Vec<MemberLeafTarget>,
     /// Witnessed `signer_count` (N).
     pub signer_count: Target,
     /// Per-block-slot witnessed Regev public-key coefficient targets (`a` then `b`, each
@@ -955,6 +1088,27 @@ impl UpdateUserTreeTarget {
         let recomputed_member_root =
             compute_member_tree_root::<F, C, D>(builder, &member_leaf_hashes);
 
+        // ── detail2 §Q-3: the NEW member set of a MemberSetUpdate block ──
+        //
+        // Witnessed unconditionally (all-empty padding when unused); its fold becomes the channel
+        // leaf's member root ONLY under the per-slot `is_member_update` select below, and the
+        // structural delta + payload gates are all conditioned on the same flag, so on every other
+        // block these targets are free padding with no constraint force.
+        let mut new_member_leaf_targets: Vec<MemberLeafTarget> =
+            Vec::with_capacity(MAX_SIG_CLUSTER);
+        let mut new_member_leaf_hashes: Vec<PoseidonHashOutTarget> =
+            Vec::with_capacity(MAX_SIG_CLUSTER);
+        let mut new_member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        for _ in 0..MAX_SIG_CLUSTER {
+            let leaf = MemberLeafTarget::new(builder);
+            let pk_bytes = Bytes32Target::from_hash_out(builder, leaf.pk_g);
+            new_member_pk_is_zero.push(pk_bytes.is_zero::<F, D, Bytes32>(builder));
+            new_member_leaf_hashes.push(leaf.hash::<F, C, D>(builder));
+            new_member_leaf_targets.push(leaf);
+        }
+        let new_member_root =
+            compute_member_tree_root::<F, C, D>(builder, &new_member_leaf_hashes);
+
         // ── The folded block statement (design §5.3) ──
         //
         // `(message, signer_count, pk_list_digest)` with the SHARED `falcon_sig::agg_list`
@@ -979,6 +1133,9 @@ impl UpdateUserTreeTarget {
         // a block that signs nothing must not be forced to carry a member set it has no business
         // knowing, and a block that signs must satisfy every one of those constraints.
         let mut any_sign = builder._false();
+        // detail2 §Q-3: true iff some slot's action is a MemberSetUpdate — gates the block-level
+        // structural-delta constraints emitted after the loop.
+        let mut any_member_update = builder._false();
         // Poseidon-digest domain for the Regev pubkey leaf component (mirrors
         // `RegevPk::poseidon_digest`).
         let regev_poseidon_domain =
@@ -1058,6 +1215,32 @@ impl UpdateUserTreeTarget {
                 channel_id,
             );
 
+            // ── detail2 §Q-3: is THIS slot's action a MemberSetUpdate? ──
+            let member_update_kind = builder.constant(F::from_canonical_u32(
+                ChannelActionKind::MemberSetUpdate.as_u32(),
+            ));
+            let is_msu_kind = builder.is_equal(channel_action.kind, member_update_kind);
+            let is_member_update = builder.and(should_check_channel_action, is_msu_kind);
+            any_member_update = builder.or(any_member_update, is_member_update);
+            // The signed block commits EXACTLY the (prev_root, new_root) transition: the action's
+            // payload_hash must be the canonical Poseidon commitment of the two folds. The prev
+            // fold is bound to the channel leaf's committed root by the N-of-N section below
+            // (design §5.4 item 2), closing the chain signed-digest → tx_tree_root →
+            // channel_action_root → payload → root transition.
+            let msu_domain = builder.constant(F::from_canonical_u32(
+                crate::constants::MEMBER_SET_UPDATE_DOMAIN,
+            ));
+            let mut payload_preimage: Vec<Target> = vec![msu_domain];
+            payload_preimage.extend(recomputed_member_root.to_vec());
+            payload_preimage.extend(new_member_root.to_vec());
+            let expected_msu_payload =
+                PoseidonHashOutTarget::hash_inputs::<F, D>(builder, &payload_preimage);
+            channel_action.payload_hash.conditional_assert_eq(
+                builder,
+                expected_msu_payload,
+                is_member_update,
+            );
+
             send_merkle_proof.conditional_verify::<F, C, D>(
                 builder,
                 should_update,
@@ -1078,12 +1261,20 @@ impl UpdateUserTreeTarget {
             );
 
             let next_index = builder.add_const(prev_user_leaf.index, F::ONE);
+            // member_pubkeys_root preserved unchanged across state transitions — UNLESS this
+            // slot's action is an authorized MemberSetUpdate (detail2 §Q-3), the ONE transition
+            // that may advance it (ChannelSafetyQ.member_set_changes_iff_update).
+            let leaf_member_root = PoseidonHashOutTarget::select(
+                builder,
+                is_member_update,
+                new_member_root,
+                prev_user_leaf.member_pubkeys_root.clone(),
+            );
             let new_user_leaf = ChannelLeafTarget {
                 index: next_index,
                 prev: block_number.clone(),
                 send_tree_root: new_send_tree_root.clone(),
-                // member_pubkeys_root preserved unchanged across state transitions
-                member_pubkeys_root: prev_user_leaf.member_pubkeys_root.clone(),
+                member_pubkeys_root: leaf_member_root,
             };
 
             let updated_root =
@@ -1196,6 +1387,55 @@ impl UpdateUserTreeTarget {
 
         // ── Block-level well-formedness of the signer set (design §5.4 items 2-3) ──
         //
+        // ── detail2 §Q-3: the structural delta of a MemberSetUpdate block ──
+        //
+        // Gated on `any_member_update`; on every other block the new-leaf targets are free
+        // padding. Rules (mirror of `validate_member_set_delta`, native):
+        //   * exactly ONE slot changes;
+        //   * a changed slot that was EMPTY (¬is_signer[i], the occupancy theorem) is an ADD and
+        //     must sit exactly at the boundary `i == signer_count`;
+        //   * a changed slot that was OCCUPIED is a ROTATE and must preserve `regev_pk_digest`
+        //     (§Q-6 — balances stay decryptable);
+        //   * a changed slot's NEW leaf is never empty (removal is not a supported op).
+        {
+            let one = builder.one();
+            let mut sum_changed = builder.zero();
+            for i in 0..MAX_SIG_CLUSTER {
+                let old_l = &member_leaf_targets[i];
+                let new_l = &new_member_leaf_targets[i];
+                let eq_pkg = old_l.pk_g.is_equal(builder, &new_l.pk_g);
+                let eq_pkb = old_l.pk_b.is_equal(builder, &new_l.pk_b);
+                let eq_rgv = old_l.regev_pk_digest.is_equal(builder, &new_l.regev_pk_digest);
+                let eq_all = {
+                    let a = builder.and(eq_pkg, eq_pkb);
+                    builder.and(a, eq_rgv)
+                };
+                let changed = builder.not(eq_all);
+                let changed_g = builder.and(changed, any_member_update);
+                sum_changed = builder.add(sum_changed, changed_g.target);
+
+                // ADD: changed ∧ was-empty ⇒ i == signer_count (the left-packed boundary).
+                let not_signer = builder.not(is_signer[i]);
+                let add_here = builder.and(changed_g, not_signer);
+                let i_const = builder.constant(F::from_canonical_usize(i));
+                builder.conditional_assert_eq(add_here.target, i_const, signer_count);
+
+                // ROTATE: changed ∧ was-occupied ⇒ regev preserved.
+                let rot_here = builder.and(changed_g, is_signer[i]);
+                old_l.regev_pk_digest.conditional_assert_eq(
+                    builder,
+                    new_l.regev_pk_digest,
+                    rot_here,
+                );
+
+                // Never a removal: a changed slot's NEW pk is non-zero.
+                let removed = builder.and(changed_g, new_member_pk_is_zero[i]);
+                builder.assert_zero(removed.target);
+            }
+            // Exactly one changed slot on an update block; zero otherwise (sum is already gated).
+            builder.conditional_assert_eq(any_member_update.target, sum_changed, one);
+        }
+
         // Gated on the COMPUTED `any_sign`: on a block that applies no member signature nothing
         // here is bound to anything, and requiring a well-formed member set there would force the
         // witness to invent one (padding blocks do not know the channel's members). On a signing
@@ -1272,6 +1512,7 @@ impl UpdateUserTreeTarget {
             public_inputs,
             prev_bp_sig_chain,
             member_leaf_targets,
+            new_member_leaf_targets,
             signer_count,
             member_regev_pk_targets,
             channel_state_fields,
@@ -1363,6 +1604,14 @@ impl UpdateUserTreeTarget {
             .zip(value.member_leaves.iter())
         {
             target.set_witness(witness, leaf);
+        }
+        // §Q-3: NEW member leaves — all-empty padding when the block is not a MemberSetUpdate.
+        {
+            let empty = MemberLeaf::empty_leaf();
+            for (i, target) in self.new_member_leaf_targets.iter().enumerate() {
+                let leaf = value.new_member_leaves.get(i).unwrap_or(&empty);
+                target.set_witness(witness, leaf);
+            }
         }
         witness.set_target(self.signer_count, F::from_canonical_u32(value.signer_count));
 
@@ -1697,8 +1946,105 @@ mod tests {
             send_merkle_proofs: vec![send_merkle_proof],
             prev_bp_sig_chain: Bytes32::default(),
             member_leaves: channel.leaves.clone(),
+            new_member_leaves: Vec::new(),
             signer_count: channel.signer_count(),
             // The bp posts from slot 0, so slot 0's Regev key is the one opened.
+            member_regev_pks: vec![channel.regev[0].clone()],
+            channel_state_fields: fields,
+            tx_v2_indices: vec![0],
+            tx_v2s: vec![tx_v2],
+            tx_v2_merkle_proofs: vec![tx_v2_proof],
+            channel_action_indices: vec![0],
+            channel_actions: vec![channel_action],
+            channel_action_merkle_proofs: vec![channel_action_proof],
+        };
+        (tree, signed_digest)
+    }
+
+    /// detail2 §Q-3 harness: a MEMBER-SET-UPDATE signing block over `channel`, transitioning the
+    /// registered leaves to `new_leaves`. Identical to `signing_block` except the channel action:
+    /// kind = MemberSetUpdate, payload = the canonical (prev_root, new_root) commitment, and the
+    /// witness carries `new_member_leaves`.
+    fn member_update_block(
+        channel: &RegisteredChannel,
+        channel_id: u32,
+        new_leaves: Vec<MemberLeaf>,
+    ) -> (UpdateUserTree, Bytes32) {
+        let block_number = BlockNumber::new(30).unwrap();
+        let key_id = 7u32;
+        let num_users = 1;
+        let mut rng = StdRng::seed_from_u64(4242);
+        let prev_block_hash_chain = Bytes32::rand(&mut rng);
+        let deposit_hash_chain = Bytes32::rand(&mut rng);
+
+        let channel_target = ChannelId::new(channel_id as u64).unwrap();
+        let send_tree = SendTree::init();
+        let prev_user_leaf = ChannelLeaf {
+            index: 0,
+            prev: BlockNumber::new(4).unwrap(),
+            send_tree_root: send_tree.get_root(),
+            member_pubkeys_root: channel.root,
+        };
+        let mut channel_tree = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+        channel_tree.update(channel_target.as_u64(), prev_user_leaf.clone());
+        let prev_account_tree_root = channel_tree.get_root();
+
+        let new_root = {
+            let mut t = MemberTree::init();
+            for l in new_leaves.iter() {
+                t.push(l.clone());
+            }
+            t.get_root()
+        };
+        let channel_action = ChannelAction {
+            kind: ChannelActionKind::MemberSetUpdate,
+            source_channel_id: channel_target,
+            destination_channel_id: channel_target,
+            tx_hash: Bytes32::rand(&mut rng),
+            seal: Bytes32::default(),
+            payload_hash: member_set_update_payload(channel.root, new_root),
+        };
+        let mut channel_action_tree = ChannelActionTree::init();
+        channel_action_tree.update(0, channel_action);
+        let channel_action_proof = channel_action_tree.prove(0);
+        let tx_v2 = TxV2 {
+            tx_class: TxClass::ChannelAction,
+            transfer_tree_root: PoseidonHashOut::default(),
+            nonce: 1,
+            channel_action_root: channel_action_tree.get_root(),
+        };
+        let mut tx_v2_tree = TxV2Tree::init();
+        tx_v2_tree.update(0, tx_v2);
+        let tx_v2_proof = tx_v2_tree.prove(0);
+        let block = Block::new_with_tx_v2s(
+            num_users,
+            channel_id,
+            &[key_id],
+            rng.next_u64(),
+            &[tx_v2],
+            deposit_hash_chain,
+            Bytes32::default(),
+        )
+        .unwrap();
+
+        let user_merkle_proof = channel_tree.prove(channel_target.as_u64());
+        let send_merkle_proof = send_tree.prove(prev_user_leaf.index.into());
+
+        let fields = channel_state_fields(0xc1a1_0000 + channel_id as u64);
+        let signed_digest = fields.signing_digest(channel_id, block.tx_tree_root);
+
+        let tree = UpdateUserTree {
+            prev_block_hash_chain,
+            prev_account_tree_root,
+            block_number,
+            block,
+            prev_account_leaves: vec![prev_user_leaf],
+            user_merkle_proofs: vec![user_merkle_proof],
+            send_merkle_proofs: vec![send_merkle_proof],
+            prev_bp_sig_chain: Bytes32::default(),
+            member_leaves: channel.leaves.clone(),
+            new_member_leaves: new_leaves,
+            signer_count: channel.signer_count(),
             member_regev_pks: vec![channel.regev[0].clone()],
             channel_state_fields: fields,
             tx_v2_indices: vec![0],
@@ -1889,6 +2235,7 @@ mod tests {
             send_merkle_proofs,
             prev_bp_sig_chain,
             member_leaves: vec![MemberLeaf::default(); MAX_SIG_CLUSTER],
+            new_member_leaves: Vec::new(),
             signer_count: 0,
             member_regev_pks: vec![dummy_regev_pk(); num_users as usize],
             channel_state_fields: ChannelStateMessageFields::default(),
@@ -2173,5 +2520,144 @@ mod tests {
                 "a prover must not be able to state the stolen chain as this block's output"
             );
         }
+    }
+
+    // ── detail2 §Q-3: MemberSetUpdate blocks ────────────────────────────────────────────────
+
+    /// Positive: a rotate block proves, and the account tree advances to a channel leaf carrying
+    /// the NEW registered member root (the frozen-copy rule's one sanctioned exception).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_rotate_block_proves_and_advances_the_root() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x51);
+        let mut rng = StdRng::seed_from_u64(0x515);
+        let mut new_leaves = channel.leaves.clone();
+        // Rotate slot 1's signing identity; regev preserved (§Q-6).
+        new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
+        new_leaves[1].pk_b = PoseidonHashOut::rand(&mut rng);
+        let (tree, _digest) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves.clone());
+
+        let pis = tree.to_public_inputs().expect("a valid rotate block is accepted natively");
+        // The advanced account root commits the NEW member root.
+        let new_member_root = {
+            let mut t = MemberTree::init();
+            for l in new_leaves.iter() {
+                t.push(l.clone());
+            }
+            t.get_root()
+        };
+        assert_ne!(new_member_root, channel.root, "the rotation must actually move the root");
+        let expected_account_root = {
+            let send_tree = SendTree::init();
+            let new_send_leaf = SendLeaf {
+                prev: BlockNumber::new(4).unwrap(),
+                cur: BlockNumber::new(30).unwrap(),
+                tx_tree_root: tree.block.tx_tree_root,
+            };
+            let send_proof = send_tree.prove(0);
+            let new_send_root = send_proof.get_root(&new_send_leaf, 0);
+            let leaf = ChannelLeaf {
+                index: 1,
+                prev: BlockNumber::new(30).unwrap(),
+                send_tree_root: new_send_root,
+                member_pubkeys_root: new_member_root,
+            };
+            let mut t = ChannelTree::new(CHANNEL_TREE_HEIGHT);
+            t.update(ChannelId::new(TEST_CHANNEL_ID as u64).unwrap().as_u64(), leaf);
+            t.get_root()
+        };
+        assert_eq!(
+            pis.new_account_tree_root, expected_account_root,
+            "the channel leaf must carry the NEW registered member root"
+        );
+
+        // And the circuit agrees byte-for-byte with the native mirror.
+        let proof = CIRCUIT.prove(&tree).expect("the rotate block proves");
+        CIRCUIT.data.verify(proof.clone()).unwrap();
+        let expected: Vec<F> = pis.to_u64_vec().into_iter().map(F::from_canonical_u64).collect();
+        assert_eq!(proof.public_inputs, expected);
+    }
+
+    /// Positive: an ADD at the left-packed boundary proves.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_add_at_boundary_proves() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x52);
+        let mut rng = StdRng::seed_from_u64(0x525);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[2] = MemberLeaf {
+            pk_g: PoseidonHashOut::rand(&mut rng),
+            pk_b: PoseidonHashOut::rand(&mut rng),
+            regev_pk_digest: PoseidonHashOut::rand(&mut rng),
+        };
+        let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        let pis = tree.to_public_inputs().expect("a boundary add is accepted natively");
+        let proof = CIRCUIT.prove(&tree).expect("the add block proves");
+        CIRCUIT.data.verify(proof.clone()).unwrap();
+        let expected: Vec<F> = pis.to_u64_vec().into_iter().map(F::from_canonical_u64).collect();
+        assert_eq!(proof.public_inputs, expected);
+    }
+
+    /// Refusal: a rotation that swaps the Regev digest (decryption-key substitution, §Q-6).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_regev_swap_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x53);
+        let mut rng = StdRng::seed_from_u64(0x535);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
+        new_leaves[1].regev_pk_digest = PoseidonHashOut::rand(&mut rng);
+        let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        assert_refused(&tree, "must preserve regev_pk_digest");
+    }
+
+    /// Refusal: two slots changed in one update.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_two_slot_change_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x54);
+        let mut rng = StdRng::seed_from_u64(0x545);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[0].pk_g = PoseidonHashOut::rand(&mut rng);
+        new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
+        let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        assert_refused(&tree, "exactly one slot may change");
+    }
+
+    /// Refusal: an add OFF the left-packed boundary (slot 4 with only 2 occupied).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_add_off_boundary_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x55);
+        let mut rng = StdRng::seed_from_u64(0x555);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[4] = MemberLeaf {
+            pk_g: PoseidonHashOut::rand(&mut rng),
+            pk_b: PoseidonHashOut::rand(&mut rng),
+            regev_pk_digest: PoseidonHashOut::rand(&mut rng),
+        };
+        let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        assert_refused(&tree, "left-packed boundary");
+    }
+
+    /// Refusal: a payload_hash that does not commit the transition — the signed block must bind
+    /// EXACTLY the (prev_root, new_root) pair.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_payload_mismatch_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x56);
+        let mut rng = StdRng::seed_from_u64(0x565);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
+        let (mut tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        // Tamper: swap in DIFFERENT new leaves than the payload committed.
+        tree.new_member_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
+        assert_refused(&tree, "payload_hash");
     }
 }

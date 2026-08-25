@@ -139,6 +139,7 @@ fn update_tree_for(
         user_merkle_proofs: w.user_merkle_proofs.clone(),
         send_merkle_proofs: w.send_merkle_proofs.clone(),
         prev_bp_sig_chain: prev_ext.bp_sig_chain,
+        new_member_leaves: w.new_member_leaves.clone().unwrap_or_default(),
         member_leaves: w
             .member_leaves
             .clone()
@@ -480,7 +481,7 @@ fn the_2_1_attack_is_dead() {
         member_root_matches(&a1),
         "A1 keeps the real member leaves, so the root connect is NOT what refuses it"
     );
-    assert_refused(&update_circuit, &a1, "out of range 2..=16");
+    assert_refused(&update_circuit, &a1, "out of range 2..=8");
 
     // ---- A2: two signatures the attacker can genuinely produce. -------------------------------
     //

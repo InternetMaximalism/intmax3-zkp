@@ -881,6 +881,7 @@ impl BlockWitnessGenerator {
             // signature and carries no member set (the N-of-N binding is gated on a block
             // actually signing).
             member_leaves: None,
+            new_member_leaves: None,
             signer_count: None,
             member_regev_pks: Some(member_regev_pks),
             channel_state_fields: None,
@@ -1478,6 +1479,7 @@ impl BlockWitnessGenerator {
                 .as_ref()
                 .and_then(|_| member_keys.as_ref().map(|k| k.member_count as u32)),
             member_leaves: signer_leaves,
+            new_member_leaves: None,
             member_regev_pks: Some(member_regev_pks),
             channel_state_fields: Some(channel_state_fields),
             tx_v2_indices: tx_v2_witness.as_ref().map(|w| w.tx_v2_indices.clone()),
