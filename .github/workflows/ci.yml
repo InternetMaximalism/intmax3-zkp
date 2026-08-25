@@ -64,6 +64,27 @@ env:
   CARGO_NET_RETRY: 3
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lean proofs (audit25-08-2026 Part 3, cross-cutting): both Lean projects must
+  # be kernel-green on every push. Until this job existed NOTHING ran lake build
+  # — the corpus could rot silently (and did: see the audit's staleness findings).
+  # ---------------------------------------------------------------------------
+  lean-proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan (pinned toolchain resolves from lean-toolchain files)
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build the spec-model corpus (ChannelSafety*, Q, Close, PW, IC)
+        working-directory: doc/architecture-audit
+        run: lake build
+      - name: Build the implementation-model corpus (doc/audit/zkp)
+        working-directory: doc/audit/zkp
+        run: lake build
   # ════════════════════════════════════════════════════════════════════════════════════════════════
   #  CONTRACTS — the declaration-vs-reality job. ~5 min. This is the fast feedback loop; it is
   #  first because it is where every fund-impacting defect of the last month actually lived.
