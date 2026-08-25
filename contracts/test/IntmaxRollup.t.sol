@@ -453,16 +453,14 @@ contract IntmaxRollupTest is Test {
         // to the reg-chain preimage IMMEDIATELY AFTER `memberCount` (LEN 475 -> 476); these match the
         // Rust `PINNED_MC*` in src/common/channel_registration.rs (Rust<->Solidity byte-identical).
         bytes32 pinnedMc2 =
-            0x6b32a3c7994eff98d812534363219a621be57b4675141395944c0aaca5edcb5a;
+            0xfdf1d070c4a7070ce715e93fbe0d07eaca875397c50c5ef037a9bc304bfdcf55;
         bytes32 pinnedMc8 =
-            0x7625aed1893502adbf63e376e94f1786eb797fa21c77c0a5101e501993c19fea;
-        bytes32 pinnedMc16 =
-            0x6d34a215c0db7a3a400af3e960a231eb1cb0db520076dae2bfa76b6a154b9809;
+            0x291b7b5bedb5252a07196256cfb4a0d1e978399cc7a99c658ad608fe4180ac78;
 
         assertEq(_registerChannelDiff(2), pinnedMc2, "MC2 preimage hash drifted");
         // Each call starts from a fresh rollup so the pending chain seed is always bytes32(0).
+        // MC16 is gone: the sig-cluster resize (fd467ea) made member_count 16 invalid.
         assertEq(_registerChannelDiff(8), pinnedMc8, "MC8 preimage hash drifted");
-        assertEq(_registerChannelDiff(16), pinnedMc16, "MC16 preimage hash drifted");
     }
 
     /// @dev Deploy a FRESH rollup (so `_pendingChannelRegHashChain == bytes32(0)`), call
@@ -536,7 +534,7 @@ contract IntmaxRollupTest is Test {
     /// validity-path registration.
     function test_channelMemberSetCommitmentMatchesVerifier() public {
         ChannelSettlementVerifier verifier = new ChannelSettlementVerifier();
-        uint32[3] memory counts = [uint32(2), 8, 16];
+        uint32[3] memory counts = [uint32(2), 5, 8];
         for (uint256 c = 0; c < counts.length; c++) {
             uint256 memberCount = counts[c];
             IntmaxRollup fresh = _freshRollup();

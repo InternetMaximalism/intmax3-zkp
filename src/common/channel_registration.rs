@@ -310,10 +310,14 @@ mod tests {
 
     #[test]
     fn test_channel_reg_validate() {
-        for mc in [2u32, 8, 16] {
+        for mc in [2u32, 5, 8] {
             let rec = make_record(mc);
             rec.validate().expect("valid record");
         }
+        // member_count above MAX_SIG_CLUSTER is out of range (the 16-era cap is gone).
+        let mut over = make_record(8);
+        over.member_count = 9;
+        assert!(over.validate().is_err());
         // member_count = 1 is out of range.
         let mut bad = make_record(2);
         bad.member_count = 1;
@@ -346,11 +350,10 @@ mod tests {
     //
     // SECURITY: if these change, the Rust <-> Solidity encodings have diverged — DO NOT update
     // blindly; investigate the layout.
-    // Re-pinned after the delegate-account `delegate_count` limb (= 0 in these vectors) was added
-    // to the reg-chain preimage IMMEDIATELY AFTER `member_count` (LEN 475 -> 476).
-    const PINNED_MC2: &str = "0x6b32a3c7994eff98d812534363219a621be57b4675141395944c0aaca5edcb5a";
-    const PINNED_MC8: &str = "0x7625aed1893502adbf63e376e94f1786eb797fa21c77c0a5101e501993c19fea";
-    const PINNED_MC16: &str = "0x6d34a215c0db7a3a400af3e960a231eb1cb0db520076dae2bfa76b6a154b9809";
+    // Re-pinned after the sig-cluster resize (fd467ea, MAX 16 -> 8): the fixed-width member
+    // segment halved, so every pin moved. MC16 is gone — the count itself is now invalid.
+    const PINNED_MC2: &str = "0xfdf1d070c4a7070ce715e93fbe0d07eaca875397c50c5ef037a9bc304bfdcf55";
+    const PINNED_MC8: &str = "0x291b7b5bedb5252a07196256cfb4a0d1e978399cc7a99c658ad608fe4180ac78";
 
     /// THE DE-RISK GATE (Rust side). Prints the three hashes (copy into the constants above + the
     /// Foundry test) and asserts they match the pinned constants.
@@ -359,12 +362,9 @@ mod tests {
         let prev = Bytes32::from_u32_slice(&DIFF_PREV_HASH_LIMBS).unwrap();
         let h2 = format!("{}", make_record(2).hash_with_prev_hash(prev));
         let h8 = format!("{}", make_record(8).hash_with_prev_hash(prev));
-        let h16 = format!("{}", make_record(16).hash_with_prev_hash(prev));
         println!("CHANNEL_REG MC2  = {h2}");
         println!("CHANNEL_REG MC8  = {h8}");
-        println!("CHANNEL_REG MC16 = {h16}");
         assert_eq!(h2, PINNED_MC2, "MC2 preimage hash drifted");
         assert_eq!(h8, PINNED_MC8, "MC8 preimage hash drifted");
-        assert_eq!(h16, PINNED_MC16, "MC16 preimage hash drifted");
     }
 }

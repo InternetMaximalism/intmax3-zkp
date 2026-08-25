@@ -710,7 +710,7 @@ contract DeployGuardsTest is Test {
             uint32(GUARD_MEMBER_COUNT),
             uint32(0) // SECURITY: the delegateCount limb the circuit constrains to zero
         );
-        for (uint256 i = 0; i < 16; i++) {
+        for (uint256 i = 0; i < 8; i++) {
             if (i < GUARD_MEMBER_COUNT) {
                 packed = abi.encodePacked(packed, pkGs[i], pkBs[i], regev[i], recipients[i]);
             } else {
@@ -726,7 +726,7 @@ contract DeployGuardsTest is Test {
     ///      recomputed independently over the cosigner prefix.
     function _closeMemberSetCommitment(bytes32[] memory cosigners) internal pure returns (bytes32) {
         bytes memory preimage = abi.encodePacked(bytes4(0x494d434d), uint32(cosigners.length));
-        for (uint256 i = 0; i < 16; i++) {
+        for (uint256 i = 0; i < 8; i++) {
             preimage = abi.encodePacked(preimage, i < cosigners.length ? cosigners[i] : bytes32(0));
         }
         return keccak256(preimage);

@@ -15,7 +15,7 @@
   "final_settled_tx_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "final_settled_tx_accumulator_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "close_intent_digest": "0xf6e19e6107c76f2fbb86539423c813a56558dffa0c12851c2a7587882b022f6e",
-  "member_set_commitment": "0xacbc8e39a88a1935a95ea4abf5e2f3a9cd0ccfdcfdd570d8a4faa731819551b7",
+  "member_set_commitment": "0x26826dea758d418b1fc4ce2031b80198dfa1509ac6b2f7e404397a3b22aa4abc",
   "member_count": 3,
   "delegate_count": 0,
   "member_pk_gs": [

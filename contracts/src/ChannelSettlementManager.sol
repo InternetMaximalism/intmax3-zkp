@@ -568,7 +568,10 @@ contract ChannelSettlementManager {
     /// F7: the block-proposer member is identified by its slot (0..MEMBER_COUNT) and its SPHINCS+
     /// pubkey hash, replacing the legacy `bpKeyId`.
     uint8 public immutable bpMemberSlot;
-    bytes32 public immutable bpPkG;
+    /// §Q-4 (member-set updates): STORAGE, seeded by the constructor — a RotateKey on the bp slot
+    /// advances it via `applyMemberSetUpdate` (stage Q3 slice C). The slot index itself never
+    /// moves.
+    bytes32 public bpPkG;
     uint64 public immutable challengePeriod;
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
@@ -584,7 +587,14 @@ contract ChannelSettlementManager {
 
     /// @notice The number of ACTIVE members (2..=MAX_MEMBER_COUNT). Mirrors the Rust
     /// `ChannelRecord.member_count` (src/common/channel.rs).
-    uint8 public immutable activeMemberCount;
+    /// §Q-4: STORAGE, seeded by the constructor at the genesis registration — an AddCosigner
+    /// advances it via `applyMemberSetUpdate` (stage Q3 slice C; no setter exists before that
+    /// entry lands, so behavior is identical to the former immutable today).
+    uint8 public activeMemberCount;
+
+    /// @notice detail2 §Q-5: the channel's member-set version — genesis registration = 0,
+    /// strictly +1 per applied `MemberSetUpdate`. Mirrors `ChannelRecord.set_version`.
+    uint64 public memberSetVersion;
 
     /// @notice The number of delegates REGISTERED AT DEPLOYMENT (delegate account). Mirrors the Rust
     /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count` AT THAT MOMENT. Delegates do
