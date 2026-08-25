@@ -90,6 +90,8 @@ use intmax3_zkp::{
         resolve_local_token_slot, sign_state, sign_state_if_backed, verify_all_signatures,
         verify_base_nonce_available, verify_inter_channel_credit_transition,
         verify_inter_channel_descriptor_matches_debit,
+        apply_member_set_update_to_state, cosign_member_set_update, propose_add_cosigner,
+        propose_rotate_key, verify_member_set_update,
         verify_inter_channel_send_transition_with_lookup,
         verify_l1_deposit_import_transition, verify_refresh_transition, verify_send_transition,
         verify_slim_send_tx, verify_snapshot, verify_token_register_state_transition, BatchTxApply,
@@ -1498,6 +1500,153 @@ fn cmd_precompute_falcon_aggregate() {
 /// ledgers were created and what becomes replayable, and (c) REFUSES if the file carries any
 /// unrecognised key, because an unrecognised key is the signature of a ledger that was RENAMED and
 /// whose entries would be thrown away — the incident that motivated all of this.
+/// detail2 §Q stage Q1 — the member-set update command (audit25-08-2026 Part 3 V1's gate,
+/// `ChannelSafetyQ.lean`'s verified shape). Two ops:
+///
+///   member-update rotate <slot> <new_keygen_seed>
+///   member-update add <joiner_keygen_seed> <recipient_hex>
+///
+/// Single atomic command in the deployment's key model (this CLI holds every cluster slot's key
+/// via `keys_for`, exactly as `cosign`/`join_delegate` do): it proposes (IMKR/IMJC consent),
+/// collects the PREVIOUS set's full N-of-N over IMMS, runs `verify_member_set_update` — the same
+/// fail-closed gate a remote co-signer would run — applies the §Q-4b state advance, has the NEW
+/// set re-sign the state, and persists. The gate is NEVER bypassed: a forged consent, a wrong
+/// version, or a structural delta beyond the op dies here exactly as in the Lean model
+/// (rotate_requires_self_consent / update_requires_prev_nofn).
+///
+/// SECURITY (key provenance): the new key comes from `keys_for(new_seed)` — the file's single
+/// derivation (finding-7 invariant). The rotated slot's `ControlledMember.keygen_seed` is updated
+/// so every later `cosign`/`close` signs with the NEW key; the old seed's key simply stops being
+/// referenced (the record no longer contains its pk_g — `rotate_sets_new_key`).
+fn cmd_member_update(args: &[String]) {
+    let sub = args
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or_else(|| die("member-update <rotate|add> ..."));
+    let mut state = load_state();
+    let record = state.snapshot.record.clone();
+    let members = state.snapshot.members.clone();
+
+    let (update, new_controlled_seed_change): (
+        intmax3_zkp::wallet_core::MemberSetUpdate,
+        Option<(u16, u64)>,
+    ) = match sub {
+        "rotate" => {
+            let slot: u16 = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| die("member-update rotate <slot> <new_keygen_seed>"));
+            let new_seed: u64 = args
+                .get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| die("member-update rotate <slot> <new_keygen_seed>"));
+            let ctl = state
+                .controlled
+                .iter()
+                .find(|c| c.slot == slot)
+                .unwrap_or_else(|| die(format!("slot {slot} is not a controlled member slot")));
+            let current_keys = keys_for(ctl.keygen_seed);
+            let new_keys = keys_for(new_seed);
+            if new_keys.pk_g() == current_keys.pk_g() {
+                die("member-update rotate: the new seed derives the CURRENT key — refusing a no-op rotation");
+            }
+            let update = propose_rotate_key(&current_keys, &new_keys, &record, &members, slot as u8)
+                .unwrap_or_else(|e| die(format!("propose rotate: {e}")));
+            (update, Some((slot, new_seed)))
+        }
+        "add" => {
+            let joiner_seed: u64 = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| die("member-update add <joiner_keygen_seed> <recipient_hex>"));
+            let recipient = args
+                .get(3)
+                .map(|s| Address::from_hex(s).unwrap_or_else(|e| die(format!("recipient: {e:?}"))))
+                .unwrap_or_else(|| die("member-update add <joiner_keygen_seed> <recipient_hex>"));
+            // B-1b: recipient must be distinct across active slots (same guard as join_delegate).
+            {
+                let bs = &state.snapshot.state.balance_state;
+                let active = bs.member_count as usize + bs.delegate_count as usize;
+                if (0..active).any(|i| bs.recipients[i] == recipient) {
+                    die("member-update add: recipient already bound to an active slot (B-1b)");
+                }
+            }
+            let joiner_keys = keys_for(joiner_seed);
+            let update = propose_add_cosigner(&joiner_keys, recipient, &record, &members)
+                .unwrap_or_else(|e| die(format!("propose add: {e}")));
+            (update, Some((record.member_count as u16, joiner_seed)))
+        }
+        other => die(format!("member-update: unknown op {other:?} (rotate|add)")),
+    };
+
+    // The PREVIOUS set's full N-of-N over the IMMS digest — every cluster slot votes.
+    let mut update = update;
+    update.member_signatures = state
+        .controlled
+        .iter()
+        .filter(|c| (c.slot as usize) < record.member_count as usize)
+        .map(|c| cosign_member_set_update(&keys_for(c.keygen_seed), c.slot as u8, &update))
+        .collect();
+
+    // THE gate — identical to what a remote co-signer runs; never bypassed.
+    let (new_record, new_members) = verify_member_set_update(&record, &members, &update)
+        .unwrap_or_else(|e| die(format!("member-set update REFUSED: {e}")));
+
+    // §Q-4b state advance (rotate: rows untouched; add: zero row inserted, delegates shift).
+    let mut next_state =
+        apply_member_set_update_to_state(&state.snapshot.state, &record, &update)
+            .unwrap_or_else(|e| die(format!("apply member-set update: {e}")));
+
+    // Bookkeeping: rotated slot's controlled seed moves to the new key; an added member becomes a
+    // controlled slot; delegates' controlled slots shift up by one on add.
+    match &new_controlled_seed_change {
+        Some((slot, seed)) if sub == "rotate" => {
+            for c in state.controlled.iter_mut() {
+                if c.slot == *slot {
+                    c.keygen_seed = *seed;
+                }
+            }
+        }
+        Some((slot, seed)) => {
+            for c in state.controlled.iter_mut() {
+                if c.slot >= *slot {
+                    c.slot += 1; // §Q-4b: delegates shift up
+                }
+            }
+            state.controlled.push(ControlledMember {
+                slot: *slot,
+                keygen_seed: *seed,
+                balance_amount: 0,
+                balance_seed: 0,
+                has_witness: false,
+                token_witnesses: Vec::new(),
+            });
+            state.controlled.sort_by_key(|c| c.slot);
+        }
+        None => unreachable!(),
+    }
+
+    // The NEW set re-signs the advanced state (the rotated/added key signs as itself now).
+    next_state = next_state.with_computed_digest();
+    for c in &state.controlled {
+        if (c.slot as usize) < new_record.member_count as usize {
+            let sig = sign_state(&keys_for(c.keygen_seed), c.slot as u8, &next_state)
+                .unwrap_or_else(|e| die(format!("re-sign: {e:?}")));
+            add_signature(&mut next_state, sig);
+        }
+    }
+
+    state.snapshot.record = new_record.clone();
+    state.snapshot.members = new_members;
+    state.snapshot.state = next_state;
+    save_state(&state);
+    write_json("channel_snapshot.json", &state.snapshot);
+    println!(
+        "member-update {sub} OK: set_version {} member_count {} (registered root advanced)",
+        new_record.set_version, new_record.member_count
+    );
+}
+
 fn cmd_migrate_state(args: &[String]) {
     const ACK: &str = "--i-understand-this-resets-replay-ledgers";
     let acked = args.iter().any(|a| a == ACK);
@@ -3955,6 +4104,7 @@ fn main() {
         // SECURITY: the DELIBERATE, acknowledged path for a `cli_state.json` that pre-dates a
         // replay ledger. It replaces the old `#[serde(default)]`, which did the same reset in
         // silence on every load.
+        "member-update" => cmd_member_update(&args),
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
