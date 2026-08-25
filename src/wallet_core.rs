@@ -3662,6 +3662,18 @@ pub fn member_set_update_block_root(
     Ok(root)
 }
 
+/// detail2 §Q-4 (stage Q3): the batch Falcon aggregate over an update's IMMS digest — the proof
+/// object `MemberSetUpdateCircuit` recursively verifies. The signatures are the update's own
+/// `member_signatures` (the previous set's N-of-N collected by `cosign_member_set_update`); the
+/// aggregation context is the shared process-wide circuit.
+pub fn prove_member_set_update_aggregate(
+    ctx: &FalconProverContext,
+    prev_record: &ChannelRecord,
+    update: &MemberSetUpdate,
+) -> WResult<FalconAggregateProofArtifact> {
+    ctx.prove_detached(prev_record, update.signing_digest(), &update.member_signatures)
+}
+
 /// One previous-set member's N-of-N vote over the update (IMMS digest).
 pub fn cosign_member_set_update(
     keys: &MemberKeys,
@@ -5273,7 +5285,7 @@ impl FalconProverContext {
         self.prove_detached(record, state.digest, &state.member_signatures)
     }
 
-    fn proof_from_artifact(
+    pub fn proof_from_artifact(
         &self,
         record: &ChannelRecord,
         state_digest: Bytes32,
@@ -10925,5 +10937,111 @@ mod member_set_update_tests {
         let next_rot = apply_member_set_update_to_state(&state, &record, &u_rot).unwrap();
         assert_eq!(next_rot.balance_state.regev_pk_digests, state.balance_state.regev_pk_digests);
         assert_eq!(next_rot.balance_state.member_count, 3);
+    }
+
+    /// detail2 §Q-4 (stage Q3, slice B): the L1-facing MemberSetUpdateCircuit proves a REAL
+    /// rotation end to end — the previous set's N-of-N over IMMS aggregated (batch Falcon),
+    /// recursively verified, the delta and both IMCM commitments recomputed in-circuit, and the
+    /// public inputs byte-equal to the native mirror.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_set_update_circuit_proves_a_real_rotation() {
+        use crate::circuits::channel::member_set_update_circuit::{
+            MemberSetUpdateCircuit, MemberSetUpdateCircuitWitness,
+        };
+        use plonky2::field::types::Field as _;
+        let (keys, record, members) = three_member_channel(0x71);
+        let mut rng = WalletRng::seed_from_u64(0x72);
+        let new_keys = MemberKeys::generate(&mut rng);
+        let mut update =
+            propose_rotate_key(&keys[1], &new_keys, &record, &members, 1).expect("propose");
+        full_nofn(&mut update, &keys);
+        let (new_record, new_members) =
+            verify_member_set_update(&record, &members, &update).expect("gate accepts");
+
+        let ctx = FalconProverContext::new();
+        let artifact = prove_member_set_update_aggregate(&ctx, &record, &update)
+            .expect("IMMS aggregate proves");
+        let agg_proof = ctx
+            .proof_from_artifact(&record, update.signing_digest(), &artifact)
+            .expect("artifact decodes and verifies against the IMMS digest");
+
+        let witness = MemberSetUpdateCircuitWitness {
+            channel_id: record.channel_id,
+            set_version: update.set_version,
+            old_leaves: registered_cosigner_leaves(&record, &members).unwrap(),
+            new_leaves: registered_cosigner_leaves(&new_record, &new_members).unwrap(),
+            recipient: Address::default(),
+            agg_proof,
+        };
+        let expected = witness.expected_public_inputs().expect("native mirror accepts");
+        assert_eq!(expected.old_count, 3);
+        assert_eq!(expected.new_count, 3);
+        assert_ne!(expected.old_commitment, expected.new_commitment);
+
+        let circuit = MemberSetUpdateCircuit::<F, C, D>::new(&ctx.verifier_data());
+        println!(
+            "MEASURE member_set_update_circuit degree=2^{} pis={}",
+            circuit.data.common.degree_bits(),
+            circuit.data.common.num_public_inputs
+        );
+        let t = std::time::Instant::now();
+        let proof = circuit.prove(&witness).expect("the rotation proves");
+        println!("MEASURE member_set_update prove={:?}", t.elapsed());
+        circuit.data.verify(proof.clone()).expect("verifies");
+        let expected_pis: Vec<F> = expected
+            .to_u64_vec()
+            .into_iter()
+            .map(F::from_canonical_u64)
+            .collect();
+        assert_eq!(proof.public_inputs, expected_pis, "PIs byte-equal to the native mirror");
+    }
+
+    /// The ADD shape: a joiner at the boundary, recipient exposed in the PIs.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_set_update_circuit_proves_a_real_add() {
+        use crate::circuits::channel::member_set_update_circuit::{
+            MemberSetUpdateCircuit, MemberSetUpdateCircuitWitness,
+        };
+        use plonky2::field::types::Field as _;
+        let (keys, record, members) = three_member_channel(0x73);
+        let mut rng = WalletRng::seed_from_u64(0x74);
+        let joiner = MemberKeys::generate(&mut rng);
+        let recipient = Address::from_u32_slice(&[7, 7, 7, 7, 7]).unwrap();
+        let mut update =
+            propose_add_cosigner(&joiner, recipient, &record, &members).expect("propose");
+        full_nofn(&mut update, &keys);
+        let (new_record, new_members) =
+            verify_member_set_update(&record, &members, &update).expect("gate accepts");
+
+        let ctx = FalconProverContext::new();
+        let artifact = prove_member_set_update_aggregate(&ctx, &record, &update)
+            .expect("IMMS aggregate proves");
+        let agg_proof = ctx
+            .proof_from_artifact(&record, update.signing_digest(), &artifact)
+            .expect("artifact verifies");
+
+        let witness = MemberSetUpdateCircuitWitness {
+            channel_id: record.channel_id,
+            set_version: update.set_version,
+            old_leaves: registered_cosigner_leaves(&record, &members).unwrap(),
+            new_leaves: registered_cosigner_leaves(&new_record, &new_members).unwrap(),
+            recipient,
+            agg_proof,
+        };
+        let expected = witness.expected_public_inputs().expect("native mirror accepts");
+        assert_eq!(expected.new_count, 4);
+        assert_eq!(expected.recipient, recipient);
+
+        let circuit = MemberSetUpdateCircuit::<F, C, D>::new(&ctx.verifier_data());
+        let proof = circuit.prove(&witness).expect("the add proves");
+        circuit.data.verify(proof.clone()).expect("verifies");
+        let expected_pis: Vec<F> = expected
+            .to_u64_vec()
+            .into_iter()
+            .map(F::from_canonical_u64)
+            .collect();
+        assert_eq!(proof.public_inputs, expected_pis);
     }
 }
