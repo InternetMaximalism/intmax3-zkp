@@ -937,7 +937,8 @@ structure BridgeAssumptions (F : Type) [CField F] (allowMleDisabled : Bool)
       (`Core/Builder.lean`) — genuinely true in Goldilocks
       (`p > 2^63`; derivable from `ReprFaithful`); the unbounded form
       is pigeonhole-false at any finite field and is never assumed.
-      Applied only to slot indices `< MAX_CHANNEL_MEMBERS = 16`, whose
+      Applied only to slot indices `< MAX_CHANNEL_MEMBERS = 8`
+      (= `MAX_SIG_CLUSTER`, cap halved by `fd467ea`), whose
       bounds come from `UpdateUser.Constraints.slotCount`; consumed by
       the single-fold-per-block argument. -/
   nat_lit_inj : Builder.NatLitInj F (2 ^ 63)

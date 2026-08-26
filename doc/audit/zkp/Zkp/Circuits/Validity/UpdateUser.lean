@@ -13,6 +13,37 @@ import Zkp.Core.Merkle
         + `src/circuits/validity/block_hash_chain/block_step.rs`
           (the `channel_reg` branch, modeled in `RegBranch` below)
 
+  ## RE-SYNC 2026-08-26 (staleness remediation, audit25-08-2026 Part 4.3)
+
+  This model was originally written against the pre-`fd467ea` circuit.
+  What is RE-SYNCED to production in this pass:
+
+  * **Constants**: `MAX_CHANNEL_MEMBERS` 16 → **8** (renamed
+    `MAX_SIG_CLUSTER` in `constants.rs:134`, cap halved by `fd467ea`),
+    `MEMBER_TREE_HEIGHT` 4 → **3** (`constants.rs:62`).
+  * **Member-root binding**: the unconditional `member_set_immutable` is
+    RETIRED — it became FALSE when detail2 §Q (member-set updates)
+    landed. Restated below as `member_set_immutable_outside_update` +
+    `member_root_change_requires_msu`, modeling the current per-slot
+    `is_member_update` select (:1223,:1266-1271) and the IMMS payload
+    bind (:1230-1242). Line cites in those theorems are CURRENT.
+
+  What is NOT yet re-modeled (flagged, not silently wrong — tracked as
+  **F-UPDU-2** in audit25-08-2026 Part 3): design M2′ (`fd467ea`)
+  replaced the per-slot bp-signature wiring this file's fold sections
+  describe (`MsgFields.bpMemberSlot` pin, per-slot `memberIncl`, the
+  `accumulate(prev, digest, bp_pk_g)` leaf) with a BLOCK-LEVEL
+  thermometer N-of-N: all 8 member leaves are witnessed, their root is
+  recomputed and connected to the channel leaf's committed root, and
+  the fold absorbs `(digest, signer_count, pk_list_digest)` — strictly
+  STRONGER bindings (full-set recomputation implies the modeled
+  inclusion; still exactly one fold per signing block). The fold-shape
+  theorems below remain sound at the abstraction `EndToEnd` consumes
+  (opaque `accumulate`, exactly-one-fold dichotomy), but their line
+  cites and the third `accumulate` argument describe the OLD shape.
+  Unmarked line numbers elsewhere in this file cite the audited base
+  commit `2c358ae` (2026-08-20).
+
   ## Protocol role
 
   This is the sub-proof `block_step.rs` verifies once per block. It is
@@ -43,12 +74,16 @@ import Zkp.Core.Merkle
     branch binds; the residual dependence on the (still-excluded)
     channel_reg chain circuit is surfaced as finding **F-UPDU-1**.
 
-  A third load-bearing binding, previously unflagged, is also modeled:
-  **member-set immutability** (`member_set_immutable`): the update
-  writes a new channel leaf whose `member_pubkeys_root` is COPIED from
-  the proven previous leaf (:922), so a block producer can never rotate
-  a channel's registered member set through the update path — only the
-  registration chain defines member sets.
+  A third load-bearing binding, previously unflagged, is also modeled —
+  RESTATED for §Q (RE-SYNC above): **conditional member-set
+  immutability** (`member_set_immutable_outside_update` /
+  `member_root_change_requires_msu`): the update writes a new channel
+  leaf whose `member_pubkeys_root` is COPIED from the proven previous
+  leaf on every ordinary transition, and can move ONLY under a
+  payload-bound §Q `MemberSetUpdate` action (:1223,:1230-1242,
+  :1266-1271 CURRENT) — so a block producer can never rotate a
+  channel's registered member set unilaterally; the transition must be
+  the one the previous set's N-of-N signed.
 
   ## Constraint inventory — update_channel_tree.rs (Target::new, :730-1067)
 
@@ -108,13 +143,16 @@ open CField Builder Bytes Merkle
 
 variable {F : Type} [CField F]
 
-/-- `constants.rs:47` — member tree height (16 slots per channel). -/
-def MEMBER_TREE_HEIGHT : Nat := 4
+/-- `constants.rs:62` — member tree height (8 sig-cluster slots per
+    channel; 3 since `fd467ea`, previously 4). -/
+def MEMBER_TREE_HEIGHT : Nat := 3
 
-/-- `constants.rs:60` — `MAX_CHANNEL_MEMBERS = 16`, the static circuit
-    size bounding `num_users` and hence the slot-loop length (the
-    member tree has `2^MEMBER_TREE_HEIGHT = 16` leaf slots). -/
-def MAX_CHANNEL_MEMBERS : Nat := 16
+/-- `constants.rs:134` — `MAX_SIG_CLUSTER = 8` (renamed from
+    `MAX_CHANNEL_MEMBERS`, cap halved 16 → 8 by `fd467ea`; the Lean name
+    is kept for existing consumers). The static circuit size bounding
+    `num_users` and hence the slot-loop length (the member tree has
+    `2^MEMBER_TREE_HEIGHT = 8` leaf slots). -/
+def MAX_CHANNEL_MEMBERS : Nat := 8
 
 /-- `constants.rs:16,:21` — channel (account) tree height = CHANNEL_ID_BITS. -/
 def CHANNEL_TREE_HEIGHT : Nat := 32
@@ -239,6 +277,17 @@ structure Slot (F : Type) where
   memberSibs : List (HashOut F)
   chainIn : Bytes32 F
   chainOut : Bytes32 F
+  /-- :1223 (CURRENT) `is_member_update = and(should_check_channel_action,
+      is_msu_kind)` — this slot's channel action is a §Q
+      `MemberSetUpdate`. -/
+  isMemberUpdate : F
+  /-- The block-level `new_member_root` fold of the witnessed NEW member
+      leaves (:1109, CURRENT), as seen by this slot. -/
+  newMemberRoot : HashOut F
+  /-- This slot's `channel_action.payload_hash` wire. -/
+  actionPayload : HashOut F
+  /-- The `leaf_member_root` select output (:1266-1271, CURRENT). -/
+  leafMemberRoot : HashOut F
 
 /-- Block-level parameters shared by every slot. -/
 structure BlockParams (F : Type) where
@@ -251,14 +300,24 @@ structure BlockParams (F : Type) where
   /-- `signed_digest` wire (:795-799), one per block. -/
   digest : Bytes32 F
 
-/-- `new_user_leaf` (:916-923): `index + 1`, `prev := block_number`,
-    the new send root, and — load-bearing — `member_pubkeys_root`
-    COPIED from the previous leaf (:922). -/
+/-- `new_user_leaf` (:1274-1279, CURRENT): `index + 1`,
+    `prev := block_number`, the new send root, and — load-bearing —
+    `member_pubkeys_root := leaf_member_root`, the OUTPUT of the §Q
+    select (:1266-1271): the previous leaf's root on every ordinary
+    transition, the witnessed new fold ONLY under `is_member_update`
+    (see `member_set_immutable_outside_update` /
+    `member_root_change_requires_msu`). -/
 def newLeaf (blockNumber : F) (s : Slot F) : ChannelLeaf F :=
   { index := s.prevLeaf.index + 1
     prev := blockNumber
     sendTreeRoot := s.newSendRoot
-    memberPubkeysRoot := s.prevLeaf.memberPubkeysRoot }
+    memberPubkeysRoot := s.leafMemberRoot }
+
+/-- `member_set_update_payload` (`common/tx.rs`) —
+    `Poseidon([IMMS domain] ‖ prev_root ‖ new_root)`, recomputed
+    in-circuit at :1230-1238 (CURRENT). Uninterpreted; single-instance
+    determinism is all the theorems here consume. -/
+opaque msuPayload {F : Type} [CField F] : HashOut F → HashOut F → HashOut F
 
 /-- The constraints the circuit emits for slot `idx`
     (update_channel_tree.rs, Target::new loop body). Every conjunct cites
@@ -283,7 +342,7 @@ structure SlotConstraints (p : BlockParams F) (idx : Nat) (s : Slot F) : Prop wh
       obligations. Mirrored as separate `bitsR` (read) / `bitsW`
       (write) existentials; their identification is proved by
       consumers from `Merkle.PowTwoInj F 32`
-      (see `member_set_immutable`), never baked in. -/
+      (see `member_set_immutable_outside_update`), never baked in. -/
   treeUpdate : s.shouldUpdate = 1 →
       (∃ bitsR : List Bool,
         bitsR.length = CHANNEL_TREE_HEIGHT ∧
@@ -315,6 +374,20 @@ structure SlotConstraints (p : BlockParams F) (idx : Nat) (s : Slot F) : Prop wh
       bp_sig_chain)`. -/
   chainSelect : SelectSpec s.shouldUpdate
       (accumulate s.chainIn p.digest p.msg.bpPkG) s.chainIn s.chainOut
+  /-- :1223 (CURRENT) `is_member_update` is an AND of two booleans. -/
+  isMemberUpdateBool : s.isMemberUpdate = 0 ∨ s.isMemberUpdate = 1
+  /-- :1266-1271 (CURRENT) `leaf_member_root = select(is_member_update,
+      new_member_root, prev_user_leaf.member_pubkeys_root)` — the §Q
+      member-root select. -/
+  memberRootSelect : SelectSpec s.isMemberUpdate s.newMemberRoot
+      s.prevLeaf.memberPubkeysRoot s.leafMemberRoot
+  /-- :1239-1242 (CURRENT) `is_member_update →
+      channel_action.payload_hash = Poseidon([IMMS] ‖ prev ‖ new)` —
+      the signed block commits EXACTLY this root transition (the prev
+      fold is connected to the channel leaf's committed root by the
+      N-of-N member-set binding, design §5.4 item 2). -/
+  msuPayloadBind : s.isMemberUpdate = 1 →
+      s.actionPayload = msuPayload s.prevLeaf.memberPubkeysRoot s.newMemberRoot
 
 /-- The loop threading (:808 `bp_sig_chain` init, :784 `account_tree_root`
     init, :928/:1025 per-slot re-binding, :1039/:1043 PI extraction):
@@ -512,24 +585,27 @@ theorem slot_preserves {p : BlockParams F} {idx : Nat} {s : Slot F}
     s.chainOut = s.chainIn ∧ s.rootOut = s.rootIn :=
   ⟨h.chainSelect.2 h0, h.rootSelect.2 h0⟩
 
-/-- **Member-set immutability (third load-bearing binding, previously
-    unflagged).** The new channel leaf written by an update carries the
-    SAME `member_pubkeys_root` as the proven previous leaf (:922), over
-    the same Merkle path. A block producer therefore cannot rotate a
-    channel's member set through the update path — only the (separately
-    anchored) registration chain ever defines `member_pubkeys_root`.
-    Without this copy the bp could install attacker keys and sign all
-    future blocks of the channel.
+/-- **Member-set binding, restated for §Q (RE-SYNC 2026-08-26).** The
+    unconditional `member_set_immutable` this theorem supersedes became
+    FALSE when detail2 §Q landed member-set updates; it is RETIRED, per
+    audit25-08-2026 Part 4.3.
+
+    Outside a `MemberSetUpdate` action the new channel leaf carries the
+    SAME `member_pubkeys_root` as the proven previous leaf (the
+    :1266-1271 select, false arm), over the same Merkle path — a block
+    producer still cannot rotate a channel's member set through an
+    ordinary state transition. Without this copy the bp could install
+    attacker keys and sign all future blocks of the channel.
 
     The single-bits conclusion identifies the two independent
     `split_le` decompositions of `treeUpdate` (`bitsR = bitsW`) from
     the named characteristic hypothesis
     `Merkle.PowTwoInj F CHANNEL_TREE_HEIGHT` (Goldilocks-true; both
-    decompose the SAME connected `channel_id` wire,
-    update_channel_tree.rs:837/:845/:926, merkle_tree.rs:227). -/
-theorem member_set_immutable {p : BlockParams F} {idx : Nat} {s : Slot F}
+    decompose the SAME connected `channel_id` wire, merkle_tree.rs:227). -/
+theorem member_set_immutable_outside_update {p : BlockParams F} {idx : Nat} {s : Slot F}
     (hpow : PowTwoInj F CHANNEL_TREE_HEIGHT)
-    (h : SlotConstraints p idx s) (h1 : s.shouldUpdate = 1) :
+    (h : SlotConstraints p idx s) (h1 : s.shouldUpdate = 1)
+    (hmu : s.isMemberUpdate = 0) :
     (newLeaf p.blockNumber s).memberPubkeysRoot = s.prevLeaf.memberPubkeysRoot
     ∧ ∃ bits : List Bool,
         bits.length = CHANNEL_TREE_HEIGHT
@@ -541,8 +617,33 @@ theorem member_set_immutable {p : BlockParams F} {idx : Nat} {s : Slot F}
     h.treeUpdate h1
   have hbits : bitsR = bitsW :=
     hpow bitsR bitsW hlenR hlenW (by rw [← hidxR, ← hidxW])
-  exact ⟨rfl, bitsR, hlenR, hidxR, hprev,
+  exact ⟨h.memberRootSelect.2 hmu, bitsR, hlenR, hidxR, hprev,
     by rw [hbits]; exact hnew, h.rootSelect.1 h1⟩
+
+/-- **The member root moves ONLY through a payload-bound
+    `MemberSetUpdate`** (the implementation-side counterpart of
+    `ChannelSafetyQ.member_set_changes_iff_update`): if the written
+    leaf's member root differs from the previous leaf's, then the
+    slot's action IS a `MemberSetUpdate` (:1223), the written root is
+    exactly the fold of the witnessed new member leaves (:1266-1271,
+    true arm), and the action's `payload_hash` is the canonical
+    `Poseidon([IMMS] ‖ prev ‖ new)` commitment of exactly this
+    transition (:1230-1242) — the object the previous set's N-of-N
+    signed. The §Q-3 structural delta gates (:1392-1436) further
+    constrain WHICH transitions are witnessable; those are modeled at
+    design level in `ChannelSafetyQ.lean` (T1-T10). -/
+theorem member_root_change_requires_msu {p : BlockParams F} {idx : Nat} {s : Slot F}
+    (h : SlotConstraints p idx s)
+    (hchange :
+      (newLeaf p.blockNumber s).memberPubkeysRoot ≠ s.prevLeaf.memberPubkeysRoot) :
+    s.isMemberUpdate = 1
+    ∧ (newLeaf p.blockNumber s).memberPubkeysRoot = s.newMemberRoot
+    ∧ s.actionPayload = msuPayload s.prevLeaf.memberPubkeysRoot s.newMemberRoot := by
+  have h1 : s.isMemberUpdate = 1 := by
+    rcases h.isMemberUpdateBool with h0 | h1
+    · exact absurd (h.memberRootSelect.2 h0) hchange
+    · exact h1
+  exact ⟨h1, h.memberRootSelect.1 h1, h.msuPayloadBind h1⟩
 
 /-! ### Block-level soundness (the loop) -/
 
@@ -674,7 +775,7 @@ theorem slots_in_range {p : BlockParams F} {io : BlockIO F}
     (h : Constraints p io) : 0 + io.slots.length ≤ 2 ^ 63 := by
   have h16 : io.slots.length ≤ MAX_CHANNEL_MEMBERS := h.slotCount
   have hlt : MAX_CHANNEL_MEMBERS ≤ 2 ^ 63 := by
-    show (16 : Nat) ≤ 2 ^ 63
+    show (8 : Nat) ≤ 2 ^ 63
     decide
   omega
 
@@ -803,7 +904,9 @@ theorem constraints_satisfiable :
       prevLeaf := leaf, newSendRoot := [], chanSibs := []
       updatedRoot := [], rootIn := [], rootOut := []
       memberPkB := [], regevDigest := [], memberSibs := []
-      chainIn := zeroBytes F, chainOut := zeroBytes F }
+      chainIn := zeroBytes F, chainOut := zeroBytes F
+      isMemberUpdate := 0, newMemberRoot := []
+      actionPayload := [], leafMemberRoot := [] }
   let p : BlockParams F :=
     { blockNumber := 0, channelId := 0, txTreeRoot := zeroBytes F
       txRootIsZero := 1, msg := msg
@@ -832,7 +935,10 @@ theorem constraints_satisfiable :
         txRootNonzeroGate := fun h => vac1 h
         bpSlotBind := fun h => vac1 h
         memberIncl := fun h => vac1 h
-        chainSelect := ⟨fun h => vac1 h, fun _ => rfl⟩ }
+        chainSelect := ⟨fun h => vac1 h, fun _ => rfl⟩
+        isMemberUpdateBool := Or.inl rfl
+        memberRootSelect := ⟨fun h => vac1 h, fun _ => rfl⟩
+        msuPayloadBind := fun h => vac1 h }
   · -- slotCount : one slot ≤ MAX_CHANNEL_MEMBERS
     show 1 ≤ MAX_CHANNEL_MEMBERS
     decide
@@ -866,7 +972,9 @@ theorem signing_constraints_satisfiable (h0 : natLit F 0 = 0) :
       updatedRoot := updated, rootIn := rootIn, rootOut := updated
       memberPkB := [], regevDigest := [], memberSibs := memberSibs
       chainIn := chainIn
-      chainOut := accumulate chainIn digest (zeroBytes F) }
+      chainOut := accumulate chainIn digest (zeroBytes F)
+      isMemberUpdate := 0, newMemberRoot := []
+      actionPayload := [], leafMemberRoot := memberRoot }
   let p : BlockParams F :=
     { blockNumber := 1, channelId := 0, txTreeRoot := txRoot
       txRootIsZero := 0, msg := msg, digest := digest }
@@ -902,7 +1010,10 @@ theorem signing_constraints_satisfiable (h0 : natLit F 0 = 0) :
         txRootNonzeroGate := fun _ => rfl
         bpSlotBind := fun _ => rfl
         memberIncl := fun _ => ⟨memberBits, ?_, ?_, ?_, rfl⟩
-        chainSelect := ⟨fun _ => rfl, fun h => vac1 h.symm⟩ }
+        chainSelect := ⟨fun _ => rfl, fun h => vac1 h.symm⟩
+        isMemberUpdateBool := Or.inl rfl
+        memberRootSelect := ⟨fun h => vac1 h, fun _ => rfl⟩
+        msuPayloadBind := fun h => vac1 h }
     · simp [chanBits, CHANNEL_TREE_HEIGHT]
     · exact (bitsValue_replicate_false CHANNEL_TREE_HEIGHT).symm
     · simp [chanBits, CHANNEL_TREE_HEIGHT]
@@ -1149,13 +1260,18 @@ end RegBranch
     would leave the second signature unfolded — revisit the loop before
     such a change (already flagged in the Rust INVARIANT comment).
 
-  * **Third load-bearing binding — member-set immutability**
-    (`member_set_immutable`): the update path copies
-    `member_pubkeys_root` from the proven previous leaf (:922). This was
-    previously unflagged: had the new leaf's member root been witnessed
-    freely, a block producer could rotate the channel's member set and
-    self-authorize all future signing blocks. Only the registration
-    chain (F-UPDU-1 scope) defines member sets.
+  * **Third load-bearing binding — conditional member-set immutability**
+    (`member_set_immutable_outside_update` /
+    `member_root_change_requires_msu`, restated for §Q — RE-SYNC
+    2026-08-26): the update path copies `member_pubkeys_root` from the
+    proven previous leaf on every ordinary transition; the root can
+    move ONLY under a `MemberSetUpdate` action whose `payload_hash` is
+    the IMMS commitment of exactly the written transition. Had the new
+    leaf's member root been witnessed freely, a block producer could
+    rotate the channel's member set and self-authorize all future
+    signing blocks. Member sets are defined by the registration chain
+    (F-UPDU-1 scope) plus the §Q update blocks (design-level model:
+    `ChannelSafetyQ.lean`).
 
   * **Obligation 2: what IS bound** (`registration_root_swap_anchored`,
     `no_proof_no_swap`, `reg_chain_advance_requires_proof`): the

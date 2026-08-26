@@ -238,7 +238,8 @@ theorem chain_determines_tree
 
   * **Member-set immutability** is N/A here: this circuit writes only FRESH
     leaves (R5); rotating a registered channel's member set is unreachable on
-    this path (that concern is the update path's `member_set_immutable`,
+    this path (that concern is the update path's
+    `member_set_immutable_outside_update`,
     `UpdateUser.lean`).
 -/
 

@@ -193,7 +193,8 @@ parameters of any theorem that needs them, never axioms. -/
     genuinely TRUE in Goldilocks (`p = 2^64 − 2^32 + 1 > 2^63`) and is
     derivable from `ReprFaithful` (`ReprFaithful.toNatLitInj` below).
     Every use in this development applies it only to small literals
-    (domain tags, slot indices `< MAX_CHANNEL_MEMBERS = 16`), so the
+    (domain tags, slot indices `< MAX_CHANNEL_MEMBERS = 8`, i.e.
+    `MAX_SIG_CLUSTER` since `fd467ea`), so the
     `m, n < bound` side conditions are dischargeable at each use site.
     Centralized here from Circuits/Validity/UpdateUser.lean, which
     re-exports the `bound = 2^63` instance under its original name. -/

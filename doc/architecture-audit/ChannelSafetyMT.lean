@@ -1392,8 +1392,11 @@ theorem c2cMT_preserves_validity (s r : EncBalanceStateMT) (sender : Member)
 /-- **LOCAL-SLOT arithmetic lemma (mirror of
     `bulk_interChannel_conservation_dest`) — feeds the base-token statement
     `c2cMT_conservation_base` below.** HONESTY NOTE (review finding M1): the
-    conclusion is about the two LOCAL slots `ts`/`td` and holds for ANY `td`
-    — the `_hres` hypothesis is deliberately inert here. By itself this says
+    conclusion is about the two LOCAL slots `ts`/`td` and holds for ANY `td`.
+    (RE-SYNC 2026-08-26, audit25-08-2026 Part 4.2(D): the formerly inert
+    `_hres : ResolvesMT` hypothesis has been REMOVED from the signature so
+    the theorem reads at its true strength — a hypothesis that binds
+    nothing should not appear to.) By itself this says
     "some slot's total went up by what the sender's slot lost", NOT "base
     token `u.tokenIndex` was conserved". The TM-6 claim about BASE-token
     value is `c2cMT_conservation_base`, where the resolution and injectivity
@@ -1401,7 +1404,6 @@ theorem c2cMT_preserves_validity (s r : EncBalanceStateMT) (sender : Member)
     shows what goes wrong at the base level when resolution is dropped. -/
 theorem c2cMT_conservation (s r : EncBalanceStateMT) (sender : Member)
     (ts td : TokenSlot) (dest : Nat) (u : BulkChannelUpdateMT)
-    (_hres : ResolvesMT r u.tokenIndex td)
     (honly : ∀ e ∈ u.entries, e.dest = dest)
     (hu : BulkUpdateProvenMT u s sender ts) :
     (applyBulkSendMT s sender ts u).total ts
@@ -1430,21 +1432,23 @@ theorem c2cMT_conservation (s r : EncBalanceStateMT) (sender : Member)
     the base `tokenIndex`); commitment injectivity is A1's collision
     resistance. If both sides open the same commitment, cross-channel
     per-base-token conservation holds even though the two channels never
-    compare registries or plaintexts directly. -/
+    compare registries or plaintexts directly. (RE-SYNC 2026-08-26: the
+    inert `hres` hypothesis removed here too, as in `c2cMT_conservation` —
+    LOCAL-slot statement; the base-token claim with working resolution
+    hypotheses is `c2cMT_conservation_base`.) -/
 theorem c2cMT_conservation_bound
     (commit : BulkChannelUpdateMT → Nat)
     (hinj : ∀ u u', commit u = commit u' → u = u')
     (us ur : BulkChannelUpdateMT) (hsame : commit us = commit ur)
     (s r : EncBalanceStateMT) (sender : Member) (ts td : TokenSlot)
     (dest : Nat)
-    (hres : ResolvesMT r ur.tokenIndex td)
     (honly : ∀ e ∈ us.entries, e.dest = dest)
     (hu : BulkUpdateProvenMT us s sender ts) :
     (applyBulkSendMT s sender ts us).total ts
       + (applyBulkReceiveMT r dest td ur).total td
       = s.total ts + r.total td := by
   obtain rfl := hinj us ur hsame
-  exact c2cMT_conservation s r sender ts td dest us hres honly hu
+  exact c2cMT_conservation s r sender ts td dest us honly hu
 
 /-- **TM-6 frame, source side.** Every token slot other than the source-
     resolved `ts` keeps every balance, its total, AND its certified total: a
@@ -1541,7 +1545,7 @@ theorem c2cMT_conservation_base (s r : EncBalanceStateMT) (sender : Member)
     have hb3 := baseTotal_eq_total_of_resolves (applyBulkReceiveMT r dest td u)
       u.tokenIndex td hresr' hinjr'
     have hb4 := baseTotal_eq_total_of_resolves r u.tokenIndex td hresr hinjr
-    have hloc := c2cMT_conservation s r sender ts td dest u hresr honly hu
+    have hloc := c2cMT_conservation s r sender ts td dest u honly hu
     omega
   · -- (2) every other base token framed on both sides.
     intro Y hY
@@ -1957,7 +1961,6 @@ theorem sampleC2C_conservation :
       + (applyBulkReceiveMT dstMT 1 0 sampleBulkMT).total 0
       = sampleMT.total 0 + dstMT.total 0 :=
   c2cMT_conservation sampleMT dstMT .m0 0 0 1 sampleBulkMT
-    ⟨by show (0 : Fin 10).val < 2; decide, by decide⟩
     (by intro e he
         simp [sampleBulkMT, sampleC2CEntry] at he
         subst he

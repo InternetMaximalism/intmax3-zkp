@@ -1,15 +1,35 @@
 # intmax3-zkp — Lean formalization & soundness audit
 
+> ## ⚠ STALENESS / TARGET-COMMIT BANNER (added 2026-08-26)
+>
+> A Lean model verifies THE CODE IT WAS WRITTEN AGAINST, not the working
+> tree. This corpus was audited against the codebase up to commit
+> `2c358ae` (2026-08-20). Production has moved since — notably `fd467ea`
+> (2026-08-24, sig-cluster: member cap 16 → 8, IMCM close-commitment
+> re-layout) and detail2 §Q (dynamic member-set updates). Divergences
+> found by the 2026-08-26 review are catalogued in
+> `doc/audit/audit25-08-2026.md` Part 4.3; the load-bearing ones
+> (constants, the §Q-falsified `member_set_immutable`, the contract line
+> map) were re-synced on 2026-08-26 and are marked in-file. Sections not
+> marked re-synced describe the `2c358ae` code. `lake build` green means
+> the PROOFS are consistent — it does not mean the MODEL matches today's
+> code; check this banner's date against `git log` before trusting a
+> line cite. Both Lean corpora now build in CI on every push.
+
+
 A line-by-line Lean 4 model of the Intmax3 Plonky2 ZKP circuits,
 built to either **prove soundness** of each circuit statement or to
 **surface the gap** where soundness cannot be proved (a candidate
 vulnerability).
 
-> Scope: ZKP circuits only. **Excluded:** cryptographic primitive
-> implementations (Poseidon, SPHINCS+, Regev, MLE/WHIR internals —
-> modeled as uninterpreted functions) and all **channel** circuits
-> (`src/circuits/channel/`, `validity/channel_reg_hash_chain/`,
-> `block_hash_chain/update_channel_tree.rs`).
+> Scope: ZKP circuits + L1 contracts. **Excluded:** cryptographic
+> primitive implementations (Poseidon, Falcon, Regev, MLE/WHIR
+> internals — modeled as uninterpreted functions) and the channel-scope
+> circuits under `src/circuits/channel/`. NOTE (2026-08-26): the
+> exclusion list previously printed here was stale —
+> `validity/channel_reg_hash_chain/channel_reg_step.rs` and
+> `block_hash_chain/update_channel_tree.rs` ARE modeled
+> (`Circuits.ChannelRegStep`, `Circuits.UpdateUser`).
 
 ## Why Lean, and what "express every line" means
 

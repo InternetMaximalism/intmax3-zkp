@@ -578,6 +578,67 @@ theorem no_double_settlement {L L'' : Ledger} {sops : List (Op × Nat)}
         exact absurd heq' (by omega)
       | tail _ hq' => exact ih p hp' q hq' heq
 
+/-! ### No-double-settle, restated for the DEPLOYED nonce-keyed scheme
+    (RE-SYNC 2026-08-26 — audit25-08-2026 Part 4.2 (B/D)).
+
+`no_double_settlement` above derives uniqueness from the one-op-per-block
+stamp — the PRE-F-WD-2 scheme; it is kept as the historical model and its
+docstring says so. The deployed scheme (F-WD-2, 2026-07-04) keys the
+nullifier on the sender tx `nonce`: two settlements of the SAME deduction
+produce the IDENTICAL nullifier, and the on-chain used-set refuses the
+second. That discipline is modeled directly below (the same fail-closed
+used-set shape as `ChannelSafetyIC`'s credit replay ledger — the two are
+the burn side and the credit side of one mechanism). -/
+
+/-- A nonce-keyed withdrawal nullifier (settlement-INDEPENDENT: determined
+    by the deduction, not by which block settles it). -/
+abbrev Nullifier := Nat
+
+/-- The on-chain used-set gate (`withdrawalNullifierUsed` /
+    `usedWithdrawalNullifiers`): settling refuses a seen nullifier and
+    RECORDS a fresh one, atomically. -/
+inductive NSettle : List Nullifier → Nullifier → List Nullifier → Prop
+  | step {used : List Nullifier} {n : Nullifier} :
+      n ∉ used → NSettle used n (n :: used)
+
+/-- Any chain of further settlements (of arbitrary other nullifiers). -/
+inductive NSettleChain : List Nullifier → List Nullifier → Prop
+  | refl (u : List Nullifier) : NSettleChain u u
+  | step {u v w : List Nullifier} {n : Nullifier} :
+      NSettle u n v → NSettleChain v w → NSettleChain u w
+
+theorem nsettle_records {u v : List Nullifier} {n : Nullifier}
+    (h : NSettle u n v) : n ∈ v := by
+  cases h with
+  | step _ => exact List.mem_cons_self _ _
+
+theorem nsettle_monotone {u v : List Nullifier} {n : Nullifier}
+    (h : NSettle u n v) : ∀ m ∈ u, m ∈ v := by
+  cases h with
+  | step _ => exact fun m hm => List.mem_cons_of_mem _ hm
+
+theorem nchain_monotone {u w : List Nullifier}
+    (h : NSettleChain u w) : ∀ m ∈ u, m ∈ w := by
+  induction h with
+  | refl _ => exact fun _ hm => hm
+  | step hs _ ih => exact fun m hm => ih m (nsettle_monotone hs m hm)
+
+/-- **The deployed no-double-settle.** Once a deduction's nonce-keyed
+    nullifier settles, NO state reachable by any further chain of
+    settlements admits settling it again — at any distance, regardless of
+    what settles in between. This is the property the deployed F-WD-2
+    scheme provides and the block-stamp model above could only
+    approximate. -/
+theorem no_double_settlement_nonce_keyed
+    {u0 u1 w : List Nullifier} {n : Nullifier}
+    (hfirst : NSettle u0 n u1) (hchain : NSettleChain u1 w) :
+    ¬ ∃ w', NSettle w n w' := by
+  rintro ⟨w', hsecond⟩
+  have hrec : n ∈ u1 := nsettle_records hfirst
+  have hmem : n ∈ w := nchain_monotone hchain n hrec
+  cases hsecond with
+  | step hfresh => exact hfresh hmem
+
 def mintSum : List (Op × Nat) → Int
   | [] => 0
   | p :: rest => p.1.mint + mintSum rest
