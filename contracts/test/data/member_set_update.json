@@ -1,0 +1,20 @@
+{
+  "channelId": 77,
+  "setVersion": 1,
+  "oldCommitment": "0x8e552f2d9cc60647e0fc821dfb2158692a2f418e6a0de13862a49761747d7a24",
+  "newCommitment": "0xb6327a1cb3577655d0da2469a0cb776073ca990f9d56a6b37ae60f9d35ab4c77",
+  "oldCount": 3,
+  "newCount": 3,
+  "recipient": "0x0000000000000000000000000000000000000000",
+  "oldMemberPkGs": [
+    "0x72d42b9fae89af7870cfec0ed3710f75aa0e32f839e1bc7ff0bf7ed07ac37dcc",
+    "0xcf8ee7935b6c39c17da36b25c7f58c97d2b2d9d8558a9a965120cff87065771f",
+    "0x5dda4cd41b62055f3199a2520f5c5c39fabe555da2d0c8c3c934be30c618b59a"
+  ],
+  "newMemberPkGs": [
+    "0x72d42b9fae89af7870cfec0ed3710f75aa0e32f839e1bc7ff0bf7ed07ac37dcc",
+    "0xdf58baa5f2f65812c546147c2cc71ab1cd06bfdead9af8622a99d881471d470f",
+    "0x5dda4cd41b62055f3199a2520f5c5c39fabe555da2d0c8c3c934be30c618b59a"
+  ],
+  "rotatedSlot": 1
+}

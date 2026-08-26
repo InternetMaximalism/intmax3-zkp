@@ -57,6 +57,17 @@ interface IChannelSettlementVerifier {
     /// Phase A: the close intent is verified by a REAL MLE/WHIR proof of the plonky2 close circuit
     /// (not a stub). The proof is the wrapped close `MleVerifier.MleProof` whose `publicInputs` are
     /// the 103 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
+    function verifyMemberSetUpdate(
+        uint32 channelId_,
+        uint64 newVersion,
+        bytes32 oldCommitment,
+        bytes32 newCommitment,
+        uint8 oldCount,
+        uint8 newCount,
+        address recipient,
+        MleVerifier.MleProof calldata mleProof
+    ) external view returns (bool);
+
     function verifyCloseIntent(
         CloseProofFields calldata fields,
         MleVerifier.MleProof calldata proof
@@ -883,6 +894,124 @@ contract ChannelSettlementManager {
     /// signing keys to the registered member set (no non-member-key substitution).
     function registeredMemberSetCommitment() public view returns (bytes32) {
         return verifier.closeMemberSetCommitment(memberPkGs, activeMemberCount);
+    }
+
+    event MemberSetUpdated(
+        uint64 indexed newVersion,
+        bytes32 oldCommitment,
+        bytes32 newCommitment,
+        uint8 newCount,
+        address newRecipient
+    );
+
+    error MemberSetUpdateWhileNotActive();
+    error MemberSetVersionNotMonotone();
+    error MemberSetUpdateCountInvalid();
+    error MemberSetUpdateProofInvalid();
+    error MemberSetUpdateRecipientInvalid();
+
+    /// @notice detail2 §Q-4 (stage Q3, slice C): advance the channel's registered sig-cluster —
+    ///         rotate one member's signing key, or add a co-signer — under a REAL MLE-verified
+    ///         `MemberSetUpdateCircuit` proof. The proof's in-circuit statement (see the Rust
+    ///         module doc): the PREVIOUS set's full N-of-N (batch Falcon aggregate, recursively
+    ///         verified) signed the IMMS digest committing EXACTLY the
+    ///         (oldCommitment → newCommitment) transition at `newVersion`, with the §Q-3
+    ///         structural delta enforced in-circuit (one slot; rotation preserves the Regev
+    ///         digest; an add sits at the left-packed boundary; never a removal).
+    ///
+    /// @dev SECURITY:
+    ///  * `oldCommitment` is COMPUTED from this contract's own storage — the proof must speak
+    ///    about the set the Manager currently holds, so replay of an old update (or an update for
+    ///    a different channel — channelId is a bound limb) is impossible; `newVersion` must be
+    ///    strictly `memberSetVersion + 1`.
+    ///  * `newPkGs` is verified against the proof's `newCommitment` limb by recomputing the IMCM
+    ///    keccak over it — the stored array can only become the exact set the OLD cluster signed.
+    ///  * NO disable seam: `verifyMemberSetUpdate` reverts while the msu VK is uninitialized, and
+    ///    the VK latch enforces degreeBits > 0 (the audit's V3 class is structurally excluded).
+    ///  * Status gate: no set change while a close is pending or done — the close family binds
+    ///    against the registered set, and moving it mid-challenge would re-point the binding.
+    function applyMemberSetUpdate(
+        bytes32[] calldata newPkGs,
+        uint8 newCount,
+        address newRecipient,
+        uint64 newVersion,
+        MleVerifier.MleProof calldata mleProof
+    ) external nonReentrant {
+        if (channelStatus != ChannelLifecycleStatus.Active) {
+            revert MemberSetUpdateWhileNotActive();
+        }
+        if (newVersion != memberSetVersion + 1) revert MemberSetVersionNotMonotone();
+        if (newPkGs.length != newCount || newCount < 2 || newCount > MAX_MEMBER_COUNT) {
+            revert MemberSetUpdateCountInvalid();
+        }
+        // The proof-side delta allows only +0 (rotate) or +1 (add).
+        if (newCount != activeMemberCount && newCount != activeMemberCount + 1) {
+            revert MemberSetUpdateCountInvalid();
+        }
+        bool isAdd = newCount == activeMemberCount + 1;
+        if (isAdd) {
+            // B-1b: a joiner binds a fresh, unique exit address.
+            if (newRecipient == address(0) || isMemberRecipient[newRecipient]) {
+                revert MemberSetUpdateRecipientInvalid();
+            }
+        } else if (newRecipient != address(0)) {
+            // The proof zero-forces the recipient limbs for a rotation; mirror it here so the
+            // calldata cannot desynchronize from the bound limbs.
+            revert MemberSetUpdateRecipientInvalid();
+        }
+
+        bytes32 oldCommitment = registeredMemberSetCommitment();
+        bytes32[MAX_MEMBER_COUNT] memory padded;
+        for (uint256 i = 0; i < newCount; i++) {
+            padded[i] = newPkGs[i];
+        }
+        bytes32 newCommitment = verifier.closeMemberSetCommitment(padded, newCount);
+
+        if (
+            !verifier.verifyMemberSetUpdate(
+                uint32(channelId),
+                newVersion,
+                oldCommitment,
+                newCommitment,
+                activeMemberCount,
+                newCount,
+                newRecipient,
+                mleProof
+            )
+        ) revert MemberSetUpdateProofInvalid();
+
+        // ── Apply ──
+        // Rotation bookkeeping for the pkG-keyed registration maps: migrate any slot whose key
+        // changed (delete the old key's entries, bind the new key at the same index/recipient).
+        for (uint256 i = 0; i < MAX_MEMBER_COUNT; i++) {
+            bytes32 oldPk = memberPkGs[i];
+            bytes32 newPk = i < newCount ? padded[i] : bytes32(0);
+            if (oldPk == newPk) continue;
+            if (oldPk != bytes32(0)) {
+                address recip = registeredRecipientOf[oldPk];
+                delete registeredMemberIndexPlusOne[oldPk];
+                delete registeredRecipientOf[oldPk];
+                if (newPk != bytes32(0) && !isAdd) {
+                    // rotation: same slot, same recipient, new key
+                    registeredMemberIndexPlusOne[newPk] = i + 1;
+                    registeredRecipientOf[newPk] = recip;
+                }
+            }
+            if (newPk != bytes32(0) && isAdd && oldPk == bytes32(0)) {
+                // the joiner's slot
+                registeredMemberIndexPlusOne[newPk] = i + 1;
+                registeredRecipientOf[newPk] = newRecipient;
+            }
+            memberPkGs[i] = newPk;
+        }
+        if (isAdd) {
+            isMemberRecipient[newRecipient] = true;
+        }
+        activeMemberCount = newCount;
+        memberSetVersion = newVersion;
+        bpPkG = memberPkGs[bpMemberSlot];
+
+        emit MemberSetUpdated(newVersion, oldCommitment, newCommitment, newCount, newRecipient);
     }
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {

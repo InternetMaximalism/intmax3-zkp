@@ -118,6 +118,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     error CloseVkNotSet();
     error CloseVkDegreeBitsZero();
+    error MemberSetUpdateVkNotSet();
+    error MemberSetUpdateVkDegreeBitsZero();
     /// Multi-token (§N-6, review MINOR 2): `tokenFundsDigest` rejects a token count outside the
     /// in-circuit-enforced 1..=MAX_CHANNEL_TOKENS range, making the Verifier self-contained
     /// defense-in-depth (not reliant on the Manager's structural check + the transitive TFD bind).
@@ -153,6 +155,16 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     /// @notice Close-circuit MLE verification key. `degreeBits == 0` ⇒ unset (reverts on verify).
     CloseVk public closeVk;
+
+    /// detail2 §Q-4: the member-set-update VK. ONLY the per-circuit anchor is stored — the
+    /// WHIR/MLE rail (whirParams, kIs, subgroupGenPowers, protocol/session ids, the MleVerifier)
+    /// is the WRAPPER's, which is circuit-independent (every inner circuit wraps to the same
+    /// degree-13 shape; verified against the close fixture: whirParams/kIs/protocol byte-equal,
+    /// only `preprocessedCommitmentRoot` differs). The close rail storage is therefore REUSED;
+    /// soundness is pinned by THIS VK's preprocessedRoot/gatesDigest, and a rail mismatch can
+    /// only ever fail verification, never accept a foreign proof.
+    CloseVk public memberSetUpdateVk;
+    bool public memberSetUpdateVkInitialized;
 
     /// @notice True once `initializeCloseVk` has run. Set-once latch.
     bool public closeVkInitialized;
@@ -198,6 +210,84 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             _closeSubgroupGenPowers.push(_subgroupGenPowers[i]);
         }
         emit CloseVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+    }
+
+    event MemberSetUpdateVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
+
+    /// detail2 §Q-4: one-time member-set-update VK initialization. Deployer-only, set exactly
+    /// once, degreeBits > 0 — NO disable seam: applyMemberSetUpdate always runs real MLE
+    /// verification. Requires the close rail (whir params etc., reused — see the storage doc) to
+    /// be initialized first.
+    function initializeMemberSetUpdateVk(CloseVk memory _vk) external {
+        require(msg.sender == deployer, "only deployer");
+        require(!memberSetUpdateVkInitialized, "msu vk already set");
+        require(closeVkInitialized, "close rail not initialized");
+        if (_vk.degreeBits == 0) revert MemberSetUpdateVkDegreeBitsZero();
+        memberSetUpdateVkInitialized = true;
+        memberSetUpdateVk = _vk;
+        emit MemberSetUpdateVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+    }
+
+    /// detail2 §Q-4: the member-set-update proof's public-input length —
+    /// `[channelId(1) | setVersion(2) | oldCommitment(8) | newCommitment(8) | oldCount(1)
+    ///  | newCount(1) | recipient(5)]` (Rust `MEMBER_SET_UPDATE_PUBLIC_INPUTS_LEN`).
+    uint256 internal constant MSU_PI_LEN = 26;
+
+    /// @notice REAL on-chain verification of a member-set-update proof (detail2 §Q-4). Binds ALL
+    ///         26 raw limbs strictly (canonical-u32 + equality, the close-limb discipline) to the
+    ///         caller-supplied expectation, then verifies the MLE proof under the msu VK. The
+    ///         proof's in-circuit statement is: the OLD set's full N-of-N (batch Falcon aggregate,
+    ///         recursively verified) signed the IMMS digest committing EXACTLY the
+    ///         (oldCommitment → newCommitment) transition at this version, with the §Q-3
+    ///         structural delta enforced in-circuit.
+    function verifyMemberSetUpdate(
+        uint32 channelId_,
+        uint64 newVersion,
+        bytes32 oldCommitment,
+        bytes32 newCommitment,
+        uint8 oldCount,
+        uint8 newCount,
+        address recipient,
+        MleVerifier.MleProof calldata mleProof
+    ) external view returns (bool) {
+        if (!memberSetUpdateVkInitialized) revert MemberSetUpdateVkNotSet();
+        uint256[] calldata pi = mleProof.publicInputs;
+        require(pi.length == MSU_PI_LEN, "msu pi len");
+        uint256[] memory expected = new uint256[](MSU_PI_LEN);
+        uint256 c = 0;
+        expected[c++] = uint256(channelId_);
+        c = _putU64(expected, c, newVersion);
+        c = _putBytes32(expected, c, oldCommitment);
+        c = _putBytes32(expected, c, newCommitment);
+        expected[c++] = uint256(oldCount);
+        expected[c++] = uint256(newCount);
+        // Rust `Address::to_u32_vec`: 5 big-endian u32 words of the 20-byte address.
+        for (uint256 i = 0; i < 5; i++) {
+            expected[c++] = (uint256(uint160(recipient)) >> (32 * (4 - i))) & 0xffffffff;
+        }
+        require(c == MSU_PI_LEN, "msu limb count");
+        for (uint256 i = 0; i < MSU_PI_LEN; i++) {
+            uint256 limb = pi[i];
+            require(limb < LIMB_BOUND, "msu limb range");
+            require(limb == expected[i], "msu limb mismatch");
+        }
+        return _verifyMsuMle(mleProof);
+    }
+
+    function _verifyMsuMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+        // The close rail (wrapper-shape parameters) with the msu VK's own soundness anchors.
+        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_closeWhirParams);
+        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
+            degreeBits: memberSetUpdateVk.degreeBits,
+            preprocessedCommitmentRoot: memberSetUpdateVk.preprocessedRoot,
+            numConstants: memberSetUpdateVk.numConstants,
+            numRoutedWires: memberSetUpdateVk.numRoutedWires,
+            protocolId: closeWhirProtocolId,
+            sessionId: closeWhirSplitSessionId,
+            kIs: _closeKIs,
+            subgroupGenPowers: _closeSubgroupGenPowers
+        });
+        return closeMleVerifier.verify(mleProof, vp, whirParams, memberSetUpdateVk.gatesDigest);
     }
 
     /// @notice REAL on-chain verification of the channel-close-intent proof (Phase A).
