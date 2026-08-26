@@ -1542,7 +1542,14 @@ debit payload + `verify_aggregate_manifest` wired into the co-sign gate behind
    sound — an inert leaf has no signed state and no E-2-committed debit — but wastes the slot for
    that window. Decide at stage-3 implementation time.
 
-## Q. Dynamic co-signer membership: add a member, rotate your own key (2026-08-23; design fixed, staged implementation)
+## Q. Dynamic co-signer membership: add a member, rotate your own key (2026-08-23; ALL THREE STAGES LANDED 2026-08-25)
+
+> STATUS: **complete.** Q1 (channel layer: `verify_member_set_update` + the `member-update` CLI),
+> Q2 (validity circuit: the `MemberSetUpdate` block transition + producer/service emission), and
+> Q3 (L1: `MemberSetUpdateCircuit` → MLE wrap → `ChannelSettlementManager.applyMemberSetUpdate`,
+> real-proof-verified, no disable seam) are all merged with adversarial tests at every layer;
+> `ChannelSafetyQ.lean` carries the machine-checked invariants (T1-T10). Fixtures:
+> `member_set_update{,_mle}.json`; forge 332/332.
 
 Today the co-signer set is write-once, pinned independently at three layers (the audit below cites
 the exact 28 rejection points): (a) off-chain gates compare every payload against a locally-held
