@@ -18,8 +18,9 @@
 
 
 **Scope:** Plonky2 ZKP circuits + L1 Solidity contracts, excluding
-cryptographic-primitive internals (Poseidon/SPHINCS+/Regev/MLE-WHIR —
-uninterpreted). The channel-registration chain circuit
+cryptographic-primitive internals (Poseidon/Falcon-512/Regev/MLE-WHIR —
+uninterpreted; the signature scheme migrated SPHINCS+ → Falcon-512 after this
+corpus was cut, see the banner). The channel-registration chain circuit
 (`channel_reg_hash_chain/channel_reg_step.rs`) is now IN scope
 (`Circuits.ChannelRegStep`), closing the former F-UPDU-1 residual. The
 `update_channel_tree.rs` base-layer per-block update circuit is likewise modeled.
@@ -27,8 +28,10 @@ The on-chain gate-constraint evaluator
 (`mle/contracts/src/Plonky2GateEvaluator.sol`) is in scope for the
 `ExponentiationGate` family (`Core.Exponentiation`); the other gate evaluators
 in that file are not modeled here.
-**Artifact:** `doc/audit/zkp/` — 45 `.lean` files, 256 `theorem` declarations,
-11,894 LOC, **zero `sorry` / zero `axiom`**, clean `lake build`.
+**Artifact:** `doc/audit/zkp/` — 45 `.lean` files, 257 `theorem` declarations,
+12,067 LOC (recounted 2026-08-26), **zero `sorry` / zero `axiom`**, clean
+`lake build` (now also run in CI on every push, together with the
+design-level corpus `doc/architecture-audit/`).
 Counts are reproducible:
 `find Zkp Zkp.lean -name '*.lean' | wc -l`,
 `grep -rh '^theorem ' Zkp Zkp.lean | wc -l`,
@@ -59,6 +62,20 @@ is now **CLOSED** — that circuit is modeled in `Circuits.ChannelRegStep`
 (`tree_and_chain_share_member_set` + `chain_determines_tree`). **F-WD-2**
 (settle-twice nullifier) is also **CLOSED** by a circuit fix (Option B, see below).
 
+**LIVENESS DISCLAIMER (added 2026-08-26 — audit25-08-2026 Part 4.3(A)):**
+"sound" above is SOUNDNESS ONLY — no theorem in THIS corpus shows an honest
+user CAN exit. The corpus's positive-direction results are isolated
+`*_satisfiable` witnesses with no adversary. That axis — whose absence let the
+gate-8 "honest exit impossible on every real deployment" class survive every
+suite — is now covered at DESIGN level in `doc/architecture-audit/`
+(`ChannelSafetyClose` honest_close_terminates, `ChannelSafetyPW`
+honest_partial_withdraw_pays, `ChannelSafetyIC` honest_window_accepted,
+`ChannelSafetyQ` honest_member_can_rotate / honest_join_accepted); an
+implementation-level honest-exit pass over the contract models remains open.
+For the current protocol audit (sig-cluster 8, §Q member-set updates, §P
+aggregated windows) see `doc/audit/audit25-08-2026.md` — the report of record
+since this summary's target commit.
+
 ## Soundness theorems (selected)
 
 | Property | Theorem | File |
@@ -76,7 +93,7 @@ is now **CLOSED** — that circuit is modeled in `Circuits.ChannelRegStep`
 | Deposit chain: sequential append, no gaps/dups | `sequential_append` | DepositStep |
 | Signatures non-skippable (computed gate) | `signatures_not_skippable` | ValidityCircuit |
 | Signing block ⇒ exactly one accumulator fold, no reset/skip | `signing_block_advances`, `later_slots_preserve` | UpdateUser (NEW) |
-| Member-set immutability (producer cannot rotate members) | `member_set_immutable` | UpdateUser (NEW) |
+| Member-set binding, §Q-conditional (producer cannot rotate members outside a payload-bound MemberSetUpdate; RESTATED 2026-08-26 — the unconditional form was falsified by §Q) | `member_set_immutable_outside_update`, `member_root_change_requires_msu` | UpdateUser (RE-SYNCED) |
 | Registration root-swap: what block_step binds | `registration_root_swap_anchored` | UpdateUser (NEW) |
 | Nullifier invariant PRESERVED from genesis (spend-once induction) | `genesis_inv`, `insert_preserves_inv`, `reachable_key_absent` | IndexedMerkle (repaired) |
 | PublicState.is_equal ANDs all 5 fields (F-PUBST-1) | `publicStateEq_sound` | PublicStateEq (NEW) |
@@ -103,7 +120,7 @@ crypto verifiers = uninterpreted oracles; named trust assumptions in
 | No double-withdraw (CEI nullifier) | `withdrawLeaf_nullifier_once`, `withdrawLeaf_consumes` | IntmaxRollupWithdraw |
 | No payout without a verified+anchored proof (withdrawNative path ONLY) | `withdrawNative_requires_proof` | IntmaxRollupWithdraw |
 | Finalized roots written ONLY by verified validity proofs | `finalize_only_on_valid`; lifted to all reachable states by `erun_finalized_provenance` | IntmaxRollupWithdraw, EndToEnd |
-| Burn path: solvency-safe but PROOF-FREE (trust-gated) | `claimAuthorized_safe`, `burn_drain_satisfiable` (drain exhibited in-model) | IntmaxRollupWithdraw, Assumptions |
+| Burn path: HISTORICAL — `claimAuthorizedWithdrawal` DELETED 2026-07-28; the theorems remain as the record of what the removed function admitted and why it must not return | `claimAuthorized_escrow_conservation`, `burn_drain_satisfiable` (drain exhibited in-model) | IntmaxRollupWithdraw, Assumptions |
 | reclaimStake: fund-bearing, both-order no-double-payout | `no_double_payout_{refund,slash}_then_reclaim` + converses | IntmaxRollupStake |
 | Stake single-resolution + conservation | `no_double_payout_*`, `stake_conserved` | IntmaxRollupStake |
 | Channel payout cap (Σ out ≤ Σ pulled) | `claim_preserves_cap`, `pull_preserves_cap` | ChannelSettlementManager |
@@ -123,15 +140,19 @@ adversarially reviewed for circularity: the proof term consumes the per-layer
 theorems; no proved conclusion is restated as an assumption field.
 
 > Contract coverage: `Coverage.lean` categorizes all remaining lines of all
-> THREE contracts (incl. the Manager close lifecycle). `verifySpecialClose` /
+> THREE contracts (incl. the Manager close lifecycle and the §Q
+> `applyMemberSetUpdate` / `verifyMemberSetUpdate` entries; line map
+> RE-POINTED 2026-08-26 after drifting ~300-350 lines). `verifySpecialClose` /
 > `verifyLateOutgoingDebit` are classified DISABLED STUB (forgeable `_matches`
-> stubs, inert via manager-side hard-disable) — NOT oracles.
+> stubs, inert via manager-side hard-disable) — NOT oracles. The map is a
+> CATALOG, not a proof (its marker theorem says so explicitly).
 
 ## Findings
 
 | ID | Severity | Status | Summary |
 |---|---|---|---|
 | **F-UPDU-1** | MEDIUM | **CLOSED (2026-07-06)** | Registration-block account roots: `block_step` binds continuity/block-number/R6/G6 around the root swap; the remaining `reg.channelTreeRoot ↔ reg.channelRegHashChain` relation lived in the channel_reg chain circuit. That circuit is now modeled in `Circuits.ChannelRegStep`: `tree_and_chain_share_member_set` discharges the closing constraint (one shared `members` list feeds both the tree leaf's `memberRoot` and the chain's `regDigest`; R5 freshness; index=channel_id), and `chain_determines_tree` proves the L1-committed reg-hash chain PINS the Poseidon channel_tree_root the account root swaps to (keccak-CR + `PowTwoInj F 32`). Base-layer exposure closed to named standard assumptions. |
+| **F-UPDU-2** | MEDIUM | **OPEN (flagged 2026-08-26)** | `UpdateUser.lean`'s per-slot bp-signature fold sections model the pre-M2′ wiring; `fd467ea` replaced it with a block-level thermometer N-of-N over the full 8-leaf recomputed member set (strictly STRONGER bindings; still exactly one fold per signing block). The abstraction `EndToEnd` consumes (opaque `accumulate`, one-fold dichotomy) remains sound; the in-file banner marks exactly which sections describe the old shape. Full re-model tracked in audit25-08-2026 Part 3. |
 | **F-WD-2** | MEDIUM | **CLOSED (fix, Option B)** | Settle-twice nullifier: the nullifier preimage keyed on the settlement `block_number` (`send_leaf.cur`), so a tx settled into two blocks yielded two distinct nullifiers for one deduction (double withdrawal / double receive-credit, capped by global solvency). **Fixed** by re-keying the `SettledTransfer` preimage from `block_number` to the sender `tx.nonce` (`transfer.rs`), a settlement-independent one-time identifier bound to the deduction (sent-tx tree slot at index=nonce, spend_circuit empty-slot check). Two settlements now yield the IDENTICAL nullifier → caught by the on-chain `withdrawalNullifierUsed` set / recipient indexed merkle. Threat-modeled + attacker-red-teamed (GO) + adversarially reviewed (GO); Lean single-use re-derived from nonce-binding; **verified end-to-end by real proof generation** (`e2e_deposit_validity_withdrawal` ok 129s, `validity_proof_mle_onchain_e2e` ok 60s, forge 174/175). Corrected-Option-A (per-channel settled-nonce SET — NOT strict-increase, which the red-team found is a liveness bug) recorded as optional defense-in-depth, not required for the fund-safety closure. |
 | F-WITHDRAW-1 (=C-M2) | Medium | **Closed** | 5 free extended fields re-pinned contract-side (`finalizedStateRoots` membership); the composition consumes only the re-pinned commitment, never a free field. |
 | F-NULL-1 | — | **Discharged (genuinely, 2026-07-02)** | Preservation induction now PROVED: `genesis_inv` + `insert_preserves_inv` + `reachable_key_absent`. The former `gap`-as-hypothesis over-constraint is removed; `InsertConstraints` is circuit-gates-only. Key-injectivity found necessary (gap-emptiness alone is not inductive). |
@@ -159,9 +180,11 @@ theorems; no proved conclusion is restated as an assumption field.
   (`PowTwoInj F k`, k ≤ 63; char>4 one-hot), faithfulness (`ReprFaithful`,
   bounded `NatLitInj`), accumulator idealizations (`AccumulateNoFixpoint`,
   `AccumulateNeverEmpty`), totality (`AddTotal`/`SubTotal`).
-- Contract-side named trust (Contracts/Assumptions.lean): burn-path
-  authorization legitimacy (deployer→manager; violation = provable in-model
-  drain, `burn_drain_satisfiable`), `allowMleDisabled=false`
+- Contract-side named trust (Contracts/Assumptions.lean): the burn-path
+  authorization-legitimacy assumption is SUPERSEDED — its target function was
+  deleted 2026-07-28 and the assumption is retained only as the historical
+  record (with the correction that `legit` was false-by-construction even for
+  the honest manager); `allowMleDisabled=false`
   (constructor-enforced), single-call atomicity (reentrancy is outside the
   model; rests on `nonReentrant`+CEI in Solidity), ETH send-failure = revert.
 - `BridgeAssumptions` (EndToEnd.lean): proof-system oracle, per-boundary
