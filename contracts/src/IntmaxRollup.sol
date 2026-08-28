@@ -89,6 +89,13 @@ contract IntmaxRollup {
     error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
+    /// @dev SECURITY (C-1/B-4): the committed proof could not be EVALUATED (a deterministic
+    ///      revert inside verification, e.g. `Plonky2GateEvaluator`'s
+    ///      `unsupported gate with non-zero filter`). That is never evidence of fraud.
+    error MleProofUnevaluable();
+    /// @dev SECURITY (C-1/B-4): the fraud proof was gas-starved, so the verification call
+    ///      could not run to completion. Never evidence of fraud — see `_mleVerdict`.
+    error FraudProofGasStarved();
     error SubmissionBeforeFinalizedBlock();
     error NothingToReclaim();
     error SubmissionNotYetFinalized();
@@ -615,6 +622,18 @@ contract IntmaxRollup {
 
     /// @notice Submissions not finalized within this many Eth blocks after posting
     ///         can be removed unconditionally via fraudProof (no proof needed).
+    /// @dev `_mleVerdict` outcomes — see `_mleVerdict` for why three failure modes are kept apart.
+    uint8 private constant MLE_INVALID     = 0; // verifier RETURNED false  (the only fraud evidence)
+    uint8 private constant MLE_VALID       = 1; // verifier RETURNED true
+    uint8 private constant MLE_UNEVALUABLE = 2; // verification reverted deterministically
+    uint8 private constant MLE_STARVED     = 3; // verification was gas-starved
+
+    /// @dev SECURITY (C-1/B-4): floor on `gasleft()` before entering MLE verification. The repo's
+    ///      own measurement of the real verifier on a real fixture is 11,019,291 gas
+    ///      (`MleE2E::test_mleVerify_gas`); this leaves headroom above it while staying well
+    ///      inside a 30M mainnet block. Below the floor the verdict is MLE_STARVED, never fraud.
+    uint256 private constant MIN_MLE_VERIFY_GAS = 12_000_000;
+
     uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
 
@@ -1300,6 +1319,29 @@ contract IntmaxRollup {
         // binds the verified proof to this submission.
         if (stateRoot != sub.stateRoot) return false;
 
+        // SECURITY (H-5/B-5: the stateRoot-only binding was insufficient). Pinning only the root
+        // leaves two submissions interchangeable whenever they declare the SAME root, and nothing
+        // in `_submit` constrains the declared root:
+        //   (a) on a heartbeat/idle posting round the honest root does not move, so anyone can
+        //       finalize submission B with submission A's byte-identical arguments — B's bond is
+        //       refunded although B's own proof was never verified, B becomes permanently
+        //       un-slashable (`fraudProof` reverts SubmissionAlreadyFinalized) and that in turn
+        //       blocks the rollback of every earlier submission; and
+        //   (b) a second whitelisted producer posts a junk batch DECLARING the honest root and
+        //       front-runs the honest finalize, after which the honest submission can never be
+        //       finalized at all (`latestFinalizedStateRoot` has already moved past its
+        //       `initialExtCommitment`) and neither submission can ever be removed.
+        // The batch's END HEIGHT is the missing discriminator: `_postBlock` strictly advances
+        // `blockNumber`, so at most one LIVE submission ends at a given height, and `fullVerify`
+        // already pins `finalBlockChain == blockHashChainAt[finalBlockNumber]`. Together with the
+        // root pin above, the verified proof is now bound to THIS submission's own batch.
+        // (Round 1 rejected this because ~20 synthetic tests built `validityPIs` before posting,
+        // with `finalBlockNumber = 0`. Those harnesses were fixed instead: a test convention must
+        // not dictate a soundness gap.)
+        if (validityPIs.finalBlockNumber != _batchMetadata[submissionId].endBlockNumber) {
+            return false;
+        }
+
         bool valid;
         try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
             valid = v;
@@ -1871,15 +1913,30 @@ contract IntmaxRollup {
         bytes32 piHash = _computeValidityPIHash(validityPIs);
         if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return false;
 
-        // ── Fraud detection (any failure = fraud) ────────────────────────
+        // ── Fraud detection (ONLY a returned `false` = fraud) ─────────────
 
-        // MLE/WHIR verification fails on the exact bytes the submitter committed.
-        // SECURITY: `mleProof` is pinned to the committed blob by preconditions 1 and 4, so this
-        // verdict is a deterministic function of the submission itself — the fraud prover has no
-        // free input left with which to steer it.
-        if (!_verifyMle(mleProof)) return true;
-
-        return false;
+        // SECURITY (C-1/B-4). The round-1 comment here read:
+        //     "`mleProof` is pinned to the committed blob by preconditions 1 and 4, so this
+        //      verdict is a deterministic function of the submission itself — the fraud prover
+        //      has no free input left with which to steer it."
+        // That argument was WRONG and is corrected here, because it silently assumed the verdict
+        // depends only on CALLDATA. It does not:
+        //   * the transaction GAS LIMIT is a free input the fraud prover chooses, and EIP-150
+        //     forwards 63/64 of it, so the prover can make the inner verification OOG while the
+        //     outer frame survives to run `_truncateSubmissions`; and
+        //   * the verifier can revert for reasons that are properties of the DEPLOYED EVALUATOR
+        //     rather than of the proof (`Plonky2GateEvaluator`'s "unsupported gate with non-zero
+        //     filter" — the gate-8 class), so an honest submission using such a gate was
+        //     convictable by anyone.
+        // Both routes produced a caught revert, and a caught revert used to read as fraud.
+        //
+        // The rule now: fraud is confirmed ONLY when the verifier ran to completion and RETURNED
+        // false. "Could not evaluate" reverts the whole `fraudProof` transaction, so nothing is
+        // truncated, no bond moves, and the submission is left exactly as it was.
+        uint8 verdict = _mleVerdict(mleProof);
+        if (verdict == MLE_STARVED) revert FraudProofGasStarved();
+        if (verdict == MLE_UNEVALUABLE) revert MleProofUnevaluable();
+        return verdict == MLE_INVALID;
     }
 
     // -----------------------------------------------------------------------
@@ -1895,13 +1952,64 @@ contract IntmaxRollup {
     function _verifyMle(
         MleVerifier.MleProof calldata mleProof
     ) internal view returns (bool) {
-        // SECURITY: Skip MLE verification only on an explicit test-only deployment.
-        if (allowMleDisabled && mleVk.degreeBits == 0) return true;
+        return _mleVerdict(mleProof) == MLE_VALID;
+    }
 
+    /// @dev SECURITY (C-1/B-4: "could not evaluate" must never read as "fraud").
+    ///
+    ///   `_verifyMle` used to collapse three distinct outcomes into one boolean:
+    ///
+    ///       try this._verifyMleWithVk(mleProof, false) returns (bool v) { return v; }
+    ///       catch { return false; }
+    ///
+    ///   and `_verifyFraud` read `false` as CONFIRMED FRAUD. Two demonstrated exploits:
+    ///
+    ///     (a) GAS STARVATION. EIP-150 forwards only 63/64 of the available gas to the inner
+    ///         call, so the transaction gas limit is a FREE attacker input — it never appears in
+    ///         `mleProof`, so the round-1 claim "the fraud prover has no free input left with
+    ///         which to steer it" was wrong. An attacker picks a limit at which the inner
+    ///         verification OOGs while the outer frame keeps the retained ~1/64 — plenty to run
+    ///         `_truncateSubmissions`. Measured on the red team's harness: honest non-convicting
+    ///         cost 4,889,847 gas, winning attack limit 2,836,161, real verifier ~11,019,291.
+    ///     (b) UNSUPPORTED GATE. `Plonky2GateEvaluator` reverts BY DESIGN on a gate the deployed
+    ///         evaluator cannot handle ("unsupported gate with non-zero filter"). An honest
+    ///         submission using such a gate was convictable by anyone.
+    ///
+    ///   Both are "the verifier could not reach a verdict", not "the verifier said no". This
+    ///   function keeps them apart:
+    ///
+    ///     MLE_VALID       the verifier RETURNED true
+    ///     MLE_INVALID     the verifier RETURNED false  — the ONLY fraud evidence
+    ///     MLE_UNEVALUABLE the call reverted deterministically
+    ///     MLE_STARVED     the call was gas-starved (floor not met, or the inner frame burned
+    ///                     the whole 63/64 it was forwarded)
+    ///
+    ///   `_verifyFraud` REVERTS on the last two; `fullVerify`/`verify` treat everything that is
+    ///   not MLE_VALID as not-valid (fail-CLOSED, unchanged).
+    ///
+    ///   SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
+    ///   true (a test-only opt-in enforced at construction). In production `allowMleDisabled` is
+    ///   false and the constructor already rejects a zero validity VK, so that branch is dead.
+    function _mleVerdict(
+        MleVerifier.MleProof calldata mleProof
+    ) internal view returns (uint8) {
+        // SECURITY: Skip MLE verification only on an explicit test-only deployment.
+        if (allowMleDisabled && mleVk.degreeBits == 0) return MLE_VALID;
+
+        // 63/64 defence, part 1: refuse to even attempt the call without enough gas for the
+        // verifier to finish honestly. Without this a caller could size the transaction so the
+        // inner frame is guaranteed to fail.
+        if (gasleft() < MIN_MLE_VERIFY_GAS) return MLE_STARVED;
+
+        uint256 gasBefore = gasleft();
         try this._verifyMleWithVk(mleProof, false) returns (bool v) {
-            return v;
+            return v ? MLE_VALID : MLE_INVALID;
         } catch {
-            return false;
+            // 63/64 defence, part 2: an inner frame that consumed everything it was forwarded
+            // leaves the outer frame at most gasBefore/64. That is the OOG signature; a
+            // deterministic revert (the gate-8 class) returns almost all of it unspent.
+            if (gasleft() <= gasBefore / 64) return MLE_STARVED;
+            return MLE_UNEVALUABLE;
         }
     }
 
