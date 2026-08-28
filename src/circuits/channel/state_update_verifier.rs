@@ -1491,6 +1491,32 @@ fn verify_balance_state_shared(
                 .to_string(),
         ));
     }
+    // SECURITY (H-2, THE EXIT LANE — twin of the B-1b check above): per-slot Regev pk digests are
+    // IMMUTABLE across EVERY supported state transition. A digest is written at exactly three
+    // places, none of them a transition: genesis assembly (`assemble_genesis_state_backed`), a
+    // delegate join (`channel_member::join_delegate`, which binds the JOINER'S OWN
+    // `poseidon_digest()` — see the A-1 finding-1 comment there), and a §Q AddCosigner
+    // (`wallet_core::apply_member_set_update_to_state`, same discipline plus the delegate-region
+    // shift). None of those is dispatched through a `*UpdateWitness::verify`, so freezing the
+    // field here costs the legitimate writers nothing.
+    //
+    // What it stops: `ensure_slot_unchanged` / `ensure_row_unchanged_except` compare only
+    // CIPHERTEXTS, `BalanceState::validate()` constrains only PADDING digests, and
+    // `verify_regev_pk_root` checks `record.regev_pk_root` — never the balance-state copy. So
+    // before this check ANY party able to propose a transition could overwrite a VICTIM slot's
+    // digest; every honest cosigner's gate passed, the corrupted value was committed into H1, and
+    // the victim could then never build a withdrawal claim (`withdrawal_claim_circuit` binds the
+    // claimant's Regev key to `regev_pk_digests[member_index]` INSIDE the Merkle-verified slot
+    // leaf, so a leaf built over a foreign digest is unreachable with the victim's key). There is
+    // no sweep function, so that loss is PERMANENT — hence fail-closed here, before any signature.
+    if prev_state.balance_state.regev_pk_digests != next_state.balance_state.regev_pk_digests {
+        return Err(ChannelStateUpdateError::InvalidStateLinkage(
+            "regev_pk_digests must remain unchanged across a state transition (H-2: Regev key \
+             changes are not a supported transition — only genesis, delegate join and a §Q \
+             AddCosigner may write a slot digest)"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2321,6 +2347,49 @@ mod tests {
             fixture.witness.verify(&VERIFIER),
             Err(ChannelStateUpdateError::InvalidStateLinkage(_))
         ));
+    }
+
+    /// H-2 (audit 28-08-2026, HIGH — THE EXIT LANE): a transition that mutates ANY slot's
+    /// `regev_pk_digests` entry is rejected fail-closed. Twin of the B-1b test above, and the same
+    /// attacker model: the proposer cannot mutate the field itself (it flows into the slot leaf →
+    /// slot-tree root → H1), so its only move is to get the honest cosigners to SIGN a next state
+    /// carrying a corrupted value. Before this check nothing compared the field prev→next —
+    /// `ensure_slot_unchanged` / `ensure_row_unchanged_except` compare only ciphertexts,
+    /// `validate()` constrains only PADDING digests, `verify_regev_pk_root` checks the RECORD's
+    /// root and never the balance-state copy — so every honest gate passed and the victim's slot
+    /// became permanently unclaimable (`withdrawal_claim_circuit` binds the claimant's Regev key
+    /// to `regev_pk_digests[member_index]` inside the Merkle-verified slot leaf, and there is no
+    /// sweep function).
+    ///
+    /// Confirmed RED without the fix: reverting the `regev_pk_digests` equality in
+    /// `verify_balance_state_shared` makes every case below return `Ok`.
+    ///
+    /// Covers a PURE BYSTANDER slot (neither sender nor recipient — the sharpest form: the
+    /// transfer itself is entirely honest), the transfer's recipient slot, and the proposer's own
+    /// slot. The message is asserted, not just the variant, because B-1b returns the same variant.
+    #[test]
+    fn in_channel_transfer_rejects_regev_pk_digest_mutation() {
+        let corrupt = Bytes32::from_u32_slice(&[0xdead, 0xbeef, 1, 2, 3, 4, 5, 6]).unwrap();
+        // Slot 2 is a bystander: it neither sends nor receives in this fixture.
+        for victim_slot in [2usize, 1, 0] {
+            let mut fixture = in_channel_fixture();
+            assert_ne!(
+                fixture.witness.prev_state.balance_state.regev_pk_digests[victim_slot], corrupt,
+                "the mutation must actually change the value"
+            );
+            fixture.witness.next_state.balance_state.regev_pk_digests[victim_slot] = corrupt;
+            fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+            match fixture.witness.verify(&VERIFIER) {
+                Err(ChannelStateUpdateError::InvalidStateLinkage(msg)) => assert!(
+                    msg.contains("regev_pk_digests"),
+                    "slot {victim_slot} must be rejected by the H-2 digest freeze, got: {msg}"
+                ),
+                other => panic!(
+                    "a next state corrupting slot {victim_slot}'s Regev pk digest must be \
+                     REJECTED before any cosigner signs it (H-2), got {other:?}"
+                ),
+            }
+        }
     }
 
     /// TM-1/TM-9 (security-review MAJOR 1): the token registry and token_count are IMMUTABLE

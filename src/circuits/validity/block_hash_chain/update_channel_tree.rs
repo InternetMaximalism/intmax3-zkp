@@ -138,8 +138,9 @@ pub struct UpdateUserTree {
     // The Regev public key witnessed at each block slot; only the updating (bp) slot's is
     // constrained — its Poseidon digest must equal that slot's member-leaf component, so the bp's
     // Regev key stays bound exactly as it was before the N-of-N rewire (design §4 "cost trap":
-    // the other 15 slots' `regev_pk_digest` are free witnesses authenticated by the root
-    // recompute, because 16 x 2 x REGEV_N range checks would blow the circuit up).
+    // the other MAX_SIG_CLUSTER-1 slots' `regev_pk_digest` are free witnesses authenticated by
+    // the root recompute, because MAX_SIG_CLUSTER x 2 x REGEV_N range checks would blow the
+    // circuit up).
     pub member_regev_pks: Vec<RegevPk>,
 
     /// Per-block IMCH `ChannelState::signing_digest()` preimage limbs (detail2 §C-3), EXCLUDING
@@ -185,6 +186,26 @@ pub fn validate_member_set_delta(
             changed.len()
         ));
     };
+    // SECURITY (M-1, §Q-3): the changed slot's NEW `pk_g` must be DISTINCT from every other slot's.
+    // Applies to BOTH arms (a rotate and an add are equally able to name a sitting member's key).
+    //
+    // What it stops: without this, a rotate-to-duplicate is an EFFECTIVE REMOVAL that bypasses the
+    // explicit no-removal rule below — slot j is re-pointed at slot k's `pk_g`, so slot j's holder
+    // can no longer sign and the cluster silently shrinks. It also breaks two things that other
+    // code TREATS AS THEOREMS: `signer_count` stops counting DISTINCT signers (`FalconAggCircuit`
+    // deliberately allows a repeated key, `falcon_sig::agg`), and the "one member's `pk_g` in two
+    // slots changes the root — duplicates are unrepresentable" obligation documented on
+    // `member_leaves` above becomes FALSE (the member tree happily represents a duplicate; only
+    // this gate makes it unreachable). Comparing against ALL slots — padding included — is exact,
+    // not over-strict: an occupied changed slot's `pk_g` is nonzero while padding `pk_g` is zero,
+    // and the in-circuit mirror asserts the same over the same 8 slots.
+    if let Some(k) = (0..MAX_SIG_CLUSTER).find(|&i| i != j && new[i].pk_g == new[j].pk_g) {
+        return Err(format!(
+            "slot {j}: the new pk_g already occupies slot {k} — duplicate signing identities are \
+             refused (M-1: a rotate-to-duplicate is a removal in disguise and would make \
+             signer_count stop counting distinct signers)"
+        ));
+    }
     if old[j] == empty {
         // ADD: must be at the left-packed boundary (every slot below occupied), new occupied.
         if new[j] == empty {
@@ -1289,7 +1310,7 @@ impl UpdateUserTreeTarget {
             // registered member set signed this block's IMCH digest. For the updating slot we:
             //   1. keep the `tx_tree_root != 0` gate;
             //   2. connect the recomputed member root to the channel leaf's committed
-            //      `member_pubkeys_root` — this is the binding that makes the 16 witnessed leaves
+            //      `member_pubkeys_root` — the binding that makes the MAX_SIG_CLUSTER witnessed leaves
             //      (and hence the folded pk list, the occupancy and `signer_count`) the channel's
             //      REGISTERED set rather than a prover-chosen one;
             //   3. compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
@@ -1344,8 +1365,8 @@ impl UpdateUserTreeTarget {
             builder.assert_zero(posts_from_empty_slot.target);
 
             // -- (3) regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over witnessed Regev coeffs --
-            // KEPT VERBATIM for the bp slot only (design §4 "cost trap"): doing this for all 16
-            // slots would be 16 x 2 x REGEV_N range checks. The other slots' `regev_pk_digest` are
+            // KEPT VERBATIM for the bp slot only (design §4 "cost trap"): doing this for every
+            // slot would be MAX_SIG_CLUSTER x 2 x REGEV_N range checks. The others' `regev_pk_digest` are
             // free witnesses authenticated by the root connect in (2).
             let regev_pk_coeffs: Vec<Target> = builder.add_virtual_targets(2 * REGEV_N);
             // SECURITY: range-check each coefficient to 32 bits so a malicious witness cannot pack
@@ -1396,10 +1417,13 @@ impl UpdateUserTreeTarget {
         //     must sit exactly at the boundary `i == signer_count`;
         //   * a changed slot that was OCCUPIED is a ROTATE and must preserve `regev_pk_digest`
         //     (§Q-6 — balances stay decryptable);
-        //   * a changed slot's NEW leaf is never empty (removal is not a supported op).
+        //   * a changed slot's NEW leaf is never empty (removal is not a supported op);
+        //   * (M-1) the changed slot's NEW `pk_g` is DISTINCT from every other slot's.
         {
             let one = builder.one();
             let mut sum_changed = builder.zero();
+            let mut changed_flags: Vec<plonky2::iop::target::BoolTarget> =
+                Vec::with_capacity(MAX_SIG_CLUSTER);
             for i in 0..MAX_SIG_CLUSTER {
                 let old_l = &member_leaf_targets[i];
                 let new_l = &new_member_leaf_targets[i];
@@ -1431,9 +1455,44 @@ impl UpdateUserTreeTarget {
                 // Never a removal: a changed slot's NEW pk is non-zero.
                 let removed = builder.and(changed_g, new_member_pk_is_zero[i]);
                 builder.assert_zero(removed.target);
+
+                changed_flags.push(changed_g);
             }
             // Exactly one changed slot on an update block; zero otherwise (sum is already gated).
             builder.conditional_assert_eq(any_member_update.target, sum_changed, one);
+
+            // SECURITY (M-1, §Q-3): NO DUPLICATE SIGNING IDENTITIES. The changed slot's NEW `pk_g`
+            // must differ from every other slot's NEW `pk_g`. Mirror of the identical rule now in
+            // `validate_member_set_delta` (native) — the two layers must stay byte-identical.
+            //
+            // What it stops: a rotate-to-duplicate. Nothing above forbids re-pointing slot j at
+            // slot k's key, and that is an EFFECTIVE REMOVAL that walks straight past the
+            // "removal is not a supported op" rule three lines up — slot j's holder can no longer
+            // sign anything, so the cluster shrinks without any of the §Q-1 removal ceremony. It
+            // also falsifies the `member_leaves` doc obligation ("one member's `pk_g` in two slots
+            // changes the root — duplicates are unrepresentable"): the tree represents duplicates
+            // perfectly well, and THIS is the gate that makes them unreachable, discharging the
+            // consumer obligation `FalconAggCircuit` leaves open (`falcon_sig::agg` deliberately
+            // permits a repeated key, so `signer_count` counts SIGNATURES, not DISTINCT signers —
+            // only distinct leaves make the two equal).
+            //
+            // Formulated over unordered pairs (28 comparisons for MAX_SIG_CLUSTER = 8 rather than
+            // 56): exactly one flag is set on an update block, so gating a pair on
+            // `changed[i] ∨ changed[k]` selects precisely the pairs containing the changed slot,
+            // and leaves every all-unchanged pair free (the OLD set's distinctness is already a
+            // theorem via the root connect). Padding slots are included: an occupied changed slot's
+            // `pk_g` is nonzero (the `removed` assert above) while padding `pk_g` is zero, so the
+            // comparison is exact rather than over-strict.
+            for i in 0..MAX_SIG_CLUSTER {
+                for k in (i + 1)..MAX_SIG_CLUSTER {
+                    let touches_changed = builder.or(changed_flags[i], changed_flags[k]);
+                    let dup = new_member_leaf_targets[i]
+                        .pk_g
+                        .is_equal(builder, &new_member_leaf_targets[k].pk_g);
+                    let bad = builder.and(touches_changed, dup);
+                    builder.assert_zero(bad.target);
+                }
+            }
         }
 
         // Gated on the COMPUTED `any_sign`: on a block that applies no member signature nothing
@@ -2378,7 +2437,7 @@ mod tests {
     /// registered set really is one member, so the root recompute, the padding rule and the
     /// active-slot rule are ALL satisfied and only the `>= 2` floor can refuse it. (Registration
     /// itself will not mint such a channel — `channel_reg_step` range-checks `member_count` to
-    /// `[2, 16]` — which is exactly why the floor has to be restated where the signature is
+    /// `[2, MAX_SIG_CLUSTER]` — which is exactly why the floor has to be restated where the signature is
     /// applied rather than assumed upstream.)
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
@@ -2612,6 +2671,40 @@ mod tests {
         new_leaves[1].regev_pk_digest = PoseidonHashOut::rand(&mut rng);
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
         assert_refused(&tree, "must preserve regev_pk_digest");
+    }
+
+    /// Refusal (audit M-1): a ROTATE-TO-DUPLICATE — slot 1's signing identity re-pointed at slot
+    /// 0's `pk_g`. This witness satisfies every §Q-3 rule that existed before M-1: exactly one
+    /// slot changes, the slot stays occupied, `regev_pk_digest` is preserved, and the new `pk_g`
+    /// is nonzero so the explicit no-removal assert is untouched. It is nonetheless an EFFECTIVE
+    /// REMOVAL — slot 1's holder can never sign again — and it makes `signer_count` stop counting
+    /// DISTINCT signers, falsifying the "duplicates are unrepresentable" obligation documented on
+    /// `member_leaves` that `FalconAggCircuit` (which deliberately permits a repeated key) leaves
+    /// for THIS layer to discharge.
+    ///
+    /// `assert_refused` pins BOTH layers: the native `validate_member_set_delta` mirror refuses it
+    /// for the stated reason, AND the circuit refuses it when driven with unchecked public inputs
+    /// (the malicious-prover path, where the native mirror is not a defence).
+    ///
+    /// Confirmed RED without the fix: reverting either the native guard or the in-circuit pairwise
+    /// gate makes the corresponding half of this assertion fail.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_update_rotate_to_duplicate_is_refused() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0x57);
+        let mut new_leaves = channel.leaves.clone();
+        new_leaves[1].pk_g = channel.leaves[0].pk_g;
+        assert_ne!(
+            new_leaves[1], channel.leaves[1],
+            "the rotation really does change slot 1"
+        );
+        assert_eq!(
+            new_leaves[1].regev_pk_digest, channel.leaves[1].regev_pk_digest,
+            "regev is preserved — the §Q-6 rule is NOT what rejects this"
+        );
+        let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
+        assert_refused(&tree, "already occupies slot");
     }
 
     /// Refusal: two slots changed in one update.

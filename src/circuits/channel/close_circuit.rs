@@ -536,6 +536,18 @@ where
         // fixed constant over zero verified signatures. Mirrors the token path's
         // `assert_one(token_active_bits[0])` a few lines below.
         builder.assert_one(active_bits[0].target);
+        // SECURITY (M-6, the 1-of-N-drain class): member_count >= 2, IN-CIRCUIT. `active_bits[i]`
+        // is the active-prefix indicator `(i < member_count)` (Boolean + monotone + Σ ==
+        // member_count above), so bit 1 set is exactly `member_count >= 2`. The documented
+        // registration floor is `2..=MAX_SIG_CLUSTER` (design §5.4 item 2 / `build_record`), but
+        // until now it lived ONLY in the native pre-check in `fill_witness` below — which a
+        // malicious prover skips by calling `fill_witness`/`data.prove` directly. That made a
+        // ONE-SIGNER close proof in-circuit satisfiable: a single cosigner could produce a
+        // structurally valid close over a state the rest of the cluster never signed, and the only
+        // thing catching it was L1's `activeMemberCount` injection — a defence outside this proof.
+        // This closes the in-circuit `>= 1` / native `>= 2` split that
+        // `update_channel_tree`'s §5.4 comment explicitly names as "a gap not to repeat".
+        builder.assert_one(active_bits[1].target);
 
         // ── Multi-token: token-slot activeness flags + TM-1 registry injectivity re-check ──
         //
@@ -778,7 +790,7 @@ where
         //    proof (pk limbs come from the gadget's `Bytes32Target::from_hash_out` safe 32-bit
         //    split of the Poseidon digest, multiplied by a boolean presence flag; message limbs are
         //    range-checked at allocation in the leaf circuit and copied upward; signer_count is a
-        //    sum of at most 16 leaf constants each equal to 1), so feeding them to the keccak
+        //    sum of at most MAX_SIG_CLUSTER leaf constants each equal to 1), so feeding them to the keccak
         //    gadget (which does NOT range-check) is sound without re-checking.
         let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
 
@@ -905,9 +917,26 @@ where
         public_inputs: &ChannelClosePublicInputs,
         witness_value: &ChannelCloseFullWitness<F, C, D>,
     ) -> Result<PartialWitness<F>, ChannelCloseCircuitError> {
+        self.fill_witness_inner(public_inputs, witness_value, true)
+    }
+
+    /// TEST SEAM (audit M-6). `enforce_cosigner_floor = false` drops ONLY the native
+    /// `member_count >= 2` pre-check — nothing else — so a test can drive this circuit exactly as
+    /// a malicious prover would: bypassing every native mirror and letting the IN-CIRCUIT gates be
+    /// the sole judge. The `<= MAX_SIG_CLUSTER` half is structural (it bounds the target arrays
+    /// indexed below) and is never relaxed. The only caller passing `false` is
+    /// `channel_close_circuit_rejects_one_signer_witness`; every production path goes through
+    /// [`Self::fill_witness`], which passes `true`.
+    fn fill_witness_inner(
+        &self,
+        public_inputs: &ChannelClosePublicInputs,
+        witness_value: &ChannelCloseFullWitness<F, C, D>,
+        enforce_cosigner_floor: bool,
+    ) -> Result<PartialWitness<F>, ChannelCloseCircuitError> {
         let state = &witness_value.close.final_channel_state;
         let member_count = state.balance_state.member_count as usize;
-        if !(2..=MAX_SIG_CLUSTER).contains(&member_count) {
+        let floor = if enforce_cosigner_floor { 2 } else { 1 };
+        if !(floor..=MAX_SIG_CLUSTER).contains(&member_count) {
             return Err(ChannelCloseCircuitError::InvalidMemberAuth(format!(
                 "member_count {member_count} out of range (must be 2..={MAX_SIG_CLUSTER} cosigners)"
             )));
@@ -1646,13 +1675,78 @@ mod tests {
         prove_and_verify_close_for(2);
     }
 
-    /// Multi-N happy path: full close for member_count = MAX_SIG_CLUSTER = 16 (all COSIGNER slots
-    /// active, NO padding — every gated signature slot is a real active cosigner signature).
+    /// Multi-N happy path: full close at the REAL maximum width, `member_count =
+    /// MAX_SIG_CLUSTER` (all COSIGNER slots active, NO padding — every gated signature slot is a
+    /// real active cosigner signature).
+    ///
+    /// TEST-INTEGRITY (audit §6): this test used to be named `..._n16` and opened with
+    /// `assert_eq!(MAX_SIG_CLUSTER, 16)`. `MAX_SIG_CLUSTER` was cut to 8 (sig-cluster resize) and
+    /// the assertion was not, so the test failed on its FIRST LINE and the full-width close path
+    /// was effectively untested — a red test that read as a covered path. The width is now taken
+    /// from the constant with nothing hardcoded, so a future resize keeps this exercising the real
+    /// maximum instead of going stale again.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
-    fn channel_close_circuit_proves_full_close_statement_n16() {
-        assert_eq!(MAX_SIG_CLUSTER, 16);
+    fn channel_close_circuit_proves_full_close_statement_n_max() {
         prove_and_verify_close_for(MAX_SIG_CLUSTER);
+    }
+
+    /// Negative (audit M-6, the 1-of-N-drain class) — a ONE-SIGNER close is UNPROVABLE in-circuit.
+    ///
+    /// This is the exact attacker model the finding names: a malicious prover does NOT call
+    /// `prove`, it builds the partial witness itself, so the native `2..=MAX_SIG_CLUSTER`
+    /// pre-check in `fill_witness` is not a defence. `fill_witness_inner(.., false)` reproduces
+    /// that bypass faithfully — it relaxes ONLY the native floor and leaves every in-circuit gate
+    /// standing. The witness is otherwise fully honest and self-consistent: a real
+    /// `member_count = 1` state, a real initial balance proof, and a REAL `FalconAggCircuit` proof
+    /// over that one member's genuine Falcon signature of the recomputed IMCH digest — so
+    /// `signer_count == member_count == 1` and every other constraint (H1 recompute, agg message
+    /// binding, member_set_commitment keccak, A5 distinctness) is satisfied. The ONLY thing that
+    /// can reject it is `assert_one(active_bits[1])`.
+    ///
+    /// Confirmed RED without the fix: reverting that one line makes this proof SUCCEED.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_one_signer_witness() {
+        let fx = fixture();
+        let witness = full_witness_n(1);
+        assert_eq!(
+            witness.close.final_channel_state.balance_state.member_count, 1,
+            "the witness really does declare a single cosigner"
+        );
+        assert_eq!(witness.member_auth.len(), 1);
+
+        // The native pre-check still refuses it through the ordinary entry points — that half of
+        // the defence is intact and must stay intact.
+        assert!(
+            matches!(
+                fx.close_circuit.prove(&witness),
+                Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
+            ),
+            "prove() must still refuse member_count = 1 natively"
+        );
+        assert!(matches!(
+            fx.close_circuit.fill_witness(
+                &witness.close.to_public_inputs().unwrap(),
+                &witness
+            ),
+            Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
+        ));
+
+        // Now the malicious-prover path: skip the native floor and let the circuit judge.
+        let mut public_inputs = witness.close.to_public_inputs().unwrap();
+        public_inputs.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
+        assert_eq!(public_inputs.member_count, 1);
+        let pw = fx
+            .close_circuit
+            .fill_witness_inner(&public_inputs, &witness, false)
+            .expect("the floor-free fill succeeds — the rejection must come from the CIRCUIT");
+        let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a one-signer close witness must be UNPROVABLE: the documented cosigner floor is \
+             2..=MAX_SIG_CLUSTER and it is now enforced in-circuit (M-6), not merely natively"
+        );
     }
 
     /// Negative — under-signed active set (A8): claim member_count = 3 but supply a Falcon

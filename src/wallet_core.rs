@@ -3330,6 +3330,20 @@ pub fn verify_member_set_update(
             if *new_pk_g == old.pk_g && *new_pk_b == old.pk_b {
                 return bail("member-set update: rotation to the identical keys");
             }
+            // SECURITY (M-1, §Q-3): the rotated-in `pk_g` must not already occupy ANOTHER slot.
+            // The AddCosigner arm below has always rejected a duplicate JOINER; the ROTATE arm did
+            // not, so a rotate-to-duplicate was an EFFECTIVE REMOVAL that walked past the explicit
+            // no-removal rule — the rotated slot's holder can never sign again, and `member_count`
+            // stops counting DISTINCT signers. The identical rule now also runs in-circuit
+            // (`member_set_update_circuit`, `update_channel_tree`) and in the native
+            // `validate_member_set_delta`; keep all four in lockstep — a native/circuit asymmetry
+            // in either direction is its own defect class.
+            if trusted_members
+                .iter()
+                .any(|m| m.slot as usize != slot && m.pk_g == *new_pk_g)
+            {
+                return bail("member-set update: rotated-in pk_g already occupies another slot");
+            }
             // §Q-1 IMKR: the CURRENT key at the slot consents to its own replacement.
             let consent = update.rotation_consent_digest(
                 slot as u8,
@@ -10995,6 +11009,131 @@ mod member_set_update_tests {
             .map(F::from_canonical_u64)
             .collect();
         assert_eq!(proof.public_inputs, expected_pis, "PIs byte-equal to the native mirror");
+    }
+
+    /// Negative (audit M-1): a ROTATE-TO-DUPLICATE is refused at EVERY layer — the co-sign gate,
+    /// the native delta mirror, and (the one that matters) the L1-facing circuit itself.
+    ///
+    /// Slot 1's signing identity is re-pointed at slot 0's key. Nothing about the §Q-3 rules that
+    /// predate M-1 objects: exactly one slot changes, it stays occupied, `regev_pk_digest` is
+    /// preserved, the new `pk_g` is nonzero. Yet slot 1's holder can never sign again — an
+    /// EFFECTIVE REMOVAL past the explicit no-removal rule — and `old_count`/`new_count` stop
+    /// being counts of DISTINCT signers, which is what the IMCM commitments L1 stores assume.
+    ///
+    /// The update is built BY HAND rather than through `propose_rotate_key`, for a reason worth
+    /// recording: `build_record` → `ChannelRecord::validate()` already refuses a duplicate
+    /// `member_pk_gs`, so the honest wallet API cannot even express this. That is exactly why the
+    /// finding is a CIRCUIT-layer one — the circuit never sees a `ChannelRecord`, only `MemberLeaf`
+    /// arrays, so an adversarial prover that skips the wallet reaches the constraint system with
+    /// nothing between it and the gates. `prove_with_public_inputs` reproduces that reach.
+    ///
+    /// Confirmed RED without the fix: reverting the pairwise gate in `member_set_update_circuit`
+    /// makes the final assertion fail (the duplicate rotation PROVES).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn member_set_update_circuit_rejects_rotate_to_duplicate() {
+        use crate::circuits::channel::member_set_update_circuit::{
+            MemberSetUpdateCircuit, MemberSetUpdateCircuitWitness, MemberSetUpdatePublicInputs,
+        };
+        use crate::circuits::validity::block_hash_chain::update_channel_tree::validate_member_set_delta;
+        use crate::common::channel::close_member_set_commitment;
+        let (keys, record, members) = three_member_channel(0x75);
+        let old_leaves = registered_cosigner_leaves(&record, &members).unwrap();
+
+        // The duplicate set: slot 1 takes slot 0's signing identity, keeping its own Regev key.
+        let mut new_members = members.clone();
+        new_members[1].pk_g = members[0].pk_g;
+        new_members[1].pk_b = members[0].pk_b;
+        let mut new_leaves = old_leaves.clone();
+        new_leaves[1].pk_g = old_leaves[0].pk_g;
+        new_leaves[1].pk_b = old_leaves[0].pk_b;
+        assert_eq!(
+            new_leaves[1].regev_pk_digest, old_leaves[1].regev_pk_digest,
+            "regev is preserved — §Q-6 is NOT what rejects this"
+        );
+
+        // The native delta mirror refuses it (and names the duplicate, not some other rule).
+        let err = validate_member_set_delta(&old_leaves, &new_leaves)
+            .expect_err("the native mirror must refuse a rotate-to-duplicate");
+        assert!(err.contains("already occupies slot"), "wrong native reason: {err}");
+
+        // Hand-build the update the wallet API refuses to build, and give it a REAL previous-set
+        // N-of-N over IMMS plus the rotating member's own §Q-1 consent — so nothing about the
+        // signature story is what fails.
+        let new_member_root = {
+            let mut t = MemberTree::init();
+            for l in new_leaves.iter().take(record.member_count as usize) {
+                t.push(l.clone());
+            }
+            Bytes32::from(t.get_root())
+        };
+        let mut update = MemberSetUpdate {
+            channel_id: record.channel_id,
+            set_version: record.set_version + 1,
+            prev_member_root: registered_cosigner_root(&record, &members).unwrap(),
+            new_member_root,
+            op: MemberSetOp::RotateKey {
+                slot: 1,
+                new_pk_g: keys[0].pk_g(),
+                new_pk_b: keys[0].pk_b(),
+                self_sig: Vec::new(),
+            },
+            member_signatures: Vec::new(),
+        };
+        let consent =
+            update.rotation_consent_digest(1, members[1].pk_g, keys[0].pk_g(), keys[0].pk_b());
+        if let MemberSetOp::RotateKey { self_sig, .. } = &mut update.op {
+            *self_sig = sign_digest(keys[1].falcon_key(), &consent);
+        }
+        full_nofn(&mut update, &keys);
+
+        // Layer 1: the co-sign gate refuses, so no honest member ever signs this.
+        assert!(
+            verify_member_set_update(&record, &members, &update).is_err(),
+            "the co-sign gate must refuse a rotate-to-duplicate"
+        );
+
+        // Layer 2: the circuit witness's native mirror refuses.
+        let ctx = FalconProverContext::new();
+        let artifact = prove_member_set_update_aggregate(&ctx, &record, &update)
+            .expect("IMMS aggregate proves — the signatures are genuine");
+        let agg_proof = ctx
+            .proof_from_artifact(&record, update.signing_digest(), &artifact)
+            .expect("artifact verifies against the IMMS digest");
+        let witness = MemberSetUpdateCircuitWitness {
+            channel_id: record.channel_id,
+            set_version: update.set_version,
+            old_leaves: old_leaves.clone(),
+            new_leaves: new_leaves.clone(),
+            recipient: Address::default(),
+            agg_proof,
+        };
+        assert!(
+            witness.expected_public_inputs().is_err(),
+            "the witness's native mirror must refuse the duplicate delta"
+        );
+
+        // Layer 3 — THE ONE THAT MATTERS: the malicious prover computes its own public inputs for
+        // the set it wants and drives the circuit directly. Only the in-circuit pairwise gate can
+        // stop it.
+        let pks = |ls: &[MemberLeaf]| -> [Bytes32; MAX_SIG_CLUSTER] {
+            std::array::from_fn(|i| Bytes32::from(ls[i].pk_g))
+        };
+        let forged = MemberSetUpdatePublicInputs {
+            channel_id: record.channel_id,
+            set_version: update.set_version,
+            old_commitment: close_member_set_commitment(&pks(&old_leaves), 3),
+            new_commitment: close_member_set_commitment(&pks(&new_leaves), 3),
+            old_count: 3,
+            new_count: 3,
+            recipient: Address::default(),
+        };
+        let circuit = MemberSetUpdateCircuit::<F, C, D>::new(&ctx.verifier_data());
+        assert!(
+            circuit.prove_with_public_inputs(&witness, &forged).is_err(),
+            "a rotate-to-duplicate must be UNPROVABLE (M-1): it is a removal in disguise and \
+             would make the IMCM counts stop counting distinct signers"
+        );
     }
 
     /// The ADD shape: a joiner at the boundary, recipient exposed in the PIs.
