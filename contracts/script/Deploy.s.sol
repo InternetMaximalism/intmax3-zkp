@@ -65,7 +65,7 @@ contract Deploy is Script {
             false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         // Defaults to the broadcaster; set BLOCK_PRODUCER when the posting key differs from the deployer.
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);

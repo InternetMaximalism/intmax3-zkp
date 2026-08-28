@@ -224,7 +224,8 @@ contract ReclaimStakeTest is Test {
         _register(".registration2");
         _postRound(2);
         _postRound(3);
-        lastSubId = _postRound(4);
+        // The aggregate validity proof finalizes via sub4, so sub4 must commit the root it proves.
+        lastSubId = _postRound(4, vm.parseJsonBytes32(lc, ".final_state_root"));
     }
 
     function _register(string memory key) internal {
@@ -254,6 +255,15 @@ contract ReclaimStakeTest is Test {
     }
 
     function _postRound(uint256 i) internal returns (uint256 subId) {
+        // Rounds that are never finalized keep the placeholder root — they only need a bond.
+        return _postRound(i, bytes32(0));
+    }
+
+    /// @dev H-5: `finalize` now binds the submission to the state root it was POSTED with, so a
+    ///      round that will later be finalized must commit the root its proof actually proves.
+    ///      Posting `bytes32(0)` and finalizing a different root (as this helper used to do
+    ///      unconditionally) is exactly the unbound-submission defect H-5 closes.
+    function _postRound(uint256 i, bytes32 stateRoot) internal returns (uint256 subId) {
         string memory base = string.concat(".blocks[", vm.toString(i), "]");
         uint256[] memory keyIdsU = FixtureLib.parseUintArray(lc, string.concat(base, ".key_ids"));
         uint32[] memory keyIds = new uint32[](keyIdsU.length);
@@ -267,7 +277,7 @@ contract ReclaimStakeTest is Test {
         });
         subId = rollup.nextSubmissionId();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: STAKE}(sb, bytes32(0), 0, bytes32(0));
+        rollup.postBlockAndSubmit{value: STAKE}(sb, bytes32(0), 0, stateRoot);
     }
 
     function _parseVpis() internal view returns (IntmaxRollup.ValidityPublicInputs memory vpis) {

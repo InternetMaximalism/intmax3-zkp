@@ -242,6 +242,11 @@ contract IntmaxRollup {
         address submitter;    // packed with `finalized` into one slot
         bool    finalized;
         uint64  submittedAtBlock; // Eth block number when submitted
+        // SECURITY (H-5): the state root THIS submission committed to. `commitment` already binds it,
+        // but `finalize` receives only (submissionId, stateRoot, validityPIs, mleProof) — not the
+        // blobHash/proofHash/proofLength needed to recompute `commitment` — so it had no way to tell
+        // which submission a proof belonged to. Stored explicitly so `finalize` can bind the two.
+        bytes32 stateRoot;
     }
 
     struct StakeInfo {
@@ -270,13 +275,16 @@ contract IntmaxRollup {
         uint64 endBlockNumber;
         bytes32 previousBlockHash;
         bytes32 previousDepositHashChain;
-        bytes32 pendingDepositHashChainBefore;
         uint64 postingRoundBefore;
         uint64 postingRoundAfter;
         uint64 processedDepositCountBefore;
         // G6: channel-registration chain snapshot for rollback (mirror of the deposit fields).
         bytes32 previousChannelRegHashChain;
-        bytes32 pendingChannelRegHashChainBefore;
+        // SECURITY (H-1): the `pendingDepositHashChainBefore` / `pendingChannelRegHashChainBefore`
+        // snapshots are RETIRED. They existed only to be restored by `_rollbackBatch`, which was
+        // unsound (a batch never advances those live cumulative accumulators — see the comment in
+        // `_rollbackBatch`). They had no other reader anywhere in the repo, so removing them also
+        // frees a storage slot per submission.
     }
 
     /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
@@ -948,12 +956,10 @@ contract IntmaxRollup {
             endBlockNumber: currentBlockNumber,
             previousBlockHash: previousBlockHash,
             previousDepositHashChain: previousDepositHashChain,
-            pendingDepositHashChainBefore: pendingHashBefore,
             postingRoundBefore: previousPostingRound,
             postingRoundAfter: currentRound,
             processedDepositCountBefore: processedDepositsBefore,
-            previousChannelRegHashChain: previousChannelRegHashChain,
-            pendingChannelRegHashChainBefore: pendingChannelRegBefore
+            previousChannelRegHashChain: previousChannelRegHashChain
         });
     }
 
@@ -1244,7 +1250,8 @@ contract IntmaxRollup {
             commitment: commitment,
             submitter: msg.sender,
             finalized: false,
-            submittedAtBlock: ethBlock
+            submittedAtBlock: ethBlock,
+            stateRoot: stateRoot
         });
 
         emit Submitted(submissionId, msg.sender, blobHash, proofHash, proofLength, stateRoot);
@@ -1281,6 +1288,17 @@ contract IntmaxRollup {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
         if (sub.finalized) return false;
+
+        // SECURITY (H-5: finalize did not bind submissionId to the proof it verifies). Without this,
+        // `submissionId` was used only to look up existence/finalized-ness — nothing tied the proof
+        // to THAT submission. Anyone could finalize submission B with submission A's public proof:
+        // B was marked finalized and its bond refunded although B's own proof was never verified,
+        // and B then became permanently un-slashable (`fraudProof` reverts SubmissionAlreadyFinalized),
+        // which additionally blocks the rollback of every earlier submission (`_truncateSubmissions`
+        // reverts on a finalized entry). `fullVerify` below pins `validityPIs.finalExtCommitment` to
+        // `stateRoot`, so pinning `stateRoot` to the submission's own committed root transitively
+        // binds the verified proof to this submission.
+        if (stateRoot != sub.stateRoot) return false;
 
         bool valid;
         try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
@@ -1775,10 +1793,12 @@ contract IntmaxRollup {
     ///     2. KZG blob binding
     ///     3. PI binding to on-chain state
     ///     4. Proof params binding: blob == abi.encode(mleProof)
+    ///     5. PI preimage binding: mleProof.publicInputs encode keccak256(ValidityPublicInputs)
     ///
-    ///   Fraud confirmed if any of:
-    ///     (a) mleProof.publicInputs don't encode keccak256(ValidityPublicInputs) — PI hash mismatch
-    ///     (b) MLE/WHIR verification fails
+    ///   Fraud confirmed if:
+    ///     MLE/WHIR verification of the committed proof fails
+    ///
+    ///   SECURITY (C-1): 5 is a PRE-CONDITION, never a fraud trigger. See the comment at the check.
     function _verifyFraud(
         uint256 submissionId,
         bytes32 blobVersionedHash,
@@ -1828,14 +1848,35 @@ contract IntmaxRollup {
             return false;
         }
 
+        // 5. PI PREIMAGE binding — `validityPIs` must be THE public inputs of the committed proof.
+        //    SECURITY (C-1: false-fraud conviction of an honest submission): this comparison used to
+        //    live below as a fraud TRIGGER ("the proof's PIs don't encode keccak256(validityPIs) ⇒
+        //    fraud"). That was unsound, because `validityPIs` is caller-supplied and NOT uniquely
+        //    determined by anything the submitter committed to: `validityPIs.prover` is constrained
+        //    by nothing on-chain, and it is a free witness in the validity circuit
+        //    (validity/block_hash_chain/validity_circuit.rs — any address is equally provable; the
+        //    production daemon takes it from the `--validity-prover` CLI flag, so it is NOT the
+        //    submitter's address and cannot be pinned to `sub.submitter`). An attacker could
+        //    therefore take an honest submission's REAL blob bytes and REAL PI values, flip only
+        //    `prover`, and force a guaranteed hash mismatch — confirming "fraud" against a valid
+        //    proof, then truncating every later submission, stealing 90% of each bond and rolling
+        //    the chain back, once per posting round.
+        //
+        //    As a PRECONDITION it is exactly the right check: preconditions 1 and 4 already pin
+        //    `mleProof` to the committed blob bytes, so `mleProof.publicInputs` IS the submitter's
+        //    own committed claim about its proof's public inputs. Requiring the fraud prover to
+        //    supply a keccak PREIMAGE of those limbs is what makes `validityPIs` trustworthy enough
+        //    for checks 3 above to mean anything. A mismatch proves only that the fraud prover
+        //    supplied the wrong preimage — never that the submission is fraudulent.
+        bytes32 piHash = _computeValidityPIHash(validityPIs);
+        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return false;
+
         // ── Fraud detection (any failure = fraud) ────────────────────────
 
-        // (a) piHash mismatch: mleProof.publicInputs must bind keccak256(ValidityPublicInputs).
-        //     SECURITY: this is the soundness anchor that replaces the removed Groth16 PI binding.
-        bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return true;
-
-        // (b) MLE/WHIR verification fails
+        // MLE/WHIR verification fails on the exact bytes the submitter committed.
+        // SECURITY: `mleProof` is pinned to the committed blob by preconditions 1 and 4, so this
+        // verdict is a deterministic function of the submission itself — the fraud prover has no
+        // free input left with which to steer it.
         if (!_verifyMle(mleProof)) return true;
 
         return false;
@@ -1976,8 +2017,19 @@ contract IntmaxRollup {
         }
 
         processedDepositCount = meta.processedDepositCountBefore;
-        _pendingDepositHashChain = meta.pendingDepositHashChainBefore;
-        _pendingChannelRegHashChain = meta.pendingChannelRegHashChainBefore;
+
+        // SECURITY (H-1: a rollback must NOT touch a chain the batch never advanced).
+        // `_pendingDepositHashChain` and `_pendingChannelRegHashChain` are LIVE CUMULATIVE
+        // accumulators owned exclusively by `deposit()` and `registerChannel()`. `_postBlock` only
+        // READS them (see the batchDepositHashChain / batchChannelRegHashChain locals) — it never
+        // writes either. So a batch never advances them, and there is nothing for a rollback to undo.
+        // Restoring the pre-batch snapshots here (as this function used to) could therefore ONLY
+        // erase deposits and channel registrations made AFTER the batch was posted: their ETH stays
+        // in `totalEscrowed` (correctly not rolled back) while the hash chain that entitles anyone to
+        // it is deleted, permanently crediting the funds to nobody. For registrations it also bricked
+        // the channelId forever, because `channelMemberSetCommitment` is not rolled back either, so
+        // the one-time `registerChannel` guard still fires on a retry.
+        // Reachable from a genuine fraud proof and from the permissionless proof-free timeout branch.
     }
 
     /// @dev Credit fraud reward/treasury share to pendingWithdrawals (pull-payment).

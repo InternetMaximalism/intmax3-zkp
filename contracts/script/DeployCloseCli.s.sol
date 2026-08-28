@@ -82,7 +82,7 @@ contract DeployCloseCli is Script {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis, false
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
         // Authorize the block producer used by the CLI withdraw flow (the selected Foundry signer).
         // Defaults to the broadcaster; set BLOCK_PRODUCER to the CLI poster address when they differ.
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
