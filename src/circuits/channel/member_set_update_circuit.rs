@@ -382,6 +382,30 @@ where
             let removed = builder.and(changed_bits[i], new_pk_zero);
             builder.assert_zero(removed.target);
         }
+
+        // SECURITY (M-1, §Q-3): NO DUPLICATE SIGNING IDENTITIES — the changed slot's NEW `pk_g`
+        // must differ from every other slot's. Byte-for-byte the same rule as the in-circuit gate
+        // in `validity::block_hash_chain::update_channel_tree` and the native
+        // `validate_member_set_delta`; all three layers must stay identical.
+        //
+        // What it stops: a rotate-to-duplicate, which re-points slot j at slot k's key and is an
+        // EFFECTIVE REMOVAL — it bypasses the "never a removal" assert directly above, since the
+        // new pk is nonzero yet slot j's original holder can never sign again. It also restores
+        // the property `old_count`/`new_count` are assumed to have: a count of DISTINCT signers.
+        //
+        // Unordered pairs (28 for MAX_SIG_CLUSTER = 8): `sum_changed == 1` is already connected
+        // above, so gating on `changed[i] ∨ changed[k]` selects exactly the pairs containing the
+        // changed slot. Padding slots are included and the comparison stays exact — a changed
+        // slot's new `pk_g` is nonzero (the `removed` assert), padding `pk_g` is the zero hash.
+        for i in 0..MAX_SIG_CLUSTER {
+            for k in (i + 1)..MAX_SIG_CLUSTER {
+                let touches_changed = builder.or(changed_bits[i], changed_bits[k]);
+                let dup =
+                    new_leaf_targets[i].pk_g.is_equal(&mut builder, &new_leaf_targets[k].pk_g);
+                let bad = builder.and(touches_changed, dup);
+                builder.assert_zero(bad.target);
+            }
+        }
         // new_count = old_count + is_add.
         let expected_new_count = builder.add(public_inputs.old_count, is_add.target);
         builder.connect(expected_new_count, public_inputs.new_count);
@@ -504,6 +528,20 @@ where
         let expected = witness
             .expected_public_inputs()
             .map_err(MemberSetUpdateCircuitError::Witness)?;
+        self.prove_with_public_inputs(witness, &expected)
+    }
+
+    /// TEST SEAM (audit M-1). Proves `witness` against CALLER-SUPPLIED public inputs instead of
+    /// the native mirror's — i.e. exactly what a malicious prover does: it never calls
+    /// [`Self::prove`], it computes the PIs for the set it WANTS and drives the circuit directly,
+    /// so `expected_public_inputs`'s `validate_member_set_delta` is not a defence. Used by
+    /// `member_set_update_circuit_rejects_rotate_to_duplicate` to show the IN-CIRCUIT §Q-3 gates
+    /// stand on their own. Every production path goes through [`Self::prove`].
+    pub(crate) fn prove_with_public_inputs(
+        &self,
+        witness: &MemberSetUpdateCircuitWitness<F, C, D>,
+        expected: &MemberSetUpdatePublicInputs,
+    ) -> Result<ProofWithPublicInputs<F, C, D>, MemberSetUpdateCircuitError> {
         let mut pw = PartialWitness::new();
         use plonky2::iop::witness::WitnessWrite as _;
         let _ = pw.set_proof_with_pis_target(&self.agg_proof, &witness.agg_proof);

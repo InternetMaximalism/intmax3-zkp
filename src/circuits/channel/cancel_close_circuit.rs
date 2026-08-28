@@ -344,6 +344,14 @@ where
         // verification does not, and an all-padding agg proof would otherwise make the
         // `agg_message.connect(revived_state_digest)` binding vacuous.
         builder.assert_one(active_bits[0].target);
+        // SECURITY (M-6, the 1-of-N-drain class): revived_member_count >= 2, IN-CIRCUIT — the twin
+        // of the new `assert_one(active_bits[1])` in `close_circuit.rs`. `active_bits[i]` is the
+        // active-prefix indicator `(i < member_count)`, so bit 1 set is exactly `>= 2`. The
+        // `2..=MAX_SIG_CLUSTER` range lived only in the native pre-check in `fill_witness` below,
+        // which a malicious prover skips by driving the circuit directly; a one-signer CANCEL is
+        // as damaging as a one-signer close (it revives a state the cluster never agreed to and
+        // burns the close's freeze nonce). Same registration floor, same layer.
+        builder.assert_one(active_bits[1].target);
 
         // `unallocated_confirmed_incoming` is part of the IMCH preimage; the revived state may have
         // a non-zero value (it is not a close), so we DO NOT force it to zero here (unlike the
@@ -606,10 +614,25 @@ where
         public_inputs: &CancelClosePublicInputs,
         witness_value: &CancelCloseFullWitness<F, C, D>,
     ) -> Result<PartialWitness<F>, CancelCloseCircuitError> {
+        self.fill_witness_inner(public_inputs, witness_value, true)
+    }
+
+    /// TEST SEAM (audit M-6), twin of `close_circuit`'s. `enforce_cosigner_floor = false` drops
+    /// ONLY the native `member_count >= 2` pre-check, so a test can drive the circuit the way a
+    /// malicious prover does — building its own partial witness, with the in-circuit gates as the
+    /// sole judge. The `<= MAX_SIG_CLUSTER` half is structural and never relaxed. The only caller
+    /// passing `false` is `cancel_close_circuit_rejects_one_signer_witness`.
+    fn fill_witness_inner(
+        &self,
+        public_inputs: &CancelClosePublicInputs,
+        witness_value: &CancelCloseFullWitness<F, C, D>,
+        enforce_cosigner_floor: bool,
+    ) -> Result<PartialWitness<F>, CancelCloseCircuitError> {
         let revived = &witness_value.cancel.revived_state;
         let close = &witness_value.cancel.close_intent;
         let member_count = revived.balance_state.member_count as usize;
-        if !(2..=MAX_SIG_CLUSTER).contains(&member_count) {
+        let floor = if enforce_cosigner_floor { 2 } else { 1 };
+        if !(floor..=MAX_SIG_CLUSTER).contains(&member_count) {
             return Err(CancelCloseCircuitError::InvalidMemberAuth(format!(
                 "member_count {member_count} out of range (must be 2..={MAX_SIG_CLUSTER} cosigners)"
             )));
@@ -1043,6 +1066,13 @@ mod tests {
     #[test]
     fn cancel_close_circuit_proves_and_pi_matches() {
         let fx = fixture();
+        // Circuit-size budget: this is the only cancel-close test that builds AND proves, so it is
+        // where the degree is reported. Added constraints must not cross a power-of-two boundary
+        // (the M-6 cosigner-floor gate was checked against this number, before and after).
+        println!(
+            "MEASURE cancel_close_circuit degree=2^{}",
+            fx.cancel_circuit.data.common.degree_bits()
+        );
         let witness = build_full_witness();
         let proof = fx.cancel_circuit.prove(&witness).expect("prove");
         fx.cancel_circuit
@@ -1204,6 +1234,45 @@ mod tests {
             matches!(&result, Err(super::CancelCloseCircuitError::InvalidMemberAuth(m)) if m.contains("distinctness")),
             "duplicate active pk_g must be rejected by the A5 indexed-insertion distinctness check, got: {:?}",
             result.as_ref().err()
+        );
+    }
+
+    /// Negative (audit M-6, the 1-of-N-drain class) — a ONE-SIGNER cancel is UNPROVABLE in-circuit.
+    /// Twin of `channel_close_circuit_rejects_one_signer_witness`; a one-signer cancel revives a
+    /// state the cluster never agreed to and burns the close's freeze nonce, so it needs the same
+    /// floor. The witness is fully honest apart from its width: a real `member_count = 1` revived
+    /// state and a REAL aggregation proof over that one member's genuine Falcon signature, so
+    /// `signer_count == member_count == 1` and only `assert_one(active_bits[1])` can refuse it.
+    ///
+    /// Confirmed RED without the fix: reverting that line makes this proof SUCCEED.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn cancel_close_circuit_rejects_one_signer_witness() {
+        use super::test_fixture::build_full_witness_n;
+        // A violated `assert_one` surfaces as a witness-generation PANIC, not an Err — the same
+        // reason `close_circuit`'s twin test wraps the prove call.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let fx = fixture();
+        let witness = build_full_witness_n(1, 0, 0, 9, 7);
+        assert_eq!(witness.member_auth.len(), 1);
+
+        // The native pre-check still refuses it through the ordinary entry points.
+        assert!(matches!(
+            fx.cancel_circuit.prove(&witness),
+            Err(super::CancelCloseCircuitError::InvalidMemberAuth(_))
+        ));
+
+        // The malicious-prover path: skip the native floor and let the circuit judge.
+        let mut pis = witness.cancel.to_public_inputs().unwrap();
+        pis.member_set_commitment = super::member_set_commitment_for_auth(&witness.member_auth);
+        let pw = fx
+            .cancel_circuit
+            .fill_witness_inner(&pis, &witness, false)
+            .expect("the floor-free fill succeeds — the rejection must come from the CIRCUIT");
+        let result = catch_unwind(AssertUnwindSafe(|| fx.cancel_circuit.data.prove(pw)));
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "a one-signer cancel witness must be UNPROVABLE (M-6)"
         );
     }
 
