@@ -281,23 +281,30 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         manager.submitWithdrawalClaim(ethClaim, tokProof);
     }
 
-    /// TM-16 (§N-6, Phase 5a): the post-close claim's credited token is the PROOF-BOUND base
-    /// tokenIndex (PI limb 56, committed by the anchored incoming tx_hash) — the genesis pin is
-    /// retired. A TOKEN_A claim credits and accrues in TOKEN_A only; the ETH lane is untouched
-    /// (cross-token isolation frame, TM-3).
+    /// TM-16 (§N-6, Phase 5a) subject: the post-close claim's credited token was the PROOF-BOUND
+    /// base tokenIndex. C-2 (audit 2026-08-28): the whole entry point is now disabled — in every
+    /// closeable state the incoming delta is ALREADY inside the receiver's slot ciphertext (a
+    /// nonzero `unallocated_confirmed_incoming` cannot close) while its tx hash is still in the
+    /// accumulator, so the post-close credit is a second payment for one entitlement. TM-16 was
+    /// about WHICH token the second credit landed in, never about whether it should exist. The
+    /// refusal is asserted here so the per-token lane assertions turn red if the stub is removed.
     function test_postCloseClaim_proofBoundToken() external {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
-        manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
-        assertEq(manager.withdrawalCredits(TOKEN_A, bob), 10, "credited in the PROVED token");
-        assertEq(manager.totalWithdrawn(TOKEN_A), 10, "accrued against the token-A budget");
+        MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        manager.submitPostCloseClaim(pc, proof);
+        assertEq(manager.withdrawalCredits(TOKEN_A, bob), 0, "no credit in ANY token lane");
+        assertEq(manager.totalWithdrawn(TOKEN_A), 0, "token-A budget untouched");
         assertEq(manager.withdrawalCredits(0, bob), 0, "ETH lane untouched");
         assertEq(manager.totalWithdrawn(0), 0, "ETH budget untouched");
     }
 
     /// TM-16 negative: a tampered token limb — the claim states TOKEN_A but the proof's PI
-    /// limb 56 carries 0 (genesis) — fails the strict limb bind. Only limb 56 differs.
+    /// limb 56 carries 0 (genesis) — fails the strict limb bind. C-2 (audit 2026-08-28): the
+    /// disabled stub refuses BEFORE the limb bind is reached; kept as a regression fence so
+    /// removing the stub restores the "claim limb mismatch" expectation visibly in the diff.
     function test_postCloseClaim_tamperedTokenLimb_reverts() external {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory genesisVariant =
@@ -306,37 +313,44 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         MleVerifier.MleProof memory proofToken0 = _postCloseClaimProof(genesisVariant);
         ChannelSettlementManager.PostCloseClaim memory claimTokenA =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
-        vm.expectRevert(bytes("claim limb mismatch"));
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(claimTokenA, proofToken0);
     }
 
-    /// TM-16 defense-in-depth: a token the channel never cosigned into its registry is refused
-    /// BEFORE proof verification (the channel can only owe registered tokens) — and would fail
-    /// the zero accrual cap anyway.
+    /// TM-16 defense-in-depth: a token the channel never cosigned into its registry is refused.
+    /// C-2 (audit 2026-08-28): the disabled stub refuses it (and every other input) even earlier.
     function test_postCloseClaim_unregisteredToken_reverts() external {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, 999);
         MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof);
     }
 
-    /// TM-16 cross-token isolation at the accrual cap: a TOKEN_A post-close claim above the
-    /// TOKEN_A fund (40) reverts even though the ETH fund (75) has plenty of headroom — token-t
-    /// claims accrue ONLY against token-t funds (TM-3), and the payout ceiling stays per token.
+    /// TM-16 cross-token isolation at the accrual cap. C-2 (audit 2026-08-28): the post-close leg is
+    /// disabled, so BOTH the over-cap and the exactly-at-cap input are refused — the per-token
+    /// isolation this test guarded is now vacuous on this path and is instead asserted on the
+    /// withdrawal-claim leg, which remains live and carries the same TM-3 accrual code.
     function test_postCloseClaim_perTokenCap_noCrossTokenDraw() external {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory over =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 41, TOKEN_A);
         MleVerifier.MleProof memory overProof = _postCloseClaimProof(over);
-        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(over, overProof);
 
-        // Exactly the token fund fits; the payout is then paid in REAL tokens only.
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 40, TOKEN_A);
-        manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
+        MleVerifier.MleProof memory pcProof = _postCloseClaimProof(pc);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        manager.submitPostCloseClaim(pc, pcProof);
+
+        // The SURVIVING leg still enforces per-token isolation end to end: a TOKEN_A withdrawal
+        // claim at exactly the token fund pays in real TOKEN_A and draws no ETH.
+        ChannelSettlementManager.WithdrawalClaim memory wc =
+            _withdrawalClaimToken(d, USER_B, bob, 40, 1, TOKEN_A);
+        manager.submitWithdrawalClaim(wc, _withdrawalClaimProof(wc));
         _fundAndPullToken(40);
         vm.prank(bob);
         assertEq(manager.claimWithdrawalCredit(TOKEN_A), 40);

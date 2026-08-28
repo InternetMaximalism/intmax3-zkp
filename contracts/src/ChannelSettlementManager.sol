@@ -243,12 +243,26 @@ contract ChannelSettlementManager {
     /// withdrawal is already prevented by the in-circuit nullifier used-sets (check-then-set CEI) at
     /// every payout path, and stale closes by `cancelClose` (C1); its verifier is also a stub.
     error LateOutgoingDebitDisabled();
+    /// Audit 2026-08-28 C-2: `submitPostCloseClaim` is DISABLED — every closeable state has already
+    /// applied the incoming delta into the receiver's slot (`CloseIntent::new` refuses a nonzero
+    /// `unallocated_confirmed_incoming`) while the tx hash remains in the settled-tx accumulator, so
+    /// the withdrawal claim and the post-close claim both succeed on ONE entitlement across two
+    /// disjoint nullifier maps. See the SECURITY block on the stub for the re-enable conditions.
+    error PostCloseClaimDisabled();
     error PartialWithdrawalNotPending();
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
     /// The withdrawal economics do not reproduce the N-of-N-signed IMBD burn descriptor.
     error PartialWithdrawalDescriptorMismatch();
     error PartialWithdrawalNotNewer();
+    /// H-6: a close is FROZEN but not yet settled, so the settlement state version that decides
+    /// whether the burn is already excluded from `channelFundAmounts` is not yet known. Retryable
+    /// once the close finalizes or is cancelled — the pending withdrawal is NOT destroyed.
+    error PartialWithdrawalCloseInProgress();
+    /// H-6: the close that SETTLED is strictly older than the burn's state, so its
+    /// `channelFundAmounts` still contains the burned amount; paying the burn too would draw the
+    /// same value twice out of the rollup escrow.
+    error PartialWithdrawalSupersededByClose();
     /// The claimed payout address is not a registered participant (member or delegate) of this
     /// channel (defence in depth — see `submitPartialWithdrawalIntent`).
     error PartialWithdrawalRecipientNotParticipant();
@@ -638,6 +652,10 @@ contract ChannelSettlementManager {
     ChannelLifecycleStatus public channelStatus;
     uint64 public currentCloseFreezeNonce;
     uint64 public closeRequestedAt;
+    /// @notice H-3: the ABSOLUTE end of the current frozen era's challenge game, anchored at the
+    /// era's FIRST close intent and NOT moved by any replacement. Zero while no intent is pending.
+    /// See `_storePendingClose` for the ladder attack this bounds and the choice of horizon.
+    uint64 public closeChallengeHorizon;
     uint256 public bpBondCredits;
 
     PendingClose public pendingClose;
@@ -1090,6 +1108,12 @@ contract ChannelSettlementManager {
             if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
                 revert InvalidFreezeNonce();
             }
+            // SECURITY (H-3, challenge-window ladder): the era's ABSOLUTE horizon is anchored
+            // HERE — at the first intent — and never again. Anchoring it to `closeRequestedAt`
+            // instead would be strictly worse: nothing bounds how long a griefer may wait before
+            // submitting the first intent, so a first intent landing just under the horizon would
+            // inherit a near-zero challenge window and settle a stale state unopposed.
+            closeChallengeHorizon = uint64(block.timestamp + 2 * uint256(challengePeriod));
         }
 
         bytes32 closeIntentDigest = computeCloseIntentDigest(intent);
@@ -1112,17 +1136,38 @@ contract ChannelSettlementManager {
 
     /// @dev Isolated frame for the 15-field PendingClose construction (keeps `submitCloseIntent`
     /// under the via-IR stack limit once the close path threads `delegateCount`).
+    ///
+    /// SECURITY (H-3 — the challenge-window ladder): this runs on BOTH the first-intent and the
+    /// challenge-replacement branch, so the naive `block.timestamp + challengePeriod` bought every
+    /// legal replacement another FULL window. `_isNewer` only forbids replaying the SAME state; it
+    /// does not stop walking up the version ladder, and §M-7 batching makes intermediate versions
+    /// cheap — so exit was delayable for as many days as there were submittable versions. The
+    /// deadline is now clamped to `closeChallengeHorizon`, an absolute value fixed at the era's
+    /// FIRST intent and never moved by a replacement.
+    ///
+    /// HORIZON = first intent + 2 * challengePeriod. Justification: `challengePeriod` is, by the
+    /// definition at `CHALLENGE_PERIOD_SECS`, the time an honest member needs to observe a pending
+    /// intent, generate an MLE/WHIR proof for a newer state, and land it. An honest member's clock
+    /// starts no later than the era's first intent (they were already warned by `requestClose` a
+    /// full `GRACE_BEFORE_PROCESS_SECS` earlier), so 2x gives them their full budgeted window PLUS
+    /// one entire spare window of replacement headroom — strictly MORE than the single window the
+    /// unladdered path guaranteed. Landing the true newest state ends the game outright
+    /// (`_isNewer` is strict), so the extra window is what a member who was still proving when a
+    /// replacement landed needs. The cap is therefore liveness-restoring without narrowing the
+    /// interval the stale-close defence was sized for.
     function _storePendingClose(
         CloseIntent calldata intent,
         bytes32 closeIntentDigest
     ) internal {
+        uint256 naturalDeadline = block.timestamp + challengePeriod;
+        uint256 horizon = closeChallengeHorizon;
         pendingClose = PendingClose({
             active: true,
             closeNonce: intent.closeNonce,
             finalEpoch: intent.finalEpoch,
             finalSmallBlockNumber: intent.finalSmallBlockNumber,
             closeFreezeNonce: intent.closeFreezeNonce,
-            challengeDeadline: uint64(block.timestamp + challengePeriod),
+            challengeDeadline: uint64(naturalDeadline < horizon ? naturalDeadline : horizon),
             closeIntentDigest: closeIntentDigest,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,
@@ -1163,6 +1208,17 @@ contract ChannelSettlementManager {
         if (request.closeIntentDigest != pendingClose.closeIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
+        // SECURITY (audit 2026-08-28 §5, "Cancel monotonicity" — defence in depth): the cancel
+        // circuit already asserts `close_final_state_version < revived_state_version` with a
+        // U64-correct comparator (`cancel_close_circuit.rs:461-467`) and connects the close operand
+        // into the IMCI recompute that L1 pins to `pendingClose.closeIntentDigest`. That made the
+        // property SINGLE-LAYER: a VK swap, a verifier regression, or a mis-keyed statement would
+        // silently remove the only barrier against cancelling a close with an OLDER state — i.e.
+        // reviving a channel into a stale head. Re-asserted here so the property survives any
+        // failure confined to the proof system. Cheap check BEFORE the expensive verify.
+        if (request.revivedStateVersion <= pendingClose.finalStateVersion) {
+            revert CloseNotNewer();
+        }
         // SECURITY (Finding D): the manager injects the channel's REGISTERED member-set commitment
         // (NOT a caller request field), exactly as the close path does via `_runCloseVerify`. The
         // verifier strict-binds the proof's in-circuit member-set commitment to this value, so the
@@ -1184,6 +1240,65 @@ contract ChannelSettlementManager {
         // Restoring Active ends the frozen era; a future close needs a fresh requestClose()
         // (and therefore a fresh grace window).
         closeRequestedAt = 0;
+        // H-3: the era is over — its absolute challenge horizon must not survive into the next one.
+        closeChallengeHorizon = 0;
+        // ── SECURITY (C-3, audit 2026-08-28 / close-detached-signing-design §8.4 "T-7a"): UNWIND
+        //    the era bump that `requestClose()` made, because this cancel unwinds that close.
+        //
+        //    THE BUG. The close PI is `signedState.close_freeze_nonce + 1`
+        //    (`close_circuit.rs:587-589`) and `submitCloseIntent` demands strict equality with this
+        //    counter. NO shipped code ever advances a `ChannelState.close_freeze_nonce`: the block
+        //    producer and the live-balance service actively REJECT a changed era
+        //    (`block_producer.rs:678,777`, `live_balance_service.rs:1760`), the wallet copies it
+        //    (`wallet_core.rs:2632`), and the only `+ 1` outside `CloseIntent::new` is inside
+        //    `#[cfg(test)]`. So without this restore, ONE cancel leaves the counter at k while
+        //    every producible state still carries k-1: no close intent can ever satisfy the
+        //    equality again, `submitPartialWithdrawalIntent` dies with it, and there is no
+        //    emergency exit — all channel funds permanently locked. And it is an ATTACK, not just a
+        //    footgun: `cancelClose` has no `msg.sender` restriction, a cancel proof needs no key
+        //    material, so a coordinator who withholds a completed signature set for v_{N+1} can let
+        //    an honest member close at v_N and then cancel — one transaction, channel bricked.
+        //
+        //    WHY THE RESTORE IS SOUND, not merely liveness-restoring. The era fence exists so a
+        //    cosignature collected in era k cannot authorise a close in era k+1. Consider what this
+        //    line actually does to the reachable state space: `requestClose` (+1), any number of
+        //    `submitCloseIntent`s (counter untouched), then `cancelClose` (-1) leaves EVERY piece of
+        //    close-lifecycle state exactly as it was before the `requestClose` — counter restored,
+        //    `pendingClose` deleted, status Active, `closeRequestedAt` and the horizon zeroed. The
+        //    round trip is a NO-OP on the machine. Therefore any close an attacker can mount after
+        //    a cancel, they could have mounted instead of ever starting the cancelled attempt: the
+        //    restore grants no capability the era fence was withholding, so no stale-close replay
+        //    becomes possible that was not already in scope for the `_isNewer` challenge game.
+        //
+        //    Two structural facts make that argument tight rather than merely suggestive. (i) The
+        //    cancel circuit's own fence `revived.close_freeze_nonce + 1 == close.close_freeze_nonce`
+        //    (`cancel_close_circuit.rs:470-472`) forces the revived state into the SAME signed era
+        //    as the close it cancels, so a cancel can never carry the channel across an era boundary
+        //    — the counter it unwinds is provably the one its own close consumed. (ii) The cancel
+        //    proof certifies a strictly NEWER signed state at that era exists
+        //    (`cancel_close_circuit.rs:461-467`, re-asserted on-chain above), so the party who
+        //    cancelled demonstrably holds better material than the stale close; if the griefer
+        //    re-closes at the same stale version, that same material answers it again — by
+        //    challenge-replacement inside the (now bounded, H-3) window, which is cheaper than a
+        //    second cancel.
+        //
+        //    REJECTED ALTERNATIVE — a "minimum close state version" latch raised by `cancelClose`
+        //    to `revivedStateVersion`. It looks safer and is strictly worse: satisfying the floor
+        //    afterwards requires the COMPLETED N-of-N set over the revived state, which by
+        //    construction only the canceller holds. In the C-3 attack the canceller IS the
+        //    withholding coordinator, so the latch converts "channel bricked for everyone" into
+        //    "channel closable only by the attacker" — a permanent lockout of every other member,
+        //    with the attacker additionally free to choose the settlement state. That is a worse
+        //    outcome than the bug.
+        //
+        //    Also note the beneficial coupling with H-6: a pending partial withdrawal is no longer
+        //    collateral damage of a close that was cancelled, because no close settled and the burn
+        //    was therefore never re-included in any `channelFundAmounts`.
+        //
+        //    UNDERFLOW: unreachable. `pendingClose.active` (checked above) implies a successful
+        //    `submitCloseIntent`, which implies `ClosePending`, which only `requestClose()` sets —
+        //    and it always bumps first. Solidity 0.8 checked arithmetic is the backstop.
+        currentCloseFreezeNonce -= 1;
         emit CloseCancelled(
             closeIntentDigest,
             request.revivedChannelStateDigest,
@@ -1251,6 +1366,8 @@ contract ChannelSettlementManager {
         // channel-layer (Phase 4+) question, out of L1 scope.
         channelStatus = ChannelLifecycleStatus.Closed;
         closeRequestedAt = 0;
+        // H-3: the era's absolute challenge horizon is consumed with it.
+        closeChallengeHorizon = 0;
 
         emit CloseFinalized(
             pendingClose.closeIntentDigest,
@@ -1413,8 +1530,12 @@ contract ChannelSettlementManager {
         pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
         pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
         pendingPartialWithdrawalEpoch = intent.finalEpoch;
-        // Store the manager era observed at submission, rather than the proof's +1 close nonce.
-        // `requestClose()` increments this value and thereby provides the unilateral veto.
+        // The manager era observed at submission. H-6: this is now a RECORD ONLY — it is no longer
+        // read by `finalizePartialWithdrawal`, because comparing it there gave every member and
+        // every delegate a one-transaction permanent strand of an already-debited burn. The
+        // double-draw it was proxying for is now checked directly against the SETTLED close's
+        // state version; see the SECURITY block in `finalizePartialWithdrawal`. Kept (rather than
+        // removed) so the public getter and the submission-era audit trail are unchanged.
         pendingPartialWithdrawalCloseFreezeNonce = currentCloseFreezeNonce;
 
         emit PartialWithdrawalSubmitted(
@@ -1428,13 +1549,55 @@ contract ChannelSettlementManager {
     function finalizePartialWithdrawal() external {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (block.timestamp <= pendingPartialWithdrawalDeadline) revert ChallengeWindowOpen();
-        // P0-9 / 1-of-N veto: requestClose() advances the era. A pending PW from the previous era
-        // must then fail even though the burn was already excluded from channelFund. The old 12B
-        // no-status-check argument was sound only under the premise that the base payout amount
-        // equalled the channel debit; IMBD now enforces that equality, while this nonce check gives
-        // any one member the deliberately accepted challenge-window veto/grief trade-off.
-        if (pendingPartialWithdrawalCloseFreezeNonce != currentCloseFreezeNonce) {
-            revert InvalidFreezeNonce();
+        // ── SECURITY (H-6, audit 2026-08-28): what this gate protects, and why it is no longer an
+        //    era comparison.
+        //
+        //    THE PROPERTY. The burn is already committed in the N-of-N-signed state, so it is
+        //    debited in-channel and EXCLUDED from that state's `channelFundAmounts`. A close
+        //    settling at a state at-or-after the burn therefore draws the escrow MINUS the burned
+        //    amount, and authorizing the burn's payout on top is exactly correct. A close settling
+        //    at a state BEFORE the burn still carries the burned amount inside
+        //    `channelFundAmounts`; authorizing the payout as well would draw that same value twice
+        //    out of the rollup escrow — once as channel settlement distributed through withdrawal
+        //    claims, once as the burn payout. THAT is the double-draw this gate must prevent, and
+        //    it is a statement about the SETTLED STATE VERSION, not about eras.
+        //
+        //    THE OLD FENCE (`pendingCloseFreezeNonce == currentCloseFreezeNonce`) was a proxy for
+        //    it that over-fired catastrophically: ANY `isMemberRecipient` address — every member
+        //    AND every delegate — could bump the era with one `requestClose()`, and re-submission
+        //    then required a state re-signed in the NEW era, which no shipped code can produce (see
+        //    the C-3 block in `cancelClose`). One transaction, by anyone, permanently stranded an
+        //    already-debited burn — and an honest member merely wanting to close triggered it by
+        //    accident. It vetoed the payout even when the close was later CANCELLED, or when it
+        //    settled at a state that already excluded the burn: in both cases nothing was ever
+        //    drawn twice.
+        //
+        //    THE REPLACEMENT keeps the protection exactly and drops the strand:
+        //      - Active     — no close has settled, no `channelFundAmounts` has been drawn, so no
+        //                     double-draw is possible. Authorize.
+        //      - ClosePending — the settlement version is not yet DECIDED. Refuse WITHOUT
+        //                     destroying the pending state, so this call is simply retried once the
+        //                     close finalizes or is cancelled (both are permissionless). Deferral,
+        //                     not a veto.
+        //      - Closed     — compare against what actually settled, using the same lexicographic
+        //                     `(epoch, stateVersion)` order as `_isNewer`. Refuse only when the
+        //                     settled close is strictly OLDER than the burn's state, i.e. precisely
+        //                     the case where its fund vector still contains the burned amount.
+        if (channelStatus == ChannelLifecycleStatus.Closed) {
+            bool settledBeforeBurn = pendingPartialWithdrawalEpoch > finalizedEpoch ||
+                (pendingPartialWithdrawalEpoch == finalizedEpoch &&
+                 pendingPartialWithdrawalStateVersion > finalizedStateVersion);
+            // RESIDUAL (documented, not silently accepted): a close that settles at a PRE-burn
+            // state does permanently strand this burn, because paying it would be the double-draw
+            // above. Mounting that is not free — it needs a full close proof at a stale state that
+            // survives the whole challenge window unopposed — and in that scenario the ENTIRE
+            // channel has already settled at a stale distribution, of which this burn is a strict
+            // sub-loss. The remedy is the one the design already relies on for stale closes:
+            // challenge-replace it with the newer state (which the burner, by definition, holds),
+            // or `cancelClose` it. There is no gate that can both pay this burn and not double-draw.
+            if (settledBeforeBurn) revert PartialWithdrawalSupersededByClose();
+        } else if (channelStatus != ChannelLifecycleStatus.Active) {
+            revert PartialWithdrawalCloseInProgress();
         }
 
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
@@ -1461,6 +1624,13 @@ contract ChannelSettlementManager {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (request.closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
+        }
+        // SECURITY (audit 2026-08-28 §5, defence in depth — the mirror of the guard in
+        // `cancelClose`): re-assert the in-circuit strict monotonicity on-chain so that a VK swap
+        // or verifier regression cannot make a burn's authorization cancellable with an OLDER
+        // state — which would be a free strand of an already-committed, already-debited burn.
+        if (request.revivedStateVersion <= pendingPartialWithdrawalStateVersion) {
+            revert PartialWithdrawalNotNewer();
         }
 
         // SECURITY: mirrors cancelClose — the N-of-N signed a strictly newer state, proving the
@@ -1562,87 +1732,63 @@ contract ChannelSettlementManager {
         );
     }
 
-    function submitPostCloseClaim(
-        PostCloseClaim calldata claim,
-        MleVerifier.MleProof calldata proof
-    ) external {
-        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
-        if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
-            revert CloseIntentDigestMismatch();
-        }
-        // B-2 (Option B): membership + recipient are PROOF-ENFORCED (see submitWithdrawalClaim). The
-        // post-close proof verifies the receiver's slot leaf (leaf-bound `recipient`, B-1b) is
-        // included at `receiver_member_index` in the signed `finalizedBalanceStateH1`, and binds
-        // `receiver_pk_g` into the settled-tx `tx_hash` accumulator inclusion — so a delegate
-        // receiver is admitted while a non-member has no witness and the payout cannot be redirected.
-        // HAZARD #8: RECOMPUTE the shared-native nullifier (it is NOT a caller-supplied field). The
-        // in-circuit derivation uses the SAME keccak preimage and the proof's PI is strict-bound to
-        // it, so the value passed to the verifier is the one the proof actually committed.
-        bytes32 sharedNativeNullifier = _deriveSharedNativeNullifier(
-            claim.closeIntentDigest,
-            claim.incomingTxHash,
-            claim.receiverPkG
-        );
-        if (usedSharedNativeNullifiers[sharedNativeNullifier]) {
-            revert NullifierAlreadyUsed();
-        }
-        // TM-16 defense in depth (mirrors submitWithdrawalClaim's TM-8 re-check): the claimed
-        // base token must be one of the TFD-bound finalized registry entries — the channel can
-        // only owe tokens it cosigned into its registry. The token is ALSO proof-enforced
-        // (in-circuit: PI limb 56 IS ids limb 5 of the anchored `incomingTxHash` recompute;
-        // verifier: strict limb bind below), and an unregistered token would fail the accrual
-        // cap anyway (`finalizedChannelFundAmount[t] == 0`); this re-check pins it against the
-        // finalized copy at the cap-lookup site too, with a precise error.
-        bool tokenRegistered = false;
-        for (uint256 i = 0; i < finalizedTokenCount; i++) {
-            if (finalizedTokenRegistry[i] == claim.tokenIndex) {
-                tokenRegistered = true;
-                break;
-            }
-        }
-        if (!tokenRegistered) revert TokenRegistryMismatch();
-        if (
-            !verifier.verifyPostCloseClaim(
-                channelId,
-                claim.closeIntentDigest,
-                claim.incomingTxHash,
-                claim.receiverPkG,
-                claim.recipient,
-                sharedNativeNullifier,
-                claim.amount,
-                // Stage 3: the finalized receiver-pk-bind anchor (H1) + source-tx inclusion anchor
-                // (accumulator root). The in-circuit recompute + Merkle inclusion are bound to these.
-                finalizedBalanceStateH1,
-                finalizedSettledTxAccumulatorRoot,
-                // TM-16 (§N-6): the PROOF-BOUND base token (PI limb 56) — committed by the
-                // anchored accumulator leaf, replacing the former genesis-registry[0] pin.
-                claim.tokenIndex,
-                proof
-            )
-        ) revert InvalidPostCloseClaimProof();
-
-        // Cap accrual against the (intent-declared) per-token channel fund, mirroring
-        // submitWithdrawalClaim (TM-3: token-t claims accrue ONLY against token-t funds).
-        // SECURITY: post-close claims share the SAME per-token accrual budget as withdrawal
-        // claims — without this, post-close claims could mint unbounded credits past the channel
-        // fund. An unfunded-but-registered token fails closed here for any nonzero amount
-        // (`finalizedChannelFundAmount[t] == 0`). (The authoritative ceiling is still
-        // `receivedChannelFunds[t]`, enforced at payout.)
-        uint256 newTotalWithdrawn = totalWithdrawn[claim.tokenIndex] + claim.amount;
-        if (newTotalWithdrawn > finalizedChannelFundAmount[claim.tokenIndex]) {
-            revert WithdrawalCapExceeded();
-        }
-        totalWithdrawn[claim.tokenIndex] = newTotalWithdrawn;
-        usedSharedNativeNullifiers[sharedNativeNullifier] = true;
-        withdrawalCredits[claim.tokenIndex][claim.recipient] += claim.amount;
-        emit PostCloseClaimAccepted(
-            claim.closeIntentDigest,
-            sharedNativeNullifier,
-            claim.receiverPkG,
-            claim.recipient,
-            claim.amount,
-            claim.tokenIndex
-        );
+    /// @notice DISABLED (audit 2026-08-28 finding C-2). Permanently reverts.
+    /// @dev SECURITY: this path DOUBLE-CREDITS an inter-channel transfer that the closing state has
+    ///      ALREADY applied. Two facts, both verified against the shipped Rust, make it
+    ///      unconditionally exploitable rather than a corner case:
+    ///
+    ///        1. EVERY closeable state has all incoming deltas applied. `CloseIntent::new` refuses a
+    ///           nonzero residue outright — `src/common/channel.rs:1080-1083`
+    ///           ("close requires unallocated_confirmed_incoming = 0").
+    ///        2. The accumulator leaf SURVIVES that application. `src/wallet_core.rs:4218`
+    ///           (`let bundle_accumulator = import_accumulator.clone();`) — the receive's accounting
+    ///           leg keeps the very accumulator the import leg pushed the tx hash into, because the
+    ///           logical transfer must be inserted exactly once.
+    ///
+    ///      So in every state that can reach `finalizeClose`, the receiver's slot ciphertext already
+    ///      CONTAINS the delta and its `tx_hash` is still inside `finalizedSettledTxAccumulatorRoot`.
+    ///      `submitWithdrawalClaim` then credits the decrypted slot balance (delta included) and
+    ///      `submitPostCloseClaim` credits the same delta a second time. Nothing stops it: the two
+    ///      nullifier maps are disjoint (`usedWithdrawalNullifiers` vs `usedSharedNativeNullifiers`)
+    ///      over different keccak domains (IMW2 vs IMCK), and the post-close circuit
+    ///      (`src/circuits/channel/post_close_claim_circuit.rs`) has no "this delta is unapplied"
+    ///      gate to omit. The shared `totalWithdrawn` budget is not a defence — it is a SHARED pot,
+    ///      so the theft simply lands on whichever co-member claims last
+    ///      (`WithdrawalCapExceeded`). No collusion, repeatable per absorbed incoming transfer.
+    ///
+    ///      NOT DETECTABLE ON-CHAIN, which is why this is a disable and not a new guard: the manager
+    ///      sees an opaque per-(slot, token) amount on one path and an opaque per-(tx, receiver)
+    ///      amount on the other, with no committed value linking "this slot's claimed balance" to
+    ///      "this incoming tx". Nothing in the manager's state can decide whether the slot amount
+    ///      already contained the delta.
+    ///
+    ///      NOTHING LEGITIMATE IS LOST. The interrupted-receive scenario this path exists for leaves
+    ///      `unallocated_confirmed_incoming != 0`, and such a state cannot close at all (fact 1), so
+    ///      the entry point has no reachable honest use today.
+    ///
+    ///      TO RE-ENABLE, one of these must first exist — a guard here cannot substitute for either:
+    ///        (a) an UNAPPLIED-INCOMING value committed inside H1, which the claim proof must open,
+    ///            so the manager can require the claimed delta to be part of a residue the balance
+    ///            did not absorb. Today H1 carries no such field: the preimage is
+    ///            `src/common/balance_state.rs:501-529`, verified field-by-field, and
+    ///            `unallocated_confirmed_incoming` is absent from it — so no signed commitment
+    ///            carries the information a fix would need; or
+    ///        (b) an APPLIED / UNAPPLIED SPLIT of the settled-tx accumulator, with this claim proving
+    ///            inclusion in the unapplied side only — which requires the receive's accounting leg
+    ///            to stop reusing the import's accumulator (fact 2) and both roots to be signed.
+    ///
+    ///      Disabled the way `submitSpecialClose` and `submitLateOutgoingDebitCorrection` are: the
+    ///      signature and ABI selector are kept so callers fail closed with a clear error, and the
+    ///      verifier statement (`ChannelSettlementVerifier.verifyPostCloseClaim`), its VK, the
+    ///      `_deriveSharedNativeNullifier` recompute and the `usedSharedNativeNullifiers` map are
+    ///      left in place but unreachable, ready for whichever of (a)/(b) lands.
+    ///      NOTE: `script/RunClose.s.sol:submitPostCloseClaimStep` will now revert at run time; it
+    ///      is a manual operator step, referenced by no test.
+    function submitPostCloseClaim(PostCloseClaim calldata, MleVerifier.MleProof calldata)
+        external
+        pure
+    {
+        revert PostCloseClaimDisabled();
     }
 
     /// @notice Pull this channel's native ETH from the rollup into the manager. Permissionless: it
