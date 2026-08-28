@@ -430,13 +430,23 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.requestClose();
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
 
-        // The pending proof belongs to era 0; requestClose advanced the live era to 1.
+        // H-6 (audit 2026-08-28): a frozen-but-unsettled close still blocks the payout, because the
+        // settlement state version that decides whether the burn is already excluded from
+        // `channelFundAmounts` is not yet known. The error is now the RETRYABLE
+        // `PartialWithdrawalCloseInProgress` rather than `InvalidFreezeNonce` — the pending
+        // withdrawal is deferred, not destroyed. (Before the fix this was a permanent strand: the
+        // era could never be satisfied again, since no shipped code advances
+        // `ChannelState.close_freeze_nonce`. The retryability is asserted in
+        // `CloseLifecycleHardening.t.sol`.)
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
+        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCloseInProgress.selector);
         manager.finalizePartialWithdrawal();
 
         bytes32 authDigest = _expectedAuthDigest(_authorizedWithdrawal());
         assertFalse(registry.partialWithdrawalAuthorized(authDigest));
+        // The pending withdrawal SURVIVES the refusal — that is the difference between a deferral
+        // and the old permanent veto.
+        assertTrue(manager.partialWithdrawalPending(), "burn authorization not destroyed");
     }
 
     function test_submitPartialWithdrawal_reverts_wrongEra() public {

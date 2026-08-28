@@ -96,25 +96,35 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     // SHARED accrual budget: withdrawal + post-close claims draw from ONE pool.
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// A withdrawal claim (40) and a post-close claim (40) together exceed the 75 declared fund →
-    /// the second accrual reverts WithdrawalCapExceeded. Confirms `totalWithdrawn` is the SHARED
-    /// budget across both claim kinds (a regression that split them would let claims mint > fund).
+    /// C-2 (audit 2026-08-28): this test's original subject was that `totalWithdrawn` is a budget
+    /// SHARED by the withdrawal and post-close legs. That sharing was never a defence — it is a
+    /// shared pot, so a post-close double-credit is not refused, it simply displaces whichever
+    /// co-member claims last (the loss surfaces as someone else's `WithdrawalCapExceeded`). The
+    /// post-close leg is disabled, so what is asserted now is that it accrues NOTHING at all, and
+    /// that the surviving withdrawal leg still enforces the cap on its own.
     function test_shared_accrual_budget_withdrawal_plus_postclose() external {
         bytes32 d = _finalizeDefault(); // fund = 75
         _submitWd(d, USER_A, alice, 40); // totalWithdrawn = 40
         assertEq(manager.totalWithdrawn(0), 40);
 
-        // Post-close claim to member B for 40 → 40 + 40 = 80 > 75 → reverts. Build the proof BEFORE
-        // expectRevert (proof building does view calls that would otherwise consume the expectation).
+        // Build the proof BEFORE expectRevert (proof building does view calls that would otherwise
+        // consume the expectation).
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("incoming_tx_1"), USER_B, bob, 40);
         MleVerifier.MleProof memory pcProof = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, pcProof);
+        assertEq(manager.totalWithdrawn(0), 40, "the disabled leg accrues nothing");
 
-        // 35 fits (40 + 35 == 75 exactly).
-        _submitPc(d, keccak256("incoming_tx_1"), USER_B, bob, 35);
-        assertEq(manager.totalWithdrawn(0), 75, "shared budget filled exactly to the fund cap");
+        // The cap still binds on the leg that remains: 40 + 36 > 75 is refused, 40 + 35 == 75 fits.
+        ChannelSettlementManager.WithdrawalClaim memory over =
+            _withdrawalClaim(d, USER_B, bob, 36);
+        MleVerifier.MleProof memory overProof = _withdrawalClaimProof(over);
+        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        manager.submitWithdrawalClaim(over, overProof);
+
+        _submitWd(d, USER_B, bob, 35);
+        assertEq(manager.totalWithdrawn(0), 75, "budget filled exactly to the fund cap");
     }
 
     /// Boundary: accrual is allowed up to EXACTLY the fund and one wei more reverts.

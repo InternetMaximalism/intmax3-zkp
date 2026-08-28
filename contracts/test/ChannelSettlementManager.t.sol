@@ -1220,7 +1220,14 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(manager.closeRequestedAt(), 0);
 
         // Re-closing straight away is barred: the channel is Active again.
-        ChannelSettlementManager.CloseIntent memory reclose = _intent(2, 10, 30, 2);
+        //
+        // C-3 (audit 2026-08-28): the re-close intent now carries era 1, not era 2. That is the
+        // whole point of the fix — era 1 is the ONLY era a real close proof can ever carry, because
+        // the close PI is `signedState.close_freeze_nonce + 1` and no shipped code advances a
+        // `ChannelState.close_freeze_nonce` past 0. This test previously built an era-2 intent,
+        // which only a `#[cfg(test)]` helper can produce, and so hid the deadlock it was walking
+        // straight through.
+        ChannelSettlementManager.CloseIntent memory reclose = _intent(2, 10, 30, 1);
         MleVerifier.MleProof memory recloseProof = _closeProof(reclose);
         vm.expectRevert(ChannelSettlementManager.CloseNotRequested.selector);
         manager.submitCloseIntent(reclose, recloseProof);
@@ -1228,7 +1235,7 @@ contract ChannelSettlementManagerTest is Test {
         // A fresh requestClose starts a fresh grace window.
         vm.prank(bob);
         manager.requestClose();
-        assertEq(manager.currentCloseFreezeNonce(), 2);
+        assertEq(manager.currentCloseFreezeNonce(), 1);
         vm.expectRevert(ChannelSettlementManager.GracePeriodNotElapsed.selector);
         manager.submitCloseIntent(reclose, recloseProof);
 
@@ -1240,6 +1247,10 @@ contract ChannelSettlementManagerTest is Test {
         );
     }
 
+    /// C-2 (audit 2026-08-28): the withdrawal leg is unchanged and still credits; the post-close leg
+    /// is now a permanently reverting stub, because in EVERY closeable state the incoming delta has
+    /// already been applied into the receiver's slot while its tx hash remains in the accumulator,
+    /// so the two legs would credit ONE entitlement twice across two disjoint nullifier maps.
     function test_submit_finalize_withdraw_and_post_close_claim() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
@@ -1277,10 +1288,14 @@ contract ChannelSettlementManagerTest is Test {
                 amount: 5,
                 tokenIndex: 0
             });
-        manager.submitPostCloseClaim(postCloseClaim, _postCloseClaimProof(postCloseClaim));
+        // Precompute the proof BEFORE expectRevert: the builder makes external view calls that
+        // would otherwise consume the expectation.
+        MleVerifier.MleProof memory pcProof = _postCloseClaimProof(postCloseClaim);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        manager.submitPostCloseClaim(postCloseClaim, pcProof);
 
         assertEq(manager.withdrawalCredits(0, alice), 30);
-        assertEq(manager.withdrawalCredits(0, bob), 5);
+        assertEq(manager.withdrawalCredits(0, bob), 0, "the double-credit path is disabled");
     }
 
     /// Delegate account (Phase 4 / DA4): a DELEGATE is registered for the WITHDRAWAL path (its
@@ -1436,9 +1451,16 @@ contract ChannelSettlementManagerTest is Test {
             uint256(manager.channelStatus()),
             uint256(ChannelSettlementManager.ChannelLifecycleStatus.Active)
         );
-        assertEq(manager.currentCloseFreezeNonce(), 1);
+        // C-3 (audit 2026-08-28): the cancel UNWINDS `requestClose`'s era bump. Before the fix this
+        // asserted 1 — i.e. it pinned the deadlock: the counter stayed one era ahead of every
+        // producible signed state, so no later close intent could ever satisfy the strict equality.
+        assertEq(manager.currentCloseFreezeNonce(), 0, "cancel restores the pre-freeze era");
         assertEq(manager.closeRequestedAt(), 0);
-        assertTrue(manager.isNativeSendAllowed(1));
+        assertEq(manager.closeChallengeHorizon(), 0, "H-3 horizon is cleared with the era");
+        // A shipped wallet state carries era 0 (nothing in the tree ever advances
+        // `ChannelState.close_freeze_nonce`), so native sends must be live again at 0, not at 1.
+        assertTrue(manager.isNativeSendAllowed(0));
+        assertFalse(manager.isNativeSendAllowed(1));
     }
 
     /// Finding D (member binding): a cancel proof whose `memberSetCommitment` limbs do NOT equal the
@@ -1681,7 +1703,11 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(alice.balance, 0, "no over-cap payout");
     }
 
-    /// submitPostCloseClaim now shares the channel-fund accrual budget (previously uncapped).
+    /// C-2 (audit 2026-08-28): `submitPostCloseClaim` used to share the channel-fund accrual budget
+    /// (this test's original subject). The shared budget was never a DEFENCE against the
+    /// double-credit — it is a shared pot, so the second credit simply displaced whichever co-member
+    /// claimed last — and the entry point is now disabled outright. The refusal is asserted at the
+    /// same over-cap input, so the test still fails if the stub is ever removed without a fix.
     function test_p3_submitPostCloseClaim_capEnforced() external {
         bytes32 d = _finalizeDefault();
         _submitWd(d, USER_A, alice, 70); // totalWithdrawn = 70 (≤ 75)
@@ -1696,8 +1722,9 @@ contract ChannelSettlementManagerTest is Test {
         // Precompute the proof BEFORE expectRevert: vm.expectRevert applies to the next external
         // call, which would otherwise be the view calls that assemble the proof.
         MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof);
+        assertEq(manager.totalWithdrawn(0), 70, "no accrual on the disabled path");
     }
 
     /// A reentering recipient cannot double-withdraw: nonReentrant + CEI make the reentrant call
@@ -2426,10 +2453,11 @@ contract ChannelSettlementManagerTest is Test {
         fresh.initializePostCloseClaimVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
     }
 
-    /// Negative (#8) — double-claim: the SAME derived shared_native_nullifier cannot be used twice.
-    /// The nullifier is RECOMPUTED by the manager from (closeIntentDigest, incomingTxHash,
-    /// receiverPkG), so re-submitting the same (digest, tx, receiver) reverts NullifierAlreadyUsed —
-    /// even though the caller no longer supplies the nullifier.
+    /// C-2 (audit 2026-08-28) — supersedes the former "#8 double-claim within the post-close map"
+    /// test. The `usedSharedNativeNullifiers` replay guard it exercised was never the binding
+    /// constraint: the theft did not need to reuse a post-close nullifier at all, because the FIRST
+    /// post-close claim already credits a delta the withdrawal claim credited under a DIFFERENT
+    /// nullifier map (IMW2 vs IMCK). The entry point is disabled, so even the first call reverts.
     function test_pcclaim_doubleClaim_reverts() external {
         bytes32 d = _finalizeDefault();
         ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
@@ -2440,18 +2468,22 @@ contract ChannelSettlementManagerTest is Test {
             amount: 5,
             tokenIndex: 0
         });
-        manager.submitPostCloseClaim(pc, _postCloseClaimProof(pc));
-        assertEq(manager.withdrawalCredits(0, bob), 5);
+        MleVerifier.MleProof memory proof1 = _postCloseClaimProof(pc);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
+        manager.submitPostCloseClaim(pc, proof1);
+        assertEq(manager.withdrawalCredits(0, bob), 0, "not even the FIRST post-close credit lands");
 
-        // Same claim → same recomputed nullifier → rejected.
+        // And the second call is refused identically — the disable is unconditional, not a
+        // once-per-nullifier guard.
         MleVerifier.MleProof memory proof2 = _postCloseClaimProof(pc);
-        vm.expectRevert(ChannelSettlementManager.NullifierAlreadyUsed.selector);
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof2);
     }
 
-    /// Negative (#8) — manager passes the RECOMPUTED nullifier to the verifier: a proof bound to a
-    /// DIFFERENT (attacker-picked) shared_native_nullifier than the recomputed one is rejected by
-    /// the strict limb bind. Confirms the manager cannot be made to bind an opaque nullifier.
+    /// Negative (#8) — the manager must never bind an attacker-picked shared_native_nullifier. C-2
+    /// (audit 2026-08-28): the entry point is disabled, so the refusal now happens BEFORE the strict
+    /// limb bind is reached. Kept as a regression fence: if the stub is removed, this reverts with
+    /// "claim limb mismatch" again rather than passing, and the mismatch is visible in the diff.
     function test_pcclaim_forgedNullifier_reverts() external {
         bytes32 d = _finalizeDefault();
         ChannelSettlementManager.PostCloseClaim memory pc = ChannelSettlementManager.PostCloseClaim({
@@ -2470,7 +2502,7 @@ contract ChannelSettlementManagerTest is Test {
             manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
         );
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(limbs);
-        vm.expectRevert(bytes("claim limb mismatch"));
+        vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof);
     }
 }
