@@ -353,14 +353,22 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
                 "exit from a closed channel is bricked"
             );
         }
-        if (handler.feasiblePostClose() > 0) {
-            assertGt(
-                handler.succeededPostClose(), 0,
-                "I6 LIVENESS: submitPostCloseClaim() was called with an amount that fit under the "
-                "remaining accrual ceiling and STILL never once succeeded -- a transfer that landed "
-                "after the close snapshot can never be recovered"
-            );
-        }
+        // C-2 (audit28-08-2026, CRITICAL): `submitPostCloseClaim` is DELIBERATELY disabled — in
+        // every closeable state the incoming delta has already been credited into the receiver's
+        // slot (a close requires `unallocated_confirmed_incoming == 0`) while its tx hash is still
+        // in the settled-tx accumulator, so the path double-credited one entitlement across two
+        // disjoint nullifier domains. The liveness floor this replaces asserted the OPPOSITE — that
+        // the path must succeed — and would now fail by design.
+        //
+        // This assertion PINS THE DISABLE: it fails the moment the path starts succeeding again,
+        // so re-enabling `submitPostCloseClaim` without first landing an unapplied-incoming
+        // commitment in H1 (or an applied/unapplied accumulator split) trips the invariant suite
+        // rather than silently restoring the double-claim.
+        assertEq(
+            handler.succeededPostClose(), 0,
+            "C-2: submitPostCloseClaim() SUCCEEDED -- the double-credit path is supposed to be "
+            "permanently disabled; re-enabling it requires an unapplied-incoming commitment in H1"
+        );
 
         // 4. The property the whole suite is FOR: real ETH reached a real member.
         assertGt(
