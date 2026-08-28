@@ -111,16 +111,41 @@ contract MultiTokenEscrowTest is Test {
 
         MleVerifier.MleProof memory mleProof = _defaultMleProof();
         finalizedRoot = keccak256("mt_finalized_state");
-        // vpis computed BEFORE posting so blockHashChainAt[0]=0 and finalBlockNumber=0 match.
+
+        uint32[] memory ids0 = new uint32[](1);
+        ids0[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch0 = new IntmaxRollup.SubBlock[](1);
+        batch0[0] = IntmaxRollup.SubBlock({
+            channelId: 1,
+            timestamp: 100,
+            txTreeRoot: bytes32(uint256(0xabc)),
+            keyIds: ids0
+        });
+
+        // SECURITY (H-5/B-5): `finalize` pins `finalBlockNumber` to the batch's own
+        // `endBlockNumber`, so the old "compute the vpis BEFORE posting, when everything is a
+        // genesis zero" convention no longer produces acceptable PIs. Replay the exact batch
+        // against a state snapshot to learn what the real post will produce, then rewind.
         IntmaxRollup.ValidityPublicInputs memory vpis = IntmaxRollup.ValidityPublicInputs({
             initialBlockNumber: 0,
             initialBlockChain: rollup.blockHashChainAt(0),
             initialExtCommitment: rollup.latestFinalizedStateRoot(),
-            finalBlockNumber: rollup.blockNumber(),
-            finalBlockChain: rollup.blockHashChain(),
+            finalBlockNumber: 0,
+            finalBlockChain: bytes32(0),
             finalExtCommitment: finalizedRoot,
             prover: address(0)
         });
+        {
+            uint256 snap = vm.snapshotState();
+            bytes32[] memory probeBlobs = new bytes32[](1);
+            probeBlobs[0] = keccak256("mt_blob_probe");
+            vm.blobhashes(probeBlobs);
+            vm.deal(address(this), address(this).balance + 1 ether);
+            rollup.postBlockAndSubmit{value: 1 ether}(batch0, keccak256("probe"), 1, finalizedRoot);
+            vpis.finalBlockNumber = rollup.blockNumber();
+            vpis.finalBlockChain = rollup.blockHashChain();
+            vm.revertToState(snap);
+        }
         bytes32 piHash = keccak256(
             abi.encodePacked(
                 vpis.initialBlockNumber,
@@ -137,18 +162,9 @@ contract MultiTokenEscrowTest is Test {
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = keccak256("mt_blob");
         vm.blobhashes(blobs);
-        uint32[] memory ids = new uint32[](1);
-        ids[0] = 1;
-        IntmaxRollup.SubBlock[] memory batch = new IntmaxRollup.SubBlock[](1);
-        batch[0] = IntmaxRollup.SubBlock({
-            channelId: 1,
-            timestamp: 100,
-            txTreeRoot: bytes32(uint256(0xabc)),
-            keyIds: ids
-        });
         vm.deal(address(this), 10 ether);
         rollup.postBlockAndSubmit{value: 1 ether}(
-            batch, keccak256("proof"), 1, finalizedRoot
+            batch0, keccak256("proof"), 1, finalizedRoot
         );
         assertTrue(rollup.finalize(0, finalizedRoot, vpis, mleProof), "finalize must succeed");
     }
