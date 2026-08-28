@@ -23,11 +23,12 @@ command -v jq >/dev/null || fail "jq is required to parse \`forge test --json\`"
 cd "$(git rev-parse --show-toplevel)/contracts"
 
 # ── Floors ──────────────────────────────────────────────────────────────────────────────────────
-# Measured at 69a8599: 309 tests across 21 suites, 0 skipped. The floors are deliberately the
-# measured values, not round numbers: DELETING a test is as much a regression as failing one, and
-# this repo has a history of coverage silently evaporating. Raise them when tests are added.
-MIN_TOTAL_TESTS=309
-MIN_SUITES=21
+# Measured at audit28-08-2026 M-3/M-11 remediation: 335 tests across 23 suites, 0 skipped
+# (was 309/21 at 69a8599). The floors are deliberately the measured values, not round numbers:
+# DELETING a test is as much a regression as failing one, and this repo has a history of coverage
+# silently evaporating. Raise them when tests are added.
+MIN_TOTAL_TESTS=335
+MIN_SUITES=23
 
 # Suites that exist specifically to guard a defect that shipped. Each is named with the class it
 # covers, and each MUST report at least this many passing tests. A rename, a deletion, or a
@@ -47,12 +48,21 @@ MIN_SUITES=21
 #                       what turns that into a failure instead of a green no-op.
 #   MleE2E/MleFinalizeE2E
 #                     — real MLE/WHIR verification of the validity/finalize path.
+#   MemberSetUpdateE2E
+#                     — audit28-08-2026 M-3/M-11. The ONLY real-PI-vector <-> Solidity-limb join
+#                       outside the close statement: `applyMemberSetUpdate` against a REAL
+#                       MemberSetUpdateCircuit proof, plus the two tests that check the msu VK and
+#                       the close VK genuinely share the WHIR rail that
+#                       `ChannelSettlementVerifier._verifyMsuMle` substitutes wholesale and never
+#                       checks on chain. Until this line existed the whole file could be deleted
+#                       while CI stayed green, and the rail-agreement assertions ran nowhere.
 #
 # `suite-key<TAB>minimum-tests`. A plain list rather than an associative array on purpose: macOS
 # ships bash 3.2, and a CI guard nobody can run locally before pushing is a guard people route
 # around.
 REQUIRED_SUITES="\
-test/DeployGuards.t.sol:DeployGuardsTest	24
+test/DeployGuards.t.sol:DeployGuardsTest	27
+test/MemberSetUpdateE2E.t.sol:MemberSetUpdateE2ETest	8
 test/ClaimMleVerify.t.sol:ClaimMleVerifyTest	4
 test/ExponentiationGate.t.sol:ExponentiationGateTest	13
 test/ExponentiationGateAdversarial.t.sol:ZZAdversarialExpProbe	10

@@ -553,40 +553,52 @@ Response: { authDigest: string }
 **Inputs:** (none — uses on-chain state)
 **Outputs:** `{ authDigest: string }`
 
-**Current status: AUTHORIZATION ONLY — NO PAYOUT ON ANY CHAIN.**
+**Current status: AUTHORIZATION *AND* PAYOUT — the payout leg landed 2026-08-28.**
 
-Read this before relying on the rows below: they describe what EXISTS, not an
-end-to-end capability. A partial withdrawal authorizes on chain and then stops.
-No ETH or ERC-20 leaves the rollup on this path today.
+*Corrected 2026-08-28 (audit28-08-2026 §7, "doc drift, reversed"). Everything
+below this line used to say the opposite: "AUTHORIZATION ONLY — NO PAYOUT ON ANY
+CHAIN", `pw-finalize` "exits 1 by design", the relay "returns 501", and
+"`cmd_partial_withdraw` has never been written". All four statements described a
+system STRICTER than the code, which is the more dangerous direction of drift —
+a reader trusting it would have believed an exit path was closed while it was in
+fact paying out. Verified against the code before rewriting.*
 
-- CLI: `pw-finalize` — implemented, and **exits 1 by design after recording the
-  authorization**. That is fail-closed, not a bug.
-- Relay: `POST /api/pw-finalize` — returns **501** with
-  `{authorized: true, paidOut: false, authDigest}` and marks the ticket
-  `settle_blocked` (never the terminal `settle_done`).
+- CLI: `pw-finalize` — implemented, and it now **runs the payout leg** rather
+  than exiting after the authorization (`src/bin/channel_member.rs`, the
+  `run_partial_withdrawal_payout` call at the end of the command).
+- Relay: `POST /api/v1/channel/:ch/partial-withdrawal/finalize` — stages the
+  daemon's payout artifacts, invokes the CLI, marks the ticket the terminal
+  `settle_done`, and returns `{ok: true, authDigest, paidOut: true}`
+  (`api/routes/partial-withdrawal.js`). The combined `.../settle` route does the
+  same and also returns `paidOut: true`. No 501 on either.
 - Contract: `finalizePartialWithdrawal()`, `claimWithdrawalCredit()` — implemented.
-- **Payout: NOT IMPLEMENTED.** `IntmaxRollup.claimAuthorizedWithdrawal` was
-  DELETED in `42640f1` because it paid the GLOBAL escrow against the
-  authorization alone, with no withdrawal proof — and since
-  `submitPartialWithdrawalIntent` binds only `auxData`, amount and recipient
-  were caller-chosen, so one valid close proof for one's OWN channel could drain
-  every channel's ETH (`doc/tasks/pw-auth-threat-model.md`). Its proof-backed
-  replacement, `cmd_partial_withdraw`, has never been written.
+- **Payout: IMPLEMENTED, and deliberately NOT a revival of the deleted door.**
+  `IntmaxRollup.claimAuthorizedWithdrawal` was DELETED in `42640f1` because it
+  paid the GLOBAL escrow against the authorization alone, with no withdrawal
+  proof — and since `submitPartialWithdrawalIntent` binds only `auxData`, amount
+  and recipient were caller-chosen, so one valid close proof for one's OWN
+  channel could drain every channel's ETH
+  (`doc/tasks/pw-auth-threat-model.md`). **It is still deleted.** Payout now goes
+  through `withdrawNative` / `withdrawERC20`, whose leaf comes from a VERIFIED
+  base-layer withdrawal proof built by the resident live service against the
+  durable base history (`LiveBalanceService::burn_payout_artifacts`); the
+  on-chain authorization is only a SECOND FACTOR on that leaf, so it can veto a
+  payout but never supply one.
+- Driver: `run_partial_withdrawal_payout` is crash-safe per the protocol
+  documented on `contracts/script/RunPartialWithdrawalPayout.s.sol` — dry-run for
+  the exact calldata, persist a `BroadcastIntent` (caller, nonce, calldata hash,
+  pre-payout credit) in the durable payout store, send at that pinned nonce, then
+  confirm with the receipt plus three on-chain observations (authorization,
+  finalized anchor, used nullifier) and the exact credit delta. Every step is
+  idempotent; a crashed run re-enters at the recorded phase.
 
-Two blockers stand in front of that replacement, both recorded at
-`src/bin/channel_member.rs:6512`: `cmd_pw_submit` invents
-`nullifier = keccak(tx_leaf ‖ pre_burn_chain)` where a provable leaf needs
-`settled_transfer.nullifier()`; and `base Transfer.amount == the channel-layer
-debit` is still only a CO-SIGNER ASSUMPTION, not an in-circuit equality
-(audit F-AUX-1). Design in progress:
-`doc/tasks/partial-withdrawal-payout-design.md`.
-
-**Full withdrawal (close → settle → withdraw → claim) is the working exit path.**
+Full withdrawal (close → settle → withdraw → claim) remains the other working
+exit path.
 
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/partial-withdrawal/finalize
-Response: { ok: true, authDigest: string }
+Response: { ok: true, authDigest: string, paidOut: true }
 ```
 
 ---
@@ -1203,8 +1215,11 @@ Response: { state: <CosignedState>, ticket: <Ticket> }
 Phase 2 — Settle:
 POST /api/v1/channel/{ch}/partial-withdrawal/settle
 Request:  { recipient: string }
-Response: { authDigest: string }
+Response: { authDigest: string, paidOut: true }
 ```
+`settle_done` is the terminal state and it is reached with the ETH actually paid:
+the route runs `pw-submit`, stages the daemon's payout artifacts, then runs
+`pw-finalize`, which performs the proof-backed payout (see A25).
 
 ---
 

@@ -45,7 +45,8 @@ contract DeployCloseCli is Script {
     }
 
     /// @return rollup  the deployed IntmaxRollup
-    /// @return sv      the deployed ChannelSettlementVerifier (all four settlement VKs keyed)
+    /// @return sv      the deployed ChannelSettlementVerifier (all FIVE settlement VKs keyed —
+    ///                 close, withdrawalClaim, postCloseClaim, cancelClose, memberSetUpdate)
     /// @return manager the deployed ChannelSettlementManager, registered on `rollup`
     /// @dev The return values exist so `test/DeployGuards.t.sol` can assert on what this script
     ///      actually deployed. `forge script --sig run` is unaffected (return types are not part of
@@ -304,10 +305,57 @@ contract DeployCloseCli is Script {
         //     registry and to this channel's on-chain member-set commitment (Finding E).
         //
         // ORDERING: this must come AFTER the `new ChannelSettlementManager` above (the address must
-        // exist) and BEFORE `stopBroadcast`. It is deliberately the LAST broadcast operation, so it
-        // adds no CREATE and cannot move the manager's own address — the close/withdrawal fixtures
-        // bake that address as the payout recipient inside the proof.
+        // exist) and BEFORE `stopBroadcast`. It is deliberately in the TRAILING group of broadcast
+        // operations — everything after the manager's CREATE is a plain call that adds no CREATE,
+        // so it cannot move the manager's own address; the close/withdrawal fixtures bake that
+        // address as the payout recipient inside the proof.
         rollup.registerSettlementManager(address(manager));
+
+        // 7. Member-set-update VK (detail2 §Q-4 key rotation).
+        //
+        // SECURITY / LIVENESS — audit28-08-2026 M-3, the FOURTH occurrence of the class audit622
+        // A-M4 first reported 2026-06-22 (a fail-closed check that protects soundness while making
+        // an HONEST path impossible). `ChannelSettlementVerifier.verifyMemberSetUpdate` opens with
+        // `if (!memberSetUpdateVkInitialized) revert MemberSetUpdateVkNotSet();`, so until this
+        // call existed EVERY real deployment shipped with `applyMemberSetUpdate` reverting forever:
+        // no key rotation, no co-signer addition, and — because `applyMemberSetUpdate` is the ONLY
+        // post-constructor write to `isMemberRecipient` — no way to move the set of addresses that
+        // may `requestClose()` or receive a partial withdrawal. `initializeMemberSetUpdateVk` is
+        // deployer-only and set-once, exactly like the other five, so a deployment that omits it is
+        // repairable only by a manual call from the surviving deployer key.
+        //
+        // ORDERING (two independent constraints, both satisfied here):
+        //   * It MUST come after step 3: `initializeMemberSetUpdateVk` itself `require`s
+        //     `closeVkInitialized` — the msu VK stores only its own per-circuit anchors and reuses
+        //     the close statement's WHIR/MLE rail (see the storage doc on `memberSetUpdateVk`).
+        //   * It MUST NOT come before the `new ChannelSettlementManager` in step 5. A broadcast
+        //     call bumps the deployer EOA's nonce, and the manager's address is CREATE-derived from
+        //     that nonce; inserting this anywhere earlier would MOVE the manager address that the
+        //     close/withdrawal fixtures bake into their proofs as the payout recipient. Placing it
+        //     here — after every CREATE in the script — moves no address at all.
+        //
+        // No fail-closed check is weakened: the revert stays; we supply the VK it was demanding.
+        {
+            string memory msuJson = _read("member_set_update_mle.json");
+            FixtureLib.DeployData memory mdd = FixtureLib.parseDeployData(msuJson);
+            MleVerifier.MleProof memory mproof = FixtureLib.parseProof(msuJson);
+            bytes32 msuGatesDigest = verifier.computeGatesDigest(
+                mproof.gates,
+                mproof.witnessIndividualEvalsAtRGateV2.length,
+                mproof.numSelectors,
+                mproof.numGateConstraints,
+                mproof.quotientDegreeFactor
+            );
+            sv.initializeMemberSetUpdateVk(
+                ChannelSettlementVerifier.CloseVk({
+                    degreeBits: mdd.degreeBits,
+                    preprocessedRoot: mdd.preCommitRoot,
+                    numConstants: mdd.numConstants,
+                    numRoutedWires: mdd.numRoutedWires,
+                    gatesDigest: msuGatesDigest
+                })
+            );
+        }
 
         vm.stopBroadcast();
 
@@ -319,6 +367,33 @@ contract DeployCloseCli is Script {
             rollup.isRegisteredSettlementManager(address(manager)),
             "settlement manager not registered: partial withdrawal cannot finalize"
         );
+
+        // Same read-back discipline for the msu VK (M-3): a deploy that reaches the console2 lines
+        // below has a working key-rotation path, and one that does not aborts loudly.
+        require(
+            sv.memberSetUpdateVkInitialized(),
+            "member-set-update VK not set: applyMemberSetUpdate would revert forever"
+        );
+
+        // M-11 (deploy-time half of the rail-agreement check). `_verifyMsuMle` verifies the msu
+        // proof under the CLOSE statement's whirParams / kIs / protocolId / sessionId, carrying
+        // only the msu VK's own degreeBits / preprocessedRoot / gatesDigest. That reuse is sound
+        // ONLY while the two circuits really do wrap to the same shape, and the VERIFIER performs
+        // no such check at runtime. Assert it here, off the deployed storage, so a fixture
+        // regeneration that changes the wrapper shape for one circuit and not the other aborts the
+        // DEPLOY instead of surfacing as an unverifiable rotation proof much later.
+        //
+        // SCOPE — this is a deploy-time and test-time check only. There is still NO on-chain
+        // agreement check inside `ChannelSettlementVerifier`; a manually-keyed verifier (or any
+        // deployment not made by this script) can still install a msu VK whose rail disagrees.
+        // A mismatch is fail-closed (verification fails; no foreign proof is accepted), so this is
+        // a liveness fence, not a soundness one.
+        {
+            (uint256 msuDegreeBits,,,, bytes32 msuGates) = sv.memberSetUpdateVk();
+            (uint256 closeDegreeBits,,,, bytes32 closeGates) = sv.closeVk();
+            require(msuDegreeBits == closeDegreeBits, "msu/close wrapper degreeBits disagree");
+            require(msuGates == closeGates, "msu/close wrapper gatesDigest disagree");
+        }
 
         console2.log("=== close-lifecycle CLI deploy ===");
         console2.log("IntmaxRollup:", address(rollup));

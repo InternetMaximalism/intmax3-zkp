@@ -131,10 +131,17 @@ jobs:
           done
           # The fixtures whose absence makes close_lifecycle_cli_e2e and two_token_cli_e2e return
           # green without doing anything (see their own skip lists).
+          #
+          # member_set_update{,_mle}.json (audit28-08-2026 M-3) are here for a second reason on top
+          # of that one: DeployCloseCli.s.sol now READS member_set_update_mle.json to install the
+          # §Q member-set-update VK, so their absence is not a silently-skipped test but a deploy
+          # script — and therefore the DeployGuards suite — that cannot run at all. They also carry
+          # the msu <-> close WHIR-rail agreement that MemberSetUpdateE2E.t.sol checks and that the
+          # Verifier never checks on chain (M-11).
           missing=0
           for f in close_lifecycle.json close_lifecycle_validity_mle.json close_withdrawal_mle.json \
                    close_intent_mle.json withdrawal_claim_mle.json post_close_claim_mle.json \
-                   cancel_close_mle.json; do
+                   cancel_close_mle.json member_set_update.json member_set_update_mle.json; do
             [ -f "contracts/test/data/$f" ] || { echo "::error::missing fixture contracts/test/data/$f"; missing=1; }
           done
           [ "$missing" -eq 0 ]

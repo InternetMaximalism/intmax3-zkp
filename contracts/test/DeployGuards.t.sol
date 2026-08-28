@@ -427,10 +427,18 @@ contract DeployGuardsTest is Test {
     }
 
     /// The rest of what a real settlement deployment needs, on the one script that claims to
-    /// provide it: the payout VK on the rollup and ALL FOUR statement VKs on the settlement
+    /// provide it: the payout VK on the rollup and ALL FIVE statement VKs on the settlement
     /// verifier. Each latch below is a `revert *VkNotSet()` on an HONEST path — close,
-    /// withdrawal-claim, post-close-claim and the only remedy against a stale close, cancel-close.
+    /// withdrawal-claim, post-close-claim, the only remedy against a stale close (cancel-close),
+    /// and the §Q key-rotation / co-signer-addition path (member-set-update).
     /// Any of them left unkeyed strands a channel exactly as `DeployClose.s.sol` did.
+    ///
+    /// M-3 (audit28-08-2026): the member-set-update assertion is the one this test was written for
+    /// and did not have. `initializeMemberSetUpdateVk` existed in the Verifier and in exactly one
+    /// test, called by NO deploy script, so every real deployment reverted `MemberSetUpdateVkNotSet`
+    /// on `applyMemberSetUpdate` forever — the FOURTH occurrence of the audit622 A-M4 class, on a
+    /// guard written expressly to end that class. If a future edit drops the script's step 7, this
+    /// line fails.
     function test_deployCloseCliScript_realChain_keysEveryVkARealDeploymentNeeds() public {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
@@ -442,7 +450,46 @@ contract DeployGuardsTest is Test {
         assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK: no remedy against a stale close");
         assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK: members could not collect");
         assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK: `post-close-claim` bricked");
+        assertTrue(
+            sv.memberSetUpdateVkInitialized(),
+            "memberSetUpdate VK: applyMemberSetUpdate reverts forever, so key rotation and every "
+            "post-constructor change to isMemberRecipient are bricked (M-3)"
+        );
+        (uint256 msuDegreeBits,,,,) = sv.memberSetUpdateVk();
+        assertGt(msuDegreeBits, 0, "the installed msu VK must have verification enabled");
         assertTrue(address(rollup.kzgVerifier()).code.length > 0, "KZG satellite must be pinned");
+    }
+
+    /// M-11 — the DEPLOY-TIME half of the rail-agreement check the Verifier does not perform.
+    ///
+    /// `ChannelSettlementVerifier._verifyMsuMle` verifies the member-set-update proof under the
+    /// CLOSE statement's rail (`_closeWhirParams`, `_closeKIs`, `closeWhirProtocolId`,
+    /// `closeWhirSplitSessionId`, `closeMleVerifier`), carrying only the msu VK's own
+    /// `degreeBits` / `preprocessedRoot` / `gatesDigest`. `initializeMemberSetUpdateVk` enforces
+    /// `closeVkInitialized` but NOTHING on chain checks the two rails actually agree.
+    ///
+    /// This asserts, off the storage of a real deploy, that the two circuits genuinely wrap to the
+    /// same shape — the premise the reuse rests on. `preprocessedRoot` is the ONE field that must
+    /// differ (it is the per-circuit soundness anchor); asserting that too makes this a check on
+    /// the rail rather than on the VK being a copy of the close VK.
+    ///
+    /// STILL OPEN: there is no RUNTIME check. This test and the script's `require` cover only
+    /// deployments made by `DeployCloseCli.s.sol`. A mismatch is fail-closed — verification would
+    /// fail, never accept a foreign proof — so what is missing is a liveness fence, not a
+    /// soundness one.
+    function test_deployCloseCliScript_realChain_msuVkSharesTheCloseWhirRail() public {
+        vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
+        (, ChannelSettlementVerifier sv,) = new DeployCloseCliHarness().run();
+        (uint256 msuDegreeBits, bytes32 msuRoot,,, bytes32 msuGates) = sv.memberSetUpdateVk();
+        (uint256 closeDegreeBits, bytes32 closeRoot,,, bytes32 closeGates) = sv.closeVk();
+        assertEq(msuDegreeBits, closeDegreeBits, "msu/close wrapper degreeBits must agree");
+        assertEq(msuGates, closeGates, "msu/close wrapper gatesDigest must agree");
+        assertTrue(
+            msuRoot != closeRoot,
+            "msu VK must carry its OWN preprocessedRoot -- an equal root means the deploy keyed the "
+            "close circuit under the msu latch"
+        );
     }
 
     // ── (4) HOLE 2 — the VK-less settlement deployer must not reach a public chain ─────────────

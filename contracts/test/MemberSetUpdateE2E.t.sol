@@ -214,6 +214,87 @@ contract MemberSetUpdateE2ETest is Test {
         manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion + 1, proof);
     }
 
+    /// M-11 (audit28-08-2026) — THE RAIL-AGREEMENT CHECK, in full, on the real fixtures.
+    ///
+    /// `ChannelSettlementVerifier._verifyMsuMle` verifies the member-set-update proof under the
+    /// CLOSE statement's rail — `_closeWhirParams`, `closeWhirProtocolId`, `closeWhirSplitSessionId`,
+    /// `_closeKIs`, `_closeSubgroupGenPowers` and `closeMleVerifier` — carrying only the msu VK's
+    /// own `degreeBits` / `preprocessedRoot` / `numConstants` / `numRoutedWires` / `gatesDigest`.
+    /// `initializeMemberSetUpdateVk` requires `closeVkInitialized`, but NOTHING on chain checks the
+    /// two rails actually agree; the whole reuse rests on the premise that every inner circuit wraps
+    /// to the same shape.
+    ///
+    /// This asserts that premise against the checked-in fixtures rather than assuming it, field by
+    /// field: the ENTIRE `WhirParams` struct (including the per-round table), the two Fiat-Shamir
+    /// domain separators, both scalar tables, and the wrapper's shape constants — with
+    /// `preprocessedRoot`, the one per-circuit soundness anchor, required to DIFFER, so this can
+    /// never be satisfied by keying the close circuit under the msu latch.
+    ///
+    /// It is deliberately a top-level test rather than a `setUp` assertion: `forge-test-guard.sh`
+    /// counts tests per suite, so only a named test is something CI can require. STILL OPEN — see
+    /// the finding: this is a fixture-time and (via `DeployGuards`) deploy-time check. The Verifier
+    /// performs no runtime agreement check, and a manually-keyed verifier can still diverge. A
+    /// divergence is fail-closed (verification fails; no foreign proof is ever accepted), so the
+    /// missing on-chain check is a liveness fence, not a soundness one.
+    function test_msuAndCloseFixturesShareTheEntireWhirRail() external view {
+        FixtureLib.DeployData memory mdd = FixtureLib.parseDeployData(msuJson);
+        FixtureLib.DeployData memory cdd =
+            FixtureLib.parseDeployData(vm.readFile(_dataPath("close_intent_mle.json")));
+
+        // The rail the Verifier substitutes wholesale, compared in one shot so a NEW WhirParams
+        // field cannot slip past this test the way a hand-listed comparison would let it.
+        assertEq(
+            keccak256(abi.encode(mdd.whirParams)),
+            keccak256(abi.encode(cdd.whirParams)),
+            "msu/close whirParams must be identical -- _verifyMsuMle substitutes the close rail"
+        );
+        assertEq(keccak256(mdd.protocolId), keccak256(cdd.protocolId), "whir protocolId must match");
+        assertEq(keccak256(mdd.sessionId), keccak256(cdd.sessionId), "whir sessionId must match");
+        assertEq(keccak256(abi.encode(mdd.kIs)), keccak256(abi.encode(cdd.kIs)), "kIs must match");
+        assertEq(
+            keccak256(abi.encode(mdd.subgroupGenPowers)),
+            keccak256(abi.encode(cdd.subgroupGenPowers)),
+            "subgroupGenPowers must match"
+        );
+
+        // The wrapper shape the msu VK carries itself must still be the wrapper's.
+        assertEq(mdd.degreeBits, cdd.degreeBits, "wrapper degreeBits must be shared");
+        assertEq(mdd.numConstants, cdd.numConstants, "wrapper numConstants must be shared");
+        assertEq(mdd.numRoutedWires, cdd.numRoutedWires, "wrapper numRoutedWires must be shared");
+
+        // ... and the ONE field that must NOT be shared.
+        assertTrue(
+            mdd.preCommitRoot != cdd.preCommitRoot,
+            "msu must carry its OWN preprocessedRoot -- equal roots mean the msu latch was keyed "
+            "with the close circuit"
+        );
+    }
+
+    /// The same premise where it actually bites: the gates digest the Verifier hands the MLE
+    /// verifier for the msu proof is the WRAPPER's, so it must equal the close circuit's.
+    function test_msuAndCloseWrapperGatesDigestsAgree() external view {
+        MleVerifier.MleProof memory mproof = FixtureLib.parseProof(msuJson);
+        MleVerifier.MleProof memory cproof =
+            FixtureLib.parseProof(vm.readFile(_dataPath("close_intent_mle.json")));
+        assertEq(
+            mle.computeGatesDigest(
+                mproof.gates,
+                mproof.witnessIndividualEvalsAtRGateV2.length,
+                mproof.numSelectors,
+                mproof.numGateConstraints,
+                mproof.quotientDegreeFactor
+            ),
+            mle.computeGatesDigest(
+                cproof.gates,
+                cproof.witnessIndividualEvalsAtRGateV2.length,
+                cproof.numSelectors,
+                cproof.numGateConstraints,
+                cproof.quotientDegreeFactor
+            ),
+            "wrapper gatesDigest must be shared across the two statements"
+        );
+    }
+
     /// Without the msu VK there is NO seam — the entry reverts (V3-class structurally excluded).
     function test_applyMemberSetUpdate_withoutVk_reverts() external {
         ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();

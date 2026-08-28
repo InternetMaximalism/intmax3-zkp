@@ -128,9 +128,52 @@ chmod 600 .claude/cosigner.key                    # the CLI REFUSES any group/wo
 | goal | script | what you get |
 |---|---|---|
 | rollup only: deposit, post, finalize, `withdrawNative`/`withdrawERC20` | `Deploy.s.sol` | validity VK + **withdrawal VK** + KZG satellite + block producer. **No** channel settlement stack. |
-| rollup **and** the channel close/claim lifecycle | `DeployCloseCli.s.sol` | everything above **plus** `ChannelSettlementVerifier` + `ChannelSettlementManager` and all four settlement VKs (close, withdrawalClaim, postCloseClaim, cancelClose), plus `registerChannel` **and `registerSettlementManager`** — the last added 2026-08-13; without it a partial withdrawal reverted `NotRegisteredSettlementManager` at `pw-finalize`, i.e. *after* the user had submitted and waited out the whole challenge period. Requires `contracts/test/data/cli_reg_record.json`, which `channel_member export-reg-record` stages. |
+| rollup **and** the channel close/claim lifecycle | `DeployCloseCli.s.sol` | everything above **plus** `ChannelSettlementVerifier` + `ChannelSettlementManager` and all **five** settlement VKs (close, withdrawalClaim, postCloseClaim, cancelClose, **memberSetUpdate**), plus `registerChannel` **and `registerSettlementManager`** — the last added 2026-08-13; without it a partial withdrawal reverted `NotRegisteredSettlementManager` at `pw-finalize`, i.e. *after* the user had submitted and waited out the whole challenge period. Requires `contracts/test/data/cli_reg_record.json`, which `channel_member export-reg-record` stages, and `contracts/test/data/member_set_update_mle.json`, which is checked in. |
 | public-testnet rollup with posting restricted to a named admin | `DeployTestnetBlockProducer.s.sol` | as `Deploy.s.sol`, plus `setBlockProducerAdmin`. |
-| devnet demo / predict the close-manager address for a dry run | `DeployClose.s.sol` | **LOCAL DEVNET ONLY, and enforced as of 2026-08-13** — `run()` opens with `require(block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, ...)`, so pointing it at Sepolia or mainnet now aborts before a single transaction. Previously this row was the only thing standing between an operator and a broken deployment. It deploys a settlement stack and initializes **none** of the four settlement VKs (channel freezable by `requestClose()`, then `CloseVkNotSet()` / `CancelCloseVkNotSet()` forever), and its `sepolia_*` fixtures are one circuit generation stale — so keying the VKs would not have made it real-network-capable either. The address it predicts is its OWN manager's, at its own nonce offset; `DeployCloseCli.s.sol` sends a different number of transactions before its manager CREATE, so the prediction does not transfer. |
+| devnet demo / predict the close-manager address for a dry run | `DeployClose.s.sol` | **LOCAL DEVNET ONLY, and enforced as of 2026-08-13** — `run()` opens with `require(block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, ...)`, so pointing it at Sepolia or mainnet now aborts before a single transaction. Previously this row was the only thing standing between an operator and a broken deployment. It deploys a settlement stack and initializes **none** of the settlement VKs (channel freezable by `requestClose()`, then `CloseVkNotSet()` / `CancelCloseVkNotSet()` forever), and its `sepolia_*` fixtures are one circuit generation stale — so keying the VKs would not have made it real-network-capable either. The address it predicts is its OWN manager's, at its own nonce offset; `DeployCloseCli.s.sol` sends a different number of transactions before its manager CREATE, so the prediction does not transfer. |
+
+**FIXED 2026-08-28 — the §Q member-set-update VK is now installed by the settlement deploy
+script (audit28-08-2026 M-3).** `initializeMemberSetUpdateVk` existed in
+`ChannelSettlementVerifier` and was called by **no deploy script and no runbook step**, so every
+real deployment made before this date has `applyMemberSetUpdate` reverting `MemberSetUpdateVkNotSet`
+**forever**: no §Q key rotation, no co-signer addition, and — because `applyMemberSetUpdate` is the
+only post-constructor write to `isMemberRecipient` — no way to change which addresses may
+`requestClose()` or receive a partial withdrawal. This is the **fourth** occurrence of the class
+first reported 2026-06-22 as audit622 A-M4 (a fail-closed check that is soundness-safe while making
+an honest path impossible). `DeployCloseCli.s.sol` now installs it as its step 7, from the
+checked-in `contracts/test/data/member_set_update_mle.json`, and `require()`s the latch afterwards.
+
+*Why step 7 and not earlier:* the msu VK's `initialize` requires `closeVkInitialized` first (it
+reuses the close statement's WHIR rail), **and** every broadcast transaction bumps the deployer
+EOA's nonce, from which the `ChannelSettlementManager` address is CREATE-derived. Inserting the call
+anywhere before the manager's CREATE would MOVE the manager address that the close/withdrawal
+fixtures bake into their proofs as the payout recipient. Placing it after every CREATE in the script
+moves no address — verified by running the script before and after the change and diffing all three
+printed addresses. **Do not reorder the broadcast section of that script for any reason.**
+
+`initializeMemberSetUpdateVk` is deployer-only and set-once, so an **already-deployed** verifier is
+repaired only by a manual call from the surviving deployer key, with the msu VK matching the
+circuits as of that deployment's commit. Read the latch back on any live settlement stack before
+promising a key rotation:
+
+```bash
+cast call <settlementVerifier> "memberSetUpdateVkInitialized()(bool)" --rpc-url "$SEPOLIA_RPC_URL"  # must print true
+# the other four latches, same discipline:
+for f in closeVkInitialized cancelCloseVkInitialized withdrawalClaimVkInitialized postCloseClaimVkInitialized; do
+  cast call <settlementVerifier> "$f()(bool)" --rpc-url "$SEPOLIA_RPC_URL"
+done
+```
+
+**KNOWN GAP (audit28-08-2026 M-11) — the msu VK reuses the close statement's WHIR rail, and nothing
+on chain checks the two agree.** `ChannelSettlementVerifier._verifyMsuMle` verifies the member-set-
+update proof under the CLOSE VK's `whirParams` / `kIs` / `protocolId` / `sessionId` / `MleVerifier`,
+carrying only the msu VK's own `degreeBits` / `preprocessedRoot` / `gatesDigest`. That reuse is sound
+only while both circuits really wrap to the same shape. `DeployCloseCli.s.sol` now `require()`s the
+agreement at deploy time and `DeployGuards.t.sol` +`MemberSetUpdateE2E.t.sol` assert it in CI, but
+**a verifier keyed by hand, or by any script other than this one, can still install a msu VK whose
+rail disagrees.** A disagreement is fail-closed — verification fails, no foreign proof is accepted —
+so the exposure is liveness, not funds. Regenerate `member_set_update_mle.json` and
+`close_intent_mle.json` **from the same circuit build**, and never key the msu VK by hand.
 
 **Settlement stack on a real network — read before promising users a close/claim exit.** The
 runbook's Sepolia procedure below deploys the **rollup only**. That is enough for
