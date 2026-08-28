@@ -19,14 +19,22 @@ pragma solidity ^0.8.24;
 ///      where Z(x) = ∏(x − ωⁱ) is the vanishing polynomial and
 ///            π    = [q(τ)]₁ = [(p−I)/Z evaluated at τ]₁.
 ///
-/// Security note on caller-supplied lagrangeBasisG1 and vanishingG2:
-///   Even though the caller provides these, forging them cannot break soundness.
-///   To make the pairing pass with wrong fieldElements, the attacker would need
-///   to produce π for an inconsistent [I(τ)]₁, which requires knowing the KZG
-///   trapdoor τ (discrete-log hard).
+/// SECURITY (H-4) — caller-supplied lagrangeBasisG1 and vanishingG2 are NOT safe:
+///   The old note here claimed forging them "cannot break soundness" because producing π for an
+///   inconsistent [I(τ)]₁ needs the trapdoor τ. That is false: π is caller-supplied as well, so
+///   whenever the caller knows dlog_{G2gen}(vanishingG2) = k the pairing
+///   e(lhs, G2_gen)·e(−π, vanishingG2) = 1 is satisfied by simply setting π := k⁻¹·lhs — pure public
+///   G1 arithmetic. k = 1 (vanishingG2 = G2_GENERATOR) is the cheapest instance and is now REJECTED
+///   outside an explicit test opt-in (see `_checkPairing`). A forged `lagrangeBasisG1` making
+///   [I(τ)]₁ = C (so lhs = ∞, π = ∞) is the same class of break.
 ///
-/// Production hardening: store the Ethereum ceremony Lagrange G1 points in an
-/// immutable TrustedSetupStore contract rather than accepting them from callers.
+/// RESIDUAL RISK (not closed here): rejecting k = 1 does not stop k = 2, 3, …, and lagrangeBasisG1
+///   remains caller-supplied. The only complete fix is to stop trusting the caller for trusted-setup
+///   data: store the Ethereum ceremony Lagrange G1 points and the domain's [Z(τ)]₂ in an immutable
+///   TrustedSetupStore (SSTORE2) and read them from there. That is a redesign of this verifier and is
+///   deliberately out of scope of the H-4 patch; it MUST land before this path is relied on in
+///   production. Today the fraud path is the only consumer and it is additionally gated by the
+///   commitment and proof-params checks in `IntmaxRollup._verifyFraud`.
 /// @dev Bundles EIP-2537 KZG multi-point opening parameters into one struct
 ///      to avoid stack-too-deep when passing alongside WHIR proof data.
 struct KZGProof {
@@ -85,6 +93,8 @@ library BlobKZGVerifier {
     error BKV_G1AddFailed();
     error BKV_PairingCheckFailed();
     error BKV_PairingFailed();
+    /// @dev SECURITY (H-4): raised when the caller claims Z(τ) = 1 (`vanishingG2 == G2_GENERATOR`).
+    error BKV_DegenerateVanishingG2();
 
     // -----------------------------------------------------------------------
     // Main entry point
@@ -92,10 +102,13 @@ library BlobKZGVerifier {
     /// @param versionedHash Blob versioned hash from BLOBHASH (stored at submit time).
     /// @param kzg           KZG opening parameters (see KZGProof struct).
     /// @param fieldElements Claimed blob values at positions 0..N-1 (32 bytes each).
+    /// @param allowDegenerateVanishingG2 TEST-ONLY opt-in permitting `vanishingG2 == G2_GENERATOR`
+    ///        (Z(τ) = 1). MUST be false in production — see `_checkPairing`.
     function verify(
         bytes32          versionedHash,
         KZGProof calldata kzg,
-        bytes32[] memory  fieldElements
+        bytes32[] memory  fieldElements,
+        bool             allowDegenerateVanishingG2
     ) internal view {
         uint256 N = fieldElements.length;
         if (kzg.kzgCommitmentG1.length != 128)    revert BKV_InvalidLength();
@@ -115,7 +128,7 @@ library BlobKZGVerifier {
 
         // Step 4: Pairing — e(lhs, G2_gen) · e(−π, [Z(τ)]₂) = 1
         bytes memory negPi = _g1Neg(kzg.openingProof);
-        _checkPairing(lhs, negPi, kzg.vanishingG2);
+        _checkPairing(lhs, negPi, kzg.vanishingG2, allowDegenerateVanishingG2);
     }
 
     // -----------------------------------------------------------------------
@@ -205,19 +218,29 @@ library BlobKZGVerifier {
     function _checkPairing(
         bytes memory lhs,
         bytes memory negPi,
-        bytes calldata vanishingG2
+        bytes calldata vanishingG2,
+        bool allowDegenerateVanishingG2
     ) private view {
-        // SECURITY (A-5): this fast path is SOUND, not a bypass. The branch is taken ONLY after a
-        // strict keccak equality check that `vanishingG2` IS the G2 generator; under that exact
-        // condition the pairing equation e(lhs,G2_gen)·e(negPi,vanishingG2)=1 is algebraically
-        // identical to e(lhs+negPi,G2_gen)=1 ⇔ lhs+negPi=∞ (the G1 identity), so the cheaper G1ADD
-        // check decides the SAME predicate the general BLS12_PAIRING branch would. A caller cannot
-        // weaken verification by supplying vanishingG2: any value other than the generator falls
-        // through to the real pairing precompile, and forging fieldElements still requires the KZG
-        // trapdoor τ (see the contract-level note above). The fast path exists only because the
-        // BLS12_PAIRING precompile is unavailable in Foundry 1.5.x; PRODUCTION (Pectra) takes the
-        // general branch and uses the real BLS12_PAIRING precompile at 0x11.
+        // SECURITY (H-4: the blob binding was vacuous at the caller's option).
+        //
+        // The previous comment here claimed this fast path was "SOUND, not a bypass" because
+        // "forging fieldElements still requires the KZG trapdoor τ". That argument is WRONG, because
+        // the opening proof π is caller-supplied too. `vanishingG2 == G2_GENERATOR` asserts Z(τ) = 1,
+        // which collapses the pairing equation to  lhs + negPi = ∞  ⇔  π = C − [I(τ)]₁. An attacker
+        // picks ANY fieldElements, computes [I(τ)]₁ = G1MSM(fieldElements, lagrangeBasisG1) from
+        // public points, and simply sets π := C − [I(τ)]₁. No trapdoor, no discrete log — the blob
+        // binding degrades to an identity that always holds, so `_verifyFraud`'s data-availability
+        // pre-condition becomes free and the fraud prover can "prove" the blob held anything.
+        // The real [Z(τ)]₂ (Z(x) = ∏(x − ωⁱ), degree N) is never the generator, so no honest prover
+        // needs this branch: it is purely an attacker affordance.
+        //
+        // It is retained ONLY behind an explicit, immutable, constructor-set test opt-in (mirroring
+        // `IntmaxRollup.allowMleDisabled`) because the BLS12_PAIRING precompile at 0x11 is
+        // unavailable in Foundry 1.5.x — verified empirically: a well-formed 768-byte valid instance
+        // returns failure — so no in-repo test can exercise the general branch. Production deploys
+        // pass `false` and this branch is unreachable there.
         if (keccak256(vanishingG2) == keccak256(G2_GENERATOR)) {
+            if (!allowDegenerateVanishingG2) revert BKV_DegenerateVanishingG2();
             bytes memory sum = _g1Add(lhs, negPi);
             // Identity point in EIP-2537 format = 128 zero bytes
             uint256 acc;
@@ -258,6 +281,17 @@ contract BlobKZGVerifierExt {
     ///      (moved verbatim from `IntmaxRollup.FIELD_MASK`; MUST match the Rust blob encoder).
     uint256 internal constant FIELD_MASK = type(uint256).max >> 3;
 
+    /// @notice TEST-ONLY opt-in permitting the degenerate `vanishingG2 == G2_GENERATOR` (Z(τ) = 1)
+    ///         branch. SECURITY (H-4): production MUST deploy with `false` — see `_checkPairing`.
+    ///         Immutable and constructor-set, so a deployed satellite's mode can never be flipped.
+    bool public immutable allowDegenerateVanishingG2;
+
+    /// @param allowDegenerateVanishingG2_ pass `false` in production. `true` is only for tests,
+    ///        which cannot build a real pairing instance (BLS12_PAIRING is absent in Foundry 1.5.x).
+    constructor(bool allowDegenerateVanishingG2_) {
+        allowDegenerateVanishingG2 = allowDegenerateVanishingG2_;
+    }
+
     /// @notice Verify that `proofBytes` (split into field elements exactly as the Rust blob encoder
     ///         does) is the data committed in the blob `blobVersionedHash` via the KZG multi-point
     ///         opening `kzg`. Reverts on any failure; returns silently on success.
@@ -266,7 +300,9 @@ contract BlobKZGVerifierExt {
         KZGProof calldata kzg,
         bytes calldata proofBytes
     ) external view {
-        BlobKZGVerifier.verify(blobVersionedHash, kzg, _toFieldElements(proofBytes));
+        BlobKZGVerifier.verify(
+            blobVersionedHash, kzg, _toFieldElements(proofBytes), allowDegenerateVanishingG2
+        );
     }
 
     /// @dev Split raw bytes into BLS12-381 field elements (top 3 bits cleared). Moved VERBATIM from

@@ -72,7 +72,7 @@ contract DeployPartialWithdrawalE2E is Script {
             vdd.kIs, vdd.subgroupGenPowers, realVerifier, genesis, false
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt());
+        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
