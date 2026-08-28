@@ -189,8 +189,22 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
 
             bytes32 digest = manager.computeCloseIntentDigest(intent);
             // A stranger cancels: no msg.sender gate exists on this path.
+            //
+            // A2026-08-28 ROUND 2 (A1): each round must now exhibit a STRICTLY NEWER revived
+            // version than every previous cancel — `13 + round`, not a replayed 13. That is the
+            // whole A1 fix, and this test is the reason the property is stated as "the era does not
+            // drift across repeated HONEST cycles": an honest party who really does hold newer
+            // material each round is unaffected by the floor, which is what is pinned here.
+            uint64 revived = 13 + round;
             vm.prank(mallory);
-            manager.cancelClose(_cancelRequest(digest, 13), _cancelProof(_cancelRequest(digest, 13)));
+            manager.cancelClose(
+                _cancelRequest(digest, revived), _cancelProof(_cancelRequest(digest, revived))
+            );
+            assertEq(
+                manager.highestCancelledRevivedStateVersion(),
+                revived,
+                "A1: the cancel consumed its material and the floor advanced"
+            );
 
             assertEq(manager.currentCloseFreezeNonce(), 0, "era restored, round-independent");
             assertEq(manager.closeRequestedAt(), 0);
@@ -269,7 +283,9 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     /// `2 * challengePeriod` would fail the last assertion.
     function test_H3_firstIntentKeepsAFullWindowAndOneReplacementFits() external {
         _requestCloseAndElapseGrace();
-        uint64 t0 = uint64(block.timestamp);
+        // TEST INTEGRITY: `vm.getBlockTimestamp()`, not `block.timestamp` — see the note on
+        // `test_H3_replacementLadderCannotOutrunTheEraHorizon` for the via-IR CSE hazard.
+        uint64 t0 = uint64(vm.getBlockTimestamp());
 
         ChannelSettlementManager.CloseIntent memory first = _intentAt(9, 12);
         manager.submitCloseIntent(first, _closeProof(first));
@@ -298,38 +314,73 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     /// PINS: the clamp in `_storePendingClose`. Reverting it to the unconditional
     /// `block.timestamp + challengePeriod` makes each of the 12 replacements buy another full day,
     /// so `assertLe(deadline, horizon)` fails on the third iteration and the final elapsed-time
-    /// assertion fails by an order of magnitude.
+    /// assertion fails by an order of magnitude. ALSO PINS the round-2 A2 floor: every rung the
+    /// ladder admits is asserted to carry at least `MIN_CLOSE_RESPONSE_SECS` of answerable time.
+    ///
+    /// TEST INTEGRITY: every "what time is it now" read goes through `vm.getBlockTimestamp()`, NOT
+    /// `block.timestamp`. Under `via_ir = true` the Yul optimizer treats `TIMESTAMP` as movable and
+    /// common-subexpression-eliminates two reads separated by a `vm.warp` into ONE — measured in
+    /// this repo: `b = block.timestamp; vm.warp(+12345); a = block.timestamp; a - b` folds to the
+    /// literal `0` while both reads report the post-warp value. The previous form of this test read
+    /// `block.timestamp` before the ladder and again after it, so the closing
+    /// `assertLe(block.timestamp, horizon)` was at risk of degenerating to `assertLe(t, t + 2*CP)`
+    /// — an assertion that cannot fail. The cheatcode is a staticcall and cannot be folded away.
     function test_H3_replacementLadderCannotOutrunTheEraHorizon() external {
         _requestCloseAndElapseGrace();
-        uint64 t0 = uint64(block.timestamp);
+        uint64 t0 = uint64(vm.getBlockTimestamp());
         uint64 horizon = t0 + 2 * CHALLENGE_PERIOD;
+        uint64 minResponse = manager.MIN_CLOSE_RESPONSE_SECS();
 
         ChannelSettlementManager.CloseIntent memory first = _intentAt(9, 12);
         manager.submitCloseIntent(first, _closeProof(first));
 
         uint64 version = 12;
+        uint64 rungs = 0;
         for (uint256 i = 0; i < 12; i++) {
             uint64 deadline = manager.getPendingClose().challengeDeadline;
             assertLe(deadline, horizon, "no replacement may push the deadline past the era horizon");
-            if (block.timestamp >= deadline) break;
-            // Land the next rung as late as the window permits (`>` deadline is what reverts).
-            vm.warp(deadline);
+            // A2: a rung is admissible only while it can still leave a usable response window, so
+            // the latest legal landing is `min(deadline, horizon - minResponse)`, not `deadline`.
+            uint64 latest = deadline < horizon - minResponse ? deadline : horizon - minResponse;
+            if (vm.getBlockTimestamp() >= latest) break;
+            vm.warp(latest);
             version += 1;
             ChannelSettlementManager.CloseIntent memory rung = _intentAt(9, version);
             manager.submitCloseIntent(rung, _closeProof(rung));
+            rungs += 1;
+            // A2, THE PROPERTY: no admitted rung may be finalizable in the block that stored it.
+            assertGe(
+                manager.getPendingClose().challengeDeadline - vm.getBlockTimestamp(),
+                minResponse,
+                "A2: every admitted rung keeps a usable response window"
+            );
         }
 
+        assertGt(rungs, 0, "the ladder is not vacuous: replacements really were admitted");
         assertLe(
-            block.timestamp,
+            vm.getBlockTimestamp(),
             horizon,
             "the whole ladder is consumed within the era's absolute horizon"
         );
+
+        // A2: past `horizon - minResponse` no further rung is admitted, even though the raw
+        // `challengeDeadline` check would still have allowed one. This is the red team's
+        // zero-length-window rung, refused.
+        ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, version + 1);
+        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        vm.warp(horizon - minResponse + 1);
+        assertGe(
+            manager.getPendingClose().challengeDeadline,
+            vm.getBlockTimestamp(),
+            "the raw deadline check alone would still admit this rung"
+        );
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
+        manager.submitCloseIntent(tooLate, tooLateProof);
+
         // The window is genuinely closed at the horizon: no further rung, and exit is available.
-        ChannelSettlementManager.CloseIntent memory late = _intentAt(9, version + 1);
-        MleVerifier.MleProof memory lateProof = _closeProof(late);
         vm.warp(horizon + 1);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(late, lateProof);
+        manager.submitCloseIntent(tooLate, tooLateProof);
 
         manager.finalizeClose();
         assertEq(

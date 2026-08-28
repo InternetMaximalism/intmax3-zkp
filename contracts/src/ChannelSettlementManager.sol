@@ -220,6 +220,12 @@ contract ChannelSettlementManager {
     error ChallengeWindowOpen();
     error ChallengeWindowClosed();
     error CloseNotNewer();
+    /// A1: the cancel does not exhibit strictly newer material than a previous cancel — i.e. it is a
+    /// REPLAY of an already-consumed cancel proof. See `cancelClose`.
+    error CancelCloseReplay();
+    /// A3: the close about to settle is strictly OLDER than a burn this manager already authorized,
+    /// so its `channelFundAmounts` still carries that burned amount. See `finalizeClose`.
+    error CloseOlderThanAuthorizedBurn();
     error CloseIntentDigestMismatch();
     error NullifierAlreadyUsed();
     error WithdrawalCapExceeded();
@@ -255,6 +261,9 @@ contract ChannelSettlementManager {
     /// The withdrawal economics do not reproduce the N-of-N-signed IMBD burn descriptor.
     error PartialWithdrawalDescriptorMismatch();
     error PartialWithdrawalNotNewer();
+    /// A4: this burn has already been cancelled once at this revived version — the cancel proof is
+    /// being REPLAYED against the burner's re-submission. See `cancelPartialWithdrawal`.
+    error PartialWithdrawalCancelReplay();
     /// H-6: a close is FROZEN but not yet settled, so the settlement state version that decides
     /// whether the burn is already excluded from `channelFundAmounts` is not yet known. Retryable
     /// once the close finalizes or is cancelled — the pending withdrawal is NOT destroyed.
@@ -577,6 +586,30 @@ contract ChannelSettlementManager {
     /// left to deploy scripts.
     uint64 public constant CHALLENGE_PERIOD_SECS = CHALLENGE_PERIOD_SECS_FLOOR;
 
+    /// @notice A2 (round 2): the minimum time an ADMITTED challenge-replacement must leave before the
+    /// era's absolute `closeChallengeHorizon`. A replacement that cannot clear this is refused
+    /// outright rather than admitted with an unanswerable window.
+    ///
+    /// SECURITY (A2 — the H-3 clamp's zero-length last rung): `_storePendingClose` sets
+    /// `challengeDeadline = min(now + challengePeriod, closeChallengeHorizon)`, and the replacement
+    /// branch admits a rung at `now == pendingClose.challengeDeadline`. A rung landing at exactly
+    /// `now == closeChallengeHorizon` therefore received `challengeDeadline == block.timestamp`, and
+    /// `finalizeClose()` (which needs only `now >= challengeDeadline`) settled it IN THE SAME BLOCK.
+    /// The attacker picked the settled state with literally zero opportunity for an on-chain reply —
+    /// a narrowing the H-3 rationale explicitly denied. This floor restores the invariant the
+    /// un-clamped path had for free: every admitted rung leaves a usable response interval.
+    ///
+    /// THE VALUE, against this repo's own measured costs. Answering a rung costs (a) generating a
+    /// fresh close proof — `a3_close_prover_builds_and_verifies_real_close_proof`, 79.3 s
+    /// (`doc/tasks/falcon-sig-phase5-notes.md:263`) — and (b) landing a transaction whose on-chain
+    /// MLE+WHIR verify alone is ~11.2M gas (`doc/architecture-audit/detail2-implementation-notes.md:294`),
+    /// i.e. better than a third of a 30M-gas block, so inclusion is a multi-block bid, not a
+    /// next-block certainty. 3,600 s is ~45x the measured proving time and leaves ~300 blocks of
+    /// inclusion headroom. It is deliberately NOT larger: it is subtracted from the tail of the
+    /// challenge game, so it must stay negligible against `CHALLENGE_PERIOD_SECS` (86,400 s) — at
+    /// 1/24 of one window and 1/48 of the 2x horizon, it costs the ladder ~2% of its span.
+    uint64 public constant MIN_CLOSE_RESPONSE_SECS = 3_600;
+
     /// @notice Chain id of the local development network (anvil's default).
     ///
     /// SECURITY: the ONLY chain on which `challengePeriod_` may fall below `CHALLENGE_PERIOD_SECS`.
@@ -656,7 +689,24 @@ contract ChannelSettlementManager {
     /// era's FIRST close intent and NOT moved by any replacement. Zero while no intent is pending.
     /// See `_storePendingClose` for the ladder attack this bounds and the choice of horizon.
     uint64 public closeChallengeHorizon;
+    /// @notice A1 (round 2): the highest `revivedStateVersion` that any successful `cancelClose` has
+    /// ever consumed. MONOTONE for the manager's lifetime — never reset by a cancel, a finalize, or
+    /// an era change (that is the whole point: `cancelClose` restores the era counter, so anything
+    /// per-era is replayable). Read ONLY by `cancelClose`; no close, finalize, or payout path reads
+    /// it. See the A1 block in `cancelClose` for the non-lockout argument.
+    uint64 public highestCancelledRevivedStateVersion;
+    /// @notice A3 (round 2): the (epoch, stateVersion) high-water mark of every burn this manager has
+    /// already authorized on the rollup. Zero until the first `finalizePartialWithdrawal`.
+    uint64 public authorizedBurnEpoch;
+    uint64 public authorizedBurnStateVersion;
     uint256 public bpBondCredits;
+
+    /// @notice A4 (round 2): per-burn anti-replay for `cancelPartialWithdrawal`, keyed on the burn's
+    /// close-intent digest (which is STABLE across a re-submission of the same burn — a burn is a
+    /// historical fact, so the re-submitted intent is byte-identical). Holds the highest
+    /// `revivedStateVersion` already consumed against that burn. Keyed per burn, NOT global: see the
+    /// A4 block in `cancelPartialWithdrawal` for why a global mark would be a lockout.
+    mapping(bytes32 => uint64) public cancelledPartialWithdrawalRevivedVersion;
 
     PendingClose public pendingClose;
     bytes32 public latestSpecialCloseDigest;
@@ -1089,6 +1139,25 @@ contract ChannelSettlementManager {
             if (block.timestamp > pendingClose.challengeDeadline) {
                 revert ChallengeWindowClosed();
             }
+            // SECURITY (A2, round 2 — the H-3 clamp's zero-length last rung): the check above alone
+            // admits a rung landing at `now == challengeDeadline == closeChallengeHorizon`, which
+            // `_storePendingClose` then clamps to `challengeDeadline == now` — finalizable in the
+            // SAME block, with no interval in which anyone can answer it. Refuse any replacement
+            // that cannot leave a usable response window before the era's absolute horizon. The
+            // horizon itself stays absolute (H-3 is untouched); only the admission rule tightens, so
+            // this can never EXTEND the ladder — it can only end it sooner.
+            //
+            // The floor degrades to `challengePeriod` on the local devnet, where the constructor
+            // permits a sub-`CHALLENGE_PERIOD_SECS` window: a fixed 3,600 s would exceed the whole
+            // 2x horizon there and forbid every replacement, silently deleting the challenge game
+            // from the E2E lifecycle tests. On every other chain `challengePeriod >= 86,400`, so the
+            // effective floor is exactly `MIN_CLOSE_RESPONSE_SECS`.
+            uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS
+                ? challengePeriod
+                : MIN_CLOSE_RESPONSE_SECS;
+            if (block.timestamp + minResponse > closeChallengeHorizon) {
+                revert ChallengeWindowClosed();
+            }
             if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
                 revert InvalidFreezeNonce();
             }
@@ -1155,6 +1224,13 @@ contract ChannelSettlementManager {
     /// (`_isNewer` is strict), so the extra window is what a member who was still proving when a
     /// replacement landed needs. The cap is therefore liveness-restoring without narrowing the
     /// interval the stale-close defence was sized for.
+    ///
+    /// CORRECTION (A2, round 2): the sentence above was FALSE for the final rung as originally
+    /// shipped. The clamp does narrow each rung's window as the horizon is approached, and a rung
+    /// admitted at exactly the horizon got a ZERO-length one — same-block finalizable. The claim
+    /// holds only because `submitCloseIntent` now refuses any replacement that cannot leave
+    /// `MIN_CLOSE_RESPONSE_SECS` before the horizon; see the A2 guard there and the constant's own
+    /// SECURITY block for the value's derivation.
     function _storePendingClose(
         CloseIntent calldata intent,
         bytes32 closeIntentDigest
@@ -1219,6 +1295,56 @@ contract ChannelSettlementManager {
         if (request.revivedStateVersion <= pendingClose.finalStateVersion) {
             revert CloseNotNewer();
         }
+        // ── SECURITY (A1, round 2 — the replayable cancel proof): a cancel must exhibit material
+        //    strictly NEWER than any cancel already performed on this manager.
+        //
+        //    THE ATTACK the C-3 restore opened. `cancelClose` has no `msg.sender` gate, no
+        //    challenge-window bound, and (before this line) no proof consumption. That was harmless
+        //    only while the first cancel was a ONE-SHOT: it left `currentCloseFreezeNonce`
+        //    permanently ahead of every producible state, bricking the channel for everyone. C-3
+        //    correctly restored the counter — but a restored counter makes eras CYCLABLE, and a
+        //    cyclable era turns one cancel proof into a REUSABLE capability. A non-member replays
+        //    the identical `(closeIntentDigest, revivedStateVersion)` calldata every round: the
+        //    honest member re-closes at the only state they hold, eve cancels it again, forever, for
+        //    gas alone. Measured by the red team: 25 rounds in 15,000 s, under 9% of ONE 172,800 s
+        //    H-3 era horizon — and each cancel zeroes `closeChallengeHorizon`, so H-3 bounds a
+        //    single era and nothing across them.
+        //
+        //    THE FLOOR. `highestCancelledRevivedStateVersion` is monotone for the manager's
+        //    lifetime. Eve's v21 proof raises it to 21 and then fails its own check; to cancel
+        //    again she must exhibit an N-of-N-signed state at v22+, which she cannot manufacture —
+        //    N-of-N includes the honest members she is censoring. Censorship is therefore bounded
+        //    by the number of DISTINCT signed versions she holds, and every honest member controls
+        //    the supply of those by declining to sign. It is not bounded by her gas budget.
+        //
+        //    WHY THIS IS NOT THE LATCH C-3 REJECTED. The rejected variant was a floor on CLOSES —
+        //    a "minimum close state version" that `submitCloseIntent` had to clear. Clearing it
+        //    required the COMPLETED N-of-N set over the revived state, which by construction only
+        //    the canceller holds; in the C-3 scenario the canceller IS the withholding coordinator,
+        //    so it converted "bricked for everyone" into "closable only by the attacker". This
+        //    floor is read in `cancelClose` and NOWHERE ELSE: `submitCloseIntent`, `finalizeClose`,
+        //    `submitPartialWithdrawalIntent`, `finalizePartialWithdrawal` and every payout path are
+        //    untouched by it. So:
+        //      - an HONEST CLOSE is never blocked. A member holding only v20 still runs
+        //        `requestClose -> submitCloseIntent(v20) -> finalizeClose` with the floor at any
+        //        value. Exit liveness — the property the C-3 brick destroyed — is preserved
+        //        unconditionally, which is exactly what the rejected latch could not say.
+        //      - an HONEST CANCEL is blocked only by material at least as new as its own. The floor
+        //        rises solely to a version some party has PROVEN an N-of-N signature set exists at;
+        //        a canceller wanting past it needs one strictly newer signed state, and channel
+        //        state versions advance by exactly the N-of-N signing the honest members
+        //        themselves perform. It can never be raised to an unreachable value by an outsider.
+        //
+        //    RESIDUAL (accepted, documented): if a withholding coordinator spends their v21 proof
+        //    to cancel, an honest member later holding only v21 cannot cancel a fresh stale close
+        //    with it. Their remedy is the one the design already relies on — challenge-replace
+        //    inside the (A2-guaranteed) window, or let the close settle and exit. The failure mode
+        //    is "the channel closes at a state one version older than the head", a bounded
+        //    mis-allocation already inside the stale-close challenge game's threat model — not the
+        //    unbounded exit censorship this line removes, and not a lockout.
+        if (request.revivedStateVersion <= highestCancelledRevivedStateVersion) {
+            revert CancelCloseReplay();
+        }
         // SECURITY (Finding D): the manager injects the channel's REGISTERED member-set commitment
         // (NOT a caller request field), exactly as the close path does via `_runCloseVerify`. The
         // verifier strict-binds the proof's in-circuit member-set commitment to this value, so the
@@ -1233,6 +1359,10 @@ contract ChannelSettlementManager {
                 proof
             )
         ) revert InvalidCancelProof();
+
+        // A1: CONSUME the material. Effect placed after the verify so the floor only ever advances
+        // on a cancel that actually happened.
+        highestCancelledRevivedStateVersion = request.revivedStateVersion;
 
         bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
         delete pendingClose;
@@ -1289,7 +1419,18 @@ contract ChannelSettlementManager {
         //    withholding coordinator, so the latch converts "channel bricked for everyone" into
         //    "channel closable only by the attacker" — a permanent lockout of every other member,
         //    with the attacker additionally free to choose the settlement state. That is a worse
-        //    outcome than the bug.
+        //    outcome than the bug. STILL REJECTED — and note that the A1 floor added above is a
+        //    DIFFERENT object: it gates cancels, not closes, so it never has to be satisfied by an
+        //    honest closer. The distinction is the whole argument; see the A1 block.
+        //
+        //    CORRECTION (A1, round 2): the paragraph above proves the restore grants no capability
+        //    the ERA FENCE was withholding, and that is still true. It does NOT prove the restore
+        //    is free, and the original text left that gap implicit: making eras cyclable also makes
+        //    a cancel proof REUSABLE, which is a capability nothing else was withholding. Sentence
+        //    (ii) above — "if the griefer re-closes at the same stale version, that same material
+        //    answers it again" — reads as reassurance but is precisely the griefer's weapon when
+        //    the griefer is the one holding the material. The A1 floor above closes that gap; the
+        //    C-3 restore is sound only in conjunction with it.
         //
         //    Also note the beneficial coupling with H-6: a pending partial withdrawal is no longer
         //    collateral damage of a close that was cancelled, because no close settled and the burn
@@ -1328,6 +1469,46 @@ contract ChannelSettlementManager {
         if (block.timestamp < pendingClose.challengeDeadline) {
             revert ChallengeWindowOpen();
         }
+        // ── SECURITY (A3, round 2 — H-6's missing direction): refuse to settle a close that is
+        //    strictly OLDER than a burn this manager already authorized.
+        //
+        //    H-6's gate in `finalizePartialWithdrawal` is evaluated ONCE, at burn-authorization
+        //    time, against whatever has settled BY THEN. Reversing the order defeats it: authorize
+        //    the burn while `Active`, THEN settle a close at a pre-burn state. That close's
+        //    `channelFundAmounts` still carries the burned amount, it becomes the
+        //    `finalizedChannelFundAmount` accrual cap below, and nothing ever revisits the
+        //    authorization — the escrow pays the burn AND the same value again through withdrawal
+        //    claims. This is the exact double-draw H-6 names as its purpose, reached by the
+        //    other side. (It was equally reachable under the old era fence, so it is a residual
+        //    rather than a round-1 regression — but the H-6 comment claimed the replacement "keeps
+        //    the protection exactly", which was an overstatement in this direction. Corrected there.)
+        //
+        //    WHY A HIGH-WATER MARK IS EXACT, not conservative. Let the close settle at V and let
+        //    the authorized burns sit at versions b_1..b_k. A burn at b_i is committed in the
+        //    N-of-N-signed state at b_i, hence DEBITED and EXCLUDED from `channelFundAmounts` of
+        //    every state at-or-after b_i. So V over-counts burn i exactly when V < b_i. Therefore
+        //    "V over-counts no burn" is precisely "V >= max(b_i)" — a single (epoch, stateVersion)
+        //    pair suffices, and no per-burn list is needed.
+        //
+        //    WHY REFUSING IS SAFE (this is a deferral, not a brick). No burn can be authorized
+        //    while a close is pending — `finalizePartialWithdrawal` reverts with
+        //    `PartialWithdrawalCloseInProgress` outside {Active, Closed} — so the mark cannot move
+        //    under a pending close, and a refusal here is a stable, immediately-diagnosable state
+        //    rather than a race. Two permissionless remedies remain open on the very close that was
+        //    refused: challenge-replace it with a newer intent while the window is open, or
+        //    `cancelClose` it, which has no window bound at all. Both are reachable by the party the
+        //    refusal protects, and the material they need provably exists: the burn's own submission
+        //    carried a full close proof at b_max, which is strictly newer than V by construction.
+        //    An HONEST close is never refused — an honest close settles at the head, and the head is
+        //    at-or-after every burn already committed into it.
+        //
+        //    Zero-init is inert: with no burn ever authorized both fields are 0, and
+        //    `0 > finalEpoch || (0 == finalEpoch && 0 > finalStateVersion)` is false for every input.
+        if (
+            authorizedBurnEpoch > pendingClose.finalEpoch ||
+            (authorizedBurnEpoch == pendingClose.finalEpoch &&
+                authorizedBurnStateVersion > pendingClose.finalStateVersion)
+        ) revert CloseOlderThanAuthorizedBurn();
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
@@ -1572,7 +1753,13 @@ contract ChannelSettlementManager {
         //    settled at a state that already excluded the burn: in both cases nothing was ever
         //    drawn twice.
         //
-        //    THE REPLACEMENT keeps the protection exactly and drops the strand:
+        //    THE REPLACEMENT protects the ORDER "close settles, then burn is authorized" and drops
+        //    the strand. It is evaluated ONCE, here, so on its own it says NOTHING about the reverse
+        //    order — authorize first, settle a pre-burn close after — which reaches the identical
+        //    double-draw. That direction is now closed by the A3 guard in `finalizeClose`, using the
+        //    `authorizedBurn{Epoch,StateVersion}` high-water mark this function records below. The
+        //    two together cover both orders; NEITHER covers both alone, and the original "keeps the
+        //    protection exactly" claimed otherwise. The three cases this gate decides:
         //      - Active     — no close has settled, no `channelFundAmounts` has been drawn, so no
         //                     double-draw is possible. Authorize.
         //      - ClosePending — the settlement version is not yet DECIDED. Refuse WITHOUT
@@ -1603,6 +1790,20 @@ contract ChannelSettlementManager {
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
         bytes32 chainKey = pendingPartialWithdrawalChainKey;
 
+        // A3: raise the authorized-burn high-water mark BEFORE the pending record is deleted. This
+        // is the only memory that survives the deletes, and it is what lets `finalizeClose` refuse a
+        // close older than this burn — the reverse-order double-draw the gate above cannot see.
+        // Monotone: a later burn at a lower version (unsignable, but cheap to exclude) must not
+        // LOWER the mark, or it would re-open the hole for the earlier, higher burn.
+        if (
+            pendingPartialWithdrawalEpoch > authorizedBurnEpoch ||
+            (pendingPartialWithdrawalEpoch == authorizedBurnEpoch &&
+                pendingPartialWithdrawalStateVersion > authorizedBurnStateVersion)
+        ) {
+            authorizedBurnEpoch = pendingPartialWithdrawalEpoch;
+            authorizedBurnStateVersion = pendingPartialWithdrawalStateVersion;
+        }
+
         delete partialWithdrawalPending;
         delete pendingPartialWithdrawalAuthDigest;
         delete pendingPartialWithdrawalChainKey;
@@ -1632,6 +1833,47 @@ contract ChannelSettlementManager {
         if (request.revivedStateVersion <= pendingPartialWithdrawalStateVersion) {
             revert PartialWithdrawalNotNewer();
         }
+        // ── SECURITY (A4, round 2 — the same replayable-cancel-proof property as A1, in the burn
+        //    lane): the check above compares against the PENDING record, and a successful cancel
+        //    DELETES that record entirely, leaving no trace that the cancel happened.
+        //
+        //    THE ATTACK. A burn is a historical fact, so a vetoed burner who re-submits produces a
+        //    byte-identical `CloseIntent` and therefore the IDENTICAL
+        //    `pendingPartialWithdrawalCloseIntentDigest`. The attacker's round-1 proof at, say,
+        //    v20 then matches the digest again, still satisfies `20 > pendingStateVersion`, and
+        //    still verifies — so one proof vetoes the same burn forever, at gas cost only. This
+        //    composes badly with H-6: the burn is already DEBITED in the signed channel state, so
+        //    a burn that can never be finalized is value the burner cannot recover in this lane.
+        //
+        //    THE FLOOR IS PER-BURN, NOT GLOBAL — and that is a deliberate divergence from A1, not
+        //    an oversight of symmetry. A single manager-wide mark shared with (or mirroring)
+        //    `highestCancelledRevivedStateVersion` would be sound against replay but would be a
+        //    LOCKOUT: a cancel in either lane at v50 would raise the bar above every honest PW
+        //    canceller's material, so a genuinely stale burn submitted afterwards at v45 could not
+        //    be cancelled by a member holding v50, and would be authorized on the deadline. The two
+        //    lanes differ in exactly the property that makes A1's global mark acceptable: in the
+        //    CLOSE lane a party blocked from cancelling still has the exit — `submitCloseIntent` and
+        //    `finalizeClose` never read A1's floor — whereas in the BURN lane the cancel IS the
+        //    whole remedy, and losing it means a stale burn is authorized. So the burn lane gets the
+        //    weakest floor that still kills the replay, keyed on the object being cancelled.
+        //
+        //    NON-LOCKOUT. `cancelledPartialWithdrawalRevivedVersion[D]` is zero for every burn no
+        //    one has yet cancelled, so an honest cancel of a genuinely stale PW is never impeded by
+        //    activity on any OTHER burn, in either lane. For a burn D already cancelled once at
+        //    version v, the next cancel of that same D needs material strictly newer than v — i.e.
+        //    exactly the "demonstrate newer material" obligation, scoped to the object it defends.
+        //    And the floor gates only `cancelPartialWithdrawal`: `submitPartialWithdrawalIntent`
+        //    and `finalizePartialWithdrawal` never read it, so a burner's own path to authorization
+        //    is unaffected at every value of the map.
+        //
+        //    RESIDUAL: an attacker holding one proof can still veto each DISTINCT burn once,
+        //    costing that burner one `challengePeriod` before the re-submission succeeds. Bounded,
+        //    non-destructive (nothing is stranded — the burn is re-submittable), and strictly
+        //    better than the unbounded veto this replaces.
+        bytes32 pwDigest = pendingPartialWithdrawalCloseIntentDigest;
+        if (request.revivedStateVersion <= cancelledPartialWithdrawalRevivedVersion[pwDigest]) {
+            revert PartialWithdrawalCancelReplay();
+        }
 
         // SECURITY: mirrors cancelClose — the N-of-N signed a strictly newer state, proving the
         // pending partial withdrawal's state is stale. The verifier binds memberSetCommitment to
@@ -1646,6 +1888,10 @@ contract ChannelSettlementManager {
                 proof
             )
         ) revert InvalidCancelProof();
+
+        // A4: CONSUME the material against this burn. Written after the verify, and BEFORE the
+        // deletes below wipe the digest this is keyed on.
+        cancelledPartialWithdrawalRevivedVersion[pwDigest] = request.revivedStateVersion;
 
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
 
