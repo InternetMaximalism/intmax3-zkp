@@ -2051,7 +2051,8 @@ contract IntmaxRollupTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            rollup.mleVerifier(), bytes32(0),
+            // B-4: fraud is confirmed only by a RETURNED false, never by a caught revert.
+            MleVerifier(address(new RejectingMleVerifier())), bytes32(0),
             true // A-2: test opt-in (this test uses a real enabled VK anyway)
         );
         rollup2.setKzgVerifier(new BlobKZGVerifierExt(true));
