@@ -59,6 +59,10 @@ import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 ///    b) Proof params binding PASSES (fake-fraud prevention)
 ///    c) MLE publicInputs don't bind keccak256(ValidityPublicInputs) OR MLE verification fails
 contract IntmaxRollup {
+    /// M-5 (audit28-08-2026): the local devnet chain id. The unpinned `postBlockAndSubmit`
+    /// overload is accepted only here, so a real deployment cannot skip the pending-chain pin.
+    uint256 private constant ROLLUP_LOCAL_DEVNET_CHAIN_ID = 31337;
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -86,6 +90,13 @@ contract IntmaxRollup {
     error EmptyBatch();
     error InvalidStakeAmount();
     error NotAuthorizedBlockProducer();
+    /// M-5 (audit28-08-2026): the producer's declared pending-chain pin did not match the live
+    /// chains, i.e. a deposit or a channel registration landed between witness generation and this
+    /// call. Fail CLEANLY here so the producer re-reads and retries, instead of posting a batch
+    /// whose proof can never finalize.
+    error PendingChainsMoved();
+    /// M-5: the unpinned `postBlockAndSubmit` overload is devnet-only.
+    error ChainPinRequired();
     error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
@@ -857,12 +868,59 @@ contract IntmaxRollup {
     /// @dev SECURITY: permissioned — posting is restricted to the `blockProducerAdmin` or the
     ///      producers it designates (`setBlockProducer`). Fail-closed: with no admin set and an
     ///      empty whitelist, nobody can post.
+    /// @notice The live pending-chain pin a producer must declare when posting (M-5).
+    /// @dev Both pending chains are LIVE CUMULATIVE and are folded into the last sub-block by
+    ///      `_postBlock`, so their value at POSTING time — not at witness-generation time — is what
+    ///      ends up under the proof. Any `deposit()` or `registerChannel()` landing in between moves
+    ///      them. Producers read this immediately before building the witness and pass it back.
+    function pendingChainsPin() public view returns (bytes32) {
+        return keccak256(abi.encodePacked(_pendingDepositHashChain, _pendingChannelRegHashChain));
+    }
+
+    /// @notice Post a batch and submit its proof commitment, pinned to the pending chains the
+    ///         witness was generated against.
+    /// @dev SECURITY (M-5, audit28-08-2026): WITHOUT this pin, ANY address could fold a record into
+    ///      `_pendingDepositHashChain` (a 1 wei `deposit()`) or `_pendingChannelRegHashChain`
+    ///      (`registerChannel`) between the producer's witness generation and this call. `_postBlock`
+    ///      then folds a DIFFERENT chain value into the block hash than the proof was built over, so
+    ///      `finalize` fails — and it fails SILENTLY (it returns false rather than reverting), so
+    ///      `finalizedStateRoots` never advances and EVERY withdrawal is blocked until the ~12 h
+    ///      `FINALIZE_DEADLINE_BLOCKS` timeout lets someone truncate the stuck submission. One cheap
+    ///      transaction per window bought a 12-hour chain halt, repeatable indefinitely.
+    ///      With the pin the race is a CLEAN REVERT: the producer re-reads `pendingChainsPin()` and
+    ///      retries in the next block, so a griefer buys one wasted transaction, not a halt.
+    ///      NOTE this is a liveness guard, not a soundness one — a wrong pin can only refuse a post.
+    function postBlockAndSubmit(
+        SubBlock[] calldata subBlocks,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot,
+        bytes32 expectedPendingChains
+    ) external payable nonReentrant {
+        if (pendingChainsPin() != expectedPendingChains) revert PendingChainsMoved();
+        _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
+    }
+
+    /// @notice Unpinned legacy overload — DEVNET ONLY.
+    /// @dev SECURITY (M-5): reverts on every chain but the local devnet, so the pin above cannot be
+    ///      skipped on a real deployment. Same shape as the settlement manager's challenge-period
+    ///      floor: the unsafe value is structurally unshippable rather than merely discouraged.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
     ) external payable nonReentrant {
+        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ChainPinRequired();
+        _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
+    }
+
+    function _postBlockAndSubmit(
+        SubBlock[] calldata subBlocks,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot
+    ) private {
         if (!isBlockProducer[msg.sender] && msg.sender != blockProducerAdmin) {
             revert NotAuthorizedBlockProducer();
         }

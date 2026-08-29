@@ -3479,18 +3479,26 @@ fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, signer: &L1S
     let state_root = lc["final_state_root"]
         .as_str()
         .unwrap_or_else(|| die("final_state_root"));
-    eprintln!("[withdraw] postBlockAndSubmit round {i} (blob tx, 1 ETH stake)…");
+    // M-5 (audit28-08-2026): pin the pending deposit/registration chains the witness was built
+    // against. Both are LIVE CUMULATIVE and are folded into the last sub-block at POSTING time, so
+    // any `deposit()` or `registerChannel()` landing in between would make the posted block commit a
+    // chain the proof does not cover — `finalize` would then fail SILENTLY and block every
+    // withdrawal until the ~12 h timeout. With the pin the race is a clean revert and we retry.
+    let pending_pin = cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[]);
+    let pending_pin = pending_pin.trim().to_string();
+    eprintln!("[withdraw] postBlockAndSubmit round {i} (blob tx, 1 ETH stake), chain pin {pending_pin}…");
     cast_signed(
         rpc,
         signer,
         &[
             "send",
             rollup,
-            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32)",
+            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)",
             &sub_block,
             proof_hash,
             &proof_length,
             state_root,
+            &pending_pin,
             "--value",
             "1ether",
             "--blob",
