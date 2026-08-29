@@ -351,8 +351,15 @@ contract RedTeamFraudBreaksTest is Test {
     // FINDING RT-4 (H-4 NOT CLOSED) — the guard is a keccak equality against ONE encoding of the
     // G2 generator. Any `vanishingG2 = [k]G2` with k != 1 whose dlog the attacker knows walks
     // straight past it, and a `lagrangeBasisG1` of infinity points makes `[I(tau)]_1` independent
-    // of the claimed blob contents. This test runs everything except the pairing precompile
-    // (absent in Foundry 1.5.x) and shows the accepting witness is pure public G1 arithmetic.
+    // of the claimed blob contents. This test runs the G1/G2 arithmetic and shows the accepting
+    // witness is pure public G1 arithmetic.
+    //
+    // POST-FIX: k = 1 is now genuinely caught (the guard compares against the CANONICAL encoding
+    // after B-2). Everything else in this finding is still OPEN — see the SECURITY (H-4 / B-6)
+    // block in BlobKZGVerifier.sol for the exact scope and for why the fraud path is nevertheless
+    // safe (pre-conditions 1 and 4 pin proofBytes by keccak, with no BLS assumption).
+    // The original note here said the pairing precompile is "absent in Foundry 1.5.x". It is not:
+    // that measured 0x11 (MAP_FP2_TO_G2). PAIRING_CHECK at 0x0f works — see BlobKzgPairing.t.sol.
     // =======================================================================
 
     function test_RT4_H4_forgedLagrangeBasisAndKnownDlogVanishingG2() public view {

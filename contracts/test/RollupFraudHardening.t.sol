@@ -216,6 +216,17 @@ contract RollupFraudHardeningTest is Test {
                 assertFalse(abi.decode(ret, (bool)), "B-4: no gas limit may convict");
             }
         }
+        // Pin the diagnostic: a call that clears the whole flow but leaves less than
+        // MIN_MLE_VERIFY_GAS at the verdict reverts FraudProofGasStarved, never "fraud".
+        vm.prank(attacker);
+        (bool okStarved, bytes memory retStarved) =
+            address(r).call{gas: honestCost + 100_000}(payload);
+        assertFalse(okStarved, "B-4: a starved fraudProof must revert");
+        assertEq(
+            bytes4(retStarved), IntmaxRollup.FraudProofGasStarved.selector,
+            "B-4: fraudProof reverts FraudProofGasStarved"
+        );
+
         assertEq(r.nextSubmissionId(), 1, "B-4: the honest submission survived every gas limit");
         assertEq(r.blockNumber(), 1, "B-4: the chain was never rolled back");
         assertEq(r.pendingWithdrawals(attacker), 0, "B-4: no bond was ever paid to the attacker");
