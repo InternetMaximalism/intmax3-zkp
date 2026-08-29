@@ -1775,6 +1775,10 @@ contract IntmaxRollup {
     ///      SECURITY: NO `degreeBits == 0` disable seam — `withdrawNative` already requires
     ///      `withdrawalVkInitialized`, and `initializeWithdrawalVk` enforces `degreeBits > 0`, so the
     ///      payout path ALWAYS runs real MLE/WHIR verification (unlike the validity test-disable path).
+    ///      SECURITY (B-4): this try/catch stays FAIL-CLOSED and must NOT be given `_mleVerdict`'s
+    ///      tri-state treatment. Here a caught revert blocks a PAYOUT, which is the safe direction;
+    ///      in `_verifyFraud` the same shape used to CONFIRM FRAUD, which is why only that call
+    ///      site had to change. Same reasoning for `finalize`'s `fullVerify` try/catch.
     function _verifyMleWithdrawal(
         MleVerifier.MleProof calldata mleProof
     ) internal view returns (bool) {
