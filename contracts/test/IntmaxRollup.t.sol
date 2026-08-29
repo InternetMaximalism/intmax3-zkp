@@ -554,7 +554,7 @@ contract IntmaxRollupTest is Test {
         ) = _diffMembers(memberCount);
 
         vm.recordLogs();
-        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         // ChannelRegistered(uint64 indexed, uint32 indexed, uint8, bytes32[], bytes32[], address[],
@@ -611,7 +611,7 @@ contract IntmaxRollupTest is Test {
                 address[] memory recipients
             ) = _diffMembers(memberCount);
             uint32 channelId = 7;
-            fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
+            fresh.registerChannel{value: 0.003 ether}(channelId, 1, 0, sphincs, pkBs, regev, recipients);
 
             // Pad the active hashes to the fixed-16 form the verifier consumes.
             bytes32[8] memory padded;
@@ -646,11 +646,11 @@ contract IntmaxRollupTest is Test {
             bytes32[] memory regev,
             address[] memory recipients
         ) = _diffMembers(3);
-        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // Same channel id, second time: reverts regardless of member set.
         vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
-        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // A DIFFERENT member set for the same channel id also reverts.
         (
@@ -660,10 +660,10 @@ contract IntmaxRollupTest is Test {
             address[] memory rc2
         ) = _diffMembers(4);
         vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
-        fresh.registerChannel(7, 0, 0, s2, pkBs2, r2, rc2);
+        fresh.registerChannel{value: 0.003 ether}(7, 0, 0, s2, pkBs2, r2, rc2);
 
         // A different channel id still succeeds.
-        fresh.registerChannel(8, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel{value: 0.003 ether}(8, 1, 0, sphincs, pkBs, regev, recipients);
         assertTrue(fresh.channelMemberSetCommitment(8) != bytes32(0));
     }
 

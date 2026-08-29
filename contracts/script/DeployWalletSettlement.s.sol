@@ -111,7 +111,7 @@ contract DeployWalletSettlement is Script {
         // count both yield the SAME `memberCount` and therefore the SAME commitment the manager
         // constructor binds to. What changes is only what the reg-chain preimage and the
         // `ChannelRegistered` event contain: no delegate slots, and a zero `delegateCount` limb.
-        rollup.registerChannel(
+        rollup.registerChannel{value: 0.003 ether}(
             r.channelId,
             r.bpSlot,
             RegRecordLib.REGISTRATION_DELEGATE_COUNT,

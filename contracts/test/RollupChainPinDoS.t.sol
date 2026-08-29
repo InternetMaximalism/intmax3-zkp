@@ -91,7 +91,7 @@ contract RollupChainPinDoSTest is Test {
         rc[0] = address(0x1001); rc[1] = address(0x1002);
 
         vm.prank(GRIEFER);
-        rollup.registerChannel(4242, 0, 0, pk, pkb, rg, rc);
+        rollup.registerChannel{value: 0.003 ether}(4242, 0, 0, pk, pkb, rg, rc);
 
         _mockBlob();
         vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
@@ -105,6 +105,34 @@ contract RollupChainPinDoSTest is Test {
             _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), rollup.pendingChainsPin()
         );
         assertEq(rollup.nextSubmissionId(), 1, "honest post landed");
+    }
+
+    /// M-5 (squatting half): registering an id costs the fee, and the fee reaches the treasury
+    /// through the existing pull path. Before the fee, bricking any predictable channel id
+    /// permanently cost only gas — registration is permissionless AND one-time per id.
+    function test_M5_squattingCostsTheRegistrationFee() public {
+        bytes32[] memory pk = new bytes32[](2);
+        pk[0] = bytes32(uint256(11)); pk[1] = bytes32(uint256(12));
+        bytes32[] memory pkb = new bytes32[](2);
+        pkb[0] = bytes32(uint256(21)); pkb[1] = bytes32(uint256(22));
+        bytes32[] memory rg = new bytes32[](2);
+        rg[0] = bytes32(uint256(31)); rg[1] = bytes32(uint256(32));
+        address[] memory rc = new address[](2);
+        rc[0] = address(0x1001); rc[1] = address(0x1002);
+
+        uint256 fee = rollup.CHANNEL_REGISTRATION_FEE();
+        assertGt(fee, 0, "a free registration is a free brick");
+
+        // Underpaying is refused outright.
+        vm.prank(GRIEFER);
+        vm.expectRevert(IntmaxRollup.InsufficientRegistrationFee.selector);
+        rollup.registerChannel{value: fee - 1}(4242, 0, 0, pk, pkb, rg, rc);
+
+        // Paying works, and the fee is credited to the treasury (this test contract).
+        uint256 before = rollup.pendingWithdrawals(address(this));
+        vm.prank(GRIEFER);
+        rollup.registerChannel{value: fee}(4242, 0, 0, pk, pkb, rg, rc);
+        assertEq(rollup.pendingWithdrawals(address(this)) - before, fee, "fee credited to treasury");
     }
 
     /// The unpinned overload is devnet-only, so a real deployment cannot skip the pin.

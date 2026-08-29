@@ -9,7 +9,7 @@ import {VmSafe} from "forge-std/Vm.sol";
 ///         `DeployPartialWithdrawalE2E`, `DeployCloseCli`) each read a registration record written
 ///         by `src/bin/channel_member.rs` and use it for TWO structurally different things:
 ///
-///           1. `IntmaxRollup.registerChannel(...)` — the L1 REGISTRATION RECORD. Under Option B
+///           1. `IntmaxRollup.registerChannel{value: 0.003 ether}(...)` — the L1 REGISTRATION RECORD. Under Option B
 ///              this is COSIGNERS-ONLY: it carries exactly `member_count` participants and its
 ///              `delegateCount` limb is ZERO. It is the preimage the validity `channel_reg_step`
 ///              circuit must reproduce.

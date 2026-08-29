@@ -3750,6 +3750,10 @@ fn cmd_withdraw(args: &[String]) {
                 &pk_bs,
                 &regev,
                 &recipients,
+                // M-5 (squatting): registration now carries CHANNEL_REGISTRATION_FEE, credited to
+                // the rollup's fraud treasury through the pull path.
+                "--value",
+                "0.003ether",
             ],
         );
     }

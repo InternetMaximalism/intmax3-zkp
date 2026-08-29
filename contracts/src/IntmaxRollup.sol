@@ -63,6 +63,19 @@ contract IntmaxRollup {
     /// overload is accepted only here, so a real deployment cannot skip the pending-chain pin.
     uint256 private constant ROLLUP_LOCAL_DEVNET_CHAIN_ID = 31337;
 
+    /// @notice Fee required to register a channel id, credited to `fraudTreasury`.
+    /// @dev SECURITY (M-5, second half — channelId squatting): registration is permissionless by
+    ///      design (anyone may create a channel) and ONE-TIME per id (`ChannelAlreadyRegistered`),
+    ///      so before this fee a stranger could brick any predictable id for the price of gas and
+    ///      the legitimate manager deploy would then revert `MemberSetMismatch` forever.
+    ///      0.003 ETH ~= USD 10 at ~USD 3,300/ETH (the deployment-time assumption). The fee is
+    ///      denominated in ETH, so its USD value DRIFTS with the price; changing it needs a
+    ///      redeploy. It is deliberately small — an anti-spam price, not a revenue mechanism, and
+    ///      not a barrier to honest channel creation.
+    ///      Credited via the existing pull-payment path (`pendingWithdrawals` -> `withdraw()`), so
+    ///      no external call is made here and `totalEscrowed` — the payout ceiling — is untouched.
+    uint256 public constant CHANNEL_REGISTRATION_FEE = 0.003 ether;
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -97,6 +110,10 @@ contract IntmaxRollup {
     error PendingChainsMoved();
     /// M-5: the unpinned `postBlockAndSubmit` overload is devnet-only.
     error ChainPinRequired();
+    /// M-5 (channelId squatting): `registerChannel` is permissionless and ONE-TIME per id, so a
+    /// stranger who registers a target id first bricks it forever. A registration fee makes that
+    /// attack cost real money per id instead of gas.
+    error InsufficientRegistrationFee();
     error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
@@ -1152,7 +1169,11 @@ contract IntmaxRollup {
         bytes32[] calldata pkBs,
         bytes32[] calldata regevPkDigests,
         address[] calldata recipients
-    ) external {
+    ) external payable {
+        // M-5 (squatting): pay first, so a griefer's cost is per-id money, not per-id gas. Credited
+        // to the treasury through the pull path; over-payment is kept (callers should send exactly).
+        if (msg.value < CHANNEL_REGISTRATION_FEE) revert InsufficientRegistrationFee();
+        pendingWithdrawals[fraudTreasury] += msg.value;
         if (channelId == 0) revert ChannelIdZeroReserved();
         if (channelId == BURN_CHANNEL_ID) revert ChannelIdBurnReserved();
         // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and

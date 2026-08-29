@@ -134,7 +134,7 @@ contract DeployClose is Script {
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
         bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
         address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
+        rollup.registerChannel{value: 0.003 ether}(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
 
         // Manager member bindings. SECURITY/SCOPE: the close-form member-set commitment binds only
         // the SPHINCS+ pubkey hashes (not recipients), so we can route member slot 0's payout
