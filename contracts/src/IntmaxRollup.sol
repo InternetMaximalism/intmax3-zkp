@@ -2016,14 +2016,50 @@ contract IntmaxRollup {
         // inner frame is guaranteed to fail.
         if (gasleft() < MIN_MLE_VERIFY_GAS) return MLE_STARVED;
 
+        // 63/64 defence, part 2 — REWRITTEN (R3-4, round 3). Round 2 wrote
+        //
+        //     if (gasleft() <= gasBefore / 64) return MLE_STARVED;
+        //
+        // and justified it as "an inner frame that consumed everything it was forwarded leaves the
+        // outer frame at most gasBefore/64. That is the OOG signature." TRUE ONLY AT CALL DEPTH 1.
+        // `_verifyMleWithVk` ends in `mleVerifier.verify(...)`, an external call to the immutable
+        // satellite, so a real OOG happens at DEPTH 2 — and EIP-150's 1/64 retention ACCUMULATES:
+        // frame 1 keeps 1/64 of its own budget and hands it back when it bubbles the revert, so
+        // frame 0 ends with gasBefore * (1 - (63/64)^2) ≈ 1.98 * gasBefore/64. The branch could
+        // therefore NEVER FIRE in production. Measured at an identical `gasBefore`: depth-1 retained
+        // 312,443 against a 312,487 threshold (fires); depth-2 retained 619,988 (never fires). End
+        // to end, 16 of 17 genuine starvations were reported `MleProofUnevaluable` — "the deployed
+        // evaluator cannot evaluate this proof", the opposite diagnosis — leaving the 12M floor as
+        // the entire starvation defence. See
+        // `RedTeamRound3Fraud.t.sol::test_R3_BREAK_B4_the6364SignatureCannotFireAtDepthTwo`.
+        // (SOUNDNESS was never affected: both verdicts revert, and `MLE_INVALID` — the only fraud
+        // evidence — is reachable only from the try arm RETURNING false.)
+        //
+        // THE FIX: forward an EXPLICIT budget and classify on how much of THAT BUDGET came back,
+        // which is depth-independent. `reserve` is `gasBefore/64` — exactly what EIP-150 would have
+        // withheld anyway, so the success path is unchanged — and the inner subtree gets the rest.
+        // A starved subtree returns almost nothing of it: at nesting depth n a full OOG hands back
+        // `budget * (1 - (63/64)^n)`, which is 1.6% at depth 1, 3.1% at depth 2 (production) and
+        // still only 12% at depth 8. A deterministic revert (the gate-8 "unsupported gate" class)
+        // unwinds early and hands back nearly the whole budget. `budget / 8` sits between the two
+        // with an order of magnitude of headroom on each side and tolerates any nesting depth up to
+        // 8, so no plausible change to the satellite's internals can silently disable this branch
+        // the way the depth-1 assumption did.
+        //
+        // The residual misclassification is deliberately on the SAFE side: a deterministic revert
+        // that occurs so late it also consumed 7/8 of the budget is reported `FraudProofGasStarved`
+        // rather than `MleProofUnevaluable`. Both revert, neither convicts, and "send more gas" is
+        // the harmless diagnosis to give first — whereas the round-2 direction told a genuinely
+        // under-gassed honest prover that the evaluator could not evaluate their proof at all.
         uint256 gasBefore = gasleft();
-        try this._verifyMleWithVk(mleProof, false) returns (bool v) {
+        uint256 reserve = gasBefore / 64;
+        uint256 budget = gasBefore - reserve;
+        try this._verifyMleWithVk{gas: budget}(mleProof, false) returns (bool v) {
             return v ? MLE_VALID : MLE_INVALID;
         } catch {
-            // 63/64 defence, part 2: an inner frame that consumed everything it was forwarded
-            // leaves the outer frame at most gasBefore/64. That is the OOG signature; a
-            // deterministic revert (the gate-8 class) returns almost all of it unspent.
-            if (gasleft() <= gasBefore / 64) return MLE_STARVED;
+            // No subtraction of `gasleft()`: the comparison is written so it cannot underflow if
+            // the try/catch machinery itself dips into the reserve.
+            if (gasleft() <= reserve + budget / 8) return MLE_STARVED;
             return MLE_UNEVALUABLE;
         }
     }

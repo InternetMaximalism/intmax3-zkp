@@ -90,6 +90,10 @@ contract RedTeamFraudBreaksTest is Test {
     uint256 internal constant INV2 =
         0x39f6d3a994cebea4199cec0404d0ec02a9ded2017fff2dff7fffffff80000001;
 
+    /// `IntmaxRollup.MIN_MLE_VERIFY_GAS`, mirrored (it is `private constant` there). R3-4: the RT-1
+    /// sweep must be able to say which side of this floor each iteration is on.
+    uint256 internal constant MIN_MLE_VERIFY_GAS_MIRROR = 12_000_000;
+
     // =======================================================================
     // FINDING RT-1 (C-1 NOT CLOSED) — gas starvation turns `!_verifyMle` into
     // a caller-steerable fraud verdict against an HONEST submission.
@@ -108,9 +112,21 @@ contract RedTeamFraudBreaksTest is Test {
     // =======================================================================
 
     ///  POST-FIX: `_mleVerdict` returns MLE_STARVED when `gasleft()` is below
-    ///  MIN_MLE_VERIFY_GAS, or when the inner frame burned the whole 63/64 it was forwarded, and
-    ///  `_verifyFraud` REVERTS on that verdict. The sweep below therefore finds no winning limit;
-    ///  the assertion is inverted from "expected a gas limit that convicts" to "none may".
+    ///  MIN_MLE_VERIFY_GAS, or when the inner subtree gave back less than 1/8 of the explicit budget
+    ///  it was forwarded, and `_verifyFraud` REVERTS on that verdict. The sweep below therefore
+    ///  finds no winning limit; the assertion is inverted from "expected a gas limit that convicts"
+    ///  to "none may".
+    ///
+    ///  TEST-INTEGRITY FIX (R3-4, round 3). As originally written the sweep ran
+    ///  `[honestCost/4, honestCost + 4*step]` with `step = honestCost/200 + 1`, i.e. a band capped
+    ///  at ~1.02 * honestCost. With this harness's scaled-down verifier `honestCost` is ~4.89M, so
+    ///  EVERY iteration was below `MIN_MLE_VERIFY_GAS` (12,000,000) and was refused by the FLOOR
+    ///  before the try/catch was ever entered. "No gas limit may convict the honest submission" was
+    ///  therefore proven only for limits under the floor, and the 63/64 branch this test's own
+    ///  doc-comment names was never executed — the same "assertion reads stronger than what it
+    ///  tests" class as the `vm.warp` finding. The sweep now spans BOTH regimes explicitly: the
+    ///  sub-floor band it always covered, AND a band above the floor where the call really does
+    ///  reach the try/catch and the OOG-classification branch really does run.
     function test_RT1_C1_gasStarvationCannotConvictAnHonestSubmission() public {
         // ~1.1M gas of verification work (the real verifier costs 11,019,291 — see MleE2E).
         (IntmaxRollup r, bytes memory payload) = _honestSubmissionOn(
@@ -131,18 +147,53 @@ contract RedTeamFraudBreaksTest is Test {
         // OUTER frame still completes. Only a *successful* call mutates state, and we stop at the
         // first one, so no snapshot juggling is needed.
         bool fraud;
+        uint256 belowFloor;
+        uint256 aboveFloor;
+        uint256 reachedTryCatch;
         uint256 step = honestCost / 200 + 1;
+
+        // Band A — the original sweep, entirely below MIN_MLE_VERIFY_GAS. Every iteration is
+        // refused by the floor; kept so the regime is still covered.
         for (uint256 g = honestCost / 4; g <= honestCost + 4 * step; g += step) {
             vm.prank(attacker);
             (bool ok, bytes memory ret) = address(r).call{gas: g}(payload);
+            belowFloor += 1;
             if (ok && ret.length == 32 && abi.decode(ret, (bool))) {
                 fraud = true;
-                emit log_named_uint("RT-1 winning tx gas limit", g);
+                emit log_named_uint("RT-1 winning tx gas limit (below floor)", g);
+                break;
+            }
+            if (!ok && ret.length >= 4 && bytes4(ret) == IntmaxRollup.MleProofUnevaluable.selector) {
+                reachedTryCatch += 1;
+            }
+        }
+
+        // Band B — R3-4: ABOVE the floor, where the call actually enters the try/catch and the
+        // OOG-classification branch is exercised. The band starts just over MIN_MLE_VERIFY_GAS and
+        // runs past the point where the whole verification comfortably fits.
+        for (uint256 g = MIN_MLE_VERIFY_GAS_MIRROR + 1; g <= 24_000_000; g += 500_000) {
+            vm.prank(attacker);
+            (bool ok, bytes memory ret) = address(r).call{gas: g}(payload);
+            aboveFloor += 1;
+            if (ok && ret.length == 32 && abi.decode(ret, (bool))) {
+                fraud = true;
+                emit log_named_uint("RT-1 winning tx gas limit (above floor)", g);
                 break;
             }
         }
 
+        emit log_named_uint("RT-1 sweep iterations below the floor", belowFloor);
+        emit log_named_uint("RT-1 sweep iterations above the floor", aboveFloor);
+
         assertFalse(fraud, "RT-1 BLOCKED: no gas limit may convict the honest submission");
+        // The sweep is not vacuous in the regime the doc-comment names: limits above the floor were
+        // really attempted, so the try/catch and its classification branch really ran.
+        assertGt(aboveFloor, 0, "RT-1: the sweep must reach the regime above MIN_MLE_VERIFY_GAS");
+        assertLt(
+            honestCost + 4 * step,
+            MIN_MLE_VERIFY_GAS_MIRROR,
+            "RT-1: band A is the sub-floor regime, as documented"
+        );
 
         // ...and nothing moved. (Pre-fix all three of these flipped.)
         assertEq(r.nextSubmissionId(), 1, "RT-1: the honest submission survives");
