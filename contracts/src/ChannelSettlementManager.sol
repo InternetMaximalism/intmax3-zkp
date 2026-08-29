@@ -223,9 +223,11 @@ contract ChannelSettlementManager {
     /// A1: the cancel does not exhibit strictly newer material than a previous cancel — i.e. it is a
     /// REPLAY of an already-consumed cancel proof. See `cancelClose`.
     error CancelCloseReplay();
-    /// A3: the close about to settle is strictly OLDER than a burn this manager already authorized,
-    /// so its `channelFundAmounts` still carries that burned amount. See `finalizeClose`.
-    error CloseOlderThanAuthorizedBurn();
+    /// A3 (round 2) — REMOVED in round 3. `finalizeClose` no longer refuses a close that is older
+    /// than an authorized burn; it settles and DEDUCTS the burn from that token's accrual cap. The
+    /// refusal was the last of four latches that made `ClosePending` terminal (R3-1). The selector
+    /// is deliberately gone rather than kept as a fail-closed stub: nothing may reintroduce a
+    /// version-dependent revert on the only remaining exit. See the R3-1 block in `finalizeClose`.
     error CloseIntentDigestMismatch();
     error NullifierAlreadyUsed();
     error WithdrawalCapExceeded();
@@ -373,6 +375,14 @@ contract ChannelSettlementManager {
     );
 
     event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey);
+    /// @notice R3-1: emitted by `finalizeClose` when the settled close is strictly older than an
+    ///         already-authorized burn and the burn's value is therefore deducted from that token's
+    ///         accrual cap instead of the settlement being refused.
+    event AuthorizedBurnDeducted(
+        uint32 indexed tokenIndex,
+        uint256 deducted,
+        uint256 remainingFundAmount
+    );
 
     event PartialWithdrawalCancelled(
         bytes32 indexed authDigest,
@@ -699,6 +709,12 @@ contract ChannelSettlementManager {
     /// already authorized on the rollup. Zero until the first `finalizePartialWithdrawal`.
     uint64 public authorizedBurnEpoch;
     uint64 public authorizedBurnStateVersion;
+    /// @notice R3-1 (round 3): Σ of the amounts of every burn this manager has authorized, per BASE
+    /// token index. This is the DEDUCTION `finalizeClose` applies when the settled close is strictly
+    /// older than the burn mark — replacing round 2's A3 REFUSAL, which made `ClosePending` terminal
+    /// (see the R3-1 block in `finalizeClose`). Consumed (zeroed) by `finalizeClose` when applied, so
+    /// a base token appearing in two registry slots is deducted exactly once.
+    mapping(uint32 => uint256) public authorizedBurnAmount;
     uint256 public bpBondCredits;
 
     /// @notice A4 (round 2): per-burn anti-replay for `cancelPartialWithdrawal`, keyed on the burn's
@@ -780,6 +796,13 @@ contract ChannelSettlementManager {
     /// Era in which the pending intent was submitted. Any `requestClose()` increments the live
     /// nonce and thereby gives one member a unilateral veto during the challenge window.
     uint64 public pendingPartialWithdrawalCloseFreezeNonce;
+    /// @notice R3-1 (round 3): the pending burn's BASE token index and amount, retained so that
+    ///         `finalizePartialWithdrawal` can accrue the authorized burn into `authorizedBurnAmount`
+    ///         AFTER the challenge window. Both are IMBD-bound at submission (`withdrawal.auxData`
+    ///         is the last push in the N-of-N-signed settled-tx chain and the descriptor recompute
+    ///         pins recipient/token/amount to it), so neither is caller-declared.
+    uint32 public pendingPartialWithdrawalTokenIndex;
+    uint256 public pendingPartialWithdrawalAmount;
 
     /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
     mapping(bytes32 => address) public registeredRecipientOf;
@@ -1139,23 +1162,46 @@ contract ChannelSettlementManager {
             if (block.timestamp > pendingClose.challengeDeadline) {
                 revert ChallengeWindowClosed();
             }
-            // SECURITY (A2, round 2 — the H-3 clamp's zero-length last rung): the check above alone
-            // admits a rung landing at `now == challengeDeadline == closeChallengeHorizon`, which
-            // `_storePendingClose` then clamps to `challengeDeadline == now` — finalizable in the
-            // SAME block, with no interval in which anyone can answer it. Refuse any replacement
-            // that cannot leave a usable response window before the era's absolute horizon. The
-            // horizon itself stays absolute (H-3 is untouched); only the admission rule tightens, so
-            // this can never EXTEND the ladder — it can only end it sooner.
+            // ── SECURITY (A2, round 2 — the H-3 clamp's zero-length last rung; REWRITTEN by R3-2).
             //
-            // The floor degrades to `challengePeriod` on the local devnet, where the constructor
-            // permits a sub-`CHALLENGE_PERIOD_SECS` window: a fixed 3,600 s would exceed the whole
-            // 2x horizon there and forbid every replacement, silently deleting the challenge game
-            // from the E2E lifecycle tests. On every other chain `challengePeriod >= 86,400`, so the
-            // effective floor is exactly `MIN_CLOSE_RESPONSE_SECS`.
-            uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS
-                ? challengePeriod
-                : MIN_CLOSE_RESPONSE_SECS;
-            if (block.timestamp + minResponse > closeChallengeHorizon) {
+            //    THE DEFECT A2 FOUND, and which is still real: the deadline check above alone admits
+            //    a rung landing at `now == challengeDeadline == closeChallengeHorizon`, which
+            //    `_storePendingClose` then clamped to `challengeDeadline == now` — finalizable in the
+            //    SAME block, with no interval in which anyone could answer it.
+            //
+            //    WHY ROUND 2's FIX WAS WRONG (R3-2,
+            //    `RedTeamRound3.t.sol::test_R3_BREAK_A2_finalHourIsAReplacementBlackout`). Round 2
+            //    refused any replacement with `block.timestamp + minResponse > closeChallengeHorizon`.
+            //    But the response to a rung IS a replacement close intent — so that rule CLOSED THE
+            //    VERY LANE it claimed to keep open, and it closed it for a full `minResponse` rather
+            //    than for the zero seconds the original defect cost. Measured: an attacker's rung
+            //    lands one second before the first deadline, an honest strictly-newer state surfaces
+            //    at `horizon - 3599` INSIDE that deadline, is refused, and the attacker's stale state
+            //    settles unopposed. On the devnet branch it was half the ladder.
+            //
+            //    THE R3-2 RULE — admit up to the horizon, and guarantee the WINDOW instead of
+            //    refusing the RUNG. Admission is now bounded by the era's absolute horizon and
+            //    nothing else, so no honest replacement that lands before the horizon is ever
+            //    refused. `_storePendingClose` then floors every admitted rung's deadline at
+            //    `now + minResponse`, so no rung is ever unanswerable. The two together bound the
+            //    ladder at `closeChallengeHorizon + minResponse` — H-3's absolute cap plus one
+            //    response interval, which is bounded and independent of the number of rungs, versus
+            //    the unbounded per-rung extension H-3 was introduced to kill.
+            //
+            //    THE FINAL RUNG. A rung landing at exactly the horizon still cannot be answered by
+            //    ANOTHER replacement (that is inherent to an absolute horizon: someone must be last).
+            //    It is answerable by `cancelClose`, which has no window bound at all and needs the
+            //    IDENTICAL material — a strictly newer N-of-N-signed state — so the response lane is
+            //    genuinely open for the whole `minResponse` interval. That is what makes the
+            //    constant's "every admitted rung leaves a usable response interval" TRUE; under the
+            //    round-2 rule it was false, because a refused replacement is not a response.
+            //
+            //    The floor degrades to `challengePeriod` on the local devnet, where the constructor
+            //    permits a sub-`CHALLENGE_PERIOD_SECS` window: a fixed 3,600 s would exceed the whole
+            //    2x horizon there and stretch the ladder well past it. On every other chain
+            //    `challengePeriod >= 86,400`, so the effective floor is exactly
+            //    `MIN_CLOSE_RESPONSE_SECS` and the overshoot is 1/48 of the horizon.
+            if (block.timestamp > closeChallengeHorizon) {
                 revert ChallengeWindowClosed();
             }
             if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
@@ -1490,25 +1536,49 @@ contract ChannelSettlementManager {
         //    "V over-counts no burn" is precisely "V >= max(b_i)" — a single (epoch, stateVersion)
         //    pair suffices, and no per-burn list is needed.
         //
-        //    WHY REFUSING IS SAFE (this is a deferral, not a brick). No burn can be authorized
-        //    while a close is pending — `finalizePartialWithdrawal` reverts with
-        //    `PartialWithdrawalCloseInProgress` outside {Active, Closed} — so the mark cannot move
-        //    under a pending close, and a refusal here is a stable, immediately-diagnosable state
-        //    rather than a race. Two permissionless remedies remain open on the very close that was
-        //    refused: challenge-replace it with a newer intent while the window is open, or
-        //    `cancelClose` it, which has no window bound at all. Both are reachable by the party the
-        //    refusal protects, and the material they need provably exists: the burn's own submission
-        //    carried a full close proof at b_max, which is strictly newer than V by construction.
-        //    An HONEST close is never refused — an honest close settles at the head, and the head is
-        //    at-or-after every burn already committed into it.
+        //    CORRECTION (R3-1, round 3): round 2 REFUSED the settlement here, and claimed the refusal
+        //    was "a deferral, not a brick" because `cancelClose` and challenge-replacement remained
+        //    open. THAT CLAIM WAS FALSE, and the falsification is a total, permanent, honest-reachable
+        //    fund lock (`RedTeamRound3.t.sol::test_R3_BREAK_A1xA3_closePendingIsTerminal`). A1's
+        //    MANAGER-LIFETIME floor `highestCancelledRevivedStateVersion` consumes exactly the
+        //    material the deferral argument depends on: once ANY cancel has spent the top of the
+        //    signed-state supply (the ordinary, intended use of `cancelClose` — cancel a stale close
+        //    with the head state), no later cancel at that version is admissible EVER. Then, past the
+        //    horizon, `finalizeClose` reverted `CloseOlderThanAuthorizedBurn`, `cancelClose` reverted
+        //    `CancelCloseReplay`, `submitCloseIntent` reverted `ChallengeWindowClosed` and
+        //    `requestClose` reverted `ChannelAlreadyFrozen` — `ClosePending` was TERMINAL and every
+        //    channel fund was unreachable forever. The naturally-armed form needs only a withholding
+        //    coordinator: a burn at the withheld head is unvetoable, so the mark lands above every
+        //    honest close by construction.
+        //
+        //    THE FIX — ADJUST THE AMOUNT, DO NOT REFUSE THE TRANSITION. The property this guard owes
+        //    is "the escrow is not drawn twice for the same value", NOT "this close may not settle".
+        //    So settle, and SUBTRACT the already-authorized burns from the accrual cap the settlement
+        //    creates. `finalizeClose` therefore has NO version-dependent revert left: past the
+        //    challenge deadline it always succeeds, which is the invariant round 3 requires
+        //    (`ChannelSettlementInvariant.t.sol::invariant_closePendingAlwaysHasAReachableExit`).
+        //
+        //    SOUNDNESS OF THE SUBTRACTION. By the high-water-mark argument above, a settled close at
+        //    V over-counts burn i exactly when V < b_i, and over-counts it by exactly the burn's
+        //    IMBD-pinned amount x_i. `authorizedBurnAmount[t]` is Σ x_i over ALL authorized burns of
+        //    base token t. The deduction below is applied only when the mark is strictly newer than
+        //    V — i.e. only when at least one burn IS over-counted — and it is applied SATURATING at
+        //    zero, so it can never underflow-revert and re-introduce the brick through arithmetic.
+        //    It is EXACT when every authorized burn is newer than V (the case the guard exists for,
+        //    including the single-burn PoC), and CONSERVATIVE — it over-deducts Σ_{b_i <= V} x_i —
+        //    in the mixed case where burns straddle V. Over-deduction is safe in the direction that
+        //    matters (it can only lower the member accrual cap, never raise it, so no double-draw is
+        //    reachable), and it is unreachable on the honest path: an honest close settles at the
+        //    head, the head is at-or-after every burn committed into it, the mark is therefore NOT
+        //    strictly newer, and the deduction does not run at all. See the RESIDUAL note at the
+        //    deduction loop for the exact bound on the mixed case.
         //
         //    Zero-init is inert: with no burn ever authorized both fields are 0, and
-        //    `0 > finalEpoch || (0 == finalEpoch && 0 > finalStateVersion)` is false for every input.
-        if (
-            authorizedBurnEpoch > pendingClose.finalEpoch ||
+        //    `0 > finalEpoch || (0 == finalEpoch && 0 > finalStateVersion)` is false for every input,
+        //    so `closeOlderThanAuthorizedBurn` is false and no deduction is applied.
+        bool closeOlderThanAuthorizedBurn = authorizedBurnEpoch > pendingClose.finalEpoch ||
             (authorizedBurnEpoch == pendingClose.finalEpoch &&
-                authorizedBurnStateVersion > pendingClose.finalStateVersion)
-        ) revert CloseOlderThanAuthorizedBurn();
+                authorizedBurnStateVersion > pendingClose.finalStateVersion);
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
@@ -1536,6 +1606,41 @@ contract ChannelSettlementManager {
             uint32 baseToken = pendingClose.tokenRegistry[t];
             finalizedTokenRegistry[t] = baseToken;
             finalizedChannelFundAmount[baseToken] += pendingClose.channelFundAmounts[t];
+        }
+
+        // ── R3-1: the burn deduction, applied AFTER the accrual loop above has finished summing.
+        //    A SECOND pass is required, not a fused one: with a duplicate base index across two
+        //    registry slots the accrual is a running sum, and deducting mid-sum could saturate to
+        //    zero against a partial total and silently discard the later slot's funds. Zeroing the
+        //    ledger entry as it is consumed makes the duplicate case deduct exactly once.
+        //
+        //    RESIDUAL (documented, not silently accepted): in the mixed case — two or more burns
+        //    straddling the settled version V — this over-deducts Σ_{b_i <= V} x_i, value that the
+        //    V-state fund vector had already correctly excluded. It is bounded by the total of the
+        //    burns already PAID to their (necessarily participant, `isMemberRecipient`-checked)
+        //    recipients, and it is reachable only when a close settles at a state that is NOT the
+        //    head, i.e. only when the channel has already been robbed by a stale settlement of which
+        //    this is a strict sub-loss — the same shape as the residual recorded in
+        //    `finalizePartialWithdrawal`. Making it exact needs a suffix-sum over the burn history
+        //    keyed on state version, which is an unbounded loop in `finalizeClose` and therefore a
+        //    gas-DoS-shaped re-introduction of the very lock this fix removes. Under-deducting is
+        //    NOT an option in the other direction: that is the H-6/A3 double-draw itself.
+        //
+        //    Burns authorized AFTER this point (status `Closed`) cannot be over-counted: the
+        //    `settledBeforeBurn` gate in `finalizePartialWithdrawal` refuses every burn newer than
+        //    the settled close, so their amounts accrue into a ledger nothing reads again.
+        if (closeOlderThanAuthorizedBurn) {
+            for (uint256 t = 0; t < tc; t++) {
+                uint32 baseToken = pendingClose.tokenRegistry[t];
+                uint256 deduction = authorizedBurnAmount[baseToken];
+                if (deduction == 0) continue;
+                authorizedBurnAmount[baseToken] = 0;
+                uint256 cap = finalizedChannelFundAmount[baseToken];
+                // SATURATING: an underflow revert here would be a brick, which is the whole defect
+                // being fixed. Clamping to zero is the fail-closed direction for a payout cap.
+                finalizedChannelFundAmount[baseToken] = cap > deduction ? cap - deduction : 0;
+                emit AuthorizedBurnDeducted(baseToken, deduction, finalizedChannelFundAmount[baseToken]);
+            }
         }
 
         // NOTE (Phase 2b review MINOR 3, examined for Phase 3): the Rust-side
@@ -1711,6 +1816,11 @@ contract ChannelSettlementManager {
         pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
         pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
         pendingPartialWithdrawalEpoch = intent.finalEpoch;
+        // R3-1: retain the IMBD-pinned (token, amount) so `finalizePartialWithdrawal` can accrue the
+        // burn into `authorizedBurnAmount`. Written AFTER the descriptor recompute above, so these
+        // are the values the N-of-N-signed chain committed to, not the caller's.
+        pendingPartialWithdrawalTokenIndex = withdrawal.tokenIndex;
+        pendingPartialWithdrawalAmount = withdrawal.amount;
         // The manager era observed at submission. H-6: this is now a RECORD ONLY — it is no longer
         // read by `finalizePartialWithdrawal`, because comparing it there gave every member and
         // every delegate a one-transaction permanent strand of an already-debited burn. The
@@ -1803,6 +1913,13 @@ contract ChannelSettlementManager {
             authorizedBurnEpoch = pendingPartialWithdrawalEpoch;
             authorizedBurnStateVersion = pendingPartialWithdrawalStateVersion;
         }
+        // R3-1: accrue the burn's value into the per-BASE-token deduction ledger. Unlike the mark
+        // above this is a SUM, not a max — it is order-independent, so an out-of-order burn (lower
+        // version submitted later) contributes correctly without needing to be refused. `finalizeClose`
+        // subtracts it from the settled fund cap instead of refusing the settlement; see the R3-1
+        // block there. Unchecked overflow is impossible: every addend is an IMBD-pinned burn amount
+        // bounded by the channel's escrowed value, and Solidity 0.8 checks the addition regardless.
+        authorizedBurnAmount[pendingPartialWithdrawalTokenIndex] += pendingPartialWithdrawalAmount;
 
         delete partialWithdrawalPending;
         delete pendingPartialWithdrawalAuthDigest;
@@ -1812,6 +1929,8 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalStateVersion;
         delete pendingPartialWithdrawalEpoch;
         delete pendingPartialWithdrawalCloseFreezeNonce;
+        delete pendingPartialWithdrawalTokenIndex;
+        delete pendingPartialWithdrawalAmount;
 
         IChannelRegistry(address(registry)).authorizePartialWithdrawal(authDigest);
 
@@ -1903,6 +2022,8 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalStateVersion;
         delete pendingPartialWithdrawalEpoch;
         delete pendingPartialWithdrawalCloseFreezeNonce;
+        delete pendingPartialWithdrawalTokenIndex;
+        delete pendingPartialWithdrawalAmount;
 
         emit PartialWithdrawalCancelled(
             authDigest,

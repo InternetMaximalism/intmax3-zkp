@@ -18,8 +18,12 @@ import {CloseTestLib} from "./CloseTestLib.sol";
 ///                                `highestCancelledRevivedStateVersion` floor in `cancelClose`)
 ///   - ATTACK 2                -> A2, `ChallengeWindowClosed` (the `MIN_CLOSE_RESPONSE_SECS`
 ///                                admission floor in `submitCloseIntent`)
-///   - ATTACK 3                -> A3, `CloseOlderThanAuthorizedBurn` (the authorized-burn
-///                                high-water check in `finalizeClose`)
+///   - ATTACK 3                -> A3, the authorized-burn high-water check in `finalizeClose`.
+///                                ROUND 3 (R3-1) replaced A3's REFUSAL with a per-token DEDUCTION:
+///                                the close settles and the already-authorized burn is subtracted
+///                                from the accrual cap. `CloseOlderThanAuthorizedBurn` no longer
+///                                exists — the refusal was the last latch that made `ClosePending`
+///                                terminal. The probe below now pins the deduction instead.
 /// Each ATTACK body is preserved VERBATIM up to the exact call that used to succeed; that call is
 /// now wrapped in `vm.expectRevert` with the guard's own selector, so the file keeps working as the
 /// regression pin for the attacks it found. Removing a guard makes its probe fail again.
@@ -379,44 +383,42 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // 2. A close then settles at v12 — BEFORE the burn. Its fund vector still carries the
         //    burned amount, and nothing revisits the authorization.
         //
-        //    ROUND 2 (A3): `finalizeClose` now refuses it. `finalizePartialWithdrawal` recorded the
-        //    burn's (epoch, stateVersion) high-water mark, and a close strictly older than that mark
-        //    is exactly a close whose `channelFundAmounts` still carries the burned amount.
+        //    ROUND 2 (A3): `finalizeClose` REFUSED it, and the round-2 comment called that refusal
+        //    "a deferral, not a brick".
+        //
+        //    ROUND 3 (R3-1): that was false — the refusal was the last of four latches that made
+        //    `ClosePending` terminal, a total permanent fund lock (RedTeamRound3.t.sol). The guard
+        //    now ADJUSTS THE AMOUNT instead of refusing the transition: the close SETTLES, and the
+        //    already-authorized burn is deducted from the accrual cap it creates. The property the
+        //    guard owes — "draw #2 does not include the burned value" — is preserved exactly, and
+        //    `finalizeClose` no longer has any version-dependent revert.
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 12);
         manager.submitCloseIntent(stale, _closeProof(stale));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        vm.expectRevert(ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
         manager.finalizeClose();
 
-        assertEq(manager.finalizedChannelFundAmount(TOKEN_INDEX), 0, "BLOCKED: no draw #2 accrued");
-        assertTrue(
-            uint8(manager.channelStatus())
-                != uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "BLOCKED: the pre-burn close did not settle"
-        );
-
-        // 3. NOT A BRICK — the refusal is a deferral with two permissionless remedies. Here is the
-        //    one that needs no window: `cancelClose` has no challenge-window bound, and the material
-        //    it needs provably exists (the burn's own submission carried a close proof at v30).
-        bytes32 staleDigest = manager.computeCloseIntentDigest(stale);
-        manager.cancelClose(
-            _cancelRequest(staleDigest, 31), _cancelProof(_cancelRequest(staleDigest, 31))
-        );
         assertEq(
             uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active),
-            "the channel is revived, not stuck"
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
+            "R3-1: the settlement is no longer refused; ClosePending is not terminal"
         );
-
-        // 4. ...and an HONEST close — one at or after the burn — settles normally. A3 refuses stale
-        //    closes only, never the head.
-        _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 32);
-        manager.submitCloseIntent(head, _closeProof(head));
-        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
-        assertEq(manager.finalizedStateVersion(), 32, "A3 does not block an honest close");
+        // The cap the stale close declared is DEFAULT_FUND_AMOUNT (it still carries the burn);
+        // the accrual cap it actually creates is that MINUS the burn already paid on L1.
+        assertEq(
+            manager.finalizedChannelFundAmount(TOKEN_INDEX),
+            DEFAULT_FUND_AMOUNT - PW_AMOUNT,
+            "BLOCKED: draw #2 is capped at fund - burn, so the burned value is not drawn twice"
+        );
+        // Mutation pin: without the deduction this would be DEFAULT_FUND_AMOUNT, i.e. the H-6
+        // double-draw. Assert the strict inequality too so a no-op deduction fails loudly.
+        assertLt(
+            manager.finalizedChannelFundAmount(TOKEN_INDEX),
+            DEFAULT_FUND_AMOUNT,
+            "the deduction actually ran"
+        );
+        // The ledger entry is CONSUMED, so a duplicate registry slot cannot deduct it twice.
+        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), 0, "deduction consumed exactly once");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
