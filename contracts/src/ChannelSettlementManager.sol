@@ -1670,6 +1670,11 @@ contract ChannelSettlementManager {
         //    Burns authorized AFTER this point (status `Closed`) cannot be over-counted: the
         //    `settledBeforeBurn` gate in `finalizePartialWithdrawal` refuses every burn newer than
         //    the settled close, so their amounts accrue into a ledger nothing reads again.
+        //
+        //    Iterating the SETTLED registry (not the ledger) is complete, not a miss: a burn's token
+        //    is checked against the BURN intent's proof-bound registry at submission, and a base
+        //    token absent from the CLOSE's registry has no `channelFundAmounts` slot in this
+        //    settlement — so there is nothing for it to over-count and nothing to deduct.
         if (closeOlderThanAuthorizedBurn) {
             for (uint256 t = 0; t < tc; t++) {
                 uint32 baseToken = pendingClose.tokenRegistry[t];
