@@ -534,6 +534,78 @@ contract RollupFraudHardeningTest is Test {
     }
 
     // =======================================================================
+    // B-6 (RESIDUAL, NOT CLOSED) — bounding what the forgeable KZG opening costs
+    // =======================================================================
+
+    /// @dev B-6 is a real, OPEN finding: the k = 1 keccak guard closes one instance and nothing
+    ///      more. `vanishingG2 = [k]G2` for any k >= 2 whose dlog the caller knows walks straight
+    ///      past it, with the accepting witness pi := k^-1 . lhs computed from public G1 points,
+    ///      and `lagrangeBasisG1` stays caller-supplied on top of that. The only complete fix is
+    ///      the immutable trusted-setup store, which is NOT landed here (see the SECURITY
+    ///      (H-4 / B-6) block in BlobKZGVerifier.sol for why it is a redesign, not a patch).
+    ///
+    ///      This test does not claim the binding is sound. It BOUNDS the damage, which is the part
+    ///      that must not be taken on faith: a forged opening cannot convict an honest submission,
+    ///      because `_verifyFraud` pre-condition 1 recomputes the submission commitment over
+    ///      keccak256(proofBytes) and pre-condition 4 pins `mleProof` to those same bytes. The
+    ///      attacker below holds a perfectly valid opening for bytes of its own choosing and still
+    ///      cannot get anywhere, because those bytes do not keccak to the committed proofHash.
+    ///
+    ///      What B-6 DOES cost is the data-availability property, which no on-chain test can
+    ///      exhibit: a submitter can post a junk blob and commit a proofHash over bytes nobody
+    ///      has. That submission is then removed by the FINALIZE_DEADLINE_BLOCKS timeout, so the
+    ///      exposure is bounded liveness/griefing at the submitter's own bond.
+    function test_B6_forgedKzgOpeningStillCannotConvictAnHonestSubmission() public {
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), false);
+        r.setKzgVerifier(new BlobKZGVerifierExt(false));
+        vm.deal(submitter, 10 ether);
+
+        // An HONEST submission.
+        bytes32 stateRoot = keccak256("honest_state_b6");
+        IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0xBEEF));
+        MleVerifier.MleProof memory honestProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory honestBytes = abi.encode(honestProof);
+        (, bytes32 honestBlobHash) = _computeGeneralKZGProof(honestBytes);
+
+        bytes32[] memory hs = new bytes32[](1);
+        hs[0] = honestBlobHash;
+        vm.blobhashes(hs);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        vm.prank(submitter);
+        r.postBlockAndSubmit{value: 1 ether}(
+            _batch(1, ids, 100, bytes32(uint256(0xabc))),
+            keccak256(honestBytes), uint32(honestBytes.length), stateRoot
+        );
+
+        // The attacker forges an opening for bytes of ITS OWN choosing. The opening itself is
+        // accepted by the production satellite — that IS the B-6 exposure, asserted here rather
+        // than glossed over.
+        MleVerifier.MleProof memory forgedProof = _mleProofWithPI(keccak256("attacker_choice"));
+        bytes memory forgedBytes = abi.encode(forgedProof);
+        (KZGProof memory forgedKzg, bytes32 forgedHash) = _computeGeneralKZGProof(forgedBytes);
+        BlobKZGVerifierExt prod = new BlobKZGVerifierExt(false);
+        prod.verify(forgedHash, forgedKzg, forgedBytes); // accepted: the binding is forgeable
+
+        // ...and it buys the attacker nothing, because pre-condition 1 recomputes the commitment
+        // over keccak256(proofBytes) and the forged bytes are not the committed ones.
+        vm.prank(attacker);
+        assertFalse(
+            r.fraudProof(0, forgedHash, stateRoot, forgedBytes, pis, forgedProof, forgedKzg),
+            "B-6: a forged KZG opening cannot convict an honest submission"
+        );
+        // Nor can it be paired with the honest blob hash: the commitment covers both.
+        vm.prank(attacker);
+        assertFalse(
+            r.fraudProof(0, honestBlobHash, stateRoot, forgedBytes, pis, forgedProof, forgedKzg),
+            "B-6: swapping in the honest blob hash does not help either"
+        );
+
+        assertEq(r.nextSubmissionId(), 1, "B-6: the honest submission survives");
+        assertEq(r.pendingWithdrawals(attacker), 0, "B-6: no bond moved");
+    }
+
+    // =======================================================================
     // Helpers
     // =======================================================================
 

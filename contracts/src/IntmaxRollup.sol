@@ -1867,6 +1867,17 @@ contract IntmaxRollup {
         //    SECURITY (fail-closed): when the satellite is unset, the binding is NOT provable, so
         //    no fraud can be confirmed — never vacuously pass (a call to an empty address would
         //    succeed and enable false fraud confirmations / rollback griefing).
+        //
+        //    SCOPE (B-6): do NOT read this check as a sound data-availability proof. The KZG
+        //    trusted-setup data (`lagrangeBasisG1`, `vanishingG2`) is still caller-supplied, so a
+        //    caller who knows dlog(vanishingG2) can forge an accepting opening — see the
+        //    SECURITY (H-4 / B-6) block in BlobKZGVerifier.sol. This function's CONVICTION
+        //    soundness does not depend on it: pre-condition 1 recomputes the commitment over
+        //    keccak256(proofBytes) and pre-condition 4 pins mleProof to those same bytes, so an
+        //    attacker with a forged opening still cannot substitute different proof bytes. What a
+        //    forged opening costs is only the DA guarantee, and that is bounded by the
+        //    FINALIZE_DEADLINE_BLOCKS timeout. This check stays because it is the right shape and
+        //    becomes sound the moment the trusted-setup store lands.
         if (address(kzgVerifier) == address(0)) return false;
         try kzgVerifier.verify(blobVersionedHash, kzg, proofBytes) {
         } catch {
