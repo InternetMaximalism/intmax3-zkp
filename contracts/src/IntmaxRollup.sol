@@ -80,12 +80,35 @@ contract IntmaxRollup {
     // Errors
     // -----------------------------------------------------------------------
     error NoBlobAttached();
+    // SECURITY (M-8: `finalize` failed silently). Every error in this group used to be DECLARED and
+    // NEVER RAISED — the ABI advertised checks that produced nothing but a bare `return false`, so an
+    // honest submitter whose proof the verifier could not even evaluate was told the same thing as a
+    // forger. They are now each raised at exactly one site (see `finalize` and `fullVerify`), and
+    // `finalize` re-emits the selector in `FinalizeRejected` so the cause survives its boolean return.
+    /// @dev `finalize`: the caller's `stateRoot` is not the root this submission committed to.
     error CommitmentMismatch();
+    /// @dev `finalize`: no submission with this id was ever posted.
     error SubmissionNotFound();
     error AlreadyFinalized();
-    error ProofVerificationFailed();
+    /// @dev `fullVerify` 1: the proof's final height moves `latestFinalizedBlockNumber` BACKWARDS.
+    error FinalizedHeightRegression();
+    /// @dev `fullVerify` 2: the proof does not start from the current finalized state root.
     error InitialStateMismatch();
+    /// @dev `fullVerify` 3: `initialBlockChain` is not the on-chain chain hash at `initialBlockNumber`.
+    ///      Split from the final-endpoint check below so the two are distinguishable in the event —
+    ///      one shared error would have re-collapsed two causes into one indistinguishable path.
     error BlockChainMismatch();
+    /// @dev `fullVerify` 4: `finalBlockChain` is not the on-chain chain hash at `finalBlockNumber`.
+    error FinalBlockChainMismatch();
+    /// @dev `fullVerify` 5: the proof's `finalExtCommitment` is not the `stateRoot` being finalized.
+    error FinalExtCommitmentMismatch();
+    /// @dev `fullVerify` 6: `mleProof.publicInputs` do not encode keccak256(ValidityPublicInputs),
+    ///      i.e. the claimed `validityPIs` are UNBOUND to the proof that step 7 verifies.
+    error ValidityPublicInputsMismatch();
+    /// @dev `fullVerify` 7: MLE/WHIR verification of the proof itself returned false.
+    ///      NOTE: the former `ProofVerificationFailed()` was deleted rather than raised — on-chain
+    ///      verification has been MLE/WHIR-only since Groth16 was removed, so it was an exact
+    ///      synonym of this error and a second name for one cause is not diagnosability.
     error MleVerificationFailed();
     // EIP-170 size relief: former string requires, converted to custom errors (semantics identical).
     error OnlyDeployer();
@@ -200,6 +223,19 @@ contract IntmaxRollup {
         uint256 indexed id,
         bytes32 stateRoot
     );
+
+    /// @notice SECURITY (M-8): emitted on EVERY rejecting exit of `finalize`, carrying the 4-byte
+    ///         selector of the error that caused it. `finalize` keeps returning `false` instead of
+    ///         reverting because its boolean IS load-bearing (`assertFalse(rollup.finalize(...))`
+    ///         across the suite, and the `script/` runners branch on it), so the cause has to travel
+    ///         out of band. Reason values:
+    ///           - a selector from the group above  → that specific check failed;
+    ///           - `0x00000000`                     → `fullVerify` aborted with NO revert data, i.e.
+    ///             the verifier could not be EVALUATED (out of gas, an invalid opcode in a satellite).
+    ///             That is explicitly NOT a claim that the proof is invalid — telling an honest user
+    ///             "your proof is invalid" when the gate could not be evaluated is how gate-8
+    ///             presented, and this code is what keeps the two apart on the validity path.
+    event FinalizeRejected(uint256 indexed id, bytes4 reason);
 
     event FraudConfirmed(
         uint256 indexed id,
@@ -555,7 +591,9 @@ contract IntmaxRollup {
     /// @notice The token index reserved for native ETH. A deposit with this token index escrows
     ///         real ETH (msg.value must equal `amount`); any other token index is accounting-only
     ///         in v1 and must not carry ETH.
-    uint32 public constant ETH_TOKEN_INDEX = 0;
+    // M-5 byte budget: made `internal` — no external consumer reads this getter (the JS side
+    // defines its own local constant), so the public accessor was dead weight against EIP-170.
+    uint32 internal constant ETH_TOKEN_INDEX = 0;
 
     /// @notice Sum of real native ETH held by this contract on behalf of queued/finalized deposits.
     /// SECURITY: `totalEscrowed` is the global ceiling for all future native payouts
@@ -1384,8 +1422,11 @@ contract IntmaxRollup {
         MleVerifier.MleProof calldata mleProof
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
-        if (sub.commitment == bytes32(0)) return false;
-        if (sub.finalized) return false;
+        // SECURITY (M-8: `finalize` failed silently). Each rejecting exit below reports WHY through
+        // `FinalizeRejected` before returning false. The boolean return is deliberately preserved:
+        // `fullVerify` failures must stay non-reverting for the callers that assert on `false`.
+        if (sub.commitment == bytes32(0)) return _rejectFinalize(submissionId, SubmissionNotFound.selector);
+        if (sub.finalized) return _rejectFinalize(submissionId, AlreadyFinalized.selector);
 
         // SECURITY (H-5: finalize did not bind submissionId to the proof it verifies). Without this,
         // `submissionId` was used only to look up existence/finalized-ness — nothing tied the proof
@@ -1396,7 +1437,7 @@ contract IntmaxRollup {
         // reverts on a finalized entry). `fullVerify` below pins `validityPIs.finalExtCommitment` to
         // `stateRoot`, so pinning `stateRoot` to the submission's own committed root transitively
         // binds the verified proof to this submission.
-        if (stateRoot != sub.stateRoot) return false;
+        if (stateRoot != sub.stateRoot) return _rejectFinalize(submissionId, CommitmentMismatch.selector);
 
         // SECURITY (H-5/B-5: the stateRoot-only binding was insufficient). Pinning only the root
         // leaves two submissions interchangeable whenever they declare the SAME root, and nothing
@@ -1417,17 +1458,33 @@ contract IntmaxRollup {
         // (Round 1 rejected this because ~20 synthetic tests built `validityPIs` before posting,
         // with `finalBlockNumber = 0`. Those harnesses were fixed instead: a test convention must
         // not dictate a soundness gap.)
+        // M-8 composes with B-5: this binding now NAMES itself instead of joining the silent
+        // `return false` crowd, so an operator can tell "your PIs are for another batch" from
+        // "your proof is invalid" — the distinction whose absence made M-5 a silent chain halt.
         if (validityPIs.finalBlockNumber != _batchMetadata[submissionId].endBlockNumber) {
-            return false;
+            return _rejectFinalize(submissionId, ValidityPublicInputsMismatch.selector);
         }
 
+        // SECURITY (M-8): `fullVerify` now reverts with a cause-specific error instead of returning
+        // false, so the catch below recovers WHICH check failed. An empty `err` (no revert data) is
+        // reported as reason `0x00000000` — "could not evaluate", never "invalid". The try/catch and
+        // the `return false` are both retained: swallowing the revert here is what keeps `finalize`
+        // fail-CLOSED-but-non-reverting (a rejected proof can never mark `sub.finalized`).
         bool valid;
+        bytes4 reason;
         try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
             valid = v;
         } catch {
-            valid = false;
+            // EIP-170: read the selector straight out of returndata rather than letting solc
+            // materialise a `bytes memory` copy of it. Scratch space (0x00-0x3f) only, so this stays
+            // memory-safe; it is zeroed first so a short/empty revert yields exactly 0x00000000.
+            assembly ("memory-safe") {
+                mstore(0, 0)
+                if gt(returndatasize(), 3) { returndatacopy(0, 0, 4) }
+                reason := mload(0)
+            }
         }
-        if (!valid) return false;
+        if (!valid) return _rejectFinalize(submissionId, reason);
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
@@ -1437,6 +1494,13 @@ contract IntmaxRollup {
         emit Finalized(submissionId, stateRoot);
         _refundStake(submissionId);
         return true;
+    }
+
+    /// @dev SECURITY (M-8): the single rejecting exit of `finalize`. Shared so every cause is
+    ///      reported the same way (and so the emit is coded once — EIP-170 budget).
+    function _rejectFinalize(uint256 id, bytes4 reason) private returns (bool) {
+        emit FinalizeRejected(id, reason);
+        return false;
     }
 
     // -----------------------------------------------------------------------
@@ -1877,6 +1941,9 @@ contract IntmaxRollup {
     ///      KZG binding is only needed for fraud proofs (proving committed blob is invalid).
     /// @dev External entry point so _fullVerify runs in a fresh EVM call context.
     ///      This avoids via_ir + optimizer code generation issues with large memory structs.
+    /// @return Always `true` — every failure REVERTS with a cause-specific error (M-8). Callers that
+    ///         need a boolean should try/catch, as `finalize` does; the `bool` return is kept so the
+    ///         external ABI shape is unchanged for anything already calling this off-chain.
     function fullVerify(
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
@@ -1888,11 +1955,24 @@ contract IntmaxRollup {
         // asserting monotonicity on-chain removes any reliance on the validity circuit guaranteeing
         // `finalBlockNumber >= initialBlockNumber` — and `latestFinalizedBlockNumber` is the height
         // `reclaimStake` compares against, so a backward move must never be accepted.
-        if (validityPIs.finalBlockNumber < latestFinalizedBlockNumber) return false;
-        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
-        if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) return false;
-        if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
-        if (validityPIs.finalExtCommitment != stateRoot) return false;
+        //
+        // SECURITY (M-8: indistinguishable silent exits). All seven checks in this function used to
+        // `return false`, so `finalize` could not tell a height regression from a broken proof and
+        // reported every one of them as a bare `false`. Each now reverts with its own error. This is
+        // a pure REFINEMENT of the existing fail-closed behaviour: the conditions are byte-identical,
+        // only the exit changed, and a revert is at least as closed as `return false` — `finalize`
+        // catches it and still returns false, so no proof that was previously rejected is now
+        // accepted. `_verifyMle` and `_verifyMleWithdrawal` are UNTOUCHED, so the fraud path
+        // (`_verifyFraud`, which does not call `fullVerify` at all) is unaffected by this change.
+        if (validityPIs.finalBlockNumber < latestFinalizedBlockNumber) revert FinalizedHeightRegression();
+        if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) revert InitialStateMismatch();
+        if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
+            revert BlockChainMismatch();
+        }
+        if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) {
+            revert FinalBlockChainMismatch();
+        }
+        if (validityPIs.finalExtCommitment != stateRoot) revert FinalExtCommitmentMismatch();
 
         // 2. piHash binding (SECURITY, replaces the removed Groth16 PI binding): the MLE proof's
         //    own public inputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32
@@ -1903,10 +1983,10 @@ contract IntmaxRollup {
         //    the WHIR Fiat-Shamir transcript inside `_verifyMle`, so binding them here ties the
         //    claimed validityPIs to the proof that step 3 verifies.
         bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return false;
+        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) revert ValidityPublicInputsMismatch();
 
         // 3. MLE proof verification
-        if (!_verifyMle(mleProof)) return false;
+        if (!_verifyMle(mleProof)) revert MleVerificationFailed();
 
         return true;
     }
