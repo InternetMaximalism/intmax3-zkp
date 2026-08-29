@@ -165,6 +165,10 @@ fn inter_channel_small_block_sig_is_validity_proven() {
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
     {
         let mut g = bwgen.borrow_mut();
@@ -399,6 +403,10 @@ fn block_producer_consumes_real_member_cosignatures() {
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
 
     // THE WALLET'S OWN STATE. `h2_tag` IS this block's tx_tree_root — that equality is what makes

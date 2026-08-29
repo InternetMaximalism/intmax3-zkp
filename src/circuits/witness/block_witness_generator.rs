@@ -8,6 +8,7 @@ use crate::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             channel_state_message::ChannelStateMessageFields,
             ext_public_state::ExtendedPublicState,
+            update_channel_tree::channel_leaf_member_root,
         },
     },
     common::{
@@ -23,9 +24,9 @@ use crate::{
             deposit_tree::{DepositMerkleProof, DepositTree},
             key_tree::{MemberLeaf, MemberTree},
             public_state_tree::{PublicStateMerkleProof, PublicStateTree},
-            tx_v2_tree::TxV2MerkleProof,
+            tx_v2_tree::{ChannelActionMerkleProof, TxV2MerkleProof},
         },
-        tx::TxV2,
+        tx::{ChannelAction, TxClass, TxV2},
         u63::{BlockNumber, BlockNumberError, U63},
     },
     constants::{CHANNEL_TREE_HEIGHT, MAX_CHANNEL_TOKENS, MAX_SIG_CLUSTER, SEND_TREE_HEIGHT},
@@ -39,7 +40,7 @@ use crate::{
         gadget::FalconSigGadgetWitness,
     },
     regev::{REGEV_N, REGEV_Q, RegevPk, hash_sig::BabyBearSecretKey},
-    utils::poseidon_hash_out::PoseidonHashOut,
+    utils::{leafable::Leafable as _, poseidon_hash_out::PoseidonHashOut},
 };
 use rand::SeedableRng as _;
 use std::collections::HashMap;
@@ -759,6 +760,69 @@ impl BlockWitnessGenerator {
         self.local_test_signers.contains_key(&channel)
     }
 
+    /// detail2 §Q-3 — SECURITY (M-2): advance the generator's authoritative mirror of a channel's
+    /// REGISTERED member set after a member-set-update block wrote the new root into the channel
+    /// leaf. Called from exactly one place: the leaf write in
+    /// [`Self::add_block_with_tx_v2_inner`], gated on the shared
+    /// `channel_leaf_member_root` predicate having actually changed the root — so the mirror and
+    /// the proven leaf cannot advance independently.
+    ///
+    /// `new_member_leaves` is the same all-`MAX_SIG_CLUSTER`-slots array the circuit folds, so the
+    /// mirror's `member_tree` reproduces the leaf's committed root by construction, and
+    /// `member_count` is its occupancy (left-packed and equal to `signer_count`, which
+    /// `check_n_of_n_witness` turns into a theorem).
+    fn advance_registered_member_set(
+        &mut self,
+        channel: ChannelId,
+        new_member_leaves: &[MemberLeaf],
+    ) -> Result<(), BlockWitnessGeneratorError> {
+        if new_member_leaves.len() != MAX_SIG_CLUSTER {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {}: a member-set update must carry all {MAX_SIG_CLUSTER} member leaves, \
+                 got {}",
+                channel.as_u64(),
+                new_member_leaves.len()
+            )));
+        }
+        let public = self.channel_members.get_mut(&channel).ok_or_else(|| {
+            BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {} advanced its member root but is not registered in this generator",
+                channel.as_u64()
+            ))
+        })?;
+        let mut member_tree = MemberTree::init();
+        for leaf in new_member_leaves.iter() {
+            member_tree.push(leaf.clone());
+        }
+        public.member_tree = member_tree;
+        public.member_count = new_member_leaves
+            .iter()
+            .filter(|leaf| **leaf != MemberLeaf::empty_leaf())
+            .count();
+
+        // FAIL-CLOSED (fixture path only): the harness's local Falcon keys are per-slot and are
+        // NOT rotated by a §Q-3 update — an ADD brings a member whose key the harness never held,
+        // and a ROTATE replaces one it does. Keeping a stale list would let the next block be
+        // built with signatures over the wrong `pk_g`s and fail thousands of constraints deep in
+        // proving. Drop it instead, so the next block for this channel fails at witness
+        // construction with the existing "no cosignatures staged and no local signing keys"
+        // message. Production registrations hold no keys here at all and are unaffected.
+        let leaves_match = self
+            .local_test_signers
+            .get(&channel)
+            .map(|signers| {
+                signers.0.len() == public.member_count
+                    && signers.0.iter().enumerate().all(|(slot, key)| {
+                        key.pk_g().reduce_to_hash_out() == new_member_leaves[slot].pk_g
+                    })
+            })
+            .unwrap_or(true);
+        if !leaves_match {
+            self.local_test_signers.remove(&channel);
+        }
+        Ok(())
+    }
+
     /// Produce a dedicated REGISTRATION block consuming exactly ONE queued registration (R6: a
     /// registration block carries no user updates, so `key_ids` is empty/all-padding and the
     /// account tree is mutated solely by the registration's channel-tree write).
@@ -885,6 +949,11 @@ impl BlockWitnessGenerator {
             signer_count: None,
             member_regev_pks: Some(member_regev_pks),
             channel_state_fields: None,
+            // A registration block is all-padding (R6): no key slot transitions a leaf, so
+            // `update_channel_tree` skips every slot and there is no TxV2 — and therefore no
+            // channel action — to open. `None` here is structural, not the M-2 hard-coding: the
+            // §Q wiring lives on the ordinary-block path, which is the only one that can carry a
+            // `TxClass::ChannelAction` slot.
             tx_v2_indices: None,
             tx_v2s: None,
             tx_v2_merkle_proofs: None,
@@ -1141,6 +1210,45 @@ impl BlockWitnessGenerator {
                     witness.tx_v2_indices.len(),
                     witness.tx_v2s.len(),
                     witness.tx_v2_merkle_proofs.len(),
+                )));
+            }
+            // detail2 §Q-2/§Q-3 — SECURITY (M-2): a `TxClass::ChannelAction` slot whose
+            // channel-action sub-witness is missing would be silently replaced downstream by
+            // `ChannelAction::default()` (kind = `InterChannelSend`), which
+            //   (a) turns `is_member_update` off, so the proven leaf keeps the OLD member root
+            //       while the caller believes it advanced one, and
+            //   (b) fails the circuit's channel-action inclusion opening anyway, but only at
+            //       proving time, thousands of constraints deep.
+            // Refuse here, at witness construction, where the message can name the cause.
+            let has_channel_action_slot = witness
+                .tx_v2s
+                .iter()
+                // `key_ids` is the unpadded prefix of `block.key_ids`; every slot beyond it is
+                // padding (key_id 0), which `update_channel_tree` skips.
+                .zip(key_ids.iter())
+                .any(|(tx, &k)| k != 0 && tx.tx_class == TxClass::ChannelAction);
+            let action_lens = (
+                witness.channel_action_indices.as_ref().map(|v| v.len()),
+                witness.channel_actions.as_ref().map(|v| v.len()),
+                witness.channel_action_merkle_proofs.as_ref().map(|v| v.len()),
+            );
+            let n = Some(num_users as usize);
+            if has_channel_action_slot && action_lens != (n, n, n) {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "a TxClass::ChannelAction slot requires a channel-action sub-witness with \
+                     num_users={num_users} entries (got indices={:?}, actions={:?}, proofs={:?}); \
+                     without it the proven block would carry ChannelAction::default() and §Q \
+                     would silently not apply (M-2)",
+                    action_lens.0, action_lens.1, action_lens.2,
+                )));
+            }
+            if !has_channel_action_slot && action_lens != (None, None, None)
+                && action_lens != (n, n, n)
+            {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "channel-action sub-witness arrays must all be absent or all have \
+                     num_users={num_users} entries (got indices={:?}, actions={:?}, proofs={:?})",
+                    action_lens.0, action_lens.1, action_lens.2,
                 )));
             }
         }
@@ -1423,7 +1531,20 @@ impl BlockWitnessGenerator {
                         channel_id, i
                     ))
                 })?;
-                member_regev_pks.push(keys.regev_pks[i].clone());
+                // detail2 §Q-3 residual: `new_member_leaves` commits only a member's
+                // `regev_pk_digest`, not the full Regev public key, so an ADD grows
+                // `member_count` past the registered `regev_pks`. A ROTATE is safe by §Q-6 (the
+                // digest is PRESERVED). Fail closed with a nameable message rather than panicking
+                // on an out-of-range slot index.
+                let regev_pk = keys.regev_pks.get(i).ok_or_else(|| {
+                    BlockWitnessGeneratorError::InvalidRequest(format!(
+                        "channel {channel_id} slot {i} is the posting slot but this generator \
+                         holds no Regev public key for it (a §Q-3 member-set ADD does not carry \
+                         the new member's Regev key; re-supply the channel's registration \
+                         material before that member posts)"
+                    ))
+                })?;
+                member_regev_pks.push(regev_pk.clone());
             } else {
                 member_regev_pks.push(dummy_regev.clone());
             }
@@ -1439,15 +1560,52 @@ impl BlockWitnessGenerator {
                 send_tree.push(new_send_leaf.clone());
                 send_entries.push(new_send_leaf.clone());
 
-                // member_pubkeys_root preserved from previous leaf
+                // SECURITY (M-2), detail2 §Q-3: the daemon's authoritative channel tree must write
+                // the SAME `member_pubkeys_root` the circuit proves. CALL the one shared
+                // derivation instead of restating the predicate here.
+                //
+                // This line used to copy `prev_user_leaf.member_pubkeys_root` unconditionally,
+                // which was consistent ONLY because the channel-action sub-witness was hard-coded
+                // `None` and `is_member_update` was therefore identically false. Those are M-2's
+                // two coupled halves: wiring the actions through without this would have diverged
+                // the base state from the proven root on the very first member-set-update block,
+                // and every later Merkle opening for the channel would have broken.
+                let slot_tx_v2 = tx_v2_witness
+                    .as_ref()
+                    .map(|w| w.tx_v2s[i])
+                    .unwrap_or_default();
+                let slot_channel_action = tx_v2_witness
+                    .as_ref()
+                    .and_then(|w| w.channel_actions.as_ref())
+                    .and_then(|actions| actions.get(i))
+                    .copied();
+                let new_member_leaves: &[MemberLeaf] = tx_v2_witness
+                    .as_ref()
+                    .and_then(|w| w.new_member_leaves.as_deref())
+                    .unwrap_or(&[]);
+                let member_pubkeys_root = channel_leaf_member_root(
+                    &slot_tx_v2,
+                    slot_channel_action.as_ref(),
+                    new_member_leaves,
+                    prev_user_leaf.member_pubkeys_root,
+                );
                 let new_user_leaf = ChannelLeaf {
                     index: prev_user_leaf.index + 1,
                     prev: new_block_number,
                     send_tree_root: new_send_root,
-                    member_pubkeys_root: prev_user_leaf.member_pubkeys_root,
+                    member_pubkeys_root,
                 };
                 account_tree_for_proofs.update(channel.as_u64(), new_user_leaf.clone());
                 self.channel_tree.update(channel.as_u64(), new_user_leaf);
+
+                // detail2 §Q-3: the leaf advanced, so the REGISTERED set every LATER block is
+                // witnessed against advances with it. `UpdateUserTree::check_n_of_n_witness`
+                // connects the recomputed member root to the channel leaf's committed
+                // `member_pubkeys_root`, so a mirror left on the old set makes the next block for
+                // this channel unprovable — the second half of M-2.
+                if member_pubkeys_root != prev_user_leaf.member_pubkeys_root {
+                    self.advance_registered_member_set(channel, new_member_leaves)?;
+                }
             }
         }
 
@@ -1490,10 +1648,20 @@ impl BlockWitnessGenerator {
             tx_v2_merkle_proofs: tx_v2_witness
                 .as_ref()
                 .map(|w| w.tx_v2_merkle_proofs.clone()),
-            // UserTransfer-only model: channel-action sub-witness stays dummy (not verified).
-            channel_action_indices: None,
-            channel_actions: None,
-            channel_action_merkle_proofs: None,
+            // detail2 §Q-2/§Q-3 — SECURITY (M-2): forwarded, no longer hard-coded `None`. A block
+            // whose slots are all `TxClass::UserTransfer` still passes `None` (the processor's
+            // dummy substitution is correct there — that branch verifies no channel-action
+            // opening), but a `TxClass::ChannelAction` slot now carries its real action, index and
+            // Merkle proof, which is what makes `is_member_update` reachable outside unit tests.
+            channel_action_indices: tx_v2_witness
+                .as_ref()
+                .and_then(|w| w.channel_action_indices.clone()),
+            channel_actions: tx_v2_witness
+                .as_ref()
+                .and_then(|w| w.channel_actions.clone()),
+            channel_action_merkle_proofs: tx_v2_witness
+                .as_ref()
+                .and_then(|w| w.channel_action_merkle_proofs.clone()),
         };
 
         self.block_chain_witness
@@ -1728,6 +1896,19 @@ pub struct BlockTxV2Witness {
     /// detail2 §Q-3: the NEW registered member leaves when this block carries a
     /// `MemberSetUpdate` channel action; `None` for every other block.
     pub new_member_leaves: Option<Vec<MemberLeaf>>,
+    /// detail2 §Q-2/§Q-3: the per-slot channel-action sub-witness — the `ChannelAction` a
+    /// `TxClass::ChannelAction` slot's `tx_v2.channel_action_root` opens to, its index in the
+    /// action tree, and the opening proof.
+    ///
+    /// SECURITY (M-2): `None` here is NOT "unused padding" — it is what makes the whole of §Q
+    /// unreachable. `block_hash_chain_processor` substitutes `ChannelAction::default()` (kind =
+    /// `InterChannelSend`), so `is_member_update = should_check_channel_action ∧ is_msu_kind` is
+    /// identically FALSE for every block whose producer left these `None`. A slot that carries a
+    /// `TxClass::ChannelAction` TxV2 MUST populate them, and `add_block_with_tx_v2_inner` refuses
+    /// the block if it does not.
+    pub channel_action_indices: Option<Vec<u64>>,
+    pub channel_actions: Option<Vec<ChannelAction>>,
+    pub channel_action_merkle_proofs: Option<Vec<ChannelActionMerkleProof>>,
 }
 
 #[derive(Debug, Clone)]

@@ -445,9 +445,17 @@ impl ProductionBlockProducer {
 
         // The ONE canonical construction (wallet_core::canonical_member_set_update_block) — the
         // same objects the CLI derived to compute the h2 the members signed.
-        let (_action, tx_v2, tx_v2_tree, tx_tree_root) =
+        let (action, action_tree, tx_v2, tx_v2_tree, tx_tree_root) =
             crate::wallet_core::canonical_member_set_update_block(channel, prev_root, new_root);
         let tx_v2_proof = tx_v2_tree.prove(channel.as_u64());
+        // SECURITY (M-2): the action and its opening against `tx_v2.channel_action_root` travel
+        // WITH the block. Dropping them (the old `let (_action, ..)`) left the validity witness to
+        // substitute `ChannelAction::default()` — kind `InterChannelSend` — so
+        // `is_member_update` was false and this block proved a leaf that did NOT advance the
+        // member root, while the producer's registry below advanced anyway. §Q existed only in
+        // unit tests until this line.
+        let action_index = crate::wallet_core::canonical_member_set_update_action_index();
+        let action_proof = action_tree.prove(action_index);
 
         if signed_state.h2_tag != tx_tree_root {
             return Err(auth(format!(
@@ -464,6 +472,11 @@ impl ProductionBlockProducer {
         let tx_v2_merkle_proofs = vec![tx_v2_proof; num_users];
         tx_v2_indices[0] = channel.as_u64();
         tx_v2s[0] = tx_v2;
+        // Slot 0 is the single active (posting) slot — `key_ids = &[1]` below. Padding slots keep
+        // the same dummy values `update_channel_tree` skips.
+        let channel_action_indices = vec![action_index; num_users];
+        let channel_actions = vec![action; num_users];
+        let channel_action_merkle_proofs = vec![action_proof; num_users];
 
         let mut candidate = self.clone();
         candidate.produce_cosigned_block(
@@ -476,6 +489,9 @@ impl ProductionBlockProducer {
                 tx_v2s,
                 tx_v2_merkle_proofs,
                 new_member_leaves: Some(new_leaves),
+                channel_action_indices: Some(channel_action_indices),
+                channel_actions: Some(channel_actions),
+                channel_action_merkle_proofs: Some(channel_action_merkle_proofs),
             },
         )?;
         // The block is in: the producer's registry advances — every later block for this channel
@@ -583,6 +599,10 @@ impl ProductionBlockProducer {
                 tx_v2s,
                 tx_v2_merkle_proofs,
                 new_member_leaves: None,
+                // §Q-2: UserTransfer-only slot — no channel action to open.
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
             },
         )?;
         candidate

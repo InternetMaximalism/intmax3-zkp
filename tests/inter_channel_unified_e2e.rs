@@ -515,6 +515,10 @@ fn unified_inter_channel_transfer_e2e() {
         tx_v2s: vec![tx_v2, TxV2::default()],
         tx_v2_merkle_proofs: vec![tx_v2_proof.clone(), tx_v2_proof.clone()],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
     {
         let mut g = bwgen.borrow_mut();

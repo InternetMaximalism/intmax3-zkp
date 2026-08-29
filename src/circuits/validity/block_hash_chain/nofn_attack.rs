@@ -352,6 +352,10 @@ fn the_2_1_attack_is_dead() {
                 tx_v2s: vec![tx_v2, TxV2::default()],
                 tx_v2_merkle_proofs: vec![tx_v2_merkle_proof.clone(), tx_v2_merkle_proof.clone()],
                 new_member_leaves: None,
+                // §Q-2: UserTransfer-only slot — no channel action to open.
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
             }),
         )
         .expect("the theft block");

@@ -3618,6 +3618,11 @@ pub fn canonical_member_set_update_block(
     new_member_root: crate::utils::poseidon_hash_out::PoseidonHashOut,
 ) -> (
     crate::common::tx::ChannelAction,
+    // SECURITY (M-2): the action TREE is returned, not just the action. The validity witness must
+    // open the action against `tx_v2.channel_action_root`, and rebuilding the tree at the call
+    // site would be a SECOND construction of the very object this function exists to make
+    // singular. `canonical_member_set_update_action_index()` is the index it opens at.
+    crate::common::trees::tx_v2_tree::ChannelActionTree,
     TxV2,
     crate::common::trees::tx_v2_tree::TxV2Tree,
     Bytes32,
@@ -3645,7 +3650,14 @@ pub fn canonical_member_set_update_block(
     let mut tree = TxV2Tree::init();
     tree.update(channel.as_u64(), tx_v2);
     let root = Bytes32::from(tree.get_root());
-    (action, tx_v2, tree, root)
+    (action, action_tree, tx_v2, tree, root)
+}
+
+/// detail2 §Q-3: the index a member-set-update block's single `ChannelAction` occupies in the
+/// action tree built by [`canonical_member_set_update_block`]. Named rather than spelled `0` at
+/// the witness call site, so the two cannot drift apart.
+pub const fn canonical_member_set_update_action_index() -> u64 {
+    0
 }
 
 /// The registered co-signer tree root as a `PoseidonHashOut` (the circuit-facing form).
@@ -3671,7 +3683,7 @@ pub fn member_set_update_block_root(
 ) -> WResult<Bytes32> {
     let prev_root = registered_cosigner_root_hash(old_record, old_members)?;
     let new_root = registered_cosigner_root_hash(new_record, new_members)?;
-    let (_a, _t, _tree, root) =
+    let (_a, _at, _t, _tree, root) =
         canonical_member_set_update_block(old_record.channel_id, prev_root, new_root);
     Ok(root)
 }
@@ -6656,6 +6668,10 @@ pub fn build_channel_withdrawal(
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
     };
 
     {
