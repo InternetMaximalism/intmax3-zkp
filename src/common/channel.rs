@@ -2055,8 +2055,11 @@ mod tests {
     /// slots are `Bytes32::default()`, and REJECTS the D6 boundary violations.
     #[test]
     fn channel_record_validate_multi_n() {
-        // Accepts 2 (min), 8 (interior), 16 (max, all slots active, no padding).
-        for count in [2u8, 8, 16] {
+        // Accepts 2 (min), 5 (interior), 8 (max, all slots active, no padding).
+        // 16-era rot: the cap became MAX_SIG_CLUSTER = 8 in `fd467ea`, so the old `16` made this
+        // test fail on its own first iteration — i.e. the max-width case was going UNTESTED, the
+        // same defect class as the `..._n16` close-circuit test the 2026-08-28 audit found (§6).
+        for count in [2u8, 5, MAX_SIG_CLUSTER as u8] {
             record_with_members(count)
                 .validate()
                 .unwrap_or_else(|e| panic!("member_count {count} must validate: {e}"));
