@@ -83,6 +83,10 @@ fn tx_v2_witness(nonce: u32) -> (Bytes32, BlockTxV2Witness) {
             // fixture convention and avoids an unrelated synthetic tree opening.
             tx_v2_merkle_proofs: vec![proof.clone(), proof],
             new_member_leaves: None,
+            // §Q-2: UserTransfer-only slot — no channel action to open.
+            channel_action_indices: None,
+            channel_actions: None,
+            channel_action_merkle_proofs: None,
             },
     )
 }

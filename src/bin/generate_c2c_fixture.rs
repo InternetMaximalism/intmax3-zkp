@@ -443,6 +443,10 @@ fn main() -> anyhow::Result<()> {
             internal_tx_v2_merkle_proof.clone(),
         ],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
 
     {
@@ -571,6 +575,10 @@ fn main() -> anyhow::Result<()> {
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
 
     {

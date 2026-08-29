@@ -208,6 +208,10 @@ fn e2e_deposit_validity_withdrawal() {
             internal_tx_v2_merkle_proof.clone(),
         ],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
 
     {
@@ -338,6 +342,10 @@ fn e2e_deposit_validity_withdrawal() {
             withdrawal_tx_v2_merkle_proof.clone(),
         ],
         new_member_leaves: None,
+        // §Q-2: UserTransfer-only slot — no channel action to open.
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
             };
 
     {
