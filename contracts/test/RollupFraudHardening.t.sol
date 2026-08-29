@@ -9,6 +9,55 @@ import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 
+/// @dev SECURITY (C-1/B-4): a stand-in for `MleVerifier` that RETURNS false. After B-4 this is
+///      the ONLY shape that confirms fraud - the verifier ran to completion and said NO.
+contract RejectingMleVerifier {
+    function verify(
+        MleVerifier.MleProof calldata,
+        MleVerifier.VerifyParams memory,
+        SpongefishWhirVerify.WhirParams memory,
+        bytes32
+    ) external pure returns (bool) {
+        return false;
+    }
+}
+
+/// @dev SECURITY (C-1/B-4, gate-8 class): a stand-in that reverts exactly the way
+///      `Plonky2GateEvaluator.sol` does on a gate the deployed evaluator cannot handle
+///      (`revert("unsupported gate with non-zero filter")`). The proof is honest; the evaluator
+///      simply cannot evaluate it. This must NOT be convictable.
+contract UnsupportedGateMleVerifier {
+    function verify(
+        MleVerifier.MleProof calldata,
+        MleVerifier.VerifyParams memory,
+        SpongefishWhirVerify.WhirParams memory,
+        bytes32
+    ) external pure returns (bool) {
+        revert("unsupported gate with non-zero filter");
+    }
+}
+
+/// @dev SECURITY (C-1/B-4, gas starvation): ACCEPTS every proof but burns a fixed, large amount
+///      of gas first - the shape of the real verifier, measured at 11,019,291 gas on the repo's
+///      own fixture (`MleE2E::test_mleVerify_gas`). Used to show the transaction gas limit can no
+///      longer steer the fraud verdict.
+contract GasHungryMleVerifier {
+    uint256 public immutable rounds;
+    constructor(uint256 rounds_) { rounds = rounds_; }
+    function verify(
+        MleVerifier.MleProof calldata,
+        MleVerifier.VerifyParams memory,
+        SpongefishWhirVerify.WhirParams memory,
+        bytes32
+    ) external view returns (bool) {
+        uint256 acc = 1;
+        uint256 n = rounds;
+        for (uint256 i = 0; i < n; i++) acc = uint256(keccak256(abi.encode(acc, i)));
+        require(acc != 0, "unreachable");
+        return true;
+    }
+}
+
 /// @title RollupFraudHardening
 /// @notice Regression tests for the 2026-08-28 audit findings C-1, H-1, H-4 and H-5.
 ///         Every test in this file FAILS on the pre-fix contracts.
@@ -92,23 +141,18 @@ contract RollupFraudHardeningTest is Test {
     }
 
     /// @dev C-1 must not disarm the fraud path: a submission whose committed proof genuinely fails
-    ///      verification is still convictable, via `!_verifyMle`.
+    ///      verification is still convictable.
+    ///
+    ///      B-4: this test previously reached "fraud confirmed" through a REVERT inside
+    ///      `_verifyMleWithVk` (a garbage `whirTranscript` makes the real verifier revert), which
+    ///      is precisely the route that also convicted honest submitters. It now runs against a
+    ///      verifier that RETURNS false, so it exercises the only remaining fraud trigger.
     function test_C1_genuinelyInvalidProofIsStillConvictable() public {
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0),
-            numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
-        IntmaxRollup r = new IntmaxRollup(
-            fraudTreasury, enabledVk, _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), rollup.mleVerifier(), bytes32(0), true
-        );
-        r.setKzgVerifier(new BlobKZGVerifierExt(true));
-        r.setBlockProducer(submitter, true);
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), true);
 
         bytes32 stateRoot = keccak256("bad_state");
         IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0));
         MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        mleProof.whirTranscript = hex"DEADBEEF"; // WHIR verification fails
         bytes memory proofBytes = abi.encode(mleProof);
 
         uint32[] memory ids = new uint32[](1);
@@ -122,6 +166,197 @@ contract RollupFraudHardeningTest is Test {
             "a genuinely invalid proof must still be convictable"
         );
         assertGt(r.pendingWithdrawals(attacker), 0, "honest fraud prover is still rewarded");
+    }
+
+    /// @dev Deploy an MLE-ENABLED rollup (non-zero validity VK, so the degreeBits==0 bypass is
+    ///      dead) on an arbitrary verifier satellite.
+    function _mleEnabledRollupOn(address verifierAddr, bool allowMleDisabled_)
+        internal returns (IntmaxRollup r)
+    {
+        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
+            degreeBits: 13, preprocessedRoot: bytes32(0),
+            numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
+        });
+        r = new IntmaxRollup(
+            fraudTreasury, enabledVk, _emptyWhirParams(), "", "",
+            _emptyMleArrays(), _emptyMleArrays(), MleVerifier(verifierAddr), bytes32(0),
+            allowMleDisabled_
+        );
+        r.setBlockProducer(submitter, true);
+        if (allowMleDisabled_) r.setKzgVerifier(new BlobKZGVerifierExt(true));
+    }
+
+    // =======================================================================
+    // B-4 - "could not evaluate" must never read as "fraud"
+    // =======================================================================
+
+    /// @dev B-4 (a): GAS STARVATION. EIP-150 forwards 63/64 of the available gas to the inner
+    ///      verification call, so the transaction gas limit is a free attacker input that never
+    ///      appears in calldata. Pre-fix, an attacker scanned for the limit at which the inner
+    ///      call OOGs while the outer frame survived to run `_truncateSubmissions`, and convicted
+    ///      an honest submission. Post-fix, an OOG is MLE_STARVED, which reverts the whole
+    ///      `fraudProof`: no truncation, no bond movement, at ANY gas limit.
+    function test_B4_gasStarvationCannotConvictAnHonestSubmission() public {
+        (IntmaxRollup r, bytes memory payload) =
+            _honestSubmissionOn(address(new GasHungryMleVerifier(9_000)));
+
+        // Control: fully funded, the honest submission is not convictable.
+        uint256 gBefore = gasleft();
+        (bool okHi, bytes memory retHi) = address(r).call(payload);
+        uint256 honestCost = gBefore - gasleft();
+        assertTrue(okHi, "control call must succeed");
+        assertFalse(abi.decode(retHi, (bool)), "control: honest submission is not convictable");
+
+        // Attack: sweep the gas limit. No limit may ever convict.
+        uint256 step = honestCost / 40 + 1;
+        for (uint256 g = honestCost / 4; g <= honestCost + 4 * step; g += step) {
+            vm.prank(attacker);
+            (bool ok, bytes memory ret) = address(r).call{gas: g}(payload);
+            if (ok && ret.length == 32) {
+                assertFalse(abi.decode(ret, (bool)), "B-4: no gas limit may convict");
+            }
+        }
+        // Pin the diagnostic: a call that clears the whole flow but leaves less than
+        // MIN_MLE_VERIFY_GAS at the verdict reverts FraudProofGasStarved, never "fraud".
+        vm.prank(attacker);
+        (bool okStarved, bytes memory retStarved) =
+            address(r).call{gas: honestCost + 100_000}(payload);
+        assertFalse(okStarved, "B-4: a starved fraudProof must revert");
+        assertEq(
+            bytes4(retStarved), IntmaxRollup.FraudProofGasStarved.selector,
+            "B-4: fraudProof reverts FraudProofGasStarved"
+        );
+
+        assertEq(r.nextSubmissionId(), 1, "B-4: the honest submission survived every gas limit");
+        assertEq(r.blockNumber(), 1, "B-4: the chain was never rolled back");
+        assertEq(r.pendingWithdrawals(attacker), 0, "B-4: no bond was ever paid to the attacker");
+    }
+
+    /// @dev B-4 (b): the GATE-8 class verbatim. `Plonky2GateEvaluator` reverts by design on a gate
+    ///      the deployed evaluator cannot handle. That is a property of the evaluator, not of the
+    ///      proof, so it must not convict anyone. `fraudProof` now reverts `MleProofUnevaluable`.
+    ///
+    ///      SOUNDNESS OF THE TRADE: refusing to convict here costs only the fraud REWARD, never
+    ///      safety. A submission whose proof cannot be evaluated also cannot be FINALIZED
+    ///      (`finalize`'s `fullVerify` try/catch is fail-CLOSED), so it is still removed by the
+    ///      `FINALIZE_DEADLINE_BLOCKS` timeout branch - the right outcome for a submission nobody
+    ///      can check.
+    function test_B4_unsupportedGateRevertCannotConvictAnHonestSubmission() public {
+        (IntmaxRollup r, bytes memory payload) =
+            _honestSubmissionOn(address(new UnsupportedGateMleVerifier()));
+
+        vm.prank(attacker);
+        (bool ok, bytes memory ret) = address(r).call(payload);
+        assertFalse(ok, "B-4: an evaluator revert must not produce a fraud verdict");
+        assertEq(
+            bytes4(ret), IntmaxRollup.MleProofUnevaluable.selector,
+            "B-4: fraudProof must revert MleProofUnevaluable"
+        );
+
+        assertEq(r.nextSubmissionId(), 1, "B-4: honest submission survives");
+        assertEq(r.pendingWithdrawals(attacker), 0, "B-4: no bond stolen");
+
+        // The timeout backstop still removes it, so liveness of removal is preserved.
+        vm.roll(block.number + 3601);
+        IntmaxRollup.ValidityPublicInputs memory emptyPis;
+        MleVerifier.MleProof memory emptyProof;
+        KZGProof memory emptyKzg;
+        vm.prank(attacker);
+        assertTrue(
+            r.fraudProof(0, bytes32(0), bytes32(0), "", emptyPis, emptyProof, emptyKzg),
+            "B-4: the 12-hour timeout branch still removes an un-evaluable submission"
+        );
+    }
+
+    // =======================================================================
+    // B-3 - the PRODUCTION fraud path must actually work
+    // =======================================================================
+
+    /// @dev B-3: with `BlobKZGVerifierExt(false)` (what all six deploy scripts pass), the H-4 guard
+    ///      reverted the degenerate branch while B-1/B-2 kept the general branch broken, so
+    ///      `_verifyFraud` pre-condition 2 was UNSATISFIABLE: an honest prover holding the real
+    ///      blob bytes, the real PIs and a self-consistent opening could not convict a genuinely
+    ///      invalid batch at all. Only the indiscriminate 12-hour timeout remained, and that
+    ///      slashes honest submitters too - the gate-8 class reintroduced by a fix.
+    ///
+    ///      Production-shaped here means: `allowMleDisabled = false` (so the degreeBits==0 bypass
+    ///      is dead), a non-zero validity VK, and the ext guard ON.
+    function test_B3_honestProverConvictsInvalidBatchOnProductionShapedDeployment() public {
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), false);
+        BlobKZGVerifierExt prod = new BlobKZGVerifierExt(false);
+        assertFalse(prod.allowDegenerateVanishingG2(), "the ext guard must be ON");
+        assertFalse(r.allowMleDisabled(), "no test bypass on a production-shaped rollup");
+        r.setKzgVerifier(prod);
+        vm.deal(submitter, 10 ether);
+
+        bytes32 stateRoot = keccak256("genuinely_bad_state");
+        IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0xBEEF));
+        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = abi.encode(mleProof);
+
+        // A well-formed NON-degenerate opening (Z(tau) = 2): the general pairing branch, which
+        // pre-fix could never succeed.
+        (KZGProof memory kzg, bytes32 blobHash) = _computeGeneralKZGProof(proofBytes);
+        assertTrue(
+            keccak256(kzg.vanishingG2) != keccak256(_bls12G2GenBytes()),
+            "B-3: the opening must go through the GENERAL branch"
+        );
+        prod.verify(blobHash, kzg, proofBytes); // the binding itself now verifies
+
+        bytes32[] memory hs = new bytes32[](1);
+        hs[0] = blobHash;
+        vm.blobhashes(hs);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        vm.prank(submitter);
+        r.postBlockAndSubmit{value: 1 ether}(
+            _batch(1, ids, 100, bytes32(uint256(0xabc))),
+            keccak256(proofBytes), uint32(proofBytes.length), stateRoot
+        );
+
+        vm.prank(attacker);
+        assertTrue(
+            r.fraudProof(0, blobHash, stateRoot, proofBytes, pis, mleProof, kzg),
+            "B-3: an honest prover must be able to convict a genuinely invalid batch in production"
+        );
+        assertEq(r.nextSubmissionId(), 0, "B-3: the invalid batch was removed");
+        assertGt(r.pendingWithdrawals(attacker), 0, "B-3: the honest fraud prover is rewarded");
+    }
+
+    /// @dev Post one HONEST submission (real blob bytes, real PIs, self-consistent opening) on a
+    ///      production-shaped rollup running `verifierAddr`, and return the exact `fraudProof(...)`
+    ///      calldata an attacker would send against it.
+    function _honestSubmissionOn(address verifierAddr)
+        internal returns (IntmaxRollup r, bytes memory payload)
+    {
+        r = _mleEnabledRollupOn(verifierAddr, false);
+        r.setKzgVerifier(new BlobKZGVerifierExt(false));
+        vm.deal(submitter, 10 ether);
+        vm.deal(attacker, 10 ether);
+
+        bytes32 stateRoot = keccak256("honest_state");
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        IntmaxRollup.SubBlock[] memory batch = _batch(1, ids, 100, bytes32(uint256(0xabc)));
+        IntmaxRollup.ValidityPublicInputs memory pis =
+            _pisForBatch(r, batch, stateRoot, address(0xBEEF));
+
+        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = abi.encode(mleProof);
+        (KZGProof memory kzg, bytes32 blobHash) = _computeGeneralKZGProof(proofBytes);
+
+        bytes32[] memory hs = new bytes32[](1);
+        hs[0] = blobHash;
+        vm.blobhashes(hs);
+        vm.prank(submitter);
+        r.postBlockAndSubmit{value: 1 ether}(
+            batch, keccak256(proofBytes), uint32(proofBytes.length), stateRoot
+        );
+
+        payload = abi.encodeCall(
+            IntmaxRollup.fraudProof,
+            (0, blobHash, stateRoot, proofBytes, pis, mleProof, kzg)
+        );
     }
 
     // =======================================================================
@@ -163,12 +398,15 @@ contract RollupFraudHardeningTest is Test {
     /// @dev H-5 must not break the honest path: finalizing a submission with ITS OWN proof works.
     function test_H5_honestFinalizeStillWorks() public {
         bytes32 root = keccak256("honest_final_state");
-        IntmaxRollup.ValidityPublicInputs memory pis = _pisFor(root, address(0));
-        MleVerifier.MleProof memory proof = _mleProofWithPI(_computePIHash(pis));
-
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
-        _postWithKZG(_batch(1, ids, 100, bytes32(uint256(0x333))), abi.encode(proof), root, submitter);
+        IntmaxRollup.SubBlock[] memory batch = _batch(1, ids, 100, bytes32(uint256(0x333)));
+
+        // B-5: the PIs must name the batch's own end height (see `_pisForBatch`).
+        IntmaxRollup.ValidityPublicInputs memory pis = _pisForBatch(rollup, batch, root, address(0));
+        MleVerifier.MleProof memory proof = _mleProofWithPI(_computePIHash(pis));
+
+        _postWithKZG(batch, abi.encode(proof), root, submitter);
 
         assertTrue(rollup.finalize(0, root, pis, proof), "honest finalize must still succeed");
         assertTrue(rollup.isFinalized(0), "submission finalized");
@@ -307,6 +545,78 @@ contract RollupFraudHardeningTest is Test {
     }
 
     // =======================================================================
+    // B-6 (RESIDUAL, NOT CLOSED) — bounding what the forgeable KZG opening costs
+    // =======================================================================
+
+    /// @dev B-6 is a real, OPEN finding: the k = 1 keccak guard closes one instance and nothing
+    ///      more. `vanishingG2 = [k]G2` for any k >= 2 whose dlog the caller knows walks straight
+    ///      past it, with the accepting witness pi := k^-1 . lhs computed from public G1 points,
+    ///      and `lagrangeBasisG1` stays caller-supplied on top of that. The only complete fix is
+    ///      the immutable trusted-setup store, which is NOT landed here (see the SECURITY
+    ///      (H-4 / B-6) block in BlobKZGVerifier.sol for why it is a redesign, not a patch).
+    ///
+    ///      This test does not claim the binding is sound. It BOUNDS the damage, which is the part
+    ///      that must not be taken on faith: a forged opening cannot convict an honest submission,
+    ///      because `_verifyFraud` pre-condition 1 recomputes the submission commitment over
+    ///      keccak256(proofBytes) and pre-condition 4 pins `mleProof` to those same bytes. The
+    ///      attacker below holds a perfectly valid opening for bytes of its own choosing and still
+    ///      cannot get anywhere, because those bytes do not keccak to the committed proofHash.
+    ///
+    ///      What B-6 DOES cost is the data-availability property, which no on-chain test can
+    ///      exhibit: a submitter can post a junk blob and commit a proofHash over bytes nobody
+    ///      has. That submission is then removed by the FINALIZE_DEADLINE_BLOCKS timeout, so the
+    ///      exposure is bounded liveness/griefing at the submitter's own bond.
+    function test_B6_forgedKzgOpeningStillCannotConvictAnHonestSubmission() public {
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), false);
+        r.setKzgVerifier(new BlobKZGVerifierExt(false));
+        vm.deal(submitter, 10 ether);
+
+        // An HONEST submission.
+        bytes32 stateRoot = keccak256("honest_state_b6");
+        IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0xBEEF));
+        MleVerifier.MleProof memory honestProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory honestBytes = abi.encode(honestProof);
+        (, bytes32 honestBlobHash) = _computeGeneralKZGProof(honestBytes);
+
+        bytes32[] memory hs = new bytes32[](1);
+        hs[0] = honestBlobHash;
+        vm.blobhashes(hs);
+        uint32[] memory ids = new uint32[](1);
+        ids[0] = 1;
+        vm.prank(submitter);
+        r.postBlockAndSubmit{value: 1 ether}(
+            _batch(1, ids, 100, bytes32(uint256(0xabc))),
+            keccak256(honestBytes), uint32(honestBytes.length), stateRoot
+        );
+
+        // The attacker forges an opening for bytes of ITS OWN choosing. The opening itself is
+        // accepted by the production satellite — that IS the B-6 exposure, asserted here rather
+        // than glossed over.
+        MleVerifier.MleProof memory forgedProof = _mleProofWithPI(keccak256("attacker_choice"));
+        bytes memory forgedBytes = abi.encode(forgedProof);
+        (KZGProof memory forgedKzg, bytes32 forgedHash) = _computeGeneralKZGProof(forgedBytes);
+        BlobKZGVerifierExt prod = new BlobKZGVerifierExt(false);
+        prod.verify(forgedHash, forgedKzg, forgedBytes); // accepted: the binding is forgeable
+
+        // ...and it buys the attacker nothing, because pre-condition 1 recomputes the commitment
+        // over keccak256(proofBytes) and the forged bytes are not the committed ones.
+        vm.prank(attacker);
+        assertFalse(
+            r.fraudProof(0, forgedHash, stateRoot, forgedBytes, pis, forgedProof, forgedKzg),
+            "B-6: a forged KZG opening cannot convict an honest submission"
+        );
+        // Nor can it be paired with the honest blob hash: the commitment covers both.
+        vm.prank(attacker);
+        assertFalse(
+            r.fraudProof(0, honestBlobHash, stateRoot, forgedBytes, pis, forgedProof, forgedKzg),
+            "B-6: swapping in the honest blob hash does not help either"
+        );
+
+        assertEq(r.nextSubmissionId(), 1, "B-6: the honest submission survives");
+        assertEq(r.pendingWithdrawals(attacker), 0, "B-6: no bond moved");
+    }
+
+    // =======================================================================
     // Helpers
     // =======================================================================
 
@@ -322,6 +632,27 @@ contract RollupFraudHardeningTest is Test {
             recips[i] = address(uint160(uint256(keccak256(abi.encodePacked("r", channelId, i)))));
         }
         rollup.registerChannel(channelId, 0, 0, pkGs, pkBs, regev, recips);
+    }
+
+    /// @dev SECURITY (H-5/B-5): `finalize` pins `validityPIs.finalBlockNumber` to the submission's
+    ///      own batch `endBlockNumber`. Replay the exact batch against a state snapshot to learn
+    ///      the (endBlockNumber, blockHashChain) the real post will produce, then rewind — rather
+    ///      than reimplement `_postBlock`'s deposit/channel-reg fold in the harness.
+    function _pisForBatch(
+        IntmaxRollup target,
+        IntmaxRollup.SubBlock[] memory batch,
+        bytes32 stateRoot,
+        address prover
+    ) internal returns (IntmaxRollup.ValidityPublicInputs memory pis) {
+        pis = _pisForOn(target, stateRoot, prover);
+        uint256 snap = vm.snapshotState();
+        _mockBlob();
+        target.setBlockProducer(address(this), true);
+        vm.deal(address(this), address(this).balance + 1 ether);
+        target.postBlockAndSubmit{value: 1 ether}(batch, bytes32(uint256(1)), 1, stateRoot);
+        pis.finalBlockNumber = target.blockNumber();
+        pis.finalBlockChain = target.blockHashChain();
+        vm.revertToState(snap);
     }
 
     function _pisFor(bytes32 stateRoot, address prover)
@@ -449,10 +780,12 @@ contract RollupFraudHardeningTest is Test {
 
     function _bls12G2GenBytes() internal pure returns (bytes memory) {
         return abi.encodePacked(
-            hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65",
-            hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
+            // SECURITY (B-2): EIP-2537 orders X as x_c0 || x_c1. The previous layout here mirrored
+            // the (malformed) constant `BlobKZGVerifier.G2_GENERATOR` used to ship; both are fixed.
             hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051",
             hex"c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
+            hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65",
+            hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
             hex"000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351a",
             hex"adfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
             hex"000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99",
@@ -495,6 +828,72 @@ contract RollupFraudHardeningTest is Test {
             }
             fes[i] = bytes32(uint256(word) & FIELD_MASK);
         }
+    }
+
+    /// @dev Build a well-formed NON-DEGENERATE KZG multi-point opening: the GENERAL pairing
+    ///      branch, which B-1 (wrong precompile address) and B-2 (malformed `G2_GENERATOR`)
+    ///      together made unreachable, and whose unreachability was finding B-3.
+    ///
+    ///      The verifier equation is  e(C - [I(tau)]_1, G2) . e(-pi, [Z(tau)]_2) = 1, i.e. in
+    ///      scalars C - I = z.pi with z = Z(tau). Nothing on-chain constrains the trusted-setup
+    ///      points, so a self-consistent instance is built by choosing them:
+    ///        lagrangeBasisG1[i] = G1   => [I(tau)]_1 = (sum f_i).G1 = S.G1
+    ///        z = 2                     => vanishingG2 = G2ADD(G2, G2), NOT the generator, so the
+    ///                                     H-4 degenerate guard does not fire
+    ///        pi = 7.G1                 => C = (S + 14).G1
+    ///      Then C - I = 14.G1 = 2.pi and the pairing holds.
+    ///
+    ///      RESIDUAL (B-6): that this instance can be BUILT by the test is the same freedom an
+    ///      attacker has - the trusted-setup data is still caller-supplied. See the RESIDUAL RISK
+    ///      note in BlobKZGVerifier and RedTeamFraudBreaks::test_RT4_*.
+    function _computeGeneralKZGProof(bytes memory proofBytes)
+        internal view returns (KZGProof memory kzg, bytes32 blobHash)
+    {
+        bytes32[] memory fes = _toFieldElementsMem(proofBytes);
+        uint256 N = fes.length;
+
+        uint256 S = 0;
+        for (uint256 i = 0; i < N; i++) S = addmod(S, uint256(fes[i]), BLS12_SCALAR_R);
+
+        bytes memory g1gen = _bls12G1GenBytes();
+        bytes memory pi = _g1MulLocal(g1gen, bytes32(uint256(7)));
+        bytes memory C  = _g1MulLocal(g1gen, bytes32(addmod(S, 14, BLS12_SCALAR_R)));
+
+        bytes memory lagrangeBasis = new bytes(N * 128);
+        for (uint256 i = 0; i < N; i++) {
+            assembly {
+                let src := add(g1gen, 32)
+                let dst := add(add(lagrangeBasis, 32), mul(i, 128))
+                mstore(dst,          mload(src))
+                mstore(add(dst, 32), mload(add(src, 32)))
+                mstore(add(dst, 64), mload(add(src, 64)))
+                mstore(add(dst, 96), mload(add(src, 96)))
+            }
+        }
+
+        bytes memory c48 = _compressG1(C);
+        (bool okSha, bytes memory hb) = address(0x02).staticcall(c48);
+        require(okSha && hb.length >= 32, "generalKZG: sha256 failed");
+        blobHash = bytes32((uint256(0x01) << 248) |
+            (uint256(bytes32(hb)) & (type(uint256).max >> 8)));
+
+        bytes memory g2 = _bls12G2GenBytes();
+        (bool okAdd, bytes memory vanishing) = address(0x0d).staticcall(bytes.concat(g2, g2));
+        require(okAdd && vanishing.length == 256, "generalKZG: G2ADD failed");
+
+        kzg = KZGProof({
+            kzgCommitment48: c48,
+            kzgCommitmentG1: C,
+            openingProof:    pi,
+            vanishingG2:     vanishing,
+            lagrangeBasisG1: lagrangeBasis
+        });
+    }
+
+    function _g1MulLocal(bytes memory pt, bytes32 sc) internal view returns (bytes memory out) {
+        bool ok;
+        (ok, out) = address(0x0c).staticcall(abi.encodePacked(pt, sc));
+        require(ok && out.length == 128, "generalKZG: G1MSM failed");
     }
 
     function _computeKZGProof(bytes memory proofBytes)

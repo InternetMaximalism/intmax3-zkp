@@ -11,30 +11,51 @@ pragma solidity ^0.8.24;
 ///
 /// How it works (KZG multi-point opening):
 ///   1. Challenger computes the interpolating polynomial I(x) where I(ωⁱ) = fieldElements[i].
-///      On-chain: [I(τ)]₁ = G1MSM(fieldElements, lagrangeBasisG1) using EIP-2537 0x0d.
+///      On-chain: [I(τ)]₁ = G1MSM(fieldElements, lagrangeBasisG1) using EIP-2537 0x0c.
 ///      lagrangeBasisG1 = [L₀(τ)]₁ .. [L_{N-1}(τ)]₁ from the Ethereum KZG trusted setup.
 ///
 ///   2. Pairing check:
-///      e(C − [I(τ)]₁, G2_gen) · e(−π, [Z(τ)]₂) = 1   (using EIP-2537 0x11)
+///      e(C − [I(τ)]₁, G2_gen) · e(−π, [Z(τ)]₂) = 1   (EIP-2537 PAIRING_CHECK, 0x0f)
 ///      where Z(x) = ∏(x − ωⁱ) is the vanishing polynomial and
 ///            π    = [q(τ)]₁ = [(p−I)/Z evaluated at τ]₁.
 ///
-/// SECURITY (H-4) — caller-supplied lagrangeBasisG1 and vanishingG2 are NOT safe:
-///   The old note here claimed forging them "cannot break soundness" because producing π for an
-///   inconsistent [I(τ)]₁ needs the trapdoor τ. That is false: π is caller-supplied as well, so
-///   whenever the caller knows dlog_{G2gen}(vanishingG2) = k the pairing
-///   e(lhs, G2_gen)·e(−π, vanishingG2) = 1 is satisfied by simply setting π := k⁻¹·lhs — pure public
-///   G1 arithmetic. k = 1 (vanishingG2 = G2_GENERATOR) is the cheapest instance and is now REJECTED
-///   outside an explicit test opt-in (see `_checkPairing`). A forged `lagrangeBasisG1` making
-///   [I(τ)]₁ = C (so lhs = ∞, π = ∞) is the same class of break.
+/// SECURITY (H-4 / B-6) — THIS OPENING IS NOT A SOUND BINDING. Read this before relying on it.
 ///
-/// RESIDUAL RISK (not closed here): rejecting k = 1 does not stop k = 2, 3, …, and lagrangeBasisG1
-///   remains caller-supplied. The only complete fix is to stop trusting the caller for trusted-setup
-///   data: store the Ethereum ceremony Lagrange G1 points and the domain's [Z(τ)]₂ in an immutable
-///   TrustedSetupStore (SSTORE2) and read them from there. That is a redesign of this verifier and is
-///   deliberately out of scope of the H-4 patch; it MUST land before this path is relied on in
-///   production. Today the fraud path is the only consumer and it is additionally gated by the
-///   commitment and proof-params checks in `IntmaxRollup._verifyFraud`.
+///   `lagrangeBasisG1`, `vanishingG2` and `openingProof` are ALL caller-supplied, and nothing here
+///   ties any of them to a trusted setup. Whenever the caller knows k = dlog_{G2gen}(vanishingG2),
+///   the pairing e(lhs, G2_gen)·e(−π, vanishingG2) = 1 is satisfied by setting π := k⁻¹·lhs — pure
+///   public G1 arithmetic, no trapdoor, no discrete log of τ. A forged `lagrangeBasisG1` (e.g. all
+///   points at infinity, making [I(τ)]₁ = ∞ so lhs = C for ANY claimed field elements) is the same
+///   class of break. `RedTeamFraudBreaks::test_RT4_*` exhibits both, on-chain, with k = 2.
+///
+///   WHAT THE k = 1 GUARD ACTUALLY BUYS (be precise — an overstated guard is its own defect):
+///   `_checkPairing` rejects vanishingG2 == G2_GENERATOR, i.e. exactly the claim Z(τ) = 1. That
+///   closes ONE instance — the cheapest one, where the pairing collapses to a G1 identity that
+///   holds for anything. It does NOT close k = 2, 3, …, and it does NOT touch `lagrangeBasisG1`.
+///   Do not read it as "the blob binding is sound now". It is not.
+///
+///   THE COMPLETE FIX, NOT LANDED HERE: stop trusting the caller for trusted-setup data — store the
+///   Ethereum ceremony Lagrange G1 points for the blob domain and that domain's [Z(τ)]₂ in an
+///   immutable store (SSTORE2) and read them from there instead of from calldata. That is a real
+///   redesign, not a patch: the ceremony data is ~512 KB for the 4096-point blob domain, so it
+///   needs chunked SSTORE2 pages and a fixed evaluation domain, whereas this verifier's domain
+///   size is currently whatever `proofBytes.length / 32` happens to be. It MUST land before this
+///   opening is treated as a data-availability proof.
+///
+///   WHY THE FRAUD PATH IS STILL SAFE MEANWHILE (bounded exposure, stated exactly):
+///   `IntmaxRollup._verifyFraud` does NOT rest its conviction soundness on this opening.
+///   Pre-condition 1 recomputes the submission commitment over `keccak256(proofBytes)`, and
+///   pre-condition 4 requires `keccak256(abi.encode(mleProof)) == keccak256(proofBytes)`. Those
+///   two keccak commitments already pin `proofBytes` and `mleProof` to exactly what the submitter
+///   committed, with no BLS assumption at all. So a forged opening does NOT let anyone convict an
+///   honest submission: they would still have to produce bytes that keccak to the committed
+///   `proofHash`. (`RollupFraudHardening::test_B6_*` pins this.)
+///   What IS lost is the DATA-AVAILABILITY property this opening is supposed to provide: that the
+///   blob the submitter actually posted contains those bytes. A dishonest submitter can post a
+///   junk blob, commit a `proofHash` over bytes nobody has, and be un-fraud-provable because no
+///   honest party can supply the preimage. That submission is then removed by the
+///   `FINALIZE_DEADLINE_BLOCKS` timeout, so the exposure is bounded liveness/griefing (the
+///   submitter loses its own bond), not theft or a forged state root.
 /// @dev Bundles EIP-2537 KZG multi-point opening parameters into one struct
 ///      to avoid stack-too-deep when passing alongside WHIR proof data.
 struct KZGProof {
@@ -47,15 +68,23 @@ struct KZGProof {
 
 library BlobKZGVerifier {
     // -----------------------------------------------------------------------
-    // EIP-2537 precompile addresses (Pectra)
-    // NOTE: Foundry 1.5.x maps G1MSM to 0x0c (not 0x0d per final EIP-2537 spec).
-    //       The pairing precompile is unavailable in Foundry 1.5.x; when vanishingG2
-    //       equals G2_GENERATOR the pairing check is replaced by a G1 identity check
-    //       (e(A,G2)·e(B,G2)=1  ↔  A+B=∞) which uses only the working G1ADD precompile.
+    // EIP-2537 precompile addresses (final spec, live since Pectra):
+    //   0x0b G1ADD | 0x0c G1MSM | 0x0d G2ADD | 0x0e G2MSM
+    //   0x0f PAIRING_CHECK | 0x10 MAP_FP_TO_G1 | 0x11 MAP_FP2_TO_G2
+    //
+    // SECURITY (B-1: the pairing precompile address was wrong).
+    //   `BLS12_PAIRING` used to be `address(0x11)`. Under the FINAL EIP-2537 that is
+    //   MAP_FP2_TO_G2, not PAIRING_CHECK — a transcription slip (G1ADD/G1MSM next to it are
+    //   correct). Consequences: (a) the general pairing branch below could never verify
+    //   anything, so blob KZG binding never worked outside the degenerate fast path, and
+    //   (b) the earlier "the pairing precompile is unavailable in Foundry 1.5.x, verified
+    //   empirically" note in `_checkPairing` measured 0x11 — MAP_FP2_TO_G2 genuinely rejects
+    //   a 768-byte pairing instance — and drew the wrong conclusion. PAIRING_CHECK at 0x0f is
+    //   present and works in this very EVM; `BlobKzgPairing.t.sol` exercises it directly.
     // -----------------------------------------------------------------------
     address internal constant BLS12_G1ADD   = address(0x0b);
     address internal constant BLS12_G1MSM   = address(0x0c);
-    address internal constant BLS12_PAIRING = address(0x11);
+    address internal constant BLS12_PAIRING = address(0x0f);
 
     // SHA-256 precompile – used to reconstruct the versioned hash
     address internal constant SHA256_PRECOMPILE = address(0x02);
@@ -69,15 +98,21 @@ library BlobKZGVerifier {
         0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000;
 
     // BLS12-381 G2 generator in EIP-2537 256-byte format:
-    // [x_im(64B)][x_re(64B)][y_im(64B)][y_re(64B)]
+    //   x_c0(64B) || x_c1(64B) || y_c0(64B) || y_c1(64B)
     // Each Fp element is the 48-byte big-endian value left-padded with 16 zero bytes (32 hex '0').
     // Source: https://eips.ethereum.org/EIPS/eip-2537
-    // G2 generator: x_im(64B) | x_re(64B) | y_im(64B) | y_re(64B) = 256 bytes
+    //
+    // SECURITY (B-2: the shipped constant was not a valid G2 point).
+    //   The previous constant laid the X coordinate out as (x_c1 || x_c0). EIP-2537 requires
+    //   (x_c0 || x_c1) — Y was already correct, so this too was a transcription slip. Fed to
+    //   PAIRING_CHECK or G2ADD the old bytes are rejected as an invalid encoding, so even at the
+    //   correct precompile address the general branch could never have verified anything.
+    //   `BlobKzgPairing.t.sol` pins the fixed constant against 0x0d (G2ADD) and 0x0f.
     bytes internal constant G2_GENERATOR =
-        hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65"
-        hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e"
         hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051"
         hex"c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8"
+        hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65"
+        hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e"
         hex"000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351a"
         hex"adfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801"
         hex"000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99"
@@ -212,8 +247,8 @@ library BlobKZGVerifier {
     // Fast path when vanishingG2 == G2_GENERATOR:
     //   e(lhs, G2_gen) · e(negPi, G2_gen) = e(lhs + negPi, G2_gen) = 1
     //   ↔ lhs + negPi = ∞  (the G1 identity point)
-    //   This uses only G1ADD (0x0b), avoiding the BLS12_PAIRING precompile
-    //   which is not available in all Foundry versions.
+    //   Algebraically equivalent to the general branch, but it is ALSO the degenerate
+    //   Z(τ) = 1 instance, which is an attacker affordance — hence the opt-in guard below.
     // -----------------------------------------------------------------------
     function _checkPairing(
         bytes memory lhs,
@@ -234,11 +269,20 @@ library BlobKZGVerifier {
         // The real [Z(τ)]₂ (Z(x) = ∏(x − ωⁱ), degree N) is never the generator, so no honest prover
         // needs this branch: it is purely an attacker affordance.
         //
-        // It is retained ONLY behind an explicit, immutable, constructor-set test opt-in (mirroring
-        // `IntmaxRollup.allowMleDisabled`) because the BLS12_PAIRING precompile at 0x11 is
-        // unavailable in Foundry 1.5.x — verified empirically: a well-formed 768-byte valid instance
-        // returns failure — so no in-repo test can exercise the general branch. Production deploys
-        // pass `false` and this branch is unreachable there.
+        // CORRECTION (B-1/B-3): the previous version of this comment justified keeping the branch
+        // with "the BLS12_PAIRING precompile at 0x11 is unavailable in Foundry 1.5.x — verified
+        // empirically". That premise was FALSE: 0x11 is MAP_FP2_TO_G2, so of course it rejects a
+        // 768-byte pairing instance. PAIRING_CHECK lives at 0x0f, it is present here, and with the
+        // corrected `G2_GENERATOR` the general branch below now runs for real (see
+        // `BlobKzgPairing.t.sol`). While that premise stood, a PRODUCTION satellite
+        // (`BlobKZGVerifierExt(false)`) had NO working branch at all: the degenerate one reverted
+        // and the general one called the wrong precompile with a malformed constant, which made
+        // `IntmaxRollup._verifyFraud` pre-condition 2 unsatisfiable and killed the proof-based
+        // fraud path outright. The branch is retained only as the (guarded) Z(τ) = 1 special case.
+        // Production deploys pass `false` and it is unreachable there.
+        //
+        // SCOPE (B-6): this guard closes k = 1 ONLY. See the SECURITY (H-4 / B-6) block at the top
+        // of this file for what remains open and why the fraud path is nevertheless safe.
         if (keccak256(vanishingG2) == keccak256(G2_GENERATOR)) {
             if (!allowDegenerateVanishingG2) revert BKV_DegenerateVanishingG2();
             bytes memory sum = _g1Add(lhs, negPi);
@@ -286,8 +330,13 @@ contract BlobKZGVerifierExt {
     ///         Immutable and constructor-set, so a deployed satellite's mode can never be flipped.
     bool public immutable allowDegenerateVanishingG2;
 
-    /// @param allowDegenerateVanishingG2_ pass `false` in production. `true` is only for tests,
-    ///        which cannot build a real pairing instance (BLS12_PAIRING is absent in Foundry 1.5.x).
+    /// @param allowDegenerateVanishingG2_ pass `false` in production.
+    ///        CORRECTION (B-1): the old text here read "`true` is only for tests, which cannot
+    ///        build a real pairing instance (BLS12_PAIRING is absent in Foundry 1.5.x)". That was
+    ///        false — it had measured 0x11 (MAP_FP2_TO_G2). With PAIRING_CHECK at 0x0f and a valid
+    ///        `G2_GENERATOR`, tests DO build real pairing instances (`BlobKzgPairing.t.sol`), so
+    ///        `true` now exists only to keep the pre-existing degenerate-branch regression tests
+    ///        (`test_H4_*`) able to construct the very instance production must reject.
     constructor(bool allowDegenerateVanishingG2_) {
         allowDegenerateVanishingG2 = allowDegenerateVanishingG2_;
     }
