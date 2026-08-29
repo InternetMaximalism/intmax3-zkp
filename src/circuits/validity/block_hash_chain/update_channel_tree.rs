@@ -159,6 +159,44 @@ pub struct UpdateUserTree {
     pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProof>,
 }
 
+/// detail2 §Q-3: THE predicate + fold that decides what `member_pubkeys_root` one block slot
+/// writes into its `ChannelLeaf` — `is_member_update ? fold(new_member_leaves) : copy`.
+///
+/// SECURITY (M-2): this is the SINGLE derivation. Both the proven side
+/// (`UpdateUserTree::compute_public_inputs`, whose in-circuit twin gates the same write on
+/// `should_check_channel_action ∧ is_msu_kind`) and the daemon's authoritative base-state mirror
+/// (`BlockWitnessGenerator::add_block_with_tx_v2_inner`, which writes the leaf into
+/// `channel_tree`) CALL it. They must not restate it: M-2 was reported precisely because the
+/// generator copied `prev_user_leaf.member_pubkeys_root` unconditionally, so the daemon's base
+/// state would have diverged from the proven root on the first member-set-update block and every
+/// later Merkle opening against that channel would have broken.
+///
+/// `new_member_leaves` is empty on every block that carries no member-set transition; a caller
+/// that has no `TxV2` for the slot at all passes the default (`TxClass::UserTransfer`), which
+/// short-circuits to the copy arm exactly as the dummy substitution in
+/// `block_hash_chain_processor` does.
+pub fn channel_leaf_member_root(
+    tx_v2: &TxV2,
+    channel_action: Option<&ChannelAction>,
+    new_member_leaves: &[MemberLeaf],
+    prev_member_pubkeys_root: PoseidonHashOut,
+) -> PoseidonHashOut {
+    let is_member_update = tx_v2.tx_class == TxClass::ChannelAction
+        && channel_action
+            .map(|a| a.kind == ChannelActionKind::MemberSetUpdate)
+            .unwrap_or(false)
+        && !new_member_leaves.is_empty();
+    if is_member_update {
+        let mut t = MemberTree::init();
+        for l in new_member_leaves.iter() {
+            t.push(l.clone());
+        }
+        t.get_root()
+    } else {
+        prev_member_pubkeys_root
+    }
+}
+
 /// detail2 §Q-3: the structural delta a `MemberSetUpdate` block may apply to the registered
 /// member leaves — EXACTLY one slot changes, and that change is one of:
 ///   * ROTATE — the slot was occupied and stays occupied, `regev_pk_digest` is PRESERVED (§Q-6:
@@ -576,22 +614,17 @@ impl UpdateUserTree {
             // member root. Computed unconditionally (both strict and non-strict modes) so the
             // account tree root is mode-independent; the strict arm above is what VALIDATES the
             // transition, exactly as every other strict/circuit split in this file.
-            let is_member_update = tx_v2.tx_class == TxClass::ChannelAction
-                && self
-                    .channel_actions
-                    .get(i)
-                    .map(|a| a.kind == ChannelActionKind::MemberSetUpdate)
-                    .unwrap_or(false)
-                && !self.new_member_leaves.is_empty();
-            let member_root_for_leaf = if is_member_update {
-                let mut t = MemberTree::init();
-                for l in self.new_member_leaves.iter() {
-                    t.push(l.clone());
-                }
-                t.get_root()
-            } else {
-                prev_user_leaf.member_pubkeys_root
-            };
+            //
+            // SECURITY (M-2): CALLED, never restated. `BlockWitnessGenerator` writes the very same
+            // leaf into the daemon's authoritative channel tree and must reach the same root by
+            // the same predicate — a second derivation that agrees only by luck is exactly the
+            // divergence M-2 reported.
+            let member_root_for_leaf = channel_leaf_member_root(
+                tx_v2,
+                self.channel_actions.get(i),
+                &self.new_member_leaves,
+                prev_user_leaf.member_pubkeys_root,
+            );
 
             // verify the inclusion of empty leaf in the send tree
             if strict {
