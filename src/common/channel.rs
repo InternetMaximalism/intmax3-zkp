@@ -1012,8 +1012,18 @@ pub struct CloseIntent {
     /// `h1()` of the final `BalanceState` (rename of the legacy `final_channel_balance_root`).
     pub final_balance_state_h1: Bytes32,
     pub channel_fund_snapshot: ChannelFund,
+    /// SECURITY (M-9, UNSIGNED): supplied by the closing coordinator at close time. It is NOT a
+    /// field of `ChannelState`, so it is absent from the member-signed IMCH preimage, and L1
+    /// only stores/emits it (`finalizedBurnTxHash` is written by `finalizeClose` and never
+    /// read). See the `signing_digest` SECURITY block below.
     pub burn_tx_hash: Bytes32,
+    /// SECURITY (M-9, UNSIGNED, transitively): IMCL is a function of the signed state EXCEPT for
+    /// `burn_tx_hash`, so this digest inherits that field's freedom. Removing `burn_tx_hash` from
+    /// the IMCI preimage alone would therefore NOT make IMCI a function of the signed state.
     pub close_withdrawal_digest: Bytes32,
+    /// SECURITY (M-9, UNSIGNED): likewise coordinator-chosen and absent from IMCH. There is no
+    /// on-chain block-number -> medium-block-state-root lookup to pin it against either
+    /// (`IntmaxRollup` exposes only `isFinalizedStateRoot(bytes32)`).
     pub snapshot_medium_block_number: u64,
     /// `state_version` of the final balance state — L1 challenge ordering compares
     /// `(final_epoch, final_state_version)` (detail2 §H-4).
@@ -1109,6 +1119,28 @@ impl CloseIntent {
     /// do not re-version IMCI). The Solidity mirror (`computeCloseIntentDigest`) is updated in
     /// Phase 3; until then the shared-vector cross-check is `#[ignore]`d (see
     /// `close_intent_digest_matches_solidity_shared_vector`).
+    ///
+    /// SECURITY (M-9 — this digest is NOT a member-authorized commitment; audit28-08-2026 §M-9,
+    /// `doc/tasks/close-detached-signing-design.md` T-5 / §8.3). The ONLY message any member ever
+    /// signs on the close path is `ChannelState::signing_digest()` (IMCH). Three fields of this
+    /// preimage are outside it and are chosen freely by whoever builds the close:
+    ///   * `close_nonce`                    (close PI limbs 1..2)
+    ///   * `burn_tx_hash`                   (close PI limbs 41..48, and, transitively, the
+    ///                                       `close_withdrawal_digest` slot)
+    ///   * `snapshot_medium_block_number`   (close PI limbs 65..66)
+    /// The close circuit recomputes this keccak over them but constrains NONE of them against the
+    /// signed state (`close_circuit.rs` block (d)), and `ChannelSettlementManager` only stores and
+    /// emits them. So one N-of-N signature set over a single `ChannelState` yields UNBOUNDEDLY
+    /// MANY distinct `close_intent_digest` values.
+    ///
+    /// CALLER OBLIGATION: do NOT treat `close_intent_digest` as a stable, N-of-N-authorized
+    /// identity for a close. It is safe today ONLY because `_isNewer` is strict on
+    /// `(finalEpoch, finalStateVersion)` and `closeFreezeNonce` — which IS inside IMCH — fences
+    /// the era; both of those are properties of the SIGNED state, not of this digest. Any new
+    /// digest-keyed replay/dedup or cancel-addressing logic must re-derive its fence from the
+    /// signed state (`final_channel_state_digest` / `close_freeze_nonce`) rather than assume a
+    /// fresh digest implies a fresh signature. Pinned by
+    /// `m9_one_signature_set_mints_many_distinct_close_intent_digests`.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -1877,6 +1909,98 @@ mod tests {
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         }
+    }
+
+    /// M-9 CHARACTERIZATION (audit28-08-2026 §M-9; `close-detached-signing-design.md` T-5/§8.3).
+    ///
+    /// This test asserts the CURRENT, DEFECTIVE behaviour on purpose, so that M-9 is executable
+    /// and so that whichever remediation lands (members sign IMCI — design-doc Option C — or an
+    /// L1 pin of the three fields) breaks this test loudly and forces the assertions to be
+    /// inverted. It is the "two witnesses differing only in `burn_tx_hash` /
+    /// `snapshot_medium_block_number`" pair, at the native layer: the close circuit's IMCI
+    /// recompute is byte-identical to `CloseIntent::signing_digest` and constrains none of these
+    /// fields, so a native pair that produces distinct digests off ONE signed state is exactly a
+    /// pair of circuit witnesses that both verify under the SAME member signatures.
+    ///
+    /// The load-bearing assertion is the first one: the members' ONLY message — the IMCH state
+    /// digest — is byte-identical across every variant.
+    #[test]
+    fn m9_one_signature_set_mints_many_distinct_close_intent_digests() {
+        let state = sample_state();
+        let close_tx = sample_close_withdrawal(&state);
+        let baseline = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+
+        // Variant 1: `burn_tx_hash` only (this also moves `close_withdrawal_digest`, which is the
+        // transitive half of the same freedom).
+        let mut burn_tx = close_tx.clone();
+        burn_tx.burn_tx_hash = Bytes32::from_u32_slice(&[0xdead, 0xbeef, 0, 0, 0, 0, 0, 0]).unwrap();
+        let variant_burn = CloseIntent::new(5, &state, &burn_tx, 123).unwrap();
+
+        // Variant 2: `snapshot_medium_block_number` only.
+        let variant_mbn = CloseIntent::new(5, &state, &close_tx, 124).unwrap();
+
+        // Variant 3: `close_nonce` only.
+        let variant_nonce = CloseIntent::new(6, &state, &close_tx, 123).unwrap();
+
+        // The ONLY message the members sign is the IMCH state digest, and it is identical for
+        // every variant — so ONE N-of-N signature set authorizes all four.
+        let imch = state.signing_digest();
+        assert_eq!(state.digest, imch, "sample state's cached digest must be IMCH");
+        for intent in [&baseline, &variant_burn, &variant_mbn, &variant_nonce] {
+            assert_eq!(
+                intent.final_channel_state_digest, imch,
+                "M-9: every variant closes the SAME member-signed state"
+            );
+            assert_eq!(
+                intent.close_freeze_nonce,
+                state.close_freeze_nonce + 1,
+                "M-9: the era fence is identical too — it comes from the signed state"
+            );
+        }
+
+        // Yet all four close-intent digests differ. This is M-9: the digest the whole cancel lane
+        // is addressed by is NOT a function of the member-signed state.
+        let digests = [
+            baseline.signing_digest(),
+            variant_burn.signing_digest(),
+            variant_mbn.signing_digest(),
+            variant_nonce.signing_digest(),
+        ];
+        for i in 0..digests.len() {
+            for j in (i + 1)..digests.len() {
+                assert_ne!(
+                    digests[i], digests[j],
+                    "M-9 (expected while unremediated): variants {i} and {j} mint distinct \
+                     close_intent_digests from ONE signature set. If this now FAILS, the fix has \
+                     landed — invert this test to assert digest stability."
+                );
+            }
+        }
+    }
+
+    /// M-9 positive control: the fences that DO hold are the ones carried by the signed state.
+    /// A different `close_freeze_nonce` (era) or a different final state digest requires a
+    /// genuinely different N-of-N signature set, because both live inside the IMCH preimage.
+    /// This is what any digest-keyed logic must key its freshness off, not `close_intent_digest`.
+    #[test]
+    fn m9_era_and_state_fences_are_inside_the_signed_imch_preimage() {
+        let state = sample_state();
+
+        let mut next_era = state.clone();
+        next_era.close_freeze_nonce += 1;
+        let next_era = next_era.with_computed_digest();
+        assert_ne!(
+            next_era.digest, state.digest,
+            "close_freeze_nonce IS inside IMCH: a new era needs a new signature set"
+        );
+
+        let mut next_version = state.clone();
+        next_version.balance_state.state_version += 1;
+        let next_version = next_version.with_computed_digest();
+        assert_ne!(
+            next_version.digest, state.digest,
+            "state_version IS inside IMCH: a new version needs a new signature set"
+        );
     }
 
     #[test]

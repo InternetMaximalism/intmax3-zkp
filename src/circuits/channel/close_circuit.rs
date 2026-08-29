@@ -684,6 +684,28 @@ where
         // constrained equal to the H1-anchored ones by construction. Byte-identical to the Rust
         // IMCI preimage (and hence to Solidity `computeCloseIntentDigest`, shared test vector in
         // `common::channel::tests`).
+        //
+        // SECURITY (M-9 — three inputs of this preimage are UNCONSTRAINED free witnesses;
+        // audit28-08-2026 §M-9, `doc/tasks/close-detached-signing-design.md` T-5). Every other
+        // limb below is either a wire of the recomputed IMCH `state_digest` / H1 (hence covered by
+        // the verified N-of-N Falcon aggregate in block (f)) or is derived from one. These three
+        // are NOT:
+        //   * `close_nonce`                  — never connected to anything. `close_freeze_nonce`
+        //                                      is the era fence and IS pinned above to
+        //                                      `final_state.close_freeze_nonce + 1`, but
+        //                                      `close_nonce` is an independent PI.
+        //   * `burn_tx_hash`                 — also feeds the IMCL preimage above, so the
+        //                                      `close_withdrawal_digest` limbs inherit its
+        //                                      freedom. The circuit proves NO L2 burn; the hash is
+        //                                      carried, not verified.
+        //   * `snapshot_medium_block_number` — never connected to anything.
+        // Consequence: `close_intent_digest` is NOT a function of the member-signed state — one
+        // signature set over one `ChannelState` satisfies this circuit for arbitrary values of all
+        // three, i.e. for unboundedly many distinct `close_intent_digest`s. Closing this needs a
+        // member-signed message that COVERS them (design-doc Option C: members sign IMCI, which
+        // costs unilateral close / T-4) or an L1 pin; neither is a circuit-local change and both
+        // change the close VK. Until then treat `close_intent_digest` as an INDEX, never as an
+        // authorization — see the caller obligation on `CloseIntent::signing_digest`.
         let close_intent_inputs = [
             vec![close_intent_domain],
             public_inputs.channel_id.to_vec(),
