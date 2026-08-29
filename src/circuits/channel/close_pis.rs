@@ -51,6 +51,8 @@ pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 103;
 #[serde(rename_all = "camelCase")]
 pub struct ChannelClosePublicInputs {
     pub channel_id: ChannelId,
+    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 1..2): hashed into IMCI only; constrained by
+    /// nothing in `close_circuit.rs` and read for no decision on L1.
     pub close_nonce: u64,
     pub final_epoch: u64,
     pub final_small_block_number: u64,
@@ -59,9 +61,17 @@ pub struct ChannelClosePublicInputs {
     pub final_balance_state_h1: Bytes32,
     pub channel_fund_amount: U256,
     pub channel_fund_intmax_state_root: Bytes32,
+    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 41..48): hashed into IMCL and IMCI only. The close
+    /// circuit proves no L2 burn; `finalizeClose` writes `finalizedBurnTxHash` and nothing ever
+    /// reads it.
     pub burn_tx_hash: Bytes32,
     pub close_withdrawal_digest: Bytes32,
+    /// SECURITY (M-9): a pure function of the signed state ONLY if the three fields flagged in
+    /// this struct are; they are not. See `CloseIntent::signing_digest`'s caller obligation before
+    /// keying any replay/dedup/cancel logic on this value.
     pub close_intent_digest: Bytes32,
+    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 65..66): hashed into IMCI only; constrained by
+    /// nothing in-circuit and read for no decision on L1.
     pub snapshot_medium_block_number: u64,
     /// `state_version` of the final balance state (detail2 §H-4 L1 ordering key). Anchored
     /// in-circuit as the unique version inside the signed H1 preimage.
