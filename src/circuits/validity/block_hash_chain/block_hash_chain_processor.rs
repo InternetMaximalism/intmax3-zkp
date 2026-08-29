@@ -110,9 +110,83 @@ pub struct BlockHashChainProcessorWitness {
     pub tx_v2_indices: Option<Vec<u64>>,
     pub tx_v2s: Option<Vec<TxV2>>,
     pub tx_v2_merkle_proofs: Option<Vec<TxV2MerkleProof>>,
+    /// Optional per-block-slot channel-action sub-witness — the `ChannelAction` a
+    /// `TxClass::ChannelAction` slot's `tx_v2.channel_action_root` opens to, plus its index and
+    /// proof. `None` substitutes `ChannelAction::default()` below.
+    ///
+    /// SECURITY (M-2): that substitution has kind `InterChannelSend`, so it makes
+    /// `is_member_update` FALSE — a `None` here does not merely omit an unused witness, it
+    /// silently turns detail2 §Q off for the block. It is correct ONLY for a block with no
+    /// `TxClass::ChannelAction` slot at all (whose branch verifies no action opening);
+    /// `BlockWitnessGenerator::add_block_with_tx_v2_inner` refuses to construct any other kind.
     pub channel_action_indices: Option<Vec<u64>>,
     pub channel_actions: Option<Vec<ChannelAction>>,
     pub channel_action_merkle_proofs: Option<Vec<ChannelActionMerkleProof>>,
+}
+
+impl BlockHashChainProcessorWitness {
+    /// The ONE mapping from a stored block witness to the `UpdateUserTree` the prover feeds — the
+    /// place every `Option` is resolved to its dummy. `prove_block` calls it; so does any test
+    /// that wants to check what a generated block ACTUALLY proves, so a test cannot accidentally
+    /// re-derive a friendlier substitution than production uses.
+    pub fn to_update_channel_tree(
+        &self,
+        prev_ext_public_state: &ExtendedPublicState,
+        block_number: crate::common::u63::BlockNumber,
+    ) -> UpdateUserTree {
+        let num_users = self.block.num_users as usize;
+        UpdateUserTree {
+            prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
+            prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
+            block_number,
+            block: self.block.clone(),
+            prev_account_leaves: self.prev_account_leaves.clone(),
+            user_merkle_proofs: self.user_merkle_proofs.clone(),
+            send_merkle_proofs: self.send_merkle_proofs.clone(),
+            // P2b: the bp IMSB-signature list accumulator before this block (the prev ext-state's).
+            prev_bp_sig_chain: prev_ext_public_state.bp_sig_chain,
+            member_leaves: self
+                .member_leaves
+                .clone()
+                .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_SIG_CLUSTER]),
+            // detail2 §Q-3: present only on a MemberSetUpdate block; empty ⇒ the leaf root copies.
+            new_member_leaves: self.new_member_leaves.clone().unwrap_or_default(),
+            signer_count: self.signer_count.unwrap_or(0),
+            member_regev_pks: self
+                .member_regev_pks
+                .clone()
+                .unwrap_or_else(|| vec![dummy_regev_pk(); num_users]),
+            channel_state_fields: self.channel_state_fields.clone().unwrap_or_default(),
+            tx_v2_indices: self
+                .tx_v2_indices
+                .clone()
+                .unwrap_or_else(|| vec![0; num_users]),
+            tx_v2s: self
+                .tx_v2s
+                .clone()
+                .unwrap_or_else(|| vec![TxV2::default(); num_users]),
+            tx_v2_merkle_proofs: self
+                .tx_v2_merkle_proofs
+                .clone()
+                .unwrap_or_else(|| vec![TxV2MerkleProof::dummy(TX_TREE_HEIGHT); num_users]),
+            channel_action_indices: self
+                .channel_action_indices
+                .clone()
+                .unwrap_or_else(|| vec![0; num_users]),
+            // SECURITY (M-2): kind `InterChannelSend` — `is_member_update` is FALSE here. See the
+            // field doc above; this arm must stay unreachable for ChannelAction slots.
+            channel_actions: self
+                .channel_actions
+                .clone()
+                .unwrap_or_else(|| vec![ChannelAction::default(); num_users]),
+            channel_action_merkle_proofs: self
+                .channel_action_merkle_proofs
+                .clone()
+                .unwrap_or_else(|| {
+                    vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users]
+                }),
+        }
+    }
 }
 
 pub struct BlockHashChainProcessor<F, C, const D: usize>
@@ -302,55 +376,8 @@ where
         }
 
         let num_users = witness.block.num_users;
-        let dummy_tx_v2_indices = vec![0; num_users as usize];
-        let dummy_tx_v2s = vec![TxV2::default(); num_users as usize];
-        let dummy_tx_v2_merkle_proofs =
-            vec![TxV2MerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize];
-        let dummy_channel_action_indices = vec![0; num_users as usize];
-        let dummy_channel_actions = vec![ChannelAction::default(); num_users as usize];
-        let dummy_channel_action_merkle_proofs =
-            vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users as usize];
-        let update_channel_tree = UpdateUserTree {
-            prev_block_hash_chain: prev_ext_public_state.block_hash_chain,
-            prev_account_tree_root: prev_ext_public_state.inner.account_tree_root,
-            block_number,
-            block: witness.block.clone(),
-            prev_account_leaves: witness.prev_account_leaves.clone(),
-            user_merkle_proofs: witness.user_merkle_proofs.clone(),
-            send_merkle_proofs: witness.send_merkle_proofs.clone(),
-            // P2b: the bp IMSB-signature list accumulator before this block (the prev ext-state's).
-            prev_bp_sig_chain: prev_ext_public_state.bp_sig_chain,
-            member_leaves: witness
-                .member_leaves
-                .clone()
-                .unwrap_or_else(|| vec![MemberLeaf::default(); MAX_SIG_CLUSTER]),
-            // detail2 §Q-3: present only on a MemberSetUpdate block; empty ⇒ the leaf root copies.
-            new_member_leaves: witness.new_member_leaves.clone().unwrap_or_default(),
-            signer_count: witness.signer_count.unwrap_or(0),
-            member_regev_pks: witness
-                .member_regev_pks
-                .clone()
-                .unwrap_or_else(|| vec![dummy_regev_pk(); num_users as usize]),
-            channel_state_fields: witness.channel_state_fields.clone().unwrap_or_default(),
-            tx_v2_indices: witness.tx_v2_indices.clone().unwrap_or(dummy_tx_v2_indices),
-            tx_v2s: witness.tx_v2s.clone().unwrap_or(dummy_tx_v2s),
-            tx_v2_merkle_proofs: witness
-                .tx_v2_merkle_proofs
-                .clone()
-                .unwrap_or(dummy_tx_v2_merkle_proofs),
-            channel_action_indices: witness
-                .channel_action_indices
-                .clone()
-                .unwrap_or(dummy_channel_action_indices),
-            channel_actions: witness
-                .channel_actions
-                .clone()
-                .unwrap_or(dummy_channel_actions),
-            channel_action_merkle_proofs: witness
-                .channel_action_merkle_proofs
-                .clone()
-                .unwrap_or(dummy_channel_action_merkle_proofs),
-        };
+        let update_channel_tree =
+            witness.to_update_channel_tree(&prev_ext_public_state, block_number);
         let update_user_proof = update_account_circuit.prove(&update_channel_tree)?;
 
         let block_step_witness = BlockStepWitness::<F, C, D> {
