@@ -455,34 +455,59 @@ contract RedTeamRound3Test is CloseSettlementBase {
         );
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════
     // BREAK 3 — A4: the per-burn mark disarms the DEFENDER, not the attacker.
+    //           *** MITIGATED (R3-3) ***
     //
-    //   Before A4, `cancelPartialWithdrawal` compared only against the PENDING
-    //   record, so an honest member could replay ONE cancel proof against every
-    //   re-submission of the same stale burn. A4 removed exactly that replay --
-    //   while re-submitting the burn intent stayed free (the single-use chainKey
-    //   guard was deliberately deleted). The attrition is therefore inverted:
-    //   the attacker needs no new material, the defender needs a strictly newer
-    //   N-of-N-signed state EVERY round.
-    // ═════════════════════════════════════════════════════════════════════════
+    //   THE ATTACK AS FOUND. Before A4, `cancelPartialWithdrawal` compared only
+    //   against the PENDING record, so an honest member could replay ONE cancel
+    //   proof against every re-submission of the same stale burn. A4 removed
+    //   exactly that replay -- while re-submitting the burn intent stayed free
+    //   (the single-use chainKey guard was deliberately deleted). The attrition
+    //   was therefore inverted: the attacker needed no new material, the defender
+    //   needed a strictly newer N-of-N-signed state EVERY round.
+    //
+    //   THE FIX (round 3, R3-3), and its honest limit. A permanent bar on
+    //   re-submitting a cancelled burn is NOT available: a burn can only ever be
+    //   submitted at its own state version (the descriptor must be the LAST push
+    //   in the proof-bound settled-tx chain), so such a bar permanently strands an
+    //   already-debited burn -- the R3-1 lock class in a new lane. Instead the
+    //   re-submission is ADMITTED but carries a LONGER window: a cancel arms
+    //   `cancelledPartialWithdrawalReviewUntil[authDigest] = now + 2*challengePeriod`,
+    //   and a re-submission of that digest takes it as the floor on its deadline.
+    //   Nothing is refused, nothing is stranded, and each attrition round is paid
+    //   for in the ATTACKER's wall-clock instead of the DEFENDER's material.
+    //
+    //   It is a mitigation, not a block, and that is correct: authorizing a
+    //   chain-bound burn is the RIGHT outcome. See the corrected claim in
+    //   `cancelPartialWithdrawal` -- recipient/token/amount are IMBD-pinned to the
+    //   N-of-N-signed chain, an append-only entry is not un-committed by a later
+    //   state, and an authorization pays nothing on its own (every payout needs a
+    //   real withdrawal proof and a single-use proof-derived nullifier). The cancel
+    //   lane is a LIVENESS aid against a griefer's wrong-nullifier submission, not
+    //   a soundness gate. What made R3-3 dangerous was that the forced burn raised
+    //   A3's mark and armed R3-1; R3-1's deduction removes that entirely.
+    // ════════════════════════════════════════════════════════════════════════
 
-    /// EXPLOIT (passes = attack works). ACTORS: `eve` pushing a stale burn intent at v20 (the burn
-    /// itself is a historical fact she holds), the honest members holding the head v30.
+    /// BLOCKED-IN-ROUND-2 (passes = the round-2 attrition no longer runs at round-2 speed). Body
+    /// preserved VERBATIM through the setup; only the verdict changed.
+    ///
+    /// ACTORS: `eve` pushing a stale burn at v20, the honest members holding the head v30.
     ///
     /// ORDERING: eve submits the stale burn; the honest side cancels it with v30 (the ONLY material
-    /// they have). Eve re-submits the byte-identical intent -- same `closeIntentDigest`. The honest
-    /// cancel at v30 is now refused by A4's own mark, and the stale burn is authorized on the
-    /// deadline.
-    ///
-    /// RESULT: two transactions from eve beat the defence outright. A4's comment says of this lane
-    /// "losing it means a stale burn is authorized" and calls that the reason the burn lane may not
-    /// have A1's global floor -- but the per-burn floor produces the same outcome after one round.
+    /// they have). Eve re-submits the byte-identical intent -- same `closeIntentDigest`, same
+    /// `authDigest`. The honest cancel at v30 is still refused by A4's own mark. But the
+    /// re-submission now inherits the review deadline the cancel armed, so eve does NOT get the burn
+    /// authorized one challenge period later: the defender has `2 * challengePeriod` from the cancel
+    /// to obtain newer material, and with it the veto lands.
     function test_R3_BREAK_A4_attritionForcesTheStaleBurnThrough() external {
+        uint256 t0 = vm.getBlockTimestamp();
+
         // Round 1: eve's stale burn, vetoed by the honest head state.
         vm.prank(eve);
         _submitPw(9, 20);
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
+        bytes32 authDigest = manager.pendingPartialWithdrawalAuthDigest();
 
         ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
         manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
@@ -491,6 +516,12 @@ contract RedTeamRound3Test is CloseSettlementBase {
             manager.cancelledPartialWithdrawalRevivedVersion(pwDigest),
             30,
             "A4 consumed the DEFENDER's material"
+        );
+        // R3-3: and it armed the review window on the AUTHORIZATION digest.
+        assertEq(
+            manager.cancelledPartialWithdrawalReviewUntil(authDigest),
+            t0 + 2 * CHALLENGE_PERIOD,
+            "R3-3: the cancel arms a review deadline for this authorization digest"
         );
 
         // Round 2: the identical intent, re-submitted for free.
@@ -501,34 +532,80 @@ contract RedTeamRound3Test is CloseSettlementBase {
             pwDigest,
             "a burn is a historical fact: byte-identical digest"
         );
+        // R3-3: it is ADMITTED (refusing it would strand an already-debited burn) but it inherits
+        // the review deadline instead of the ordinary one-period window.
+        assertEq(
+            manager.pendingPartialWithdrawalDeadline(),
+            t0 + 2 * CHALLENGE_PERIOD,
+            "R3-3: the re-submission carries the extended window, not a fresh short one"
+        );
 
-        // The honest side has nothing newer than v30. A4 refuses the only veto available.
+        // The honest side still has nothing newer than v30 right now, and A4 still refuses.
         ChannelSettlementManager.CancelCloseRequest memory veto2 = _cancelRequest(pwDigest, 30);
         MleVerifier.MleProof memory veto2Proof = _cancelProof(veto2);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCancelReplay.selector);
         manager.cancelPartialWithdrawal(veto2, veto2Proof);
 
-        // The stale burn is authorized on the rollup.
-        vm.warp(vm.getBlockTimestamp() + CHALLENGE_PERIOD + 1);
+        // Round 2's finalize at one challenge period -- the moment the attack used to win -- is now
+        // refused: the window has not run out.
+        vm.warp(t0 + CHALLENGE_PERIOD + 1);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
         manager.finalizePartialWithdrawal();
-        assertTrue(
+        assertFalse(
             registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
-            "the stale burn eve could not push in round 1 is authorized in round 2"
+            "BLOCKED: the stale burn is NOT authorized on eve's schedule"
         );
-        // ...and it moved A3's high-water mark with it, arming BREAK 1.
-        assertEq(manager.authorizedBurnStateVersion(), 20, "A3 mark raised by the forced burn");
+
+        // The defender spends the extra window obtaining a strictly newer signed state (an ordinary
+        // event in a live channel) and the veto lands.
+        vm.warp(t0 + CHALLENGE_PERIOD + 2);
+        ChannelSettlementManager.CancelCloseRequest memory veto3 = _cancelRequest(pwDigest, 31);
+        manager.cancelPartialWithdrawal(veto3, _cancelProof(veto3));
+        assertFalse(manager.partialWithdrawalPending(), "round 2: the veto lands after all");
+        assertEq(manager.authorizedBurnStateVersion(), 0, "A3's mark was never raised");
     }
 
-    /// CONTROL for BREAK 3: with A4's mark not yet set for this burn, the SAME veto succeeds. The
-    /// only difference between the two rounds above is the mark A4 introduced.
+    /// CONTROL for BREAK 3: with A4's mark not yet set for this burn, the SAME veto succeeds, and
+    /// the FIRST submission of a burn is never delayed -- the review floor is armed only by a cancel.
     function test_R3_BREAK_A4_control_theFirstVetoAlwaysWorks() external {
+        uint256 t0 = vm.getBlockTimestamp();
         vm.prank(eve);
         _submitPw(9, 20);
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
         assertEq(manager.cancelledPartialWithdrawalRevivedVersion(pwDigest), 0, "mark unset");
+        assertEq(
+            manager.pendingPartialWithdrawalDeadline(),
+            t0 + CHALLENGE_PERIOD,
+            "R3-3 never delays a first submission"
+        );
         ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
         manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
         assertFalse(manager.partialWithdrawalPending(), "vetoed");
+    }
+
+    /// R3-3 must not become the strand it replaces. However long the attrition runs, the burn stays
+    /// SUBMITTABLE and, absent a veto, AUTHORIZABLE: the review window only delays, it never refuses.
+    /// This is the anti-lock pin for the R3-3 guard.
+    function test_R3_FIXED_A4_reviewWindowDelaysButNeverStrands() external {
+        uint256 t0 = vm.getBlockTimestamp();
+        vm.prank(eve);
+        _submitPw(9, 20);
+        bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
+        ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
+        manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
+
+        // Re-submission is ADMITTED -- never refused, whatever the cancel history.
+        vm.prank(eve);
+        _submitPw(9, 20);
+        assertTrue(manager.partialWithdrawalPending(), "the burn is re-submittable, not stranded");
+
+        // Past the extended window, with no veto, it authorizes normally.
+        vm.warp(t0 + 2 * CHALLENGE_PERIOD + 1);
+        manager.finalizePartialWithdrawal();
+        assertTrue(
+            registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
+            "the burn's L1 authorization is delayed, never denied"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════

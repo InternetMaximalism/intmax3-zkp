@@ -697,6 +697,12 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         manager.cancelPartialWithdrawal(req, replayedProof);
 
         // BLOCKED: the burn goes through on the re-submission. Eve's veto was one-shot.
+        //
+        // R3-3 (round 3): the re-submission inherits the review window the cancel armed
+        // (`cancelledPartialWithdrawalReviewUntil[authDigest]`), so it authorizes LATER than it used
+        // to — but it still authorizes. That is the whole design: the extension delays, it never
+        // refuses, because refusing would strand an already-debited burn.
+        vm.warp(uint256(manager.pendingPartialWithdrawalDeadline()) + 1);
         manager.finalizePartialWithdrawal();
         assertTrue(
             registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
@@ -707,7 +713,12 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     /// A4 NON-LOCKOUT. The floor is keyed PER BURN, so a cancel consumed against one burn cannot
     /// block an honest cancel of a DIFFERENT burn — and neither can activity in the close lane.
     /// This is the property a single global mark (the A1 shape) would have destroyed: in the burn
-    /// lane the cancel IS the whole remedy, so losing it means a stale burn is authorized.
+    /// lane the cancel is the only veto.
+    ///
+    /// R3-3 (round 3) corrects the round-2 sentence that continued "so losing it means a stale burn
+    /// is authorized". Authorizing a chain-bound burn is the CORRECT outcome, not a loss — the
+    /// cancel lane is a liveness aid against a griefer's wrong-nullifier submission. See the
+    /// corrected block in `cancelPartialWithdrawal`.
     ///
     /// PINS: the mapping being keyed on the burn digest rather than a scalar high-water mark.
     /// Collapse it to a scalar shared with `highestCancelledRevivedStateVersion` and burn #2's

@@ -737,6 +737,17 @@ contract ChannelSettlementManager {
     /// A4 block in `cancelPartialWithdrawal` for why a global mark would be a lockout.
     mapping(bytes32 => uint64) public cancelledPartialWithdrawalRevivedVersion;
 
+    /// @notice R3-3 (round 3): per-AUTHORIZATION-DIGEST review deadline. `cancelPartialWithdrawal`
+    /// sets it to `now + 2 * challengePeriod`; a re-submission of that same authorization digest
+    /// takes it as the floor on its own challenge deadline. This is the ONLY thing that answers A4's
+    /// inverted attrition, and it does so by EXTENDING A WINDOW rather than refusing a transition —
+    /// refusing the re-submission would permanently strand an already-debited burn (a burn can only
+    /// be submitted at its own state version). Keyed on the authorization digest, NOT the burn's
+    /// `closeIntentDigest`, because a griefer's wrong-nullifier intent shares the latter and would
+    /// otherwise be able to delay the honest burn. See the R3-3 block in
+    /// `submitPartialWithdrawalIntent`.
+    mapping(bytes32 => uint64) public cancelledPartialWithdrawalReviewUntil;
+
     PendingClose public pendingClose;
     bytes32 public latestSpecialCloseDigest;
     bytes32 public finalizedCloseIntentDigest;
@@ -1843,7 +1854,45 @@ contract ChannelSettlementManager {
         pendingPartialWithdrawalAuthDigest = authDigest;
         pendingPartialWithdrawalChainKey = chainKey;
         pendingPartialWithdrawalCloseIntentDigest = computeCloseIntentDigest(intent);
-        pendingPartialWithdrawalDeadline = uint64(block.timestamp) + challengePeriod;
+        // ── SECURITY (R3-3, round 3 — the A4 attrition, disarmed on the ATTACKER's side).
+        //
+        //    THE DEFECT. A4 stopped an attacker replaying ONE cancel proof against a burn forever,
+        //    but re-SUBMITTING the burn stayed free: a burn is a historical fact, so the resubmitted
+        //    `CloseIntent` is byte-identical and a cancel deletes the pending record entirely. The
+        //    attrition was therefore inverted — the attacker needed no new material each round while
+        //    the defender needed a strictly newer N-of-N-signed state every round, so two
+        //    transactions beat the defence
+        //    (`RedTeamRound3.t.sol::test_R3_BREAK_A4_attritionForcesTheStaleBurnThrough`).
+        //
+        //    WHY NOT REFUSE THE RE-SUBMISSION (which is the obvious fix, and is wrong). A burn can
+        //    only ever be submitted at its OWN state version: `submitPartialWithdrawalIntent`
+        //    requires the burn descriptor to be the LAST push in the proof-bound settled-tx chain,
+        //    so any later state pushes past it and no re-submission at a newer version exists. A
+        //    permanent bar on re-submitting a cancelled burn is therefore a PERMANENT STRAND of an
+        //    already-debited burn — the R3-1 lock class in a new lane, and strictly worse than what
+        //    it prevents. (Keying such a bar on `closeIntentDigest` would additionally resurrect the
+        //    front-run DoS the single-use `chainKey` guard was deleted to fix: a griefer's
+        //    wrong-nullifier submission shares the burn's `closeIntentDigest` but not its
+        //    `authDigest`, so one cancelled griefing intent would bar the honest burn forever. See
+        //    the "single-use removed" note above.)
+        //
+        //    WHAT IS DONE INSTEAD — EXTEND THE WINDOW, REFUSE NOTHING. A re-submission of an
+        //    authorization digest that a strictly-newer signed state already vetoed carries a
+        //    LONGER challenge window (`2 * challengePeriod` from the cancel, the same "one budgeted
+        //    window plus one spare" H-3 uses). Nothing is refused, nothing is stranded, and the
+        //    round-trip cost is paid by the attacker in wall-clock instead of by the defender in
+        //    material. Keyed on `authDigest`, so a griefer's bogus-nullifier intent cannot delay the
+        //    honest burn.
+        //
+        //    HONEST LIMIT, stated plainly: this is a MITIGATION, not a block. An attacker who
+        //    outlasts a defender that never obtains newer material still gets the burn authorized —
+        //    and that outcome is CORRECT, not a loss: see the corrected claim in
+        //    `cancelPartialWithdrawal` for why authorizing a chain-bound burn is the right result
+        //    and why the cancel lane is a liveness aid rather than a soundness gate.
+        uint64 pwDeadline = uint64(block.timestamp) + challengePeriod;
+        uint64 reviewUntil = cancelledPartialWithdrawalReviewUntil[authDigest];
+        if (reviewUntil > pwDeadline) pwDeadline = reviewUntil;
+        pendingPartialWithdrawalDeadline = pwDeadline;
         pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
         pendingPartialWithdrawalEpoch = intent.finalEpoch;
         // R3-1: retain the IMBD-pinned (token, amount) so `finalizePartialWithdrawal` can accrue the
@@ -2002,9 +2051,25 @@ contract ChannelSettlementManager {
         //    be cancelled by a member holding v50, and would be authorized on the deadline. The two
         //    lanes differ in exactly the property that makes A1's global mark acceptable: in the
         //    CLOSE lane a party blocked from cancelling still has the exit — `submitCloseIntent` and
-        //    `finalizeClose` never read A1's floor — whereas in the BURN lane the cancel IS the
-        //    whole remedy, and losing it means a stale burn is authorized. So the burn lane gets the
-        //    weakest floor that still kills the replay, keyed on the object being cancelled.
+        //    `finalizeClose` never read A1's floor — whereas in the BURN lane the cancel is the only
+        //    veto. So the burn lane gets the weakest floor that still kills the replay, keyed on the
+        //    object being cancelled.
+        //
+        //    CORRECTION (R3-3, round 3): the round-2 text continued "and losing it means a stale
+        //    burn is authorized", which framed this cancel as load-bearing for SOUNDNESS. It is not,
+        //    and the overstatement is what made A4's inverted attrition look fatal. A submittable
+        //    burn is a genuine one: `_checkCloseProof` binds the intent's state, and the descriptor
+        //    recompute pins `(recipient, tokenIndex, amount)` to the LAST push of the N-of-N-signed
+        //    settled-tx chain, so recipient/token/amount are member-signed, not caller-declared.
+        //    A later signed state does not un-commit an append-only chain entry — so "stale" here
+        //    means "committed a while ago", NOT "invalid", and authorizing it is the CORRECT
+        //    outcome. Nor can an authorization pay anything by itself: every payout goes through
+        //    `withdrawNative`/`withdrawERC20` under a real withdrawal proof and a single-use
+        //    proof-derived nullifier, so an authorization carrying an attacker-chosen nullifier is
+        //    inert. What this cancel genuinely buys is LIVENESS — vetoing a griefer's
+        //    wrong-nullifier submission so the honest burner need not wait out its window — and,
+        //    since round 3, that is all it is claimed to buy. The reverse-order double-draw it was
+        //    also leaned on for is handled where it belongs, by the R3-1 deduction in `finalizeClose`.
         //
         //    NON-LOCKOUT. `cancelledPartialWithdrawalRevivedVersion[D]` is zero for every burn no
         //    one has yet cancelled, so an honest cancel of a genuinely stale PW is never impeded by
@@ -2043,6 +2108,16 @@ contract ChannelSettlementManager {
         cancelledPartialWithdrawalRevivedVersion[pwDigest] = request.revivedStateVersion;
 
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
+        // R3-3: arm the review window for THIS authorization digest. A re-submission of the same
+        // digest cannot be finalized before it, so the defender's next round is bought with the
+        // attacker's wall-clock rather than with the defender's material. Written after the verify
+        // and before the deletes; `max` so an earlier, longer review is never shortened.
+        {
+            uint64 reviewUntil = uint64(block.timestamp) + 2 * challengePeriod;
+            if (reviewUntil > cancelledPartialWithdrawalReviewUntil[authDigest]) {
+                cancelledPartialWithdrawalReviewUntil[authDigest] = reviewUntil;
+            }
+        }
 
         delete partialWithdrawalPending;
         delete pendingPartialWithdrawalAuthDigest;
