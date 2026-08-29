@@ -85,15 +85,19 @@ pub fn verify_mle_proof<F: RichField + Extendable<D>, const D: usize>(
 //  (R3). This check converts that class from "found by incident on a real chain" to "found by the
 //  fixture generator that is about to write the file".
 //
-//  WHY THIS LIVES HERE AND NOT IN THE SUBMODULE
-//  `contracts/lib/polygon-plonky2/mle/src/fixture.rs:510-512` is where the `255` sentinel is
-//  emitted, but a guard placed there would be (a) NOT carried by the Cargo/Foundry pin — a plain
-//  `git submodule update` silently reverts it, which is the very failure mode being guarded
-//  against, and (b) wrong in the general case, because the supported set is a property of THIS
-//  repo's deployed evaluator (locally patched to add id 8) rather than of upstream's. Upstream's
-//  `proof_to_json` / `proof_to_fixture` are also infallible-signature public API, so turning them
-//  into fallible calls is a breaking upstream change. Every fixture this repo writes goes through
-//  `export_mle_json` below, so this is the complete chokepoint.
+//  WHY THIS STILL LIVES HERE, NOW THAT THE SUBMODULE ALSO FAILS CLOSED
+//  As of 2026-08-30 (audit M-10) `mle/src/fixture.rs` no longer emits the `255` sentinel or a
+//  guessed parameter: `classify_gate` derives every gate parameter structurally and returns an
+//  `Err` naming the gate for anything it cannot resolve. This guard is NOT redundant with it:
+//    (a) the submodule fix is not carried by the Cargo/Foundry pin — a plain `git submodule
+//        update` silently reverts it, which is the very failure mode being guarded against;
+//    (b) `SOLIDITY_SUPPORTED_GATE_IDS` is a property of THIS repo's deployed evaluator (locally
+//        patched to add id 8), not of upstream's, so only this side can decide that a gate
+//        upstream classifies happily has no on-chain branch — that is literally the gate-8 case;
+//    (c) it compares the fixture's BYTES against values recomputed from `common_data`, so it also
+//        catches a fixture that was hand-edited, reordered, or produced by a different generator.
+//  Every fixture this repo writes goes through `export_mle_json` below, so this is the complete
+//  chokepoint.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// Gate ids that the deployed `Plonky2GateEvaluator.sol` dispatcher can actually evaluate.
@@ -105,9 +109,10 @@ pub fn verify_mle_proof<F: RichField + Extendable<D>, const D: usize>(
 /// vice versa — is a test failure, so it cannot silently go stale.
 pub const SOLIDITY_SUPPORTED_GATE_IDS: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
-/// Sentinel written by `plonky2_mle::fixture::classify_gate` for any gate it does not recognise.
-/// It is a well-formed `u8` that hashes into a valid `gatesDigest`, so it is invisible to every
-/// check except this one and the on-chain revert.
+/// Sentinel that `plonky2_mle::fixture::classify_gate` USED to write for any gate it did not
+/// recognise (it now returns an `Err` naming the gate instead — audit M-10). It is a well-formed
+/// `u8` that hashes into a valid `gatesDigest`, so in a fixture produced before that fix — or by a
+/// reverted submodule — it is invisible to every check except this one and the on-chain revert.
 pub const UNSUPPORTED_GATE_ID: u8 = 255;
 
 /// SECURITY: reject a fixture the deployed on-chain evaluator provably cannot verify.
@@ -115,9 +120,11 @@ pub const UNSUPPORTED_GATE_ID: u8 = 255;
 /// Two independent failure shapes are checked, both of which yield a well-formed-but-unusable
 /// fixture:
 ///
-/// 1. **Unsupported gate.** `classify_gate` maps an unrecognised gate to [`UNSUPPORTED_GATE_ID`]
-///    (255); the Solidity dispatcher reverts on any id outside [`SOLIDITY_SUPPORTED_GATE_IDS`]
-///    whose filter is non-zero.
+/// 1. **Unsupported gate.** The Solidity dispatcher reverts on any id outside
+///    [`SOLIDITY_SUPPORTED_GATE_IDS`] whose filter is non-zero. Historically an unrecognised gate
+///    also reached here as the [`UNSUPPORTED_GATE_ID`] (255) sentinel; the exporter now refuses to
+///    write one at all, so the sentinel check is retained only for fixtures produced by a hand-edit
+///    or by an older / reverted `plonky2_mle`.
 /// 2. **Silent `as u8` truncation.** `fixture.rs:531-534` narrows `selector_index`, `group_start`,
 ///    `group_end` and `gate_row_index` with `as u8` and `num_constraints` with `as u16`. A wrap
 ///    produces a fixture that names the WRONG selector column / row — the proof would then be
@@ -125,6 +132,15 @@ pub const UNSUPPORTED_GATE_ID: u8 = 255;
 ///    `common_data` (the pre-truncation source of truth), bounds-checks it, and compares it against
 ///    what was actually serialized, so both an out-of-range value and any future divergence between
 ///    the two are caught.
+/// 3. **A wrong gate PARAMETER** (audit finding M-10). `gateId` alone does not determine what the
+///    on-chain evaluator checks: `numOrConsts` / `param2` / `param3` carry `num_ops`,
+///    `num_power_bits`, the `BaseSumGate` base, `num_copies`, the interpolation `degree` … and they
+///    drive `Plonky2GateEvaluator`'s per-gate constraint count and wire layout. Until 2026-08-30
+///    they were scraped from a `Debug` string with a `.unwrap_or(0)` fallback and were NOT covered
+///    here — a wrong value still produced a well-formed fixture, a valid `gatesDigest` and a
+///    passing Rust `mle_verify`. They are now re-derived STRUCTURALLY from the circuit's own gate
+///    objects via `plonky2_mle::fixture::classify_gate` and compared field-for-field, exactly like
+///    the five layout fields.
 pub fn check_on_chain_evaluable<F: RichField + Extendable<D>, const D: usize>(
     common_data: &plonky2::plonk::circuit_data::CommonCircuitData<F, D>,
     json: &str,
@@ -134,15 +150,28 @@ pub fn check_on_chain_evaluable<F: RichField + Extendable<D>, const D: usize>(
         .map(|row| {
             let sel_idx = si.selector_indices[row];
             let group = &si.groups[sel_idx];
-            ExpectedGateRow {
+            // SECURITY: an independent re-derivation, NOT a re-read of the fixture. If a gate
+            // cannot be classified this fails here rather than emitting a `255` row.
+            let params = plonky2_mle::fixture::classify_gate::<F, D>(&common_data.gates[row])
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "gate row {row}: the circuit uses a gate whose on-chain parameters cannot \
+                         be established — {e}"
+                    )
+                })?;
+            Ok(ExpectedGateRow {
+                gate_id: params.gate_id,
                 selector_index: sel_idx,
                 group_start: group.start,
                 group_end: group.end,
                 gate_row_index: row,
                 num_constraints: common_data.gates[row].0.num_constraints(),
-            }
+                num_or_consts: params.num_or_consts,
+                param2: params.param2,
+                param3: params.param3,
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     check_fixture_json_gates(json, &expected)
 }
 
@@ -150,11 +179,19 @@ pub fn check_on_chain_evaluable<F: RichField + Extendable<D>, const D: usize>(
 /// `mle/src/fixture.rs` narrows with `as u8` / `as u16`.
 #[derive(Debug, Clone, Copy)]
 pub struct ExpectedGateRow {
+    /// Structurally derived gate id — compared for equality, not merely membership in
+    /// [`SOLIDITY_SUPPORTED_GATE_IDS`].
+    pub gate_id: u8,
     pub selector_index: usize,
     pub group_start: usize,
     pub group_end: usize,
     pub gate_row_index: usize,
     pub num_constraints: usize,
+    /// `numOrConsts` / `param2` / `param3`: the gate's on-chain evaluation parameters. Audit
+    /// finding M-10 — these were outside this guard while driving on-chain evaluation.
+    pub num_or_consts: u16,
+    pub param2: u16,
+    pub param3: u16,
 }
 
 /// Pure core of [`check_on_chain_evaluable`], split out so the guard itself can be tested against
@@ -208,6 +245,38 @@ pub fn check_fixture_json_gates(json: &str, expected: &[ExpectedGateRow]) -> Res
         // Pre-truncation values, recomputed from the circuit itself.
         let e = &expected[row];
 
+        ensure!(
+            gate_id_u8 == e.gate_id,
+            "gate row {row} (`{name}`): fixture serialized gateId = {gate_id_u8} but the circuit's \
+             own gate classifies as {} — the fixture does not describe this circuit. Both ids are \
+             on-chain-supported, so nothing downstream would notice: the evaluator would simply \
+             check the WRONG gate's constraints.",
+            e.gate_id
+        );
+
+        // SECURITY (M-10): the on-chain evaluation parameters. `gateId` selects the branch;
+        // these select how many constraints that branch checks and where its wires are. A wrong
+        // value here is invisible to `gatesDigest`, to `mle_verify`, and — unlike an unsupported
+        // gate id — often invisible on-chain too: it just evaluates the wrong thing.
+        for (field, wide) in [
+            ("numOrConsts", e.num_or_consts),
+            ("param2", e.param2),
+            ("param3", e.param3),
+        ] {
+            let serialized = entry
+                .get(field)
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("gate row {row} ({name}) has no `{field}`"))?;
+            ensure!(
+                serialized == u64::from(wide),
+                "gate row {row} (`{name}`): fixture serialized {field} = {serialized} but the \
+                 gate itself says {wide}. This parameter drives Plonky2GateEvaluator's constraint \
+                 count / wire layout for this gate, so the on-chain verifier would evaluate \
+                 constraints that are not the circuit's — with a valid `gatesDigest` and a \
+                 passing Rust `mle_verify`."
+            );
+        }
+
         for (field, wide, max) in [
             ("selectorIndex", e.selector_index, u8::MAX as usize),
             ("groupStart", e.group_start, u8::MAX as usize),
@@ -244,7 +313,12 @@ pub fn export_mle_json<F: RichField + Extendable<D>, const D: usize>(
     proof: &MleProof<F>,
     common_data: &plonky2::plonk::circuit_data::CommonCircuitData<F, D>,
 ) -> Result<String> {
-    let json = plonky2_mle::fixture::proof_to_json(proof, common_data, common_data.degree_bits());
+    // SECURITY: `try_proof_to_json` fails rather than emitting a guessed gate parameter or the
+    // `255` sentinel (audit M-10). `check_on_chain_evaluable` then re-derives the same values
+    // independently and compares them against what was actually serialized.
+    let json =
+        plonky2_mle::fixture::try_proof_to_json(proof, common_data, common_data.degree_bits())
+            .map_err(|e| anyhow::anyhow!("MLE fixture export refused to write a fixture: {e}"))?;
     check_on_chain_evaluable(common_data, &json)?;
     Ok(json)
 }

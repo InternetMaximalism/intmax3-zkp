@@ -234,7 +234,15 @@ contract MleFinalizeE2ETest is Test {
     function _parseDeployData(string memory json) internal pure returns (DeployData memory d) {
         d.degreeBits = vm.parseJsonUint(json, ".degreeBits");
         d.whirParams = _parseWhirParams(json, ".whirParams");
-        d.whirParams.numCommitments = 4;
+        // SECURITY (audit M-10): the Rust exporter is the single source of truth for this field.
+        // It used to write a stale `2` — correct only before v2 added the auxiliary and
+        // inverse-helper commitments — which THIS line, and two other consumers, silently patched
+        // back to 4. Nothing checked the field it wrote, so any submitter that trusted the export
+        // (a relayer, a new deploy script, a partner integration) deployed a VK describing a
+        // 2-commitment proof and rejected every honest proof. `plonky2_mle` now derives it from
+        // `proof::NUM_SPLIT_COMMITMENTS`; assert rather than patch, so a stale fixture fails
+        // loudly here instead of on chain.
+        require(d.whirParams.numCommitments == 4, "stale fixture: whirParams.numCommitments != 4");
         d.protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
         d.sessionId = vm.parseJsonBytes(json, ".whirSplitSessionId");
         d.preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
