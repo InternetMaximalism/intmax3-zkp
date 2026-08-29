@@ -1997,7 +1997,7 @@
     "numVariables": 13,
     "foldingFactor": 4,
     "numVectors": 1,
-    "numCommitments": 2,
+    "numCommitments": 4,
     "outDomainSamples": 1,
     "inDomainSamples": 39,
     "initialSumcheckRounds": 4,

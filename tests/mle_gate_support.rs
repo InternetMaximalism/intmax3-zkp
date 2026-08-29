@@ -418,8 +418,9 @@ use plonky2::{
     },
     plonk::circuit_data::CircuitConfig,
 };
-use plonky2_mle::fixture::{
-    GateParams, SUPPORTED_BASE_SUM_BASES, classify_gate, parse_gate_params_from_id,
+use plonky2_mle::{
+    fixture::{GateParams, SUPPORTED_BASE_SUM_BASES, classify_gate, parse_gate_params_from_id},
+    proof::NUM_SPLIT_COMMITMENTS,
 };
 
 type F = GoldilocksField;
@@ -705,5 +706,57 @@ fn guard_rejects_a_gate_id_swapped_for_another_supported_one() {
     assert!(
         msg.contains("gateId"),
         "the rejection must name the field: {msg}"
+    );
+}
+
+/// Audit M-10, second half: `whirParams.numCommitments`.
+///
+/// The exporter hardcoded `2` — correct only before v2 added the auxiliary and inverse-helper
+/// commitments — and the wrong value survived only because three in-repo Solidity consumers
+/// hand-patched it to `4` after parsing. It now comes from `plonky2_mle::proof::
+/// NUM_SPLIT_COMMITMENTS`, the same constant `mle_verify` hands to `verify_split`, and the three
+/// consumers assert it instead of patching it. This pins the checked-in fixtures to that constant
+/// so the field cannot drift back.
+#[test]
+fn every_checked_in_fixture_declares_the_real_commitment_count() {
+    let data_dir = repo_root().join("contracts/test/data");
+    let mut checked = 0usize;
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(&data_dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", data_dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let Ok(value) =
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path).unwrap())
+        else {
+            continue;
+        };
+        let Some(n) = value
+            .pointer("/whirParams/numCommitments")
+            .and_then(|v| v.as_u64())
+        else {
+            continue;
+        };
+        checked += 1;
+        assert_eq!(
+            n as usize,
+            NUM_SPLIT_COMMITMENTS,
+            "{}: whirParams.numCommitments = {n}, but the proof carries {NUM_SPLIT_COMMITMENTS} \
+             separately-committed vectors (preprocessed, witness, auxiliary, inverse_helpers). \
+             SpongefishWhirVerify drives round-0 Merkle verification off this field, so a VK built \
+             from it would reject every honest proof.",
+            path.display()
+        );
+    }
+
+    assert!(
+        checked >= 12,
+        "expected at least 12 fixtures carrying whirParams under {} but found {checked}",
+        data_dir.display()
     );
 }
