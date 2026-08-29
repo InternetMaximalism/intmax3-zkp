@@ -596,9 +596,9 @@ contract ChannelSettlementManager {
     /// left to deploy scripts.
     uint64 public constant CHALLENGE_PERIOD_SECS = CHALLENGE_PERIOD_SECS_FLOOR;
 
-    /// @notice A2 (round 2): the minimum time an ADMITTED challenge-replacement must leave before the
-    /// era's absolute `closeChallengeHorizon`. A replacement that cannot clear this is refused
-    /// outright rather than admitted with an unanswerable window.
+    /// @notice A2 (round 2, REWRITTEN by R3-2 in round 3): the minimum response interval every
+    /// ADMITTED challenge-replacement is guaranteed. It is a FLOOR ON THE DEADLINE
+    /// (`_storePendingClose`), NOT an admission bar.
     ///
     /// SECURITY (A2 — the H-3 clamp's zero-length last rung): `_storePendingClose` sets
     /// `challengeDeadline = min(now + challengePeriod, closeChallengeHorizon)`, and the replacement
@@ -606,8 +606,21 @@ contract ChannelSettlementManager {
     /// `now == closeChallengeHorizon` therefore received `challengeDeadline == block.timestamp`, and
     /// `finalizeClose()` (which needs only `now >= challengeDeadline`) settled it IN THE SAME BLOCK.
     /// The attacker picked the settled state with literally zero opportunity for an on-chain reply —
-    /// a narrowing the H-3 rationale explicitly denied. This floor restores the invariant the
-    /// un-clamped path had for free: every admitted rung leaves a usable response interval.
+    /// a narrowing the H-3 rationale explicitly denied.
+    ///
+    /// CORRECTION (R3-2): round 2 spent this constant on the ADMISSION rule — refusing any
+    /// replacement with `now + minResponse > horizon` — and claimed that restored "every admitted
+    /// rung leaves a usable response interval". IT DID THE OPPOSITE. The response to a rung IS a
+    /// replacement close intent, so the rule converted the final `minResponse` of every era from
+    /// "replacements admitted" into "replacements refused": a griefer's rung landing one second
+    /// before the first deadline made an honest strictly-newer state, surfacing well inside that
+    /// deadline, unsubmittable, and the griefer's stale state settled
+    /// (`RedTeamRound3.t.sol::test_R3_BREAK_A2_finalHourIsAReplacementBlackout`). The value is now
+    /// applied where it was always meant to be — as the floor on the admitted rung's own deadline —
+    /// and the claim above is true as written: admission runs to the horizon, and every admitted
+    /// rung gets at least `minResponse` in which it can be answered (by a replacement, or for the
+    /// rung that lands last, by `cancelClose`, which needs the identical material and has no window
+    /// bound). The ladder's absolute end moves from `horizon` to `horizon + minResponse`.
     ///
     /// THE VALUE, against this repo's own measured costs. Answering a rung costs (a) generating a
     /// fresh close proof — `a3_close_prover_builds_and_verifies_real_close_proof`, 79.3 s
@@ -1273,23 +1286,40 @@ contract ChannelSettlementManager {
     ///
     /// CORRECTION (A2, round 2): the sentence above was FALSE for the final rung as originally
     /// shipped. The clamp does narrow each rung's window as the horizon is approached, and a rung
-    /// admitted at exactly the horizon got a ZERO-length one — same-block finalizable. The claim
-    /// holds only because `submitCloseIntent` now refuses any replacement that cannot leave
-    /// `MIN_CLOSE_RESPONSE_SECS` before the horizon; see the A2 guard there and the constant's own
-    /// SECURITY block for the value's derivation.
+    /// admitted at exactly the horizon got a ZERO-length one — same-block finalizable.
+    ///
+    /// CORRECTION (R3-2, round 3): round 2 restored the claim by having `submitCloseIntent` REFUSE
+    /// any replacement that could not leave `MIN_CLOSE_RESPONSE_SECS` before the horizon. That was
+    /// the wrong lever — the response to a rung IS a replacement, so the rule denied the response it
+    /// was protecting, for a full `minResponse` (see the R3-2 block in `submitCloseIntent`). The
+    /// guarantee is now enforced HERE, on the WINDOW rather than on the ADMISSION: every admitted
+    /// rung's deadline is floored at `now + minResponse`. Admission is bounded by the horizon, so
+    /// the ladder ends at `closeChallengeHorizon + minResponse` — an absolute cap independent of the
+    /// number of rungs, which is the property H-3 was introduced to obtain.
     function _storePendingClose(
         CloseIntent calldata intent,
         bytes32 closeIntentDigest
     ) internal {
         uint256 naturalDeadline = block.timestamp + challengePeriod;
         uint256 horizon = closeChallengeHorizon;
+        uint256 deadline = naturalDeadline < horizon ? naturalDeadline : horizon;
+        // R3-2: floor the clamped deadline so no admitted rung is unanswerable. `minResponse`
+        // degrades to `challengePeriod` on the devnet (see the constant), and `challengePeriod` is
+        // never below it elsewhere — so for the era's FIRST intent, where `naturalDeadline` is
+        // `now + challengePeriod` and always at-or-below the horizon it just set, this floor is a
+        // no-op. It bites only on a late rung, exactly where the zero-length window was.
+        uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS
+            ? challengePeriod
+            : MIN_CLOSE_RESPONSE_SECS;
+        uint256 floorDeadline = block.timestamp + minResponse;
+        if (deadline < floorDeadline) deadline = floorDeadline;
         pendingClose = PendingClose({
             active: true,
             closeNonce: intent.closeNonce,
             finalEpoch: intent.finalEpoch,
             finalSmallBlockNumber: intent.finalSmallBlockNumber,
             closeFreezeNonce: intent.closeFreezeNonce,
-            challengeDeadline: uint64(naturalDeadline < horizon ? naturalDeadline : horizon),
+            challengeDeadline: uint64(deadline),
             closeIntentDigest: closeIntentDigest,
             finalChannelStateDigest: intent.finalChannelStateDigest,
             finalBalanceStateH1: intent.finalBalanceStateH1,

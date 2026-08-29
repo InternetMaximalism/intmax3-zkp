@@ -313,9 +313,15 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     ///
     /// PINS: the clamp in `_storePendingClose`. Reverting it to the unconditional
     /// `block.timestamp + challengePeriod` makes each of the 12 replacements buy another full day,
-    /// so `assertLe(deadline, horizon)` fails on the third iteration and the final elapsed-time
-    /// assertion fails by an order of magnitude. ALSO PINS the round-2 A2 floor: every rung the
-    /// ladder admits is asserted to carry at least `MIN_CLOSE_RESPONSE_SECS` of answerable time.
+    /// so the deadline bound fails on the third iteration and the final elapsed-time assertion fails
+    /// by an order of magnitude. ALSO PINS the A2 response floor: every rung the ladder admits is
+    /// asserted to carry at least `MIN_CLOSE_RESPONSE_SECS` of answerable time.
+    ///
+    /// R3-2 (round 3): admission now runs to the horizon rather than stopping `minResponse` short of
+    /// it, and the guarantee is delivered by flooring each admitted rung's deadline instead of by
+    /// refusing the rung. The ladder's absolute end therefore moves from `horizon` to
+    /// `horizon + MIN_CLOSE_RESPONSE_SECS` — still a fixed cap, independent of the number of rungs,
+    /// which is the property H-3 exists to provide.
     ///
     /// TEST INTEGRITY: every "what time is it now" read goes through `vm.getBlockTimestamp()`, NOT
     /// `block.timestamp`. Under `via_ir = true` the Yul optimizer treats `TIMESTAMP` as movable and
@@ -336,19 +342,27 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
 
         uint64 version = 12;
         uint64 rungs = 0;
+        bool reachedHorizon = false;
         for (uint256 i = 0; i < 12; i++) {
             uint64 deadline = manager.getPendingClose().challengeDeadline;
-            assertLe(deadline, horizon, "no replacement may push the deadline past the era horizon");
-            // A2: a rung is admissible only while it can still leave a usable response window, so
-            // the latest legal landing is `min(deadline, horizon - minResponse)`, not `deadline`.
-            uint64 latest = deadline < horizon - minResponse ? deadline : horizon - minResponse;
-            if (vm.getBlockTimestamp() >= latest) break;
+            assertLe(
+                deadline,
+                horizon + minResponse,
+                "no replacement may push the deadline past the era horizon + one response interval"
+            );
+            // R3-2: a rung is admissible while `now <= min(challengeDeadline, horizon)`. The
+            // round-2 form of this line stopped at `horizon - minResponse`, which is the blackout
+            // R3-2 removed; the latest legal landing is now the horizon itself.
+            uint64 latest = deadline < horizon ? deadline : horizon;
+            if (vm.getBlockTimestamp() > latest || reachedHorizon) break;
             vm.warp(latest);
+            reachedHorizon = latest == horizon;
             version += 1;
             ChannelSettlementManager.CloseIntent memory rung = _intentAt(9, version);
             manager.submitCloseIntent(rung, _closeProof(rung));
             rungs += 1;
-            // A2, THE PROPERTY: no admitted rung may be finalizable in the block that stored it.
+            // A2, THE PROPERTY (unchanged, now delivered by the deadline floor rather than by the
+            // admission bar): no admitted rung may be finalizable in the block that stored it.
             assertGe(
                 manager.getPendingClose().challengeDeadline - vm.getBlockTimestamp(),
                 minResponse,
@@ -357,18 +371,19 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         }
 
         assertGt(rungs, 0, "the ladder is not vacuous: replacements really were admitted");
+        assertTrue(reachedHorizon, "the ladder was actually walked all the way to the horizon");
         assertLe(
             vm.getBlockTimestamp(),
             horizon,
-            "the whole ladder is consumed within the era's absolute horizon"
+            "every rung of the ladder landed within the era's absolute horizon"
         );
 
-        // A2: past `horizon - minResponse` no further rung is admitted, even though the raw
-        // `challengeDeadline` check would still have allowed one. This is the red team's
-        // zero-length-window rung, refused.
+        // R3-2: past the horizon no further rung is admitted, even though the raw
+        // `challengeDeadline` check would still have allowed one (the last rung's floored deadline
+        // is `horizon + minResponse`). THIS is what bounds the ladder now.
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, version + 1);
         MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
-        vm.warp(horizon - minResponse + 1);
+        vm.warp(uint256(horizon) + 1);
         assertGe(
             manager.getPendingClose().challengeDeadline,
             vm.getBlockTimestamp(),
@@ -377,8 +392,8 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
 
-        // The window is genuinely closed at the horizon: no further rung, and exit is available.
-        vm.warp(horizon + 1);
+        // ...and it stays closed for the rest of the final rung's response interval.
+        vm.warp(uint256(horizon) + minResponse);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
 
@@ -386,7 +401,12 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         assertEq(
             uint256(manager.channelStatus()),
             uint256(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "exit is reachable at the horizon, not delayed indefinitely"
+            "exit is reachable one response interval past the horizon, not delayed indefinitely"
+        );
+        assertEq(
+            vm.getBlockTimestamp(),
+            uint256(horizon) + minResponse,
+            "the era's absolute end is horizon + MIN_CLOSE_RESPONSE_SECS, whatever the ladder did"
         );
     }
 

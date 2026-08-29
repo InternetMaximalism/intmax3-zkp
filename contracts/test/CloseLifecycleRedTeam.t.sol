@@ -274,40 +274,49 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         assertEq(manager.getPendingClose().challengeDeadline, horizon, "rung 2 clamped to the horizon");
 
         // Rung 3 — landed at exactly the horizon. `now > challengeDeadline` is the revert
-        // condition, so `now == deadline` is admitted, and the clamp then hands the replacement a
+        // condition, so `now == deadline` is admitted, and the clamp then handed the replacement a
         // deadline equal to NOW.
         //
-        // ROUND 2 (A2): REFUSED. `submitCloseIntent` now also requires that an admitted replacement
-        // leave `MIN_CLOSE_RESPONSE_SECS` before the horizon, so the zero-length rung never enters
-        // storage. Note the raw deadline check the attack relied on would still pass here — the
-        // assertion below pins that it is the NEW guard doing the work, not the old one.
+        // ROUND 2 (A2) refused the RUNG. ROUND 3 (R3-2) refuses the ZERO-LENGTH WINDOW instead: the
+        // rung is admitted (refusing it was itself an attack — see
+        // `RedTeamRound3.t.sol::test_R3_BREAK_A2_finalHourIsAReplacementBlackout`, where the refusal
+        // is what let a griefer's stale state settle), and `_storePendingClose` floors its deadline
+        // at `now + MIN_CLOSE_RESPONSE_SECS`. The attack's actual harm — "zero opportunity for an
+        // on-chain reply" — is what is blocked, and it is blocked without denying anyone the reply.
         vm.warp(horizon);
         ChannelSettlementManager.CloseIntent memory r3 = _intentAt(9, 12);
-        MleVerifier.MleProof memory r3Proof = _closeProof(r3);
-        assertGe(
-            manager.getPendingClose().challengeDeadline,
-            uint64(vm.getBlockTimestamp()),
-            "the pre-A2 deadline check alone would have admitted this rung"
-        );
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(r3, r3Proof);
-
-        // The state the honest ladder had reached still stands, and it is the one that settles.
+        uint64 minResponse = manager.MIN_CLOSE_RESPONSE_SECS();
+        manager.submitCloseIntent(r3, _closeProof(r3));
         assertEq(
-            manager.getPendingClose().finalStateVersion,
-            11,
-            "BLOCKED: the attacker did not get to choose the settled state"
+            manager.getPendingClose().challengeDeadline,
+            uint64(vm.getBlockTimestamp()) + minResponse,
+            "BLOCKED: the rung at the horizon is NOT zero-length; it carries a full response window"
         );
+        // Same-block finalization — the whole point of the attack — is refused.
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
         manager.finalizeClose();
-        assertEq(manager.finalizedStateVersion(), 11, "rung 2, which had a real window, settles");
+
+        // And the reply is genuinely available for that whole interval: `cancelClose` needs the
+        // identical material a replacement would and has no window bound.
+        vm.warp(uint256(horizon) + minResponse - 1);
+        bytes32 r3Digest = manager.computeCloseIntentDigest(r3);
+        manager.cancelClose(_cancelRequest(r3Digest, 13), _cancelProof(_cancelRequest(r3Digest, 13)));
+        assertEq(
+            uint8(manager.channelStatus()),
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active),
+            "BLOCKED: the attacker's rung was answerable, so it did not get to pick the settled state"
+        );
     }
 
     /// The A2 property stated directly, independent of the ladder: EVERY admitted replacement has a
     /// strictly positive, usable window between its storage and its finalizability.
     ///
-    /// PINS: `MIN_CLOSE_RESPONSE_SECS` and the `now + minResponse > horizon` guard. Delete the guard
-    /// and the last rung is admitted with `challengeDeadline == block.timestamp`, i.e. finalizable
-    /// in the same block, and both assertions below fail.
+    /// PINS (as rewritten by R3-2): `MIN_CLOSE_RESPONSE_SECS` and the deadline FLOOR in
+    /// `_storePendingClose`. Delete the floor and the rung landing at the horizon is stored with
+    /// `challengeDeadline == block.timestamp`, i.e. finalizable in the same block, and the
+    /// assertions below fail. The guard R3-2 removed — the `now + minResponse > horizon` ADMISSION
+    /// bar — is pinned in the opposite direction here: restoring it makes the admissions below
+    /// revert.
     function test_A2_everyAdmittedReplacementKeepsAUsableWindow() external {
         _requestCloseAndElapseGrace();
         uint64 t0 = uint64(vm.getBlockTimestamp());
@@ -324,31 +333,50 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         manager.submitCloseIntent(r2, _closeProof(r2));
         assertEq(manager.getPendingClose().challengeDeadline, horizon, "deadline is at the horizon");
 
-        // The very last instant a replacement is admissible.
+        // The instant round 2 treated as "the last admissible" one. The window it earns is
+        // unchanged — a full MIN_CLOSE_RESPONSE_SECS — but it is now the FLOOR that provides it,
+        // not the clamp.
         vm.warp(horizon - minResponse);
         ChannelSettlementManager.CloseIntent memory last = _intentAt(9, 12);
         manager.submitCloseIntent(last, _closeProof(last));
         assertEq(
             manager.getPendingClose().challengeDeadline - vm.getBlockTimestamp(),
             minResponse,
-            "the last admissible rung still carries a full MIN_CLOSE_RESPONSE_SECS"
+            "the rung still carries a full MIN_CLOSE_RESPONSE_SECS"
         );
         // Same-block finalization — the whole point of the attack — is refused.
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
         manager.finalizeClose();
 
-        // One second later, no replacement is admitted at all.
+        // R3-2: one second later a replacement IS admitted — round 2 refused it, and that refusal
+        // was the blackout. It too carries a full response window.
         vm.warp(horizon - minResponse + 1);
         ChannelSettlementManager.CloseIntent memory late = _intentAt(9, 13);
-        MleVerifier.MleProof memory lateProof = _closeProof(late);
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(late, lateProof);
+        manager.submitCloseIntent(late, _closeProof(late));
+        assertEq(
+            manager.getPendingClose().challengeDeadline - vm.getBlockTimestamp(),
+            minResponse,
+            "every admitted rung, at every instant up to the horizon, keeps a usable window"
+        );
 
-        // A2 never delays the exit: the horizon is untouched and still bounds the era.
-        vm.warp(horizon);
+        // Past the horizon, and only past it, admission ends. That is what bounds the ladder.
+        vm.warp(uint256(horizon) + 1);
+        ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, 14);
+        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
+        manager.submitCloseIntent(tooLate, tooLateProof);
+
+        // A2 delays the exit by at most one response interval: the era ends at
+        // `horizon + MIN_CLOSE_RESPONSE_SECS`, a fixed overshoot independent of the ladder's length.
+        vm.warp(uint256(manager.getPendingClose().challengeDeadline));
         manager.finalizeClose();
-        assertEq(vm.getBlockTimestamp(), horizon, "exit still lands exactly at the H-3 horizon");
-        assertEq(manager.finalizedStateVersion(), 12);
+        assertLe(
+            vm.getBlockTimestamp(),
+            uint256(horizon) + minResponse,
+            "exit lands at the H-3 horizon plus at most one response interval"
+        );
+        // v13 — the replacement round 2 refused as "the blackout" — is what settles.
+        assertEq(manager.finalizedStateVersion(), 13);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
