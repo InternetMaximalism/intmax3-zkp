@@ -100,10 +100,9 @@ pub enum ChannelRegStepError {
 /// SECURITY (Option B): this is the COSIGNER-scoped registered root (`MAX_SIG_CLUSTER` slots,
 /// height `MEMBER_TREE_HEIGHT`). L1 registration is cosigners-only, and `delegate_count == 0` is
 /// now a CIRCUIT CONSTRAINT (`ChannelRegStepTarget::new`), not a convention — so for every record
-/// this step can prove, `active == member_count`. This helper still reads `delegate_count` so it
-/// stays a faithful native mirror of the in-circuit root for the general shape (`validate` only
-/// bounds `member_count + delegate_count <= MAX_SIG_CLUSTER`); a record with a nonzero
-/// `delegate_count` gets a native root here that the circuit will refuse to reproduce.
+/// this step can prove, `active == member_count`. Native validation also rejects a nonzero delegate
+/// count. This helper retains the general-shape calculation so the direct circuit negative test can
+/// deliberately bypass native validation and prove that the circuit independently enforces zero.
 ///
 /// This root is NOT the wallet's live membership root (`wallet_core::member_pubkeys_root`, height
 /// `WALLET_MEMBER_TREE_HEIGHT`), which evolves with delegate joins and is never compared to this
@@ -145,6 +144,18 @@ where
         &self,
         channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
     ) -> Result<ChannelRegChainPublicInputs<F, C, D>, ChannelRegStepError> {
+        self.record.validate()?;
+        self.to_public_inputs_unchecked(channel_reg_chain_vd)
+    }
+
+    /// Derive the public inputs after the caller has validated the record.
+    ///
+    /// Kept separate so the circuit's delegate-count negative test can deliberately bypass the
+    /// native guard and continue testing the independent `assert_zero(delegate_count)` constraint.
+    fn to_public_inputs_unchecked(
+        &self,
+        channel_reg_chain_vd: &VerifierCircuitData<F, C, D>,
+    ) -> Result<ChannelRegChainPublicInputs<F, C, D>, ChannelRegStepError> {
         let total_inputs = self.initial_value.is_some() as usize
             + self.prev_channel_reg_chain_proof.is_some() as usize;
         if total_inputs != 1 {
@@ -153,9 +164,6 @@ where
                     .to_string(),
             ));
         }
-
-        self.record.validate()?;
-
         let prev_pis = if let Some((
             initial_channel_reg_hash_chain,
             initial_channel_tree_root,
@@ -392,7 +400,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
             &prev_pis.initial_channel_reg_count,
         );
 
-        // ── member_count ∈ [2, 16] range check ──
+        // ── member_count ∈ [2, MAX_SIG_CLUSTER] (currently [2, 8]) range check ──
         // member_count - 2 in [0, 14] and 16 - member_count in [0, 14].
         let two = builder.constant(F::from_canonical_u64(2));
         let max = builder.constant(F::from_canonical_u64(MAX_SIG_CLUSTER as u64));
@@ -401,25 +409,25 @@ impl<const D: usize> ChannelRegStepTarget<D> {
         let max_minus_mc = builder.sub(max, member_count);
         builder.range_check(max_minus_mc, 4);
 
-        // bp_member_slot < member_count: member_count - 1 - bp_member_slot in [0, 15].
+        // bp_member_slot < member_count: member_count - 1 - bp_member_slot in [0, 7].
         let one = builder.one();
         let mc_minus_one = builder.sub(member_count, one);
         let slot_diff = builder.sub(mc_minus_one, bp_member_slot);
         builder.range_check(slot_diff, 4);
 
-        // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 16] ──
-        // SECURITY: `active <= MAX_SIG_CLUSTER` (no over-allocation past the fixed 16 slots);
+        // ── delegate account: active = member_count + delegate_count, with active ∈ [2, 8] ──
+        // SECURITY: `active <= MAX_SIG_CLUSTER` (no over-allocation past the fixed 8 slots);
         // `delegate_count >= 0` so `active >= member_count >= 2` holds automatically. The
         // thermometer mask below uses `active` as the threshold, so padding begins at `active`.
         //
         // Since the `assert_zero(delegate_count)` above, `active_count == member_count`
-        // identically, so this bound is implied by the `member_count ∈ [2, 16]` check and the mask
+        // identically, so this bound is implied by the `member_count ∈ [2, 8]` check and the mask
         // is byte-for-byte the legacy one. RETAINED DELIBERATELY as a redundant bound: it is what
         // keeps this block correct-by-construction if the delegate pin is ever revisited, and it
         // costs a sub-gate handful of rows (measured: no degree change).
         let active_count = builder.add(member_count, delegate_count);
         let max_minus_active = builder.sub(max, active_count);
-        builder.range_check(max_minus_active, 4); // active in [member_count, 16] ⊆ [0,15] above 16-mc
+        builder.range_check(max_minus_active, 4); // active in [member_count, 8]; 4-bit check is retained circuit shape
 
         // ── is_active thermometer mask: is_active[i] = (i < active_count) ──
         // `active_count` is a single threshold, so the mask is monotonic non-increasing by
@@ -603,7 +611,7 @@ impl<const D: usize> ChannelRegStepTarget<D> {
 /// `[2, MAX_SIG_CLUSTER]`, so `is_active[i] = Σ_{t = i+1..=MAX} is_equal(member_count, t)`.
 /// Exactly one `is_equal` fires (when `member_count == t`), and it is in the sum iff `t > i`, i.e.
 /// iff `i < member_count`. The sum is therefore 0 or 1 and has standard generators (no unfilled
-/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_SIG_CLUSTER = 16), so
+/// witness). INTENTIONALLY SIMPLE: the constant range is tiny (<= MAX_SIG_CLUSTER = 8), so
 /// unrolling is cheap.
 pub(crate) fn lt_const_threshold<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
@@ -877,12 +885,11 @@ mod tests {
     ///
     /// SECURITY — what this test is intended to prove: that cosigner-only L1 registration is an
     /// enforced circuit property and not merely a convention of the construction sites. The test
-    /// deliberately builds a record that passes EVERY native check — `ChannelRegRecord::validate`
-    /// still permits `member_count + delegate_count <= MAX_SIG_CLUSTER`, and the delegate slot is a
-    /// well-formed, nonzero, distinct member entry — and asserts native
-    /// `to_public_inputs` SUCCEEDS on it before asserting that proving FAILS. Without that first
-    /// assertion the test could pass for the wrong reason (an early native rejection), which would
-    /// leave the in-circuit constraint untested.
+    /// deliberately builds a structurally well-formed record with one delegate. Normal native
+    /// validation must now reject it, matching L1. The test then uses the private unchecked PI
+    /// derivation so the witness reaches the circuit and independently exercises
+    /// `assert_zero(delegate_count)`; this prevents the native guard from masking a circuit
+    /// regression.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn test_channel_reg_step_rejects_nonzero_delegate_count() {
@@ -898,9 +905,13 @@ mod tests {
         let mut record = make_record(5, 4);
         record.member_count = 3;
         record.delegate_count = 1;
-        record
-            .validate()
-            .expect("the record must be natively VALID — otherwise the circuit is untested");
+        assert!(
+            matches!(
+                record.validate(),
+                Err(crate::common::channel_registration::ChannelRegRecordError::DelegateCountNonZero(1))
+            ),
+            "native registration validation must reject delegate_count = 1"
+        );
 
         let channel_tree = ChannelTree::init();
         let witness = ChannelRegStepWitness::<F, C, D> {
@@ -911,10 +922,12 @@ mod tests {
             block_number: BlockNumber::new(7).unwrap(),
         };
 
-        // (1) The native path accepts it: no off-circuit gate stands in the way.
+        // (1) Deliberately bypass only the native record guard so the malformed count still reaches
+        //     the constraint system. All remaining native derivation (Merkle path, hash, PI layout)
+        //     is unchanged.
         let new_pis = witness
-            .to_public_inputs(&chain_vd)
-            .expect("native public-input derivation must ACCEPT delegate_count = 1 today");
+            .to_public_inputs_unchecked(&chain_vd)
+            .expect("unchecked PI derivation must accept this otherwise-well-formed record");
 
         // (2) The circuit refuses it. Fill the witness directly so the failure can only come from
         //     the constraint system, and so a `prove()` that panics on the copy-constraint

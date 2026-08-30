@@ -30,6 +30,10 @@ INTMAX_NODE_CONFIG=config.json npm run delegate
 npm test                                     # pure-logic unit suite (no network/WASM needed)
 ```
 
+The co-signer listens only on `127.0.0.1` by default. If `cosignerHost` is configured to expose it
+remotely, set the same high-entropy `INTMAX_COSIGNER_BEARER_TOKEN` on the co-signer and delegates,
+and put the connection behind TLS/VPN; startup otherwise fails closed.
+
 ## Design invariants (enforced)
 - **Orchestrators, not crypto.** Soundness is the CLI/WASM/on-chain gate; the loops add policy +
   liveness and never weaken a check.

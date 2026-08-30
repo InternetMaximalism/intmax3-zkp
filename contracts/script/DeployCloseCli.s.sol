@@ -206,7 +206,7 @@ contract DeployCloseCli is Script {
         //    registration the validity `channel_reg_step` circuit refuses to fold — cannot recur
         //    here either. `RegRecordLib.parse` additionally REQUIRES `reg_delegate_count == 0`, so
         //    a producer change fails loudly at deploy time instead of being quietly ignored.
-        rollup.registerChannel{value: 0.003 ether}(
+        rollup.registerChannel(
             r.channelId,
             r.bpSlot,
             RegRecordLib.REGISTRATION_DELEGATE_COUNT,

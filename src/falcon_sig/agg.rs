@@ -2,8 +2,8 @@
 //!
 //! NOTE (2026-08-15): the close / cancel-close provers now use
 //! [`super::batch::FalconBatchAggCircuit`] — ONE flat circuit with a batched (random-evaluation)
-//! product check instead of per-leaf NTTs — which proves all 16 signatures ~10x faster at the
-//! SAME 137-element public-input contract defined here. This tree is retained as the audited
+//! product check instead of per-leaf NTTs — which proves all 8 signatures ~10x faster at the
+//! SAME 73-element public-input contract defined here. This tree is retained as the audited
 //! fallback and as the owner of the shared layout constants / `FalconAggWitness` type.
 //!
 //! This module restores the RETIRED `poseidon_sig::aggregate` binary-tree aggregator
@@ -12,16 +12,15 @@
 //! ONE degree-2^20 circuit and therefore needed ~22 GB peak RSS just to build and prove.
 //!
 //! Memory is (roughly) linear in circuit DEGREE — every polynomial is stored at 8x its degree
-//! (LDE blowup) across ~220 polynomials — so the fix is structural: split the 16 signatures across
-//! 16 SMALL leaf circuits and recombine them with 4 SMALL recursion levels. No leaf or level
+//! (LDE blowup) across ~220 polynomials — so the fix is structural: split the 8 signatures across
+//! 8 SMALL leaf circuits and recombine them with 3 SMALL recursion levels. No leaf or level
 //! exceeds 2^17, and only one circuit proves at a time.
 //!
 //! ```text
 //!   leaf (1 Falcon signature)        -> 1 slot   ("level 0" layout)
 //!   level 1: 2 leaves                -> 2 slots
 //!   level 2: 2 level-1 nodes         -> 4 slots
-//!   level 3: 2 level-2 nodes         -> 8 slots
-//!   level 4: 2 level-3 nodes         -> 16 slots   == MAX_SIG_CLUSTER
+//!   level 3: 2 level-2 nodes         -> 8 slots   == MAX_SIG_CLUSTER
 //! ```
 //!
 //! # Public-input layout (canonical, level `k`, `0 <= k <= AGG_LEVELS`)
@@ -148,7 +147,7 @@ use crate::{
 };
 
 // PUBLIC-INPUT LAYOUT (identical offsets/width to the flat Phase-2 circuit and to the retired
-// `poseidon_sig::aggregate` at level 4)
+// `poseidon_sig::aggregate` at level 3)
 // ================================================================================================
 
 /// Number of aggregation levels above the leaf (level 3 => 8 slots == `MAX_SIG_CLUSTER`).
@@ -288,7 +287,7 @@ where
         let num_gates_before_padding = builder.num_gates();
         let data = builder.build::<C>();
         // SECURITY (review INFO-1): a RELEASE-mode self-check. `debug_assert` here compiled out of
-        // every test and production build, leaving the 137-element top-level contract guarded
+        // every test and production build, leaving the 73-element top-level contract guarded
         // solely by the consumers' asserts. This module now guards its own layout too.
         assert_eq!(
             data.common.num_public_inputs,
@@ -455,7 +454,7 @@ where
         let num_gates_before_padding = builder.num_gates();
         let data = builder.build::<C>();
         // SECURITY (review INFO-1): release-mode self-check — at level AGG_LEVELS this IS the
-        // 137-element contract the close / cancel-close circuits slice blindly.
+        // 73-element contract the close / cancel-close circuits slice blindly.
         assert_eq!(
             data.common.num_public_inputs,
             falcon_agg_public_inputs_len(level),
@@ -513,7 +512,7 @@ where
 ///
 /// The consumer-facing API is unchanged from the flat Phase-2 circuit — `new()`,
 /// `verifier_data()` (the TOP level's), `prove(&FalconAggWitness)` (returns a TOP-level proof with
-/// the 137-element contract) — so close / cancel-close change by a VK swap only.
+/// the 73-element contract) — so close / cancel-close change by a VK swap only.
 pub struct FalconAggCircuit<F, C, const D: usize>
 where
     F: RichField + Extendable<D>,
@@ -559,7 +558,7 @@ where
         &self.levels[AGG_LEVELS - 1]
     }
 
-    /// The TOP-level circuit data (137 public inputs).
+    /// The TOP-level circuit data (73 public inputs).
     pub fn data(&self) -> &CircuitData<F, C, D> {
         &self.top().data
     }
@@ -627,7 +626,7 @@ where
 
     /// Aggregate `leaf_proofs` and then LIFT the result to the FIXED `level` (consumers verify at a
     /// build-time CONSTANT verifier key — the close / cancel-close circuits need the
-    /// level-`AGG_LEVELS` (16-slot) layout regardless of `n` — and so cannot accept the minimal
+    /// level-`AGG_LEVELS` (8-slot) layout regardless of `n` — and so cannot accept the minimal
     /// level, which varies with `n`).
     ///
     /// Each lift step is `level_k.prove(node, None)`: the lifted node becomes a lone LEFT child
@@ -656,7 +655,7 @@ where
     }
 
     /// Proves the aggregation of `witness.active` signatures (slot order) over `witness.message`,
-    /// returning a TOP-LEVEL (`AGG_LEVELS`) proof in the 137-element consumer contract.
+    /// returning a TOP-LEVEL (`AGG_LEVELS`) proof in the 73-element consumer contract.
     ///
     /// Leaves are proved one at a time and the tree is folded bottom-up, so peak memory is that of
     /// ONE small circuit rather than one 2^20 monolith.
@@ -814,7 +813,7 @@ mod tests {
         assert_ne!(falcon_padding_pk_g(), Bytes32::default());
     }
 
-    /// Happy path, N = MAX_SIG_CLUSTER = 16 (a full tree, no absent subtree anywhere).
+    /// Happy path, N = MAX_SIG_CLUSTER = 8 (a full tree, no absent subtree anywhere).
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn agg_happy_n16() {
@@ -1151,7 +1150,7 @@ mod tests {
     }
 
     /// Measurement (the Phase-2.6 deliverable): per-circuit gates / degree / build time, plus the
-    /// end-to-end 16-signature aggregation prove time. Run in isolation with --nocapture under
+    /// end-to-end 8-signature aggregation prove time. Run in isolation with --nocapture under
     /// `/usr/bin/time -l` to capture peak RSS.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]

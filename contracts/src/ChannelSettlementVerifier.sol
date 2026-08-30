@@ -39,9 +39,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// "IMCM" — close-circuit member-set commitment domain (mirrors Rust
     /// `CLOSE_MEMBER_SET_DOMAIN` / `close_member_set_commitment`, src/common/channel.rs).
     uint32 internal constant CLOSE_MEMBER_SET_DOMAIN = 0x494d434d;
-    /// D6 pad-to-MAX: the close circuit is sized for this many member slots (mirrors Rust
-    /// `MAX_CHANNEL_MEMBERS`, src/constants.rs). Active members occupy slots `0..memberCount`;
-    /// padding slots are zero.
+    /// D6 pad-to-MAX: the close circuit is sized for this many cosigner slots (mirrors Rust
+    /// `MAX_SIG_CLUSTER`, src/constants.rs). Active members occupy slots `0..memberCount`;
+    /// padding slots are zero. The legacy internal name denotes this sig-cluster width, not the
+    /// separate 1024-slot balance capacity.
     uint256 internal constant MAX_CHANNEL_MEMBERS = 8;
     /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the BALANCE-SLOT capacity — the total
     /// number of active PARTICIPANTS (cosigning members + delegates) a channel's balance state can
@@ -1249,11 +1250,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     /// @dev F4/D6 member-set commitment (pad-to-MAX): FIXED-length keccak over
     /// `[IMCM, memberCount, h_0..h_{MAX-1}]` — the domain word, the `memberCount` u32 limb, and
-    /// ALL `MAX_CHANNEL_MEMBERS` (16) SPHINCS+ pubkey hashes in slot order, where padding slots
+    /// ALL `MAX_CHANNEL_MEMBERS` (8) SPHINCS+ pubkey hashes in slot order, where padding slots
     /// (`>= memberCount`) contribute zero. Byte-for-byte mirror of Rust
     /// `close_member_set_commitment` (src/common/channel.rs): one big-endian u32 word per limb
-    /// (130 u32 words total = 4 domain + 4 memberCount + 16*32 hash bytes), so
-    /// `abi.encodePacked(bytes4(domain), uint32(memberCount), h_0..h_15)` reproduces the preimage.
+    /// (264 bytes total = 4-byte domain + 4-byte memberCount + 8*32-byte hashes), so
+    /// `abi.encodePacked(bytes4(domain), uint32(memberCount), h_0..h_7)` reproduces the preimage.
     ///
     /// SECURITY: this is the in-circuit FIXED form — the close circuit zeroes padding slots and
     /// `memberCount` fixes the active/padding boundary, so the commitment is injective on the

@@ -73,7 +73,7 @@ contract CloseExitHandler {
         if (
             manager.channelStatus() == ChannelSettlementManager.ChannelLifecycleStatus.ClosePending &&
             manager.getPendingClose().active &&
-            block.timestamp >= manager.getPendingClose().challengeDeadline
+            block.timestamp > manager.getPendingClose().challengeDeadline
         ) {
             sawPendingPastDeadline += 1;
         }
@@ -232,7 +232,9 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     function _burnDescriptor() internal view returns (bytes32) {
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d4244),
+                bytes4(0x494d4432),
+                uint32(CHANNEL_ID),
+                PW_BASE_NONCE,
                 TX_LEAF,
                 bytes32((uint256(2) << 248) | uint256(uint160(alice))),
                 TOKEN_INDEX,
@@ -257,6 +259,7 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
             recipient: alice,
             tokenIndex: TOKEN_INDEX,
             amount: PW_AMOUNT,
+            baseNonce: PW_BASE_NONCE,
             nullifier: PW_NULLIFIER,
             auxData: _burnDescriptor(),
             txLeaf: TX_LEAF
@@ -311,7 +314,7 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
         // (a) `finalizeClose` — permissionless, needs NO material at all, only the passage of time.
         uint256 snap = vm.snapshotState();
         uint64 deadline = manager.getPendingClose().challengeDeadline;
-        if (block.timestamp < deadline) vm.warp(uint256(deadline));
+        if (block.timestamp <= deadline) vm.warp(uint256(deadline) + 1);
         try manager.finalizeClose() {
             viaFinalize = true;
         } catch {}
@@ -395,8 +398,8 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     ///
     /// AGAINST THE PRE-FIX CONTRACT this fails: `finalizeClose` reverts `CloseOlderThanAuthorizedBurn`
     /// (A3), `cancelClose` reverts `CancelCloseReplay` (A1's spent floor), `submitCloseIntent`
-    /// reverts `ChallengeWindowClosed` (H-3's horizon) — all three probes false, the assertion fires,
-    /// and the lock is reported. AGAINST THE FIXED CONTRACT `finalizeClose` settles.
+    /// reverts `ChallengeWindowClosed` (H-3/R3-4's fixed response-tail end) — all three probes false,
+    /// the assertion fires, and the lock is reported. AGAINST THE FIXED CONTRACT `finalizeClose` settles.
     ///
     /// This is how the round-3 invariant avoids the round-2 mistake of asserting a liveness floor
     /// that no run could ever violate: the RED case is exhibited, not argued.
@@ -432,12 +435,16 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
         ChannelSettlementManager.CloseIntent memory stale2 =
             this.oBuildIntent(28, manager.currentCloseFreezeNonce());
         manager.submitCloseIntent(stale2, this.oCloseProof(stale2));
-        vm.warp(uint256(manager.closeChallengeHorizon()) + 1);
+        vm.warp(
+            uint256(manager.closeChallengeHorizon())
+                + manager.MIN_CLOSE_RESPONSE_SECS()
+                + 1
+        );
 
         assertEq(
             uint8(manager.channelStatus()),
             uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
-            "the machine is parked in ClosePending, past the horizon"
+            "the machine is parked in ClosePending, past the fixed response-tail end"
         );
 
         // THE CHECK, with the supply top pinned at 30 — no party can manufacture v31.
@@ -452,6 +459,6 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
         // genuinely shut here, which is exactly why this scenario is the non-vacuity witness.
         assertTrue(f, "R3-1: finalizeClose is the exit that stays reachable");
         assertFalse(c, "A1's spent floor really does refuse the cancel");
-        assertFalse(r, "H-3's horizon really does refuse the replacement");
+        assertFalse(r, "H-3/R3-4's fixed absolute end really does refuse the replacement");
     }
 }

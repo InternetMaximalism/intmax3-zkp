@@ -1,7 +1,7 @@
 //! Falcon-512/Poseidon signature AGGREGATE VERIFICATION — one flat circuit, batched algebra.
 //!
-//! Replaces the binary-tree recursion of [`super::agg`] (16 leaf proofs + 4 recursion levels =
-//! up to 31 proofs for a full close) with ONE proof that verifies all `MAX_SIG_CLUSTER` signatures
+//! Replaces the binary-tree recursion of [`super::agg`] (8 leaf proofs + 3 recursion levels =
+//! up to 15 proofs for a full close) with ONE proof that verifies all `MAX_SIG_CLUSTER` signatures
 //! directly. The tree existed because the old FLAT circuit verified each signature with an
 //! in-circuit NTT (~14.8k range-checked mod-q reductions per signature) and therefore needed a
 //! degree-2^20 circuit (~22 GB peak RSS). This module removes the NTT itself, so the flat form
@@ -83,7 +83,7 @@
 //!
 //! # Consumer contract
 //!
-//! Public inputs are EXACTLY the tree's top-level 137-element layout
+//! Public inputs are EXACTLY the tree's top-level 73-element layout
 //! (`FALCON_AGG_MSG_OFFSET` / `FALCON_AGG_COUNT_OFFSET` / `FALCON_AGG_PK_LIST_OFFSET`), so the
 //! close / cancel-close circuits consume a batch proof by a VERIFIER-KEY swap ONLY.
 //!
@@ -204,7 +204,7 @@ const TRANSCRIPT_ELEMS_PER_SLOT: usize = N / 4 + N / 4 + PI_COEFFS; // 1279
 
 /// Range-checks `v < q` with ONE binary decomposition row instead of the Phase-1 gadget's two
 /// (`v < 2^14` and `(q-1) - v < 2^14`). This circuit performs ~1.5k `< q` checks PER SLOT; the
-/// one-row form is what keeps the whole 16-slot batch inside degree 2^17.
+/// one-row form is what keeps the whole 8-slot batch inside degree 2^17.
 ///
 /// SECURITY (equivalence with the two-check form): `split_le` constrains `v = sum b_i 2^i` over
 /// exactly 14 boolean limbs (booleanity enforced by the `BaseSumGate` itself), so `v < 2^14`.
@@ -494,7 +494,7 @@ struct BatchSlotTarget {
 }
 
 /// Flat aggregate-verification circuit for up to [`MAX_SIG_CLUSTER`] Falcon-512/Poseidon
-/// signatures over one shared message digest, exposing the tree's exact 137-element top-level
+/// signatures over one shared message digest, exposing the tree's exact 73-element top-level
 /// contract. Consumer-facing API mirrors [`super::agg::FalconAggCircuit`]: `new()`,
 /// `verifier_data()`, `data()`, `prove(&FalconAggWitness)`.
 pub struct FalconBatchAggCircuit<F, C, const D: usize, const SLOTS: usize = MAX_SIG_CLUSTER>
@@ -664,7 +664,7 @@ where
         // Fiat-Shamir challenge over ALL slots' committed polynomials, then the per-slot
         // product checks pi_i(tau) == h_i(tau) * s2_i(tau).
         assert_eq!(transcript.len(), transcript_elems);
-        // The legacy/fixed-16 transcript is already rate-aligned (so its circuit and VK remain
+        // The full-width/fixed-8 transcript is already rate-aligned (so its circuit and VK remain
         // byte-for-byte unchanged). Sized 2/4/8 circuits have a compile-time-fixed length that is
         // not rate-aligned; canonical trailing zeros make the final overwrite block complete.
         // SLOTS is part of the circuit/VK, hence there is no variable-length padding ambiguity.
@@ -678,10 +678,10 @@ where
             builder.connect_extension(pi_eval, prod);
         }
 
-        // Public inputs — the tree's exact top-level layout: message(8) | count(1) | 16 pk_g(8).
+        // Public inputs — the tree's exact top-level layout: message(8) | count(1) | 8 pk_g(8).
         builder.register_public_inputs(&message.to_vec());
         builder.register_public_input(signer_count);
-        // Consumer layout remains the fixed 16-slot/137-PI contract. A sized circuit constrains
+        // Consumer layout remains the fixed 8-slot/73-PI contract. A sized circuit constrains
         // only its SLOTS prefix and exposes a constant-zero suffix, so close/cancel parsing does
         // not change; only the verifier key does.
         gated_pk_limbs.resize(MAX_SIG_CLUSTER * 8, zero);

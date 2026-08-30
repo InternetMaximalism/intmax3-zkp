@@ -16,7 +16,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 const { createBatchWindow, projectToSlim, partitionByAnchor } = require('./batch-window');
-const { publicBacking, baseHead } = require('./public-backing');
+const { publicBacking } = require('./public-backing');
 
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
@@ -554,10 +554,8 @@ app.get('/api/backing', (req, res) => {
 });
 
 app.get('/api/base-head', (req, res) => {
-  try {
-    const ch = reqChannel(req);
-    res.json(baseHead(JSON.parse(fs.readFileSync(wc(ch, 'channel_backing.json'), 'utf8'))));
-  } catch (e) { res.status(409).json({ error: String(e.message || e) }); }
+  reqChannel(req);
+  res.status(409).json({ error: 'authoritative live base head unavailable on this legacy relay; use the daemon-backed API' });
 });
 
 // GET /api/tokens?channel=N — per-token channel view + VERIFIED display metadata (§N).
@@ -674,6 +672,11 @@ app.post('/api/inter/send', (req, res) => {
     const debitPayload = req.body && req.body.debitPayload;
     const descriptor = req.body && req.body.transferDescriptor;
     if (!debitPayload || !descriptor) throw new Error('inter/send needs { debitPayload, transferDescriptor }');
+    // This legacy relay has no resident base-state authority: its only nonce source is the frozen
+    // setup-time channel_backing.json. Signing here after any prior send can debit the channel and
+    // then fail base settlement. Keep the endpoint fail-closed; use the daemon-backed api/ service.
+    res.status(503).json({ error: 'inter-channel sends require the daemon-backed API live base nonce' });
+    return;
     fs.writeFileSync(wc(ch, 'inter_debit_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'inter_descriptor.json'), JSON.stringify(descriptor));
     cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
@@ -921,6 +924,8 @@ app.post('/api/cosign-burn', (req, res) => {
     }
     const { debitPayload, transferDescriptor } = req.body || {};
     if (!debitPayload || !transferDescriptor) throw new Error('cosign-burn needs { debitPayload, transferDescriptor }');
+    res.status(503).json({ error: 'burn co-signing requires the daemon-backed API live base nonce' });
+    return;
     fs.writeFileSync(wc(ch, 'burn_payload.json'), JSON.stringify(debitPayload));
     fs.writeFileSync(wc(ch, 'burn_descriptor.json'), JSON.stringify(transferDescriptor));
     cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);

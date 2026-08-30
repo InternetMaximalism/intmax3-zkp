@@ -1,4 +1,4 @@
-//! The burn nullifier: ONE derivation, and the stranding condition that a second one causes.
+//! The burn nullifier and the stable IPW2 authorization identity.
 //!
 //! ## The defect these tests exist to prevent recurring
 //!
@@ -15,12 +15,10 @@
 //! `src/circuits/withdraw/single_withdrawal_circuit.rs:376-390` and in-circuit at `:513-525`).
 //!
 //! Different hash family, different preimage, different arity: the two can never coincide. So the
-//! authorization `submitPartialWithdrawalIntent` recorded was one that **no withdrawal proof could
-//! ever match** — while permanently consuming the channel's single-use chain key
-//! `keccak(channelId, finalSettledTxChain)`
-//! (`contracts/src/ChannelSettlementManager.sol:1204-1205`, set at `:1250`) for a burn whose
-//! channel-side debit had already happened. Fail-closed against theft, but it **stranded the burned
-//! value**: debited in-channel, unpayable on L1, chain key gone.
+//! Under the retired IMPW schema that mismatch also changed the authorization digest and stranded
+//! the burn. IPW2 deliberately excludes this proof-only nullifier: its stable identity is the IMD2
+//! descriptor, which already binds source channel, base nonce, recipient, token, amount, and the
+//! co-signed burn transaction leaf. The proof still independently constrains its own nullifier.
 //!
 //! ## What each test proves
 //!
@@ -28,9 +26,8 @@
 //!   against an INDEPENDENT re-implementation of the circuit's preimage layout written out in this
 //!   file. It does not call `SettledTransfer`, so it fails if `burn_withdrawal_leaf` is ever
 //!   re-pointed at another hash, another field order, or another tuple.
-//! * `the_old_cli_derivation_strands_the_burn` — the stranding condition itself: the pre-fix
-//!   formula's authDigest is not the provable leaf's authDigest, so `withdrawNative`'s
-//!   `partialWithdrawalAuthorized[...]` lookup misses and the burn can never be paid.
+//! * `auth_v2_is_stable_across_proof_only_nullifier_derivations` — a wrong historical nullifier is
+//!   still not the circuit's nullifier, but cannot create a second authorization identity.
 //! * `h2_reconstruction_*` — the `pw-submit` pre-flight guard is not a dead guard: every field the
 //!   nullifier commits to also moves H2, so a wrong tuple cannot reproduce the co-signed `h2_tag`.
 //!
@@ -39,7 +36,11 @@
 #![cfg(not(debug_assertions))]
 
 use intmax3_zkp::{
-    common::{balance_state::settled_tx_chain_push, channel_id::ChannelId},
+    common::{
+        balance_state::settled_tx_chain_push,
+        channel::burn_descriptor,
+        channel_id::ChannelId,
+    },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{
@@ -49,7 +50,7 @@ use intmax3_zkp::{
 };
 
 /// A representative burn, in the shape `build_burn_send_token` produces: an `ADDRESS_TAG` L1
-/// recipient, a nonzero `aux_data` (= the IMBD burn descriptor), and the source channel's id.
+/// recipient, a nonzero `aux_data` (= the IMD2 burn descriptor), and the source channel's id.
 struct Burn {
     channel_id: ChannelId,
     recipient_pk_g: Bytes32,
@@ -64,18 +65,28 @@ fn a_burn() -> Burn {
         circuits::balance::common::recipient::calculate_recipient_from_address,
         ethereum_types::address::Address,
     };
+    let channel_id = ChannelId::new(7).unwrap();
+    let recipient_pk_g = calculate_recipient_from_address(
+        Address::from_hex("0x70997970c51812dc3a010c7d01b50e0d17dc79c8").unwrap(),
+    );
+    let token_index = 0;
+    let amount = 5_000_000_000_000_000;
+    let tx_nonce = 1;
+    let tx_leaf = Bytes32::from_u32_slice(&[0xd1, 0x27, 0x25, 0x4e, 8, 2, 2, 4]).unwrap();
     Burn {
-        channel_id: ChannelId::new(7).unwrap(),
-        recipient_pk_g: calculate_recipient_from_address(
-            Address::from_hex("0x70997970c51812dc3a010c7d01b50e0d17dc79c8").unwrap(),
+        channel_id,
+        recipient_pk_g,
+        token_index,
+        amount,
+        aux_data: burn_descriptor(
+            channel_id,
+            tx_nonce,
+            tx_leaf,
+            recipient_pk_g,
+            token_index,
+            U256::from(amount),
         ),
-        token_index: 0,
-        amount: 5_000_000_000_000_000,
-        aux_data: Bytes32::from_hex(
-            "0xd127254e822ed4e4eb86896fe455a50bccf4873bdb5b2dc5bc57988b4fb4cfc5",
-        )
-        .unwrap(),
-        tx_nonce: 1,
+        tx_nonce,
     }
 }
 
@@ -198,17 +209,12 @@ fn nullifier_binds_every_field_of_the_burn() {
     assert_ne!(base, b.leaf().nullifier, "recipient must bind");
 }
 
-/// THE STRANDING CONDITION. Reproduces the live bug end to end at the level where it does the
-/// damage: the authorization the pre-fix `pw-submit` wrote is keyed on an authDigest that the
-/// provable leaf's authDigest never equals, so `withdrawNative`'s
-/// `partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]` gate
-/// (`contracts/src/IntmaxRollup.sol:1512-1516`) reverts forever — with the chain key already spent
-/// and the channel already debited.
-///
-/// This test fails the moment anyone reintroduces the second derivation, because then the derived
-/// leaf's nullifier WOULD be the legacy one and the two digests would coincide.
+/// IPW2 regression: proof-only nullifier variance must not mint a second authorization identity.
+/// A legacy invented nullifier remains unequal to the circuit's Poseidon nullifier, but the stable
+/// authorization is keyed by the IMD2 descriptor and payout tuple, not by that caller-carried
+/// proof field.
 #[test]
-fn the_old_cli_derivation_strands_the_burn() {
+fn auth_v2_is_stable_across_proof_only_nullifier_derivations() {
     let b = a_burn();
     let provable = b.leaf();
 
@@ -225,15 +231,13 @@ fn the_old_cli_derivation_strands_the_burn() {
          derivation is back, or the real one was changed to match it"
     );
 
-    // What that costs, spelled out in the value the contract actually looks up.
+    // IPW2's contract lookup is stable even if an off-chain caller carries the wrong nullifier.
     let mut authorized_leaf = provable.clone();
     authorized_leaf.nullifier = legacy;
-    assert_ne!(
+    assert_eq!(
         partial_withdrawal_auth_digest(&authorized_leaf),
         partial_withdrawal_auth_digest(&provable),
-        "the authDigest recorded on L1 must differ from the provable leaf's — this inequality IS \
-         the stranding: the chain key is spent, the channel is debited, and no proof can ever \
-         redeem the burn"
+        "IPW2 must exclude the proof-only nullifier; IMD2 aux_data is the stable burn identity"
     );
 
     // And the fix's postcondition: what `pw-submit` authorizes today IS what a provable leaf

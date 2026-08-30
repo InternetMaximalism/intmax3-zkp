@@ -3,8 +3,10 @@
 //! The balance/withdrawal prover owns private witness material; this module deliberately accepts
 //! only its public proof artefacts.  It then records the irreversible L1 boundary in three durable
 //! phases: prepared proof, proof payout (`withdrawNative`/`withdrawERC20`) and recipient pull
-//! (`withdraw`/`withdrawToken`).  A caller may resume any phase after a crash, but it may never
-//! replace an in-flight withdrawal or mark it complete from an authorization alone.
+//! (`withdraw`/`withdrawToken`). If the proved recipient is external to the local signer, a durable
+//! handoff completes the local workflow at the proof-payout boundary without claiming the recipient
+//! pulled. A caller may resume any phase after a crash, but it may never replace an in-flight
+//! withdrawal or mark it complete from an authorization alone.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -140,6 +142,9 @@ pub struct BroadcastIntent {
 #[serde(rename_all = "camelCase")]
 pub struct PayoutConfirmation {
     pub receipt: L1TransactionReceipt,
+    /// Exact value of `partialWithdrawalAuthorized(authDigest)` observed after the successful
+    /// payout receipt. IPW2 is one-shot, so this MUST be false: a true value would leave the same
+    /// proof-independent authorization reusable with another proof-valid nullifier.
     pub authorization_observed: bool,
     pub finalized_anchor_observed: bool,
     pub nullifier_used_observed: bool,
@@ -169,15 +174,108 @@ pub struct PartialWithdrawalCandidate {
     pub lane: PartialWithdrawalLane,
     pub artifacts: PartialWithdrawalProofArtifacts,
     pub payout_broadcast: Option<BroadcastIntent>,
+    /// Every transaction hash returned while (re)broadcasting the exact persisted payout intent.
+    /// The vector is append-only because a dropped transaction may be replaced at the same nonce;
+    /// either exact transaction is a valid receipt candidate, but no different calldata is.
+    #[serde(default)]
+    pub payout_tx_hashes: Vec<Bytes32>,
     pub payout_confirmation: Option<PayoutConfirmation>,
+    /// The proof payout is final, but the proved recipient is a different account from the local
+    /// broadcaster and must pull its own credit. This closes the local workflow without pretending
+    /// that an unobserved recipient pull occurred.
+    #[serde(default)]
+    pub recipient_pull_delegated: bool,
     pub pull_broadcast: Option<BroadcastIntent>,
+    #[serde(default)]
+    pub pull_tx_hashes: Vec<Bytes32>,
     pub pull_confirmation: Option<PullConfirmation>,
 }
 
 impl PartialWithdrawalCandidate {
     pub fn is_complete(&self) -> bool {
-        self.payout_confirmation.is_some() && self.pull_confirmation.is_some()
+        self.payout_confirmation.is_some()
+            && (self.pull_confirmation.is_some() || self.recipient_pull_delegated)
     }
+}
+
+/// The four on-chain facts needed to resume a partial withdrawal without accidentally calling
+/// `finalizePartialWithdrawal` after its one-shot IPW2 authorization has already been consumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartialWithdrawalOnchainState {
+    pub manager_pending: bool,
+    pub pending_auth_digest: Bytes32,
+    pub authorization: bool,
+    pub nullifier_used: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialWithdrawalResumeAction {
+    FinalizePending,
+    BroadcastPayout,
+    ReconcilePayout,
+    ContinueAfterPayout,
+}
+
+/// Decide the only safe next irreversible action from the durable journal and live L1 state.
+///
+/// `authorization == false && nullifier_used == true` is the normal post-payout state under IPW2,
+/// not evidence that finalization is missing. Conversely, an already-used nullifier without a
+/// pre-broadcast journal cannot be adopted: the operator would have no pinned caller/nonce/calldata
+/// from which to prove that the observed state transition belongs to this candidate.
+pub fn partial_withdrawal_resume_action(
+    candidate: &PartialWithdrawalCandidate,
+    state: PartialWithdrawalOnchainState,
+) -> Result<PartialWithdrawalResumeAction, PartialWithdrawalPayoutError> {
+    if state.authorization && state.nullifier_used {
+        return Err(PartialWithdrawalPayoutError::Conflict(
+            "IPW2 authorization is still live after the withdrawal nullifier was consumed".into(),
+        ));
+    }
+
+    if candidate.payout_confirmation.is_some() {
+        if !state.nullifier_used || state.authorization {
+            return Err(PartialWithdrawalPayoutError::Conflict(
+                "stored payout confirmation disagrees with one-shot authorization/nullifier state"
+                    .into(),
+            ));
+        }
+        return Ok(PartialWithdrawalResumeAction::ContinueAfterPayout);
+    }
+
+    if state.nullifier_used {
+        if candidate.payout_broadcast.is_none() {
+            return Err(PartialWithdrawalPayoutError::Conflict(
+                "withdrawal nullifier is used but no durable payout broadcast intent exists".into(),
+            ));
+        }
+        return Ok(PartialWithdrawalResumeAction::ReconcilePayout);
+    }
+
+    if state.authorization {
+        return Ok(if candidate.payout_broadcast.is_some() {
+            PartialWithdrawalResumeAction::ReconcilePayout
+        } else {
+            PartialWithdrawalResumeAction::BroadcastPayout
+        });
+    }
+
+    if candidate.payout_broadcast.is_some() {
+        return Err(PartialWithdrawalPayoutError::Conflict(
+            "payout was journaled for broadcast, but neither authorization nor used nullifier is present"
+                .into(),
+        ));
+    }
+    if state.manager_pending && state.pending_auth_digest == candidate.auth_digest {
+        return Ok(PartialWithdrawalResumeAction::FinalizePending);
+    }
+    Err(PartialWithdrawalPayoutError::Conflict(
+        if state.manager_pending {
+            "settlement manager is pending a different partial-withdrawal authorization"
+        } else {
+            "partial withdrawal is neither manager-pending, authorized, nor already paid"
+        }
+        .into(),
+    ))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,8 +383,11 @@ impl PartialWithdrawalPayoutStore {
             lane,
             artifacts: request.artifacts,
             payout_broadcast: None,
+            payout_tx_hashes: Vec::new(),
             payout_confirmation: None,
+            recipient_pull_delegated: false,
             pull_broadcast: None,
+            pull_tx_hashes: Vec::new(),
             pull_confirmation: None,
         };
         let mut disk = self.disk.clone();
@@ -339,10 +440,62 @@ impl PartialWithdrawalPayoutStore {
                 }
                 Some(_) => Ok(()),
                 None => {
+                    push_tx_hash(
+                        &mut candidate.payout_tx_hashes,
+                        confirmation.receipt.tx_hash,
+                    )?;
                     candidate.payout_confirmation = Some(confirmation);
                     Ok(())
                 }
             }
+        })
+    }
+
+    /// Persist a node-accepted transaction hash immediately after `eth_sendRawTransaction`, before
+    /// waiting for its receipt. A retry can query every recorded replacement or fall back to the
+    /// pinned sender/nonce scan if the process died in the send-to-persist gap.
+    pub fn record_payout_tx_hash(
+        &mut self,
+        candidate_id: Bytes32,
+        tx_hash: Bytes32,
+    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
+        self.mutate_candidate(candidate_id, |candidate| {
+            if candidate.payout_broadcast.is_none() {
+                return Err(PartialWithdrawalPayoutError::InvalidRequest(
+                    "cannot record a payout transaction before its broadcast intent".into(),
+                ));
+            }
+            if let Some(confirmation) = &candidate.payout_confirmation {
+                if confirmation.receipt.tx_hash != tx_hash {
+                    return Err(PartialWithdrawalPayoutError::Conflict(
+                        "cannot append a replacement hash after payout confirmation".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            push_tx_hash(&mut candidate.payout_tx_hashes, tx_hash)
+        })
+    }
+
+    /// Finish the local workflow at the proof-payout boundary when the proved recipient is not the
+    /// broadcaster. The credit remains on-chain for that recipient; no pull receipt is fabricated.
+    pub fn mark_recipient_pull_delegated(
+        &mut self,
+        candidate_id: Bytes32,
+    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
+        self.mutate_candidate(candidate_id, |candidate| {
+            if candidate.payout_confirmation.is_none() {
+                return Err(PartialWithdrawalPayoutError::InvalidRequest(
+                    "cannot hand off the recipient pull before payout confirmation".into(),
+                ));
+            }
+            if candidate.pull_broadcast.is_some() || candidate.pull_confirmation.is_some() {
+                return Err(PartialWithdrawalPayoutError::Conflict(
+                    "cannot hand off a recipient pull that already began locally".into(),
+                ));
+            }
+            candidate.recipient_pull_delegated = true;
+            Ok(())
         })
     }
 
@@ -352,6 +505,11 @@ impl PartialWithdrawalPayoutStore {
         intent: BroadcastIntent,
     ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
         self.mutate_candidate(candidate_id, |candidate| {
+            if candidate.recipient_pull_delegated {
+                return Err(PartialWithdrawalPayoutError::Conflict(
+                    "recipient pull was delegated to the external proved recipient".into(),
+                ));
+            }
             let payout = candidate.payout_confirmation.as_ref().ok_or_else(|| {
                 PartialWithdrawalPayoutError::InvalidRequest(
                     "cannot pull before the proof payout has a successful receipt".into(),
@@ -397,10 +555,34 @@ impl PartialWithdrawalPayoutStore {
                 }
                 Some(_) => Ok(()),
                 None => {
+                    push_tx_hash(&mut candidate.pull_tx_hashes, confirmation.receipt.tx_hash)?;
                     candidate.pull_confirmation = Some(confirmation);
                     Ok(())
                 }
             }
+        })
+    }
+
+    pub fn record_pull_tx_hash(
+        &mut self,
+        candidate_id: Bytes32,
+        tx_hash: Bytes32,
+    ) -> Result<PartialWithdrawalCandidate, PartialWithdrawalPayoutError> {
+        self.mutate_candidate(candidate_id, |candidate| {
+            if candidate.pull_broadcast.is_none() {
+                return Err(PartialWithdrawalPayoutError::InvalidRequest(
+                    "cannot record a pull transaction before its broadcast intent".into(),
+                ));
+            }
+            if let Some(confirmation) = &candidate.pull_confirmation {
+                if confirmation.receipt.tx_hash != tx_hash {
+                    return Err(PartialWithdrawalPayoutError::Conflict(
+                        "cannot append a replacement hash after pull confirmation".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            push_tx_hash(&mut candidate.pull_tx_hashes, tx_hash)
         })
     }
 
@@ -614,6 +796,29 @@ fn expected_pull_kind(lane: PartialWithdrawalLane) -> L1CallKind {
     }
 }
 
+const MAX_REPLACEMENT_TX_HASHES: usize = 16;
+
+fn push_tx_hash(
+    hashes: &mut Vec<Bytes32>,
+    tx_hash: Bytes32,
+) -> Result<(), PartialWithdrawalPayoutError> {
+    if tx_hash == Bytes32::default() {
+        return Err(PartialWithdrawalPayoutError::InvalidRequest(
+            "transaction hash must be non-zero".into(),
+        ));
+    }
+    if hashes.contains(&tx_hash) {
+        return Ok(());
+    }
+    if hashes.len() >= MAX_REPLACEMENT_TX_HASHES {
+        return Err(PartialWithdrawalPayoutError::Conflict(
+            "too many replacement transaction hashes for one broadcast intent".into(),
+        ));
+    }
+    hashes.push(tx_hash);
+    Ok(())
+}
+
 fn validate_payout_confirmation(
     candidate: &PartialWithdrawalCandidate,
     confirmation: &PayoutConfirmation,
@@ -629,7 +834,9 @@ fn validate_payout_confirmation(
             "payout confirmation substituted a different pre-broadcast credit".into(),
         ));
     }
-    if !receipt.success
+    if receipt.tx_hash == Bytes32::default()
+        || receipt.block_hash == Bytes32::default()
+        || !receipt.success
         || receipt.chain_id != candidate.chain_id
         || receipt.from != intent.caller
         || receipt.to != candidate.rollup
@@ -642,12 +849,12 @@ fn validate_payout_confirmation(
             "payout receipt failed or targets the wrong chain/rollup/function".into(),
         ));
     }
-    if !confirmation.authorization_observed
+    if confirmation.authorization_observed
         || !confirmation.finalized_anchor_observed
         || !confirmation.nullifier_used_observed
     {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "authorization, finalized proof anchor and used nullifier must all be observed after payout"
+            "successful payout must consume authorization, retain the finalized anchor, and use the nullifier"
                 .into(),
         ));
     }
@@ -685,7 +892,9 @@ fn validate_pull_confirmation(
         ));
     }
     let receipt = &confirmation.receipt;
-    if !receipt.success
+    if receipt.tx_hash == Bytes32::default()
+        || receipt.block_hash == Bytes32::default()
+        || !receipt.success
         || receipt.chain_id != candidate.chain_id
         || receipt.to != candidate.rollup
         || receipt.from != candidate.artifacts.withdrawal.recipient
@@ -745,7 +954,8 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
                 "active candidate identity cannot be recomputed: {e}"
             ))
         })?;
-        if active.candidate_id != expected_id || active.lane != lane_for(&active.artifacts.withdrawal)
+        if active.candidate_id != expected_id
+            || active.lane != lane_for(&active.artifacts.withdrawal)
         {
             return Err(PartialWithdrawalPayoutError::Snapshot(
                 "active candidate id or asset lane differs from its proof artefacts".into(),
@@ -756,14 +966,14 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
                 "snapshot confirms a proof payout without its broadcast intent".into(),
             ));
         }
-        if active
-            .payout_broadcast
-            .as_ref()
-            .is_some_and(|intent| {
-                intent.caller == Address::default()
-                    || intent.calldata_hash == Bytes32::default()
-            })
-        {
+        verify_tx_hashes(
+            &active.payout_tx_hashes,
+            active.payout_broadcast.is_some(),
+            "payout",
+        )?;
+        if active.payout_broadcast.as_ref().is_some_and(|intent| {
+            intent.caller == Address::default() || intent.calldata_hash == Bytes32::default()
+        }) {
             return Err(PartialWithdrawalPayoutError::Snapshot(
                 "snapshot contains a zero payout caller".into(),
             ));
@@ -773,11 +983,26 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
                 "snapshot begins a recipient pull before confirming its proof payout".into(),
             ));
         }
+        if active.recipient_pull_delegated
+            && (active.payout_confirmation.is_none()
+                || active.pull_broadcast.is_some()
+                || active.pull_confirmation.is_some())
+        {
+            return Err(PartialWithdrawalPayoutError::Snapshot(
+                "external recipient handoff lacks payout confirmation or overlaps a local pull"
+                    .into(),
+            ));
+        }
         if active.pull_confirmation.is_some() && active.pull_broadcast.is_none() {
             return Err(PartialWithdrawalPayoutError::Snapshot(
                 "snapshot confirms a recipient pull without its broadcast intent".into(),
             ));
         }
+        verify_tx_hashes(
+            &active.pull_tx_hashes,
+            active.pull_broadcast.is_some(),
+            "pull",
+        )?;
         if let Some(intent) = &active.pull_broadcast {
             let payout = active.payout_confirmation.as_ref().ok_or_else(|| {
                 PartialWithdrawalPayoutError::Snapshot(
@@ -794,6 +1019,15 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
             }
         }
         if let Some(confirmation) = &active.payout_confirmation {
+            if !active
+                .payout_tx_hashes
+                .contains(&confirmation.receipt.tx_hash)
+            {
+                return Err(PartialWithdrawalPayoutError::Snapshot(
+                    "payout confirmation receipt is absent from its transaction-hash journal"
+                        .into(),
+                ));
+            }
             validate_payout_confirmation(active, confirmation).map_err(|e| {
                 PartialWithdrawalPayoutError::Snapshot(format!(
                     "stored payout confirmation is invalid: {e}"
@@ -801,6 +1035,14 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
             })?;
         }
         if let Some(confirmation) = &active.pull_confirmation {
+            if !active
+                .pull_tx_hashes
+                .contains(&confirmation.receipt.tx_hash)
+            {
+                return Err(PartialWithdrawalPayoutError::Snapshot(
+                    "pull confirmation receipt is absent from its transaction-hash journal".into(),
+                ));
+            }
             validate_pull_confirmation(active, confirmation).map_err(|e| {
                 PartialWithdrawalPayoutError::Snapshot(format!(
                     "stored pull confirmation is invalid: {e}"
@@ -817,6 +1059,33 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
                 "snapshot confirms a pull without a proof payout".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn verify_tx_hashes(
+    hashes: &[Bytes32],
+    has_intent: bool,
+    phase: &str,
+) -> Result<(), PartialWithdrawalPayoutError> {
+    if !hashes.is_empty() && !has_intent {
+        return Err(PartialWithdrawalPayoutError::Snapshot(format!(
+            "snapshot records a {phase} transaction without its broadcast intent"
+        )));
+    }
+    if hashes.len() > MAX_REPLACEMENT_TX_HASHES {
+        return Err(PartialWithdrawalPayoutError::Snapshot(format!(
+            "snapshot contains too many {phase} replacement transactions"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if hashes
+        .iter()
+        .any(|hash| *hash == Bytes32::default() || !seen.insert(*hash))
+    {
+        return Err(PartialWithdrawalPayoutError::Snapshot(format!(
+            "snapshot contains a zero or duplicate {phase} transaction hash"
+        )));
     }
     Ok(())
 }

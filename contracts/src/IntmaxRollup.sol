@@ -63,19 +63,6 @@ contract IntmaxRollup {
     /// overload is accepted only here, so a real deployment cannot skip the pending-chain pin.
     uint256 private constant ROLLUP_LOCAL_DEVNET_CHAIN_ID = 31337;
 
-    /// @notice Fee required to register a channel id, credited to `fraudTreasury`.
-    /// @dev SECURITY (M-5, second half — channelId squatting): registration is permissionless by
-    ///      design (anyone may create a channel) and ONE-TIME per id (`ChannelAlreadyRegistered`),
-    ///      so before this fee a stranger could brick any predictable id for the price of gas and
-    ///      the legitimate manager deploy would then revert `MemberSetMismatch` forever.
-    ///      0.003 ETH ~= USD 10 at ~USD 3,300/ETH (the deployment-time assumption). The fee is
-    ///      denominated in ETH, so its USD value DRIFTS with the price; changing it needs a
-    ///      redeploy. It is deliberately small — an anti-spam price, not a revenue mechanism, and
-    ///      not a barrier to honest channel creation.
-    ///      Credited via the existing pull-payment path (`pendingWithdrawals` -> `withdraw()`), so
-    ///      no external call is made here and `totalEscrowed` — the payout ceiling — is untouched.
-    uint256 public constant CHANNEL_REGISTRATION_FEE = 0.003 ether;
-
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -133,10 +120,6 @@ contract IntmaxRollup {
     error PendingChainsMoved();
     /// M-5: the unpinned `postBlockAndSubmit` overload is devnet-only.
     error ChainPinRequired();
-    /// M-5 (channelId squatting): `registerChannel` is permissionless and ONE-TIME per id, so a
-    /// stranger who registers a target id first bricks it forever. A registration fee makes that
-    /// attack cost real money per id instead of gas.
-    error InsufficientRegistrationFee();
     error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
@@ -177,18 +160,14 @@ contract IntmaxRollup {
     // Events
     // -----------------------------------------------------------------------
     event BlockPosted(
-        uint64 indexed blockNumber,
-        uint32 channelId,
-        uint32[] keyIds,
-        bytes32 txTreeRoot,
-        bytes32 newBlockHashChain
+        uint64 indexed blockNumber, uint32 channelId, uint32[] keyIds, bytes32 txTreeRoot, bytes32 newBlockHashChain
     );
 
     event Deposited(
         uint64 indexed depositIndex,
         address depositor,
         bytes32 recipient,
-        uint32  tokenIndex,
+        uint32 tokenIndex,
         uint256 amount,
         bytes32 auxData,
         bytes32 newDepositHashChain
@@ -201,7 +180,7 @@ contract IntmaxRollup {
     event ChannelRegistered(
         uint64 indexed regIndex,
         uint32 indexed channelId,
-        uint8   bpMemberSlot,
+        uint8 bpMemberSlot,
         bytes32[] memberPkGs,
         bytes32[] regevPkDigests,
         address[] recipients,
@@ -215,14 +194,11 @@ contract IntmaxRollup {
         address indexed submitter,
         bytes32 blobVersionedHash,
         bytes32 proofHash,
-        uint32  proofLength,
+        uint32 proofLength,
         bytes32 stateRoot
     );
 
-    event Finalized(
-        uint256 indexed id,
-        bytes32 stateRoot
-    );
+    event Finalized(uint256 indexed id, bytes32 stateRoot);
 
     /// @notice SECURITY (M-8): emitted on EVERY rejecting exit of `finalize`, carrying the 4-byte
     ///         selector of the error that caused it. `finalize` keeps returning `false` instead of
@@ -237,10 +213,7 @@ contract IntmaxRollup {
     ///             presented, and this code is what keeps the two apart on the validity path.
     event FinalizeRejected(uint256 indexed id, bytes4 reason);
 
-    event FraudConfirmed(
-        uint256 indexed id,
-        address indexed prover
-    );
+    event FraudConfirmed(uint256 indexed id, address indexed prover);
 
     event WithdrawalCredited(address indexed recipient, uint256 amount);
 
@@ -253,12 +226,7 @@ contract IntmaxRollup {
     event BlockProducerSet(address indexed producer, bool allowed);
     event BlockProducerAdminSet(address indexed admin);
 
-    event NativeWithdrawn(
-        address indexed recipient,
-        uint256 amount,
-        bytes32 indexed nullifier,
-        uint64 blockNumber
-    );
+    event NativeWithdrawn(address indexed recipient, uint256 amount, bytes32 indexed nullifier, uint64 blockNumber);
 
     error WithdrawalVkNotSet();
     error WithdrawalExtCommitmentMismatch();
@@ -301,18 +269,18 @@ contract IntmaxRollup {
     ///         (`solidity_keccak256` u32→4-byte-BE packing), and the fold is re-checked on-chain so
     ///         the amount/recipient paid is the one bound by the verified proof — never caller-declared.
     struct Withdrawal {
-        address recipient;   // 20 bytes  (Rust Address, 5×u32 big-endian)
-        uint32  tokenIndex;  // 4 bytes
-        uint256 amount;      // 32 bytes  (Rust U256, 8×u32 big-endian)
-        bytes32 nullifier;   // 32 bytes
-        bytes32 auxData;     // 32 bytes
+        address recipient; // 20 bytes  (Rust Address, 5×u32 big-endian)
+        uint32 tokenIndex; // 4 bytes
+        uint256 amount; // 32 bytes  (Rust U256, 8×u32 big-endian)
+        bytes32 nullifier; // 32 bytes
+        bytes32 auxData; // 32 bytes
     }
 
     struct Submission {
-        bytes32 commitment;   // keccak256(blobHash || proofHash || proofLength || stateRoot || ethBlockNumber)
-        address submitter;    // packed with `finalized` into one slot
-        bool    finalized;
-        uint64  submittedAtBlock; // Eth block number when submitted
+        bytes32 commitment; // keccak256(blobHash || proofHash || proofLength || stateRoot || ethBlockNumber)
+        address submitter; // packed with `finalized` into one slot
+        bool finalized;
+        uint64 submittedAtBlock; // Eth block number when submitted
         // SECURITY (H-5): the state root THIS submission committed to. `commitment` already binds it,
         // but `finalize` receives only (submissionId, stateRoot, validityPIs, mleProof) — not the
         // blobHash/proofHash/proofLength needed to recompute `commitment` — so it had no way to tell
@@ -327,9 +295,9 @@ contract IntmaxRollup {
 
     /// @notice A single fast block (~5 seconds) within a posting-round batch.
     struct SubBlock {
-        uint32   channelId;
-        uint64   timestamp;
-        bytes32  txTreeRoot;
+        uint32 channelId;
+        uint64 timestamp;
+        bytes32 txTreeRoot;
         uint32[] keyIds;
     }
 
@@ -366,11 +334,11 @@ contract IntmaxRollup {
     ///      `_mleSubgroupGenPowers`) because Solidity's auto-generated public
     ///      getters cannot return structs containing dynamic arrays cleanly.
     struct MleVk {
-        uint256 degreeBits;                // log2 of circuit degree
-        bytes32 preprocessedRoot;          // WHIR Merkle root for preprocessed polynomial (VK binding)
-        uint256 numConstants;              // number of constant columns
-        uint256 numRoutedWires;            // number of routed wire columns
-        bytes32 gatesDigest;               // v2 R2-#1: keccak hash pinning gate metadata
+        uint256 degreeBits; // log2 of circuit degree
+        bytes32 preprocessedRoot; // WHIR Merkle root for preprocessed polynomial (VK binding)
+        uint256 numConstants; // number of constant columns
+        uint256 numRoutedWires; // number of routed wire columns
+        bytes32 gatesDigest; // v2 R2-#1: keccak hash pinning gate metadata
     }
 
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
@@ -380,10 +348,10 @@ contract IntmaxRollup {
     ///         final_block_chain (8 u32), final_ext_commitment (8 u32),
     ///         prover (5 u32) = 41 u32 = 164 bytes.
     struct ValidityPublicInputs {
-        uint64  initialBlockNumber;
+        uint64 initialBlockNumber;
         bytes32 initialBlockChain;
         bytes32 initialExtCommitment;
-        uint64  finalBlockNumber;
+        uint64 finalBlockNumber;
         bytes32 finalBlockChain;
         bytes32 finalExtCommitment;
         address prover;
@@ -470,7 +438,7 @@ contract IntmaxRollup {
 
     /// @notice Authorized partial-withdrawal auth digests.
     /// SECURITY: a burn withdrawal (auxData != 0) is only paid out if the auth digest
-    ///           keccak256("IMPW" || nullifier || recipient || tokenIndex || amount || auxData)
+    ///           keccak256("IPW2" || recipient || tokenIndex || amount || auxData)
     ///           was authorized by a registered settlement manager via a finalized close proof.
     mapping(bytes32 => bool) public partialWithdrawalAuthorized;
 
@@ -554,9 +522,9 @@ contract IntmaxRollup {
     ///         signer set (no divergent-signer-set attack).
     ///
     /// @dev `channelMemberSetCommitment[channelId]` is the close-form IMCM commitment computed with
-    ///      the SAME fixed-16 keccak preimage as
+    ///      the SAME fixed-8 keccak preimage as
     ///      `ChannelSettlementVerifier.closeMemberSetCommitment` — i.e.
-    ///      `keccak256(bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15)` with padding
+    ///      `keccak256(bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_7)` with padding
     ///      slots (>= memberCount) zeroed. This is byte-identical to what the close path matches the
     ///      close proof's `member_set_commitment` PI against (asserted by
     ///      `IntmaxRollup.t.sol::test_channelMemberSetCommitmentMatchesVerifier`). A nonzero value
@@ -689,10 +657,10 @@ contract IntmaxRollup {
     /// @notice Submissions not finalized within this many Eth blocks after posting
     ///         can be removed unconditionally via fraudProof (no proof needed).
     /// @dev `_mleVerdict` outcomes — see `_mleVerdict` for why three failure modes are kept apart.
-    uint8 private constant MLE_INVALID     = 0; // verifier RETURNED false  (the only fraud evidence)
-    uint8 private constant MLE_VALID       = 1; // verifier RETURNED true
+    uint8 private constant MLE_INVALID = 0; // verifier RETURNED false  (the only fraud evidence)
+    uint8 private constant MLE_VALID = 1; // verifier RETURNED true
     uint8 private constant MLE_UNEVALUABLE = 2; // verification reverted deterministically
-    uint8 private constant MLE_STARVED     = 3; // verification was gas-starved
+    uint8 private constant MLE_STARVED = 3; // verification was gas-starved
 
     /// @dev SECURITY (C-1/B-4): floor on `gasleft()` before entering MLE verification. The repo's
     ///      own measurement of the real verifier on a real fixture is 11,019,291 gas
@@ -754,10 +722,9 @@ contract IntmaxRollup {
     /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into a storage
     ///      slot. Used by the constructor (validity VK) and `initializeWithdrawalVk` (withdrawal
     ///      VK). The destination arrays are assumed empty (each VK slot is written exactly once).
-    function _copyWhirParams(
-        SpongefishWhirVerify.WhirParams storage dst,
-        SpongefishWhirVerify.WhirParams memory src
-    ) private {
+    function _copyWhirParams(SpongefishWhirVerify.WhirParams storage dst, SpongefishWhirVerify.WhirParams memory src)
+        private
+    {
         dst.numVariables = src.numVariables;
         dst.foldingFactor = src.foldingFactor;
         dst.numVectors = src.numVectors;
@@ -875,7 +842,7 @@ contract IntmaxRollup {
     /// @notice Authorize a partial-withdrawal auth digest. Only callable by registered settlement
     ///         managers after a close proof (proving N-of-N channel consent) has been verified and
     ///         the challenge period has elapsed.
-    /// @param authDigest keccak256("IMPW" || nullifier || recipient || tokenIndex || amount || auxData)
+    /// @param authDigest keccak256("IPW2" || recipient || tokenIndex || amount || auxData)
     function authorizePartialWithdrawal(bytes32 authDigest) external {
         if (!isRegisteredSettlementManager[msg.sender]) revert NotRegisteredSettlementManager();
         partialWithdrawalAuthorized[authDigest] = true;
@@ -887,13 +854,13 @@ contract IntmaxRollup {
     // SECURITY (why it is gone, so it is never re-added): it paid native ETH out of the GLOBAL
     // `totalEscrowed` after checking ONLY `partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]`.
     // It never called `_verifyWithdrawalSet`, so NOTHING proved the withdrawal's economics. The
-    // authorization it consumed is minted by `ChannelSettlementManager.submitPartialWithdrawalIntent`,
-    // which binds ONLY `withdrawal.auxData` to the cosigned close state — `amount`, `recipient` and
-    // `nullifier` were caller-supplied and flowed untouched into the digest. Net effect: anyone able
-    // to produce one valid close proof for their OWN channel could name an arbitrary amount and
-    // recipient and drain the ETH escrow of ALL channels.
+    // historical v1 authorization bound only `withdrawal.auxData` to the cosigned close state;
+    // caller-supplied economics then flowed into the digest. IPW2/IMD2 now authenticate source
+    // channel, base nonce, recipient, token, and amount, but intentionally do not authenticate the
+    // proof-derived nullifier. A proof-free payout would therefore still omit the base withdrawal
+    // proof that establishes entitlement and single-use identity, so it must not be restored.
     //
-    // The IMPW authorization is a SECOND FACTOR (channel consent), not a payout authority. It is
+    // The IPW2 authorization is a SECOND FACTOR (channel consent), not a payout authority. It is
     // used correctly in `withdrawNative` / `withdrawERC20`, where the economics come from the
     // VERIFIED withdrawal proof and the flag can only veto, never supply, a field. Burn payouts must
     // go through those entry points. Consequently a forged authorization is inert — exactly as it
@@ -960,12 +927,11 @@ contract IntmaxRollup {
     /// @dev SECURITY (M-5): reverts on every chain but the local devnet, so the pin above cannot be
     ///      skipped on a real deployment. Same shape as the settlement manager's challenge-period
     ///      floor: the unsafe value is structurally unshippable rather than merely discouraged.
-    function postBlockAndSubmit(
-        SubBlock[] calldata subBlocks,
-        bytes32 proofHash,
-        uint32 proofLength,
-        bytes32 stateRoot
-    ) external payable nonReentrant {
+    function postBlockAndSubmit(SubBlock[] calldata subBlocks, bytes32 proofHash, uint32 proofLength, bytes32 stateRoot)
+        external
+        payable
+        nonReentrant
+    {
         if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ChainPinRequired();
         _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
     }
@@ -1022,9 +988,8 @@ contract IntmaxRollup {
         // CUMULATIVE: `_pendingChannelRegHashChain` is NOT reset (see comment above), so when a
         // registration has occurred it already equals the running cumulative; the ternary still
         // selects `previous` only in the never-registered case (pending == 0).
-        bytes32 batchChannelRegHashChain = pendingChannelRegBefore == bytes32(0)
-            ? previousChannelRegHashChain
-            : pendingChannelRegBefore;
+        bytes32 batchChannelRegHashChain =
+            pendingChannelRegBefore == bytes32(0) ? previousChannelRegHashChain : pendingChannelRegBefore;
 
         uint64 previousPostingRound = postingRound;
         postingRound++;
@@ -1067,11 +1032,7 @@ contract IntmaxRollup {
             blockChannelRegHash[currentBlockNumber] = regHash;
 
             emit BlockPosted(
-                currentBlockNumber,
-                subBlocks[i].channelId,
-                subBlocks[i].keyIds,
-                subBlocks[i].txTreeRoot,
-                currentHash
+                currentBlockNumber, subBlocks[i].channelId, subBlocks[i].keyIds, subBlocks[i].txTreeRoot, currentHash
             );
         }
 
@@ -1104,12 +1065,11 @@ contract IntmaxRollup {
     /// @dev Multi-token (§N-7): a nonzero `tokenIndex` now escrows REAL ERC-20 value. The former
     ///      "accounting-only nonzero tokenIndex" regime is RETIRED — an unregistered nonzero index
     ///      reverts instead of recording unbacked value in the deposit hash chain.
-    function deposit(
-        bytes32 recipient,
-        uint32 tokenIndex,
-        uint256 amount,
-        bytes32 auxData
-    ) external payable nonReentrant {
+    function deposit(bytes32 recipient, uint32 tokenIndex, uint256 amount, bytes32 auxData)
+        external
+        payable
+        nonReentrant
+    {
         // --- Native-ETH escrow (Phase 1) ---
         // SECURITY: For ETH deposits the caller MUST forward exactly `amount` wei; we then grow
         // `totalEscrowed`, the global ceiling for all future native payouts. CEI: this is a pure
@@ -1149,28 +1109,18 @@ contract IntmaxRollup {
         // Compute deposit hash matching Rust's Deposit::hash_with_prev_hash:
         //   keccak256(prev_hash || depositor(5×u32) || recipient(8×u32) || token_index(u32) || amount(8×u32) || aux_data(8×u32))
         //   Note: deposit_index and block_number are NOT included in the hash.
-        bytes32 newHash = _computeDepositHash(
-            _pendingDepositHashChain,
-            msg.sender,
-            recipient,
-            tokenIndex,
-            amount,
-            auxData
-        );
+        bytes32 newHash =
+            _computeDepositHash(_pendingDepositHashChain, msg.sender, recipient, tokenIndex, amount, auxData);
         _pendingDepositHashChain = newHash;
         _depositRecords[idx] = DepositRecord({
-            depositor: msg.sender,
-            recipient: recipient,
-            tokenIndex: tokenIndex,
-            amount: amount,
-            auxData: auxData
+            depositor: msg.sender, recipient: recipient, tokenIndex: tokenIndex, amount: amount, auxData: auxData
         });
 
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
     }
 
     /// @notice Register a channel's member set. One SPHINCS+ key per member (D6 pad-to-MAX):
-    ///         between `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` ACTIVE members in slot
+    ///         between `MIN_CHANNEL_MEMBERS` and `MAX_CHANNEL_MEMBERS` cosigners in slot
     ///         order, each described by their SPHINCS+ pubkey hash (bytes32, the member identity),
     ///         their Regev pubkey digest (bytes32), and their L1 withdrawal recipient (address).
     ///         Mirrors the Rust `ChannelRecord` (src/common/channel.rs): the registration record
@@ -1178,24 +1128,22 @@ contract IntmaxRollup {
     ///         `regev_pk_root`, and the `bp_member_slot`. The ACTIVE member pubkey hashes must be
     ///         nonzero and pairwise distinct (`ChannelRecord::validate`); the active count is the
     ///         array length.
-    /// @dev R3 WORD-ALIGNED fixed-16 preimage (consumed by the validity `channel_reg_step`
-    ///      circuit). The keccak chain folds a FIXED 16-slot, word-aligned stream so the circuit
+    /// @dev R3 WORD-ALIGNED fixed-8 preimage (consumed by the validity `channel_reg_step`
+    ///      circuit). The keccak chain folds a FIXED 8-slot, word-aligned stream so the circuit
     ///      can consume it with a SINGLE keccak (no byte-straddling); padding slots
     ///      (i >= activeCount) contribute zeros. Header fields are uint32 (4-byte words):
     ///        keccak256(prev || channelId(uint32) || bpMemberSlot(uint32) || memberCount(uint32) ||
     ///                  delegateCount(uint32) ||
-    ///                  for i in 0..16: (pkG(32) || pkB(32) || regevPkDigest(32) || recipient(20))).
+    ///                  for i in 0..8: (pkG(32) || pkB(32) || regevPkDigest(32) || recipient(20))).
     ///      This is byte-identical to the Rust `ChannelRegRecord::hash_with_prev_hash`
     ///      (src/common/channel_registration.rs) and its in-circuit twin — asserted by
     ///      `IntmaxRollup.t.sol::test_channelRegPreimageDifferential`.
-    ///      `memberPubkeysRoot` = keccak of ALL active participant pubkey hashes (members +
-    ///      delegates); `regevPkRoot` = keccak of all active Regev pubkey digests.
-    /// @dev Delegate account: the `memberPkGs`/`pkBs`/`regevPkDigests`/`recipients` arrays carry the
-    ///      ACTIVE participants — members first (`0..memberCount`) then delegates
-    ///      (`memberCount..memberCount+delegateCount`). `memberCount = arrayLength - delegateCount`.
-    ///      `delegateCount` is committed into the reg preimage IMMEDIATELY AFTER `memberCount`. The
-    ///      close-form IMCM member-set commitment below stays MEMBER-ONLY (`0..memberCount`):
-    ///      delegates do not co-sign, so they are excluded from the N-of-N signer set.
+    ///      `memberPubkeysRoot` = keccak of all cosigner pubkey hashes; `regevPkRoot` = keccak of
+    ///      all cosigner Regev pubkey digests.
+    /// @dev Option B registration is cosigner-only. `delegateCount` remains in the ABI and fixed
+    ///      registration preimage for wire compatibility, but MUST be zero. Delegates are added
+    ///      later under a cosigner-signed channel state; accepting them here would create an L1
+    ///      registration that the validity `channel_reg_step` circuit cannot prove.
     /// @dev P3: `pkBs[i]` is the participant's BabyBear hash-sig public key (L1/keccak digest form).
     ///      It enters the reg preimage between `pkG` and `regevPkDigest` so the in-circuit 3-field
     ///      `MemberLeaf{pk_g, pk_b, regev_pk}` is bound to the L1 keccak chain (R2 cross-binding).
@@ -1207,61 +1155,48 @@ contract IntmaxRollup {
         bytes32[] calldata pkBs,
         bytes32[] calldata regevPkDigests,
         address[] calldata recipients
-    ) external payable {
-        // M-5 (squatting): pay first, so a griefer's cost is per-id money, not per-id gas. Credited
-        // to the treasury through the pull path; over-payment is kept (callers should send exactly).
-        if (msg.value < CHANNEL_REGISTRATION_FEE) revert InsufficientRegistrationFee();
-        pendingWithdrawals[fraudTreasury] += msg.value;
+    ) external {
+        // Channel ids are one-shot protocol state. Pricing a targeted front-run does not authorize
+        // it: a stranger can still pay a small fee and permanently occupy a predictable id. Keep
+        // registration under the immutable deployment authority instead.
+        if (msg.sender != deployer) revert OnlyDeployer();
         if (channelId == 0) revert ChannelIdZeroReserved();
         if (channelId == BURN_CHANNEL_ID) revert ChannelIdBurnReserved();
+        // The validity registration circuit constrains this retained wire field to zero. Reject
+        // before deriving either accumulator or writing any per-channel state.
+        if (delegateCount != 0) revert DelegateCountExceedsActive();
         // Finding E: ONE-TIME registration per channel. Matches the validity R5 one-time guard and
         // makes `channelMemberSetCommitment[channelId]` an unambiguous single source of truth that
         // the close-path manager binds to. A nonzero commitment means already registered.
         if (channelMemberSetCommitment[channelId] != bytes32(0)) revert ChannelAlreadyRegistered();
-        // Delegate account: the arrays carry the ACTIVE participants (members first, then
-        // delegates). `activeCount = memberPkGs.length` = memberCount + delegateCount; delegates
-        // occupy the contiguous region `memberCount..activeCount`. `memberCount` is derived as
-        // `activeCount - delegateCount`. With delegateCount = 0 this equals the legacy
-        // `memberCount = memberPkGs.length`, so the preimage is byte-identical (Phase 1).
-        uint256 activeCount = memberPkGs.length;
-        if (uint256(delegateCount) > activeCount) revert DelegateCountExceedsActive();
-        uint256 memberCount = activeCount - uint256(delegateCount);
+        uint256 memberCount = memberPkGs.length;
         if (
-            memberCount < MIN_CHANNEL_MEMBERS ||
-            activeCount > MAX_CHANNEL_MEMBERS ||
-            pkBs.length != activeCount ||
-            regevPkDigests.length != activeCount ||
-            recipients.length != activeCount
+            memberCount < MIN_CHANNEL_MEMBERS || memberCount > MAX_CHANNEL_MEMBERS || pkBs.length != memberCount
+                || regevPkDigests.length != memberCount || recipients.length != memberCount
         ) revert MemberCountOrArrayLenInvalid();
         // bpMemberSlot must select a co-signing MEMBER, not a delegate.
         if (uint256(bpMemberSlot) >= memberCount) revert BpMemberSlotOutOfRange();
 
-        // One key per ACTIVE participant (members + delegates): active pubkey hashes must be nonzero
-        // and pairwise distinct (mirrors ChannelRecord::validate over `0..member_count+delegate_count`).
-        // Regev digests must be set; recipients must be set.
-        for (uint256 i = 0; i < activeCount; i++) {
-            if (memberPkGs[i] == bytes32(0)) revert MemberPubkeyHashZeroReserved();
-            if (regevPkDigests[i] == bytes32(0)) revert RegevPkDigestZeroReserved();
-            if (recipients[i] == address(0)) revert RecipientZeroReserved();
-            for (uint256 j = i + 1; j < activeCount; j++) {
+        // Each bytes32 identity is the unique big-endian encoding of four canonical Goldilocks
+        // limbs. The circuit reconstructs these bytes from four field elements; accepting a limb
+        // >= p here would commit an on-chain preimage for which no registration proof exists.
+        for (uint256 i = 0; i < memberCount; i++) {
+            _requireValidIdentities(memberPkGs[i], pkBs[i], regevPkDigests[i], recipients[i]);
+            for (uint256 j = i + 1; j < memberCount; j++) {
                 if (memberPkGs[i] == memberPkGs[j]) revert MemberPubkeyHashesNotDistinct();
             }
         }
 
-        // R3 WORD-ALIGNED fixed-16 preimage built in a helper (keeps this frame off the via-IR
+        // R3 WORD-ALIGNED fixed-8 preimage built in a helper (keeps this frame off the via-IR
         // stack-too-deep limit). The word-aligned HEADER (prev || channelId(uint32) ||
         // bpMemberSlot(uint32) || memberCount(uint32) || delegateCount(uint32)) is assembled here and
-        // passed as ONE `bytes` slot; the helper folds the 16 fixed member slots and hashes. This is
+        // passed as ONE `bytes` slot; the helper folds the 8 fixed cosigner slots and hashes. This is
         // a byte-for-byte mirror of the Rust `ChannelRegRecord::hash_with_prev_hash`.
         bytes32 newHash = _channelRegHashChain(
             abi.encodePacked(
-                _pendingChannelRegHashChain,
-                channelId,
-                uint32(bpMemberSlot),
-                uint32(memberCount),
-                uint32(delegateCount)
+                _pendingChannelRegHashChain, channelId, uint32(bpMemberSlot), uint32(memberCount), uint32(0)
             ),
-            activeCount,
+            memberCount,
             memberPkGs,
             pkBs,
             regevPkDigests,
@@ -1273,10 +1208,7 @@ contract IntmaxRollup {
         // not co-sign) + bp identity as the SINGLE SOURCE OF TRUTH for this channel. Computed in a
         // helper to stay under the stack limit; byte-identical to
         // `ChannelSettlementVerifier.closeMemberSetCommitment(paddedHashes, memberCount)`.
-        channelMemberSetCommitment[channelId] = _closeMemberSetCommitment(
-            uint32(memberCount),
-            memberPkGs
-        );
+        channelMemberSetCommitment[channelId] = _closeMemberSetCommitment(uint32(memberCount), memberPkGs);
         // bp identity: the member registered at `bpMemberSlot` (already range-checked above).
         channelBpMemberSlot[channelId] = bpMemberSlot;
         channelBpPkG[channelId] = memberPkGs[bpMemberSlot];
@@ -1296,20 +1228,47 @@ contract IntmaxRollup {
         );
     }
 
+    /// @dev Require all three bytes32 values to encode four big-endian canonical
+    ///      Goldilocks elements. A loop is intentionally used here to preserve EIP-170 headroom;
+    ///      registration is deployment-time control-plane work, not a hot execution path.
+    function _requireValidIdentities(bytes32 pkG, bytes32 pkB, bytes32 regev, address recipient) private pure {
+        assembly ("memory-safe") {
+            // One compact registration-shape error covers zero and non-canonical identities. The
+            // older specific errors remain in the ABI, but separate revert branches would push the
+            // deployable rollup over EIP-170.
+            if or(or(iszero(pkG), iszero(regev)), iszero(recipient)) {
+                mstore(0, 0xe7bf2968) // MemberCountOrArrayLenInvalid()
+                revert(28, 4)
+            }
+            let mask := 0xffffffffffffffff
+            let modulus := 0xffffffff00000001
+            for { let offset := 0 } lt(offset, 256) { offset := add(offset, 64) } {
+                if or(
+                    or(
+                        iszero(lt(and(shr(offset, pkG), mask), modulus)),
+                        iszero(lt(and(shr(offset, pkB), mask), modulus))
+                    ),
+                    iszero(lt(and(shr(offset, regev), mask), modulus))
+                ) {
+                    mstore(0, 0xe7bf2968) // MemberCountOrArrayLenInvalid()
+                    revert(28, 4)
+                }
+            }
+        }
+    }
+
     /// @dev Close-form IMCM member-set commitment (MEMBER-ONLY, pad-to-MAX D6): keccak256(
-    ///      bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_15 ) with active hashes in
+    ///      bytes4(0x494d434d) || uint32(memberCount) || h_0 || .. || h_7 ) with active hashes in
     ///      slot order and padding slots (i >= memberCount) zeroed. Delegates are EXCLUDED (they do
     ///      not co-sign). Byte-identical to `ChannelSettlementVerifier.closeMemberSetCommitment` and
     ///      the Rust `close_member_set_commitment`. Extracted to its own frame for the via-IR stack
     ///      limit.
-    function _closeMemberSetCommitment(
-        uint32 memberCount,
-        bytes32[] calldata memberPkGs
-    ) internal pure returns (bytes32) {
-        bytes memory memberSetPreimage = abi.encodePacked(
-            bytes4(CLOSE_MEMBER_SET_DOMAIN),
-            memberCount
-        );
+    function _closeMemberSetCommitment(uint32 memberCount, bytes32[] calldata memberPkGs)
+        internal
+        pure
+        returns (bytes32)
+    {
+        bytes memory memberSetPreimage = abi.encodePacked(bytes4(CLOSE_MEMBER_SET_DOMAIN), memberCount);
         for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
             bytes32 slot = i < memberCount ? memberPkGs[i] : bytes32(0);
             memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
@@ -1317,15 +1276,15 @@ contract IntmaxRollup {
         return keccak256(memberSetPreimage);
     }
 
-    /// @dev R3 WORD-ALIGNED fixed-16 reg-chain preimage (D6 pad-to-MAX + delegate account). The
-    ///      keccak chain hashes a FIXED 16-slot, word-aligned stream so the validity
+    /// @dev R3 WORD-ALIGNED fixed-8 reg-chain preimage (D6 pad-to-MAX + delegate account). The
+    ///      keccak chain hashes a FIXED 8-slot, word-aligned stream so the validity
     ///      (channel_reg_step) circuit can consume it with a SINGLE keccak (no byte-straddling).
     ///      Padding slots (i >= activeCount) contribute bytes32(0) || bytes32(0) || 20 zero bytes.
     ///      Header fields are uint32 (4-byte words), matching the Rust
     ///      `ChannelRegRecord::hash_with_prev_hash` u32 stream:
     ///        prev(32) || channelId(uint32=4) || bpMemberSlot(uint32=4) || memberCount(uint32=4) ||
     ///        delegateCount(uint32=4) ||
-    ///        for i in 0..16: ( pkG(32) || pkB(32) || regevDigest(32) || recipient(20) ).
+    ///        for i in 0..8: ( pkG(32) || pkB(32) || regevDigest(32) || recipient(20) ).
     ///      SECURITY: `delegateCount` sits IMMEDIATELY AFTER `memberCount` (delegate account); active
     ///      slots are `0..memberCount+delegateCount`. recipient is appended as the 20 address bytes
     ///      (abi.encodePacked(address)), equal to the Rust Address 5-u32 big-endian encoding — NOT a
@@ -1345,31 +1304,21 @@ contract IntmaxRollup {
             if (i < activeCount) {
                 packed = abi.encodePacked(
                     packed,
-                    memberPkGs[i],     // bytes32: 32 bytes (pk_g)
-                    pkBs[i],           // bytes32: 32 bytes (pk_b, P3)
+                    memberPkGs[i], // bytes32: 32 bytes (pk_g)
+                    pkBs[i], // bytes32: 32 bytes (pk_b, P3)
                     regevPkDigests[i], // bytes32: 32 bytes
-                    recipients[i]      // address: 20 bytes
+                    recipients[i] // address: 20 bytes
                 );
             } else {
                 // Padding slot: zeroed pkG(32) || pkB(32) || regev(32) || recipient(20).
-                packed = abi.encodePacked(
-                    packed,
-                    bytes32(0),
-                    bytes32(0),
-                    bytes32(0),
-                    bytes20(0)
-                );
+                packed = abi.encodePacked(packed, bytes32(0), bytes32(0), bytes32(0), bytes20(0));
             }
         }
         return keccak256(packed);
     }
 
     // -----------------------------------------------------------------------
-    function _submit(
-        bytes32 proofHash,
-        uint32 proofLength,
-        bytes32 stateRoot
-    ) internal returns (uint256 submissionId) {
+    function _submit(bytes32 proofHash, uint32 proofLength, bytes32 stateRoot) internal returns (uint256 submissionId) {
         bytes32 blobHash;
         assembly {
             blobHash := blobhash(0)
@@ -1378,9 +1327,7 @@ contract IntmaxRollup {
 
         submissionId = nextSubmissionId++;
         uint64 ethBlock = uint64(block.number);
-        bytes32 commitment = keccak256(
-            abi.encodePacked(blobHash, proofHash, proofLength, stateRoot, ethBlock)
-        );
+        bytes32 commitment = keccak256(abi.encodePacked(blobHash, proofHash, proofLength, stateRoot, ethBlock));
 
         _submissions[submissionId] = Submission({
             commitment: commitment,
@@ -1403,9 +1350,7 @@ contract IntmaxRollup {
     ///      this surface gets one fewer argument and is safer (the prover
     ///      can no longer supply mismatched evals). Groth16 is removed: on-chain
     ///      verification is MLE/WHIR-only.
-    function verify(
-        MleVerifier.MleProof calldata mleProof
-    ) external view returns (bool) {
+    function verify(MleVerifier.MleProof calldata mleProof) external view returns (bool) {
         return _verifyMle(mleProof);
     }
 
@@ -1554,11 +1499,8 @@ contract IntmaxRollup {
             return true;
         }
 
-        bool confirmed = _verifyFraud(
-            submissionId, blobVersionedHash, stateRoot,
-            proofBytes, validityPIs,
-            mleProof, kzg
-        );
+        bool confirmed =
+            _verifyFraud(submissionId, blobVersionedHash, stateRoot, proofBytes, validityPIs, mleProof, kzg);
         if (!confirmed) return false;
 
         _truncateSubmissions(submissionId, msg.sender);
@@ -1595,7 +1537,7 @@ contract IntmaxRollup {
         uint256 amount = pendingWithdrawals[msg.sender];
         if (amount == 0) revert NothingToWithdraw();
         pendingWithdrawals[msg.sender] = 0;
-        (bool ok, ) = msg.sender.call{value: amount}("");
+        (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert WithdrawTransferFailed();
     }
 
@@ -1686,11 +1628,10 @@ contract IntmaxRollup {
     ///     GLOBAL solvency ceiling: Σ payouts ≤ Σ real ETH escrowed; underflow reverts the whole
     ///     call → cross-channel theft impossible) + pull-payment credit. v1 pays ETH token only.
     ///   • No external call here (pull-payment via `withdraw()`); `nonReentrant` is belt-and-braces.
-    function withdrawNative(
-        Withdrawal[] calldata ws,
-        address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
-    ) external nonReentrant {
+    function withdrawNative(Withdrawal[] calldata ws, address withdrawalProver, MleVerifier.MleProof calldata mleProof)
+        external
+        nonReentrant
+    {
         uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
 
         // 4. Pay out each leaf (CEI: all checks/effects precede any value movement; pull-payment).
@@ -1706,22 +1647,24 @@ contract IntmaxRollup {
             // authorization from a registered settlement manager — a SECOND FACTOR (channel
             // consent) on top of the proof. Normal withdrawals (auxData == 0) are unaffected.
             //
-            // SECURITY — what the auth digest does and does NOT do (corrected 2026-07-28,
-            // doc/tasks/pw-auth-threat-model.md; the previous wording overstated this):
-            //   • REPLAY binding (TRUE): the digest is a keccak over ALL of
-            //     (nullifier, recipient, tokenIndex, amount, auxData), so ONE authorization cannot
-            //     be re-read as a different (recipient, amount) tuple.
-            //   • DERIVATION (FALSE — never claim this): the digest does NOT establish that those
-            //     fields are correct. The Manager binds only `auxData` to the cosigned state; the
-            //     other fields are whatever its caller supplied. The economics come EXCLUSIVELY
-            //     from `_verifyWithdrawalSet` above, which re-folds `ws` into the proof's pis_hash,
-            //     so `w` here IS the proof's leaf, not a caller declaration. The flag can only
-            //     VETO a proven leaf; it can never supply a field. That is why this must stay a
-            //     conjunction with the proof and must never become a standalone payout gate.
+            // SECURITY — IPW2 commits (recipient, tokenIndex, amount, auxData), while IMD2 makes
+            // that auxData commit the immutable source channel, base nonce, tx leaf, and the same
+            // economics in the N-of-N-signed history. The proof-side nullifier is deliberately
+            // absent from IPW2 because the Manager cannot verify it. `_verifyWithdrawalSet` above
+            // supplies that missing proof binding and this loop enforces nullifier single use. The
+            // authorization must therefore stay a second factor on this proof-backed path, never a
+            // standalone payout authority.
             if (w.auxData != bytes32(0)) {
-                if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
+                bytes32 authDigest = _withdrawalAuthDigest(w);
+                if (!partialWithdrawalAuthorized[authDigest]) {
                     revert PartialWithdrawalNotAuthorized();
                 }
+                // IPW2 deliberately omits the proof-side nullifier, so a permanent flag would
+                // authorize every later proof-valid leaf carrying the same payout tuple/auxData
+                // under a fresh nonce. Consume the N-of-N authorization with the first successful
+                // proof-backed payout. Any later revert (including escrow underflow) restores this
+                // delete atomically with the rest of the transaction.
+                delete partialWithdrawalAuthorized[authDigest];
             }
 
             withdrawalNullifierUsed[w.nullifier] = true;
@@ -1736,7 +1679,7 @@ contract IntmaxRollup {
     ///         §N-7). MIRRORS `withdrawNative` exactly — the SAME withdrawal-set verification
     ///         (`_verifyWithdrawalSet`: real MLE/WHIR under the withdrawal VK, finalized-root
     ///         anchor, chain re-fold → pis_hash binding), the SAME per-leaf nullifier single-use,
-    ///         and the SAME IMPW partial-withdrawal authorization gate (the auth digest already
+    ///         and the SAME IPW2 partial-withdrawal authorization gate (the auth digest already
     ///         binds `tokenIndex`) — only the asset dispatch differs.
     ///
     /// SECURITY:
@@ -1749,11 +1692,10 @@ contract IntmaxRollup {
     ///   • Pull-payment (CEI): credits `pendingTokenWithdrawals[t][recipient]`; NO token code runs
     ///     inside this loop. Recipients pull via `withdrawToken`, where `nonReentrant` guards the
     ///     single external token call.
-    function withdrawERC20(
-        Withdrawal[] calldata ws,
-        address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
-    ) external nonReentrant {
+    function withdrawERC20(Withdrawal[] calldata ws, address withdrawalProver, MleVerifier.MleProof calldata mleProof)
+        external
+        nonReentrant
+    {
         uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
 
         for (uint256 i = 0; i < ws.length; i++) {
@@ -1762,14 +1704,18 @@ contract IntmaxRollup {
             if (address(tokenAddressOf[w.tokenIndex]) == address(0)) revert TokenIndexNotRegistered();
             if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
 
-            // GAP2 mirror: burn withdrawals need a finalized IMPW authorization (the digest commits
+            // GAP2 mirror: burn withdrawals need a finalized IPW2 authorization (the digest commits
             // tokenIndex, so an ETH authorization can never authorize an ERC-20 payout). SAME
             // second-factor semantics as `withdrawNative` — see the SECURITY note there: this is a
             // veto on a proof-verified leaf, NOT a derivation of the leaf's fields.
             if (w.auxData != bytes32(0)) {
-                if (!partialWithdrawalAuthorized[_withdrawalAuthDigest(w)]) {
+                bytes32 authDigest = _withdrawalAuthDigest(w);
+                if (!partialWithdrawalAuthorized[authDigest]) {
                     revert PartialWithdrawalNotAuthorized();
                 }
+                // Same one-shot authorization semantics as the native lane. The token index is in
+                // IPW2, so the two asset paths cannot consume one another's authorization.
+                delete partialWithdrawalAuthorized[authDigest];
             }
 
             withdrawalNullifierUsed[w.nullifier] = true;
@@ -1797,22 +1743,22 @@ contract IntmaxRollup {
         SafeERC20Lib.safeTransfer(token, msg.sender, amount);
     }
 
-    /// @dev IMPW partial-withdrawal auth digest over ALL withdrawal fields (incl. tokenIndex).
-    ///      Shared by the ETH and ERC-20 payout paths. SECURITY: committing every field gives
-    ///      REPLAY binding only (one authorization cannot be re-read as a different tuple); it does
-    ///      NOT make the fields trustworthy — see the note in `withdrawNative`. The proof-free
-    ///      consumer of this digest (`claimAuthorizedWithdrawal`) was removed 2026-07-28.
+    /// @dev IPW2 partial-withdrawal auth digest over the proof-verified withdrawal economics and
+    ///      IMD2 descriptor. The proof-only nullifier is deliberately excluded: the manager cannot
+    ///      authenticate it, while the payout path separately enforces its single use. Shared by
+    ///      the ETH and ERC-20 payout paths. The proof-free consumer of this digest
+    ///      (`claimAuthorizedWithdrawal`) was removed 2026-07-28.
     function _withdrawalAuthDigest(Withdrawal calldata w) private pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(0x494d5057), // "IMPW" domain
-                w.nullifier,
-                w.recipient,
-                w.tokenIndex,
-                w.amount,
-                w.auxData
-            )
-        );
+        return
+            keccak256(
+                abi.encodePacked(
+                    bytes4(0x49505732), // "IPW2" domain
+                    w.recipient,
+                    w.tokenIndex,
+                    w.amount,
+                    w.auxData
+                )
+            );
     }
 
     /// @dev Shared verification core of `withdrawNative` / `withdrawERC20` (steps 1–3): real
@@ -1857,8 +1803,7 @@ contract IntmaxRollup {
         for (uint256 i = 0; i < ws.length; i++) {
             withdrawalHash = _foldWithdrawalLeaf(withdrawalHash, ws[i]);
         }
-        bytes32 pisHash =
-            _withdrawalPisHash(withdrawalHash, withdrawalProver, extCommitment, wdBlockNumber);
+        bytes32 pisHash = _withdrawalPisHash(withdrawalHash, withdrawalProver, extCommitment, wdBlockNumber);
         if (!_limbsMatchBytes32(pi, 0, pisHash)) revert WithdrawalPublicInputsMismatch();
     }
 
@@ -1869,9 +1814,7 @@ contract IntmaxRollup {
     ///      = 152-byte preimage. abi.encodePacked emits address as 20 bytes, uint32 as 4, uint256 as
     ///      32 (big-endian) — matching the Rust 5/1/8 u32-limb layout exactly.
     function _foldWithdrawalLeaf(bytes32 prev, Withdrawal calldata w) private pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(prev, w.recipient, w.tokenIndex, w.amount, w.nullifier, w.auxData)
-        );
+        return keccak256(abi.encodePacked(prev, w.recipient, w.tokenIndex, w.amount, w.nullifier, w.auxData));
     }
 
     /// @dev pis_hash = remove_3bits( keccak256(
@@ -1880,12 +1823,11 @@ contract IntmaxRollup {
     ///      remove_3bits clears the TOP 3 bits of the 256-bit value (Rust Bytes32::remove_3bits:
     ///      `limb[0] &= (1<<29)-1`, limb[0] = most-significant u32) ⇒ `value & ((1<<253)-1)`.
     ///      blockNumber as abi.encodePacked(uint64) = [high32_BE, low32_BE] = Rust to_u32_vec [high, low].
-    function _withdrawalPisHash(
-        bytes32 withdrawalHash,
-        address prover,
-        bytes32 extCommitment,
-        uint64 blockNumber
-    ) private pure returns (bytes32) {
+    function _withdrawalPisHash(bytes32 withdrawalHash, address prover, bytes32 extCommitment, uint64 blockNumber)
+        private
+        pure
+        returns (bytes32)
+    {
         bytes32 h = keccak256(abi.encodePacked(withdrawalHash, prover, extCommitment, blockNumber));
         return bytes32(uint256(h) & ((uint256(1) << 253) - 1));
     }
@@ -1903,9 +1845,7 @@ contract IntmaxRollup {
 
     /// @dev Check 8 big-endian u32 limbs at `off` equal `value` EXACTLY (no masking — a limb with
     ///      high bits set is malformed and rejected). Mirrors `_mlePublicInputsMatch`.
-    function _limbsMatchBytes32(uint256[] memory limbs, uint256 off, bytes32 value)
-        private pure returns (bool)
-    {
+    function _limbsMatchBytes32(uint256[] memory limbs, uint256 off, bytes32 value) private pure returns (bool) {
         uint256 h = uint256(value);
         for (uint256 i = 0; i < 8; i++) {
             uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
@@ -1922,9 +1862,7 @@ contract IntmaxRollup {
     ///      tri-state treatment. Here a caught revert blocks a PAYOUT, which is the safe direction;
     ///      in `_verifyFraud` the same shape used to CONFIRM FRAUD, which is why only that call
     ///      site had to change. Same reasoning for `finalize`'s `fullVerify` try/catch.
-    function _verifyMleWithdrawal(
-        MleVerifier.MleProof calldata mleProof
-    ) internal view returns (bool) {
+    function _verifyMleWithdrawal(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
         try this._verifyMleWithVk(mleProof, true) returns (bool v) {
             return v;
         } catch {
@@ -2020,9 +1958,8 @@ contract IntmaxRollup {
             uint32 proofLength = uint32(proofBytes.length);
             bytes32 proofHash = keccak256(proofBytes);
             uint64 ethBlock = _submissions[submissionId].submittedAtBlock;
-            bytes32 commitment = keccak256(
-                abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot, ethBlock)
-            );
+            bytes32 commitment =
+                keccak256(abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot, ethBlock));
             if (commitment != _submissions[submissionId].commitment) return false;
         }
 
@@ -2042,8 +1979,8 @@ contract IntmaxRollup {
         //    FINALIZE_DEADLINE_BLOCKS timeout. This check stays because it is the right shape and
         //    becomes sound the moment the trusted-setup store lands.
         if (address(kzgVerifier) == address(0)) return false;
-        try kzgVerifier.verify(blobVersionedHash, kzg, proofBytes) {
-        } catch {
+        try kzgVerifier.verify(blobVersionedHash, kzg, proofBytes) {}
+        catch {
             return false;
         }
 
@@ -2123,9 +2060,7 @@ contract IntmaxRollup {
     ///      false and the constructor already rejects a zero validity VK, so this branch is dead and
     ///      every finalize runs real MLE/WHIR verification. The extra `allowMleDisabled` conjunct is
     ///      defense-in-depth: even if a zero VK somehow reached storage, it would NOT skip here.
-    function _verifyMle(
-        MleVerifier.MleProof calldata mleProof
-    ) internal view returns (bool) {
+    function _verifyMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
         return _mleVerdict(mleProof) == MLE_VALID;
     }
 
@@ -2164,9 +2099,7 @@ contract IntmaxRollup {
     ///   SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
     ///   true (a test-only opt-in enforced at construction). In production `allowMleDisabled` is
     ///   false and the constructor already rejects a zero validity VK, so that branch is dead.
-    function _mleVerdict(
-        MleVerifier.MleProof calldata mleProof
-    ) internal view returns (uint8) {
+    function _mleVerdict(MleVerifier.MleProof calldata mleProof) internal view returns (uint8) {
         // SECURITY: Skip MLE verification only on an explicit test-only deployment.
         if (allowMleDisabled && mleVk.degreeBits == 0) return MLE_VALID;
 
@@ -2228,10 +2161,7 @@ contract IntmaxRollup {
     ///      or the withdrawal VK (`withdrawalMleVk`/`_whirParamsW`/…). Shared to stay under EIP-170.
     ///      v2: the WHIR ext3 evaluations are embedded inside `mleProof` itself (Issues #3 + #7), so
     ///      an attacker cannot mix-and-match them.
-    function _verifyMleWithVk(
-        MleVerifier.MleProof calldata mleProof,
-        bool isWithdrawal
-    ) external view returns (bool) {
+    function _verifyMleWithVk(MleVerifier.MleProof calldata mleProof, bool isWithdrawal) external view returns (bool) {
         MleVk storage vk = isWithdrawal ? withdrawalMleVk : mleVk;
         SpongefishWhirVerify.WhirParams memory whirParams =
             _loadWhirParamsFrom(isWithdrawal ? _whirParamsW : _whirParams);
@@ -2252,7 +2182,9 @@ contract IntmaxRollup {
     ///      (`_whirParams`) and withdrawal (`_whirParamsW`) verification paths to avoid duplicating
     ///      this (bytecode-heavy) field-by-field copy twice (EIP-170 budget).
     function _loadWhirParamsFrom(SpongefishWhirVerify.WhirParams storage s)
-        private view returns (SpongefishWhirVerify.WhirParams memory p)
+        private
+        view
+        returns (SpongefishWhirVerify.WhirParams memory p)
     {
         p.numVariables = s.numVariables;
         p.foldingFactor = s.foldingFactor;
@@ -2398,9 +2330,7 @@ contract IntmaxRollup {
     ///      initial_ext_commitment (8×u32) || final_block_number (2×u32) ||
     ///      final_block_chain (8×u32) || final_ext_commitment (8×u32) ||
     ///      prover (5×u32) = 41 u32 words = 164 bytes.
-    function _computeValidityPIHash(
-        ValidityPublicInputs calldata pis
-    ) internal pure returns (bytes32) {
+    function _computeValidityPIHash(ValidityPublicInputs calldata pis) internal pure returns (bytes32) {
         // Pack into the same u32 layout as Rust's to_u32_vec():
         //   BlockNumber → [lo32, hi32] of the u64
         //   Bytes32     → 8 × u32 (big-endian byte order within each u32 matches Rust's U32LimbTrait)
@@ -2429,10 +2359,7 @@ contract IntmaxRollup {
     /// `verify()`. So `publicInputs` must have exactly 8 elements, each equal to the corresponding
     /// u32 limb of keccak256(ValidityPublicInputs). This ties the verified proof to the claimed
     /// validityPIs (and therefore to the accepted state root) with no separately-trusted argument.
-    function _mlePublicInputsMatch(
-        uint256[] memory publicInputs,
-        bytes32 piHash
-    ) internal pure returns (bool) {
+    function _mlePublicInputsMatch(uint256[] memory publicInputs, bytes32 piHash) internal pure returns (bool) {
         if (publicInputs.length != 8) return false;
         uint256 h = uint256(piHash);
         for (uint256 i = 0; i < 8; i++) {
@@ -2460,11 +2387,7 @@ contract IntmaxRollup {
         // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
         // does NOT match Rust's 4-byte-per-u32 packing. We must manually pack
         // the keyIds as raw 4-byte big-endian values.
-        bytes memory packed = abi.encodePacked(
-            prevHash,
-            channelId,
-            timestamp
-        );
+        bytes memory packed = abi.encodePacked(prevHash, channelId, timestamp);
         // Pack keyIds as 4-byte big-endian values (matching Rust u32 layout)
         for (uint256 i = 0; i < keyIds.length; i++) {
             packed = bytes.concat(packed, bytes4(keyIds[i]));
@@ -2475,12 +2398,7 @@ contract IntmaxRollup {
         // byte-identical to Rust `Block::hash_with_prev_hash` (deposit chain then reg chain, each
         // 32 bytes). This folds the registration chain into the on-chain block hash chain, so the
         // `blockHashChainAt` snapshot the validity proof must match commits the registration set.
-        packed = bytes.concat(
-            packed,
-            txTreeRoot,
-            blockDepositHashChain,
-            blockChannelRegHashChain
-        );
+        packed = bytes.concat(packed, txTreeRoot, blockDepositHashChain, blockChannelRegHashChain);
         return keccak256(packed);
     }
 
@@ -2495,16 +2413,6 @@ contract IntmaxRollup {
         uint256 amount,
         bytes32 auxData
     ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                prevHash,
-                depositor,
-                recipient,
-                tokenIndex,
-                amount,
-                auxData
-            )
-        );
+        return keccak256(abi.encodePacked(prevHash, depositor, recipient, tokenIndex, amount, auxData));
     }
-
 }

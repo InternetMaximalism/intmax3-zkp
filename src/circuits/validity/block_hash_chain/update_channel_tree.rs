@@ -510,6 +510,13 @@ impl UpdateUserTree {
                             i, e
                         ))
                     })?;
+                if tx_v2.nonce != prev_user_leaf.index {
+                    return Err(UpdateUserTreeError::InvalidLength(format!(
+                        "tx_v2 nonce at i {i} must equal the previous channel send index \
+                         (expected {}, got {})",
+                        prev_user_leaf.index, tx_v2.nonce
+                    )));
+                }
             }
 
             if strict {
@@ -1226,6 +1233,16 @@ impl UpdateUserTreeTarget {
 
             let bound_tx_root = tx_v2_merkle_proof.get_root::<F, C, D>(builder, tx_v2, tx_v2_index);
             block_tx_root.conditional_assert_eq(builder, bound_tx_root, should_update);
+            // SECURITY (base-send replay): H2 authenticates this TxV2, including its nonce.  The
+            // channel leaf's `index` is the persisted base-account send cursor, so binding the two
+            // makes an already-applied signed H2 unusable after the leaf advances.  Do NOT bind the
+            // independent `small_block_number` here: incoming and other channel transitions may
+            // advance that counter without consuming a base nonce.
+            builder.conditional_assert_eq(
+                should_update.target,
+                tx_v2.nonce,
+                prev_user_leaf.index,
+            );
 
             let user_transfer_class =
                 builder.constant(F::from_canonical_u32(TxClass::UserTransfer.as_u32()));
@@ -2004,7 +2021,7 @@ mod tests {
         let tx_v2 = TxV2 {
             tx_class: TxClass::ChannelAction,
             transfer_tree_root: PoseidonHashOut::default(),
-            nonce: 1,
+            nonce: 0,
             channel_action_root: channel_action_tree.get_root(),
         };
         let mut tx_v2_tree = TxV2Tree::init();
@@ -2102,7 +2119,7 @@ mod tests {
         let tx_v2 = TxV2 {
             tx_class: TxClass::ChannelAction,
             transfer_tree_root: PoseidonHashOut::default(),
-            nonce: 1,
+            nonce: 0,
             channel_action_root: channel_action_tree.get_root(),
         };
         let mut tx_v2_tree = TxV2Tree::init();
@@ -2514,6 +2531,29 @@ mod tests {
 
         tree.block.tx_tree_root = Bytes32::default();
         assert_refused(&tree, "H2=0 is reserved for in-channel updates");
+    }
+
+    /// A correctly signed H2 is not a timeless bearer token. The TxV2 nonce committed below H2
+    /// must be the channel leaf's current base-send cursor; after one application the leaf advances
+    /// and the same signed root is unusable. `small_block_number` is intentionally independent:
+    /// incoming and other channel transitions can advance it without consuming this base cursor.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn a_tx_v2_nonce_not_equal_to_the_current_send_index_is_unprovable() {
+        let _heavy = heavy();
+        let channel = RegisteredChannel::new(2, 0xa1);
+        let (mut tree, _) = signing_block(&channel, TEST_CHANNEL_ID);
+        assert_eq!(tree.prev_account_leaves[0].index, 0);
+        assert_eq!(tree.tx_v2s[0].nonce, 0);
+        assert!(tree.to_public_inputs().is_ok());
+        assert!(CIRCUIT.prove(&tree).is_ok());
+
+        tree.tx_v2s[0].nonce = 1;
+        let mut tx_tree = TxV2Tree::init();
+        tx_tree.update(tree.tx_v2_indices[0], tree.tx_v2s[0]);
+        tree.tx_v2_merkle_proofs[0] = tx_tree.prove(tree.tx_v2_indices[0]);
+        tree.block.tx_tree_root = Bytes32::from(tx_tree.get_root());
+        assert_refused(&tree, "tx_v2 nonce");
     }
 
     /// (g) An IMCH `h2_tag` differing from the block's `tx_tree_root` — unsatisfiable BY

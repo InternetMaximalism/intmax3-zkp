@@ -6,8 +6,9 @@
 //! `member_pubkeys_root`, binding the in-circuit member set to the on-chain registration. This
 //! module is the shared definition of the registration record and its keccak preimage.
 //!
-//! SECURITY (R3, D6 pad-to-MAX): the preimage is a FIXED 16-slot, WORD-ALIGNED u32-limb stream.
-//! Active members occupy slots `0..member_count`; padding slots `member_count..16` contribute
+//! SECURITY (R3, D6 pad-to-MAX): the preimage is a FIXED `MAX_SIG_CLUSTER`-slot (currently 8),
+//! WORD-ALIGNED u32-limb stream. Active members occupy slots `0..member_count`; padding slots
+//! `member_count..MAX_SIG_CLUSTER` contribute
 //! their zero/default values. Every field is a whole number of u32 limbs, so the in-circuit
 //! keccak is a SINGLE keccak with no byte-straddling, and the Rust / circuit / Solidity preimages
 //! are byte-identical (asserted by the differential test below + the Foundry counterpart).
@@ -32,6 +33,7 @@ use crate::{
         bytes32::{Bytes32, Bytes32Target},
         u32limb_trait::{U32LimbTargetTrait as _, U32LimbTrait as _},
     },
+    utils::poseidon_hash_out::PoseidonHashOut,
 };
 
 /// One channel member's registration entry.
@@ -76,13 +78,13 @@ pub struct MemberRegEntryTarget {
 }
 
 /// A single on-chain channel registration: a channel id, the bp member slot, the active member
-/// count, and a FIXED 16-slot member array (active first, padding zeroed).
+/// count, and a FIXED `MAX_SIG_CLUSTER`-slot member array (active first, padding zeroed).
 ///
 /// SECURITY (Option B, tasks/reg-chain-1024-threat-model.md): L1 registration covers ONLY the
-/// <= [`MAX_SIG_CLUSTER`] cosigners, so the record has exactly `MAX_SIG_CLUSTER` slots — matching the
-/// DEPLOYED contract's fixed-16 `_channelRegHashChain` byte-for-byte. Delegates are authenticated
-/// by the cosigner-signed H1 balance-slot tree, never by prior L1 registration; registration-
-/// producing paths emit `delegate_count = 0`.
+/// <= [`MAX_SIG_CLUSTER`] cosigners, so the record has exactly `MAX_SIG_CLUSTER` slots — matching
+/// the DEPLOYED contract's fixed-width `_channelRegHashChain` byte-for-byte. Delegates are
+/// authenticated by the cosigner-signed H1 balance-slot tree, never by prior L1 registration;
+/// registration producers and consumers require `delegate_count = 0`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelRegRecord {
@@ -91,9 +93,8 @@ pub struct ChannelRegRecord {
     pub member_count: u32,
     /// Number of DELEGATE participants registered after the members. Under Option B registration
     /// is cosigners-only, so new registrations emit `delegate_count = 0`. The field STAYS in the
-    /// record and the keccak preimage because the DEPLOYED contract hashes it (byte-compat), and
-    /// nonzero values remain accepted for legacy 16-slot channels — bounded by the record's
-    /// capacity: `member_count + delegate_count <= MAX_SIG_CLUSTER` (the record only HAS 16 slots).
+    /// record and the keccak preimage because the deployed contract hashes it (byte-compat), but
+    /// nonzero values are rejected: the validity registration circuit is cosigner-only.
     /// Committed into the reg-chain keccak preimage IMMEDIATELY AFTER `member_count` so the
     /// member/delegate/padding split is bound to the L1 registration chain.
     pub delegate_count: u32,
@@ -104,10 +105,16 @@ pub struct ChannelRegRecord {
 pub enum ChannelRegRecordError {
     #[error("member_count {0} out of range (must be 2..={MAX_SIG_CLUSTER})")]
     MemberCountOutOfRange(u32),
-    #[error("member_count {0} + delegate_count {1} exceeds MAX_SIG_CLUSTER ({MAX_SIG_CLUSTER})")]
-    DelegateCountOutOfRange(u32, u32),
+    #[error("delegate_count {0} must be zero for cosigner-only L1 registration")]
+    DelegateCountNonZero(u32),
     #[error("active member {0} has a zero pk_g")]
     ZeroActivePkG(usize),
+    #[error("active member {0} has a non-canonical pk_g Goldilocks encoding")]
+    NonCanonicalPkG(usize),
+    #[error("active member {0} has a non-canonical pk_b Goldilocks encoding")]
+    NonCanonicalPkB(usize),
+    #[error("active member {0} has a non-canonical Regev digest Goldilocks encoding")]
+    NonCanonicalRegevPkDigest(usize),
     #[error("active members {0} and {1} have equal pk_g (must be distinct)")]
     DuplicatePkG(usize, usize),
     #[error("padding slot {0} is not default/zero")]
@@ -130,30 +137,35 @@ impl ChannelRegRecord {
                 self.member_count,
             ));
         }
-        let mc = self.member_count as usize;
-        // Regions: members `0..mc`, delegates `mc..mc+dc` (legacy 16-slot channels only; Option B
-        // registrations emit dc = 0), padding `mc+dc..MAX_SIG_CLUSTER`. Active = members +
-        // delegates; both must be nonzero + pairwise distinct (no shared-key forgery across the
-        // WHOLE active set). Under Option B the record only HAS `MAX_SIG_CLUSTER` slots, so
-        // `member_count + delegate_count <= MAX_SIG_CLUSTER` bounds the active region.
-        let active = mc
-            .checked_add(self.delegate_count as usize)
-            .filter(|&a| a <= MAX_SIG_CLUSTER)
-            .ok_or(ChannelRegRecordError::DelegateCountOutOfRange(
-                self.member_count,
+        if self.delegate_count != 0 {
+            return Err(ChannelRegRecordError::DelegateCountNonZero(
                 self.delegate_count,
-            ))?;
-        for i in 0..active {
+            ));
+        }
+        let mc = self.member_count as usize;
+        for i in 0..mc {
             if self.members[i].pk_g == Bytes32::default() {
                 return Err(ChannelRegRecordError::ZeroActivePkG(i));
             }
-            for j in (i + 1)..active {
+            // The registration circuit witnesses these as four Goldilocks field elements and
+            // reconstructs the exact bytes for the keccak chain. Reject the many-to-one reduced
+            // encodings here, matching both that constraint and IntmaxRollup.registerChannel.
+            if PoseidonHashOut::try_from(self.members[i].pk_g).is_err() {
+                return Err(ChannelRegRecordError::NonCanonicalPkG(i));
+            }
+            if PoseidonHashOut::try_from(self.members[i].pk_b).is_err() {
+                return Err(ChannelRegRecordError::NonCanonicalPkB(i));
+            }
+            if PoseidonHashOut::try_from(self.members[i].regev_pk_digest).is_err() {
+                return Err(ChannelRegRecordError::NonCanonicalRegevPkDigest(i));
+            }
+            for j in (i + 1)..mc {
                 if self.members[i].pk_g == self.members[j].pk_g {
                     return Err(ChannelRegRecordError::DuplicatePkG(i, j));
                 }
             }
         }
-        for i in active..MAX_SIG_CLUSTER {
+        for i in mc..MAX_SIG_CLUSTER {
             if self.members[i] != MemberRegEntry::default() {
                 return Err(ChannelRegRecordError::NonZeroPaddingSlot(i));
             }
@@ -167,16 +179,17 @@ impl ChannelRegRecord {
         Ok(())
     }
 
-    /// R3 WORD-ALIGNED fixed-16 keccak preimage (native).
+    /// R3 WORD-ALIGNED fixed-`MAX_SIG_CLUSTER` keccak preimage (native; currently 8 slots).
     ///
     /// Preimage u32-limb stream (each whole-word):
     /// `[ prev(8), channel_id(1), bp_member_slot(1), member_count(1), delegate_count(1),
-    ///    for i in 0..16: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
-    /// Total = 8 + 1 + 1 + 1 + 1 + 16*(8+8+8+5) = 12 + 464 = 476 u32. `delegate_count` is a
+    ///    for i in 0..MAX_SIG_CLUSTER: ( pk_g(8), pk_b(8), regev_pk_digest(8), recipient(5) ) ]`
+    /// With `MAX_SIG_CLUSTER = 8`, total = 8 + 1 + 1 + 1 + 1 + 8*(8+8+8+5) = 244 u32.
+    /// `delegate_count` is a
     /// single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their zero values.
     /// `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream is
     /// byte-identical to the DEPLOYED Solidity `abi.encodePacked` preimage in
-    /// `IntmaxRollup._channelRegHashChain` (fixed 16-slot loop; verified by the pinned
+    /// `IntmaxRollup._channelRegHashChain` (fixed `MAX_SIG_CLUSTER`-slot loop; verified by the pinned
     /// differential test below + the Foundry counterpart — Option B restores this exact form).
     ///
     /// SECURITY (P3): `pk_b` enters this preimage between `pk_g` and `regev_pk_digest` so the
@@ -203,7 +216,8 @@ impl ChannelRegRecord {
 
 /// Word count of the R3 registration preimage (excluding the keccak output): see
 /// [`ChannelRegRecord::hash_with_prev_hash`].
-pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize = 8 + 1 + 1 + 1 + 1 + MAX_SIG_CLUSTER * (8 + 8 + 8 + 5);
+pub const CHANNEL_REG_PREIMAGE_U32_LEN: usize =
+    8 + 1 + 1 + 1 + 1 + MAX_SIG_CLUSTER * (8 + 8 + 8 + 5);
 
 impl MemberRegEntryTarget {
     /// The u32-limb stream for one member slot: pk_g(8) || pk_b(8) || regev_pk_digest(8) ||
@@ -334,6 +348,42 @@ mod tests {
         let mut bad4 = make_record(2);
         bad4.members[1].pk_g = bad4.members[0].pk_g;
         assert!(bad4.validate().is_err());
+
+        // L1 registration and the validity circuit are both cosigner-only.
+        let mut delegated = make_record(2);
+        delegated.delegate_count = 1;
+        assert!(matches!(
+            delegated.validate(),
+            Err(ChannelRegRecordError::DelegateCountNonZero(1))
+        ));
+    }
+
+    #[test]
+    fn test_channel_reg_validate_rejects_noncanonical_identity_encodings() {
+        // First 64-bit big-endian limb equals p = 0xFFFF_FFFF_0000_0001. A field witness reduces
+        // it to zero, so it cannot reproduce these exact registration bytes.
+        let noncanonical = Bytes32::from_u32_slice(&[0xffff_ffff, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+
+        let mut bad_pk_g = make_record(2);
+        bad_pk_g.members[0].pk_g = noncanonical;
+        assert!(matches!(
+            bad_pk_g.validate(),
+            Err(ChannelRegRecordError::NonCanonicalPkG(0))
+        ));
+
+        let mut bad_pk_b = make_record(2);
+        bad_pk_b.members[0].pk_b = noncanonical;
+        assert!(matches!(
+            bad_pk_b.validate(),
+            Err(ChannelRegRecordError::NonCanonicalPkB(0))
+        ));
+
+        let mut bad_regev = make_record(2);
+        bad_regev.members[0].regev_pk_digest = noncanonical;
+        assert!(matches!(
+            bad_regev.validate(),
+            Err(ChannelRegRecordError::NonCanonicalRegevPkDigest(0))
+        ));
     }
 
     /// The keccak-chain seed (prev_hash) shared by the Rust and Solidity differential tests. The

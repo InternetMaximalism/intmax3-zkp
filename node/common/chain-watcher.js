@@ -7,7 +7,10 @@
 // events handled — no silent event loss on a mid-batch failure). ethers is lazy-required so
 // pure-logic unit tests do not need it.
 //
-// ChainEvent: { kind, contract, channelId, args:{...decoded}, blockNumber, txHash, logIndex }
+// ChainEvent: { kind, contract, channelId, channelIds, args:{...decoded}, blockNumber, txHash,
+// logIndex }. `channelId` is populated only for a uniquely-routed event; `channelIds` is the
+// authoritative target set. Shared-rollup events that are genuinely global are intentionally
+// broadcast only to channels configured for that rollup, never to unrelated runtimes.
 
 // EXACT event fragments (human-readable; ethers derives topic0 + decodes args by name).
 const ROLLUP_FRAGMENTS = [
@@ -74,7 +77,9 @@ const MANAGER_GETTER_ABI = [
     'bytes32 closeIntentDigest,' +
     'bytes32 finalChannelStateDigest,' +
     'bytes32 finalBalanceStateH1,' +
-    'uint256 channelFundAmount,' +
+    'uint256[10] channelFundAmounts,' +
+    'uint32[10] tokenRegistry,' +
+    'uint8 tokenCount,' +
     'bytes32 channelFundIntmaxStateRoot,' +
     'bytes32 burnTxHash,' +
     'bytes32 closeWithdrawalDigest,' +
@@ -92,6 +97,47 @@ function decodedArgs(parsed) {
     out[f.name] = typeof v === 'bigint' ? v.toString() : (Array.isArray(v) ? v.map(String) : v);
   }
   return out;
+}
+
+function sameAddress(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+}
+
+// Resolve an already-decoded event to the configured channel runtimes that own it. Manager events
+// are address-scoped. Shared-rollup events use their explicit channelId/manager/recipient whenever
+// the event exposes one; only events with no channel discriminator are broadcast to that rollup's
+// channels. This helper is pure so multi-channel routing can be regression-tested without RPC.
+function routeEventChannelIds(channels, { contract, address, kind, args = {} }) {
+  const configured = Array.isArray(channels) ? channels : [];
+  if (contract === 'manager') {
+    return [...new Set(configured.filter(c => sameAddress(c.manager, address)).map(c => c.id))];
+  }
+  if (contract !== 'rollup') return [];
+
+  const candidates = configured.filter(c => sameAddress(c.rollup, address));
+  if (args.channelId !== undefined && args.channelId !== null) {
+    return [...new Set(candidates.filter(c => String(c.id) === String(args.channelId)).map(c => c.id))];
+  }
+
+  if (
+    (kind === 'PartialWithdrawalAuthorized' || kind === 'SettlementManagerRegistered')
+    && typeof args.manager === 'string'
+  ) {
+    return [...new Set(candidates.filter(c => sameAddress(c.manager, args.manager)).map(c => c.id))];
+  }
+
+  // A deployment may publish each channel's deposit recipient in config. When it does, a deposit
+  // is routed exactly; channels lacking that metadata remain candidates because the CLI performs
+  // the authoritative on-chain recipient check. Known non-matches are never needlessly invoked.
+  if (kind === 'Deposited' && typeof args.recipient === 'string') {
+    const matches = candidates.filter(c => sameAddress(c.depositRecipient || c.deposit_recipient, args.recipient));
+    const unknown = candidates.filter(c => !(c.depositRecipient || c.deposit_recipient));
+    if (matches.length || unknown.length !== candidates.length) {
+      return [...new Set([...matches, ...unknown].map(c => c.id))];
+    }
+  }
+
+  return [...new Set(candidates.map(c => c.id))];
 }
 
 class ChainWatcher {
@@ -136,12 +182,21 @@ class ChainWatcher {
     try { parsed = this._iface.parseLog({ topics: logEntry.topics, data: logEntry.data }); }
     catch (e) { return null; } // not one of our events
     if (!parsed) return null;
+    const contract = this._contractKindForAddress(logEntry.address);
+    const args = decodedArgs(parsed);
+    const channelIds = routeEventChannelIds(this.channels, {
+      contract,
+      address: logEntry.address,
+      kind: parsed.name,
+      args,
+    });
     return {
       kind: parsed.name,
-      contract: this._contractKindForAddress(logEntry.address),
-      channelId: this._channelForAddress(logEntry.address),
+      contract,
+      channelId: channelIds.length === 1 ? channelIds[0] : null,
+      channelIds,
       address: logEntry.address,
-      args: decodedArgs(parsed),
+      args,
       blockNumber: logEntry.blockNumber,
       txHash: logEntry.transactionHash,
       logIndex: logEntry.index != null ? logEntry.index : logEntry.logIndex,
@@ -162,7 +217,11 @@ class ChainWatcher {
     for (const c of this.channels) { if (c.rollup) addresses.push(c.rollup); if (c.manager) addresses.push(c.manager); }
     if (addresses.length === 0) return safeHead + 1;
 
-    const logs = await this._provider.getLogs({ fromBlock, toBlock: safeHead, address: addresses });
+    const logs = await this._provider.getLogs({
+      fromBlock,
+      toBlock: safeHead,
+      address: [...new Set(addresses.map(a => a.toLowerCase()))],
+    });
     logs.sort((a, b) => a.blockNumber - b.blockNumber || (a.index ?? a.logIndex) - (b.index ?? b.logIndex));
 
     // Group by block, process each block fully before advancing the cursor past it.
@@ -220,4 +279,11 @@ class ChainWatcher {
   provider() { this._init(); return this._provider; }
 }
 
-module.exports = { ChainWatcher, ROLLUP_FRAGMENTS, MANAGER_FRAGMENTS, ROLLUP_GETTER_ABI };
+module.exports = {
+  ChainWatcher,
+  ROLLUP_FRAGMENTS,
+  MANAGER_FRAGMENTS,
+  ROLLUP_GETTER_ABI,
+  MANAGER_GETTER_ABI,
+  routeEventChannelIds,
+};

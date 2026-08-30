@@ -74,9 +74,21 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     }
 
     function _burnDescriptor() internal view returns (bytes32) {
+        return _burnDescriptorFor(TX_LEAF, PW_BASE_NONCE);
+    }
+
+    function _burnDescriptorFor(bytes32 txLeaf, uint32 baseNonce)
+        internal view returns (bytes32)
+    {
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d4244), TX_LEAF, _baseRecipient(alice), TOKEN_INDEX, PW_AMOUNT
+                bytes4(0x494d4432),
+                uint32(CHANNEL_ID),
+                baseNonce,
+                txLeaf,
+                _baseRecipient(alice),
+                TOKEN_INDEX,
+                PW_AMOUNT
             )
         );
     }
@@ -88,6 +100,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             recipient: alice,
             tokenIndex: TOKEN_INDEX,
             amount: PW_AMOUNT,
+            baseNonce: PW_BASE_NONCE,
             nullifier: PW_NULLIFIER,
             auxData: _burnDescriptor(),
             txLeaf: TX_LEAF
@@ -98,7 +111,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d5057), w.nullifier, w.recipient, w.tokenIndex, w.amount, w.auxData
+                bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData
             )
         );
     }
@@ -107,6 +120,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         internal view returns (ChannelSettlementManager.CloseIntent memory intent)
     {
         intent = _intentAt(epoch, stateVersion);
+        intent.channelFundAmounts[0] = DEFAULT_FUND_AMOUNT - PW_AMOUNT;
         intent.finalSettledTxChain =
             keccak256(abi.encodePacked(uint32(0x494d5443), PREV_CHAIN, _burnDescriptor()));
     }
@@ -248,8 +262,8 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     /// `challengeDeadline = min(now + challengePeriod, closeChallengeHorizon)`. The replacement
     /// branch admits an intent while `now <= pendingClose.challengeDeadline`, and the deadline can
     /// equal the horizon — so a rung landing at exactly `t == horizon` gets
-    /// `challengeDeadline == block.timestamp` and `finalizeClose()` (which requires only
-    /// `block.timestamp >= challengeDeadline`) succeeds in the same block.
+    /// `challengeDeadline == block.timestamp` and the historical `finalizeClose()` boundary
+    /// allowed same-block settlement. Finalization now requires a strictly later timestamp.
     ///
     /// Before the H-3 fix every rung bought a full fresh `challengePeriod`, so the final rung
     /// always left honest members one whole window to answer it. The clamp trades ladder LENGTH
@@ -359,24 +373,36 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             "every admitted rung, at every instant up to the horizon, keeps a usable window"
         );
 
-        // Past the horizon, and only past it, admission ends. That is what bounds the ladder.
+        // R3-4: the already-budgeted response tail also admits a strictly-newer replacement, but
+        // it cannot extend the fixed horizon+minResponse end.
         vm.warp(uint256(horizon) + 1);
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, 14);
         MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
+        assertEq(
+            manager.getPendingClose().challengeDeadline,
+            horizon + minResponse,
+            "tail response cannot extend the absolute end"
+        );
 
-        // A2 delays the exit by at most one response interval: the era ends at
-        // `horizon + MIN_CLOSE_RESPONSE_SECS`, a fixed overshoot independent of the ladder's length.
+        // Strict deadline ownership adds exactly one timestamp so replacement and finalization
+        // cannot both win at equality. After it, admission is permanently closed.
         vm.warp(uint256(manager.getPendingClose().challengeDeadline));
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
+        manager.finalizeClose();
+        vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
+        ChannelSettlementManager.CloseIntent memory afterEnd = _intentAt(9, 15);
+        MleVerifier.MleProof memory afterEndProof = _closeProof(afterEnd);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
+        manager.submitCloseIntent(afterEnd, afterEndProof);
         manager.finalizeClose();
         assertLe(
             vm.getBlockTimestamp(),
-            uint256(horizon) + minResponse,
-            "exit lands at the H-3 horizon plus at most one response interval"
+            uint256(horizon) + minResponse + 1,
+            "exit lands one timestamp after the final response interval"
         );
-        // v13 — the replacement round 2 refused as "the blackout" — is what settles.
-        assertEq(manager.finalizedStateVersion(), 13);
+        // v14 — the R3-4 response in the already-budgeted tail — is what settles.
+        assertEq(manager.finalizedStateVersion(), 14);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -445,8 +471,9 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             DEFAULT_FUND_AMOUNT,
             "the deduction actually ran"
         );
-        // The ledger entry is CONSUMED, so a duplicate registry slot cannot deduct it twice.
-        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), 0, "deduction consumed exactly once");
+        // Gross burn telemetry is retained; settlement is driven by the proof-bound post-state
+        // snapshot, not by consuming/subtracting this counter.
+        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -671,6 +698,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // Round 1 — eve's single cancel proof at v20 legitimately vetoes the burn once.
         _submitPwAndElapse(9, 12);
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
+        bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(pwDigest, 20);
         MleVerifier.MleProof memory replayedProof = _cancelProof(req);
 
@@ -678,7 +706,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         manager.cancelPartialWithdrawal(req, replayedProof);
         assertFalse(manager.partialWithdrawalPending(), "round 1: the burn is vetoed");
         assertEq(
-            manager.cancelledPartialWithdrawalRevivedVersion(pwDigest),
+            manager.cancelledPartialWithdrawalRevivedVersion(burnKey),
             20,
             "A4: the material is consumed against THIS burn"
         );
@@ -686,6 +714,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // Round 2 — the burner re-submits the SAME burn. The digest is stable, which is exactly
         // what made the replay work.
         _submitPwAndElapse(9, 12);
+        assertEq(manager.pendingPartialWithdrawalBurnKey(), burnKey, "logical burn key is stable");
         assertEq(
             manager.pendingPartialWithdrawalCloseIntentDigest(),
             pwDigest,
@@ -699,7 +728,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // BLOCKED: the burn goes through on the re-submission. Eve's veto was one-shot.
         //
         // R3-3 (round 3): the re-submission inherits the review window the cancel armed
-        // (`cancelledPartialWithdrawalReviewUntil[authDigest]`), so it authorizes LATER than it used
+        // (`cancelledPartialWithdrawalReviewUntil[burnKey]`), so it authorizes LATER than it used
         // to — but it still authorizes. That is the whole design: the extension delays, it never
         // refuses, because refusing would strand an already-debited burn.
         vm.warp(uint256(manager.pendingPartialWithdrawalDeadline()) + 1);
@@ -720,7 +749,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     /// cancel lane is a liveness aid against a griefer's wrong-nullifier submission. See the
     /// corrected block in `cancelPartialWithdrawal`.
     ///
-    /// PINS: the mapping being keyed on the burn digest rather than a scalar high-water mark.
+    /// PINS: the mapping being keyed on the IMBK logical burn rather than a scalar high-water mark.
     /// Collapse it to a scalar shared with `highestCancelledRevivedStateVersion` and burn #2's
     /// honest cancel below reverts.
     function test_A4_floorIsPerBurnAndDoesNotLockOutOtherCancels() external {
@@ -736,16 +765,29 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // Burn #1, cancelled at v20.
         _submitPwAndElapse(9, 12);
         bytes32 burn1 = manager.pendingPartialWithdrawalCloseIntentDigest();
+        bytes32 burnKey1 = manager.pendingPartialWithdrawalBurnKey();
         manager.cancelPartialWithdrawal(
             _cancelRequest(burn1, 20), _cancelProof(_cancelRequest(burn1, 20))
         );
 
-        // Burn #2 — a DIFFERENT burn, at a different state. An honest party holding only v20
+        // Burn #2 — a DIFFERENT IMD2 descriptor, at a different state. An honest party holding only v20
         // material cancels it. Neither the close lane's v50 nor burn #1's v20 impedes this.
-        _submitPwAndElapse(9, 13);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w2 = _authorizedWithdrawal();
+        w2.baseNonce = PW_BASE_NONCE + 1;
+        w2.txLeaf = keccak256("a4_second_burn");
+        w2.nullifier = keccak256("a4_second_nullifier");
+        w2.auxData = _burnDescriptorFor(w2.txLeaf, w2.baseNonce);
+        ChannelSettlementManager.CloseIntent memory i2 = _intentAt(9, 13);
+        i2.finalSettledTxChain =
+            keccak256(abi.encodePacked(uint32(0x494d5443), PREV_CHAIN, w2.auxData));
+        manager.submitPartialWithdrawalIntent(i2, _closeProof(i2), PREV_CHAIN, w2);
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+
         bytes32 burn2 = manager.pendingPartialWithdrawalCloseIntentDigest();
-        assertTrue(burn2 != burn1, "distinct burns have distinct digests");
-        assertEq(manager.cancelledPartialWithdrawalRevivedVersion(burn2), 0, "burn #2 is unmarked");
+        bytes32 burnKey2 = manager.pendingPartialWithdrawalBurnKey();
+        assertTrue(burn2 != burn1, "distinct burns have distinct close digests");
+        assertTrue(burnKey2 != burnKey1, "distinct IMD2 descriptors have distinct burn keys");
+        assertEq(manager.cancelledPartialWithdrawalRevivedVersion(burnKey2), 0, "burn #2 is unmarked");
         manager.cancelPartialWithdrawal(
             _cancelRequest(burn2, 20), _cancelProof(_cancelRequest(burn2, 20))
         );

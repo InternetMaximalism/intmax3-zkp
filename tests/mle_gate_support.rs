@@ -604,12 +604,13 @@ fn every_checked_in_fixture_parameter_round_trips() {
     let mut checked_rows = 0usize;
 
     for path in entries {
-        let value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let Some(gates) = value.get("gates").and_then(|g| g.as_array()) else {
             continue;
         };
         checked_files += 1;
+        let mut expected_rows = Vec::with_capacity(gates.len());
 
         for (row, entry) in gates.iter().enumerate() {
             checked_rows += 1;
@@ -645,7 +646,32 @@ fn every_checked_in_fixture_parameter_round_trips() {
                  verifier check constraints that are not the circuit's.",
                 path.display()
             );
+
+            // Route every checked-in fixture through the exact guard used by the exporter. The
+            // independent name re-derivation above supplies the gate parameters; the remaining
+            // layout values are fixture data because no CommonCircuitData is available in this
+            // cheap repository scan. In particular this makes the deployed evaluator's finite
+            // CosetInterpolation (gate 13) parameter envelope mandatory for every fixture, not
+            // merely covered by a synthetic negative test below.
+            expected_rows.push(ExpectedGateRow {
+                gate_id: rederived.gate_id,
+                selector_index: entry["selectorIndex"].as_u64().unwrap() as usize,
+                group_start: entry["groupStart"].as_u64().unwrap() as usize,
+                group_end: entry["groupEnd"].as_u64().unwrap() as usize,
+                gate_row_index: row,
+                num_constraints: entry["numConstraints"].as_u64().unwrap() as usize,
+                num_or_consts: rederived.num_or_consts,
+                param2: rederived.param2,
+                param3: rederived.param3,
+            });
         }
+
+        check_fixture_json_gates(&raw, &expected_rows).unwrap_or_else(|e| {
+            panic!(
+                "{}: checked-in fixture is outside the deployed on-chain evaluator envelope: {e}",
+                path.display()
+            )
+        });
     }
 
     assert!(
@@ -707,6 +733,50 @@ fn guard_rejects_a_gate_id_swapped_for_another_supported_one() {
         msg.contains("gateId"),
         "the rejection must name the field: {msg}"
     );
+}
+
+#[test]
+fn guard_rejects_coset_parameters_outside_the_solidity_constants_envelope() {
+    let (value, expected) = real_fixture_with_expectations();
+    let template = expected[0];
+
+    for (bits, degree, needle) in [
+        (0, 2, "subgroup_bits"),
+        (6, 2, "subgroup_bits"),
+        (4, 1, "minimum 2"),
+        (4, 17, "subgroup size"),
+    ] {
+        let mut one_gate = value.clone();
+        one_gate["gates"] = serde_json::json!([{
+            "name": format!("CosetInterpolationGate {{ subgroup_bits: {bits}, degree: {degree} }}"),
+            "gateId": 13,
+            "selectorIndex": template.selector_index,
+            "groupStart": template.group_start,
+            "groupEnd": template.group_end,
+            "gateRowIndex": 0,
+            "numConstraints": template.num_constraints,
+            "numOrConsts": bits,
+            "param2": degree,
+            "param3": 0
+        }]);
+        let expected = [ExpectedGateRow {
+            gate_id: 13,
+            selector_index: template.selector_index,
+            group_start: template.group_start,
+            group_end: template.group_end,
+            gate_row_index: 0,
+            num_constraints: template.num_constraints,
+            num_or_consts: bits,
+            param2: degree,
+            param3: 0,
+        }];
+        let err = check_fixture_json_gates(&one_gate.to_string(), &expected)
+            .expect_err("an unevaluable CosetInterpolation parameter set must be rejected");
+        assert!(
+            err.to_string().contains(needle),
+            "rejection for bits={bits}, degree={degree} must mention `{needle}`: {err}"
+        );
+    }
 }
 
 /// Audit M-10, second half: `whirParams.numCommitments`.

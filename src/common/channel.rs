@@ -44,8 +44,8 @@ const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
 const SPECIAL_CLOSE_DOMAIN: u32 = 0x494d5343; // "IMSC"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
 const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
-/// "IMBD" — amount-committing partial-withdrawal burn descriptor.
-pub const BURN_DESCRIPTOR_DOMAIN: u32 = 0x494d4244;
+/// "IMD2" — channel- and nonce-bound partial-withdrawal burn descriptor v2.
+pub const BURN_DESCRIPTOR_DOMAIN: u32 = 0x494d4432;
 // "IMCK" — domain separator for the post-close shared-native nullifier (HAZARD #8 fix). MUST match
 // the in-circuit derivation in `circuits::channel::post_close_claim_circuit` and the L1 mirror.
 const POST_CLOSE_NULLIFIER_DOMAIN: u32 = 0x494d434b; // "IMCK"
@@ -252,7 +252,7 @@ pub struct ChannelRecord {
     /// member_count`.
     ///
     /// WIDTH: u8 is sufficient — this is COSIGNER-slot space (`< member_count <= MAX_SIG_CLUSTER =
-    /// 16`), never a delegate/balance slot (audited 2026-07-18, u16 slot widening).
+    /// 8`), never a delegate/balance slot (audited 2026-07-18, u16 slot widening).
     pub bp_member_slot: u8,
     pub special_close_penalty: U256,
     pub close_freeze_nonce: u64,
@@ -340,15 +340,15 @@ impl ChannelRecord {
     }
 
     /// IMCR signing digest (pad-to-MAX D6). Member segment = `bp_member_slot`(1) +
-    /// `status`(1) + `member_count`(1) + ALL `MAX_CHANNEL_MEMBERS` pubkey hashes (16*8 = 128
+    /// `status`(1) + `member_count`(1) + ALL `MAX_CHANNEL_MEMBERS` pubkey hashes (1024*8 = 8192
     /// limbs, padding slots contribute their `Bytes32::default()` zero limbs) +
     /// `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the preimage (detail2 §H-1).
     ///
     /// PREIMAGE (exact): `[IMCR, channel_id(1), bp_member_slot(1), split_u64(close_freeze_nonce),
-    /// status(1), member_count(1), delegate_count(1), member_hashes(16*8), member_pubkeys_root(8),
+    /// status(1), member_count(1), delegate_count(1), member_hashes(1024*8), member_pubkeys_root(8),
     /// special_close_penalty(8), regev_pk_root(8)]`. The `member_count` limb replaces the legacy
     /// `CHANNEL_MEMBERS` constant limb in the same position; `delegate_count` is a single u32 limb
-    /// IMMEDIATELY AFTER `member_count` (delegate account). Hashing all 16 hashes (not just the
+    /// IMMEDIATELY AFTER `member_count` (delegate account). Hashing all 1024 hashes (not just the
     /// active ones) plus both counts fixes the member/delegate/padding split under the member
     /// signatures.
     ///
@@ -433,7 +433,7 @@ pub struct MemberSignature {
     /// Member slot (0..member_count) — array index into the channel's active member list.
     ///
     /// WIDTH: u8 is sufficient — state co-signing is COSIGNER-only (`member_count <=
-    /// MAX_SIG_CLUSTER = 16`); delegates never produce a `MemberSignature` (audited 2026-07-18).
+    /// MAX_SIG_CLUSTER = 8`); delegates never produce a `MemberSignature` (audited 2026-07-18).
     pub member_slot: u8,
     /// The signing member's SPHINCS+ pubkey hash (their identity).
     pub pk_g: Bytes32,
@@ -800,7 +800,13 @@ impl InterChannelTx {
         hash_words(
             &[
                 vec![INTER_CHANNEL_TX_DOMAIN_V5],
-                self.signed_small_block.signing_digest().to_u32_vec(),
+                // A11 is created before the N-of-N round finishes. Bind the immutable block
+                // message, not `SignedSmallBlock::signing_digest()`: the latter deliberately
+                // includes the member signature/proof blobs that are attached later, which made
+                // the sender's otherwise-valid proof fail on the final wire object. The message
+                // already commits channel/sequence/H2/H1/era; those are the values the sender is
+                // authorizing, while the later blobs authenticate that same message separately.
+                self.signed_small_block.message.signing_digest().to_u32_vec(),
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
                 self.destination_channel_id.to_u32_vec(),
@@ -892,11 +898,17 @@ impl InterChannelTx {
 
 /// Amount-committing descriptor stored in a burn Transfer's `aux_data`:
 ///
-/// `keccak256(abi.encodePacked(bytes4("IMBD"), txLeaf, recipient, tokenIndex, amount))`.
+/// `keccak256(abi.encodePacked(bytes4("IMD2"), sourceChannelId, baseNonce, txLeaf, recipient,
+/// tokenIndex, amount))`.
 ///
 /// `recipient` is the 32-byte ADDRESS_TAG value as it appears in the base Transfer; `amount` is
-/// the full uint256. Normal inter-channel sends do not use this descriptor and keep aux_data zero.
+/// the full uint256. `source_channel_id` and `base_nonce` are canonical single-u32 limbs, so two
+/// otherwise identical burns from different channels or base-account slots cannot share an
+/// authorization identity. Normal inter-channel sends do not use this descriptor and keep
+/// aux_data zero.
 pub fn burn_descriptor(
+    source_channel_id: ChannelId,
+    base_nonce: u32,
     tx_leaf: Bytes32,
     recipient: Bytes32,
     token_index: u32,
@@ -904,6 +916,8 @@ pub fn burn_descriptor(
 ) -> Bytes32 {
     let words: Vec<u32> = [BURN_DESCRIPTOR_DOMAIN]
         .into_iter()
+        .chain(source_channel_id.to_u32_vec())
+        .chain([base_nonce])
         .chain(tx_leaf.to_u32_vec())
         .chain(recipient.to_u32_vec())
         .chain([token_index])
@@ -1664,8 +1678,8 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// Close-circuit member-set commitment (detail2 §F-3, F5 soundness binding; pad-to-MAX D6).
 ///
 /// `member_set_commitment = keccak([IMCM, member_count, h_0(8), …, h_{MAX_SIG_CLUSTER-1}(8)])` over
-/// `member_count` (single u32 limb right after the domain) and ALL `MAX_SIG_CLUSTER` COSIGNER pubkey
-/// hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
+/// `member_count` (single u32 limb right after the domain) and ALL `MAX_SIG_CLUSTER` COSIGNER
+/// pubkey hashes in SLOT ORDER, where PADDING slots (`>= member_count`) contribute their
 /// `Bytes32::default()` (zero) limbs. This preimage is FIXED-LENGTH.
 ///
 /// SECURITY: this commits the active COSIGNER set INJECTIVELY — `member_count` fixes the
@@ -1680,17 +1694,16 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// balance slot capacity (`MAX_CHANNEL_MEMBERS`). Delegates hold balances but do NOT co-sign the
 /// close, so they never enter this commitment.
 ///
-/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_SIG_CLUSTER hashes,
-/// padding zeroed) rather than the "active-only" variable-length form, because the in-circuit
-/// keccak gadget takes a build-time-fixed input length and cannot hash a `member_count`-dependent
-/// number of words. The fixed form is cryptographically equivalent (member_count + zeroed padding
-/// is injective on the active set). This native helper MUST agree byte-for-byte with the in-circuit
-/// keccak (`ChannelCloseCircuit::new`).
+/// DESIGN NOTE (D6, forced): the preimage is fixed-length (member_count + all MAX_SIG_CLUSTER
+/// hashes, padding zeroed) rather than the "active-only" variable-length form, because the
+/// in-circuit keccak gadget takes a build-time-fixed input length and cannot hash a
+/// `member_count`-dependent number of words. The fixed form is cryptographically equivalent
+/// (member_count + zeroed padding is injective on the active set). This native helper MUST agree
+/// byte-for-byte with the in-circuit keccak (`ChannelCloseCircuit::new`).
 ///
-/// PENDING PHASE-2 CONTRACT MAX_SIG_CLUSTER SPLIT: the L1 Solidity mirror
-/// (`ChannelSettlementVerifier.sol`) still pads to `MAX_CHANNEL_MEMBERS`, so this now MISMATCHES
-/// the contract. The coordinated contract-side split is a separate follow-up task; until then the
-/// Rust↔Solidity cross-check vector is `#[ignore]`d.
+/// SOLIDITY MIRROR: `ChannelSettlementVerifier.closeMemberSetCommitment` pads the same fixed eight
+/// cosigner slots (its internal constant retains the legacy `MAX_CHANNEL_MEMBERS` name but equals
+/// Rust `MAX_SIG_CLUSTER = 8`). The Rust and Solidity preimages therefore have identical width.
 pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_SIG_CLUSTER], member_count: u8) -> Bytes32 {
     let count = member_count as usize;
     let mut words = Vec::with_capacity(2 + MAX_SIG_CLUSTER * 8);
@@ -1774,8 +1787,10 @@ mod tests {
 
     #[test]
     fn burn_descriptor_matches_frozen_cross_language_vector() {
-        // Solidity: keccak256(abi.encodePacked(bytes4("IMBD"), txLeaf, baseRecipient,
-        //                                      uint32(7), uint256(20))).
+        // Solidity: keccak256(abi.encodePacked(bytes4("IMD2"), uint32(1), uint32(9), txLeaf,
+        //                                      baseRecipient, uint32(7), uint256(20))).
+        let source_channel_id = ChannelId::new(1).unwrap();
+        let base_nonce = 9;
         let tx_leaf =
             Bytes32::from_hex("0x0000000000000000000000000000000000000000000000000000000000000001")
                 .unwrap();
@@ -1783,11 +1798,57 @@ mod tests {
             Bytes32::from_hex("0x02000000000000000000000000000000000000000000000000000000000000aa")
                 .unwrap();
         let expected =
-            Bytes32::from_hex("0xe53d8cf5a9b6cebadd222943673c931958739afde63b4a95c0cbc4ae0ddb5a0d")
+            Bytes32::from_hex("0xb6753ec0eaf281f39942bbc2293983db8369713fc8a3f9446f6c86c8b5c737f5")
                 .unwrap();
         assert_eq!(
-            burn_descriptor(tx_leaf, base_recipient, 7, U256::from(20u64)),
+            burn_descriptor(
+                source_channel_id,
+                base_nonce,
+                tx_leaf,
+                base_recipient,
+                7,
+                U256::from(20u64),
+            ),
             expected
+        );
+    }
+
+    #[test]
+    fn burn_descriptor_v2_binds_source_channel_and_base_nonce() {
+        let tx_leaf = Bytes32::from_u32_slice(&[1; 8]).unwrap();
+        let recipient = Bytes32::from_u32_slice(&[2; 8]).unwrap();
+        let amount = U256::from(20u64);
+        let base = burn_descriptor(
+            ChannelId::new(7).unwrap(),
+            9,
+            tx_leaf,
+            recipient,
+            3,
+            amount,
+        );
+        assert_ne!(
+            base,
+            burn_descriptor(
+                ChannelId::new(8).unwrap(),
+                9,
+                tx_leaf,
+                recipient,
+                3,
+                amount,
+            ),
+            "source channel must bind the IMD2 identity"
+        );
+        assert_ne!(
+            base,
+            burn_descriptor(
+                ChannelId::new(7).unwrap(),
+                10,
+                tx_leaf,
+                recipient,
+                3,
+                amount,
+            ),
+            "base-account nonce must bind the IMD2 identity"
         );
     }
 
@@ -2174,7 +2235,7 @@ mod tests {
         }
     }
 
-    /// Multi-N (D6 pad-to-MAX): `ChannelRecord::validate()` ACCEPTS member_count = 2 / 8 / 16
+    /// Multi-N (D6 pad-to-MAX): `ChannelRecord::validate()` ACCEPTS member_count = 2 / 5 / 8
     /// (the boundary and an interior value) when active slots are distinct + nonzero and padding
     /// slots are `Bytes32::default()`, and REJECTS the D6 boundary violations.
     #[test]
@@ -2238,7 +2299,7 @@ mod tests {
         ok_bp.validate().unwrap();
     }
 
-    /// `close_member_set_commitment` binds `member_count`: with the SAME 16-slot hash array, the
+    /// `close_member_set_commitment` binds `member_count`: with the SAME 8-slot cosigner hash array, the
     /// digest for count = 2 differs from count = 3. Proves member_count is genuinely part of the
     /// preimage (not ignored), so two active sets that share a hash prefix cannot collide.
     #[test]

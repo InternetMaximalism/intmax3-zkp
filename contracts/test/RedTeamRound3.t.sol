@@ -60,7 +60,13 @@ contract RedTeamRound3Test is CloseSettlementBase {
     function _burnDescriptor() internal view returns (bytes32) {
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d4244), TX_LEAF, _baseRecipient(alice), TOKEN_INDEX, PW_AMOUNT
+                bytes4(0x494d4432),
+                uint32(CHANNEL_ID),
+                PW_BASE_NONCE,
+                TX_LEAF,
+                _baseRecipient(alice),
+                TOKEN_INDEX,
+                PW_AMOUNT
             )
         );
     }
@@ -72,6 +78,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
             recipient: alice,
             tokenIndex: TOKEN_INDEX,
             amount: PW_AMOUNT,
+            baseNonce: PW_BASE_NONCE,
             nullifier: PW_NULLIFIER,
             auxData: _burnDescriptor(),
             txLeaf: TX_LEAF
@@ -82,7 +89,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d5057), w.nullifier, w.recipient, w.tokenIndex, w.amount, w.auxData
+                bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData
             )
         );
     }
@@ -91,6 +98,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         internal view returns (ChannelSettlementManager.CloseIntent memory intent)
     {
         intent = _intentAt(epoch, stateVersion);
+        intent.channelFundAmounts[0] = DEFAULT_FUND_AMOUNT - PW_AMOUNT;
         intent.finalSettledTxChain =
             keccak256(abi.encodePacked(uint32(0x494d5443), PREV_CHAIN, _burnDescriptor()));
     }
@@ -172,7 +180,8 @@ contract RedTeamRound3Test is CloseSettlementBase {
         manager.submitCloseIntent(stale2, _closeProof(stale2));
         bytes32 d2 = manager.computeCloseIntentDigest(stale2);
         uint64 horizon = manager.closeChallengeHorizon();
-        vm.warp(uint256(horizon) + 1);
+        uint64 absoluteEnd = horizon + manager.MIN_CLOSE_RESPONSE_SECS();
+        vm.warp(uint256(absoluteEnd) + 1);
 
         // ── the three OTHER latches remain exactly as armed as when the attack landed. ──────
         // (b) A1 still refuses the cancel with the newest material that exists.
@@ -181,7 +190,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.CancelCloseReplay.selector);
         manager.cancelClose(rescue, rescueProof);
 
-        // (c) the replacement lane is still shut past the horizon -- even with the head state.
+        // (c) the replacement lane is shut past the fixed response-tail end -- even with the head.
         ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 30);
         MleVerifier.MleProof memory headProof = _closeProof(head);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
@@ -210,7 +219,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
             DEFAULT_FUND_AMOUNT - PW_AMOUNT,
             "R3-1: the authorized burn is deducted, not double-drawn"
         );
-        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), 0, "ledger consumed exactly once");
+        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
     }
 
     /// MUTATION PIN for the R3-1 fix. The deduction must be REAL, not a no-op: with the same facts
@@ -397,9 +406,9 @@ contract RedTeamRound3Test is CloseSettlementBase {
         );
     }
 
-    /// The H-3 property R3-2 must not weaken: the ladder is still ABSOLUTELY bounded. However it is
-    /// walked, no rung is admissible past the horizon, so the era ends at `horizon + minResponse`
-    /// and not one second later.
+    /// The H-3 property must not weaken: the ladder is still ABSOLUTELY bounded. R3-4 opens the
+    /// already-budgeted tail to strictly-newer responses, but no replacement can move the fixed
+    /// `horizon + minResponse` end by one second.
     function test_R3_FIXED_A2_ladderIsStillBoundedAtHorizonPlusMinResponse() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory rung0 = _intentAt(9, 10);
@@ -411,27 +420,64 @@ contract RedTeamRound3Test is CloseSettlementBase {
         uint64 deadline = manager.getPendingClose().challengeDeadline;
         assertEq(deadline, horizon + minResp, "ladder end is the absolute cap");
 
-        // One second past the horizon nothing more is admissible -- even though the pending
-        // deadline is still `minResponse - 1` away, and even with a strictly newer state.
+        // R3-4: one second into the tail, a strictly-newer state is admissible and wins, but its
+        // deadline stays pinned to the same absolute end rather than buying another response rung.
         vm.warp(uint256(horizon) + 1);
         assertLt(vm.getBlockTimestamp(), uint256(deadline), "the response window is still open");
         ChannelSettlementManager.CloseIntent memory extra = _intentAt(9, nextVersion);
-        MleVerifier.MleProof memory extraProof = _closeProof(extra);
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(extra, extraProof);
+        manager.submitCloseIntent(extra, _closeProof(extra));
+        assertEq(manager.getPendingClose().challengeDeadline, deadline, "tail response cannot extend end");
 
-        // ...but the response lane is genuinely open: `cancelClose` needs the IDENTICAL material
-        // (a strictly newer N-of-N-signed state) and has no window bound at all. That is what makes
-        // the final rung answerable, and it is what the constant's claim now rests on.
-        bytes32 d = manager.getPendingClose().closeIntentDigest;
-        manager.cancelClose(
-            _cancelRequest(d, nextVersion), _cancelProof(_cancelRequest(d, nextVersion))
-        );
-        assertEq(
-            uint8(manager.channelStatus()),
-            uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active),
-            "the final rung IS answerable for the whole minResponse interval"
-        );
+        // Only after the fixed end is every further rung refused.
+        vm.warp(uint256(deadline) + 1);
+        ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, nextVersion + 1);
+        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
+        manager.submitCloseIntent(tooLate, tooLateProof);
+
+        manager.finalizeClose();
+        assertEq(manager.finalizedStateVersion(), nextVersion, "tail replacement is what settles");
+    }
+
+    /// R3-4 composition regression: an earlier era consumed cancel(v30), so a later final stale
+    /// rung cannot be answered by cancel. The v30 close replacement must remain usable during the
+    /// fixed response tail, and must not extend that tail.
+    function test_R3_FIXED_A1xA2_spentCancelVersionCanReplaceInResponseTail() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory era1 = _intentAt(9, 27);
+        manager.submitCloseIntent(era1, _closeProof(era1));
+        bytes32 d1 = manager.getPendingClose().closeIntentDigest;
+        manager.cancelClose(_cancelRequest(d1, 30), _cancelProof(_cancelRequest(d1, 30)));
+        assertEq(manager.highestCancelledRevivedStateVersion(), 30, "v30 cancel consumed");
+
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 27);
+        manager.submitCloseIntent(stale, _closeProof(stale));
+        uint64 horizon = manager.closeChallengeHorizon();
+        uint64 nextVersion = _walkLadderToHorizon(28);
+        assertEq(nextVersion, 30, "v29 is the final stale rung at the horizon");
+        uint64 absoluteEnd = horizon + manager.MIN_CLOSE_RESPONSE_SECS();
+        assertEq(manager.getPendingClose().challengeDeadline, absoluteEnd);
+
+        vm.warp(uint256(horizon) + 1);
+        bytes32 d2 = manager.getPendingClose().closeIntentDigest;
+        ChannelSettlementManager.CancelCloseRequest memory spent = _cancelRequest(d2, 30);
+        MleVerifier.MleProof memory spentProof = _cancelProof(spent);
+        vm.expectRevert(ChannelSettlementManager.CancelCloseReplay.selector);
+        manager.cancelClose(spent, spentProof);
+
+        ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 30);
+        manager.submitCloseIntent(head, _closeProof(head));
+        assertEq(manager.getPendingClose().finalStateVersion, 30, "spent cancel material still replaces");
+        assertEq(manager.getPendingClose().challengeDeadline, absoluteEnd, "tail remains fixed");
+
+        vm.warp(uint256(absoluteEnd) + 1);
+        ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, 31);
+        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
+        manager.submitCloseIntent(tooLate, tooLateProof);
+        manager.finalizeClose();
+        assertEq(manager.finalizedStateVersion(), 30, "newest available state settles");
     }
 
     /// The original A2 defect must stay fixed: a rung landing at exactly the horizon may NOT be
@@ -473,14 +519,15 @@ contract RedTeamRound3Test is CloseSettlementBase {
     //   in the proof-bound settled-tx chain), so such a bar permanently strands an
     //   already-debited burn -- the R3-1 lock class in a new lane. Instead the
     //   re-submission is ADMITTED but carries a LONGER window: a cancel arms
-    //   `cancelledPartialWithdrawalReviewUntil[authDigest] = now + 2*challengePeriod`,
-    //   and a re-submission of that digest takes it as the floor on its deadline.
+    //   `cancelledPartialWithdrawalReviewUntil[burnKey] = now + 2*challengePeriod`,
+    //   and a re-submission of that logical burn takes it as the floor on its deadline.
     //   Nothing is refused, nothing is stranded, and each attrition round is paid
     //   for in the ATTACKER's wall-clock instead of the DEFENDER's material.
     //
     //   It is a mitigation, not a block, and that is correct: authorizing a
     //   chain-bound burn is the RIGHT outcome. See the corrected claim in
-    //   `cancelPartialWithdrawal` -- recipient/token/amount are IMBD-pinned to the
+    //   `cancelPartialWithdrawal` -- source channel/base nonce/recipient/token/amount are
+    //   IMD2-pinned to the
     //   N-of-N-signed chain, an append-only entry is not un-committed by a later
     //   state, and an authorization pays nothing on its own (every payout needs a
     //   real withdrawal proof and a single-use proof-derived nullifier). The cancel
@@ -507,26 +554,27 @@ contract RedTeamRound3Test is CloseSettlementBase {
         vm.prank(eve);
         _submitPw(9, 20);
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        bytes32 authDigest = manager.pendingPartialWithdrawalAuthDigest();
+        bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
 
         ChannelSettlementManager.CancelCloseRequest memory veto = _cancelRequest(pwDigest, 30);
         manager.cancelPartialWithdrawal(veto, _cancelProof(veto));
         assertFalse(manager.partialWithdrawalPending(), "round 1: the stale burn is vetoed");
         assertEq(
-            manager.cancelledPartialWithdrawalRevivedVersion(pwDigest),
+            manager.cancelledPartialWithdrawalRevivedVersion(burnKey),
             30,
             "A4 consumed the DEFENDER's material"
         );
-        // R3-3: and it armed the review window on the AUTHORIZATION digest.
+        // R3-3: and it armed the review window on the logical burn key.
         assertEq(
-            manager.cancelledPartialWithdrawalReviewUntil(authDigest),
+            manager.cancelledPartialWithdrawalReviewUntil(burnKey),
             t0 + 2 * CHALLENGE_PERIOD,
-            "R3-3: the cancel arms a review deadline for this authorization digest"
+            "R3-3: the cancel arms a review deadline for this logical burn"
         );
 
         // Round 2: the identical intent, re-submitted for free.
         vm.prank(eve);
         _submitPw(9, 20);
+        assertEq(manager.pendingPartialWithdrawalBurnKey(), burnKey, "logical burn key is stable");
         assertEq(
             manager.pendingPartialWithdrawalCloseIntentDigest(),
             pwDigest,
@@ -572,7 +620,8 @@ contract RedTeamRound3Test is CloseSettlementBase {
         vm.prank(eve);
         _submitPw(9, 20);
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
-        assertEq(manager.cancelledPartialWithdrawalRevivedVersion(pwDigest), 0, "mark unset");
+        bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
+        assertEq(manager.cancelledPartialWithdrawalRevivedVersion(burnKey), 0, "mark unset");
         assertEq(
             manager.pendingPartialWithdrawalDeadline(),
             t0 + CHALLENGE_PERIOD,

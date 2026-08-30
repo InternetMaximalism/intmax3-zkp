@@ -19,6 +19,7 @@ function loadBurnRoute(relativeRoute, endpoint) {
   };
   let activeTicket = null;
   let cliCalls = 0;
+  let liveSettleCalls = 0;
 
   const originalLoad = Module._load;
   Module._load = function mockedLoad(request, parent, isMain) {
@@ -52,8 +53,12 @@ function loadBurnRoute(relativeRoute, endpoint) {
         stableRequestId: (kind) => `${kind}:test`,
         postInterChannel: async () => ({ requestId: 'test', blockNumber: 1 }),
         liveSnapshotExists: () => false,
-        liveSettleInterChannel: async () => null,
+        liveSettleInterChannel: async () => {
+          liveSettleCalls += 1;
+          return { baseNonce: 1 };
+        },
         liveBurnPayoutArtifacts: async () => ({}),
+        authoritativeBaseNonceEnv: async () => ({ INTMAX_LIVE_BASE_NONCE: '0' }),
       };
     }
     if (request === '../lib/cli') {
@@ -86,6 +91,7 @@ function loadBurnRoute(relativeRoute, endpoint) {
   return {
     setActive(ticket) { activeTicket = ticket; },
     cliCalls() { return cliCalls; },
+    liveSettleCalls() { return liveSettleCalls; },
     async invoke() {
       const response = {
         statusCode: 200,
@@ -118,6 +124,7 @@ for (const route of [
   test(`${route.file}: every non-terminal PW state rejects a second burn`, async () => {
     const harness = loadBurnRoute(route.file, route.endpoint);
     for (const status of [
+      'burn_pending',
       'burn_done',
       'settle_pending',
       'settle_blocked',
@@ -140,6 +147,26 @@ for (const route of [
     const response = await harness.invoke();
     assert.equal(response.statusCode, 200);
     assert.equal(harness.cliCalls(), 1);
+    assert.equal(
+      harness.liveSettleCalls(),
+      1,
+      'a successful co-sign must advance the resident base-state authority before returning',
+    );
+  });
+
+  test(`${route.file}: an exact burn_pending retry resumes instead of overwriting`, async () => {
+    const harness = loadBurnRoute(route.file, route.endpoint);
+    harness.setActive({
+      id: 'pw_test',
+      type: 'partial_withdrawal',
+      status: 'burn_pending',
+      params: { producerRequestId: 'burn:test', amount: '5', recipient: '0x1', tokenIndex: '0' },
+      steps: { burn: null, settle: null },
+    });
+    const response = await harness.invoke();
+    assert.equal(response.statusCode, 200);
+    assert.equal(harness.cliCalls(), 1);
+    assert.equal(harness.liveSettleCalls(), 1);
   });
 }
 

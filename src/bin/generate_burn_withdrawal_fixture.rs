@@ -6,7 +6,7 @@
 //! `c2c_withdrawal_payout.json`, `sepolia_withdrawal_payout.json`) is a NORMAL withdrawal
 //! (`aux_data == 0`). So `contracts/test/PartialWithdrawalPayout.t.sol` could only ever assert that
 //! the burn branch fails on the proof binding (`test_burnLeafWithoutAuthorization_failsClosed`) —
-//! it could never drive a REAL proved burn leaf THROUGH the proof binding and INTO the IMPW
+//! it could never drive a REAL proved burn leaf THROUGH the proof binding and INTO the IPW2
 //! authorization gate. This fixture closes that gap: it is a real 3-block lifecycle whose
 //! withdrawal leaf is proved with a nonzero burn descriptor, so `withdrawNative` verifies the proof
 //! and then reaches `if (w.auxData != 0) require(partialWithdrawalAuthorized[...])`.
@@ -20,7 +20,7 @@
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
-    common::channel::burn_descriptor,
+    common::{channel::burn_descriptor, channel_id::ChannelId},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
     wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
 };
@@ -55,13 +55,15 @@ fn main() -> anyhow::Result<()> {
         // A fixed, non-anvil L1 recipient so the fixture is self-describing and stable across runs.
         .unwrap_or_else(|| Address::from_u32_slice(&[0x00, 0x00, 0x00, 0x00, 0x0B0E_0000]).unwrap());
 
-    // A real IMBD-shaped burn descriptor. On the payout side `withdrawNative` never re-derives it
+    // A real IMD2-shaped burn descriptor. On the payout side `withdrawNative` never re-derives it
     // (that binding is the Manager's job at submit time — Phase 0/2), so its exact preimage does not
     // affect what this fixture proves; we still compute a genuine `burn_descriptor(...)` value
     // rather than an arbitrary constant so the leaf reads as a faithful burn. The tx_leaf and
     // recipient limbs here are documentation stand-ins for the inter-channel burn structure a live
     // burn would carry.
     let burn_aux = burn_descriptor(
+        ChannelId::new(channel_id as u64).expect("fixture channel id"),
+        0, // the fixture models the channel's first base-account send
         Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xB0E0]).unwrap(),
         Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 0xB0E1]).unwrap(),
         0,

@@ -41,10 +41,18 @@ async function flushPublishedHead(ch) {
     const result = readJson(interResultPath);
     const sourceHead = result.aHead || result.sourceHead;
     if (sourceHead && sameJsonValue(sourceHead.digest, snapshot.state.digest)) {
-      await producer.postInterChannel(
+      const debitPayload = readJson(interDebitPath);
+      const descriptor = readJson(interDescriptorPath);
+      let operation = null;
+      try { operation = readJson(wc(ch, 'inter_operation.json')); } catch (e) { /* pre-journal */ }
+      const producerRequestId = operation && operation.producerRequestId
+        ? operation.producerRequestId
+        : producer.stableRequestId('inter', { ch, debitPayload, transferDescriptor: descriptor });
+      const producerReceipt = await producer.postInterChannel(
         sourceHead,
-        readJson(interDebitPath),
-        readJson(interDescriptorPath),
+        debitPayload,
+        descriptor,
+        producerRequestId,
       );
       if (result.bFundImportState && result.bBundleApplyState) {
         await producer.syncOffchainHeads([
@@ -52,6 +60,18 @@ async function flushPublishedHead(ch) {
           result.bBundleApplyState,
         ]);
       }
+      // Producer admission and the resident private/base proof are two durable phases. Replaying
+      // only the first after a crash leaves the public channel head advanced while /base-head still
+      // exposes the old nonce; the next request can then be signed at a duplicate cursor. The live
+      // service keys idempotence by the producer request id, so this replay is safe both before and
+      // after a successful prior settlement.
+      await producer.liveSettleInterChannel(
+        ch,
+        producerReceipt,
+        sourceHead,
+        debitPayload,
+        descriptor,
+      );
     }
   }
 

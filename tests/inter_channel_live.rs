@@ -177,6 +177,7 @@ fn run_positive(
     } = build_inter_channel_send(
         &a.keys[sender_slot as usize],
         &a.snapshot,
+        0, // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         dest_id,
         recipient_slot,
@@ -512,6 +513,7 @@ fn inter_channel_live_send_and_credit() {
         let built = build_inter_channel_send(
             &a.keys[sender_slot as usize],
             &a.snapshot,
+            0, // registered ChannelLeaf has not consumed a base send slot
             sender_slot,
             dest_id,
             recipient_slot,
@@ -630,6 +632,7 @@ fn inter_channel_live_token1_send_and_credit() {
     } = build_inter_channel_send_token(
         &a.keys[sender_slot as usize],
         &a_snapshot,
+        0, // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         dest_id,
         recipient_slot,

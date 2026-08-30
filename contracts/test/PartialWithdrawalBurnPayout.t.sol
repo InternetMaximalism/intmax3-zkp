@@ -14,7 +14,7 @@ import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 ///         `PartialWithdrawalPayout.t.sol` runs against the DEFAULT fixture, whose leaf is a normal
 ///         withdrawal (`aux_data == 0`). It therefore could only assert that a FORGED burn leaf
 ///         fails on the proof binding (`test_burnLeafWithoutAuthorization_failsClosed`) — it could
-///         never carry a REAL proof for an `aux != 0` leaf THROUGH the binding and INTO the IMPW
+///         never carry a REAL proof for an `aux != 0` leaf THROUGH the binding and INTO the IPW2
 ///         authorization gate. This suite loads the `burn_` fixture set — the repo's first payout
 ///         artifact proved with a nonzero burn descriptor (P3 HEAVY) — so every test here exercises
 ///         `withdrawNative`'s burn branch with a genuinely proof-verified leaf.
@@ -37,13 +37,9 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         return "burn_";
     }
 
-    /// The IMPW auth digest, recomputed exactly as `IntmaxRollup._withdrawalAuthDigest`.
+    /// The IPW2 auth digest, recomputed exactly as `IntmaxRollup._withdrawalAuthDigest`.
     function _authDigest(IntmaxRollup.Withdrawal memory w) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(0x494d5057), w.nullifier, w.recipient, w.tokenIndex, w.amount, w.auxData
-            )
-        );
+        return keccak256(abi.encodePacked(bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData));
     }
 
     function _registerManager() internal {
@@ -87,12 +83,16 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         assertEq(rollup.pendingWithdrawals(ws[0].recipient), ws[0].amount, "burn leaf paid");
         assertEq(rollup.totalEscrowed(), escrowBefore - ws[0].amount, "escrow debited exactly");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
+        assertFalse(
+            rollup.partialWithdrawalAuthorized(_authDigest(ws[0])),
+            "IPW2 authorization is consumed by the first successful proof-backed payout"
+        );
     }
 
     // ── P4-3: a real burn leaf without an authorization reverts AT the flag check ─────────────────
 
     /// THE NEW EVIDENCE. The leaf is proof-verified (real `aux != 0` proof), so `_verifyWithdrawalSet`
-    /// PASSES; the revert is therefore `PartialWithdrawalNotAuthorized` from the IMPW gate itself —
+    /// PASSES; the revert is therefore `PartialWithdrawalNotAuthorized` from the IPW2 gate itself —
     /// not `WithdrawalPublicInputsMismatch` from the proof binding, which is all the forged-leaf test
     /// in `PartialWithdrawalPayout.t.sol` can reach. This proves the second factor actually guards a
     /// proven leaf: the burn branch is entered, and it fails closed for want of channel consent.
@@ -102,9 +102,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         assertTrue(ws[0].auxData != bytes32(0), "precondition: burn leaf");
-        assertFalse(
-            rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "precondition: not authorized"
-        );
+        assertFalse(rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "precondition: not authorized");
 
         MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
         vm.expectRevert(IntmaxRollup.PartialWithdrawalNotAuthorized.selector);
@@ -222,7 +220,10 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         rollup.withdrawNative(ws, prover, wproof);
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
 
-        // Second time: rejected on the shared nullifier, even with the authorization still standing.
+        assertFalse(rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "one-shot IPW2 authorization consumed");
+
+        // Second time: the shared nullifier check is earlier and independently rejects the exact
+        // proof replay; a fresh-nullifier leaf would instead reach the now-cleared IPW2 flag.
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }

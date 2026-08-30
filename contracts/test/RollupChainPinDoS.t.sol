@@ -5,8 +5,8 @@ pragma solidity ^0.8.24;
 //
 // `_pendingDepositHashChain` and `_pendingChannelRegHashChain` are LIVE CUMULATIVE and are folded
 // into the last sub-block at POSTING time. A producer generates its witness against the values it
-// reads, so ANY address that folds a record in between — a 1 wei `deposit()`, or a
-// `registerChannel()` — makes `_postBlock` commit a different chain than the proof was built over.
+// reads, so a 1 wei permissionless `deposit()` or a deployer-authorized `registerChannel()` landing
+// in between makes `_postBlock` commit a different chain than the proof was built over.
 // `finalize` then fails SILENTLY (it returns false), `finalizedStateRoots` never advances, and EVERY
 // withdrawal is blocked until the ~12 h `FINALIZE_DEADLINE_BLOCKS` timeout lets someone truncate the
 // stuck submission. One cheap transaction per window bought a 12-hour chain halt, repeatable.
@@ -77,8 +77,8 @@ contract RollupChainPinDoSTest is Test {
         assertEq(rollup.nextSubmissionId(), 1, "the retry posted");
     }
 
-    /// The same for the registration writer (the originally-reported half of M-5).
-    function test_M5_griefersRegistrationMakesThePostRevertCleanly() public {
+    /// The same clean retry behavior for an authorized registration racing the producer's pin.
+    function test_M5_authorizedRegistrationMakesThePostRevertCleanly() public {
         bytes32 pin = rollup.pendingChainsPin();
 
         bytes32[] memory pk = new bytes32[](2);
@@ -90,8 +90,7 @@ contract RollupChainPinDoSTest is Test {
         address[] memory rc = new address[](2);
         rc[0] = address(0x1001); rc[1] = address(0x1002);
 
-        vm.prank(GRIEFER);
-        rollup.registerChannel{value: 0.003 ether}(4242, 0, 0, pk, pkb, rg, rc);
+        rollup.registerChannel(4242, 0, 0, pk, pkb, rg, rc);
 
         _mockBlob();
         vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
@@ -107,10 +106,9 @@ contract RollupChainPinDoSTest is Test {
         assertEq(rollup.nextSubmissionId(), 1, "honest post landed");
     }
 
-    /// M-5 (squatting half): registering an id costs the fee, and the fee reaches the treasury
-    /// through the existing pull path. Before the fee, bricking any predictable channel id
-    /// permanently cost only gas — registration is permissionless AND one-time per id.
-    function test_M5_squattingCostsTheRegistrationFee() public {
+    /// M-5 (squatting half): a targeted front-run is an authorization problem, not a pricing
+    /// problem. A stranger cannot occupy the one-shot id, even if it sends the retired fee amount.
+    function test_M5_channelSquattingIsDeployerOnlyEvenWithLegacyFee() public {
         bytes32[] memory pk = new bytes32[](2);
         pk[0] = bytes32(uint256(11)); pk[1] = bytes32(uint256(12));
         bytes32[] memory pkb = new bytes32[](2);
@@ -120,19 +118,24 @@ contract RollupChainPinDoSTest is Test {
         address[] memory rc = new address[](2);
         rc[0] = address(0x1001); rc[1] = address(0x1002);
 
-        uint256 fee = rollup.CHANNEL_REGISTRATION_FEE();
-        assertGt(fee, 0, "a free registration is a free brick");
-
-        // Underpaying is refused outright.
+        // The function-level authorization produces the explicit reason on an ordinary call.
         vm.prank(GRIEFER);
-        vm.expectRevert(IntmaxRollup.InsufficientRegistrationFee.selector);
-        rollup.registerChannel{value: fee - 1}(4242, 0, 0, pk, pkb, rg, rc);
+        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
+        rollup.registerChannel(4242, 0, 0, pk, pkb, rg, rc);
 
-        // Paying works, and the fee is credited to the treasury (this test contract).
-        uint256 before = rollup.pendingWithdrawals(address(this));
+        // A legacy caller trying to attach the former 0.003 ETH fee is rejected by the nonpayable
+        // ABI before it can occupy the id.
+        bytes memory callData = abi.encodeWithSelector(
+            rollup.registerChannel.selector, 4242, 0, 0, pk, pkb, rg, rc
+        );
         vm.prank(GRIEFER);
-        rollup.registerChannel{value: fee}(4242, 0, 0, pk, pkb, rg, rc);
-        assertEq(rollup.pendingWithdrawals(address(this)) - before, fee, "fee credited to treasury");
+        (bool ok, ) = address(rollup).call{value: 0.003 ether}(callData);
+        assertFalse(ok, "legacy fee must not bypass deployer authorization");
+        assertEq(rollup.channelMemberSetCommitment(4242), bytes32(0), "target id remains free");
+
+        // The immutable deployer can still perform the intended one-shot registration.
+        rollup.registerChannel(4242, 0, 0, pk, pkb, rg, rc);
+        assertTrue(rollup.channelMemberSetCommitment(4242) != bytes32(0));
     }
 
     /// The unpinned overload is devnet-only, so a real deployment cannot skip the pin.

@@ -4,10 +4,11 @@
 // Uses Node's built-in fetch (Node 18+); no extra dependency.
 
 class ApiClient {
-  constructor({ baseUrl, timeoutMs = 600_000, maxRetries = 3 }) {
+  constructor({ baseUrl, timeoutMs = 600_000, maxRetries = 3, bearerToken = '' }) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.timeoutMs = timeoutMs;
     this.maxRetries = maxRetries;
+    this.bearerToken = bearerToken;
   }
 
   async _req(method, pathname, body) {
@@ -16,9 +17,11 @@ class ApiClient {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), this.timeoutMs);
       try {
+        const headers = body ? { 'content-type': 'application/json' } : {};
+        if (this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
         const res = await fetch(this.baseUrl + pathname, {
           method,
-          headers: body ? { 'content-type': 'application/json' } : {},
+          headers,
           body: body ? JSON.stringify(body) : undefined,
           signal: ctrl.signal,
         });

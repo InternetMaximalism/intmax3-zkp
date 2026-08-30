@@ -187,7 +187,7 @@ contract C2CFullE2ETest is Test {
         bytes32[] memory pkBs = vm.parseJsonBytes32Array(lc, string.concat(key, ".member_pk_bs"));
         bytes32[] memory regev = vm.parseJsonBytes32Array(lc, string.concat(key, ".regev_pk_digests"));
         address[] memory recipients = vm.parseJsonAddressArray(lc, string.concat(key, ".recipients"));
-        rollup.registerChannel{value: 0.003 ether}(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
+        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
     }
 
     function _deposit() internal {

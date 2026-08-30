@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID} from "../src/ChannelSettlementManager.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
@@ -10,23 +10,35 @@ import {FixtureLib} from "./FixtureLib.sol";
 /// @notice Reads intent + withdrawal fields from `test/data/pw_submit.json` and drives the
 ///         `manager.submitPartialWithdrawalIntent` call with the real wrapped-close MLE proof.
 contract SubmitPartialWithdrawal is Script {
-    function _read(string memory f) internal view returns (string memory) {
+    error LocalDevnetOnly(uint256 actualChainId);
+
+    function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
     function _parseAmounts(string memory j) internal pure returns (uint256[10] memory a) {
         string[] memory raw = vm.parseJsonStringArray(j, ".channel_fund_amounts");
         require(raw.length == 10, "channel_fund_amounts must have 10 entries");
-        for (uint256 i = 0; i < 10; i++) a[i] = vm.parseUint(raw[i]);
+        for (uint256 i = 0; i < 10; i++) {
+            a[i] = vm.parseUint(raw[i]);
+        }
     }
 
     function _parseRegistry(string memory j) internal pure returns (uint32[10] memory r) {
         uint256[] memory raw = vm.parseJsonUintArray(j, ".token_registry");
         require(raw.length == 10, "token_registry must have 10 entries");
-        for (uint256 i = 0; i < 10; i++) r[i] = uint32(raw[i]);
+        for (uint256 i = 0; i < 10; i++) {
+            r[i] = uint32(raw[i]);
+        }
     }
 
     function run() external {
+        // This script stages mutable test fixtures and uses the anvil-only partial-withdrawal E2E
+        // lifecycle. Refuse every other chain before reading a fixture or resolving a target.
+        if (block.chainid != SETTLEMENT_LOCAL_DEVNET_CHAIN_ID) {
+            revert LocalDevnetOnly(block.chainid);
+        }
+
         string memory j = _read("pw_submit.json");
         address managerAddr = vm.parseJsonAddress(j, ".manager");
         ChannelSettlementManager manager = ChannelSettlementManager(payable(managerAddr));
@@ -55,6 +67,7 @@ contract SubmitPartialWithdrawal is Script {
         w.recipient = vm.parseJsonAddress(j, ".withdrawal_recipient");
         w.tokenIndex = uint32(vm.parseJsonUint(j, ".withdrawal_token_index"));
         w.amount = vm.parseJsonUint(j, ".withdrawal_amount");
+        w.baseNonce = uint32(vm.parseJsonUint(j, ".withdrawal_base_nonce"));
         w.nullifier = vm.parseJsonBytes32(j, ".withdrawal_nullifier");
         w.auxData = vm.parseJsonBytes32(j, ".withdrawal_aux_data");
         w.txLeaf = vm.parseJsonBytes32(j, ".burn_tx_leaf");

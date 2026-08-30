@@ -68,7 +68,13 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     function _burnDescriptor() internal view returns (bytes32) {
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d4244), TX_LEAF, _baseRecipient(alice), TOKEN_INDEX, PW_AMOUNT
+                bytes4(0x494d4432),
+                uint32(CHANNEL_ID),
+                PW_BASE_NONCE,
+                TX_LEAF,
+                _baseRecipient(alice),
+                TOKEN_INDEX,
+                PW_AMOUNT
             )
         );
     }
@@ -80,6 +86,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
             recipient: alice,
             tokenIndex: TOKEN_INDEX,
             amount: PW_AMOUNT,
+            baseNonce: PW_BASE_NONCE,
             nullifier: PW_NULLIFIER,
             auxData: _burnDescriptor(),
             txLeaf: TX_LEAF
@@ -90,7 +97,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d5057), w.nullifier, w.recipient, w.tokenIndex, w.amount, w.auxData
+                bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData
             )
         );
     }
@@ -112,6 +119,34 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
             intent, _closeProof(intent), PREV_CHAIN, _authorizedWithdrawal()
         );
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+    }
+
+    /// The deadline boundary has one owner: replacement. At `now == deadline`, finalization must
+    /// fail and a strictly-newer close must still land, so transaction ordering cannot choose the
+    /// settled state. The replacement itself becomes finalizable only strictly after its deadline.
+    function test_closeDeadlineEqualityBelongsToReplacementNotFinalize() public {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 10);
+        manager.submitCloseIntent(stale, _closeProof(stale));
+
+        uint64 staleDeadline = manager.getPendingClose().challengeDeadline;
+        vm.warp(staleDeadline);
+
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
+        manager.finalizeClose();
+
+        ChannelSettlementManager.CloseIntent memory newer = _intentAt(9, 11);
+        manager.submitCloseIntent(newer, _closeProof(newer));
+        assertEq(manager.getPendingClose().finalStateVersion, 11, "replacement owns equality");
+
+        uint64 newerDeadline = manager.getPendingClose().challengeDeadline;
+        vm.warp(newerDeadline);
+        vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
+        manager.finalizeClose();
+
+        vm.warp(uint256(newerDeadline) + 1);
+        manager.finalizeClose();
+        assertEq(manager.finalizedStateVersion(), 11, "newer state settles after strict deadline");
     }
 
     /// Drive a full close of the channel at `(epoch, stateVersion)`, from Active to Closed.
@@ -378,9 +413,9 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
             "every rung of the ladder landed within the era's absolute horizon"
         );
 
-        // R3-2: past the horizon no further rung is admitted, even though the raw
-        // `challengeDeadline` check would still have allowed one (the last rung's floored deadline
-        // is `horizon + minResponse`). THIS is what bounds the ladder now.
+        // R3-4: the last rung's already-budgeted response tail remains open to a strictly-newer
+        // close (cancel material may have been consumed in an earlier era), but that response must
+        // not move the fixed `horizon + minResponse` end.
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, version + 1);
         MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
         vm.warp(uint256(horizon) + 1);
@@ -389,24 +424,30 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
             vm.getBlockTimestamp(),
             "the raw deadline check alone would still admit this rung"
         );
-        vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
+        assertEq(
+            manager.getPendingClose().challengeDeadline,
+            horizon + minResponse,
+            "tail replacement must not extend the absolute end"
+        );
 
-        // ...and it stays closed for the rest of the final rung's response interval.
-        vm.warp(uint256(horizon) + minResponse);
+        // It closes permanently one second after that fixed end.
+        vm.warp(uint256(horizon) + minResponse + 1);
+        ChannelSettlementManager.CloseIntent memory afterEnd = _intentAt(9, version + 2);
+        MleVerifier.MleProof memory afterEndProof = _closeProof(afterEnd);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
-        manager.submitCloseIntent(tooLate, tooLateProof);
+        manager.submitCloseIntent(afterEnd, afterEndProof);
 
         manager.finalizeClose();
         assertEq(
             uint256(manager.channelStatus()),
             uint256(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "exit is reachable one response interval past the horizon, not delayed indefinitely"
+            "exit is reachable strictly after the final response deadline"
         );
         assertEq(
             vm.getBlockTimestamp(),
-            uint256(horizon) + minResponse,
-            "the era's absolute end is horizon + MIN_CLOSE_RESPONSE_SECS, whatever the ladder did"
+            uint256(horizon) + minResponse + 1,
+            "finalization is one timestamp after horizon + MIN_CLOSE_RESPONSE_SECS"
         );
     }
 

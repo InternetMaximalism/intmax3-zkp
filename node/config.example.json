@@ -5,6 +5,9 @@
   "confirmations": 2,
   "pollIntervalMs": 4000,
   "apiBaseUrl": "http://127.0.0.1:8100",
+  "cosignerHost": "127.0.0.1",
+  "cosignerPort": 8200,
+  "cosignerMaxBodyBytes": 1048576,
   "tokensManifest": "./tokens.json",
   "channels": [
     { "id": 7, "rollup": "0x0000000000000000000000000000000000000000", "manager": "0x0000000000000000000000000000000000000000", "verifier": "0x0000000000000000000000000000000000000000", "workDir": "../wallet-live-work/ch7" }

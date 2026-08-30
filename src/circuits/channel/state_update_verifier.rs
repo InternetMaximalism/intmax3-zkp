@@ -633,8 +633,9 @@ impl InterChannelSendUpdateWitness {
         let receiver_delta = &self.inter_channel_tx.receiver_deltas[0];
         // One key per member: the receiver pubkey hash is self-describing (no key_id embedding to
         // re-check). Cross-channel membership of the receiver is the receiving channel's concern.
-        // Normal C2C pushes the tx leaf. A burn pushes the amount-committing IMBD descriptor that
-        // is also the base Transfer's aux_data; this is the N-of-N-signed half of F-AUX-1.
+        // Normal C2C pushes the tx leaf. A burn pushes the channel- and nonce-bound IMD2
+        // descriptor that is also the base Transfer's aux_data; this is the N-of-N-signed half of
+        // F-AUX-1.
         let tx_leaf = self
             .inter_channel_tx
             .tx_leaf_hash()
@@ -643,6 +644,8 @@ impl InterChannelSendUpdateWitness {
             == crate::constants::BURN_CHANNEL_ID as u32
         {
             burn_descriptor(
+                self.inter_channel_tx.source_channel_id,
+                self.inter_channel_tx.base_nonce,
                 tx_leaf,
                 receiver_delta.receiver_pk_g,
                 self.inter_channel_tx.token_index,

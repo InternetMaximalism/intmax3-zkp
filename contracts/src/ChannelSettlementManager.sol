@@ -68,10 +68,10 @@ interface IChannelSettlementVerifier {
         MleVerifier.MleProof calldata mleProof
     ) external view returns (bool);
 
-    function verifyCloseIntent(
-        CloseProofFields calldata fields,
-        MleVerifier.MleProof calldata proof
-    ) external view returns (bool);
+    function verifyCloseIntent(CloseProofFields calldata fields, MleVerifier.MleProof calldata proof)
+        external
+        view
+        returns (bool);
 
     function verifySpecialClose(
         bytes4 channelId,
@@ -136,10 +136,7 @@ interface IChannelSettlementVerifier {
         bytes calldata proof
     ) external pure returns (bool);
 
-    function closeMemberSetCommitment(
-        bytes32[8] memory memberPkGs,
-        uint8 memberCount
-    ) external pure returns (bytes32);
+    function closeMemberSetCommitment(bytes32[8] memory memberPkGs, uint8 memberCount) external pure returns (bytes32);
 }
 
 /// @notice Read-only view of the rollup's per-channel registration (the SINGLE SOURCE OF TRUTH for
@@ -185,7 +182,7 @@ contract ChannelSettlementManager {
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
     /// order 0..memberCount. Slots `memberCount..MAX_MEMBER_COUNT` are zero padding. Mirrors the
-    /// Rust `MAX_CHANNEL_MEMBERS` constant (src/constants.rs).
+    /// Rust `MAX_SIG_CLUSTER` constant (src/constants.rs); the 1024-slot balance capacity is separate.
     uint256 internal constant MAX_MEMBER_COUNT = 8;
     uint256 internal constant MIN_MEMBER_COUNT = 2;
     /// Fixed per-channel token capacity — the width of every `channelFundAmounts` / `tokenRegistry`
@@ -260,8 +257,15 @@ contract ChannelSettlementManager {
     error PartialWithdrawalNotPending();
     error PartialWithdrawalAuxDataZero();
     error PartialWithdrawalChainMismatch();
-    /// The withdrawal economics do not reproduce the N-of-N-signed IMBD burn descriptor.
+    /// The withdrawal economics do not reproduce the N-of-N-signed IMD2 burn descriptor.
     error PartialWithdrawalDescriptorMismatch();
+    /// A singleton pending slot may be refreshed only for the same logical IMBK burn. Replacing it
+    /// with a different burn would erase the first burn's only authorization path.
+    error PartialWithdrawalDifferentBurnPending();
+    /// This logical IMBK burn already finalized once. Manager finalization and Rollup
+    /// authorization are atomic, so resubmitting it has no recovery value and could monopolize the
+    /// singleton pending slot or re-enable a consumed one-shot payout capability.
+    error PartialWithdrawalAlreadyAccounted();
     error PartialWithdrawalNotNewer();
     /// A4: this burn has already been cancelled once at this revived version — the cancel proof is
     /// being REPLAYED against the burner's re-submission. See `cancelPartialWithdrawal`.
@@ -297,11 +301,7 @@ contract ChannelSettlementManager {
         Closed
     }
 
-    event CloseRequested(
-        address indexed requester,
-        uint64 closeRequestedAt,
-        uint64 closeFreezeNonce
-    );
+    event CloseRequested(address indexed requester, uint64 closeRequestedAt, uint64 closeFreezeNonce);
 
     event CloseSubmitted(
         bytes32 indexed closeIntentDigest,
@@ -326,16 +326,11 @@ contract ChannelSettlementManager {
     );
 
     event CloseCancelled(
-        bytes32 indexed closeIntentDigest,
-        bytes32 indexed revivedChannelStateDigest,
-        uint64 revivedStateVersion
+        bytes32 indexed closeIntentDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion
     );
 
     event LateOutgoingDebitAccepted(
-        bytes32 indexed closeIntentDigest,
-        bytes32 indexed sourceTxHash,
-        bytes32 indexed debitNullifier,
-        uint64 amount
+        bytes32 indexed closeIntentDigest, bytes32 indexed sourceTxHash, bytes32 indexed debitNullifier, uint64 amount
     );
 
     event CloseFinalized(
@@ -368,26 +363,17 @@ contract ChannelSettlementManager {
     event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
 
     event PartialWithdrawalSubmitted(
-        bytes32 indexed authDigest,
-        bytes32 indexed chainKey,
-        uint64 challengeDeadline,
-        uint64 finalStateVersion
+        bytes32 indexed authDigest, bytes32 indexed chainKey, uint64 challengeDeadline, uint64 finalStateVersion
     );
 
     event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey);
     /// @notice R3-1: emitted by `finalizeClose` when the settled close is strictly older than an
     ///         already-authorized burn and the burn's value is therefore deducted from that token's
     ///         accrual cap instead of the settlement being refused.
-    event AuthorizedBurnDeducted(
-        uint32 indexed tokenIndex,
-        uint256 deducted,
-        uint256 remainingFundAmount
-    );
+    event AuthorizedBurnDeducted(uint32 indexed tokenIndex, uint256 deducted, uint256 remainingFundAmount);
 
     event PartialWithdrawalCancelled(
-        bytes32 indexed authDigest,
-        bytes32 indexed revivedChannelStateDigest,
-        uint64 revivedStateVersion
+        bytes32 indexed authDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion
     );
 
     /// @dev Mirror of Rust `CloseIntent` (src/common/channel.rs), minus the channel id (this
@@ -508,18 +494,13 @@ contract ChannelSettlementManager {
     ///      keccak over the IMCK domain word + closeIntentDigest(8 u32) + incomingTxHash(8 u32) +
     ///      receiverPkG(8 u32). Each bytes32 is 8 big-endian u32 words, so `abi.encodePacked` of the
     ///      domain (bytes4) + the three bytes32 reproduces the preimage byte stream.
-    function _deriveSharedNativeNullifier(
-        bytes32 closeIntentDigest,
-        bytes32 incomingTxHash,
-        bytes32 receiverPkG
-    ) internal pure returns (bytes32) {
+    function _deriveSharedNativeNullifier(bytes32 closeIntentDigest, bytes32 incomingTxHash, bytes32 receiverPkG)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(
-            abi.encodePacked(
-                bytes4(POST_CLOSE_NULLIFIER_DOMAIN),
-                closeIntentDigest,
-                incomingTxHash,
-                receiverPkG
-            )
+            abi.encodePacked(bytes4(POST_CLOSE_NULLIFIER_DOMAIN), closeIntentDigest, incomingTxHash, receiverPkG)
         );
     }
 
@@ -536,9 +517,14 @@ contract ChannelSettlementManager {
         address recipient;
         uint32 tokenIndex;
         uint256 amount;
+        /// Base private-state nonce consumed by the burn. It is part of the IMD2 descriptor so
+        /// the signed channel history commits to the exact source-channel transition.
+        uint32 baseNonce;
+        /// Retained for withdrawal-proof compatibility and diagnostics. It is deliberately NOT
+        /// part of the IPW2 authorization digest: the manager never verifies this proof-side value.
         bytes32 nullifier;
         bytes32 auxData;
-        /// Regev tx leaf used as an input to IMBD. It is not independently trusted: `auxData`
+        /// Regev tx leaf used as an input to IMD2. It is not independently trusted: `auxData`
         /// is pinned by the close chain and must equal the recompute over this leaf + economics.
         bytes32 txLeaf;
     }
@@ -604,7 +590,7 @@ contract ChannelSettlementManager {
     /// `challengeDeadline = min(now + challengePeriod, closeChallengeHorizon)`, and the replacement
     /// branch admits a rung at `now == pendingClose.challengeDeadline`. A rung landing at exactly
     /// `now == closeChallengeHorizon` therefore received `challengeDeadline == block.timestamp`, and
-    /// `finalizeClose()` (which needs only `now >= challengeDeadline`) settled it IN THE SAME BLOCK.
+    /// the historical `finalizeClose()` equality boundary settled it IN THE SAME BLOCK.
     /// The attacker picked the settled state with literally zero opportunity for an on-chain reply —
     /// a narrowing the H-3 rationale explicitly denied.
     ///
@@ -616,11 +602,11 @@ contract ChannelSettlementManager {
     /// before the first deadline made an honest strictly-newer state, surfacing well inside that
     /// deadline, unsubmittable, and the griefer's stale state settled
     /// (`RedTeamRound3.t.sol::test_R3_BREAK_A2_finalHourIsAReplacementBlackout`). The value is now
-    /// applied where it was always meant to be — as the floor on the admitted rung's own deadline —
-    /// and the claim above is true as written: admission runs to the horizon, and every admitted
-    /// rung gets at least `minResponse` in which it can be answered (by a replacement, or for the
-    /// rung that lands last, by `cancelClose`, which needs the identical material and has no window
-    /// bound). The ladder's absolute end moves from `horizon` to `horizon + minResponse`.
+    /// applied where it was always meant to be — as the floor on the admitted rung's own deadline.
+    /// R3-4 additionally keeps strictly-newer replacement open through the already-budgeted tail:
+    /// relying only on `cancelClose` was unsound when an earlier era had consumed the same revived
+    /// version. Tail replacements are clamped to the SAME `horizon + minResponse` absolute end, so
+    /// they restore that response lane without reviving the unbounded ladder.
     ///
     /// THE VALUE, against this repo's own measured costs. Answering a rung costs (a) generating a
     /// fresh close proof — `a3_close_prover_builds_and_verifies_real_close_proof`, 79.3 s
@@ -694,7 +680,7 @@ contract ChannelSettlementManager {
     /// stops the active region being shrunk below the registered count. The old strict equality had
     /// exactly the same property. See `ChannelSettlementVerifier.CloseDelegateCountOutOfRange`.
     /// Deployment invariant (unchanged, separate from the close bound):
-    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT` (the 16-slot on-chain binding
+    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT` (the 8-slot on-chain binding
     /// arrays); the close path's ceiling is the wider 1024-participant capacity.
     uint8 public immutable activeDelegateCount;
 
@@ -722,31 +708,35 @@ contract ChannelSettlementManager {
     /// already authorized on the rollup. Zero until the first `finalizePartialWithdrawal`.
     uint64 public authorizedBurnEpoch;
     uint64 public authorizedBurnStateVersion;
-    /// @notice R3-1 (round 3): Σ of the amounts of every burn this manager has authorized, per BASE
-    /// token index. This is the DEDUCTION `finalizeClose` applies when the settled close is strictly
-    /// older than the burn mark — replacing round 2's A3 REFUSAL, which made `ClosePending` terminal
-    /// (see the R3-1 block in `finalizeClose`). Consumed (zeroed) by `finalizeClose` when applied, so
-    /// a base token appearing in two registry slots is deducted exactly once.
+    /// @notice Cumulative gross amount of every unique burn this manager authorized, per BASE token.
+    /// Telemetry only: gross-burn subtraction is NOT a sound close cap when the channel receives
+    /// credits between the stale close and a later burn. Settlement uses the newest proof-bound
+    /// post-burn fund snapshot below instead.
     mapping(uint32 => uint256) public authorizedBurnAmount;
+    /// @notice Newest authorized burn state's proof-bound POST-burn channel fund, by BASE token.
+    /// For a stale close at V and this newer observed state B, the safe live cap is
+    /// `min(fund(V), fund(B))`: it prevents re-drawing net value already removed through B while
+    /// preserving replenishing credits included through B. `authorizedBurnSnapshotActive` avoids
+    /// treating the valid genesis coordinate (epoch=0, version=0) as "no snapshot".
+    bool public authorizedBurnSnapshotActive;
+    mapping(uint32 => uint256) public authorizedBurnPostFundAmount;
+    uint32[10] public authorizedBurnTokenRegistry;
+    uint8 public authorizedBurnTokenCount;
     uint256 public bpBondCredits;
 
-    /// @notice A4 (round 2): per-burn anti-replay for `cancelPartialWithdrawal`, keyed on the burn's
-    /// close-intent digest (which is STABLE across a re-submission of the same burn — a burn is a
-    /// historical fact, so the re-submitted intent is byte-identical). Holds the highest
-    /// `revivedStateVersion` already consumed against that burn. Keyed per burn, NOT global: see the
-    /// A4 block in `cancelPartialWithdrawal` for why a global mark would be a lockout.
+    /// @notice Per-burn anti-replay for `cancelPartialWithdrawal`, keyed by the IMBK logical burn
+    /// identity (`channelId`, IMD2 descriptor). Unlike a close-intent digest, this key cannot be
+    /// changed by varying proof-side close fields that are not signed into the burn.
     mapping(bytes32 => uint64) public cancelledPartialWithdrawalRevivedVersion;
 
-    /// @notice R3-3 (round 3): per-AUTHORIZATION-DIGEST review deadline. `cancelPartialWithdrawal`
-    /// sets it to `now + 2 * challengePeriod`; a re-submission of that same authorization digest
-    /// takes it as the floor on its own challenge deadline. This is the ONLY thing that answers A4's
-    /// inverted attrition, and it does so by EXTENDING A WINDOW rather than refusing a transition —
-    /// refusing the re-submission would permanently strand an already-debited burn (a burn can only
-    /// be submitted at its own state version). Keyed on the authorization digest, NOT the burn's
-    /// `closeIntentDigest`, because a griefer's wrong-nullifier intent shares the latter and would
-    /// otherwise be able to delay the honest burn. See the R3-3 block in
-    /// `submitPartialWithdrawalIntent`.
+    /// @notice Per-burn review deadline, keyed by the same IMBK logical burn identity as the cancel
+    /// replay floor. Nullifier and malleable close-intent fields therefore cannot reset the window.
     mapping(bytes32 => uint64) public cancelledPartialWithdrawalReviewUntil;
+
+    /// @notice True once this logical IMBK burn has contributed to the stale-close deduction
+    /// ledger. Re-authorizing the same genuine burn remains allowed (and re-calls the rollup
+    /// idempotently), but can never accrue its amount or high-water mark twice.
+    mapping(bytes32 => bool) public accountedPartialWithdrawalBurn;
 
     PendingClose public pendingClose;
     bytes32 public latestSpecialCloseDigest;
@@ -813,6 +803,7 @@ contract ChannelSettlementManager {
     bool public partialWithdrawalPending;
     bytes32 public pendingPartialWithdrawalAuthDigest;
     bytes32 public pendingPartialWithdrawalChainKey;
+    bytes32 public pendingPartialWithdrawalBurnKey;
     bytes32 public pendingPartialWithdrawalCloseIntentDigest;
     uint64 public pendingPartialWithdrawalDeadline;
     uint64 public pendingPartialWithdrawalStateVersion;
@@ -822,11 +813,16 @@ contract ChannelSettlementManager {
     uint64 public pendingPartialWithdrawalCloseFreezeNonce;
     /// @notice R3-1 (round 3): the pending burn's BASE token index and amount, retained so that
     ///         `finalizePartialWithdrawal` can accrue the authorized burn into `authorizedBurnAmount`
-    ///         AFTER the challenge window. Both are IMBD-bound at submission (`withdrawal.auxData`
+    ///         AFTER the challenge window. Both are IMD2-bound at submission (`withdrawal.auxData`
     ///         is the last push in the N-of-N-signed settled-tx chain and the descriptor recompute
     ///         pins recipient/token/amount to it), so neither is caller-declared.
     uint32 public pendingPartialWithdrawalTokenIndex;
     uint256 public pendingPartialWithdrawalAmount;
+    /// Full proof-bound POST-burn fund vector for the pending state. On finalization, a genuinely
+    /// newer burn replaces the authorized high-water snapshot atomically with this vector.
+    uint32[10] public pendingPartialWithdrawalTokenRegistry;
+    uint256[10] public pendingPartialWithdrawalPostBurnFundAmounts;
+    uint8 public pendingPartialWithdrawalTokenCount;
 
     /// F7: member identity is the SPHINCS+ pubkey hash (bytes32).
     mapping(bytes32 => address) public registeredRecipientOf;
@@ -879,10 +875,9 @@ contract ChannelSettlementManager {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
         // D6 pad-to-MAX: 2..=MAX_MEMBER_COUNT active members are registered, slot order. Slots
         // beyond `memberBindings.length` stay zero (padding).
-        if (
-            memberBindings.length < MIN_MEMBER_COUNT ||
-            memberBindings.length > MAX_MEMBER_COUNT
-        ) revert InvalidMemberCount();
+        if (memberBindings.length < MIN_MEMBER_COUNT || memberBindings.length > MAX_MEMBER_COUNT) {
+            revert InvalidMemberCount();
+        }
         // F7: the block-proposer slot must be a valid ACTIVE member index, and its pubkey hash
         // nonzero. SECURITY: bpMemberSlot must be < the active member count (not just MAX), or a
         // padding slot could masquerade as the proposer.
@@ -899,10 +894,9 @@ contract ChannelSettlementManager {
         // deployment-time floor only — it costs nothing at runtime and cannot be relaxed later,
         // which is deliberate: `challengePeriod` is immutable and has no setter, so a channel
         // deployed short can never be repaired.
-        if (
-            block.chainid != LOCAL_DEVNET_CHAIN_ID &&
-            challengePeriod_ < CHALLENGE_PERIOD_SECS
-        ) revert ChallengePeriodTooShort(challengePeriod_, CHALLENGE_PERIOD_SECS);
+        if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod_ < CHALLENGE_PERIOD_SECS) {
+            revert ChallengePeriodTooShort(challengePeriod_, CHALLENGE_PERIOD_SECS);
+        }
 
         channelId = channelId_;
         bpMemberSlot = bpMemberSlot_;
@@ -922,18 +916,14 @@ contract ChannelSettlementManager {
 
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
-            if (
-                binding.pkG == bytes32(0) ||
-                binding.recipient == address(0)
-            ) {
+            if (binding.pkG == bytes32(0) || binding.recipient == address(0)) {
                 revert InvalidMemberBinding();
             }
             if (registeredMemberIndexPlusOne[binding.pkG] != 0) {
                 revert DuplicateRegisteredMember();
             }
             registeredRecipientOf[binding.pkG] = binding.recipient;
-            registeredMemberIndexPlusOne[binding.pkG] =
-                registeredMemberPkGs.length + 1;
+            registeredMemberIndexPlusOne[binding.pkG] = registeredMemberPkGs.length + 1;
             registeredMemberPkGs.push(binding.pkG);
             memberPkGs[i] = binding.pkG;
             isMemberRecipient[binding.recipient] = true;
@@ -954,7 +944,7 @@ contract ChannelSettlementManager {
         // close proof could authenticate DIFFERENT signer sets for the same channel. The close-form
         // IMCM commitment over the just-built `memberPkGs`/`activeMemberCount` MUST
         // equal the commitment the rollup recorded at `registerChannel` (computed with the SAME
-        // fixed-16 keccak preimage), and the bp identity MUST match.
+        // fixed-8 keccak preimage), and the bp identity MUST match.
         //
         // DEPLOYMENT ORDER: `registerChannel(channelId, ...)` on the rollup MUST run BEFORE this
         // manager is deployed; otherwise the registry returns bytes32(0) and this reverts.
@@ -963,8 +953,7 @@ contract ChannelSettlementManager {
             revert MemberSetMismatch();
         }
         if (
-            bpMemberSlot_ != registry.channelBpMemberSlot(channelIdU32) ||
-            bpPkG_ != registry.channelBpPkG(channelIdU32)
+            bpMemberSlot_ != registry.channelBpMemberSlot(channelIdU32) || bpPkG_ != registry.channelBpPkG(channelIdU32)
         ) {
             revert BpMismatch();
         }
@@ -1003,7 +992,7 @@ contract ChannelSettlementManager {
     }
 
     /// @notice The close-circuit member-set commitment for this channel's registered members
-    /// (D6 pad-to-MAX FIXED form): keccak([IMCM, activeMemberCount, memberPkGs[0..15]])
+    /// (D6 pad-to-MAX FIXED form): keccak([IMCM, activeMemberCount, memberPkGs[0..7]])
     /// over ALL MAX_MEMBER_COUNT slots in slot order (padding zeroed). The close proof's in-circuit
     /// commitment MUST equal this value (enforced in `_checkCloseProof`), binding the verified
     /// signing keys to the registered member set (no non-member-key substitution).
@@ -1012,11 +1001,7 @@ contract ChannelSettlementManager {
     }
 
     event MemberSetUpdated(
-        uint64 indexed newVersion,
-        bytes32 oldCommitment,
-        bytes32 newCommitment,
-        uint8 newCount,
-        address newRecipient
+        uint64 indexed newVersion, bytes32 oldCommitment, bytes32 newCommitment, uint8 newCount, address newRecipient
     );
 
     error MemberSetUpdateWhileNotActive();
@@ -1082,8 +1067,7 @@ contract ChannelSettlementManager {
         }
         bytes32 newCommitment = verifier.closeMemberSetCommitment(padded, newCount);
 
-        if (
-            !verifier.verifyMemberSetUpdate(
+        if (!verifier.verifyMemberSetUpdate(
                 uint32(channelId),
                 newVersion,
                 oldCommitment,
@@ -1092,8 +1076,7 @@ contract ChannelSettlementManager {
                 newCount,
                 newRecipient,
                 mleProof
-            )
-        ) revert MemberSetUpdateProofInvalid();
+            )) revert MemberSetUpdateProofInvalid();
 
         // ── Apply ──
         // Rotation bookkeeping for the pkG-keyed registration maps: migrate any slot whose key
@@ -1130,9 +1113,7 @@ contract ChannelSettlementManager {
     }
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {
-        return
-            channelStatus == ChannelLifecycleStatus.Active &&
-            suppliedCloseFreezeNonce == currentCloseFreezeNonce;
+        return channelStatus == ChannelLifecycleStatus.Active && suppliedCloseFreezeNonce == currentCloseFreezeNonce;
     }
 
     // REMOVED: `fundBpBondCredits(uint256)`.
@@ -1166,10 +1147,7 @@ contract ChannelSettlementManager {
     /// @notice Step 2 of the two-step close: record (or challenge-replace) a close intent.
     /// Direct submission from `Active` is disallowed — `requestClose()` must run first
     /// (abstract2 §3.5).
-    function submitCloseIntent(
-        CloseIntent calldata intent,
-        MleVerifier.MleProof calldata proof
-    ) external {
+    function submitCloseIntent(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) external {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         // Multi-token: cheap structural bound BEFORE the proof check (defense-in-depth; the
         // strict TFD limb bind would reject an out-of-range count anyway, since the in-circuit
@@ -1190,8 +1168,8 @@ contract ChannelSettlementManager {
             //
             //    THE DEFECT A2 FOUND, and which is still real: the deadline check above alone admits
             //    a rung landing at `now == challengeDeadline == closeChallengeHorizon`, which
-            //    `_storePendingClose` then clamped to `challengeDeadline == now` — finalizable in the
-            //    SAME block, with no interval in which anyone could answer it.
+            //    `_storePendingClose` then clamped to `challengeDeadline == now`; before the strict
+            //    finalization boundary this was same-block finalizable, with no reply interval.
             //
             //    WHY ROUND 2's FIX WAS WRONG (R3-2,
             //    `RedTeamRound3.t.sol::test_R3_BREAK_A2_finalHourIsAReplacementBlackout`). Round 2
@@ -1203,29 +1181,29 @@ contract ChannelSettlementManager {
             //    at `horizon - 3599` INSIDE that deadline, is refused, and the attacker's stale state
             //    settles unopposed. On the devnet branch it was half the ladder.
             //
-            //    THE R3-2 RULE — admit up to the horizon, and guarantee the WINDOW instead of
-            //    refusing the RUNG. Admission is now bounded by the era's absolute horizon and
-            //    nothing else, so no honest replacement that lands before the horizon is ever
-            //    refused. `_storePendingClose` then floors every admitted rung's deadline at
-            //    `now + minResponse`, so no rung is ever unanswerable. The two together bound the
-            //    ladder at `closeChallengeHorizon + minResponse` — H-3's absolute cap plus one
-            //    response interval, which is bounded and independent of the number of rungs, versus
-            //    the unbounded per-rung extension H-3 was introduced to kill.
+            //    THE R3-2 RULE — admit to the horizon and guarantee a deadline floor instead of
+            //    refusing the rung. R3-4 then opens the already-budgeted tail to strictly-newer
+            //    responses while clamping all of them to one fixed absolute end. The combination
+            //    bounds the ladder at `closeChallengeHorizon + minResponse`, independent of the
+            //    number of rungs, versus the unbounded per-rung extension H-3 was introduced to kill.
             //
-            //    THE FINAL RUNG. A rung landing at exactly the horizon still cannot be answered by
-            //    ANOTHER replacement (that is inherent to an absolute horizon: someone must be last).
-            //    It is answerable by `cancelClose`, which has no window bound at all and needs the
-            //    IDENTICAL material — a strictly newer N-of-N-signed state — so the response lane is
-            //    genuinely open for the whole `minResponse` interval. That is what makes the
-            //    constant's "every admitted rung leaves a usable response interval" TRUE; under the
-            //    round-2 rule it was false, because a refused replacement is not a response.
+            //    THE RESPONSE TAIL (R3-4). A rung landing at the horizon cannot rely only on
+            //    `cancelClose`: the same revived version may already have been consumed by an
+            //    earlier era's lifetime replay floor. The already-budgeted `minResponse` tail is
+            //    therefore also open to strictly-newer replacements. `_storePendingClose` clamps
+            //    every replacement in that tail to the SAME absolute end, so this does not extend
+            //    the ladder. It merely makes the advertised response interval usable even after a
+            //    prior cancel consumed the responder's version.
             //
             //    The floor degrades to `challengePeriod` on the local devnet, where the constructor
             //    permits a sub-`CHALLENGE_PERIOD_SECS` window: a fixed 3,600 s would exceed the whole
             //    2x horizon there and stretch the ladder well past it. On every other chain
             //    `challengePeriod >= 86,400`, so the effective floor is exactly
             //    `MIN_CLOSE_RESPONSE_SECS` and the overshoot is 1/48 of the horizon.
-            if (block.timestamp > closeChallengeHorizon) {
+            uint256 minResponse =
+                challengePeriod < MIN_CLOSE_RESPONSE_SECS ? challengePeriod : MIN_CLOSE_RESPONSE_SECS;
+            uint256 absoluteEnd = uint256(closeChallengeHorizon) + minResponse;
+            if (block.timestamp > absoluteEnd) {
                 revert ChallengeWindowClosed();
             }
             if (intent.closeFreezeNonce != currentCloseFreezeNonce) {
@@ -1303,14 +1281,11 @@ contract ChannelSettlementManager {
     /// any replacement that could not leave `MIN_CLOSE_RESPONSE_SECS` before the horizon. That was
     /// the wrong lever — the response to a rung IS a replacement, so the rule denied the response it
     /// was protecting, for a full `minResponse` (see the R3-2 block in `submitCloseIntent`). The
-    /// guarantee is now enforced HERE, on the WINDOW rather than on the ADMISSION: every admitted
-    /// rung's deadline is floored at `now + minResponse`. Admission is bounded by the horizon, so
-    /// the ladder ends at `closeChallengeHorizon + minResponse` — an absolute cap independent of the
-    /// number of rungs, which is the property H-3 was introduced to obtain.
-    function _storePendingClose(
-        CloseIntent calldata intent,
-        bytes32 closeIntentDigest
-    ) internal {
+    /// guarantee is now enforced HERE, on the WINDOW rather than on the ADMISSION: before the
+    /// horizon each admitted rung's deadline is floored at `now + minResponse`. R3-4 admits
+    /// strictly-newer responses during the resulting tail but clamps them to the same
+    /// `closeChallengeHorizon + minResponse` absolute end — the cap H-3 was introduced to obtain.
+    function _storePendingClose(CloseIntent calldata intent, bytes32 closeIntentDigest) internal {
         uint256 naturalDeadline = block.timestamp + challengePeriod;
         uint256 horizon = closeChallengeHorizon;
         uint256 deadline = naturalDeadline < horizon ? naturalDeadline : horizon;
@@ -1319,11 +1294,13 @@ contract ChannelSettlementManager {
         // never below it elsewhere — so for the era's FIRST intent, where `naturalDeadline` is
         // `now + challengePeriod` and always at-or-below the horizon it just set, this floor is a
         // no-op. It bites only on a late rung, exactly where the zero-length window was.
-        uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS
-            ? challengePeriod
-            : MIN_CLOSE_RESPONSE_SECS;
+        uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS ? challengePeriod : MIN_CLOSE_RESPONSE_SECS;
         uint256 floorDeadline = block.timestamp + minResponse;
         if (deadline < floorDeadline) deadline = floorDeadline;
+        // R3-4: the response tail is an admission window, not another extension rung. A
+        // replacement landing after `horizon` keeps the one fixed `horizon + minResponse` end.
+        uint256 absoluteEnd = horizon + minResponse;
+        if (deadline > absoluteEnd) deadline = absoluteEnd;
         pendingClose = PendingClose({
             active: true,
             closeNonce: intent.closeNonce,
@@ -1363,10 +1340,7 @@ contract ChannelSettlementManager {
         revert SpecialCloseDisabled();
     }
 
-    function cancelClose(
-        CancelCloseRequest calldata request,
-        MleVerifier.MleProof calldata proof
-    ) external {
+    function cancelClose(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof) external {
         if (!pendingClose.active) revert CloseNotActive();
         if (request.closeIntentDigest != pendingClose.closeIntentDigest) {
             revert CloseIntentDigestMismatch();
@@ -1436,16 +1410,14 @@ contract ChannelSettlementManager {
         // (NOT a caller request field), exactly as the close path does via `_runCloseVerify`. The
         // verifier strict-binds the proof's in-circuit member-set commitment to this value, so the
         // members who signed the higher-version revived state are the channel's registered members.
-        if (
-            !verifier.verifyCancelClose(
+        if (!verifier.verifyCancelClose(
                 channelId,
                 request.closeIntentDigest,
                 registeredMemberSetCommitment(),
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
                 proof
-            )
-        ) revert InvalidCancelProof();
+            )) revert InvalidCancelProof();
 
         // A1: CONSUME the material. Effect placed after the verify so the floor only ever advances
         // on a cancel that actually happened.
@@ -1527,11 +1499,7 @@ contract ChannelSettlementManager {
         //    `submitCloseIntent`, which implies `ClosePending`, which only `requestClose()` sets —
         //    and it always bumps first. Solidity 0.8 checked arithmetic is the backstop.
         currentCloseFreezeNonce -= 1;
-        emit CloseCancelled(
-            closeIntentDigest,
-            request.revivedChannelStateDigest,
-            request.revivedStateVersion
-        );
+        emit CloseCancelled(closeIntentDigest, request.revivedChannelStateDigest, request.revivedStateVersion);
     }
 
     /// @notice DISABLED (P6-A / detail2 §H-3, C3). Permanently reverts.
@@ -1544,20 +1512,20 @@ contract ChannelSettlementManager {
     ///      lost by disabling is an accepted, out-of-scope time-difference grief. The stub verifier
     ///      (`ChannelSettlementVerifier.verifyLateOutgoingDebit`) is left in place but unreachable.
     ///      The signature (and ABI selector) is kept so callers fail closed with a clear error.
-    function submitLateOutgoingDebitCorrection(LateOutgoingDebitCorrection calldata, bytes calldata)
-        external
-        pure
-    {
+    function submitLateOutgoingDebitCorrection(LateOutgoingDebitCorrection calldata, bytes calldata) external pure {
         revert LateOutgoingDebitDisabled();
     }
 
     function finalizeClose() external {
         if (!pendingClose.active) revert CloseNotActive();
-        if (block.timestamp < pendingClose.challengeDeadline) {
+        // At equality a strictly-newer replacement is still admissible. Finalization must therefore
+        // wait until the following timestamp; otherwise transaction order chooses which valid
+        // transition wins at the boundary.
+        if (block.timestamp <= pendingClose.challengeDeadline) {
             revert ChallengeWindowOpen();
         }
-        // ── SECURITY (A3, round 2 — H-6's missing direction): refuse to settle a close that is
-        //    strictly OLDER than a burn this manager already authorized.
+        // ── SECURITY (A3/R3-1/R3-5 — H-6's missing direction): a close strictly OLDER than an
+        //    already-authorized burn must not re-draw value removed in the later state.
         //
         //    H-6's gate in `finalizePartialWithdrawal` is evaluated ONCE, at burn-authorization
         //    time, against whatever has settled BY THEN. Reversing the order defeats it: authorize
@@ -1570,12 +1538,10 @@ contract ChannelSettlementManager {
         //    rather than a round-1 regression — but the H-6 comment claimed the replacement "keeps
         //    the protection exactly", which was an overstatement in this direction. Corrected there.)
         //
-        //    WHY A HIGH-WATER MARK IS EXACT, not conservative. Let the close settle at V and let
-        //    the authorized burns sit at versions b_1..b_k. A burn at b_i is committed in the
-        //    N-of-N-signed state at b_i, hence DEBITED and EXCLUDED from `channelFundAmounts` of
-        //    every state at-or-after b_i. So V over-counts burn i exactly when V < b_i. Therefore
-        //    "V over-counts no burn" is precisely "V >= max(b_i)" — a single (epoch, stateVersion)
-        //    pair suffices, and no per-burn list is needed.
+        //    Let the close settle at V and let B be the newest burn state this manager authorized.
+        //    Both `fund(V)` and `fund(B)` are proof-bound POST-state vectors. If V < B, cap each
+        //    token at `min(fund(V), fund(B))`. This is exact through B: every burn/outflow through B
+        //    lowers `fund(B)`, while any deposit/incoming credit through B replenishes it.
         //
         //    CORRECTION (R3-1, round 3): round 2 REFUSED the settlement here, and claimed the refusal
         //    was "a deferral, not a brick" because `cancelClose` and challenge-replacement remained
@@ -1592,34 +1558,26 @@ contract ChannelSettlementManager {
         //    coordinator: a burn at the withheld head is unvetoable, so the mark lands above every
         //    honest close by construction.
         //
-        //    THE FIX — ADJUST THE AMOUNT, DO NOT REFUSE THE TRANSITION. The property this guard owes
-        //    is "the escrow is not drawn twice for the same value", NOT "this close may not settle".
-        //    So settle, and SUBTRACT the already-authorized burns from the accrual cap the settlement
-        //    creates. `finalizeClose` therefore has NO version-dependent revert left: past the
+        //    THE FIX — ADJUST THE CAP, DO NOT REFUSE THE TRANSITION. The property this guard owes is
+        //    "the escrow is not drawn twice for the same value", NOT "this close may not settle".
+        //    `finalizeClose` therefore has NO version-dependent revert left: past the
         //    challenge deadline it always succeeds, which is the invariant round 3 requires
         //    (`ChannelSettlementInvariant.t.sol::invariant_closePendingAlwaysHasAReachableExit`).
         //
-        //    SOUNDNESS OF THE SUBTRACTION. By the high-water-mark argument above, a settled close at
-        //    V over-counts burn i exactly when V < b_i, and over-counts it by exactly the burn's
-        //    IMBD-pinned amount x_i. `authorizedBurnAmount[t]` is Σ x_i over ALL authorized burns of
-        //    base token t. The deduction below is applied only when the mark is strictly newer than
-        //    V — i.e. only when at least one burn IS over-counted — and it is applied SATURATING at
-        //    zero, so it can never underflow-revert and re-introduce the brick through arithmetic.
-        //    It is EXACT when every authorized burn is newer than V (the case the guard exists for,
-        //    including the single-burn PoC), and CONSERVATIVE — it over-deducts Σ_{b_i <= V} x_i —
-        //    in the mixed case where burns straddle V. Over-deduction is safe in the direction that
-        //    matters (it can only lower the member accrual cap, never raise it, so no double-draw is
-        //    reachable), and it is unreachable on the honest path: an honest close settles at the
-        //    head, the head is at-or-after every burn committed into it, the mark is therefore NOT
-        //    strictly newer, and the deduction does not run at all. See the RESIDUAL note at the
-        //    deduction loop for the exact bound on the mixed case.
+        //    R3-5 CORRECTION. Gross suffix subtraction was safe against double draw but NOT exact:
+        //    V fund=10; then credit=10; then burn=10; B fund=10. Burn payout 10 plus stale-close
+        //    cap 10 is fully backed by 20, while subtracting the gross burn from V trapped the
+        //    original 10. The proof-bound B snapshot fixes that fund-strand class.
         //
-        //    Zero-init is inert: with no burn ever authorized both fields are 0, and
-        //    `0 > finalEpoch || (0 == finalEpoch && 0 > finalStateVersion)` is false for every input,
-        //    so `closeOlderThanAuthorizedBurn` is false and no deduction is applied.
-        bool closeOlderThanAuthorizedBurn = authorizedBurnEpoch > pendingClose.finalEpoch ||
-            (authorizedBurnEpoch == pendingClose.finalEpoch &&
-                authorizedBurnStateVersion > pendingClose.finalStateVersion);
+        //    RESIDUAL: this snapshot knows every flow THROUGH B, but not an inter-channel outgoing
+        //    after the last authorized burn. End-to-end stale-close solvency therefore still relies
+        //    on the close challenge/watchtower path until L1 advances a proof-bound fund high-water
+        //    on every outgoing transition. This cap must not be described as closing that separate
+        //    late-outgoing architecture gap.
+        bool closeOlderThanAuthorizedBurn = authorizedBurnSnapshotActive
+            && (authorizedBurnEpoch > pendingClose.finalEpoch
+            || (authorizedBurnEpoch == pendingClose.finalEpoch
+                && authorizedBurnStateVersion > pendingClose.finalStateVersion));
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
@@ -1649,27 +1607,14 @@ contract ChannelSettlementManager {
             finalizedChannelFundAmount[baseToken] += pendingClose.channelFundAmounts[t];
         }
 
-        // ── R3-1: the burn deduction, applied AFTER the accrual loop above has finished summing.
-        //    A SECOND pass is required, not a fused one: with a duplicate base index across two
-        //    registry slots the accrual is a running sum, and deducting mid-sum could saturate to
-        //    zero against a partial total and silently discard the later slot's funds. Zeroing the
-        //    ledger entry as it is consumed makes the duplicate case deduct exactly once.
-        //
-        //    RESIDUAL (documented, not silently accepted): in the mixed case — two or more burns
-        //    straddling the settled version V — this over-deducts Σ_{b_i <= V} x_i, value that the
-        //    V-state fund vector had already correctly excluded. It is bounded by the total of the
-        //    burns already PAID to their (necessarily participant, `isMemberRecipient`-checked)
-        //    recipients, and it is reachable only when a close settles at a state that is NOT the
-        //    head, i.e. only when the channel has already been robbed by a stale settlement of which
-        //    this is a strict sub-loss — the same shape as the residual recorded in
-        //    `finalizePartialWithdrawal`. Making it exact needs a suffix-sum over the burn history
-        //    keyed on state version, which is an unbounded loop in `finalizeClose` and therefore a
-        //    gas-DoS-shaped re-introduction of the very lock this fix removes. Under-deducting is
-        //    NOT an option in the other direction: that is the H-6/A3 double-draw itself.
+        // ── R3-1/R3-5: cap against the newest later proof-bound POST-burn fund snapshot, applied
+        //    AFTER the accrual loop has finished summing. A second pass preserves a safe aggregate
+        //    even if a duplicate base index somehow crosses the circuit's registry-injectivity
+        //    check.
         //
         //    Burns authorized AFTER this point (status `Closed`) cannot be over-counted: the
         //    `settledBeforeBurn` gate in `finalizePartialWithdrawal` refuses every burn newer than
-        //    the settled close, so their amounts accrue into a ledger nothing reads again.
+        //    the settled close.
         //
         //    Iterating the SETTLED registry (not the ledger) is complete, not a miss: a burn's token
         //    is checked against the BURN intent's proof-bound registry at submission, and a base
@@ -1678,14 +1623,11 @@ contract ChannelSettlementManager {
         if (closeOlderThanAuthorizedBurn) {
             for (uint256 t = 0; t < tc; t++) {
                 uint32 baseToken = pendingClose.tokenRegistry[t];
-                uint256 deduction = authorizedBurnAmount[baseToken];
-                if (deduction == 0) continue;
-                authorizedBurnAmount[baseToken] = 0;
                 uint256 cap = finalizedChannelFundAmount[baseToken];
-                // SATURATING: an underflow revert here would be a brick, which is the whole defect
-                // being fixed. Clamping to zero is the fail-closed direction for a payout cap.
-                finalizedChannelFundAmount[baseToken] = cap > deduction ? cap - deduction : 0;
-                emit AuthorizedBurnDeducted(baseToken, deduction, finalizedChannelFundAmount[baseToken]);
+                uint256 observedPostBurnFund = authorizedBurnPostFundAmount[baseToken];
+                if (observedPostBurnFund >= cap) continue;
+                finalizedChannelFundAmount[baseToken] = observedPostBurnFund;
+                emit AuthorizedBurnDeducted(baseToken, cap - observedPostBurnFund, observedPostBurnFund);
             }
         }
 
@@ -1723,7 +1665,9 @@ contract ChannelSettlementManager {
         bytes32 prevSettledTxChain,
         AuthorizedWithdrawal calldata withdrawal
     ) external {
-        if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelClosed();
+        if (channelStatus != ChannelLifecycleStatus.Active) {
+            revert ChannelClosed();
+        }
 
         _checkCloseProof(intent, proof);
 
@@ -1738,19 +1682,18 @@ contract ChannelSettlementManager {
 
         if (withdrawal.auxData == bytes32(0)) revert PartialWithdrawalAuxDataZero();
 
-        // SECURITY: verify settled_tx_chain binding — the burn's IMBD descriptor
+        // SECURITY: verify settled_tx_chain binding — the burn's IMD2 descriptor
         // (`withdrawal.auxData`) was the LAST push in the N-of-N-signed chain.
-        bytes32 expectedChain = keccak256(
-            abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData)
-        );
+        bytes32 expectedChain = keccak256(abi.encodePacked(uint32(0x494d5443), prevSettledTxChain, withdrawal.auxData));
         if (expectedChain != intent.finalSettledTxChain) revert PartialWithdrawalChainMismatch();
 
         // ── Defence in depth (2026-07-28, doc/tasks/pw-auth-threat-model.md §4) ──────────────
         //
         // SECURITY — `withdrawal.auxData` is bound to the cosigned state by the chain recompute.
-        // The IMBD check below then derives recipient/token/amount from that pinned value and the
-        // burn's Regev tx leaf. `nullifier` remains supplied by the base withdrawal proof path: the
-        // authorization is only a second factor and never replaces `_verifyWithdrawalSet`.
+        // The IMD2 check below then derives source channel/base nonce and recipient/token/amount
+        // from that pinned value and the burn's Regev tx leaf. `nullifier` remains supplied by the
+        // base withdrawal proof path; the authorization is only a second factor and never replaces
+        // `_verifyWithdrawalSet`.
         //
         // Soundness remains conjunctive: every burn payout must go through
         // `withdrawNative` / `withdrawERC20`, where the leaf is proof-verified and this
@@ -1768,7 +1711,7 @@ contract ChannelSettlementManager {
         //     IMPORTANT: `intent.channelFundAmounts[t]` is the POST-BURN fund. Comparing the burn
         //     amount to that value would subtract the same burn twice: a valid pre-burn fund F and
         //     burn X expose F-X here, so `X <= F-X` rejects every burn over half the balance and
-        //     every full-balance burn. The exact amount is already bound by IMBD below, while the
+        //     every full-balance burn. The exact amount is already bound by IMD2 below, while the
         //     channel transition/base spend proof enforce debit/no-underflow. Therefore this scan
         //     is registry membership only; it must not impose a second post-state amount cap.
         //     FAIL CLOSED: a token the channel never cosigned into its registry is rejected rather
@@ -1799,15 +1742,16 @@ contract ChannelSettlementManager {
             revert PartialWithdrawalRecipientNotParticipant();
         }
 
-        // F-AUX-1: auxData is the value pinned by the N-of-N-signed settled-tx chain. Requiring it
-        // to be the IMBD recompute makes the pinned value determine recipient/token/amount. The
-        // base withdrawal proof later supplies those same economics to the IMPW authorization.
-        bytes32 baseRecipient = bytes32(
-            (uint256(2) << 248) | uint256(uint160(withdrawal.recipient))
-        );
+        // F-AUX-1 v2: auxData is the value pinned by the N-of-N-signed settled-tx chain. Requiring
+        // it to be the IMD2 recompute makes that value determine the immutable source channel,
+        // consumed base nonce, recipient, token, and amount. The base withdrawal proof later
+        // supplies those same economics to the IPW2 authorization.
+        bytes32 baseRecipient = bytes32((uint256(2) << 248) | uint256(uint160(withdrawal.recipient)));
         bytes32 expectedDescriptor = keccak256(
             abi.encodePacked(
-                bytes4(0x494d4244),
+                bytes4(0x494d4432), // "IMD2"
+                uint32(channelId),
+                withdrawal.baseNonce,
                 withdrawal.txLeaf,
                 baseRecipient,
                 withdrawal.tokenIndex,
@@ -1823,7 +1767,7 @@ contract ChannelSettlementManager {
         //
         // SECURITY (single-use removed): the former `usedPartialWithdrawalChains[chainKey]` guard
         // marked a burn's `(channelId, finalSettledTxChain)` consumed at finalize, so any intent —
-        // including a griefer's front-run carrying a wrong, IMPW-only `nullifier` — permanently
+        // including a griefer's front-run carrying a wrong, proof-only `nullifier` — permanently
         // burned the burn's one chain slot and stranded its L1 payout. That guard was a fossil of the
         // deleted proof-free `claimAuthorizedWithdrawal` payout (42640f1): its only job was to bound
         // "at most one AUTHORIZATION per chain state", which mattered only when an authorization
@@ -1834,20 +1778,34 @@ contract ChannelSettlementManager {
         // fund-stranding, at no soundness cost. Do not re-add it without re-introducing a proof-free
         // payout, which must not exist.
         bytes32 chainKey = keccak256(abi.encodePacked(channelId, intent.finalSettledTxChain));
+        bytes32 burnKey = keccak256(
+            abi.encodePacked(bytes4(0x494d424b), uint32(channelId), withdrawal.auxData) // "IMBK"
+        );
+        if (accountedPartialWithdrawalBurn[burnKey]) {
+            revert PartialWithdrawalAlreadyAccounted();
+        }
 
-        // Challenge replacement: if a pending intent exists, allow replacement only if the new state
-        // is strictly newer (higher epoch/stateVersion).
-        if (partialWithdrawalPending) {
-            bool newer = intent.finalEpoch > pendingPartialWithdrawalEpoch ||
-                (intent.finalEpoch == pendingPartialWithdrawalEpoch &&
-                 intent.finalStateVersion > pendingPartialWithdrawalStateVersion);
+        // Challenge replacement may refresh proof material for the SAME historical burn only. The
+        // pending slot is the sole route to its L1 authorization: letting an unrelated newer burn
+        // overwrite it can strand the first already-debited burn, especially if a close starts
+        // before it is resubmitted. Preserve the original deadline as well, so a finite supply of
+        // later signed states cannot turn one burn into a resettable challenge-window ladder.
+        bool replacingPending = partialWithdrawalPending;
+        uint64 replacementDeadline;
+        if (replacingPending) {
+            if (burnKey != pendingPartialWithdrawalBurnKey) {
+                revert PartialWithdrawalDifferentBurnPending();
+            }
+            bool newer = intent.finalEpoch > pendingPartialWithdrawalEpoch
+                || (intent.finalEpoch == pendingPartialWithdrawalEpoch
+                    && intent.finalStateVersion > pendingPartialWithdrawalStateVersion);
             if (!newer) revert PartialWithdrawalNotNewer();
+            replacementDeadline = pendingPartialWithdrawalDeadline;
         }
 
         bytes32 authDigest = keccak256(
             abi.encodePacked(
-                bytes4(0x494d5057),
-                withdrawal.nullifier,
+                bytes4(0x49505732), // "IPW2"
                 withdrawal.recipient,
                 withdrawal.tokenIndex,
                 withdrawal.amount,
@@ -1858,6 +1816,7 @@ contract ChannelSettlementManager {
         partialWithdrawalPending = true;
         pendingPartialWithdrawalAuthDigest = authDigest;
         pendingPartialWithdrawalChainKey = chainKey;
+        pendingPartialWithdrawalBurnKey = burnKey;
         pendingPartialWithdrawalCloseIntentDigest = computeCloseIntentDigest(intent);
         // ── SECURITY (R3-3, round 3 — the A4 attrition, disarmed on the ATTACKER's side).
         //
@@ -1876,18 +1835,16 @@ contract ChannelSettlementManager {
         //    permanent bar on re-submitting a cancelled burn is therefore a PERMANENT STRAND of an
         //    already-debited burn — the R3-1 lock class in a new lane, and strictly worse than what
         //    it prevents. (Keying such a bar on `closeIntentDigest` would additionally resurrect the
-        //    front-run DoS the single-use `chainKey` guard was deleted to fix: a griefer's
-        //    wrong-nullifier submission shares the burn's `closeIntentDigest` but not its
-        //    `authDigest`, so one cancelled griefing intent would bar the honest burn forever. See
-        //    the "single-use removed" note above.)
+        //    front-run DoS the single-use `chainKey` guard was deleted to fix. Logical burn
+        //    identity is instead tracked only for accounting/review, never as a submission bar.
         //
         //    WHAT IS DONE INSTEAD — EXTEND THE WINDOW, REFUSE NOTHING. A re-submission of an
-        //    authorization digest that a strictly-newer signed state already vetoed carries a
+        //    logical burn that a strictly-newer signed state already vetoed carries a
         //    LONGER challenge window (`2 * challengePeriod` from the cancel, the same "one budgeted
         //    window plus one spare" H-3 uses). Nothing is refused, nothing is stranded, and the
         //    round-trip cost is paid by the attacker in wall-clock instead of by the defender in
-        //    material. Keyed on `authDigest`, so a griefer's bogus-nullifier intent cannot delay the
-        //    honest burn.
+        //    material. Keyed on the IMBK logical burn identity, so neither a proof-only nullifier
+        //    nor malleable close-intent fields can reset the review window.
         //
         //    HONEST LIMIT, stated plainly: this is a MITIGATION, not a block. An attacker who
         //    outlasts a defender that never obtains newer material still gets the burn authorized —
@@ -1895,16 +1852,20 @@ contract ChannelSettlementManager {
         //    `cancelPartialWithdrawal` for why authorizing a chain-bound burn is the right result
         //    and why the cancel lane is a liveness aid rather than a soundness gate.
         uint64 pwDeadline = uint64(block.timestamp) + challengePeriod;
-        uint64 reviewUntil = cancelledPartialWithdrawalReviewUntil[authDigest];
+        uint64 reviewUntil = cancelledPartialWithdrawalReviewUntil[burnKey];
         if (reviewUntil > pwDeadline) pwDeadline = reviewUntil;
+        if (replacingPending) pwDeadline = replacementDeadline;
         pendingPartialWithdrawalDeadline = pwDeadline;
         pendingPartialWithdrawalStateVersion = intent.finalStateVersion;
         pendingPartialWithdrawalEpoch = intent.finalEpoch;
-        // R3-1: retain the IMBD-pinned (token, amount) so `finalizePartialWithdrawal` can accrue the
+        // R3-1: retain the IMD2-pinned (token, amount) so `finalizePartialWithdrawal` can accrue the
         // burn into `authorizedBurnAmount`. Written AFTER the descriptor recompute above, so these
         // are the values the N-of-N-signed chain committed to, not the caller's.
         pendingPartialWithdrawalTokenIndex = withdrawal.tokenIndex;
         pendingPartialWithdrawalAmount = withdrawal.amount;
+        pendingPartialWithdrawalTokenRegistry = intent.tokenRegistry;
+        pendingPartialWithdrawalPostBurnFundAmounts = intent.channelFundAmounts;
+        pendingPartialWithdrawalTokenCount = intent.tokenCount;
         // The manager era observed at submission. H-6: this is now a RECORD ONLY — it is no longer
         // read by `finalizePartialWithdrawal`, because comparing it there gave every member and
         // every delegate a one-transaction permanent strand of an already-debited burn. The
@@ -1914,10 +1875,7 @@ contract ChannelSettlementManager {
         pendingPartialWithdrawalCloseFreezeNonce = currentCloseFreezeNonce;
 
         emit PartialWithdrawalSubmitted(
-            authDigest,
-            chainKey,
-            pendingPartialWithdrawalDeadline,
-            intent.finalStateVersion
+            authDigest, chainKey, pendingPartialWithdrawalDeadline, intent.finalStateVersion
         );
     }
 
@@ -1965,9 +1923,9 @@ contract ChannelSettlementManager {
         //                     settled close is strictly OLDER than the burn's state, i.e. precisely
         //                     the case where its fund vector still contains the burned amount.
         if (channelStatus == ChannelLifecycleStatus.Closed) {
-            bool settledBeforeBurn = pendingPartialWithdrawalEpoch > finalizedEpoch ||
-                (pendingPartialWithdrawalEpoch == finalizedEpoch &&
-                 pendingPartialWithdrawalStateVersion > finalizedStateVersion);
+            bool settledBeforeBurn = pendingPartialWithdrawalEpoch > finalizedEpoch
+                || (pendingPartialWithdrawalEpoch == finalizedEpoch
+                    && pendingPartialWithdrawalStateVersion > finalizedStateVersion);
             // RESIDUAL (documented, not silently accepted): a close that settles at a PRE-burn
             // state does permanently strand this burn, because paying it would be the double-draw
             // above. Mounting that is not free — it needs a full close proof at a stale state that
@@ -1983,31 +1941,34 @@ contract ChannelSettlementManager {
 
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
         bytes32 chainKey = pendingPartialWithdrawalChainKey;
+        bytes32 burnKey = pendingPartialWithdrawalBurnKey;
+        // Account each logical burn exactly once. Submission rejects an already-accounted IMBK;
+        // repeat the invariant here before effects as defence in depth. Mark before the external
+        // call (CEI); a revert in `authorizePartialWithdrawal` rolls this write back too.
+        if (accountedPartialWithdrawalBurn[burnKey]) {
+            revert PartialWithdrawalAlreadyAccounted();
+        }
+        accountedPartialWithdrawalBurn[burnKey] = true;
 
-        // A3: raise the authorized-burn high-water mark BEFORE the pending record is deleted. This
-        // is the only memory that survives the deletes, and it is what lets `finalizeClose` refuse a
-        // close older than this burn — the reverse-order double-draw the gate above cannot see.
-        // Monotone: a later burn at a lower version (unsignable, but cheap to exclude) must not
-        // LOWER the mark, or it would re-open the hole for the earlier, higher burn.
-        if (
-            pendingPartialWithdrawalEpoch > authorizedBurnEpoch ||
-            (pendingPartialWithdrawalEpoch == authorizedBurnEpoch &&
-                pendingPartialWithdrawalStateVersion > authorizedBurnStateVersion)
-        ) {
+        authorizedBurnAmount[pendingPartialWithdrawalTokenIndex] += pendingPartialWithdrawalAmount;
+
+        // A newer proof-bound POST-burn fund vector supersedes the prior high-water snapshot.
+        // Out-of-order finalization of an older historical burn must never move it backwards.
+        bool newerSnapshot = !authorizedBurnSnapshotActive
+            || pendingPartialWithdrawalEpoch > authorizedBurnEpoch
+            || (pendingPartialWithdrawalEpoch == authorizedBurnEpoch
+                && pendingPartialWithdrawalStateVersion > authorizedBurnStateVersion);
+        if (newerSnapshot) {
+            _replaceAuthorizedBurnSnapshot();
+            authorizedBurnSnapshotActive = true;
             authorizedBurnEpoch = pendingPartialWithdrawalEpoch;
             authorizedBurnStateVersion = pendingPartialWithdrawalStateVersion;
         }
-        // R3-1: accrue the burn's value into the per-BASE-token deduction ledger. Unlike the mark
-        // above this is a SUM, not a max — it is order-independent, so an out-of-order burn (lower
-        // version submitted later) contributes correctly without needing to be refused. `finalizeClose`
-        // subtracts it from the settled fund cap instead of refusing the settlement; see the R3-1
-        // block there. Unchecked overflow is impossible: every addend is an IMBD-pinned burn amount
-        // bounded by the channel's escrowed value, and Solidity 0.8 checks the addition regardless.
-        authorizedBurnAmount[pendingPartialWithdrawalTokenIndex] += pendingPartialWithdrawalAmount;
 
         delete partialWithdrawalPending;
         delete pendingPartialWithdrawalAuthDigest;
         delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalBurnKey;
         delete pendingPartialWithdrawalCloseIntentDigest;
         delete pendingPartialWithdrawalDeadline;
         delete pendingPartialWithdrawalStateVersion;
@@ -2015,16 +1976,41 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalCloseFreezeNonce;
         delete pendingPartialWithdrawalTokenIndex;
         delete pendingPartialWithdrawalAmount;
+        delete pendingPartialWithdrawalTokenRegistry;
+        delete pendingPartialWithdrawalPostBurnFundAmounts;
+        delete pendingPartialWithdrawalTokenCount;
 
+        // IPW2 is a one-shot payout authorization. Once the Rollup consumes it, the accounted IMBK
+        // bar above prevents this historical burn from ever turning the flag back on.
         IChannelRegistry(address(registry)).authorizePartialWithdrawal(authDigest);
 
         emit PartialWithdrawalFinalized(authDigest, chainKey);
     }
 
-    function cancelPartialWithdrawal(
-        CancelCloseRequest calldata request,
-        MleVerifier.MleProof calldata proof
-    ) external {
+    /// @dev Replace the latest authorized burn state's per-base-token POST-burn fund snapshot.
+    /// Both registries are fixed-width and proof-bounded to at most ten entries, so cleanup and
+    /// installation are constant-bounded. `+=` preserves the safe aggregate if a malformed
+    /// duplicate registry somehow crosses the circuit/verifier injectivity checks.
+    function _replaceAuthorizedBurnSnapshot() private {
+        uint8 oldCount = authorizedBurnTokenCount;
+        for (uint256 t = 0; t < oldCount; t++) {
+            delete authorizedBurnPostFundAmount[authorizedBurnTokenRegistry[t]];
+            delete authorizedBurnTokenRegistry[t];
+        }
+
+        uint8 newCount = pendingPartialWithdrawalTokenCount;
+        authorizedBurnTokenCount = newCount;
+        for (uint256 t = 0; t < newCount; t++) {
+            uint32 baseToken = pendingPartialWithdrawalTokenRegistry[t];
+            authorizedBurnTokenRegistry[t] = baseToken;
+            authorizedBurnPostFundAmount[baseToken] +=
+                pendingPartialWithdrawalPostBurnFundAmounts[t];
+        }
+    }
+
+    function cancelPartialWithdrawal(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof)
+        external
+    {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (request.closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
@@ -2089,44 +2075,43 @@ contract ChannelSettlementManager {
         //    costing that burner one `challengePeriod` before the re-submission succeeds. Bounded,
         //    non-destructive (nothing is stranded — the burn is re-submittable), and strictly
         //    better than the unbounded veto this replaces.
-        bytes32 pwDigest = pendingPartialWithdrawalCloseIntentDigest;
-        if (request.revivedStateVersion <= cancelledPartialWithdrawalRevivedVersion[pwDigest]) {
+        bytes32 burnKey = pendingPartialWithdrawalBurnKey;
+        if (request.revivedStateVersion <= cancelledPartialWithdrawalRevivedVersion[burnKey]) {
             revert PartialWithdrawalCancelReplay();
         }
 
         // SECURITY: mirrors cancelClose — the N-of-N signed a strictly newer state, proving the
         // pending partial withdrawal's state is stale. The verifier binds memberSetCommitment to
         // the registered channel members (same as cancelClose).
-        if (
-            !verifier.verifyCancelClose(
+        if (!verifier.verifyCancelClose(
                 channelId,
                 pendingPartialWithdrawalCloseIntentDigest,
                 registeredMemberSetCommitment(),
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
                 proof
-            )
-        ) revert InvalidCancelProof();
+            )) revert InvalidCancelProof();
 
         // A4: CONSUME the material against this burn. Written after the verify, and BEFORE the
         // deletes below wipe the digest this is keyed on.
-        cancelledPartialWithdrawalRevivedVersion[pwDigest] = request.revivedStateVersion;
+        cancelledPartialWithdrawalRevivedVersion[burnKey] = request.revivedStateVersion;
 
         bytes32 authDigest = pendingPartialWithdrawalAuthDigest;
-        // R3-3: arm the review window for THIS authorization digest. A re-submission of the same
-        // digest cannot be finalized before it, so the defender's next round is bought with the
-        // attacker's wall-clock rather than with the defender's material. Written after the verify
-        // and before the deletes; `max` so an earlier, longer review is never shortened.
+        // Arm the review window for THIS logical burn. A re-submission cannot be finalized before
+        // it, even if its nullifier or unsigned close fields change, so the next round is bought
+        // with the attacker's wall-clock rather than with the defender's material. Written after
+        // the verify and before the deletes; `max` so an earlier, longer review is never shortened.
         {
             uint64 reviewUntil = uint64(block.timestamp) + 2 * challengePeriod;
-            if (reviewUntil > cancelledPartialWithdrawalReviewUntil[authDigest]) {
-                cancelledPartialWithdrawalReviewUntil[authDigest] = reviewUntil;
+            if (reviewUntil > cancelledPartialWithdrawalReviewUntil[burnKey]) {
+                cancelledPartialWithdrawalReviewUntil[burnKey] = reviewUntil;
             }
         }
 
         delete partialWithdrawalPending;
         delete pendingPartialWithdrawalAuthDigest;
         delete pendingPartialWithdrawalChainKey;
+        delete pendingPartialWithdrawalBurnKey;
         delete pendingPartialWithdrawalCloseIntentDigest;
         delete pendingPartialWithdrawalDeadline;
         delete pendingPartialWithdrawalStateVersion;
@@ -2135,17 +2120,10 @@ contract ChannelSettlementManager {
         delete pendingPartialWithdrawalTokenIndex;
         delete pendingPartialWithdrawalAmount;
 
-        emit PartialWithdrawalCancelled(
-            authDigest,
-            request.revivedChannelStateDigest,
-            request.revivedStateVersion
-        );
+        emit PartialWithdrawalCancelled(authDigest, request.revivedChannelStateDigest, request.revivedStateVersion);
     }
 
-    function submitWithdrawalClaim(
-        WithdrawalClaim calldata claim,
-        MleVerifier.MleProof calldata proof
-    ) external {
+    function submitWithdrawalClaim(WithdrawalClaim calldata claim, MleVerifier.MleProof calldata proof) external {
         if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
@@ -2174,8 +2152,7 @@ contract ChannelSettlementManager {
         if (usedWithdrawalNullifiers[claim.withdrawalNullifier]) {
             revert NullifierAlreadyUsed();
         }
-        if (
-            !verifier.verifyWithdrawalClaim(
+        if (!verifier.verifyWithdrawalClaim(
                 channelId,
                 claim.closeIntentDigest,
                 finalizedBalanceStateH1,
@@ -2187,8 +2164,7 @@ contract ChannelSettlementManager {
                 claim.tokenIndex,
                 claim.withdrawalNullifier,
                 proof
-            )
-        ) revert InvalidWithdrawalClaimProof();
+            )) revert InvalidWithdrawalClaimProof();
 
         // Per-token accrual cap (TM-3): token-t claims accrue ONLY against token-t funds.
         uint256 newTotalWithdrawn = totalWithdrawn[claim.tokenIndex] + claim.amount;
@@ -2261,10 +2237,7 @@ contract ChannelSettlementManager {
     ///      left in place but unreachable, ready for whichever of (a)/(b) lands.
     ///      NOTE: `script/RunClose.s.sol:submitPostCloseClaimStep` will now revert at run time; it
     ///      is a manual operator step, referenced by no test.
-    function submitPostCloseClaim(PostCloseClaim calldata, MleVerifier.MleProof calldata)
-        external
-        pure
-    {
+    function submitPostCloseClaim(PostCloseClaim calldata, MleVerifier.MleProof calldata) external pure {
         revert PostCloseClaimDisabled();
     }
 
@@ -2330,7 +2303,7 @@ contract ChannelSettlementManager {
         totalCreditedOut[tokenIndex] += amount;
         emit WithdrawalClaimed(msg.sender, tokenIndex, amount);
         if (tokenIndex == 0) {
-            (bool ok, ) = msg.sender.call{value: amount}("");
+            (bool ok,) = msg.sender.call{value: amount}("");
             if (!ok) revert TransferFailed();
         } else {
             IERC20 token = registry.tokenAddressOf(tokenIndex);
@@ -2355,9 +2328,7 @@ contract ChannelSettlementManager {
     /// Rust preimage (`abi.encodePacked(uint256[10])` = 10 x 32 BE bytes; shared vector:
     /// `close_intent_digest_matches_solidity_shared_vector`). `tokenRegistry`/`tokenCount` are NOT
     /// part of the IMCI preimage (they bind through the tokenFundsDigest PI and the signed H1).
-    function computeCloseIntentDigest(
-        CloseIntent memory intent
-    ) public view returns (bytes32) {
+    function computeCloseIntentDigest(CloseIntent memory intent) public view returns (bytes32) {
         // Built in two concatenated chunks so via-IR can free the intermediate field slots
         // (stack-too-deep otherwise after the close path threads delegateCount elsewhere). The byte
         // stream is identical to a single abi.encodePacked of all limbs in order.
@@ -2387,9 +2358,7 @@ contract ChannelSettlementManager {
         );
     }
 
-    function computeSpecialCloseDigest(
-        SpecialClose memory specialClose
-    ) public view returns (bytes32) {
+    function computeSpecialCloseDigest(SpecialClose memory specialClose) public view returns (bytes32) {
         return keccak256(
             abi.encodePacked(
                 bytes4(0x494d5343),
@@ -2404,10 +2373,7 @@ contract ChannelSettlementManager {
         );
     }
 
-    function _checkCloseProof(
-        CloseIntent calldata intent,
-        MleVerifier.MleProof calldata proof
-    ) internal view {
+    function _checkCloseProof(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) internal view {
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
         // channel's registered member-set commitment, AND the close proof's `memberCount` limb must
         // equal this channel's `activeMemberCount`, so a close can only finalize with the channel's
@@ -2442,10 +2408,11 @@ contract ChannelSettlementManager {
 
     /// @dev Isolated frame for the 17-arg `verifyCloseIntent` marshaling (keeps `_checkCloseProof`
     /// and `submitCloseIntent` under the via-IR stack limit once `delegateCount` is appended).
-    function _runCloseVerify(
-        CloseIntent calldata intent,
-        MleVerifier.MleProof calldata proof
-    ) internal view returns (bool) {
+    function _runCloseVerify(CloseIntent calldata intent, MleVerifier.MleProof calldata proof)
+        internal
+        view
+        returns (bool)
+    {
         CloseProofFields memory fields = CloseProofFields({
             channelId: channelId,
             closeNonce: intent.closeNonce,
@@ -2489,15 +2456,8 @@ contract ChannelSettlementManager {
     /// honest member's newest state always wins a challenge. The tiebreak is STRICT `>` —
     /// re-submitting an equal `(epoch, version)` pair is rejected (`CloseNotNewer`), which
     /// prevents challenge-window extension by replaying the pending state.
-    function _isNewer(
-        CloseIntent calldata intent,
-        PendingClose memory current
-    ) internal pure returns (bool) {
-        return
-            intent.finalEpoch > current.finalEpoch ||
-            (
-                intent.finalEpoch == current.finalEpoch &&
-                intent.finalStateVersion > current.finalStateVersion
-            );
+    function _isNewer(CloseIntent calldata intent, PendingClose memory current) internal pure returns (bool) {
+        return intent.finalEpoch > current.finalEpoch
+            || (intent.finalEpoch == current.finalEpoch && intent.finalStateVersion > current.finalStateVersion);
     }
 }

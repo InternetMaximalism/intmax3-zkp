@@ -3750,10 +3750,6 @@ fn cmd_withdraw(args: &[String]) {
                 &pk_bs,
                 &regev,
                 &recipients,
-                // M-5 (squatting): registration now carries CHANNEL_REGISTRATION_FEE, credited to
-                // the rollup's fraud treasury through the pull path.
-                "--value",
-                "0.003ether",
             ],
         );
     }
@@ -5818,7 +5814,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
     write_json("channel_snapshot.json", &a_state.snapshot);
 
     // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
-    // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IMPW authDigest).
+    // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IPW2 authDigest).
     //
     // SECURITY: the L1 withdrawal leaf — and above all its NULLIFIER — is recorded HERE, derived
     // by the one shared `burn_withdrawal_leaf`. It is settlement-independent (F-WD-2), so it is
@@ -5833,6 +5829,8 @@ fn cmd_cosign_burn_send(args: &[String]) {
         descriptor.receiver_delta.digest(),
     );
     let burn_aux_data = burn_descriptor(
+        descriptor.source_channel_id,
+        descriptor.inter_channel_tx.base_nonce,
         burn_tx_leaf,
         descriptor.receiver_pk_g,
         descriptor.inter_channel_tx.token_index,
@@ -7772,10 +7770,26 @@ fn cmd_pw_submit(args: &[String]) {
     );
 
     // Multitoken §N: the burned BASE token_index recorded by cosign-burn-send (default 0 for
-    // legacy last_burn.json files). Bound into the IMPW authDigest, so the L1 leg pays the
-    // burned asset (withdrawNative for 0, withdrawERC20 otherwise).
+    // legacy last_burn.json files). Bound into the IPW2 authDigest, so the L1 leg pays the burned
+    // asset (withdrawNative for 0, withdrawERC20 otherwise).
     let burn_token_index: u32 = burn["token_index"].as_u64().unwrap_or(0) as u32;
+    let channel_id = state.snapshot.record.channel_id;
+    // The base nonce is an explicit IMI5 field persisted at burn time. It MUST NOT be reconstructed
+    // from the channel small-block number: incoming/import transitions advance that counter
+    // without consuming a base sent-tx slot. `tx_nonce` is accepted only as the field name used by
+    // the immediately preceding schema; neither path invents a nonce from channel state.
+    let recorded_nonce = burn["base_nonce"]
+        .as_u64()
+        .or_else(|| burn["tx_nonce"].as_u64())
+        .unwrap_or_else(|| die("last_burn.json missing required base_nonce/tx_nonce"));
+    let tx_nonce = u32::try_from(recorded_nonce).unwrap_or_else(|_| {
+        die(format!(
+            "last_burn.json base nonce {recorded_nonce} exceeds u32"
+        ))
+    });
     let burn_aux_data = burn_descriptor(
+        channel_id,
+        tx_nonce,
         tx_leaf,
         receiver_pk_g,
         burn_token_index,
@@ -7786,7 +7800,7 @@ fn cmd_pw_submit(args: &[String]) {
             .unwrap_or_else(|e| die(format!("parse last_burn.json aux_data: {e:?}")));
         if recorded != burn_aux_data {
             die(format!(
-                "last_burn.json burn descriptor {} != canonical IMBD descriptor {} — refusing",
+                "last_burn.json burn descriptor {} != canonical IMD2 descriptor {} — refusing",
                 recorded.to_hex(),
                 burn_aux_data.to_hex()
             ));
@@ -7811,20 +7825,6 @@ fn cmd_pw_submit(args: &[String]) {
     // The leaf now comes from `burn_withdrawal_leaf`, the one shared derivation, which calls the
     // same `SettledTransfer::nullifier()` the circuit calls. Every input is settlement-independent
     // (F-WD-2), so no circuit, PI or VK change is required to know the nullifier at burn time.
-    let channel_id = state.snapshot.record.channel_id;
-    // The base nonce is an explicit IMI3 field persisted at burn time. It MUST NOT be reconstructed
-    // from the channel small-block number: incoming/import transitions advance that counter
-    // without consuming a base sent-tx slot. `tx_nonce` is accepted only as the field name used by
-    // the immediately preceding schema; neither path invents a nonce from channel state.
-    let recorded_nonce = burn["base_nonce"]
-        .as_u64()
-        .or_else(|| burn["tx_nonce"].as_u64())
-        .unwrap_or_else(|| die("last_burn.json missing required base_nonce/tx_nonce"));
-    let tx_nonce = u32::try_from(recorded_nonce).unwrap_or_else(|_| {
-        die(format!(
-            "last_burn.json base nonce {recorded_nonce} exceeds u32"
-        ))
-    });
     let withdrawal = burn_withdrawal_leaf(
         channel_id,
         receiver_pk_g,
@@ -7962,6 +7962,7 @@ fn cmd_pw_submit(args: &[String]) {
         "withdrawal_amount": burn_amount,
         "withdrawal_nullifier": nullifier.to_hex(),
         "withdrawal_aux_data": burn_aux_data.to_hex(),
+        "withdrawal_base_nonce": tx_nonce,
         "burn_tx_leaf": tx_leaf.to_hex(),
     });
     // Same shared resolution as the exit commands (F4).
@@ -8055,83 +8056,6 @@ fn cmd_pw_finalize(args: &[String]) {
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing rollup"));
 
-    // Idempotency: if a previous run already finalized (the rollup has the authorization) skip
-    // straight to the claim — a second finalizePartialWithdrawal() would revert
-    // PartialWithdrawalNotPending and wedge the retry.
-    let already = cast(&[
-        "call",
-        rollup,
-        "partialWithdrawalAuthorized(bytes32)",
-        auth_digest,
-        "--rpc-url",
-        &rpc,
-    ]);
-    // Exact ABI bool word — a loose suffix match could misread unexpected RPC output.
-    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
-    if already.trim() == TRUE_WORD {
-        eprintln!("pw-finalize: already authorized on-chain; skipping finalize call");
-    } else {
-        // finalizePartialWithdrawal requires block.timestamp > pendingPartialWithdrawalDeadline
-        // (ChannelSettlementManager). Anvil needs explicit time travel to pass the window; a real
-        // chain (e.g. Sepolia) passes it by simply waiting for a later block — evm_increaseTime
-        // does not exist there.
-        let chain_id = cast(&["chain-id", "--rpc-url", &rpc]);
-        if chain_id.trim() == "31337" {
-            cast(&["rpc", "evm_increaseTime", "2", "--rpc-url", &rpc]);
-            cast(&["rpc", "evm_mine", "--rpc-url", &rpc]);
-        } else {
-            let deadline_hex = cast(&[
-                "call",
-                manager,
-                "pendingPartialWithdrawalDeadline()",
-                "--rpc-url",
-                &rpc,
-            ]);
-            let deadline = u128::from_str_radix(deadline_hex.trim().trim_start_matches("0x"), 16)
-                .unwrap_or_else(|e| die(format!("parse pendingPartialWithdrawalDeadline: {e}")));
-            let mut waited = 0u64;
-            loop {
-                let ts: u128 = cast(&["block", "latest", "-f", "timestamp", "--rpc-url", &rpc])
-                    .trim()
-                    .parse()
-                    .unwrap_or_else(|e| die(format!("parse latest block timestamp: {e}")));
-                if ts > deadline {
-                    break;
-                }
-                if waited >= 300 {
-                    die(format!(
-                        "challenge window still open after {waited}s (block ts {ts} <= deadline {deadline}) — aborting"
-                    ));
-                }
-                eprintln!(
-                    "pw-finalize: challenge window open (block ts {ts} <= deadline {deadline}); waiting for the next block…"
-                );
-                std::thread::sleep(std::time::Duration::from_secs(6));
-                waited += 6;
-            }
-        }
-
-        cast_signed(
-            &rpc,
-            l1_signer.get(),
-            &["send", manager, "finalizePartialWithdrawal()"],
-        );
-    }
-
-    let check = cast(&[
-        "call",
-        rollup,
-        "partialWithdrawalAuthorized(bytes32)",
-        auth_digest,
-        "--rpc-url",
-        &rpc,
-    ]);
-    let authorized = check.trim() == TRUE_WORD;
-    if !authorized {
-        die("on-chain partialWithdrawalAuthorized returned false");
-    }
-    eprintln!("pw-finalize: authorization recorded on-chain.");
-
     // The payout leg (partial-withdrawal-payout-design Phase 3). History: the old
     // `claimAuthorizedWithdrawal` door was REMOVED 2026-07-28 (it paid the GLOBAL escrow against
     // an authorization binding neither amount nor recipient — doc/tasks/pw-auth-threat-model.md).
@@ -8140,25 +8064,32 @@ fn cmd_pw_finalize(args: &[String]) {
     // history (`LiveBalanceService::burn_payout_artifacts`), and this authorization is only a
     // second factor on that leaf. The API route obtains the artifacts from the daemon and stages
     // them in the channel workdir before invoking this command.
-    run_partial_withdrawal_payout(&rpc, &l1_signer, rollup, auth_digest);
+    // IPW2 is one-shot: a successful proof payout deletes the authorization in the same
+    // transaction that consumes the proof nullifier. The payout driver therefore owns the whole
+    // pending -> authorized -> consumed state machine; checking only the authorization here would
+    // mistake a completed payout for an unfinalized manager intent and retry a non-pending manager.
+    run_partial_withdrawal_payout(&rpc, &l1_signer, rollup, manager, auth_digest);
 }
 
 /// Crash-safe L1 payout driver for a proved partial withdrawal, per the protocol documented on
 /// `RunPartialWithdrawalPayout.s.sol`: dry-run the script for the EXACT calldata, persist a
 /// `BroadcastIntent` (caller, nonce, calldata hash, pre-payout credit) in the durable payout
 /// store, only then send at that pinned nonce, then confirm with the receipt + the three
-/// on-chain observations the store demands (authorization, finalized anchor, used nullifier)
-/// and the exact credit delta. Every step is idempotent: a crashed run re-enters at the
-/// recorded phase.
+/// on-chain observations the store demands (authorization consumed/false, finalized anchor, used
+/// nullifier) and the exact credit delta. Every step is idempotent: a crashed run re-enters at the
+/// recorded phase and reconciles a mined transaction by stored hash or pinned sender/nonce.
 fn run_partial_withdrawal_payout(
     rpc: &str,
     l1_signer: &LazyL1Signer,
     rollup: &str,
+    manager: &str,
     auth_digest: &str,
 ) {
     use intmax3_zkp::partial_withdrawal_payout::{
-        BroadcastIntent, L1CallKind, PartialWithdrawalPayoutStore, PartialWithdrawalProofArtifacts,
-        PayoutConfirmation, PreparePartialWithdrawalPayout, PullConfirmation,
+        partial_withdrawal_resume_action, BroadcastIntent, L1CallKind,
+        PartialWithdrawalPayoutStore, PartialWithdrawalProofArtifacts,
+        PartialWithdrawalResumeAction, PayoutConfirmation, PreparePartialWithdrawalPayout,
+        PullConfirmation,
     };
 
     let contracts_dir =
@@ -8188,11 +8119,14 @@ fn run_partial_withdrawal_payout(
     let burn_base_nonce = producer_meta["liveReceipt"]["baseNonce"]
         .as_u64()
         .unwrap_or_else(|| {
-            die("pw_producer.json liveReceipt.baseNonce missing (was the burn settled in the \
-                 live authority?)")
+            die(
+                "pw_producer.json liveReceipt.baseNonce missing (was the burn settled in the \
+                 live authority?)",
+            )
         })
         .checked_sub(1)
-        .unwrap_or_else(|| die("live baseNonce 0 cannot follow a burn")) as u32;
+        .unwrap_or_else(|| die("live baseNonce 0 cannot follow a burn"))
+        as u32;
     let channel_id_u64 = cosigned_head["channelId"]
         .as_u64()
         .unwrap_or_else(|| die("burn_cosigned.json missing channelId"));
@@ -8219,6 +8153,30 @@ fn run_partial_withdrawal_payout(
         candidate.lane
     );
 
+    let nullifier_hex = candidate.artifacts.withdrawal.nullifier.to_string();
+    let mut chain_state =
+        read_partial_withdrawal_onchain_state(rpc, rollup, manager, auth_digest, &nullifier_hex);
+    let mut resume_action = partial_withdrawal_resume_action(&candidate, chain_state)
+        .unwrap_or_else(|e| die(format!("unsafe partial-withdrawal resume state: {e}")));
+    if resume_action == PartialWithdrawalResumeAction::FinalizePending {
+        finalize_pending_partial_withdrawal(rpc, l1_signer, manager);
+        chain_state = read_partial_withdrawal_onchain_state(
+            rpc,
+            rollup,
+            manager,
+            auth_digest,
+            &nullifier_hex,
+        );
+        if !chain_state.authorization || chain_state.nullifier_used {
+            die(
+                "finalizePartialWithdrawal completed without creating an unused one-shot IPW2 \
+                 authorization; the logical burn may already have been consumed",
+            );
+        }
+        resume_action = PartialWithdrawalResumeAction::BroadcastPayout;
+        eprintln!("pw-finalize: one-shot authorization recorded on-chain.");
+    }
+
     let recipient = candidate.artifacts.withdrawal.recipient;
     let recipient_hex = recipient.to_string();
     let is_native = candidate.artifacts.withdrawal.token_index == 0;
@@ -8236,111 +8194,113 @@ fn run_partial_withdrawal_payout(
     fs::write(&mle_path, &candidate.artifacts.withdrawal_mle_json)
         .unwrap_or_else(|e| die(format!("write {mle_path}: {e}")));
 
-    if candidate.payout_confirmation.is_none() {
-        // 1. Dry-run for the exact calldata.
-        let mut forge = Command::new("forge");
-        forge
-            .current_dir(&contracts_dir)
-            .env("ROLLUP", rollup)
-            .env("PW_PAYOUT_PATH", &payout_path)
-            .env("PW_MLE_PATH", &mle_path)
-            .args([
-                "script",
-                "script/RunPartialWithdrawalPayout.s.sol",
-                "--sig",
-                step,
-                "--rpc-url",
+    if resume_action != PartialWithdrawalResumeAction::ContinueAfterPayout {
+        let payout_kind = if is_native {
+            L1CallKind::WithdrawNative
+        } else {
+            L1CallKind::WithdrawErc20
+        };
+        let current = store
+            .active()
+            .unwrap_or_else(|e| die(format!("payout store active: {e}")))
+            .unwrap_or_else(|| die("payout store lost the active candidate"));
+        // Reconcile BEFORE attempting a new forge simulation. Once the exact payout succeeds the
+        // one-shot authorization is false, so simulating the same withdrawal necessarily reverts;
+        // that normal crash-after-mining state must still reach receipt recovery.
+        let reconciled = current.payout_broadcast.as_ref().and_then(|intent| {
+            reconcile_confirmed_l1_call(rpc, rollup, intent, &current.payout_tx_hashes, payout_kind)
+                .map(|receipt| (receipt, intent.clone()))
+        });
+        let (receipt, tx_hash, intent) = if let Some((receipt, intent)) = reconciled {
+            let hash = receipt.tx_hash.to_string();
+            (receipt, hash, intent)
+        } else {
+            if chain_state.nullifier_used {
+                die(
+                    "withdrawal nullifier is already used, but no exact canonical payout receipt \
+                     was found from the durable broadcast intent",
+                );
+            }
+            let (calldata, calldata_hash) = build_partial_withdrawal_payout_calldata(
+                &contracts_dir,
+                chain_id,
                 rpc,
-                "--code-size-limit",
-                "50000",
-            ]);
-        let out = forge
-            .output()
-            .unwrap_or_else(|e| die(format!("forge payout dry-run failed to start: {e}")));
-        if !out.status.success() {
-            die(format!(
-                "forge payout dry-run FAILED:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-        let dry = fs::read_to_string(format!(
-            "{contracts_dir}/broadcast/RunPartialWithdrawalPayout.s.sol/{chain_id}/dry-run/run-latest.json"
-        ))
-        .unwrap_or_else(|e| die(format!("read payout dry-run journal: {e}")));
-        let dry: serde_json::Value = serde_json::from_str(&dry)
-            .unwrap_or_else(|e| die(format!("parse payout dry-run journal: {e}")));
-        let tx = &dry["transactions"][0]["transaction"];
-        let calldata = tx["input"]
-            .as_str()
-            .or_else(|| tx["data"].as_str())
-            .unwrap_or_else(|| die("payout dry-run journal has no calldata"))
-            .to_string();
-        let dry_to = tx["to"].as_str().unwrap_or_default().to_lowercase();
-        if dry_to != rollup.to_lowercase() {
-            die(format!(
-                "payout dry-run targets {dry_to}, expected the rollup {rollup}"
-            ));
-        }
-        let calldata_hash = cast(&["keccak", &calldata])
-            .trim()
-            .parse::<Bytes32>()
-            .unwrap_or_else(|e| die(format!("keccak calldata: {e}")));
-
-        // 2. Persist the broadcast intent BEFORE anything irreversible.
-        let caller_hex = l1_signer.get().address();
-        let caller = caller_hex
-            .parse::<Address>()
-            .unwrap_or_else(|e| die(format!("parse caller address: {e}")));
-        let caller_nonce: u64 = cast(&["nonce", &caller_hex, "--rpc-url", rpc])
-            .trim()
-            .parse()
-            .unwrap_or_else(|e| die(format!("parse caller nonce: {e}")));
-        let start_block: u64 = cast(&["block-number", "--rpc-url", rpc])
-            .trim()
-            .parse()
-            .unwrap_or_else(|e| die(format!("parse block number: {e}")));
-        let credit_before = read_pending_credit(rpc, rollup, &recipient_hex);
-        store
-            .mark_payout_broadcast(
-                candidate_id,
-                BroadcastIntent {
-                    caller,
-                    start_block,
-                    caller_nonce,
-                    calldata_hash,
-                    credit_before,
-                },
-            )
-            .unwrap_or_else(|e| die(format!("persist payout intent: {e}")));
-
-        // 3. Send the EXACT dry-run calldata at the persisted nonce.
-        let nonce_arg = caller_nonce.to_string();
-        let send_out = cast_signed(
-            rpc,
-            l1_signer.get(),
-            &["send", rollup, &calldata, "--nonce", &nonce_arg, "--json"],
-        );
-        let tx_hash = extract_tx_hash(&send_out);
-
-        // 4. Confirm from the receipt + the three on-chain observations.
-        let receipt = read_l1_receipt(
-            rpc,
-            &tx_hash,
-            if is_native {
-                L1CallKind::WithdrawNative
+                rollup,
+                &payout_path,
+                &mle_path,
+                step,
+            );
+            let caller_hex = l1_signer.get().address();
+            let caller = caller_hex
+                .parse::<Address>()
+                .unwrap_or_else(|e| die(format!("parse caller address: {e}")));
+            let intent = if let Some(intent) = current.payout_broadcast.clone() {
+                if intent.caller != caller || intent.calldata_hash != calldata_hash {
+                    die(
+                        "persisted payout intent does not match the current signer or exact proof calldata",
+                    );
+                }
+                intent
             } else {
-                L1CallKind::WithdrawErc20
-            },
-        );
-        let payout_meta: serde_json::Value =
-            serde_json::from_str(&candidate.artifacts.payout_json)
-                .unwrap_or_else(|e| die(format!("parse candidate payout json: {e}")));
+                let intent = BroadcastIntent {
+                    caller,
+                    start_block: cast(&["block-number", "--rpc-url", rpc])
+                        .trim()
+                        .parse()
+                        .unwrap_or_else(|e| die(format!("parse payout start block: {e}"))),
+                    caller_nonce: read_account_nonce(rpc, &caller_hex, "latest"),
+                    calldata_hash,
+                    credit_before: read_pending_credit(rpc, rollup, &current.artifacts.withdrawal),
+                };
+                store
+                    .mark_payout_broadcast(candidate_id, intent.clone())
+                    .unwrap_or_else(|e| die(format!("persist payout intent: {e}")));
+                intent
+            };
+
+            // Re-scan after the potentially expensive simulation to close the race with a pending
+            // transaction mining while calldata was rebuilt.
+            let current = store
+                .active()
+                .unwrap_or_else(|e| die(format!("payout store active: {e}")))
+                .unwrap_or_else(|| die("payout store lost the active candidate"));
+            if let Some(receipt) = reconcile_confirmed_l1_call(
+                rpc,
+                rollup,
+                &intent,
+                &current.payout_tx_hashes,
+                payout_kind,
+            ) {
+                let hash = receipt.tx_hash.to_string();
+                (receipt, hash, intent)
+            } else {
+                require_nonce_free_for_exact_rebroadcast(rpc, &caller_hex, intent.caller_nonce);
+                let nonce_arg = intent.caller_nonce.to_string();
+                let send_out = cast_signed(
+                    rpc,
+                    l1_signer.get(),
+                    &["send", rollup, &calldata, "--nonce", &nonce_arg, "--json"],
+                );
+                let tx_hash = extract_tx_hash(&send_out);
+                let tx_hash_b32 = tx_hash
+                    .parse::<Bytes32>()
+                    .unwrap_or_else(|e| die(format!("parse payout tx hash: {e}")));
+                store
+                    .record_payout_tx_hash(candidate_id, tx_hash_b32)
+                    .unwrap_or_else(|e| die(format!("persist payout tx hash: {e}")));
+                (read_l1_receipt(rpc, &tx_hash, payout_kind), tx_hash, intent)
+            }
+        };
+
+        // Confirm the exact successful receipt and all atomic postconditions. Authorization
+        // MUST now be false; used-nullifier + exact credit delta distinguish consumption from a
+        // missing/failed authorization.
+        let payout_meta: serde_json::Value = serde_json::from_str(&candidate.artifacts.payout_json)
+            .unwrap_or_else(|e| die(format!("parse candidate payout json: {e}")));
         let ext_commitment = payout_meta["ext_commitment"]
             .as_str()
             .unwrap_or_else(|| die("candidate payout json missing ext_commitment"))
             .to_string();
-        let nullifier_hex = candidate.artifacts.withdrawal.nullifier.to_string();
         let confirmation = PayoutConfirmation {
             receipt,
             authorization_observed: read_bool_view(
@@ -8361,8 +8321,8 @@ fn run_partial_withdrawal_payout(
                 "withdrawalNullifierUsed(bytes32)",
                 &nullifier_hex,
             ),
-            credit_before,
-            credit_after: read_pending_credit(rpc, rollup, &recipient_hex),
+            credit_before: intent.credit_before,
+            credit_after: read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal),
         };
         store
             .confirm_payout(candidate_id, confirmation)
@@ -8376,13 +8336,15 @@ fn run_partial_withdrawal_payout(
     //    `intent.caller == recipient`); otherwise the recipient pulls with `withdraw()`.
     let caller_hex = l1_signer.get().address();
     if caller_hex.to_lowercase() != recipient_hex.to_lowercase() {
+        store
+            .mark_recipient_pull_delegated(candidate_id)
+            .unwrap_or_else(|e| die(format!("persist external recipient handoff: {e}")));
         eprintln!(
             "pw-finalize: payout credited {recipient_hex}; that account pulls it with \
-             `withdraw()` (this signer is {caller_hex}). Done."
+             the matching native/ERC-20 pull (this signer is {caller_hex}). Local workflow COMPLETE."
         );
         return;
     }
-    let _ = (rollup_addr, chain_id);
     let candidate = store
         .active()
         .unwrap_or_else(|e| die(format!("payout store active: {e}")))
@@ -8395,79 +8357,439 @@ fn run_partial_withdrawal_payout(
         .payout_confirmation
         .clone()
         .unwrap_or_else(|| die("pull before payout confirmation"));
-    let pull_fn = if is_native { "withdraw()" } else { "withdrawToken()" };
-    let pull_calldata_owned = cast(&["calldata", pull_fn]);
+    let pull_calldata_owned = if is_native {
+        cast(&["calldata", "withdraw()"])
+    } else {
+        let token_index = candidate.artifacts.withdrawal.token_index.to_string();
+        cast(&["calldata", "withdrawToken(uint32)", &token_index])
+    };
     let pull_calldata = pull_calldata_owned.trim();
     let calldata_hash = cast(&["keccak", pull_calldata])
         .trim()
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak pull calldata: {e}")));
-    let caller_nonce: u64 = cast(&["nonce", &caller_hex, "--rpc-url", rpc])
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| die(format!("parse pull nonce: {e}")));
-    let start_block: u64 = cast(&["block-number", "--rpc-url", rpc])
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| die(format!("parse pull block number: {e}")));
-    store
-        .mark_pull_broadcast(
-            candidate.candidate_id,
-            BroadcastIntent {
-                caller: recipient,
-                start_block,
-                caller_nonce,
-                calldata_hash,
-                credit_before: payout_conf.credit_after,
-            },
-        )
-        .unwrap_or_else(|e| die(format!("persist pull intent: {e}")));
-    let nonce_arg = caller_nonce.to_string();
-    let send_out = cast_signed(
-        rpc,
-        l1_signer.get(),
-        &["send", rollup, pull_calldata, "--nonce", &nonce_arg, "--json"],
-    );
-    let tx_hash = extract_tx_hash(&send_out);
-    let receipt = read_l1_receipt(
-        rpc,
-        &tx_hash,
-        if is_native {
-            L1CallKind::PullNative
-        } else {
-            L1CallKind::PullErc20
-        },
-    );
+    let intent = if let Some(intent) = candidate.pull_broadcast.clone() {
+        if intent.caller != recipient
+            || intent.calldata_hash != calldata_hash
+            || intent.credit_before != payout_conf.credit_after
+        {
+            die("persisted pull intent differs from the proved recipient/calldata/credit");
+        }
+        intent
+    } else {
+        let current_credit = read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal);
+        if current_credit != payout_conf.credit_after {
+            die(format!(
+                "recipient credit changed before pull intent: expected {}, observed {}",
+                payout_conf.credit_after, current_credit
+            ));
+        }
+        let intent = BroadcastIntent {
+            caller: recipient,
+            start_block: cast(&["block-number", "--rpc-url", rpc])
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| die(format!("parse pull block number: {e}"))),
+            caller_nonce: read_account_nonce(rpc, &caller_hex, "latest"),
+            calldata_hash,
+            credit_before: payout_conf.credit_after,
+        };
+        store
+            .mark_pull_broadcast(candidate.candidate_id, intent.clone())
+            .unwrap_or_else(|e| die(format!("persist pull intent: {e}")));
+        intent
+    };
+    let pull_kind = if is_native {
+        L1CallKind::PullNative
+    } else {
+        L1CallKind::PullErc20
+    };
+    let current = store
+        .active()
+        .unwrap_or_else(|e| die(format!("payout store active: {e}")))
+        .unwrap_or_else(|| die("payout store lost the active candidate"));
+    let (receipt, tx_hash) = if let Some(receipt) =
+        reconcile_confirmed_l1_call(rpc, rollup, &intent, &current.pull_tx_hashes, pull_kind)
+    {
+        let hash = receipt.tx_hash.to_string();
+        (receipt, hash)
+    } else {
+        let credit = read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal);
+        if credit != intent.credit_before {
+            die(format!(
+                "pull credit changed without an exact canonical receipt: expected {}, observed {}",
+                intent.credit_before, credit
+            ));
+        }
+        require_nonce_free_for_exact_rebroadcast(rpc, &caller_hex, intent.caller_nonce);
+        let nonce_arg = intent.caller_nonce.to_string();
+        let send_out = cast_signed(
+            rpc,
+            l1_signer.get(),
+            &[
+                "send",
+                rollup,
+                pull_calldata,
+                "--nonce",
+                &nonce_arg,
+                "--json",
+            ],
+        );
+        let tx_hash = extract_tx_hash(&send_out);
+        let tx_hash_b32 = tx_hash
+            .parse::<Bytes32>()
+            .unwrap_or_else(|e| die(format!("parse pull tx hash: {e}")));
+        store
+            .record_pull_tx_hash(candidate.candidate_id, tx_hash_b32)
+            .unwrap_or_else(|e| die(format!("persist pull tx hash: {e}")));
+        (read_l1_receipt(rpc, &tx_hash, pull_kind), tx_hash)
+    };
     store
         .confirm_pull(
             candidate.candidate_id,
             PullConfirmation {
                 receipt,
-                credit_before: payout_conf.credit_after,
-                credit_after: read_pending_credit(rpc, rollup, &recipient_hex),
+                credit_before: intent.credit_before,
+                credit_after: read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal),
             },
         )
         .unwrap_or_else(|e| die(format!("confirm pull: {e}")));
     eprintln!("pw-finalize: recipient pull confirmed (tx {tx_hash}). Partial withdrawal COMPLETE.");
 }
 
-fn read_pending_credit(rpc: &str, rollup: &str, recipient_hex: &str) -> U256 {
-    let raw = cast(&[
+fn build_partial_withdrawal_payout_calldata(
+    contracts_dir: &str,
+    chain_id: u64,
+    rpc: &str,
+    rollup: &str,
+    payout_path: &str,
+    mle_path: &str,
+    step: &str,
+) -> (String, Bytes32) {
+    let mut forge = Command::new("forge");
+    forge
+        .current_dir(contracts_dir)
+        .env("ROLLUP", rollup)
+        .env("PW_PAYOUT_PATH", payout_path)
+        .env("PW_MLE_PATH", mle_path)
+        .args([
+            "script",
+            "script/RunPartialWithdrawalPayout.s.sol",
+            "--sig",
+            step,
+            "--rpc-url",
+            rpc,
+            "--code-size-limit",
+            "50000",
+        ]);
+    let out = forge
+        .output()
+        .unwrap_or_else(|e| die(format!("forge payout dry-run failed to start: {e}")));
+    if !out.status.success() {
+        die(format!(
+            "forge payout dry-run FAILED:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let dry = fs::read_to_string(format!(
+        "{contracts_dir}/broadcast/RunPartialWithdrawalPayout.s.sol/{chain_id}/dry-run/run-latest.json"
+    ))
+    .unwrap_or_else(|e| die(format!("read payout dry-run journal: {e}")));
+    let dry: serde_json::Value = serde_json::from_str(&dry)
+        .unwrap_or_else(|e| die(format!("parse payout dry-run journal: {e}")));
+    let tx = &dry["transactions"][0]["transaction"];
+    let calldata = tx["input"]
+        .as_str()
+        .or_else(|| tx["data"].as_str())
+        .unwrap_or_else(|| die("payout dry-run journal has no calldata"))
+        .to_string();
+    let dry_to = tx["to"].as_str().unwrap_or_default();
+    if !dry_to.eq_ignore_ascii_case(rollup) {
+        die(format!(
+            "payout dry-run targets {dry_to}, expected the rollup {rollup}"
+        ));
+    }
+    let calldata_hash = cast(&["keccak", &calldata])
+        .trim()
+        .parse::<Bytes32>()
+        .unwrap_or_else(|e| die(format!("keccak payout calldata: {e}")));
+    (calldata, calldata_hash)
+}
+
+fn read_pending_credit(rpc: &str, rollup: &str, withdrawal: &Withdrawal) -> U256 {
+    let recipient = withdrawal.recipient.to_string();
+    let raw = if withdrawal.token_index == 0 {
+        cast(&[
+            "call",
+            rollup,
+            "pendingWithdrawals(address)",
+            &recipient,
+            "--rpc-url",
+            rpc,
+        ])
+    } else {
+        let token_index = withdrawal.token_index.to_string();
+        cast(&[
+            "call",
+            rollup,
+            "pendingTokenWithdrawals(uint32,address)",
+            &token_index,
+            &recipient,
+            "--rpc-url",
+            rpc,
+        ])
+    };
+    Bytes32::from_hex(raw.trim())
+        .map(U256::from)
+        .unwrap_or_else(|e| die(format!("parse pending withdrawal credit: {e:?}")))
+}
+
+fn read_partial_withdrawal_onchain_state(
+    rpc: &str,
+    rollup: &str,
+    manager: &str,
+    auth_digest: &str,
+    nullifier: &str,
+) -> intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalOnchainState {
+    use intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalOnchainState;
+
+    // Omit return types so `cast call` returns the raw ABI word consumed by the parsers below.
+    // With `(bool)` / `(uint256)`, cast pretty-prints decoded values (for example `true` or a
+    // decimal), which must not be compared with or parsed as a 32-byte ABI word.
+    let manager_pending = read_bool_view0(rpc, manager, "partialWithdrawalPending()");
+    let pending_auth_digest = cast(&[
         "call",
-        rollup,
-        "pendingWithdrawals(address)",
-        recipient_hex,
+        manager,
+        "pendingPartialWithdrawalAuthDigest()",
+        "--rpc-url",
+        rpc,
+    ])
+    .trim()
+    .parse::<Bytes32>()
+    .unwrap_or_else(|e| die(format!("parse pending partial-withdrawal auth digest: {e}")));
+    PartialWithdrawalOnchainState {
+        manager_pending,
+        pending_auth_digest,
+        authorization: read_bool_view(
+            rpc,
+            rollup,
+            "partialWithdrawalAuthorized(bytes32)",
+            auth_digest,
+        ),
+        nullifier_used: read_bool_view(
+            rpc,
+            rollup,
+            "withdrawalNullifierUsed(bytes32)",
+            nullifier,
+        ),
+    }
+}
+
+fn finalize_pending_partial_withdrawal(rpc: &str, l1_signer: &LazyL1Signer, manager: &str) {
+    // finalizePartialWithdrawal requires block.timestamp > deadline. Anvil needs explicit time
+    // travel; a real chain advances naturally and is polled for at most five minutes here.
+    let deadline_hex = cast(&[
+        "call",
+        manager,
+        "pendingPartialWithdrawalDeadline()",
         "--rpc-url",
         rpc,
     ]);
-    Bytes32::from_hex(raw.trim())
-        .map(U256::from)
-        .unwrap_or_else(|e| die(format!("parse pendingWithdrawals: {e:?}")))
+    let deadline = parse_u64_quantity(deadline_hex.trim(), "pendingPartialWithdrawalDeadline");
+    if rpc_chain_id(rpc) == 31337 {
+        let ts = cast(&["block", "latest", "-f", "timestamp", "--rpc-url", rpc]);
+        let ts = parse_u64_quantity(ts.trim(), "latest block timestamp");
+        if ts <= deadline {
+            let advance = deadline
+                .checked_sub(ts)
+                .and_then(|delta| delta.checked_add(1))
+                .unwrap_or_else(|| die("partial-withdrawal deadline cannot be advanced safely"))
+                .to_string();
+            cast(&["rpc", "evm_increaseTime", &advance, "--rpc-url", rpc]);
+        }
+        cast(&["rpc", "evm_mine", "--rpc-url", rpc]);
+    } else {
+        let mut waited = 0u64;
+        loop {
+            let ts = cast(&["block", "latest", "-f", "timestamp", "--rpc-url", rpc]);
+            let ts = parse_u64_quantity(ts.trim(), "latest block timestamp");
+            if ts > deadline {
+                break;
+            }
+            if waited >= 300 {
+                die(format!(
+                    "challenge window still open after {waited}s (block ts {ts} <= deadline {deadline})"
+                ));
+            }
+            eprintln!(
+                "pw-finalize: challenge window open (block ts {ts} <= deadline {deadline}); waiting…"
+            );
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            waited += 6;
+        }
+    }
+    cast_signed(
+        rpc,
+        l1_signer.get(),
+        &["send", manager, "finalizePartialWithdrawal()"],
+    );
 }
 
 fn read_bool_view(rpc: &str, rollup: &str, sig: &str, arg: &str) -> bool {
     const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
     cast(&["call", rollup, sig, arg, "--rpc-url", rpc]).trim() == TRUE_WORD
+}
+
+fn read_bool_view0(rpc: &str, contract: &str, sig: &str) -> bool {
+    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    cast(&["call", contract, sig, "--rpc-url", rpc]).trim() == TRUE_WORD
+}
+
+fn parse_u64_quantity(raw: &str, what: &str) -> u64 {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).unwrap_or_else(|e| die(format!("parse {what}: {e}")))
+    } else {
+        raw.parse::<u64>()
+            .unwrap_or_else(|e| die(format!("parse {what}: {e}")))
+    }
+}
+
+fn read_account_nonce(rpc: &str, account: &str, block: &str) -> u64 {
+    let raw = cast(&["nonce", account, "--block", block, "--rpc-url", rpc]);
+    parse_u64_quantity(raw.trim(), &format!("{block} account nonce"))
+}
+
+/// Refuse to guess when a transaction at the pinned nonce may still be pending. If both latest and
+/// pending nonces equal the intent nonce, the nonce is free and rebroadcasting the exact calldata
+/// is safe. A mined-but-unresolved nonce is also a hard failure: the canonical-block scan should
+/// have found it, so proceeding would hide an RPC/pruning/reorg inconsistency.
+fn require_nonce_free_for_exact_rebroadcast(rpc: &str, caller: &str, intended_nonce: u64) {
+    let latest = read_account_nonce(rpc, caller, "latest");
+    let pending = read_account_nonce(rpc, caller, "pending");
+    if latest > intended_nonce {
+        die(format!(
+            "sender nonce {intended_nonce} is already mined but no exact canonical receipt was found"
+        ));
+    }
+    if pending > intended_nonce {
+        die(format!(
+            "sender nonce {intended_nonce} is still pending; retry after it is mined or dropped"
+        ));
+    }
+    if latest < intended_nonce || pending < intended_nonce {
+        die(format!(
+            "sender nonce regressed below persisted intent {intended_nonce} (latest={latest}, pending={pending})"
+        ));
+    }
+}
+
+/// Return a successful-or-failed mined receipt candidate for the exact persisted intent. The
+/// payout store performs the final success/target/calldata checks. Known hashes are tried first;
+/// then canonical blocks are scanned by `(caller, nonce)` to bridge a crash immediately after
+/// broadcast but before the returned transaction hash was fsynced.
+fn reconcile_confirmed_l1_call(
+    rpc: &str,
+    expected_to: &str,
+    intent: &intmax3_zkp::partial_withdrawal_payout::BroadcastIntent,
+    known_hashes: &[Bytes32],
+    call_kind: intmax3_zkp::partial_withdrawal_payout::L1CallKind,
+) -> Option<intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt> {
+    for hash in known_hashes.iter().rev() {
+        if let Some(receipt) = try_read_l1_receipt(rpc, &hash.to_string(), call_kind) {
+            return Some(receipt);
+        }
+    }
+
+    let latest: u64 = cast(&["block-number", "--rpc-url", rpc])
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| {
+            die(format!(
+                "parse latest block for receipt reconciliation: {e}"
+            ))
+        });
+    if latest < intent.start_block {
+        die(format!(
+            "canonical head {latest} is below persisted broadcast start block {}",
+            intent.start_block
+        ));
+    }
+    for block_number in intent.start_block..=latest {
+        let block_arg = block_number.to_string();
+        let raw = cast(&["block", &block_arg, "--full", "--json", "--rpc-url", rpc]);
+        let block: serde_json::Value = serde_json::from_str(raw.trim())
+            .unwrap_or_else(|e| die(format!("parse full block {block_number}: {e}")));
+        match exact_intent_tx_hash_in_block(&block, intent, expected_to) {
+            Ok(Some(hash)) => {
+                return Some(read_l1_receipt(rpc, &hash, call_kind));
+            }
+            Ok(None) => {}
+            Err(error) => die(format!(
+                "transaction at persisted sender nonce is not the exact intended call: {error}"
+            )),
+        }
+    }
+    None
+}
+
+fn exact_intent_tx_hash_in_block(
+    block: &serde_json::Value,
+    intent: &intmax3_zkp::partial_withdrawal_payout::BroadcastIntent,
+    expected_to: &str,
+) -> Result<Option<String>, String> {
+    let transactions = block["transactions"]
+        .as_array()
+        .ok_or_else(|| "full block has no transactions array".to_string())?;
+    let caller = intent.caller.to_string().to_lowercase();
+    for tx in transactions {
+        let Some(from) = tx["from"].as_str() else {
+            continue;
+        };
+        if from.to_lowercase() != caller {
+            continue;
+        }
+        let nonce = json_u64_quantity(&tx["nonce"], "transaction nonce")?;
+        if nonce != intent.caller_nonce {
+            continue;
+        }
+        let to = tx["to"].as_str().unwrap_or_default();
+        let input = tx["input"]
+            .as_str()
+            .or_else(|| tx["data"].as_str())
+            .ok_or_else(|| "transaction at intended nonce has no input".to_string())?;
+        let calldata = hex::decode(input.trim_start_matches("0x"))
+            .map_err(|e| format!("decode transaction input: {e}"))?;
+        let calldata_hash = Bytes32::from_bytes_be(&keccak_hash::keccak(&calldata).0)
+            .map_err(|e| format!("convert calldata hash: {e:?}"))?;
+        if !to.eq_ignore_ascii_case(expected_to) || calldata_hash != intent.calldata_hash {
+            return Err(format!(
+                "nonce {} was replaced (to={to}, calldataHash={calldata_hash})",
+                intent.caller_nonce
+            ));
+        }
+        let hash = tx["hash"]
+            .as_str()
+            .filter(|hash| !hash.is_empty())
+            .ok_or_else(|| "exact transaction has no hash".to_string())?;
+        return Ok(Some(hash.to_string()));
+    }
+    Ok(None)
+}
+
+fn json_u64_quantity(value: &serde_json::Value, what: &str) -> Result<u64, String> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    let raw = value
+        .as_str()
+        .ok_or_else(|| format!("{what} is neither a JSON integer nor quantity string"))?;
+    if let Some(hex) = raw.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).map_err(|e| format!("parse {what}: {e}"))
+    } else {
+        raw.parse().map_err(|e| format!("parse {what}: {e}"))
+    }
 }
 
 fn extract_tx_hash(send_json: &str) -> String {
@@ -8484,13 +8806,38 @@ fn read_l1_receipt(
     tx_hash: &str,
     call_kind: intmax3_zkp::partial_withdrawal_payout::L1CallKind,
 ) -> intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt {
-    use intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt;
     let receipt_raw = cast(&["receipt", tx_hash, "--json", "--rpc-url", rpc]);
+    parse_l1_receipt(rpc, tx_hash, call_kind, &receipt_raw)
+}
+
+fn try_read_l1_receipt(
+    rpc: &str,
+    tx_hash: &str,
+    call_kind: intmax3_zkp::partial_withdrawal_payout::L1CallKind,
+) -> Option<intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt> {
+    let out = Command::new("cast")
+        .args(["receipt", tx_hash, "--json", "--async", "--rpc-url", rpc])
+        .output()
+        .unwrap_or_else(|e| die(format!("cast receipt failed to start: {e}")));
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    Some(parse_l1_receipt(rpc, tx_hash, call_kind, &raw))
+}
+
+fn parse_l1_receipt(
+    rpc: &str,
+    tx_hash: &str,
+    call_kind: intmax3_zkp::partial_withdrawal_payout::L1CallKind,
+    receipt_raw: &str,
+) -> intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt {
+    use intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt;
     let r: serde_json::Value = serde_json::from_str(receipt_raw.trim())
         .unwrap_or_else(|e| die(format!("parse cast receipt: {e}")));
     let tx_raw = cast(&["tx", tx_hash, "--json", "--rpc-url", rpc]);
-    let t: serde_json::Value = serde_json::from_str(tx_raw.trim())
-        .unwrap_or_else(|e| die(format!("parse cast tx: {e}")));
+    let t: serde_json::Value =
+        serde_json::from_str(tx_raw.trim()).unwrap_or_else(|e| die(format!("parse cast tx: {e}")));
     let hex_u64 = |v: &serde_json::Value, what: &str| -> u64 {
         let s = v
             .as_str()
@@ -8507,13 +8854,11 @@ fn read_l1_receipt(
         .trim()
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak tx input: {e}")));
-    let chain_id = t["chainId"]
-        .as_str()
-        .map(|s| {
-            u64::from_str_radix(s.trim_start_matches("0x"), 16)
-                .unwrap_or_else(|e| die(format!("parse chainId: {e}")))
-        })
-        .unwrap_or_else(|| rpc_chain_id(rpc));
+    let chain_id = if t["chainId"].is_null() {
+        rpc_chain_id(rpc)
+    } else {
+        json_u64_quantity(&t["chainId"], "chainId").unwrap_or_else(|e| die(e))
+    };
     L1TransactionReceipt {
         tx_hash: tx_hash
             .parse()
@@ -8538,10 +8883,71 @@ fn read_l1_receipt(
         success: r["status"]
             .as_str()
             .map(|s| s == "0x1" || s == "1")
-            .unwrap_or(false),
+            .unwrap_or_else(|| r["status"].as_u64() == Some(1)),
         call_kind,
         calldata_hash,
         transaction_nonce: hex_u64(&t["nonce"], "nonce"),
+    }
+}
+
+#[cfg(test)]
+mod partial_withdrawal_reconcile_tests {
+    use super::*;
+    use intmax3_zkp::partial_withdrawal_payout::BroadcastIntent;
+
+    fn intent(calldata: &[u8]) -> BroadcastIntent {
+        BroadcastIntent {
+            caller: "0x0000000000000000000000000000000000000071"
+                .parse()
+                .unwrap(),
+            start_block: 10,
+            caller_nonce: 3,
+            calldata_hash: Bytes32::from_bytes_be(&keccak_hash::keccak(calldata).0).unwrap(),
+            credit_before: U256::default(),
+        }
+    }
+
+    #[test]
+    fn canonical_block_scan_recovers_the_exact_crash_window_transaction() {
+        let block = serde_json::json!({
+            "transactions": [{
+                "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "from": "0x0000000000000000000000000000000000000071",
+                "to": "0x0000000000000000000000000000000000000042",
+                "nonce": "0x3",
+                "input": "0x1234"
+            }]
+        });
+        let found = exact_intent_tx_hash_in_block(
+            &block,
+            &intent(&[0x12, 0x34]),
+            "0x0000000000000000000000000000000000000042",
+        )
+        .unwrap();
+        assert_eq!(
+            found.as_deref(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn canonical_block_scan_rejects_same_nonce_replacement() {
+        let block = serde_json::json!({
+            "transactions": [{
+                "hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "from": "0x0000000000000000000000000000000000000071",
+                "to": "0x0000000000000000000000000000000000000042",
+                "nonce": 3,
+                "input": "0x9999"
+            }]
+        });
+        let error = exact_intent_tx_hash_in_block(
+            &block,
+            &intent(&[0x12, 0x34]),
+            "0x0000000000000000000000000000000000000042",
+        )
+        .unwrap_err();
+        assert!(error.contains("replaced"));
     }
 }
 

@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const fs = require('fs');
 const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLocks } = require('../lib/lock');
 const producer = require('../lib/block-producer');
@@ -10,7 +11,6 @@ async function flushLastProducerBlock(ch) {
   const debitPath = wc(ch, 'inter_debit_payload.json');
   const descriptorPath = wc(ch, 'inter_descriptor.json');
   const resultPath = wc(ch, 'inter_transfer.json');
-  const fs = require('fs');
   if (!(fs.existsSync(debitPath) && fs.existsSync(descriptorPath) && fs.existsSync(resultPath))) {
     return null;
   }
@@ -18,7 +18,18 @@ async function flushLastProducerBlock(ch) {
   const descriptor = readJson(descriptorPath);
   const result = readJson(resultPath);
   const signedState = result.aHead || result.sourceHead || result;
-  const blockReceipt = await producer.postInterChannel(signedState, debitPayload, descriptor);
+  const destination = Number(descriptor.destinationChannelId);
+  if (!Number.isSafeInteger(destination) || !result.bFundImportState || !result.bSnapshot) {
+    throw new Error('signed inter-channel result is missing destination binding/fund-import snapshot');
+  }
+  let operation = null;
+  try { operation = readJson(wc(ch, 'inter_operation.json')); } catch (e) { /* pre-journal artifact */ }
+  const producerRequestId = operation && operation.producerRequestId
+    ? operation.producerRequestId
+    : producer.stableRequestId('inter', { ch, debitPayload, transferDescriptor: descriptor });
+  const blockReceipt = await producer.postInterChannel(
+    signedState, debitPayload, descriptor, producerRequestId,
+  );
   let destinationHeadReceipt = null;
   if (result.bFundImportState && result.bBundleApplyState) {
     destinationHeadReceipt = await producer.syncOffchainHeads([
@@ -26,7 +37,23 @@ async function flushLastProducerBlock(ch) {
       result.bBundleApplyState,
     ]);
   }
-  return { blockReceipt, destinationHeadReceipt };
+  const liveReceipt = await producer.liveSettleInterChannel(
+    ch,
+    blockReceipt,
+    signedState,
+    debitPayload,
+    descriptor,
+  );
+  const sourceArtifact = await producer.liveSendArtifact(ch, producerRequestId);
+  const destinationLiveReceipt = await producer.liveReceiveInterChannel(destination, {
+    producerReceipt: blockReceipt,
+    debitPayload,
+    descriptor,
+    sourceArtifact,
+    fundImportState: result.bFundImportState,
+    destinationSnapshot: result.bSnapshot,
+  });
+  return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt };
 }
 
 // POST /api/v1/channel/:ch/inter-channel/send (A16/W4)
@@ -50,21 +77,73 @@ router.post('/send', (req, res) => {
       res.status(400).json({ error: `tokenIndex mismatch: body says ${tokenIndex}, signed descriptor says ${descTok}` });
       return;
     }
+    const producerRequestId = producer.stableRequestId('inter', {
+      ch, debitPayload, transferDescriptor,
+    });
+    let operation = null;
+    try { operation = readJson(wc(ch, 'inter_operation.json')); } catch (e) { /* first request */ }
+
+    // Completed HTTP retries are content-addressed and return the already-settled response. An
+    // in-flight operation may likewise be resumed only by the identical request; otherwise a
+    // caller could overwrite the sole recovery inputs after the channel signature was committed.
+    if (operation && operation.producerRequestId === producerRequestId && operation.status === 'completed') {
+      res.json(operation.response);
+      return;
+    }
+    if (operation && operation.status === 'prepared' && operation.producerRequestId !== producerRequestId) {
+      res.status(409).json({ error: 'a different inter-channel transition is signed or pending recovery' });
+      return;
+    }
+    if (
+      operation
+      && operation.status === 'prepared'
+      && operation.producerRequestId === producerRequestId
+      && fs.existsSync(wc(ch, 'inter_transfer.json'))
+    ) {
+      const recovered = await flushLastProducerBlock(ch);
+      const recoveredResult = readJson(wc(ch, 'inter_transfer.json'));
+      const response = {
+        sourceHead: recoveredResult.aHead || recoveredResult.sourceHead || recoveredResult,
+        destSnapshot: recoveredResult.bSnapshot || recoveredResult.destSnapshot || null,
+        ...recovered,
+      };
+      writeJson(wc(ch, 'inter_operation.json'), {
+        ...operation, status: 'completed', completedAt: Date.now(), response,
+      });
+      res.json(response);
+      return;
+    }
     // Crash recovery: `cosign-inter-transfer` commits the N-of-N channel head before this route
     // can durably admit its producer block. The three artifacts are retained, so every later
     // mutation first idempotently flushes that exact signed head. A structurally rejected pending
     // block stops the channel here instead of letting its state outrun the base chain.
-    await flushLastProducerBlock(ch);
-    await flushPublishedHead(ch);
-    writeJson(wc(ch, 'inter_debit_payload.json'), debitPayload);
-    writeJson(wc(ch, 'inter_descriptor.json'), transferDescriptor);
-    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json']);
+    if (!operation || operation.status !== 'prepared') {
+      await flushLastProducerBlock(ch);
+      await flushPublishedHead(ch);
+      fs.rmSync(wc(ch, 'inter_transfer.json'), { force: true });
+      writeJson(wc(ch, 'inter_debit_payload.json'), debitPayload);
+      writeJson(wc(ch, 'inter_descriptor.json'), transferDescriptor);
+      operation = {
+        producerRequestId,
+        status: 'prepared',
+        createdAt: Date.now(),
+      };
+      writeJson(wc(ch, 'inter_operation.json'), operation);
+    }
+    // Read under the same per-channel lock that encloses signing + producer admission + live
+    // settlement. A second API request cannot observe/reuse this cursor before the first advances.
+    const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
+    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json'], liveNonceEnv);
     const result = readJson(wc(ch, 'inter_transfer.json'));
     const sourceHead = result.aHead || result.sourceHead || result;
+    if (!Number.isSafeInteger(destination) || !result.bFundImportState || !result.bSnapshot) {
+      throw new Error('cosign-inter-transfer omitted destination binding/fund-import snapshot');
+    }
     const blockReceipt = await producer.postInterChannel(
       sourceHead,
       debitPayload,
       transferDescriptor,
+      producerRequestId,
     );
     const destinationHeadReceipt = result.bFundImportState && result.bBundleApplyState
       ? await producer.syncOffchainHeads([
@@ -72,28 +151,42 @@ router.post('/send', (req, res) => {
         result.bBundleApplyState,
       ])
       : null;
-    // Live-tracked source channel: the base-state authority MUST settle this send (its journaled
-    // base proof advances through the very spend the producer just admitted). A failure here is a
-    // route failure — silently skipping would let the channel head outrun the base authority.
-    // A channel with no live snapshot predates the live spine and is skipped (legacy migration
-    // seam, removed once every channel is re-initialized on the new rollup).
-    let liveReceipt = null;
-    if (producer.liveSnapshotExists(ch)) {
-      liveReceipt = await producer.liveSettleInterChannel(
-        ch,
-        blockReceipt,
-        sourceHead,
-        debitPayload,
-        transferDescriptor,
-      );
-    }
-    res.json({
+    // The authoritative nonce above can only come from the resident base-state service, so its
+    // matching settle is mandatory. Silently skipping here would commit the channel debit while
+    // leaving that authority at the old nonce, recreating the next-send strand this route is meant
+    // to prevent.
+    const liveReceipt = await producer.liveSettleInterChannel(
+      ch,
+      blockReceipt,
+      sourceHead,
+      debitPayload,
+      transferDescriptor,
+    );
+    // Source settlement alone advances only the sender's private base state. The destination must
+    // consume the source proof artifact and both N-of-N credit states before this operation is
+    // marked complete; otherwise the credited snapshot cannot be spent or withdrawn from the
+    // resident destination balance proof.
+    const sourceArtifact = await producer.liveSendArtifact(ch, producerRequestId);
+    const destinationLiveReceipt = await producer.liveReceiveInterChannel(destination, {
+      producerReceipt: blockReceipt,
+      debitPayload,
+      descriptor: transferDescriptor,
+      sourceArtifact,
+      fundImportState: result.bFundImportState,
+      destinationSnapshot: result.bSnapshot,
+    });
+    const response = {
       sourceHead,
       destSnapshot: result.bSnapshot || result.destSnapshot || null,
       blockReceipt,
       destinationHeadReceipt,
       liveReceipt,
+      destinationLiveReceipt,
+    };
+    writeJson(wc(ch, 'inter_operation.json'), {
+      ...operation, status: 'completed', completedAt: Date.now(), response,
     });
+    res.json(response);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });

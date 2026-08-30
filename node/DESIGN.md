@@ -197,10 +197,18 @@ holds no metadata and everything is served as raw base indices.
 
 ### 2.4 Configuration (`node/config.example.json`)
 `{ rpcUrl, chainId, channels:[{id, rollup, manager, verifier, workDir}], confirmations,
-role:"cosigner"|"delegate", apiBaseUrl, pollIntervalMs, tokensManifest, policy:{...},
+role:"cosigner"|"delegate", apiBaseUrl, pollIntervalMs, tokensManifest,
+cosignerHost, cosignerPort, cosignerMaxBodyBytes, policy:{...},
 keys:{seedSource} }` (`tokensManifest` → §2.5).
 Secrets (deposit key, delegate seed) come from env / gitignored files, never from this file —
 consistent with the repo's key-handling rules.
+
+The signing HTTP service binds `127.0.0.1` by default and caps request bodies at 1 MiB. Binding
+`cosignerHost` to any non-loopback address is fail-closed unless
+`INTMAX_COSIGNER_BEARER_TOKEN` is at least 32 characters; delegates use the same environment
+variable. A remote deployment must additionally protect that bearer in transit with TLS, a VPN,
+or a trusted local TLS reverse proxy. Request artifacts are action-id scoped, so two requests or
+processes cannot overwrite one another's CLI inputs.
 
 ---
 

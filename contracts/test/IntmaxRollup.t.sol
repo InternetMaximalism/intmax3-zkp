@@ -554,7 +554,7 @@ contract IntmaxRollupTest is Test {
         ) = _diffMembers(memberCount);
 
         vm.recordLogs();
-        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         // ChannelRegistered(uint64 indexed, uint32 indexed, uint8, bytes32[], bytes32[], address[],
@@ -611,7 +611,7 @@ contract IntmaxRollupTest is Test {
                 address[] memory recipients
             ) = _diffMembers(memberCount);
             uint32 channelId = 7;
-            fresh.registerChannel{value: 0.003 ether}(channelId, 1, 0, sphincs, pkBs, regev, recipients);
+            fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
 
             // Pad the active hashes to the fixed-16 form the verifier consumes.
             bytes32[8] memory padded;
@@ -646,11 +646,11 @@ contract IntmaxRollupTest is Test {
             bytes32[] memory regev,
             address[] memory recipients
         ) = _diffMembers(3);
-        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // Same channel id, second time: reverts regardless of member set.
         vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
-        fresh.registerChannel{value: 0.003 ether}(7, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(7, 1, 0, sphincs, pkBs, regev, recipients);
 
         // A DIFFERENT member set for the same channel id also reverts.
         (
@@ -660,11 +660,89 @@ contract IntmaxRollupTest is Test {
             address[] memory rc2
         ) = _diffMembers(4);
         vm.expectRevert(IntmaxRollup.ChannelAlreadyRegistered.selector);
-        fresh.registerChannel{value: 0.003 ether}(7, 0, 0, s2, pkBs2, r2, rc2);
+        fresh.registerChannel(7, 0, 0, s2, pkBs2, r2, rc2);
 
         // A different channel id still succeeds.
-        fresh.registerChannel{value: 0.003 ether}(8, 1, 0, sphincs, pkBs, regev, recipients);
+        fresh.registerChannel(8, 1, 0, sphincs, pkBs, regev, recipients);
         assertTrue(fresh.channelMemberSetCommitment(8) != bytes32(0));
+    }
+
+    /// A nonzero delegate count is not merely unsupported by the wallet tooling: the validity
+    /// registration circuit constrains the retained wire limb to zero. L1 must reject it before
+    /// advancing the pending registration chain or installing any per-channel anchor.
+    function test_registerChannel_nonzeroDelegateFailsClosedThenValidRegistrationSucceeds() public {
+        IntmaxRollup fresh = _freshRollup();
+        (
+            bytes32[] memory sphincs,
+            bytes32[] memory pkBs,
+            bytes32[] memory regev,
+            address[] memory recipients
+        ) = _diffMembers(3);
+        uint32 channelId = 71;
+        bytes32 pendingBefore = fresh.pendingChainsPin();
+        uint64 countBefore = fresh.channelRegCount();
+
+        vm.expectRevert(IntmaxRollup.DelegateCountExceedsActive.selector);
+        fresh.registerChannel(channelId, 1, 1, sphincs, pkBs, regev, recipients);
+
+        assertEq(fresh.pendingChainsPin(), pendingBefore, "delegate reject advanced pending chain");
+        assertEq(fresh.channelRegCount(), countBefore, "delegate reject advanced count");
+        assertEq(fresh.channelMemberSetCommitment(channelId), bytes32(0), "delegate reject installed commitment");
+        assertEq(fresh.channelBpPkG(channelId), bytes32(0), "delegate reject installed bp identity");
+
+        // The rejected channel id was not poisoned and can still be registered canonically.
+        fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
+        assertEq(fresh.channelRegCount(), countBefore + 1);
+        assertTrue(fresh.channelMemberSetCommitment(channelId) != bytes32(0));
+    }
+
+    /// Every registered identity bytes32 is four big-endian Goldilocks limbs. Supplying p itself
+    /// in any limb would reduce to zero inside the field while the L1 keccak chain retained the
+    /// nonzero bytes, making that registration permanently unprovable.
+    function test_registerChannel_noncanonicalIdentityFailsClosedThenValidRegistrationSucceeds() public {
+        bytes32 noncanonical = bytes32(uint256(0xFFFFFFFF00000001) << 192);
+
+        for (uint256 identityKind = 0; identityKind < 3; identityKind++) {
+            IntmaxRollup fresh = _freshRollup();
+            (
+                bytes32[] memory sphincs,
+                bytes32[] memory pkBs,
+                bytes32[] memory regev,
+                address[] memory recipients
+            ) = _diffMembers(3);
+            bytes32 original;
+            if (identityKind == 0) {
+                original = sphincs[0];
+                sphincs[0] = noncanonical;
+            } else if (identityKind == 1) {
+                original = pkBs[0];
+                pkBs[0] = noncanonical;
+            } else {
+                original = regev[0];
+                regev[0] = noncanonical;
+            }
+
+            uint32 channelId = uint32(80 + identityKind);
+            bytes32 pendingBefore = fresh.pendingChainsPin();
+            uint64 countBefore = fresh.channelRegCount();
+            vm.expectRevert(IntmaxRollup.MemberCountOrArrayLenInvalid.selector);
+            fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
+
+            assertEq(fresh.pendingChainsPin(), pendingBefore, "identity reject advanced pending chain");
+            assertEq(fresh.channelRegCount(), countBefore, "identity reject advanced count");
+            assertEq(
+                fresh.channelMemberSetCommitment(channelId), bytes32(0), "identity reject installed commitment"
+            );
+            assertEq(fresh.channelBpPkG(channelId), bytes32(0), "identity reject installed bp identity");
+
+            if (identityKind == 0) sphincs[0] = original;
+            else if (identityKind == 1) pkBs[0] = original;
+            else regev[0] = original;
+
+            fresh.registerChannel(channelId, 1, 0, sphincs, pkBs, regev, recipients);
+            assertEq(fresh.channelRegCount(), countBefore + 1);
+            assertTrue(fresh.channelMemberSetCommitment(channelId) != bytes32(0));
+        }
     }
 
     /// G6 byte-exact block-hash differential: `_computeBlockHash` over the SAME fields as the Rust

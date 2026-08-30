@@ -26,6 +26,15 @@ library FixtureLib {
     // The canonical forge-std cheatcode address.
     Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
+    /// Maximum number of gate rows this parser accepts. The previous bounded scan silently
+    /// returned 64 when a fixture carried a 65th row, so the deployed gates digest described only a
+    /// prefix of the fixture. Keep the existing capacity, but reject overflow explicitly.
+    uint256 internal constant MAX_GATES = 64;
+
+    /// Goldilocks base-field modulus. Domain generators and Ext3 limbs are field elements, not
+    /// arbitrary uint64 values; accepting `[P, 2^64)` creates non-canonical representations.
+    uint256 internal constant GOLDILOCKS_MODULUS = 0xFFFFFFFF00000001;
+
     /// @notice Cached real MLE VK params parsed from mle_fixture.json.
     struct DeployData {
         uint256 degreeBits;
@@ -99,10 +108,10 @@ library FixtureLib {
         pure
         returns (IntmaxRollup.ValidityPublicInputs memory vpis)
     {
-        vpis.initialBlockNumber = uint64(vm.parseJsonUint(json, ".initial_block_number"));
+        vpis.initialBlockNumber = _fixtureUint64(vm.parseJsonUint(json, ".initial_block_number"));
         vpis.initialBlockChain = vm.parseJsonBytes32(json, ".initial_block_chain");
         vpis.initialExtCommitment = vm.parseJsonBytes32(json, ".initial_ext_commitment");
-        vpis.finalBlockNumber = uint64(vm.parseJsonUint(json, ".final_block_number"));
+        vpis.finalBlockNumber = _fixtureUint64(vm.parseJsonUint(json, ".final_block_number"));
         vpis.finalBlockChain = vm.parseJsonBytes32(json, ".final_block_chain");
         vpis.finalExtCommitment = vm.parseJsonBytes32(json, ".final_ext_commitment");
         vpis.prover = vm.parseJsonAddress(json, ".prover");
@@ -188,18 +197,7 @@ library FixtureLib {
         uint256 nGates = countGates(json);
         proof.gates = new Plonky2GateEvaluator.GateInfo[](nGates);
         for (uint256 i = 0; i < nGates; i++) {
-            string memory p = string.concat(".gates[", vm.toString(i), "]");
-            proof.gates[i] = Plonky2GateEvaluator.GateInfo({
-                gateId: uint8(vm.parseJsonUint(json, string.concat(p, ".gateId"))),
-                selectorIndex: uint8(vm.parseJsonUint(json, string.concat(p, ".selectorIndex"))),
-                groupStart: uint8(vm.parseJsonUint(json, string.concat(p, ".groupStart"))),
-                groupEnd: uint8(vm.parseJsonUint(json, string.concat(p, ".groupEnd"))),
-                gateRowIndex: uint8(vm.parseJsonUint(json, string.concat(p, ".gateRowIndex"))),
-                numConstraints: uint16(vm.parseJsonUint(json, string.concat(p, ".numConstraints"))),
-                numOrConsts: uint16(vm.parseJsonUint(json, string.concat(p, ".numOrConsts"))),
-                param2: uint16(vm.parseJsonUint(json, string.concat(p, ".param2"))),
-                param3: uint16(vm.parseJsonUint(json, string.concat(p, ".param3")))
-            });
+            proof.gates[i] = parseGateInfo(json, i);
         }
 
         try vm.parseJsonStringArray(json, ".publicInputsHash") returns (string[] memory hs) {
@@ -212,14 +210,74 @@ library FixtureLib {
         }
     }
 
+    /// Parse one gate row without permitting Solidity's explicit integer casts to truncate a
+    /// malformed fixture. Every field width mirrors `Plonky2GateEvaluator.GateInfo` exactly.
+    function parseGateInfo(string memory json, uint256 index)
+        internal
+        pure
+        returns (Plonky2GateEvaluator.GateInfo memory gate)
+    {
+        string memory p = string.concat(".gates[", vm.toString(index), "]");
+        gate = Plonky2GateEvaluator.GateInfo({
+            gateId: _gateUint8(vm.parseJsonUint(json, string.concat(p, ".gateId"))),
+            selectorIndex: _gateUint8(vm.parseJsonUint(json, string.concat(p, ".selectorIndex"))),
+            groupStart: _gateUint8(vm.parseJsonUint(json, string.concat(p, ".groupStart"))),
+            groupEnd: _gateUint8(vm.parseJsonUint(json, string.concat(p, ".groupEnd"))),
+            gateRowIndex: _gateUint8(vm.parseJsonUint(json, string.concat(p, ".gateRowIndex"))),
+            numConstraints: _gateUint16(vm.parseJsonUint(json, string.concat(p, ".numConstraints"))),
+            numOrConsts: _gateUint16(vm.parseJsonUint(json, string.concat(p, ".numOrConsts"))),
+            param2: _gateUint16(vm.parseJsonUint(json, string.concat(p, ".param2"))),
+            param3: _gateUint16(vm.parseJsonUint(json, string.concat(p, ".param3")))
+        });
+    }
+
     function countGates(string memory json) internal pure returns (uint256 n) {
-        for (uint256 i = 0; i < 64; i++) {
-            try vm.parseJsonUint(json, string.concat(".gates[", vm.toString(i), "].gateId")) returns (uint256) {
-                n = i + 1;
-            } catch {
-                break;
-            }
+        // `vm.parseJson` ABI-encodes a JSON array as a top-level dynamic array. Read its encoded
+        // length instead of treating a failed per-index field parse as EOF: the latter conflates
+        // absent rows with malformed rows and lets a malformed row at the cap hide a valid tail.
+        bytes memory encodedGates = vm.parseJson(json, ".gates");
+        n = _encodedDynamicArrayLength(encodedGates);
+        require(n != 0, "fixture: no gate rows");
+        require(n <= MAX_GATES, "fixture: more than 64 gate rows");
+
+        // Prove that every present array element has a uint `gateId`. `parseGateInfo` performs the
+        // remaining schema and width checks when the proof is materialized.
+        for (uint256 i = 0; i < n; i++) {
+            vm.parseJsonUint(json, string.concat(".gates[", vm.toString(i), "].gateId"));
         }
+    }
+
+    function _encodedDynamicArrayLength(bytes memory encoded) private pure returns (uint256 length) {
+        require(encoded.length >= 64, "fixture: malformed gates array encoding");
+        uint256 offset;
+        assembly ("memory-safe") {
+            offset := mload(add(encoded, 0x20))
+        }
+        require(offset <= encoded.length - 32, "fixture: malformed gates array offset");
+        assembly ("memory-safe") {
+            length := mload(add(add(encoded, 0x20), offset))
+        }
+    }
+
+    function _gateUint8(uint256 value) private pure returns (uint8) {
+        require(value <= type(uint8).max, "fixture: GateInfo uint8 overflow");
+        return uint8(value);
+    }
+
+    function _gateUint16(uint256 value) private pure returns (uint16) {
+        require(value <= type(uint16).max, "fixture: GateInfo uint16 overflow");
+        return uint16(value);
+    }
+
+    function _fixtureUint64(uint256 value) private pure returns (uint64) {
+        require(value <= type(uint64).max, "fixture: uint64 overflow");
+        return uint64(value);
+    }
+
+    function _goldilocksBase(uint256 value) private pure returns (uint64) {
+        uint64 narrowed = _fixtureUint64(value);
+        require(value < GOLDILOCKS_MODULUS, "fixture: non-canonical Goldilocks element");
+        return narrowed;
     }
 
     function parseV2LogupFields(string memory json, MleVerifier.MleProof memory proof) internal pure {
@@ -286,7 +344,7 @@ library FixtureLib {
         params.initialCodewordLength = vm.parseJsonUint(json, string.concat(basePath, ".initialCodewordLength"));
         params.initialMerkleDepth = vm.parseJsonUint(json, string.concat(basePath, ".initialMerkleDepth"));
         params.initialDomainGenerator =
-            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(basePath, ".initialDomainGenerator"))));
+            _goldilocksBase(vm.parseUint(vm.parseJsonString(json, string.concat(basePath, ".initialDomainGenerator"))));
         params.initialInterleavingDepth = vm.parseJsonUint(json, string.concat(basePath, ".initialInterleavingDepth"));
         params.initialNumVariables = vm.parseJsonUint(json, string.concat(basePath, ".initialNumVariables"));
         params.initialCosetSize = vm.parseJsonUint(json, string.concat(basePath, ".initialCosetSize"));
@@ -299,7 +357,7 @@ library FixtureLib {
             params.rounds[i].codewordLength = vm.parseJsonUint(json, string.concat(rp, ".codewordLength"));
             params.rounds[i].merkleDepth = vm.parseJsonUint(json, string.concat(rp, ".merkleDepth"));
             params.rounds[i].domainGenerator =
-                uint64(vm.parseUint(vm.parseJsonString(json, string.concat(rp, ".domainGenerator"))));
+                _goldilocksBase(vm.parseUint(vm.parseJsonString(json, string.concat(rp, ".domainGenerator"))));
             params.rounds[i].inDomainSamples = vm.parseJsonUint(json, string.concat(rp, ".inDomainSamples"));
             params.rounds[i].outDomainSamples = vm.parseJsonUint(json, string.concat(rp, ".outDomainSamples"));
             params.rounds[i].sumcheckRounds = vm.parseJsonUint(json, string.concat(rp, ".sumcheckRounds"));
@@ -312,15 +370,11 @@ library FixtureLib {
         params.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
     }
 
-    function parseExt3(string memory json, string memory path)
-        internal
-        pure
-        returns (GoldilocksExt3.Ext3 memory)
-    {
+    function parseExt3(string memory json, string memory path) internal pure returns (GoldilocksExt3.Ext3 memory) {
         return GoldilocksExt3.Ext3(
-            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c0")))),
-            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c1")))),
-            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c2"))))
+            _goldilocksBase(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c0")))),
+            _goldilocksBase(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c1")))),
+            _goldilocksBase(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c2"))))
         );
     }
 

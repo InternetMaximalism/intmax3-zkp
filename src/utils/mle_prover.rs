@@ -254,6 +254,34 @@ pub fn check_fixture_json_gates(json: &str, expected: &[ExpectedGateRow]) -> Res
             e.gate_id
         );
 
+        // The Solidity CosetInterpolation evaluator has a deliberately finite constants table:
+        // subgroup_bits must be one of 1..=5, and its wire walk assumes 2 <= degree <= 2^bits.
+        // Structural classification proves that these values came from the Rust gate, but that is
+        // not enough to prove the deployed evaluator has constants for them. Without this envelope
+        // check a perfectly well-formed fixture (and gatesDigest) can pass every Rust check and then
+        // deterministically revert on-chain when the constants table is touched.
+        if gate_id_u8 == 13 {
+            let subgroup_bits = e.num_or_consts;
+            let degree = e.param2;
+            ensure!(
+                (1..=5).contains(&subgroup_bits),
+                "gate row {row} (`{name}`): CosetInterpolation subgroup_bits = {subgroup_bits} is \
+                 outside the deployed Solidity constants-table envelope 1..=5"
+            );
+            ensure!(
+                degree >= 2,
+                "gate row {row} (`{name}`): CosetInterpolation degree = {degree} is below the \
+                 deployed evaluator minimum 2"
+            );
+            let subgroup_size = 1u32 << u32::from(subgroup_bits);
+            ensure!(
+                u32::from(degree) <= subgroup_size,
+                "gate row {row} (`{name}`): CosetInterpolation degree = {degree} exceeds the \
+                 subgroup size 2^{subgroup_bits} = {subgroup_size} supported by the deployed \
+                 evaluator"
+            );
+        }
+
         // SECURITY (M-10): the on-chain evaluation parameters. `gateId` selects the branch;
         // these select how many constraints that branch checks and where its wires are. A wrong
         // value here is invisible to `gatesDigest`, to `mle_verify`, and — unlike an unsupported

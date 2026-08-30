@@ -297,7 +297,7 @@ fn the_2_1_attack_is_dead() {
         token_index: 0,
         amount: U256::from(THEFT),
         // SECURITY (§2.1): `aux_data = 0` disarms BOTH would-be second factors with one knob — the
-        // IMPW gate at `IntmaxRollup.sol:1512` only fires when `auxData != 0`, and
+        // IPW2 gate at `IntmaxRollup.sol:1512` only fires when `auxData != 0`, and
         // `send_tx_circuit.rs:293` folds nothing into `settled_tx_chain` when it is zero, so the
         // close-time chain equality never sees the theft either. Unchanged by this phase; recorded
         // here because it is what makes the withdrawal below payable without any co-operation.

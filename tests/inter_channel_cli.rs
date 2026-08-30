@@ -370,6 +370,7 @@ fn build_burn_send_debits_only_sender_and_targets_l1() {
     let built = build_burn_send(
         &a_keys[sender_slot as usize],
         &a.snapshot,
+        0, // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
         amount,
@@ -456,7 +457,7 @@ fn burn_nonce_guard_reads_base_sent_tx_tree_occupancy() {
     assert!(err.0.contains("already occupied"), "{}", err.0);
 }
 
-/// GAP1/F-AUX PROOF: the burn Transfer's `aux_data` is the canonical IMBD descriptor and both
+/// GAP1/F-AUX PROOF: the burn Transfer's `aux_data` is the canonical IMD2 descriptor and both
 /// layers push that SAME descriptor into `settled_tx_chain`.
 #[test]
 fn burn_send_base_chain_matches_channel() {
@@ -478,6 +479,7 @@ fn burn_send_base_chain_matches_channel() {
     let built = build_burn_send(
         &a_keys[sender_slot as usize],
         &a.snapshot,
+        0, // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
         amount,
@@ -501,6 +503,8 @@ fn burn_send_base_chain_matches_channel() {
     );
 
     let aux = burn_descriptor(
+        desc.source_channel_id,
+        desc.inter_channel_tx.base_nonce,
         tx_leaf,
         desc.receiver_pk_g,
         desc.inter_channel_tx.token_index,
@@ -512,7 +516,7 @@ fn burn_send_base_chain_matches_channel() {
     let expected_channel_chain = settled_tx_chain_push(genesis_chain, aux);
     assert_eq!(
         next.balance_state.settled_tx_chain, expected_channel_chain,
-        "channel settled_tx_chain must be push(genesis, IMBD descriptor)"
+        "channel settled_tx_chain must be push(genesis, IMD2 descriptor)"
     );
 
     // The BASE layer pushes settled_tx_chain by transfer.aux_data (send_tx_circuit.rs:290-297).
@@ -522,7 +526,7 @@ fn burn_send_base_chain_matches_channel() {
     // tx_leaf).
     assert_eq!(
         base_chain, next.balance_state.settled_tx_chain,
-        "GAP1: base settled_tx_chain must match channel settled_tx_chain (same IMBD descriptor)"
+        "GAP1: base settled_tx_chain must match channel settled_tx_chain (same IMD2 descriptor)"
     );
 
     // Sanity: a zero aux_data (the pre-fix bug) would NOT match.
@@ -563,6 +567,7 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
     let built = build_burn_send(
         &a_keys[sender_slot as usize],
         &a.snapshot,
+        0, // registered ChannelLeaf has not consumed a base send slot
         sender_slot,
         l1,
         amount,
@@ -584,11 +589,16 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
     );
 
     // The nonce the nullifier binds (F-WD-2: the SENDER nonce, not a settlement block) is the
-    // post-burn small block number — which is what `pw-submit` reads off the head.
+    // authenticated pre-block base-send leaf cursor supplied above. `pw-submit` reads this exact
+    // nonce from `last_burn.json`; it must never reconstruct it from the independent channel
+    // small-block counter.
     assert_eq!(
-        desc.tx_v2.nonce as u64, next.small_block_number,
-        "the burn tx's nonce must be the post-burn small_block_number — pw-submit derives it \
-         from the head, so a divergence here would make every derived nullifier unmatchable"
+        desc.tx_v2.nonce, 0,
+        "the burn tx must retain the authenticated pre-block base-send cursor"
+    );
+    assert_eq!(
+        next.small_block_number, 1,
+        "the signed channel transition counter advances independently of the base-send nonce"
     );
 
     let leaf = burn_withdrawal_leaf(
@@ -597,6 +607,8 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
         desc.inter_channel_tx.token_index,
         amount,
         intmax3_zkp::common::channel::burn_descriptor(
+            desc.source_channel_id,
+            desc.inter_channel_tx.base_nonce,
             tx_leaf,
             desc.receiver_pk_g,
             desc.inter_channel_tx.token_index,
@@ -612,12 +624,14 @@ fn burn_withdrawal_leaf_reconstructs_the_cosigned_h2_tag() {
     assert_eq!(
         leaf.aux_data,
         intmax3_zkp::common::channel::burn_descriptor(
+            desc.source_channel_id,
+            desc.inter_channel_tx.base_nonce,
             tx_leaf,
             desc.receiver_pk_g,
             desc.inter_channel_tx.token_index,
             intmax3_zkp::ethereum_types::u256::U256::from(amount),
         ),
-        "the leaf's aux_data is the canonical IMBD descriptor"
+        "the leaf's aux_data is the canonical IMD2 descriptor"
     );
 
     // THE GUARD, run exactly as `pw-submit` runs it.

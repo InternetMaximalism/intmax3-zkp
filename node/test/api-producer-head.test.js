@@ -28,6 +28,10 @@ producer.postInterChannel = async (state, debitPayload, descriptor) => {
   heads.set(state.channelId, state.digest);
   return { generation: calls.length };
 };
+producer.liveSettleInterChannel = async (channelId, receipt, state, debitPayload, descriptor) => {
+  calls.push({ kind: 'settle', channelId, receipt, state, debitPayload, descriptor });
+  return { baseNonce: calls.length };
+};
 
 function write(ch, name, value) {
   const directory = path.join(work, `ch${ch}`);
@@ -54,9 +58,10 @@ test('recovers a source H2 transition before trying an off-chain sync', async ()
   });
 
   await flushPublishedHead(7);
-  assert.deepEqual(calls.map(call => call.kind), ['post', 'sync']);
+  assert.deepEqual(calls.map(call => call.kind), ['post', 'sync', 'settle']);
   assert.equal(heads.get(7), 'after-a');
   assert.equal(heads.get(8), 'after-b');
+  assert.equal(calls[2].channelId, 7);
 });
 
 test('destination recovery copy replays both contiguous receive states', async () => {

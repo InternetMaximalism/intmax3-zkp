@@ -29,7 +29,12 @@ async function main() {
   account.slot = account.slot != null ? account.slot : 3; // delegates default to slot 3+
   account.recipient = account.recipient || process.env.CLAIM_RECIPIENT;
 
-  const api = new ApiClient({ baseUrl: cfg.apiBaseUrl || 'http://127.0.0.1:8200' });
+  const api = new ApiClient({
+    baseUrl: cfg.apiBaseUrl || 'http://127.0.0.1:8200',
+    // Secrets stay in the environment, never in the checked-in JSON config. A co-signer bound to
+    // a non-loopback interface refuses to start without this token.
+    bearerToken: process.env.INTMAX_COSIGNER_BEARER_TOKEN || '',
+  });
   const wallet = new Wallet({ pkgDir: cfg.pkgDir });
   alert.configure({ webhook: cfg.alertWebhook });
   fs.mkdirSync(account.workDir || '.', { recursive: true });

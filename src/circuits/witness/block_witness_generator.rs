@@ -137,8 +137,8 @@ pub enum BlockWitnessGeneratorError {
 }
 
 /// Active member count for test channels (pad-to-MAX D6): these fixtures register 3 active members
-/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_SIG_CLUSTER = 16 slots) with
-/// slots 3..16 left as empty leaves (padding). Kept at 3 so existing validity/balance tests are
+/// per channel; the member tree is height MEMBER_TREE_HEIGHT (MAX_SIG_CLUSTER = 8 slots) with
+/// slots 3..8 left as empty leaves (padding). Kept at 3 so existing validity/balance tests are
 /// unchanged.
 pub const TEST_ACTIVE_MEMBERS: usize = 3;
 
@@ -153,7 +153,7 @@ pub fn deterministic_member_falcon_keys(channel_id: u32, n: usize) -> Vec<Falcon
         .map(|slot| {
             // SECURITY (Phase-3 review MINOR): the slot rides one byte, so two slots >= 255 apart
             // would collide into ONE identity — and this repo has already shipped and fixed a
-            // u8-slot-256 bug once (project_option_b_1024). Unreachable at MAX_SIG_CLUSTER = 16,
+            // u8-slot-256 bug once (project_option_b_1024). Unreachable at MAX_SIG_CLUSTER = 8,
             // but assert rather than rely on that staying true.
             assert!(
                 slot < 255,
@@ -445,7 +445,7 @@ impl ChannelMemberKeys {
     ///
     /// SECURITY (Option B): the reg record has only `MAX_SIG_CLUSTER` slots — registration is
     /// cosigners-only, and registration-producing paths emit `delegate_count = 0`. A nonzero
-    /// `delegate_count` is accepted only within the 16-slot capacity (legacy 16-slot channels);
+    /// `delegate_count` is accepted only within the fixed 8-slot registration capacity;
     /// anything beyond is rejected here (and by `ChannelRegRecord::validate`).
     ///
     /// SECURITY (small-block N-of-N Phase 1): `delegate_count == 0` is now a CIRCUIT CONSTRAINT in

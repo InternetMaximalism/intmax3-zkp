@@ -183,8 +183,34 @@ function readJson(filepath) {
 }
 
 function writeJson(filepath, data) {
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
+  // Workflow artifacts are crash-recovery records, not disposable request scratch. A process death
+  // during truncate/write must not turn them into malformed JSON and strand an already-signed
+  // channel transition. Keep the temporary file beside the destination so rename is atomic.
+  fs.mkdirSync(path.dirname(filepath), { recursive: true });
+  const tmp = `${filepath}.tmp-${process.pid}-${Date.now()}-${writeJson.sequence++}`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, filepath);
+    // Persist the directory entry as well as the file contents. Some filesystems/platforms reject
+    // fsync on a directory; the atomic rename still prevents malformed JSON in that case.
+    try {
+      const dirFd = fs.openSync(path.dirname(filepath), 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch (e) {
+      if (!e || !['EINVAL', 'ENOTSUP', 'EISDIR'].includes(e.code)) throw e;
+    }
+  } catch (e) {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.rmSync(tmp, { force: true }); } catch (_) { /* preserve the original error */ }
+    throw e;
+  }
 }
+writeJson.sequence = 0;
 
 module.exports = {
   REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, l1SignerArgsForChain, l1SignerArgs,

@@ -9,7 +9,7 @@ import {VmSafe} from "forge-std/Vm.sol";
 ///         `DeployPartialWithdrawalE2E`, `DeployCloseCli`) each read a registration record written
 ///         by `src/bin/channel_member.rs` and use it for TWO structurally different things:
 ///
-///           1. `IntmaxRollup.registerChannel{value: 0.003 ether}(...)` — the L1 REGISTRATION RECORD. Under Option B
+///           1. `IntmaxRollup.registerChannel(...)` — the deployer-authorized L1 REGISTRATION RECORD. Under Option B
 ///              this is COSIGNERS-ONLY: it carries exactly `member_count` participants and its
 ///              `delegateCount` limb is ZERO. It is the preimage the validity `channel_reg_step`
 ///              circuit must reproduce.
@@ -47,8 +47,7 @@ import {VmSafe} from "forge-std/Vm.sol";
 ///      leading cosigner slice ONLY; the manager consumes the whole thing.
 library RegRecordLib {
     /// forge-std's `VM_ADDRESS`, restated because a library cannot inherit `CommonBase`.
-    VmSafe private constant vm =
-        VmSafe(address(uint160(uint256(keccak256("hevm cheat code")))));
+    VmSafe private constant vm = VmSafe(address(uint160(uint256(keccak256("hevm cheat code")))));
 
     /// SECURITY (Option B, cosigner-only L1 registration): the ONLY delegate count that may reach
     /// `registerChannel`. A CONSTANT, not a field read — there is no JSON a producer can write that
@@ -82,10 +81,18 @@ library RegRecordLib {
     /// emitting a nonzero registration delegate count fail LOUDLY at deploy time (where it is a
     /// one-line fix) instead of having the value silently ignored here and the two sides drift.
     function parse(string memory json) internal view returns (Record memory r) {
-        r.channelId = uint32(vm.parseJsonUint(json, ".channel_id"));
-        r.bpSlot = uint8(vm.parseJsonUint(json, ".bp_member_slot"));
-        r.memberCount = uint8(vm.parseJsonUint(json, ".member_count"));
-        r.activeDelegateCount = uint8(vm.parseJsonUint(json, ".active_delegate_count"));
+        uint256 channelId = vm.parseJsonUint(json, ".channel_id");
+        uint256 bpSlot = vm.parseJsonUint(json, ".bp_member_slot");
+        uint256 memberCount = vm.parseJsonUint(json, ".member_count");
+        uint256 activeDelegateCount = vm.parseJsonUint(json, ".active_delegate_count");
+        require(channelId <= type(uint32).max, "reg record: channel_id exceeds uint32");
+        require(bpSlot <= type(uint8).max, "reg record: bp_member_slot exceeds uint8");
+        require(memberCount <= type(uint8).max, "reg record: member_count exceeds uint8");
+        require(activeDelegateCount <= type(uint8).max, "reg record: active_delegate_count exceeds uint8");
+        r.channelId = uint32(channelId);
+        r.bpSlot = uint8(bpSlot);
+        r.memberCount = uint8(memberCount);
+        r.activeDelegateCount = uint8(activeDelegateCount);
         require(
             vm.parseJsonUint(json, ".reg_delegate_count") == 0,
             "reg record: reg_delegate_count must be 0 (Option B: L1 registration is cosigner-only; a nonzero registration is unprovable by channel_reg_step)"
@@ -100,10 +107,8 @@ library RegRecordLib {
         require(r.bpSlot < r.memberCount, "reg record: bp_member_slot must be a co-signing member");
         uint256 active = uint256(r.memberCount) + uint256(r.activeDelegateCount);
         require(
-            r.pkGs.length == active &&
-                r.pkBs.length == active &&
-                r.regevDigests.length == active &&
-                r.recipients.length == active,
+            r.pkGs.length == active && r.pkBs.length == active && r.regevDigests.length == active
+                && r.recipients.length == active,
             "reg record: arrays must hold member_count + active_delegate_count entries (members first)"
         );
     }

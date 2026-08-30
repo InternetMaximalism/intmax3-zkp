@@ -41,8 +41,36 @@ function makeCli({ binPath, repoRoot, defaultTimeoutMs = 600_000 }) {
 
   function writeJson(cwd, name, value) {
     fs.mkdirSync(cwd, { recursive: true });
-    fs.writeFileSync(path.join(cwd, name), JSON.stringify(value));
+    const target = path.join(cwd, name);
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${writeJson.sequence++}`;
+    let fd;
+    try {
+      fd = fs.openSync(tmp, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify(value));
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.renameSync(tmp, target);
+      // Persist the directory entry as well as the file contents. Some filesystems can otherwise
+      // lose the rename after a host crash even though fsync(file) succeeded.
+      let dirFd;
+      try {
+        dirFd = fs.openSync(cwd, 'r');
+        fs.fsyncSync(dirFd);
+      } catch (_) {
+        // Directory fsync is not supported on every platform; atomic rename still prevents a
+        // reader from observing partial JSON.
+      } finally {
+        if (dirFd !== undefined) fs.closeSync(dirFd);
+      }
+    } catch (e) {
+      if (fd !== undefined) fs.closeSync(fd);
+      try { fs.rmSync(tmp, { force: true }); } catch (_) { /* keep original error */ }
+      throw e;
+    }
   }
+
+  writeJson.sequence = 0;
 
   return { CLI, run, readJson, writeJson };
 }

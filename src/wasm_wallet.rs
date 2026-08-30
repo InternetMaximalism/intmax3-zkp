@@ -622,7 +622,7 @@ pub fn wallet_send_inter_channel(
 /// Mirrors `wallet_send_inter_channel`.
 /// `token_index` (OPTIONAL — `undefined`/omitted = the genesis `registry[0]`) is the BASE token
 /// to burn (multitoken §N): the debit lands at the local position the source registry resolves,
-/// and the resulting L1 partial withdrawal pays out in that asset (IMPW binds `tokenIndex`).
+/// and the resulting L1 partial withdrawal pays out in that asset (IPW2 binds `tokenIndex`).
 #[wasm_bindgen]
 pub fn wallet_burn_send(
     amount: u64,

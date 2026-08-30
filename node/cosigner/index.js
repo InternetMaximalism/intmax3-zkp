@@ -4,6 +4,7 @@
 // Resumable: loads cursors/tickets, backfills chain events, then accepts requests.
 
 const http = require('http');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -16,6 +17,46 @@ const log = require('../common/log');
 const alert = require('../common/alert');
 const { makeRuntime, makeLock } = require('./loop');
 
+const DEFAULT_COSIGNER_BODY_LIMIT = 1024 * 1024;
+
+function isLoopbackHost(host) {
+  const normalized = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
+function resolveHttpSecurity(cfg, env = process.env) {
+  const host = cfg.cosignerHost || '127.0.0.1';
+  const bearerToken = env.INTMAX_COSIGNER_BEARER_TOKEN || '';
+  const maxBodyBytes = cfg.cosignerMaxBodyBytes == null
+    ? DEFAULT_COSIGNER_BODY_LIMIT
+    : Number(cfg.cosignerMaxBodyBytes);
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1024 || maxBodyBytes > 16 * 1024 * 1024) {
+    throw new Error('cosignerMaxBodyBytes must be an integer between 1024 and 16777216');
+  }
+  // `server.listen(port)` binds all interfaces on many platforms. A remotely reachable signing
+  // oracle must never come up unauthenticated; keep the secret out of config and require enough
+  // entropy to resist online guessing. TLS/VPN or a trusted local reverse proxy remains required
+  // to protect this bearer token in transit.
+  if (!isLoopbackHost(host) && bearerToken.length < 32) {
+    throw new Error('non-loopback cosignerHost requires INTMAX_COSIGNER_BEARER_TOKEN (>= 32 chars)');
+  }
+  return { host, bearerToken, maxBodyBytes };
+}
+
+function bearerAuthorized(header, expectedToken) {
+  if (!expectedToken) return true;
+  const actual = Buffer.from(String(header || ''), 'utf8');
+  const expected = Buffer.from(`Bearer ${expectedToken}`, 'utf8');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function targetRuntimeIds(event, runtimes) {
+  const requested = Array.isArray(event && event.channelIds)
+    ? event.channelIds
+    : (event && event.channelId !== undefined && event.channelId !== null ? [event.channelId] : []);
+  return [...new Set(requested)].filter(id => runtimes.has(id));
+}
+
 function loadConfig() {
   const p = process.env.INTMAX_NODE_CONFIG || path.join(__dirname, '..', 'config.json');
   if (!fs.existsSync(p)) {
@@ -27,6 +68,7 @@ function loadConfig() {
 
 async function main() {
   const cfg = loadConfig();
+  const httpSecurity = resolveHttpSecurity(cfg);
   const repoRoot = path.join(__dirname, '..', '..');
   const cli = makeCli({ binPath: process.env.CHANNEL_MEMBER_BIN, repoRoot });
   const api = new ApiClient({ baseUrl: cfg.apiBaseUrl || 'http://127.0.0.1:8100' });
@@ -66,11 +108,40 @@ async function main() {
 
   // --- HTTP server for peer requests (delegate → co-signer) ---
   const server = http.createServer((req, res) => {
+    const route = String(req.url || '').replace(/\?.*$/, '');
+    const m = route.match(/^\/api\/v1\/channel\/(\d+)\/(cosign|cosign-refresh|inter-channel\/send|burn\/cosign|snapshot)$/);
+    if (!m) { res.writeHead(404).end(JSON.stringify({ error: 'not found' })); req.resume(); return; }
+    const expectedMethod = m[2] === 'snapshot' ? 'GET' : 'POST';
+    if (req.method !== expectedMethod) {
+      res.writeHead(405, { allow: expectedMethod }).end(JSON.stringify({ error: 'method not allowed' }));
+      req.resume();
+      return;
+    }
+    if (!bearerAuthorized(req.headers.authorization, httpSecurity.bearerToken)) {
+      res.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }));
+      req.resume();
+      return;
+    }
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > httpSecurity.maxBodyBytes) {
+      res.writeHead(413).end(JSON.stringify({ error: 'request body too large' }));
+      req.resume();
+      return;
+    }
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let bodyBytes = 0;
+    let tooLarge = false;
+    req.on('data', (c) => {
+      bodyBytes += c.length;
+      if (bodyBytes > httpSecurity.maxBodyBytes) {
+        tooLarge = true;
+        chunks.length = 0;
+      } else if (!tooLarge) {
+        chunks.push(c);
+      }
+    });
     req.on('end', async () => {
-      const m = req.url.match(/^\/api\/v1\/channel\/(\d+)\/(cosign|cosign-refresh|inter-channel\/send|burn\/cosign|snapshot)$/);
-      if (!m) { res.writeHead(404).end(JSON.stringify({ error: 'not found' })); return; }
+      if (tooLarge) { res.writeHead(413).end(JSON.stringify({ error: 'request body too large' })); return; }
       const chId = Number(m[1]);
       const rt = runtimes.get(chId);
       if (!rt) { res.writeHead(404).end(JSON.stringify({ error: 'unknown channel' })); return; }
@@ -79,28 +150,65 @@ async function main() {
       catch (e) { res.writeHead(400).end(JSON.stringify({ error: 'invalid JSON' })); return; }
       const kindMap = { cosign: 'cosign', 'cosign-refresh': 'cosign-refresh', 'inter-channel/send': 'inter', 'burn/cosign': 'burn', snapshot: 'snapshot' };
       const event = { source: 'api', kind: kindMap[m[2]], body, sender: body && body.sender };
-      const result = await rt.lock(() => rt.runtime.dispatch(event));
-      const out = result || { ok: true, status: 200, body: {} };
-      res.writeHead(out.status || 200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(out.body || {}));
+      try {
+        const result = await rt.lock(() => rt.runtime.dispatch(event));
+        const out = result || { ok: true, status: 200, body: {} };
+        res.writeHead(out.status || 200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out.body || {}));
+      } catch (e) {
+        log.error({ event: 'COSIGNER_HTTP_DISPATCH_ERROR', channel: chId, error: String(e && e.message || e) });
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal dispatch failure' }));
+      }
     });
   });
   const port = cfg.cosignerPort || 8200;
-  server.listen(port, () => log.info({ event: 'COSIGNER_HTTP_UP', port, channels: cfg.channels.map((c) => c.id) }));
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 10_000;
+  server.listen(port, httpSecurity.host, () => log.info({
+    event: 'COSIGNER_HTTP_UP',
+    host: httpSecurity.host,
+    port,
+    authenticated: Boolean(httpSecurity.bearerToken),
+    channels: cfg.channels.map((c) => c.id),
+  }));
 
   // --- chain watcher poll loop (watcher constructed above for getPendingClose) ---
   const pollFailures = new Map(); // channelId -> consecutive failure count
   async function pollChain() {
-    for (const { runtime, lock, ch, store } of runtimes.values()) {
-      try {
-        const from = store.get('cursor') || 0;
-        await watcher.pollOnce(
-          from,
-          (ev) => lock(() => runtime.dispatch({ source: 'chain', ...ev })),
-          (cursor) => store.setCursor(cursor)
-        );
-        pollFailures.set(ch.id, 0);
-      } catch (e) {
+    const entries = [...runtimes.values()];
+    if (entries.length === 0) return;
+    // One RPC scan covers all configured addresses. The previous per-runtime loop scanned the same
+    // logs N times and dispatched every decoded event into whichever runtime happened to own that
+    // iteration, so one manager's close could freeze every channel. Start at the least-advanced
+    // per-channel cursor and skip already-consumed events for runtimes that are further ahead.
+    const from = Math.min(...entries.map(({ store }) => Number(store.get('cursor') || 0)));
+    try {
+      await watcher.pollOnce(
+        from,
+        async (ev) => {
+          for (const id of targetRuntimeIds(ev, runtimes)) {
+            const target = runtimes.get(id);
+            if (Number(target.store.get('cursor') || 0) > Number(ev.blockNumber)) continue;
+            try {
+              await target.lock(() => target.runtime.dispatch({ source: 'chain', ...ev }));
+            } catch (e) {
+              const routedError = e instanceof Error ? e : new Error(String(e));
+              routedError.chainChannelId = id;
+              throw routedError;
+            }
+          }
+        },
+        (cursor) => {
+          for (const { store } of entries) store.setCursor(cursor);
+        },
+      );
+      for (const { ch } of entries) pollFailures.set(ch.id, 0);
+    } catch (e) {
+      const affected = e && e.chainChannelId !== undefined
+        ? entries.filter(({ ch }) => String(ch.id) === String(e.chainChannelId))
+        : entries;
+      for (const { ch, store } of affected) {
         const n = (pollFailures.get(ch.id) || 0) + 1;
         pollFailures.set(ch.id, n);
         log.warn({ event: 'CHAIN_POLL_ERROR', channel: ch.id, consecutive: n, error: String(e && e.message || e) });
@@ -136,4 +244,11 @@ if (require.main === module) {
   main().catch((e) => { log.error({ event: 'FATAL', error: String(e && e.stack || e) }); process.exit(1); });
 }
 
-module.exports = { main };
+module.exports = {
+  main,
+  targetRuntimeIds,
+  isLoopbackHost,
+  resolveHttpSecurity,
+  bearerAuthorized,
+  DEFAULT_COSIGNER_BODY_LIMIT,
+};

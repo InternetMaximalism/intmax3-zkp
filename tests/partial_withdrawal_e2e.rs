@@ -355,9 +355,10 @@ fn partial_withdrawal_e2e_anvil() {
     );
     bwg.commit_receive_deposit(&deposit_proof, &dw).unwrap();
 
-    // Bootstrap nonce 0 with an actual zero-value base transaction. Channel burn TxV2 nonces are
-    // `post_small_block_number`, so the first burn is nonce 1; without this real sent-tx-tree step
-    // the base account remains at nonce 0 and P2-4 correctly refuses the burn as unprovable.
+    // Bootstrap nonce 0 with an actual zero-value base transaction. Channel burn TxV2 nonces use
+    // the authenticated pre-block ChannelLeaf index, so the first burn is nonce 1; without this
+    // real sent-tx-tree step the base account remains at nonce 0 and P2-4 correctly refuses the
+    // burn as unprovable.
     let bootstrap_transfer = Transfer::default();
     let bootstrap_spend_witness = bwg.spend_witness(&[bootstrap_transfer.clone()]).unwrap();
     let timer = Instant::now();
@@ -456,6 +457,7 @@ fn partial_withdrawal_e2e_anvil() {
     let built = build_burn_send(
         &keys[0],
         &snapshot,
+        1, // bootstrap base send advanced the authenticated ChannelLeaf index to one
         0, // sender_slot
         withdrawal_addr,
         burn_amount,
@@ -504,6 +506,8 @@ fn partial_withdrawal_e2e_anvil() {
         desc.receiver_delta.digest(),
     );
     let burn_aux_data = burn_descriptor(
+        desc.source_channel_id,
+        desc.inter_channel_tx.base_nonce,
         tx_leaf,
         desc.receiver_pk_g,
         desc.inter_channel_tx.token_index,
@@ -512,7 +516,7 @@ fn partial_withdrawal_e2e_anvil() {
     let expected_chain = settled_tx_chain_push(genesis_chain, burn_aux_data);
     assert_eq!(
         next_state.balance_state.settled_tx_chain, expected_chain,
-        "channel chain must be push(genesis, IMBD descriptor)"
+        "channel chain must be push(genesis, IMD2 descriptor)"
     );
     eprintln!("[PW E2E] settled_tx_chain OK");
 
@@ -687,6 +691,7 @@ fn partial_withdrawal_e2e_anvil() {
             "withdrawal_amount": burn_amount,
             "withdrawal_nullifier": withdrawal.nullifier.to_hex(),
             "withdrawal_aux_data": burn_aux_data.to_hex(),
+            "withdrawal_base_nonce": desc.inter_channel_tx.base_nonce,
             "burn_tx_leaf": tx_leaf.to_hex(),
         });
         std::fs::write(

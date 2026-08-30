@@ -4,11 +4,12 @@
 
 const { checkHeadMonotonic } = require('../verify');
 const dsm = require('../state-machine');
+const wire = require('../../common/wire');
 
 function headOf(snapshot) {
   const st = (snapshot && snapshot.state) || {};
-  const bs = st.balance_state || {};
-  return { digest: st.digest, epoch: st.epoch || 0, stateVersion: bs.state_version || 0 };
+  const version = wire.stateVersion(st);
+  return { digest: st.digest, epoch: st.epoch || 0, stateVersion: version == null ? 0 : version };
 }
 
 // Record a decrypted BalanceReport into the store.

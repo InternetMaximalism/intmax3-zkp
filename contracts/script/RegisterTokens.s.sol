@@ -49,6 +49,9 @@ contract RegisterTokens is Script {
     error NativeMustBeIndexZero(uint32 tokenIndex);
     error IndexZeroMustBeNative(uint32 tokenIndex);
     error TokenAddressZero(uint32 tokenIndex);
+    error ManifestTokensEmpty();
+    error ManifestTooManyTokens(uint256 maxTokens);
+    error MissingTokenIndex(uint256 position);
     /// @dev SET-ONCE violation attempt: the index is already bound to a DIFFERENT token.
     error AlreadyRegisteredToAnotherToken(uint32 tokenIndex, address onChain, address manifest);
     /// @dev The post-registration read-back disagreed — never report success on an unverified write.
@@ -83,15 +86,26 @@ contract RegisterTokens is Script {
     ///      the rollup's `deployer`). Prints one summary line per token: REGISTERED / already-set /
     ///      native-skip.
     function registerAll(IntmaxRollup rollup, string memory json) public {
-        // Walk the array by index (a `[*]` wildcard yields multiple JSON values, which
-        // `parseJsonUintArray` refuses) and stop at the first absent element. MAX_TOKENS bounds the
-        // loop so a hostile/degenerate file cannot spin it.
+        // The manifest schema requires one non-empty, contiguous JSON array. Check both boundaries
+        // BEFORE any registration: otherwise a 65th entry is silently ignored after the capped walk,
+        // and a present element missing `tokenIndex` looks like end-of-array and hides its tail.
+        if (!vm.keyExistsJson(json, ".tokens[0]")) revert ManifestTokensEmpty();
+        if (vm.keyExistsJson(json, string.concat(".tokens[", vm.toString(MAX_TOKENS), "]"))) {
+            revert ManifestTooManyTokens(MAX_TOKENS);
+        }
+
+        // Walk the now-bounded array by index (a `[*]` wildcard yields multiple JSON values, which
+        // `parseJsonUintArray` refuses). JSON arrays are contiguous, so the first absent element is
+        // the end; every present element must carry the schema's authoritative `tokenIndex` field.
         uint256[] memory indices = new uint256[](MAX_TOKENS);
         uint256 n = 0;
 
         for (uint256 i = 0; i < MAX_TOKENS; i++) {
             string memory base = string.concat(".tokens[", vm.toString(i), "]");
-            if (!vm.keyExistsJson(json, string.concat(base, ".tokenIndex"))) break;
+            if (!vm.keyExistsJson(json, base)) break;
+            if (!vm.keyExistsJson(json, string.concat(base, ".tokenIndex"))) {
+                revert MissingTokenIndex(i);
+            }
 
             uint256 raw = vm.parseJsonUint(json, string.concat(base, ".tokenIndex"));
             if (raw > type(uint32).max) revert TokenIndexNotU32(raw);

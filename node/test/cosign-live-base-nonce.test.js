@@ -3,8 +3,8 @@
 // D4a: the cosigner must gate an outgoing send against the daemon's LIVE base nonce, not the frozen
 // channel_backing.json. `liveBaseNonceEnv` fetches it from /base-head and turns it into the
 // INTMAX_LIVE_BASE_NONCE the CLI co-sign guard reads. The safety-critical property is FAIL-CLOSED:
-// if the live nonce cannot be obtained, it must return {} so the CLI falls back to the frozen
-// witness (which refuses a stale second send) rather than proceeding with no authoritative check.
+// if the live nonce cannot be obtained, co-signing must stop. The frozen backing witness is a
+// setup-time snapshot and is not an authoritative fallback after any outgoing send.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -25,16 +25,18 @@ test('nonce 0 is a valid live cursor, not falsy-dropped', async () => {
   assert.deepEqual(env, { INTMAX_LIVE_BASE_NONCE: '0' });
 });
 
-test('fetch throws → {} (fail-closed: CLI falls back to the frozen witness)', async () => {
+test('fetch throws → hard refusal (never fall back to the frozen witness)', async () => {
   const api = { getBaseHead: async () => { throw new Error('daemon unreachable'); } };
-  const env = await liveBaseNonceEnv(api, ch, log);
-  assert.deepEqual(env, {});
+  await assert.rejects(() => liveBaseNonceEnv(api, ch, log), /refusing to co-sign/);
 });
 
-test('non-integer / missing nonce → {} (never pass a bogus override to the guard)', async () => {
-  for (const bad of [{ nonce: '3' }, { nonce: null }, {}, null]) {
+test('invalid / missing nonce → hard refusal (never pass a bogus override to the guard)', async () => {
+  for (const bad of [{ nonce: '3' }, { nonce: null }, { nonce: -1 }, { nonce: 0x1_0000_0000 }, {}, null]) {
     const api = { getBaseHead: async () => bad };
-    const env = await liveBaseNonceEnv(api, ch, log);
-    assert.deepEqual(env, {}, `bad head ${JSON.stringify(bad)} must yield no override`);
+    await assert.rejects(
+      () => liveBaseNonceEnv(api, ch, log),
+      /refusing to co-sign/,
+      `bad head ${JSON.stringify(bad)} must stop co-signing`,
+    );
   }
 });

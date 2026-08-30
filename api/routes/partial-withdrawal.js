@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const fs = require('fs');
 const { cli, wc, RPC, readJson, writeJson, ensureSettlement, failRoute } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
@@ -12,14 +13,6 @@ router.post('/burn', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, async () => {
     const active = findActiveTicket(ch, 'partial_withdrawal');
-    // `findActiveTicket` returns every non-terminal PW state. Once a burn exists, creating a
-    // second one would overwrite last_burn.json and the ticket even when the first workflow is
-    // already submit/finalize/payout-pending (or deliberately blocked for a retry). Only the
-    // terminal `settle_done` state is eligible to start another burn.
-    if (active) {
-      res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
-      return;
-    }
     const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
     if (!debitPayload || !transferDescriptor) {
       res.status(400).json({ error: 'needs { debitPayload, transferDescriptor, amount, recipient, tokenIndex? }' });
@@ -34,35 +27,65 @@ router.post('/burn', (req, res) => {
       res.status(400).json({ error: `tokenIndex mismatch: body says ${tokenIndex}, signed descriptor says ${descTok}` });
       return;
     }
-    writeJson(wc(ch, 'burn_payload.json'), debitPayload);
-    writeJson(wc(ch, 'burn_descriptor.json'), transferDescriptor);
-    cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json']);
+    const producerRequestId = producer.stableRequestId('burn', {
+      ch, debitPayload, transferDescriptor,
+    });
+    // `burn_pending` is a durable two-phase marker written before signing. A retry of the exact
+    // same request resumes; every other non-terminal PW state remains an exclusion lock. This
+    // prevents a crash after N-of-N signing from letting the next HTTP request overwrite the only
+    // artifacts capable of settling that already-advanced channel head.
+    let ticket = active;
+    if (active) {
+      const resumable = active.status === 'burn_pending'
+        && active.params
+        && active.params.producerRequestId === producerRequestId;
+      if (!resumable) {
+        res.status(409).json({ error: 'resolve the active partial withdrawal before burning again', ticket: active });
+        return;
+      }
+    } else {
+      writeJson(wc(ch, 'burn_payload.json'), debitPayload);
+      writeJson(wc(ch, 'burn_descriptor.json'), transferDescriptor);
+      fs.rmSync(wc(ch, 'burn_cosigned.json'), { force: true });
+      ticket = upsertTicket(ch, {
+        id: `pw_${producerRequestId.slice('burn:'.length)}`,
+        type: 'partial_withdrawal',
+        status: 'burn_pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        params: {
+          producerRequestId,
+          amount: String(req.body.amount || ''),
+          recipient: req.body.recipient || '',
+          tokenIndex: descTok !== undefined ? String(descTok) : '0',
+        },
+        steps: { burn: null, settle: null },
+      });
+    }
+    // This route owns the channel lock through cosign -> producer admission -> live settle. Bind the
+    // CLI to the daemon cursor read inside that critical section; never fall back to frozen setup
+    // state when the live authority is unavailable.
+    const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
+    if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
+      cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'], liveNonceEnv);
+    }
     // The burn is an inter-channel send to BURN_CHANNEL_ID: admit it durably at the producer and
     // settle it in the live base-state authority, exactly like a normal send. The journaled
     // producer request id is what the payout leg later proves against.
     const cosignedHead = readJson(wc(ch, 'burn_cosigned.json'));
-    const producerRequestId = producer.stableRequestId('burn', {
-      ch, debitPayload, transferDescriptor,
-    });
     const blockReceipt = await producer.postInterChannel(
       cosignedHead, debitPayload, transferDescriptor, producerRequestId,
     );
-    let liveReceipt = null;
-    if (producer.liveSnapshotExists(ch)) {
-      liveReceipt = await producer.liveSettleInterChannel(
-        ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor,
-      );
-    }
+    // Persist the public admission before the second phase. A crash here is recoverable by
+    // idempotently replaying the same post + live settle from the burn_pending ticket/artifacts.
+    writeJson(wc(ch, 'pw_producer.json'), { producerRequestId, blockReceipt, liveReceipt: null });
+    const liveReceipt = await producer.liveSettleInterChannel(
+      ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor,
+    );
     writeJson(wc(ch, 'pw_producer.json'), { producerRequestId, blockReceipt, liveReceipt });
-    const ticket = upsertTicket(ch, {
-      id: 'pw_' + Date.now(),
-      type: 'partial_withdrawal',
-      status: 'burn_done',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      params: { amount: String(req.body.amount || ''), recipient: req.body.recipient || '', tokenIndex: descTok !== undefined ? String(descTok) : '0' },
-      steps: { burn: { completedAt: Date.now() }, settle: null },
-    });
+    ticket.status = 'burn_done';
+    ticket.steps = { ...(ticket.steps || {}), burn: { completedAt: Date.now() }, settle: null };
+    ticket = upsertTicket(ch, ticket);
     const cosigned = readJson(wc(ch, 'burn_cosigned.json'));
     res.json({ state: cosigned, ticket });
   }).catch(e => {

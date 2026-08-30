@@ -37,7 +37,7 @@ function fakeCtx({ store, available = true, refreshOk = true } = {}) {
     api: {
       cosignRefresh: async () => {
         if (!refreshOk) throw new Error('withheld');
-        return { state: { member_signatures: ['s0'], digest: '0xnew', balance_state: { state_version: 1 } } };
+        return { state: { memberSignatures: ['s0'], digest: '0xnew', balanceState: { stateVersion: 1 } } };
       },
     },
   };

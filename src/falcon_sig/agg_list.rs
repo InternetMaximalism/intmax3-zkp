@@ -11,7 +11,7 @@
 //! # The fold (§5.3)
 //!
 //! ```text
-//!   pk_list_digest_i = Poseidon([AGG_PK_LIST_DOMAIN] ‖ pk_g_0(8) ‖ ... ‖ pk_g_15(8))
+//!   pk_list_digest_i = Poseidon([AGG_PK_LIST_DOMAIN] ‖ pk_g_0(8) ‖ ... ‖ pk_g_7(8))
 //!   leaf_i           = Poseidon([AGG_LIST_LEAF_DOMAIN] ‖ m_i(8) ‖ signer_count_i ‖
 //!                               pk_list_digest_i(4))
 //!   C_0              = 0                       (the empty chain)
@@ -42,7 +42,7 @@
 //!     members, nor that `signer_count` equals the channel's `member_count`. `FalconAggCircuit`
 //!     deliberately allows the same leaf proof in two slots (`agg.rs:81-83`). Those are CONSUMER
 //!     obligations, discharged in `update_channel_tree` by recomputing the member-tree root over
-//!     the same 16 pk slots (design §5.4 items 1-5, Phase 3). Nothing here may be read as evidence
+//!     the same 8 pk slots (design §5.4 items 1-5, Phase 3). Nothing here may be read as evidence
 //!     that they are already enforced.
 
 use anyhow::Result;
@@ -87,8 +87,8 @@ use crate::{
 /// Registered in `constants.rs::all_domain_constants_pairwise_distinct`.
 pub const AGG_LIST_LEAF_DOMAIN: u32 = 0x494d_414c;
 
-/// "IMPL" — domain separator of the 16-slot signer pk-list digest
-/// `Poseidon([IMPL] ‖ pk_g_0(8) ‖ ... ‖ pk_g_15(8))`.
+/// "IMPL" — domain separator of the 8-slot signer pk-list digest
+/// `Poseidon([IMPL] ‖ pk_g_0(8) ‖ ... ‖ pk_g_7(8))`.
 /// Registered in `constants.rs::all_domain_constants_pairwise_distinct`.
 pub const AGG_PK_LIST_DOMAIN: u32 = 0x494d_504c;
 
@@ -98,7 +98,7 @@ pub const AGG_PK_LIST_LIMBS: usize = MAX_SIG_CLUSTER * BYTES32_LEN;
 // FORMAT — native reference (must match the in-circuit gadgets bit-for-bit)
 // ================================================================================================
 
-/// `pk_list_digest = Poseidon([AGG_PK_LIST_DOMAIN] ‖ 16 slots × pk_g(8 limbs))`.
+/// `pk_list_digest = Poseidon([AGG_PK_LIST_DOMAIN] ‖ 8 slots × pk_g(8 limbs))`.
 ///
 /// `signer_pks` are the ACTIVE signers in slot order; the remaining slots are zero — byte-identical
 /// to the zero padding `FalconAggCircuit` constrains its inactive slots to, and to the empty
@@ -269,7 +269,7 @@ pub(crate) fn agg_list_leaf_target<F: RichField + Extendable<D>, const D: usize>
 /// any other circuit fails even with an identical public-input shape.
 ///
 /// SECURITY (no free witness on the folded statement): every folded value — the message limbs, the
-/// signer count, all 16 pk slots — is read from the VERIFIED proof's public inputs. The only
+/// signer count, all 8 pk slots — is read from the VERIFIED proof's public inputs. The only
 /// witnesses of this circuit are the proof itself and `prev_chain` (which the cyclic wrapper
 /// constrains to the previous step's output, and to zero at the first step).
 pub struct AggListStepCircuit<F, C, const D: usize>
@@ -291,15 +291,15 @@ where
     <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
 {
     /// `agg_top_vd` MUST be `FalconAggCircuit::verifier_data()` — the TOP (level
-    /// `AGG_LEVELS`) verifier data, whose statement is the 137-element contract.
+    /// `AGG_LEVELS`) verifier data, whose statement is the 73-element contract.
     ///
-    /// SECURITY (arity gate): the 73-element (MAX_SIG_CLUSTER=8) layout is asserted BEFORE any target is added, in a
-    /// RELEASE-mode `assert_eq!`. Every offset below is positional, so a verifier key for a
-    /// DIFFERENT aggregation level (level 2 exposes 41 elements, the leaf 17) would otherwise
-    /// silently produce a step that folds a shorter pk list — a circuit that builds, proves and
-    /// commits to the wrong statement. This assert cannot catch a caller substituting an unrelated
-    /// circuit that happens to expose 137 public inputs; that is the caller's obligation, and the
-    /// constant-VK binding makes it observable in the circuit digest.
+    /// SECURITY (arity gate): the 73-element (MAX_SIG_CLUSTER=8) layout is asserted BEFORE any
+    /// target is added, in a RELEASE-mode `assert_eq!`. Every offset below is positional, so a
+    /// verifier key for a DIFFERENT aggregation level (level 2 exposes 41 elements, the leaf 17)
+    /// would otherwise silently produce a step that folds a shorter pk list — a circuit that
+    /// builds, proves and commits to the wrong statement. This assert cannot catch a caller
+    /// substituting an unrelated circuit that happens to expose 73 public inputs; that is the
+    /// caller's obligation, and the constant-VK binding makes it observable in the circuit digest.
     pub fn new(agg_top_vd: &VerifierCircuitData<F, C, D>) -> Self {
         assert_eq!(
             agg_top_vd.common.num_public_inputs, FALCON_AGG_PUBLIC_INPUTS_LEN,
@@ -319,14 +319,15 @@ where
         // signer_count = PI[8].
         let signer_count = agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET];
         // SECURITY (defence in depth): `1 <= signer_count <= MAX_SIG_CLUSTER` is STRUCTURAL in
-        // `FalconAggCircuit` (unconditional left child; leaf count is the constant 1; 16 slots), so
+        // `FalconAggCircuit` (unconditional left child; leaf count is the constant 1; 8 slots), so
         // this range check is redundant TODAY. It is kept because it costs one gate and because
         // this circuit reads the count as an opaque field element: were the aggregator ever to
         // expose an out-of-range count, the fold would otherwise carry it into the chain unnoticed.
-        // `count - 1 ∈ [0, 2^4)` is exactly `1 <= count <= 16`.
+        // The proof already gives the exact `<= 8` bound; this four-bit check is only an additional
+        // broad rejection of field values outside `1..=16`.
         let count_minus_one = builder.add_const(signer_count, F::NEG_ONE);
         builder.range_check(count_minus_one, 4);
-        // pk_list_digest over ALL 16 slots, padding included (padding is constrained zero inside
+        // pk_list_digest over ALL 8 slots, padding included (padding is constrained zero inside
         // the aggregation circuit, so both sides agree without an extra gate here).
         let pk_limbs = &agg_proof.public_inputs
             [FALCON_AGG_PK_LIST_OFFSET..FALCON_AGG_PK_LIST_OFFSET + AGG_PK_LIST_LIMBS];
@@ -507,7 +508,7 @@ mod tests {
     static AGG_16: Lazy<ProofWithPublicInputs<F, C, D>> =
         Lazy::new(|| real_agg_proof(MAX_SIG_CLUSTER, digest(0x10), 30));
 
-    /// Measurement hygiene / memory: circuit builds and 16-signature aggregations are the heaviest
+    /// Measurement hygiene / memory: circuit builds and 8-signature aggregations are the heaviest
     /// operations in the repo. Cases that build or prove hold this lock so the suite never runs two
     /// of them concurrently, whatever `--test-threads` is set to.
     static HEAVY: Mutex<()> = Mutex::new(());

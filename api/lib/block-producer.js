@@ -124,8 +124,17 @@ function execute(command) {
   });
 }
 
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+}
+
 function stableRequestId(kind, body) {
-  const digest = crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  // JSON object insertion order is a transport detail. Hash a recursively sorted encoding so a
+  // crash retry with the same semantic request cannot acquire a different producer id merely
+  // because an HTTP client reordered keys.
+  const digest = crypto.createHash('sha256').update(canonicalJson(body)).digest('hex');
   return `${kind}:${digest}`;
 }
 
@@ -229,6 +238,18 @@ function liveBaseHead(channelId) {
   return execute({ command: 'liveBaseHead', channelId });
 }
 
+// Every outgoing co-sign must be bound to the resident daemon's authoritative cursor. The
+// setup-time channel_backing.json nonce is intentionally not a fallback: it does not advance and
+// can make a channel debit succeed before the base settle rejects the stale nonce.
+async function authoritativeBaseNonceEnv(channelId) {
+  const live = await liveBaseHead(channelId);
+  const nonce = live && live.baseNonce;
+  if (!Number.isInteger(nonce) || nonce < 0 || nonce > 0xffffffff) {
+    throw new Error(`authoritative live base nonce unavailable for channel ${channelId}`);
+  }
+  return { INTMAX_LIVE_BASE_NONCE: String(nonce) };
+}
+
 function liveBurnPayoutArtifacts(channelId, producerRequestId, descriptor, withdrawalProver) {
   return execute({
     command: 'liveBurnPayoutArtifacts',
@@ -256,6 +277,7 @@ module.exports = {
   postInterChannel,
   register,
   stableRequestId,
+  canonicalJson,
   status,
   syncOffchainHeads,
   validityStatus,
@@ -272,6 +294,7 @@ module.exports = {
   liveSendArtifact,
   liveBackingArtifact,
   liveBaseHead,
+  authoritativeBaseNonceEnv,
   liveReceiveInterChannel,
   liveBurnPayoutArtifacts,
   liveSnapshotExists,

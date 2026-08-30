@@ -74,7 +74,7 @@ const _: () = assert!(
 /// member tree ([`MEMBER_TREE_HEIGHT`], cosigners-only, written once at registration). The wallet
 /// root is never compared to the registered root anywhere; it anchors the off-chain member set
 /// that peers verify (`verify_snapshot` / payload checks), while the registered root authenticates
-/// the block producer in the validity circuit. Keeping the heights different (10 vs 4) makes
+/// the block producer in the validity circuit. Keeping the heights different (10 vs 3) makes
 /// accidental conflation fail loudly (root mismatch / proof length mismatch) instead of silently.
 pub const WALLET_MEMBER_TREE_HEIGHT: usize = 10;
 const _: () = assert!(
@@ -90,17 +90,17 @@ const _: () = assert!(
 /// `ChannelRecord`, `BalanceState.enc_balances` and `BalanceState.pending_adds` are all sized by
 /// this constant.
 ///
-/// SECURITY: this is a STATIC ZK-circuit size (the close circuit verifies MAX_CHANNEL_MEMBERS
-/// SPHINCS+ slots, gating padding slots off). Deviation D6 from abstract2 §2.1 (which fixes 3
-/// members) — see detail2-implementation-notes.md.
+/// SECURITY: this is the STATIC balance-slot ZK-circuit size. Close signatures instead use the
+/// distinct `MAX_SIG_CLUSTER = 8` width and gate its padding SPHINCS+ slots off. Deviation D6 from
+/// abstract2 §2.1 (which fixes 3 members) — see detail2-implementation-notes.md.
 pub const MAX_CHANNEL_MEMBERS: usize = 1024;
 
 /// Height of the per-channel BALANCE-SLOT Poseidon Merkle tree: the tree whose 1024 leaves are
 /// `balance_slot_leaf_hash(regev_pk_digests[i], enc_balances[i].digest(), pending_adds[i])`
 /// (member slot order) and whose ROOT rides in the `BalanceState::h1()` header. This is the
 /// H1-commitment tree (see `tasks/h1-poseidon-root-threat-model.md`) — DISTINCT from
-/// [`MEMBER_TREE_HEIGHT`] (the validity-side member pubkey tree), which merely happens to share
-/// the same height because both are indexed by the slot space `0..MAX_CHANNEL_MEMBERS`.
+/// [`MEMBER_TREE_HEIGHT`] (the validity-side cosigner pubkey tree). Their heights are intentionally
+/// different: balance slots use height 10, while the registered sig-cluster tree uses height 3.
 ///
 /// SECURITY/INVARIANT: `1 << BALANCE_SLOT_TREE_HEIGHT == MAX_CHANNEL_MEMBERS` (const-asserted
 /// below). The claim circuits allocate inclusion proofs of exactly this height and
@@ -146,9 +146,9 @@ pub const MAX_SIG_CLUSTER: usize = 8;
 /// `IndexedMerkleLeaf::default()` at index 0) and then pushes up to `MAX_SIG_CLUSTER` active
 /// leaves, for at most `MAX_SIG_CLUSTER + 1` occupied leaf slots. `IncrementalMerkleTree::push`
 /// asserts `index < 2^height`, so we need `2^height >= MAX_SIG_CLUSTER + 1`, i.e.
-/// `height >= ceil(log2(MAX_SIG_CLUSTER + 1))`. Derived from `MAX_SIG_CLUSTER` (the distinctness tree
-/// only holds COSIGNER keys now, not balance slots) so a later cap bump stays correct without a
-/// manual edit. For MAX_SIG_CLUSTER=16: `ceil(log2(17)) = 5` → 32 leaf slots.
+/// `height >= ceil(log2(MAX_SIG_CLUSTER + 1))`. Derived from `MAX_SIG_CLUSTER` (the distinctness
+/// tree only holds COSIGNER keys now, not balance slots) so a later cap bump stays correct without
+/// a manual edit. For MAX_SIG_CLUSTER=8: `ceil(log2(9)) = 4` → 16 leaf slots.
 ///
 /// SECURITY: the height only bounds tree CAPACITY; it does not affect WHICH keys are checked
 /// (the active gating and key sourcing do). Over-sizing the tree is sound (it only adds unused
@@ -302,6 +302,14 @@ mod tests {
         assert_eq!(KEY_ROTATION_CONSENT_DOMAIN, u32::from_be_bytes(*b"IMKR"));
         assert_eq!(JOINER_CONSENT_DOMAIN, u32::from_be_bytes(*b"IMJC"));
         assert_eq!(TOKEN_FUNDS_DIGEST_DOMAIN, u32::from_be_bytes(*b"IMTF"));
+        assert_eq!(
+            crate::common::channel::BURN_DESCRIPTOR_DOMAIN,
+            u32::from_be_bytes(*b"IMD2")
+        );
+        assert_eq!(
+            crate::wallet_core::PARTIAL_WITHDRAWAL_DOMAIN,
+            u32::from_be_bytes(*b"IPW2")
+        );
     }
 
     /// Repo-wide domain-constant NON-COLLISION check (detail2 §G-2 / §N-9, TM-15): every domain
@@ -357,7 +365,14 @@ mod tests {
                 0x494d_4248,
             ),
             ("IMTL TX_LEAF_DOMAIN (balance_state.rs)", 0x494d_544c),
-            ("IMBD BURN_DESCRIPTOR_DOMAIN (channel.rs)", 0x494d_4244),
+            (
+                "IMBD BURN_DESCRIPTOR_DOMAIN v1 (retired; historic descriptors)",
+                0x494d_4244,
+            ),
+            (
+                "IMD2 BURN_DESCRIPTOR_DOMAIN v2 (channel.rs)",
+                crate::common::channel::BURN_DESCRIPTOR_DOMAIN,
+            ),
             (
                 "IMTC SETTLED_TX_CHAIN_DOMAIN (balance_state.rs)",
                 0x494d_5443,
@@ -386,8 +401,12 @@ mod tests {
             ("IMPG DOMAIN_PK_G (poseidon_sig/mod.rs)", 0x494d_5047),
             ("IMSG DOMAIN_SIG_G (poseidon_sig/mod.rs)", 0x494d_5347),
             (
-                "IMPW PARTIAL_WITHDRAWAL_DOMAIN (wallet_core.rs)",
+                "IMPW PARTIAL_WITHDRAWAL_DOMAIN v1 (retired; historic authorizations)",
                 0x494d_5057,
+            ),
+            (
+                "IPW2 PARTIAL_WITHDRAWAL_DOMAIN v2 (wallet_core.rs)",
+                crate::wallet_core::PARTIAL_WITHDRAWAL_DOMAIN,
             ),
             ("MBLF MEMBER_LEAF_DOMAIN (key_tree.rs)", 0x4d42_4c46),
             (

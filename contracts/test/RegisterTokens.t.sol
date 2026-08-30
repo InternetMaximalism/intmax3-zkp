@@ -9,6 +9,37 @@ import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {MockMleVerifier} from "./CloseTestLib.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {RegisterTokens} from "../script/RegisterTokens.s.sol";
+import {SubmitPartialWithdrawal} from "../script/SubmitPartialWithdrawal.s.sol";
+
+contract SubmitPartialWithdrawalNoReadHarness is SubmitPartialWithdrawal {
+    error FixtureReadAttempted();
+
+    bool internal failReads = true;
+
+    function _read(string memory) internal view override returns (string memory) {
+        if (failReads) revert FixtureReadAttempted();
+        return "{}";
+    }
+}
+
+contract SubmitPartialWithdrawalScriptGuardTest is Test {
+    function test_run_publicChainRevertsBeforeReadingFixtures() public {
+        uint256 publicChainId = 11155111;
+        vm.chainId(publicChainId);
+
+        SubmitPartialWithdrawalNoReadHarness script = new SubmitPartialWithdrawalNoReadHarness();
+        vm.expectRevert(abi.encodeWithSelector(SubmitPartialWithdrawal.LocalDevnetOnly.selector, publicChainId));
+        script.run();
+    }
+
+    function test_run_anvilPassesTheChainGateBeforeReadingFixture() public {
+        vm.chainId(31337);
+
+        SubmitPartialWithdrawalNoReadHarness script = new SubmitPartialWithdrawalNoReadHarness();
+        vm.expectRevert(SubmitPartialWithdrawalNoReadHarness.FixtureReadAttempted.selector);
+        script.run();
+    }
+}
 
 /// @title RegisterTokens deploy-script logic (multitoken §N-7, TM-1/TM-10b).
 /// @notice Exercises `RegisterTokens.registerAll` — the script's core logic — against a REAL
@@ -72,18 +103,42 @@ contract RegisterTokensTest is Test {
 
     function _entry(uint32 idx, string memory symbol, address token) internal pure returns (string memory) {
         return string.concat(
-            '{"tokenIndex":', vm.toString(uint256(idx)),
-            ',"symbol":"', symbol,
-            '","name":"Test Token","decimals":6,"address":"', vm.toString(token), '"}'
+            '{"tokenIndex":',
+            vm.toString(uint256(idx)),
+            ',"symbol":"',
+            symbol,
+            '","name":"Test Token","decimals":6,"address":"',
+            vm.toString(token),
+            '"}'
         );
     }
 
     function _manifest(string memory entries) internal view returns (string memory) {
         return string.concat(
-            '{"chainId":', vm.toString(block.chainid),
-            ',"rollup":"', vm.toString(address(rollup)),
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
             '","tokens":[{"tokenIndex":0,"symbol":"ETH","name":"Ether","decimals":18,"address":null,"native":true}',
             bytes(entries).length == 0 ? "" : string.concat(",", entries),
+            "]}"
+        );
+    }
+
+    function _manifestWithTokenCount(uint256 count) internal view returns (string memory) {
+        string memory entries =
+            '{"tokenIndex":0,"symbol":"ETH","name":"Ether","decimals":18,"address":null,"native":true}';
+        for (uint256 i = 1; i < count; i++) {
+            entries =
+                string.concat(entries, ",", _entry(uint32(i), string.concat("T", vm.toString(i)), address(uint160(i))));
+        }
+        return string.concat(
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
+            '","tokens":[',
+            entries,
             "]}"
         );
     }
@@ -91,7 +146,8 @@ contract RegisterTokensTest is Test {
     // ── tests ───────────────────────────────────────────────────────────────────────────────
 
     function test_registerAll_registersNonNativeEntries_andReadsBack() public {
-        string memory json = _manifest(string.concat(_entry(7, "AAA", address(tokenA)), ",", _entry(8, "BBB", address(tokenB))));
+        string memory json =
+            _manifest(string.concat(_entry(7, "AAA", address(tokenA)), ",", _entry(8, "BBB", address(tokenB))));
         script.registerAll(rollup, json);
 
         assertEq(address(rollup.tokenAddressOf(7)), address(tokenA), "index 7 bound to tokenA");
@@ -122,7 +178,8 @@ contract RegisterTokensTest is Test {
 
     /// A duplicate base index is the TM-1 double-drain shape — refuse the whole run.
     function test_registerAll_duplicateIndexReverts() public {
-        string memory json = _manifest(string.concat(_entry(7, "AAA", address(tokenA)), ",", _entry(7, "BBB", address(tokenB))));
+        string memory json =
+            _manifest(string.concat(_entry(7, "AAA", address(tokenA)), ",", _entry(7, "BBB", address(tokenB))));
         vm.expectRevert(abi.encodeWithSelector(RegisterTokens.DuplicateTokenIndex.selector, uint32(7)));
         script.registerAll(rollup, json);
     }
@@ -130,9 +187,13 @@ contract RegisterTokensTest is Test {
     /// A non-native entry at index 0 would put an ERC-20 label on the contract-reserved ETH index.
     function test_registerAll_indexZeroMustBeNative() public {
         string memory json = string.concat(
-            '{"chainId":', vm.toString(block.chainid),
-            ',"rollup":"', vm.toString(address(rollup)),
-            '","tokens":[', _entry(0, "AAA", address(tokenA)), "]}"
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
+            '","tokens":[',
+            _entry(0, "AAA", address(tokenA)),
+            "]}"
         );
         vm.expectRevert(abi.encodeWithSelector(RegisterTokens.IndexZeroMustBeNative.selector, uint32(0)));
         script.registerAll(rollup, json);
@@ -141,8 +202,10 @@ contract RegisterTokensTest is Test {
     /// A native entry at a nonzero index misdeclares which asset is ETH.
     function test_registerAll_nativeMustBeIndexZero() public {
         string memory json = string.concat(
-            '{"chainId":', vm.toString(block.chainid),
-            ',"rollup":"', vm.toString(address(rollup)),
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
             '","tokens":[{"tokenIndex":3,"symbol":"ETH","name":"Ether","decimals":18,"address":null,"native":true}]}'
         );
         vm.expectRevert(abi.encodeWithSelector(RegisterTokens.NativeMustBeIndexZero.selector, uint32(3)));
@@ -160,13 +223,52 @@ contract RegisterTokensTest is Test {
     function test_registerAll_displayMetadataHasNoOnChainEffect() public {
         script.registerAll(rollup, _manifest(_entry(7, "AAA", address(tokenA))));
         string memory relabelled = string.concat(
-            '{"chainId":', vm.toString(block.chainid),
-            ',"rollup":"', vm.toString(address(rollup)),
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
             '","tokens":[{"tokenIndex":0,"symbol":"ETH","name":"Ether","decimals":18,"address":null,"native":true},',
             '{"tokenIndex":7,"symbol":"USDC","name":"Totally Not TokenA","decimals":18,"address":"',
-            vm.toString(address(tokenA)), '"}]}'
+            vm.toString(address(tokenA)),
+            '"}]}'
         );
         script.registerAll(rollup, relabelled);
         assertEq(address(rollup.tokenAddressOf(7)), address(tokenA), "a relabel cannot move the binding");
+    }
+
+    /// The bounded walker must reject, not silently ignore, the 65th manifest entry.
+    function test_registerAll_moreThanMaximumEntriesRevertsBeforeRegistration() public {
+        vm.expectRevert(abi.encodeWithSelector(RegisterTokens.ManifestTooManyTokens.selector, uint256(64)));
+        script.registerAll(rollup, _manifestWithTokenCount(65));
+        assertEq(address(rollup.tokenAddressOf(1)), address(0), "overflow manifest must write nothing");
+    }
+
+    /// A malformed element cannot masquerade as end-of-array and hide a valid tail entry.
+    function test_registerAll_missingTokenIndexDoesNotHideTail() public {
+        string memory json = string.concat(
+            '{"chainId":',
+            vm.toString(block.chainid),
+            ',"rollup":"',
+            vm.toString(address(rollup)),
+            '","tokens":[',
+            '{"tokenIndex":0,"symbol":"ETH","name":"Ether","decimals":18,"address":null,"native":true},',
+            '{"symbol":"BROKEN","name":"Missing Index","decimals":6,"address":"',
+            vm.toString(address(tokenA)),
+            '"},',
+            _entry(8, "TAIL", address(tokenB)),
+            "]}"
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(RegisterTokens.MissingTokenIndex.selector, uint256(1)));
+        script.registerAll(rollup, json);
+        assertEq(address(rollup.tokenAddressOf(8)), address(0), "tail must not be silently ignored");
+    }
+
+    function test_registerAll_emptyTokensArrayReverts() public {
+        string memory json = string.concat(
+            '{"chainId":', vm.toString(block.chainid), ',"rollup":"', vm.toString(address(rollup)), '","tokens":[]}'
+        );
+        vm.expectRevert(RegisterTokens.ManifestTokensEmpty.selector);
+        script.registerAll(rollup, json);
     }
 }

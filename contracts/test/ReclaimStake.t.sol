@@ -229,7 +229,7 @@ contract ReclaimStakeTest is Test {
     }
 
     function _register(string memory key) internal {
-        rollup.registerChannel{value: 0.003 ether}(
+        rollup.registerChannel(
             uint32(vm.parseJsonUint(lc, string.concat(key, ".channel_id"))),
             uint8(vm.parseJsonUint(lc, string.concat(key, ".bp_member_slot"))),
             // Delegate account Phase 1: fixtures are member-only (delegate_count = 0).

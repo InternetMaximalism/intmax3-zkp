@@ -6,6 +6,7 @@
 
 const { SIGNALS } = require('../state-machine');
 const policy = require('../../common/policy');
+const wire = require('../../common/wire');
 
 // --- OWN: drive cooperative close steps (timer-driven) ---
 async function driveCloseStep(event, ctx) {
@@ -13,14 +14,15 @@ async function driveCloseStep(event, ctx) {
   const step = event.step; // 'finalize'
   if (step === 'finalize') {
     const actionId = `finalize:${ch.id}:${event.closeIntentDigest || ''}`;
-    if (!store.claimAction(actionId)) return;
+    if (!store.claimAction(actionId, { retryPending: true })) return;
     try {
       await cli.run(ch.id, ch.workDir, ['settle', ch.manager, rpc]);
       store.completeAction(actionId, 'ok');
       log.info({ event: 'CLOSE_FINALIZED_DRIVEN', channel: ch.id });
     } catch (e) {
-      store.completeAction(actionId, 'error');
+      store.releaseAction(actionId);
       log.error({ event: 'CLOSE_FINALIZE_FAILED', channel: ch.id, error: String(e.stderr || e.message || e) });
+      throw e;
     }
   }
 }
@@ -28,14 +30,15 @@ async function driveCloseStep(event, ctx) {
 async function drivePwFinalize(event, ctx) {
   const { cli, ch, rpc, store, log } = ctx;
   const actionId = `pw-finalize:${ch.id}:${event.authDigest || ''}`;
-  if (!store.claimAction(actionId)) return;
+  if (!store.claimAction(actionId, { retryPending: true })) return;
   try {
     await cli.run(ch.id, ch.workDir, ['pw-finalize', rpc]);
     store.completeAction(actionId, 'ok');
     log.info({ event: 'PW_FINALIZED_DRIVEN', channel: ch.id });
   } catch (e) {
-    store.completeAction(actionId, 'error');
+    store.releaseAction(actionId);
     log.error({ event: 'PW_FINALIZE_FAILED', channel: ch.id, error: String(e.stderr || e.message || e) });
+    throw e;
   }
 }
 
@@ -83,7 +86,7 @@ async function onCloseIntentObserved(event, ctx) {
   // STALE close authored by someone else freezing an OLDER state ⇒ defend with a newer head.
   const response = policy.staleCloseResponse(ctx.policy);
   const actionId = `stale-close:${response}:${pending.closeIntentDigest || event.txHash || ''}`;
-  if (!store.claimAction(actionId)) return;
+  if (!store.claimAction(actionId, { retryPending: true })) return;
   await alert.raise('attack', ch.id, 'STALE_CLOSE_DETECTED',
     `pending close froze v${pending.stateVersion}@e${pending.epoch} but our head is v${ourHead.stateVersion}@e${ourHead.epoch}`,
     { response, txHash: event.txHash, pendingDigest: pending.closeIntentDigest });
@@ -96,8 +99,12 @@ async function onCloseIntentObserved(event, ctx) {
     }
     store.completeAction(actionId, 'ok');
   } catch (e) {
-    store.completeAction(actionId, 'error');
+    store.releaseAction(actionId);
     await alert.raise('attack', ch.id, 'STALE_CLOSE_RESPONSE_FAILED', String(e.stderr || e.message || e), { response });
+    // Chain watcher advances only after every handler succeeds. Throwing keeps this block/event
+    // live for retry throughout the challenge window instead of permanently deduping a transient
+    // RPC/fee/nonce failure.
+    throw e;
   }
 }
 
@@ -115,8 +122,8 @@ function readHeadVersion(cli, ch) {
   try {
     const snap = cli.readJson(ch.workDir, 'channel_snapshot.json');
     const st = snap.state || {};
-    const bs = st.balance_state || {};
-    return { epoch: st.epoch || 0, stateVersion: bs.state_version || 0 };
+    const version = wire.stateVersion(st);
+    return { epoch: st.epoch || 0, stateVersion: version == null ? 0 : version };
   } catch (e) { return null; }
 }
 

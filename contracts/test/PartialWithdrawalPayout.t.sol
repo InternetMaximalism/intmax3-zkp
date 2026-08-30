@@ -33,11 +33,11 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
 
     address internal attacker = makeAddr("pwAttacker");
 
-    /// The IMPW auth digest, recomputed exactly as `IntmaxRollup._withdrawalAuthDigest`.
+    /// The IPW2 auth digest, recomputed exactly as `IntmaxRollup._withdrawalAuthDigest`.
     function _authDigest(IntmaxRollup.Withdrawal memory w) internal pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
-                bytes4(0x494d5057), w.nullifier, w.recipient, w.tokenIndex, w.amount, w.auxData
+                bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData
             )
         );
     }
@@ -165,7 +165,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
     /// a proven normal leaf: flipping auxData to non-zero breaks the binding and reverts.
     ///
     /// This is the direct positive evidence that the burn branch of `withdrawNative` is reachable
-    /// ONLY via a proof that actually committed to `auxData` — i.e. that the IMPW flag is a second
+    /// ONLY via a proof that actually committed to `auxData` — i.e. that the IPW2 flag is a second
     /// factor on a proof-derived leaf, never a way to synthesize one.
     function test_provenLeaf_cannotBeRelabelledAsBurn() public {
         if (!fixturesReady) { vm.skip(true); return; }

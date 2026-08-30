@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { wc } = require('./cli');
+const { wc, writeJson } = require('./cli');
 
 const TICKET_FILE = 'tickets.json';
 const TICKET_TTL = 3600_000;
@@ -10,15 +10,24 @@ const TERMINAL = {
 };
 
 function readTickets(ch) {
+  let parsed;
   try {
-    return JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(wc(ch, TICKET_FILE), 'utf8'));
   } catch (e) {
-    return [];
+    if (e && e.code === 'ENOENT') return [];
+    // A malformed or unreadable journal may contain an active burn/settlement exclusion lock.
+    // Treating it as empty authorizes conflicting work, so startup/request handling must fail shut.
+    throw new Error(`cannot read durable ticket journal for channel ${ch}: ${e.message}`, { cause: e });
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`durable ticket journal for channel ${ch} is not a JSON array`);
+  }
+  return parsed;
 }
 
 function writeTickets(ch, tickets) {
-  fs.writeFileSync(wc(ch, TICKET_FILE), JSON.stringify(tickets, null, 2));
+  if (!Array.isArray(tickets)) throw new TypeError('tickets must be an array');
+  writeJson(wc(ch, TICKET_FILE), tickets);
 }
 
 function findActiveTicket(ch, type) {

@@ -45,7 +45,7 @@ async function handleDepositImport(event, ctx) {
     return alert.raise('warn', ch.id, 'DEPOSIT_BAD_ARGS', built.error, { txHash });
   }
   const actionId = `deposit-import:${txHash}`;
-  if (!store.claimAction(actionId)) return; // already imported
+  if (!store.claimAction(actionId, { retryPending: true })) return; // already imported
   const slot = built.args[1];
   const tokenIndex = dep.tokenIndex != null ? String(dep.tokenIndex) : '(from log)';
   try {
@@ -58,6 +58,9 @@ async function handleDepositImport(event, ctx) {
     store.releaseAction(actionId); // allow a later retry (review M6); not necessarily an attack
     // (e.g. nullifier reuse is a legit refusal); alert as a fault so an operator can inspect.
     await alert.raise('fault', ch.id, 'DEPOSIT_IMPORT_FAILED', String(e.stderr || e.message || e), { txHash: event.txHash });
+    // Do not let the watcher advance past a deposit that was not imported. A deterministic replay
+    // refusal remains visible/retryable until the CLI journal is reconciled by the operator.
+    throw e;
   }
 }
 

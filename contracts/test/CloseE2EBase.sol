@@ -169,7 +169,9 @@ abstract contract CloseE2EBase is Test {
             bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
             bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
             address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-            rollup_.registerChannel{value: 0.003 ether}(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
+            // The canonical CREATE2 factory is the immutable rollup deployer in this local path.
+            vm.prank(FACTORY);
+            rollup_.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
         }
 
         manager_ = ChannelSettlementManager(

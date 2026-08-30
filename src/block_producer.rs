@@ -94,7 +94,7 @@ impl ProductionChannelRegistration {
             bp_member_slot: snapshot.record.bp_member_slot as u32,
             member_count: snapshot.record.member_count as u32,
             // Option B: delegates are authenticated by the co-signed H1 tree and never enter the
-            // fixed-16 L1 registration record.
+            // fixed-8 L1 registration record.
             delegate_count: 0,
             members: entries,
         };

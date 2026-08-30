@@ -23,12 +23,12 @@ command -v jq >/dev/null || fail "jq is required to parse \`forge test --json\`"
 cd "$(git rev-parse --show-toplevel)/contracts"
 
 # ── Floors ──────────────────────────────────────────────────────────────────────────────────────
-# Measured at audit28-08-2026 M-3/M-11 remediation: 335 tests across 23 suites, 0 skipped
-# (was 309/21 at 69a8599). The floors are deliberately the measured values, not round numbers:
+# Measured on the frozen audit30-08-2026 integration tree: 473 tests across 37 suites, 0 skipped
+# (was 335/23 at audit28-08-2026). The floors are deliberately the measured values, not round numbers:
 # DELETING a test is as much a regression as failing one, and this repo has a history of coverage
 # silently evaporating. Raise them when tests are added.
-MIN_TOTAL_TESTS=335
-MIN_SUITES=23
+MIN_TOTAL_TESTS=473
+MIN_SUITES=37
 
 # Suites that exist specifically to guard a defect that shipped. Each is named with the class it
 # covers, and each MUST report at least this many passing tests. A rename, a deletion, or a
@@ -56,6 +56,12 @@ MIN_SUITES=23
 #                       `ChannelSettlementVerifier._verifyMsuMle` substitutes wholesale and never
 #                       checks on chain. Until this line existed the whole file could be deleted
 #                       while CI stayed green, and the rail-agreement assertions ran nowhere.
+#   AuthorizedBurnFenwick
+#                     — proof-bound newest-snapshot selection for authorized burns. Guards against
+#                       selecting an older balance root after the signed burn snapshot exists.
+#   FixtureParsingGuards
+#                     — deployment input schema boundaries: gate-count/hole rejection, checked
+#                       integer narrowing and canonical Goldilocks elements.
 #
 # `suite-key<TAB>minimum-tests`. A plain list rather than an associative array on purpose: macOS
 # ships bash 3.2, and a CI guard nobody can run locally before pushing is a guard people route
@@ -63,12 +69,14 @@ MIN_SUITES=23
 REQUIRED_SUITES="\
 test/DeployGuards.t.sol:DeployGuardsTest	27
 test/MemberSetUpdateE2E.t.sol:MemberSetUpdateE2ETest	8
-test/ClaimMleVerify.t.sol:ClaimMleVerifyTest	4
+test/ClaimMleVerify.t.sol:ClaimMleVerifyTest	8
 test/ExponentiationGate.t.sol:ExponentiationGateTest	13
 test/ExponentiationGateAdversarial.t.sol:ZZAdversarialExpProbe	10
 test/CloseLifecycleE2E.t.sol:CloseLifecycleE2ETest	2
 test/MleE2E.t.sol:MleE2ETest	6
-test/MleFinalizeE2E.t.sol:MleFinalizeE2ETest	2"
+test/MleFinalizeE2E.t.sol:MleFinalizeE2ETest	2
+test/AuthorizedBurnFenwick.t.sol:AuthorizedBurnSnapshotTest	7
+test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17"
 
 out="$(mktemp -t forge-test-json)"
 trap 'rm -f "$out"' EXIT

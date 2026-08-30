@@ -33,8 +33,7 @@ contract MockRollupRegistry is IChannelRegistry {
         for (uint256 i = 0; i < activeHashes.length; i++) {
             padded[i] = activeHashes[i];
         }
-        channelMemberSetCommitment[channelId] =
-            verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
+        channelMemberSetCommitment[channelId] = verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
         channelBpMemberSlot[channelId] = bpMemberSlot;
         channelBpPkG[channelId] = activeHashes[bpMemberSlot];
     }
@@ -50,14 +49,16 @@ contract MockRollupRegistry is IChannelRegistry {
         uint256 amount = pendingWithdrawals[msg.sender];
         require(amount > 0, "nothing to withdraw");
         pendingWithdrawals[msg.sender] = 0;
-        (bool ok, ) = msg.sender.call{value: amount}("");
+        (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "withdraw failed");
     }
 
     mapping(bytes32 => bool) public partialWithdrawalAuthorized;
+    mapping(bytes32 => uint256) public partialWithdrawalAuthorizationCalls;
 
     function authorizePartialWithdrawal(bytes32 authDigest) external override {
         partialWithdrawalAuthorized[authDigest] = true;
+        partialWithdrawalAuthorizationCalls[authDigest] += 1;
     }
 
     // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
@@ -99,6 +100,7 @@ abstract contract CloseSettlementBase is Test {
     address internal mallory = makeAddr("mallory");
 
     bytes4 internal constant CHANNEL_ID = hex"00000009";
+    uint32 internal constant PW_BASE_NONCE = 9;
     uint8 internal constant BP_MEMBER_SLOT = 0;
     bytes32 internal constant USER_A = keccak256("member_a_sphincs_pubkey_hash");
     bytes32 internal constant USER_B = keccak256("member_b_sphincs_pubkey_hash");
@@ -131,14 +133,11 @@ abstract contract CloseSettlementBase is Test {
 
     // ── deployment helpers ──
 
-    function _deployManager(
-        MockRollupRegistry reg,
-        address rA,
-        address rB,
-        address rC
-    ) internal returns (ChannelSettlementManager m) {
-        ChannelSettlementManager.MemberBinding[] memory bindings =
-            new ChannelSettlementManager.MemberBinding[](3);
+    function _deployManager(MockRollupRegistry reg, address rA, address rB, address rC)
+        internal
+        returns (ChannelSettlementManager m)
+    {
+        ChannelSettlementManager.MemberBinding[] memory bindings = new ChannelSettlementManager.MemberBinding[](3);
         bindings[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: rA});
         bindings[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: rB});
         bindings[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: rC});
@@ -168,9 +167,7 @@ abstract contract CloseSettlementBase is Test {
             uint256[] memory kIs,
             uint256[] memory subgroupGenPowers
         ) = CloseTestLib.dummyVkArgs();
-        v.initializeCloseVk(
-            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
-        );
+        v.initializeCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
     }
 
     function _initWithdrawalClaimVk(ChannelSettlementVerifier v) internal {
@@ -217,12 +214,11 @@ abstract contract CloseSettlementBase is Test {
 
     // ── intent + proof builders ──
 
-    function _intent(
-        uint64 closeNonce,
-        uint64 finalEpoch,
-        uint64 finalSmallBlockNumber,
-        uint64 closeFreezeNonce
-    ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
+    function _intent(uint64 closeNonce, uint64 finalEpoch, uint64 finalSmallBlockNumber, uint64 closeFreezeNonce)
+        internal
+        pure
+        returns (ChannelSettlementManager.CloseIntent memory intent)
+    {
         intent = _intentWithFund(closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce, DEFAULT_FUND_AMOUNT);
     }
 
@@ -246,8 +242,13 @@ abstract contract CloseSettlementBase is Test {
         uint256 channelFundAmount
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = _intentWithTokens(
-            closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce,
-            _singleAmounts(channelFundAmount), _singleRegistry(), 1
+            closeNonce,
+            finalEpoch,
+            finalSmallBlockNumber,
+            closeFreezeNonce,
+            _singleAmounts(channelFundAmount),
+            _singleRegistry(),
+            1
         );
     }
 
@@ -282,7 +283,9 @@ abstract contract CloseSettlementBase is Test {
     }
 
     function _closeProof(ChannelSettlementManager.CloseIntent memory intent)
-        internal view returns (MleVerifier.MleProof memory)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
     {
         return this._closeProofCd(
             intent,
@@ -296,26 +299,24 @@ abstract contract CloseSettlementBase is Test {
     /// the manager's registered count. Used by the delegate-count range tests — the registered count
     /// is only a FLOOR now, so a proof may legitimately carry a larger one (a delegate joined after
     /// the manager was deployed), and must be REJECTED with a smaller one.
-    function _closeProofWithDelegateCount(
-        ChannelSettlementManager.CloseIntent memory intent,
-        uint32 delegateCount
-    ) internal view returns (MleVerifier.MleProof memory) {
-        return this._closeProofCd(
-            intent,
-            manager.registeredMemberSetCommitment(),
-            manager.activeMemberCount(),
-            delegateCount
-        );
+    function _closeProofWithDelegateCount(ChannelSettlementManager.CloseIntent memory intent, uint32 delegateCount)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
+    {
+        return
+            this._closeProofCd(
+                intent, manager.registeredMemberSetCommitment(), manager.activeMemberCount(), delegateCount
+            );
     }
 
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
-        internal view returns (MleVerifier.MleProof memory)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
     {
         return this._closeProofCd(
-            intent,
-            m.registeredMemberSetCommitment(),
-            m.activeMemberCount(),
-            uint32(m.activeDelegateCount())
+            intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), uint32(m.activeDelegateCount())
         );
     }
 
@@ -327,30 +328,33 @@ abstract contract CloseSettlementBase is Test {
         uint8 memberCount,
         uint32 delegateCount
     ) external view returns (MleVerifier.MleProof memory) {
-        uint256[] memory limbs = verifier.expectedCloseLimbs(CloseProofFields({
-            channelId: CHANNEL_ID,
-            closeNonce: intent.closeNonce,
-            finalEpoch: intent.finalEpoch,
-            finalSmallBlockNumber: intent.finalSmallBlockNumber,
-            closeFreezeNonce: intent.closeFreezeNonce,
-            finalChannelStateDigest: intent.finalChannelStateDigest,
-            finalBalanceStateH1: intent.finalBalanceStateH1,
-            channelFundAmounts: intent.channelFundAmounts,
-            tokenRegistry: intent.tokenRegistry,
-            tokenCount: intent.tokenCount,
-            channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
-            burnTxHash: intent.burnTxHash,
-            closeWithdrawalDigest: intent.closeWithdrawalDigest,
-            snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
-            finalStateVersion: intent.finalStateVersion,
-            finalSettledTxChain: intent.finalSettledTxChain,
-            finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
-            memberSetCommitment: memberSetCommitment,
-            memberCount: memberCount,
-            // B-2: `minDelegateCount` is only the FLOOR predicate input; the limb-94 VALUE laid out
-            // in the vector is the explicit second argument below.
-            minDelegateCount: delegateCount
-        }), delegateCount);
+        uint256[] memory limbs = verifier.expectedCloseLimbs(
+            CloseProofFields({
+                channelId: CHANNEL_ID,
+                closeNonce: intent.closeNonce,
+                finalEpoch: intent.finalEpoch,
+                finalSmallBlockNumber: intent.finalSmallBlockNumber,
+                closeFreezeNonce: intent.closeFreezeNonce,
+                finalChannelStateDigest: intent.finalChannelStateDigest,
+                finalBalanceStateH1: intent.finalBalanceStateH1,
+                channelFundAmounts: intent.channelFundAmounts,
+                tokenRegistry: intent.tokenRegistry,
+                tokenCount: intent.tokenCount,
+                channelFundIntmaxStateRoot: intent.channelFundIntmaxStateRoot,
+                burnTxHash: intent.burnTxHash,
+                closeWithdrawalDigest: intent.closeWithdrawalDigest,
+                snapshotMediumBlockNumber: intent.snapshotMediumBlockNumber,
+                finalStateVersion: intent.finalStateVersion,
+                finalSettledTxChain: intent.finalSettledTxChain,
+                finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
+                memberSetCommitment: memberSetCommitment,
+                memberCount: memberCount,
+                // B-2: `minDelegateCount` is only the FLOOR predicate input; the limb-94 VALUE laid out
+                // in the vector is the explicit second argument below.
+                minDelegateCount: delegateCount
+            }),
+            delegateCount
+        );
         return CloseTestLib.proofWithLimbs(limbs);
     }
 
@@ -358,12 +362,11 @@ abstract contract CloseSettlementBase is Test {
 
     /// Build a withdrawal claim with the canonical per-member nullifier (one slot per member),
     /// genesis token (slot 0 / base token 0).
-    function _withdrawalClaim(
-        bytes32 closeIntentDigest,
-        bytes32 memberPkG,
-        address recipient,
-        uint64 amount
-    ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
+    function _withdrawalClaim(bytes32 closeIntentDigest, bytes32 memberPkG, address recipient, uint64 amount)
+        internal
+        pure
+        returns (ChannelSettlementManager.WithdrawalClaim memory claim)
+    {
         claim = _withdrawalClaimToken(closeIntentDigest, memberPkG, recipient, amount, 0, 0);
     }
 
@@ -385,9 +388,7 @@ abstract contract CloseSettlementBase is Test {
             amount: amount,
             tokenSlot: tokenSlot,
             tokenIndex: tokenIndex,
-            withdrawalNullifier: keccak256(
-                abi.encodePacked("withdraw", closeIntentDigest, memberPkG, tokenSlot)
-            )
+            withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, memberPkG, tokenSlot))
         });
     }
 
@@ -402,21 +403,22 @@ abstract contract CloseSettlementBase is Test {
         uint256 salt
     ) internal pure returns (ChannelSettlementManager.WithdrawalClaim memory claim) {
         claim = ChannelSettlementManager.WithdrawalClaim({
-            closeIntentDigest: closeIntentDigest,
-            memberPkG: memberPkG,
-            recipient: recipient,
-            userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount, salt)),
-            amount: amount,
-            tokenSlot: 0,
-            tokenIndex: 0,
-            withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, memberPkG, salt))
-        });
+                closeIntentDigest: closeIntentDigest,
+                memberPkG: memberPkG,
+                recipient: recipient,
+                userAmountDigest: keccak256(abi.encodePacked(memberPkG, amount, salt)),
+                amount: amount,
+                tokenSlot: 0,
+                tokenIndex: 0,
+                withdrawalNullifier: keccak256(abi.encodePacked("withdraw", closeIntentDigest, memberPkG, salt))
+            });
     }
 
-    function _withdrawalClaimProofFor(
-        ChannelSettlementManager m,
-        ChannelSettlementManager.WithdrawalClaim memory claim
-    ) internal view returns (MleVerifier.MleProof memory) {
+    function _withdrawalClaimProofFor(ChannelSettlementManager m, ChannelSettlementManager.WithdrawalClaim memory claim)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
+    {
         uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
             CHANNEL_ID,
             claim.closeIntentDigest,
@@ -433,21 +435,21 @@ abstract contract CloseSettlementBase is Test {
     }
 
     function _withdrawalClaimProof(ChannelSettlementManager.WithdrawalClaim memory claim)
-        internal view returns (MleVerifier.MleProof memory)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
     {
         return _withdrawalClaimProofFor(manager, claim);
     }
 
     // ── post-close-claim builders ──
 
-    function _expectedSharedNativeNullifier(
-        bytes32 closeIntentDigest,
-        bytes32 incomingTxHash,
-        bytes32 receiverPkG
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(bytes4(uint32(0x494d434b)), closeIntentDigest, incomingTxHash, receiverPkG)
-        );
+    function _expectedSharedNativeNullifier(bytes32 closeIntentDigest, bytes32 incomingTxHash, bytes32 receiverPkG)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(bytes4(uint32(0x494d434b)), closeIntentDigest, incomingTxHash, receiverPkG));
     }
 
     /// @dev Genesis-token (ETH, tokenIndex 0) convenience overload — the single-token test
@@ -481,13 +483,12 @@ abstract contract CloseSettlementBase is Test {
         });
     }
 
-    function _postCloseClaimProofFor(
-        ChannelSettlementManager m,
-        ChannelSettlementManager.PostCloseClaim memory claim
-    ) internal view returns (MleVerifier.MleProof memory) {
-        bytes32 snn = _expectedSharedNativeNullifier(
-            claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG
-        );
+    function _postCloseClaimProofFor(ChannelSettlementManager m, ChannelSettlementManager.PostCloseClaim memory claim)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
+    {
+        bytes32 snn = _expectedSharedNativeNullifier(claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG);
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
             CHANNEL_ID,
             claim.closeIntentDigest,
@@ -504,7 +505,9 @@ abstract contract CloseSettlementBase is Test {
     }
 
     function _postCloseClaimProof(ChannelSettlementManager.PostCloseClaim memory claim)
-        internal view returns (MleVerifier.MleProof memory)
+        internal
+        view
+        returns (MleVerifier.MleProof memory)
     {
         return _postCloseClaimProofFor(manager, claim);
     }
@@ -533,8 +536,7 @@ abstract contract CloseSettlementBase is Test {
     /// Drive the default manager to Closed with a custom declared channel-fund amount.
     function _finalizeWithFund(uint256 channelFundAmount) internal returns (bytes32) {
         _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory intent =
-            _intentWithFund(1, 9, 22, 1, channelFundAmount);
+        ChannelSettlementManager.CloseIntent memory intent = _intentWithFund(1, 9, 22, 1, channelFundAmount);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizeClose();

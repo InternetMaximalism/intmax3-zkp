@@ -1052,7 +1052,7 @@ pub fn assemble_genesis_state_backed(
 /// native Falcon-512/Poseidon signature over the IMCH digest, wire-encoded with the signer's
 /// public polynomial `h` so any holder of the registered `pk_g` can verify it).
 ///
-/// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_SIG_CLUSTER = 16`), so u8 is
+/// WIDTH: `slot` is a COSIGNER slot (`< member_count <= MAX_SIG_CLUSTER = 8`), so u8 is
 /// sufficient — delegates never co-sign state (audited 2026-07-18, u16 slot widening).
 pub fn sign_state(keys: &MemberKeys, slot: u8, state: &ChannelState) -> WResult<MemberSignature> {
     let digest = state.signing_digest();
@@ -1141,6 +1141,19 @@ pub fn verify_snapshot(
     // Own BALANCE-SLOT (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
     my_keys: Option<(&MemberKeys, u16)>,
 ) -> WResult<()> {
+    // A snapshot is one channel-scoped object.  Do this before any nested validation so a record
+    // cannot be paired with an otherwise self-consistent, genuinely signed state from another
+    // channel (in particular when two channels reuse the same member set).
+    let channel_id = snapshot.record.channel_id;
+    if snapshot.state.channel_id != channel_id {
+        return bail("snapshot channel_id mismatch: state.channel_id != record.channel_id");
+    }
+    if snapshot.state.channel_fund.channel_id != channel_id {
+        return bail("snapshot channel_id mismatch: channel_fund.channel_id != record.channel_id");
+    }
+    if snapshot.state.balance_state.channel_id != channel_id {
+        return bail("snapshot channel_id mismatch: balance_state.channel_id != record.channel_id");
+    }
     snapshot
         .record
         .validate()
@@ -2301,10 +2314,20 @@ pub fn attach_small_block_signatures(
     }
 
     // Slot order is the order every aggregation path consumes; `verify_all_signatures` has already
-    // proved one signature per active slot with the registered pk_g.
+    // proved one signature per active slot with the registered pk_g. Install on a clone and assert
+    // that the sender-authorized A11 message is invariant under this final-wire mutation. This
+    // would have failed before IMI5 stopped hashing the mutable signature/proof carriers.
+    let a11_before = inter_channel_tx.signing_digest();
     let mut signatures = a_signed.member_signatures.clone();
     signatures.sort_by_key(|s| s.member_slot);
-    inter_channel_tx.signed_small_block.signatures = signatures;
+    let mut final_tx = inter_channel_tx.clone();
+    final_tx.signed_small_block.signatures = signatures;
+    if final_tx.signing_digest() != a11_before {
+        return bail(
+            "attaching N-of-N small-block signatures changed the A11 sender-authorized digest",
+        );
+    }
+    *inter_channel_tx = final_tx;
     Ok(())
 }
 
@@ -2314,6 +2337,7 @@ pub fn attach_small_block_signatures(
 pub fn build_inter_channel_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
+    prev_user_leaf_index: u32,
     sender_slot: u16,
     destination_channel_id: ChannelId,
     destination_recipient_slot: u16,
@@ -2331,6 +2355,7 @@ pub fn build_inter_channel_send(
     build_inter_channel_send_token(
         keys,
         snapshot,
+        prev_user_leaf_index,
         sender_slot,
         destination_channel_id,
         destination_recipient_slot,
@@ -2363,10 +2388,15 @@ pub fn build_inter_channel_send(
 /// E-2 (whose IMU2 PVs bind `token_index`), the 1-tx `TxV2Tree` (root + inclusion proof
 /// computed INTERNALLY), self-signs the building member's slot if it is a co-signing member, and
 /// CALLS `InterChannelSendUpdateWitness::verify` to self-check before returning.
+/// `prev_user_leaf_index` must be read from the authenticated pre-block `ChannelLeaf`: the
+/// validity circuit requires `TxV2.nonce == prev_user_leaf.index`. It cannot be reconstructed from
+/// `small_block_number`, because incoming-only channel transitions advance that independent
+/// counter without consuming a base send slot.
 #[allow(clippy::too_many_arguments)]
 pub fn build_inter_channel_send_token(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
+    prev_user_leaf_index: u32,
     sender_slot: u16,
     destination_channel_id: ChannelId,
     destination_recipient_slot: u16,
@@ -2381,11 +2411,10 @@ pub fn build_inter_channel_send_token(
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
-    // Compatibility wrapper for fixture callers. Production wallets must use
-    // `build_inter_channel_send_token_at_base_nonce` with the persisted base-account cursor;
-    // channel small-block numbers are not a base nonce source after an incoming transition.
-    let base_nonce = u32::try_from(snapshot.state.small_block_number + 1)
-        .map_err(|_| WalletError("small_block_number exceeds the TxV2 nonce width".into()))?;
+    // Compatibility wrapper for callers that hold the authenticated public ChannelLeaf. The
+    // production wallet instead reads the equal cursor from its persisted base IVC head and calls
+    // `build_inter_channel_send_token_at_base_nonce` directly.
+    let base_nonce = prev_user_leaf_index;
     build_inter_channel_send_token_at_base_nonce(
         keys,
         snapshot,
@@ -2499,12 +2528,14 @@ pub fn build_inter_channel_send_token_at_base_nonce(
     // Computed INTERNALLY (root = H2; inclusion proof) so the browser need not.
     let mut transfer_tree = TransferTree::init();
     // SECURITY: every real inter-channel settle carries the exact tag both channel accounts fold.
-    // Normal sends carry `tx_leaf`; burns carry the amount-committing IMBD descriptor. A zero aux
-    // value would make the base send/receive circuits leave `settled_tx_chain` unchanged while the
-    // N-of-N channel head advances it, making the live IVC irreconcilable.
+    // Normal sends carry `tx_leaf`; burns carry the channel- and nonce-bound IMD2 descriptor. A
+    // zero aux value would make the base send/receive circuits leave `settled_tx_chain` unchanged
+    // while the N-of-N channel head advances it, making the live IVC irreconcilable.
     let burn_aux =
         if destination_channel_id.channel_id() == crate::constants::BURN_CHANNEL_ID as u32 {
             burn_descriptor(
+                record.channel_id,
+                base_nonce,
                 tx_leaf,
                 destination_recipient_pk_g,
                 token_index,
@@ -2778,6 +2809,7 @@ pub fn build_inter_channel_send_token_at_base_nonce(
 pub fn build_burn_send(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
+    prev_user_leaf_index: u32,
     sender_slot: u16,
     withdrawal_l1_address: crate::ethereum_types::address::Address,
     amount: u64,
@@ -2791,6 +2823,7 @@ pub fn build_burn_send(
     build_burn_send_token(
         keys,
         snapshot,
+        prev_user_leaf_index,
         sender_slot,
         withdrawal_l1_address,
         genesis_token_index,
@@ -2807,11 +2840,12 @@ pub fn build_burn_send(
 /// debits the sender's balance + the channel fund at the LOCAL slot A's registry resolves for
 /// `token_index`, and the base `Transfer` (→ the burn `Withdrawal`) carries that SAME base
 /// index, so the L1 leg pays out via `withdrawERC20`/`withdrawNative` in the burned asset (the
-/// IMPW authDigest already binds `tokenIndex`).
+/// IPW2 authDigest already binds `tokenIndex`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_burn_send_token(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
+    prev_user_leaf_index: u32,
     sender_slot: u16,
     withdrawal_l1_address: crate::ethereum_types::address::Address,
     token_index: u32,
@@ -2822,11 +2856,9 @@ pub fn build_burn_send_token(
     level: RegevSecurityLevel,
     rng: &mut impl Rng,
 ) -> WResult<BuiltInterChannelSend> {
-    // Compatibility wrapper for fixtures that still model one channel transition per base send.
-    // Production callers must pass the persisted base cursor explicitly; incoming channel
-    // transitions advance `small_block_number` without consuming a base nonce.
-    let base_nonce = u32::try_from(snapshot.state.small_block_number + 1)
-        .map_err(|_| WalletError("small_block_number exceeds the TxV2 nonce width".into()))?;
+    // Compatibility wrapper for callers that hold the authenticated public ChannelLeaf. Never
+    // derive this cursor from the independent channel small-block counter.
+    let base_nonce = prev_user_leaf_index;
     build_burn_send_token_at_base_nonce(
         keys,
         snapshot,
@@ -3118,7 +3150,7 @@ pub fn verify_aggregate_manifest(
 use crate::common::channel::{hash_words, split_u64};
 use crate::constants::MAX_SIG_CLUSTER;
 
-/// The REGISTERED co-signer root (16-slot `MemberTree`, the tree the validity circuit freezes in
+/// The REGISTERED co-signer root (8-slot `MemberTree`, the tree the validity circuit freezes in
 /// `ChannelLeaf.member_pubkeys_root`): slots `0..member_count` from the authenticated member list.
 /// Distinct from the wallet-tree `record.member_pubkeys_root` (1024 slots, cosigners + delegates).
 pub fn registered_cosigner_root(
@@ -3215,7 +3247,7 @@ pub struct MemberSetUpdate {
     pub channel_id: ChannelId,
     /// Strictly `trusted.set_version + 1`.
     pub set_version: u64,
-    /// REGISTERED co-signer root before the update (16-slot tree).
+    /// REGISTERED co-signer root before the update (8-slot tree).
     pub prev_member_root: Bytes32,
     /// After.
     pub new_member_root: Bytes32,
@@ -3748,6 +3780,8 @@ pub fn canonical_inter_channel_base_transfer(
     }
     let aux_data = if is_burn {
         burn_descriptor(
+            inter_channel_tx.source_channel_id,
+            inter_channel_tx.base_nonce,
             tx_leaf,
             receiver_pk_g,
             inter_channel_tx.token_index,
@@ -3916,11 +3950,11 @@ pub fn verify_burn_nonce_available(
 ///   same function that built the one inside the co-signed tx tree;
 /// * `from` — the SOURCE channel id, which in-circuit is `balance_pis.channel_id` (`:513`);
 /// * `transfer_index` — [`INTER_CHANNEL_TRANSFER_INDEX`], asserted zero in `send_tx_circuit`;
-/// * `nonce` — the burn tx's `TxV2.nonce` (`= prev.small_block_number + 1`), which the withdrawal
-///   circuit forces equal to `tx.nonce` (`:508`) and which the sent-tx merkle proof pins to the
-///   deduction. This is what F-WD-2 bought: the nullifier binds the SENDER NONCE, not the
-///   settlement block, so it is computable before the burn is ever settled — no circuit change, no
-///   PI change, no VK rotation is needed to know it at burn time.
+/// * `nonce` — the burn tx's `TxV2.nonce` (`= prev_user_leaf.index`), which the withdrawal circuit
+///   forces equal to `tx.nonce` (`:508`) and which the sent-tx merkle proof pins to the deduction.
+///   This is what F-WD-2 bought: the nullifier binds the SENDER NONCE, not the settlement block, so
+///   it is computable before the burn is ever settled — no circuit change, no PI change, no VK
+///   rotation is needed to know it at burn time.
 ///
 /// Fails closed if the recipient is not an `ADDRESS_TAG` L1 recipient — i.e. if the transfer is
 /// not withdrawable at all, in which case there is no leaf to authorize.
@@ -3957,13 +3991,16 @@ pub fn burn_withdrawal_leaf(
     })
 }
 
-/// IMPW domain prefix for partial-withdrawal authDigest (matches Solidity `bytes4(0x494d5057)`).
-pub const PARTIAL_WITHDRAWAL_DOMAIN: u32 = 0x494d5057;
+/// IPW2 domain prefix for partial-withdrawal authDigest (matches Solidity `bytes4(0x49505732)`).
+pub const PARTIAL_WITHDRAWAL_DOMAIN: u32 = 0x49505732;
 
 /// Compute the `authDigest` that the on-chain `withdrawNative` gate checks for burn withdrawals
 /// (`auxData != 0`). Must be byte-identical to the Solidity encoding:
-/// `keccak256(abi.encodePacked(bytes4(0x494d5057), nullifier, recipient, tokenIndex, amount,
-/// auxData))`.
+/// `keccak256(abi.encodePacked(bytes4(0x49505732), recipient, tokenIndex, amount, auxData))`.
+///
+/// The proof-only withdrawal nullifier is deliberately excluded: the signed IMD2 `aux_data`
+/// carries the stable source-channel/base-nonce burn identity, while the withdrawal proof remains
+/// responsible for proving its own nullifier.
 pub fn partial_withdrawal_auth_digest(
     withdrawal: &crate::common::withdrawal::Withdrawal,
 ) -> Bytes32 {
@@ -3972,7 +4009,6 @@ pub fn partial_withdrawal_auth_digest(
     let words: Vec<u32> = [PARTIAL_WITHDRAWAL_DOMAIN]
         .iter()
         .copied()
-        .chain(withdrawal.nullifier.to_u32_vec())
         .chain(withdrawal.recipient.to_u32_vec())
         .chain([withdrawal.token_index])
         .chain(withdrawal.amount.to_u32_vec())
@@ -6189,15 +6225,15 @@ pub struct ChannelWithdrawalParams {
     /// byte-identical output (no extra RNG draws).
     pub erc20_lane: Option<Erc20LaneParams>,
     /// Partial-withdrawal (burn) mode. `Some(desc)` stamps the primary native withdrawal transfer's
-    /// `aux_data` with the burn descriptor `desc` (a nonzero IMBD-shaped value), so the proved,
+    /// `aux_data` with the burn descriptor `desc` (a nonzero IMD2-shaped value), so the proved,
     /// on-chain-payable leaf is a BURN leaf (`aux_data != 0`).  This is the artifact the
     /// partial-withdrawal PAYOUT path needs and the repo previously lacked: every committed payout
     /// fixture was a normal (`aux_data == 0`) withdrawal, so `PartialWithdrawalPayout.t.sol` could
-    /// only assert the burn branch fails on proof binding, never REACH the IMPW authorization gate
+    /// only assert the burn branch fails on proof binding, never REACH the IPW2 authorization gate
     /// with a real proof (doc/tasks/partial-withdrawal-payout-design.md P3 HEAVY note / P4-3).
     ///
     /// SCOPE: this exercises the payout side only — `withdrawNative`'s `aux != 0 ⇒ requires a
-    /// finalized IMPW authorization` conjunction over a REAL proof-committed leaf.  The IMBD
+    /// finalized IPW2 authorization` conjunction over a REAL proof-committed leaf.  The IMD2
     /// descriptor's binding to a co-signed inter-channel burn (`amount == X`, recipient, token) is
     /// enforced at SUBMIT time by the Manager (Phase 0/2, covered by `PartialWithdrawal.t.sol`);
     /// `withdrawNative` never re-derives it, so any fixed nonzero `aux_data` faithfully drives the
@@ -6600,7 +6636,7 @@ pub fn build_channel_withdrawal(
         None => Address::rand(&mut rng),
     };
     // Partial-withdrawal (burn) mode stamps the leaf's `aux_data` with a nonzero burn descriptor so
-    // the proved leaf enters `withdrawNative`'s burn branch (needs a finalized IMPW authorization);
+    // the proved leaf enters `withdrawNative`'s burn branch (needs a finalized IPW2 authorization);
     // a normal withdrawal keeps `aux_data == 0`. See `ChannelWithdrawalParams::burn_aux_data`.
     let withdrawal_transfer = Transfer {
         recipient: calculate_recipient_from_address(withdrawal_address),
@@ -7374,6 +7410,60 @@ mod delegate_send_tests {
         add_signature(&mut genesis, g1);
 
         (record, keys, members, genesis, witnesses)
+    }
+
+    /// A signed state and a registration record are only one snapshot when every nested channel id
+    /// agrees.  Re-sign each state mutation so these negatives exercise the explicit snapshot seam,
+    /// rather than passing merely because `state.digest` or its Falcon signatures became stale.
+    #[test]
+    fn verify_snapshot_rejects_each_channel_id_mismatch() {
+        let mut rng = StdRng::seed_from_u64(0x5A4F_1D);
+        let (record, keys, members, state, _w) =
+            setup_delegate_channel(&mut rng, 11, [5, 6, 0]);
+        let snapshot = ChannelSnapshot {
+            record,
+            state,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        verify_snapshot(&snapshot, None).expect("control snapshot must verify");
+
+        let foreign = ChannelId::new(12).unwrap();
+        let assert_channel_mismatch = |bad: &ChannelSnapshot, mutated_field: &str| {
+            let err = verify_snapshot(bad, None)
+                .expect_err("a snapshot with divergent channel ids must be rejected");
+            assert!(
+                err.to_string().contains("snapshot channel_id mismatch"),
+                "mutating {mutated_field} reached the wrong rejection: {err}"
+            );
+        };
+        let resign = |bad: &mut ChannelSnapshot| {
+            bad.state.member_signatures.clear();
+            bad.state.digest = bad.state.signing_digest();
+            for slot in 0..bad.record.member_count {
+                let sig = sign_state(&keys[slot as usize], slot, &bad.state).unwrap();
+                add_signature(&mut bad.state, sig);
+            }
+        };
+
+        let mut bad = snapshot.clone();
+        bad.record.channel_id = foreign;
+        assert_channel_mismatch(&bad, "record.channel_id");
+
+        let mut bad = snapshot.clone();
+        bad.state.channel_id = foreign;
+        resign(&mut bad);
+        assert_channel_mismatch(&bad, "state.channel_id");
+
+        let mut bad = snapshot.clone();
+        bad.state.channel_fund.channel_id = foreign;
+        resign(&mut bad);
+        assert_channel_mismatch(&bad, "channel_fund.channel_id");
+
+        let mut bad = snapshot.clone();
+        bad.state.balance_state.channel_id = foreign;
+        resign(&mut bad);
+        assert_channel_mismatch(&bad, "balance_state.channel_id");
     }
 
     /// REPRO (browser deposit-display bug): two consecutive L1 deposit imports must reflect the
@@ -9855,6 +9945,96 @@ mod delegate_send_tests {
         state
     }
 
+    /// The compatibility builders take the authenticated pre-block ChannelLeaf cursor explicitly.
+    /// An incoming L1 deposit advances the signed channel small-block counter but does not append a
+    /// base send leaf, so deriving the TxV2 nonce from `small_block_number + 1` makes an otherwise
+    /// valid outgoing send permanently unprovable by `UpdateUserTree`.
+    #[test]
+    fn compatibility_builders_keep_prev_leaf_nonce_after_incoming_transition() {
+        let mut rng = StdRng::seed_from_u64(0x1C0A_1A6);
+        let (record, keys, members, genesis, w_t0, _w_t1) =
+            setup_two_token_channel(&mut rng, 30, [50, 30, 20], [0, 0]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members: members.clone(),
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+
+        // Credit a different participant so sender slot 0's original amount witness remains the
+        // exact opening of its unchanged ciphertext.
+        let incoming_amount = 3u64;
+        let deposit = Deposit {
+            deposit_index: Default::default(),
+            block_number: Default::default(),
+            depositor: Address::default(),
+            recipient: Bytes32::default(),
+            token_index: 0,
+            amount: U256::from(incoming_amount),
+            aux_data: Bytes32::default(),
+        };
+        let (incoming_delta, _) =
+            encrypt_amount(&mut rng, &keys[1].regev_pk, incoming_amount).unwrap();
+        let incoming =
+            build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &incoming_delta, LEVEL)
+                .expect("incoming deposit transition builds");
+        let incoming_snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: resign_two_members(incoming.bundle_apply_state, &keys),
+            members,
+            settled_tx_accumulator: incoming.settled_tx_accumulator,
+        };
+
+        let prev_user_leaf_index = 0u32;
+        assert_eq!(incoming_snapshot.state.small_block_number, 1);
+        assert_eq!(
+            u32::try_from(incoming_snapshot.state.small_block_number + 1).unwrap(),
+            2,
+            "the removed derivation has diverged from the still-zero base send cursor"
+        );
+
+        let destination = MemberKeys::generate(&mut rng);
+        let send = build_inter_channel_send_token(
+            &keys[0],
+            &incoming_snapshot,
+            prev_user_leaf_index,
+            0,
+            ChannelId::new(31).unwrap(),
+            0,
+            destination.regev_pk.clone(),
+            destination.pk_g(),
+            Salt::default(),
+            0,
+            5,
+            50,
+            &w_t0[0],
+            Bytes32::from_u32_slice(&[1, 1, 2, 3, 5, 8, 13, 21]).unwrap(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("post-incoming compatibility send builds");
+        assert_eq!(send.transfer_descriptor.inter_channel_tx.base_nonce, 0);
+        assert_eq!(send.transfer_descriptor.tx_v2.nonce, 0);
+
+        let burn = build_burn_send_token(
+            &keys[0],
+            &incoming_snapshot,
+            prev_user_leaf_index,
+            0,
+            Address::from_u32_slice(&[0xA11CE; 5]).unwrap(),
+            0,
+            5,
+            50,
+            &w_t0[0],
+            Bytes32::from_u32_slice(&[21, 13, 8, 5, 3, 2, 1, 1]).unwrap(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("post-incoming compatibility burn builds");
+        assert_eq!(burn.transfer_descriptor.inter_channel_tx.base_nonce, 0);
+        assert_eq!(burn.transfer_descriptor.tx_v2.nonce, 0);
+    }
+
     /// §N-1 TokenRegister via the cosign gate, end-to-end: member 0 proposes through
     /// `build_token_register` (canonical builder + self-check + own REAL signature), member 1
     /// re-runs the gate and co-signs, and the fully-signed head passes the authoritative
@@ -10057,6 +10237,7 @@ mod delegate_send_tests {
             build_inter_channel_send_token(
                 &keys[0],
                 &snapshot,
+                0, // registered ChannelLeaf has not consumed a base send slot
                 0,
                 dest_channel,
                 0,
@@ -10260,6 +10441,7 @@ mod delegate_send_tests {
         let built = build_inter_channel_send_token(
             &keys[0],
             &snapshot,
+            0, // registered ChannelLeaf has not consumed a base send slot
             0,
             dest_channel,
             0,
@@ -10279,6 +10461,7 @@ mod delegate_send_tests {
         let a_send = built.debit_payload.proposed_next_state.clone();
         let mut tx = built.debit_payload.inter_channel_tx.clone();
         let n = record.member_count as usize;
+        let a11_before_attach = tx.signing_digest();
 
         // The builder emits an UNSIGNED block: correctly-slotted NON-signatures.
         let placeholder = crate::common::channel::structural_cosign_placeholder(1);
@@ -10336,6 +10519,13 @@ mod delegate_send_tests {
         // Positive: the real N-of-N installs.
         attach_small_block_signatures(&record, &a_signed, &mut tx)
             .expect("a fully co-signed state signs its own block");
+        assert_eq!(
+            tx.signing_digest(),
+            a11_before_attach,
+            "final-wire N-of-N blobs must not mutate the sender-authorized A11 message"
+        );
+        verify_inter_channel_tx_sender_hash_sig(&tx, LEVEL, &snapshot.members)
+            .expect("the sender's A11 proof must verify on the final wire object");
         assert_eq!(
             tx.signed_small_block.signatures, a_signed.member_signatures,
             "the block must carry the members' OWN signatures, in slot order"
@@ -10418,6 +10608,39 @@ mod partial_withdrawal_tests {
         };
         let d1 = partial_withdrawal_auth_digest(&w);
         w.recipient = Address::from_u32_slice(&[9, 9, 9, 9, 9]).unwrap();
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn auth_digest_ignores_proof_only_nullifier() {
+        let mut w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(100u64),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        w.nullifier = Bytes32::from_u32_slice(&[0xCC; 8]).unwrap();
+        let d2 = partial_withdrawal_auth_digest(&w);
+        assert_eq!(
+            d1, d2,
+            "IPW2 identity is the IMD2-backed payout tuple, not the proof-only nullifier"
+        );
+    }
+
+    #[test]
+    fn auth_digest_changes_on_token_index() {
+        let mut w = Withdrawal {
+            recipient: Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap(),
+            token_index: 0,
+            amount: U256::from(100u64),
+            nullifier: Bytes32::from_u32_slice(&[0xAA; 8]).unwrap(),
+            aux_data: Bytes32::from_u32_slice(&[0xBB; 8]).unwrap(),
+        };
+        let d1 = partial_withdrawal_auth_digest(&w);
+        w.token_index = 1;
         let d2 = partial_withdrawal_auth_digest(&w);
         assert_ne!(d1, d2);
     }

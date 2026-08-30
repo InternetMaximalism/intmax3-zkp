@@ -66,9 +66,10 @@ test('store: cursor advances monotonically', () => {
 });
 
 // ---- delegate verifyCosigned gate ----
-const PREV = { digest: '0xhead', epoch: 1, stateVersion: 4 };
+const HEAD = '0x' + '11'.repeat(32);
+const PREV = { digest: HEAD, epoch: 1, stateVersion: 4 };
 function goodResp() {
-  return { state: { member_signatures: ['s0', 's1', 's2'], prev_digest: '0xhead', balance_state: { state_version: 5 } } };
+  return { state: { memberSignatures: ['s0', 's1', 's2'], prevDigest: HEAD, balanceState: { stateVersion: 5 } } };
 }
 
 test('verify: accepts a well-formed, head-extending, +1 version response', () => {
@@ -76,18 +77,18 @@ test('verify: accepts a well-formed, head-extending, +1 version response', () =>
 });
 
 test('verify: rejects missing signatures', () => {
-  const r = goodResp(); r.state.member_signatures = [];
+  const r = goodResp(); r.state.memberSignatures = [];
   assert.equal(verifyCosignedStructural({}, r, PREV).ok, false);
 });
 
 test('verify: rejects head that does not extend ours (prev_digest mismatch)', () => {
-  const r = goodResp(); r.state.prev_digest = '0xWRONG';
+  const r = goodResp(); r.state.prevDigest = '0xWRONG';
   const v = verifyCosignedStructural({}, r, PREV);
   assert.equal(v.ok, false); assert.match(v.reason, /extend/);
 });
 
 test('verify: rejects version that does not advance by exactly 1', () => {
-  const r = goodResp(); r.state.balance_state.state_version = 7;
+  const r = goodResp(); r.state.balanceState.stateVersion = 7;
   assert.equal(verifyCosignedStructural({}, r, PREV).ok, false);
 });
 
@@ -97,8 +98,8 @@ test('verify: rejects empty/garbage response (fail-closed)', () => {
 });
 
 test('verify: recipient mismatch is rejected when tx echoed', () => {
-  const sent = { channel_tx: { recipient_pk_g: '0xRECIP' } };
-  const r = goodResp(); r.channel_tx = { recipient_pk_g: '0xOTHER' };
+  const sent = { channelTx: { recipientPkG: '0xRECIP' } };
+  const r = goodResp(); r.channelTx = { recipientPkG: '0xOTHER' };
   assert.equal(verifyCosignedStructural(sent, r, PREV).ok, false);
 });
 

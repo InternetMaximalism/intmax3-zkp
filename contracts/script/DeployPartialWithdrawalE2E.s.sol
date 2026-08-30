@@ -117,7 +117,7 @@ contract DeployPartialWithdrawalE2E is Script {
         //    (`active_delegate_count = 0`, `tests/partial_withdrawal_e2e.rs`), so this is a no-op
         //    for it — it is wired through the shared reader so it CANNOT become live-count
         //    passthrough if that driver ever grows a delegate.
-        rollup.registerChannel{value: 0.003 ether}(
+        rollup.registerChannel(
             r.channelId,
             r.bpSlot,
             RegRecordLib.REGISTRATION_DELEGATE_COUNT,

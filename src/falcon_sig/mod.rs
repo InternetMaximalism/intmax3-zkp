@@ -616,6 +616,8 @@ mod tests {
             0x494d_534c,                       // IMSL (retired)
             0x494d_4248,                       // IMBH
             0x494d_544c,                       // IMTL
+            0x494d_4244,                       // IMBD (retired)
+            0x494d_4432,                       // IMD2
             0x494d_5443,                       // IMTC
             0x494d_5243,                       // IMRC
             0x494d_524b,                       // IMRK
@@ -628,7 +630,8 @@ mod tests {
             0x494d_4c4c,                       // IMLL
             crate::poseidon_sig::DOMAIN_PK_G,  // IMPG
             crate::poseidon_sig::DOMAIN_SIG_G, // IMSG
-            0x494d_5057,                       // IMPW
+            0x494d_5057,                       // IMPW (retired)
+            0x4950_5732,                       // IPW2
             0x4d42_4c46,                       // MBLF
             0x4348_4c46,                       // CHLF
             0x5549_4400,                       // UID\0

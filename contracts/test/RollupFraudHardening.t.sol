@@ -631,7 +631,7 @@ contract RollupFraudHardeningTest is Test {
             regev[i] = keccak256(abi.encodePacked("rg", channelId, i));
             recips[i] = address(uint160(uint256(keccak256(abi.encodePacked("r", channelId, i)))));
         }
-        rollup.registerChannel{value: 0.003 ether}(channelId, 0, 0, pkGs, pkBs, regev, recips);
+        rollup.registerChannel(channelId, 0, 0, pkGs, pkBs, regev, recips);
     }
 
     /// @dev SECURITY (H-5/B-5): `finalize` pins `validityPIs.finalBlockNumber` to the submission's
