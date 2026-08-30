@@ -266,7 +266,7 @@ contract RedTeamFraudBreaksTest is Test {
         // A rollup whose genesis root is R (i.e. the state has not moved).
         IntmaxRollup r = new IntmaxRollup(
             fraudTreasury, _emptyMleVk(), _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(), R, true
+            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(block.chainid), R, true
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -352,7 +352,7 @@ contract RedTeamFraudBreaksTest is Test {
 
         IntmaxRollup r = new IntmaxRollup(
             fraudTreasury, _emptyMleVk(), _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(), R0, true
+            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(block.chainid), R0, true
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);

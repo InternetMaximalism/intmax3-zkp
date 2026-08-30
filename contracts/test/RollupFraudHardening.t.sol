@@ -150,7 +150,7 @@ contract RollupFraudHardeningTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            new MleVerifier(),
+            new MleVerifier(block.chainid),
             bytes32(0),
             true
         );

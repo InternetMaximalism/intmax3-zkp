@@ -375,7 +375,7 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function setUp() public {
-        MleVerifier mleVerifierContract = new MleVerifier();
+        MleVerifier mleVerifierContract = new MleVerifier(block.chainid);
 
         // Non-E2E rollup: mleVk.degreeBits = 0 to skip MLE verification
         // (non-E2E tests exercise the MLE PI binding + KZG/fraud paths with a synthetic dummy
@@ -522,7 +522,7 @@ contract IntmaxRollupTest is Test {
     /// @dev Deploy a FRESH rollup (so `_pendingChannelRegHashChain == bytes32(0)`), call
     ///      `registerChannel`, and return the emitted `newChannelRegHashChain`.
     function _registerChannelDiff(uint256 memberCount) internal returns (bytes32) {
-        MleVerifier mleVerifierContract = new MleVerifier();
+        MleVerifier mleVerifierContract = new MleVerifier(block.chainid);
         IntmaxRollup fresh = new IntmaxRollup(
             fraudTreasury,
             _emptyMleVk(),
@@ -570,7 +570,7 @@ contract IntmaxRollupTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            new MleVerifier(),
+            new MleVerifier(block.chainid),
             bytes32(0),
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
@@ -714,7 +714,7 @@ contract IntmaxRollupTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            new MleVerifier(),
+            new MleVerifier(block.chainid),
             bytes32(0),
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
@@ -1109,9 +1109,9 @@ contract IntmaxRollupTest is Test {
     ///         finalized with a garbage proof.
     function test_constructor_rejectsZeroValidityVk_inProductionMode() public {
         // Hoist the MleVerifier creation OUT of the args: with `vm.expectRevert`, the next external
-        // call/creation must be the one that reverts — an inline `new MleVerifier()` arg would be
+        // call/creation must be the one that reverts — an inline `new MleVerifier(block.chainid)` arg would be
         // consumed by expectRevert instead of the IntmaxRollup creation.
-        MleVerifier v = new MleVerifier();
+        MleVerifier v = new MleVerifier(block.chainid);
         vm.expectRevert(IntmaxRollup.ValidityVkDegreeBitsZero.selector);
         new IntmaxRollup(
             fraudTreasury,
@@ -1138,7 +1138,7 @@ contract IntmaxRollupTest is Test {
             "",
             _emptyMleArrays(),
             _emptyMleArrays(),
-            new MleVerifier(),
+            new MleVerifier(block.chainid),
             bytes32(0),
             true // explicit test opt-in
         );
@@ -1150,7 +1150,7 @@ contract IntmaxRollupTest is Test {
     function test_constructor_rejectsMleDisabledOptIn_onPublicChain() public {
         // Deploy the verifier while still on the local chain so the expected
         // revert is specifically IntmaxRollup's independent bypass guard.
-        MleVerifier v = new MleVerifier();
+        MleVerifier v = new MleVerifier(block.chainid);
         vm.chainId(1);
         vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, uint256(1)));
         new IntmaxRollup(

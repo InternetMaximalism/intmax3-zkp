@@ -49,7 +49,7 @@ contract Deploy is Script {
 
         vm.startBroadcast();
 
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
         IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(mleJson, verifier);
 
         rollup = new IntmaxRollup(

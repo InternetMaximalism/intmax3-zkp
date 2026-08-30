@@ -44,7 +44,7 @@ contract MleFinalizeE2ETest is Test {
     }
 
     function setUp() public {
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(block.chainid);
 
         string memory mleJson = _loadMle();
         DeployData memory dd = _parseDeployData(mleJson);

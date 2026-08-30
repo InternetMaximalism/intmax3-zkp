@@ -51,8 +51,11 @@ the submodule's 79/79 suite (incl. tamper/boundary-reject tests), parent
 `MleE2E` + `MleFinalizeE2E`, and an independent adversarial review.
 
 **Deploy-trust note:** the two libraries are linked at deploy time via Forge's
-auto-deploy/auto-link (`new MleVerifier()` in `script/Deploy.s.sol`). The library
-address is fixed in immutable code, not attacker-controllable. Do NOT hand-specify
+auto-deploy/auto-link (`new MleVerifier(FixtureLib.mleVerifierChainId())` in
+`script/Deploy.s.sol`). `MLE_VERIFIER_CHAIN_ID` defaults to `31337`, must match
+the chain executing the constructor, and is stored as an immutable runtime pin.
+Selecting Sepolia explicitly does not repair the known PCS soundness break and
+is not release-approved. The library address is fixed in immutable code, not attacker-controllable. Do NOT hand-specify
 a `[libraries]` address in `foundry.toml` for a real deploy — always use the
 auto-link path so a malicious delegatecall target cannot be substituted.
 
@@ -195,7 +198,8 @@ verify after the fact:
 
 ```bash
 forge verify-contract <MleVerifierAddr> src/../MleVerifier.sol:MleVerifier \
-  --chain sepolia --etherscan-api-key "$ETHERSCAN_API_KEY"
+  --chain sepolia --etherscan-api-key "$ETHERSCAN_API_KEY" \
+  --constructor-args <abi-encoded-MLE_VERIFIER_CHAIN_ID>
 forge verify-contract $ROLLUP_ADDR src/IntmaxRollup.sol:IntmaxRollup \
   --chain sepolia --etherscan-api-key "$ETHERSCAN_API_KEY" \
   --constructor-args <abi-encoded-args>

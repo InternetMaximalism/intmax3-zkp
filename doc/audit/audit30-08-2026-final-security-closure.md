@@ -27,17 +27,18 @@ known before the corresponding root. Terminal equations consume separately claim
 evaluations. A prover can move those evaluations in the batching kernel and preserve both the PCS
 opening and terminal equations. This affects validity, close, cancel and withdrawal statements.
 
-The safe release response is explicit: the real `MleVerifier` is deployable and executable only on
-chain id `31337`, with a distinct `MleProofEngineUnavailable` error. The error is not
-`InvalidMleProof`, so the fraud path classifies it as unevaluable and cannot slash an honest
-submission. The rollup's zero-degree test bypass and value-moving entry points are also limited to
-`31337`; short-window Managers and development mock verifiers repeat the same runtime check so
-state prepared on a development chain cannot become payable after a chain-id migration. For the
-audited verifier bytecode and official deployment scripts, this prevents unsafe public-chain state
-finalization and value movement, but it deliberately makes the advertised public protocol
-unavailable until the PCS is redesigned. It is a mitigation, not a cryptographic repair. It does
-not retroactively protect a legacy deployment or a rollup deliberately wired to a different
-verifier; redeployment and deployed-bytecode verification are required.
+The real `MleVerifier` now pins a non-zero execution chain in its constructor. Deployment requires
+the configured chain id to equal the current chain, and `verify` plus `fraudVerdictEncoded` repeat
+the immutable check at runtime. Official scripts default the pin to `31337`; selecting another
+chain through `MLE_VERIFIER_CHAIN_ID` is an explicit unsafe opt-in, not a PCS repair or release
+approval. A wrong-chain failure remains distinct from `InvalidMleProof`, so the fraud path treats
+it as unevaluable and cannot slash an honest submission. Independently, the rollup's zero-degree
+test bypass and value-moving entry points remain limited to `31337`; short-window Managers and
+development mock verifiers retain their fixed runtime checks. Thus merely configuring the verifier
+for a public chain does not enable audited Rollup value flow, and development state cannot become
+payable after a chain-id migration. This is operational containment, not a cryptographic repair,
+and it does not retroactively protect a legacy deployment or a rollup deliberately wired to a
+different verifier.
 
 Two independent exit-liveness blockers also remain:
 
@@ -73,19 +74,19 @@ Lean build is not evidence against the Critical PCS finding.
 | Area | Disposition | Evidence / exact limitation |
 |---|---|---|
 | KZG trusted setup | **ACCEPTED ASSUMPTION** | Per owner instruction, the Ethereum ceremony is trusted. No release block is assigned to ceremony scale or participants. |
-| Proof-DA binding/codec | **FIXED locally; public E2E unavailable** | Lossless SimpleCoder reconstruction for one/two blobs; exact blob count/order, proof hash/length, root, block and submission id are domain-bound; standard point-evaluation precompile evidence is journaled before finalize/fraud. There is no public-chain post -> attest -> finalize release evidence while the real MLE engine and full-withdrawal CLI are 31337-only. |
-| Invalid-proof fraud verdict | **FIXED as a classifier; unavailable publicly** | Only canonical decode failure or `InvalidMleProof()` is proof-invalid. OOG, unsupported/config errors and unknown reverts are UNEVALUABLE/STARVED. The underlying verifier is now public-chain disabled because of the PCS Critical. |
-| MLE/WHIR PCS soundness | **CRITICAL mitigated by disable; redesign open** | Constituent evals are not committed before batching. The audited verifier and official deployment paths revert publicly; local 31337 stays available only for development and regression. Legacy or deliberately substituted verifier deployments are not retroactively protected. |
+| Proof-DA binding/codec | **FIXED locally; public E2E unavailable** | Lossless SimpleCoder reconstruction for one/two blobs; exact blob count/order, proof hash/length, root, block and submission id are domain-bound; standard point-evaluation precompile evidence is journaled before finalize/fraud. There is no public-chain post -> attest -> finalize release evidence while Rollup value boundaries and the full-withdrawal CLI remain 31337-only. |
+| Invalid-proof fraud verdict | **FIXED as a classifier; public release unavailable** | Only canonical decode failure or `InvalidMleProof()` is proof-invalid. OOG, unsupported/config errors, wrong-chain use and unknown reverts are UNEVALUABLE/STARVED. Configuring the verifier for a public chain does not make its PCS sound. |
+| MLE/WHIR PCS soundness | **CRITICAL; chain-pinned containment only, redesign open** | Constituent evals are not committed before batching. The verifier has an immutable deploy-time chain pin and official scripts default it to 31337, but an operator can explicitly select another chain. Such selection is unsafe and does not change the NO-GO verdict. |
 | Reorg-aware head/watcher | **FIXED** | Finalized tag required off-devnet; durable cursor includes block hash/parent; logs and head are revalidated before/after processing; replacement/removal/malformed history causes sticky halt. |
 | MSU atomicity | **SAFE BY DISABLE** | Manager entry always reverts, producer/service paths reject, and validity circuit constrains the update target to zero. Cross-layer atomic MSU is not implemented. |
 | Close-intent authorization (M-9) | **FIXED for metadata/cancel replay only** | `closeNonce = freezeNonce + 1`, snapshot block and burn hash are canonical zero; cancel digest binds channel/final-state/freeze nonce; revived version is strictly newer and lifetime replay floor is enforced. The zero sentinels do not authenticate a burn, live withdrawal or Manager funding. |
-| Delegate participant close | **FIXED locally** | Immutable depth-10 participant root/count binds slot, pkG and recipient; a delegate can freeze via membership proof without coordinator signature. The route remains 31337-only while public MLE verification is disabled. |
+| Delegate participant close | **FIXED locally** | Immutable depth-10 participant root/count binds slot, pkG and recipient; a delegate can freeze via membership proof without coordinator signature. The audited Rollup value path remains 31337-only while PCS soundness is unresolved. |
 | Delegate claim/payout completion | **FIXED locally** | Claim is self-proved with the session Regev secret and submitted directly; `EXIT_DONE` requires the exact finalized Manager `WithdrawalClaimed` event, accepted claim, tx hash, recipient, token and amount for every claim. Browser/live public-chain claim E2E was not run and operational delegate/recipient keys are required. |
 | Delegate close-proof availability | **OPEN / NO-GO** | Unilateral freeze exists, but no independently recoverable public balance attestation/local close prover guarantees progression to a submitted close. |
 | Production full withdrawal | **OPEN, fail-closed** | Public CLI release gate allows only 31337 because the builder creates a fresh demo history rather than importing the live finalized/pending chains. |
 | Rollup -> Manager backing | **OPEN / NO-GO** | Close finalization does not mint/credit backing. `pullChannelFunds` only pulls pre-existing rollup credit. Paying from global escrow without a channel-bound proof would introduce a drain. |
 | Post-close claim | **DISABLED** | Unconditionally reverting surface; not advertised as available. |
-| EIP-170 | **PASS with dangerously low margin** | `IntmaxRollup` runtime 24,514 B (62 B margin), `ChannelSettlementVerifier` 23,888 B (688 B), Manager 22,976 B (1,600 B). Only test-only `BlockHashHarness` exceeded the limit, by 82 B. Any production source change requires a repeat size gate. |
+| EIP-170 | **PASS with dangerously low margin** | `IntmaxRollup` runtime 24,514 B (62 B margin), `ChannelSettlementVerifier` 23,888 B (688 B), Manager 22,976 B (1,600 B), and `MleVerifier` 19,387 B (5,189 B). Only test-only `BlockHashHarness` exceeded the limit, by 82 B. Any production source change requires a repeat size gate. |
 
 ## Critical PCS finding and concrete exploit
 
@@ -108,14 +109,15 @@ changes no root, WHIR transcript/hints, sumcheck proof, public input or claimed 
 Before and after, the witness batch is `12944411284857403794` and the `_invInner` result is
 `580551468794229723`. Index 80 is outside the `numRoutedWires = 80` terminal loop, so it cancels the
 batch delta; the inverse-helper change cancels the terminal delta. The same construction was
-calculated for the submodule `small_mul.json` fixture and is frozen in the public-chain release-guard
+calculated for the submodule `small_mul.json` fixture and is frozen in the immutable-chain-pin
 regression.
 
 Merely reversing the WHIR point order or comparing Ext3 `c0` with the base-field batch does not fix
 this attack: the mutation intentionally preserves the batch. A sound redesign must commit the
 constituent oracle polynomials before sampling their batching coefficients, or use an equivalent
-vector commitment/opening argument that binds every terminal value. Until then, 31337-only is the
-security boundary.
+vector commitment/opening argument that binds every terminal value. Until then, the constructor pin
+is only an operational wrong-network boundary; official scripts default to 31337 and any public
+selection is explicitly outside this audit's release approval.
 
 ## Three attacker/defender rounds
 
@@ -145,9 +147,10 @@ live withdrawal was produced, or that the Manager received channel-scoped backin
 
 The independent attack side rejected the prior audit's PCS-bound claims and produced the correlated
 three-field acceptance mutation above. The defense did not relabel a partial check as sound. It
-disabled construction and execution of the real verifier outside 31337, fenced the rollup's zero-VK
-bypass to 31337, reserved a non-convicting unavailability error, and added public-chain tests for a
-valid proof and the correlated forgery. The final frozen-diff bypass review found no remaining path
+added an immutable constructor-selected execution-chain pin, kept the official default and the
+rollup's zero-VK/value-flow boundaries at 31337, reserved a non-convicting unavailability result,
+and added wrong-chain tests for valid, malformed and correlated-forgery inputs. The final
+frozen-diff bypass review found no remaining path
 in the audited deployment scripts, development mock verifiers, short-window Manager mutations, or
 rollup value boundaries that could turn 31337-prepared state into public-chain value movement. The
 cryptographic redesign remains an explicit blocker.
@@ -174,8 +177,8 @@ The completed final frozen-tree matrix was:
 
 | Check | Result |
 |---|---|
-| Parent Forge, all suites/invariants | 502 / 502 pass |
-| MLE submodule Forge | 106 / 106 pass |
+| Parent Forge, all suites/invariants | 503 / 503 pass |
+| MLE submodule Forge | 109 / 109 pass |
 | Node tests, unrestricted localhost rerun | 335 / 335 pass |
 | Rust `cargo check --all-targets` | pass (existing warnings) |
 | Lean `lake build` | pass; model staleness/uninterpreted-MLE caveat applies |
@@ -193,10 +196,10 @@ the security commit.
 1. Redesign the MLE PCS so every terminal constituent evaluation is committed before its batching
    challenge (or is bound by an equivalent sound vector-opening argument); add the correlated
    mutation and a fully synthesized arbitrary-statement proof as negative E2E tests.
-2. Remove the 31337-only verifier guard only after an independent cryptographic review of the new
-   transcript order, commitment format, Rust verifier and Solidity verifier. Redeploy the audited
-   verifier and pin/verify deployed bytecode; the guard does not repair legacy or substituted
-   verifier deployments.
+2. Do not configure the verifier for a public chain or relax the Rollup's 31337-only value boundary
+   until an independent cryptographic review of the new transcript order, commitment format, Rust
+   verifier and Solidity verifier. Redeploy the audited verifier and pin/verify deployed bytecode;
+   the constructor chain pin does not repair legacy or substituted verifier deployments.
 3. Build close proofs from durable authenticated public balance data without coordinator
    availability, and test restart/reorg recovery from `ClosePending` through payout.
 4. Implement a channel-bound production live-withdrawal producer that creates the exact rollup

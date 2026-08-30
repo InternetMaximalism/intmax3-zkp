@@ -26,6 +26,15 @@ library FixtureLib {
     // The canonical forge-std cheatcode address.
     Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
+    /// @notice Resolve the immutable execution-chain pin for a new real MLE verifier.
+    /// @dev Keep the known-unsafe PCS local by default. A non-31337 deployment
+    ///      therefore requires an explicit `MLE_VERIFIER_CHAIN_ID` opt-in, and
+    ///      the MleVerifier constructor independently requires it to equal the
+    ///      chain actually executing the deployment.
+    function mleVerifierChainId() internal view returns (uint256) {
+        return vm.envOr("MLE_VERIFIER_CHAIN_ID", uint256(31337));
+    }
+
     /// Maximum number of gate rows this parser accepts. The previous bounded scan silently
     /// returned 64 when a fixture carried a 65th row, so the deployed gates digest described only a
     /// prefix of the fixture. Keep the existing capacity, but reject overflow explicitly.

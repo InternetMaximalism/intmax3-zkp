@@ -13,7 +13,7 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
-import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
+import {InvalidMleVerifierChainId, MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 import {MockChannelRegistry} from "./ChannelSettlementManager.t.sol";
@@ -23,6 +23,7 @@ import {DeployClose} from "../script/DeployClose.s.sol";
 import {DeployCloseCli} from "../script/DeployCloseCli.s.sol";
 import {DeployPartialWithdrawalE2E, E2EMockMleVerifier} from "../script/DeployPartialWithdrawalE2E.s.sol";
 import {DeployWalletSettlement, WalletMockMleVerifier} from "../script/DeployWalletSettlement.s.sol";
+import {FixtureLib} from "../script/FixtureLib.sol";
 import {DeployConfig} from "../script/DeployConfig.sol";
 
 /// @notice `DeployCloseCli` with its ONE run-time-staged input redirected to a checked-in copy.
@@ -118,6 +119,7 @@ contract DeployGuardsTest is Test {
     address internal fraudTreasury = makeAddr("guards_fraudTreasury");
 
     function setUp() public {
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         verifier = new ChannelSettlementVerifier();
         mockMle = new MockMleVerifier();
         (
@@ -310,10 +312,21 @@ contract DeployGuardsTest is Test {
     /// real deployment actually uses.
     function test_deployCloseCliScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployCloseCliHarness script = new DeployCloseCliHarness();
-        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        vm.expectRevert(
+            abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
+        );
         script.run();
+    }
+
+    function test_mleVerifierChainId_explicitConfiguredChainDeploysPinnedVerifier() public {
+        vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(REAL_CHAIN_ID));
+        MleVerifier configured = new MleVerifier(FixtureLib.mleVerifierChainId());
+        assertEq(configured.allowedChainId(), REAL_CHAIN_ID, "constructor must persist the explicit chain pin");
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
     }
 
     /// `DeployClose.s.sol` on the devnet keeps the short window, so the local lifecycle E2Es that
@@ -336,9 +349,12 @@ contract DeployGuardsTest is Test {
     /// still works and both withdrawal entry points revert `WithdrawalVkNotSet()` forever.
     function test_deployScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         Deploy script = new Deploy();
-        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        vm.expectRevert(
+            abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
+        );
         script.run();
     }
 
@@ -346,9 +362,12 @@ contract DeployGuardsTest is Test {
     /// its own docstring positions it for a public testnet.
     function test_deployTestnetBlockProducerScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployTestnetBlockProducer script = new DeployTestnetBlockProducer();
-        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        vm.expectRevert(
+            abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
+        );
         script.run();
     }
 

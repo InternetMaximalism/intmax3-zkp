@@ -31,7 +31,7 @@ contract C2CBlockHashTest is Test {
             return;
         }
         string memory vkJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle.json"));
-        MleVerifier verifier = new MleVerifier();
+        MleVerifier verifier = new MleVerifier(block.chainid);
         FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(vkJson);
         IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(vkJson, verifier);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");

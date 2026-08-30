@@ -72,7 +72,7 @@ contract DeployPartialWithdrawalE2E is Script {
         vm.startBroadcast();
 
         // 1. IntmaxRollup with real validity VK (needed for deposit()).
-        MleVerifier realVerifier = new MleVerifier();
+        MleVerifier realVerifier = new MleVerifier(FixtureLib.mleVerifierChainId());
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(mleJson, realVerifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(mleJson);
         rollup = new IntmaxRollup(

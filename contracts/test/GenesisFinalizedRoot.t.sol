@@ -39,7 +39,7 @@ contract GenesisFinalizedRootTest is Test {
             "",
             empty,
             empty,
-            new MleVerifier(),
+            new MleVerifier(block.chainid),
             genesis,
             true
         );

@@ -53,7 +53,7 @@ contract ProofDaRollupTest is Test {
         SpongefishWhirVerify.WhirParams memory whir = _emptyWhir();
         uint256[] memory empty = new uint256[](0);
         rollup = new IntmaxRollup(
-            address(0xdead), vk, whir, "", "", empty, empty, new MleVerifier(), genesis, true
+            address(0xdead), vk, whir, "", "", empty, empty, new MleVerifier(block.chainid), genesis, true
         );
         da = new ProofDaIntegrationHarness();
         rollup.setKzgVerifier(da);

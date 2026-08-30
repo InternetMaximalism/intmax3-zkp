@@ -48,7 +48,7 @@ contract ClaimMleVerifyTest is Test {
     uint256 internal constant FINAL_ROW_BYTES = 384;
 
     function setUp() public {
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(block.chainid);
     }
 
     function _load(string memory name) internal view returns (string memory) {

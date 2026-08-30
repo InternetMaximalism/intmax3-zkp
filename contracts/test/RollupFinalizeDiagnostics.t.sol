@@ -44,7 +44,7 @@ contract RollupFinalizeDiagnosticsTest is Test {
     // -----------------------------------------------------------------------
 
     function setUp() public {
-        mleVerifier = new MleVerifier();
+        mleVerifier = new MleVerifier(block.chainid);
         rollup = _newRollup(0); // degreeBits = 0 → MLE verification skipped (test opt-in)
         vm.deal(poster, 100 ether);
     }

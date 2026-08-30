@@ -39,7 +39,7 @@ contract DeployC2C is Script {
 
         vm.startBroadcast();
 
-        MleVerifier verifier = new MleVerifier();
+        MleVerifier verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
         IntmaxRollup rollup = new IntmaxRollup(

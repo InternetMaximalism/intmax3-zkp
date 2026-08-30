@@ -25,7 +25,7 @@ abstract contract CloseE2EBase is Test {
     address internal constant FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     // Fixed salts (any distinct constants; pinned so script + test agree).
-    bytes32 internal constant SALT_MV = keccak256("intmax-close-e2e/MleVerifier/v1");
+    bytes32 internal constant SALT_MV = keccak256("intmax-close-e2e/MleVerifier/v2-chain-pinned");
     bytes32 internal constant SALT_ROLLUP = keccak256("intmax-close-e2e/IntmaxRollup/v1");
     bytes32 internal constant SALT_SV = keccak256("intmax-close-e2e/SettlementVerifier/v1");
     bytes32 internal constant SALT_MANAGER = keccak256("intmax-close-e2e/SettlementManager/v1");
@@ -52,8 +52,8 @@ abstract contract CloseE2EBase is Test {
 
     // ── initcodes ──
 
-    function _mleVerifierInitcode() internal pure returns (bytes memory) {
-        return type(MleVerifier).creationCode;
+    function _mleVerifierInitcode(uint256 allowedChainId) internal pure returns (bytes memory) {
+        return abi.encodePacked(type(MleVerifier).creationCode, abi.encode(allowedChainId));
     }
 
     function _settlementVerifierInitcode() internal pure returns (bytes memory) {
@@ -124,9 +124,9 @@ abstract contract CloseE2EBase is Test {
     function predictManagerAddressFrom(string memory vkJson, string memory lcJson)
         public returns (address managerAddr)
     {
-        MleVerifier tmp = new MleVerifier();
+        MleVerifier tmp = new MleVerifier(block.chainid);
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        address mvAddr = _predict(SALT_MV, _mleVerifierInitcode());
+        address mvAddr = _predict(SALT_MV, _mleVerifierInitcode(block.chainid));
         address rollupAddr = _predict(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, mvAddr, tmp));
         address svAddr = _predict(SALT_SV, _settlementVerifierInitcode());
         managerAddr = _predict(SALT_MANAGER, _managerInitcode(lcJson, svAddr, rollupAddr));
@@ -156,7 +156,7 @@ abstract contract CloseE2EBase is Test {
         )
     {
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        verifier_ = MleVerifier(_deploy(SALT_MV, _mleVerifierInitcode()));
+        verifier_ = MleVerifier(_deploy(SALT_MV, _mleVerifierInitcode(block.chainid)));
         rollup_ = IntmaxRollup(payable(_deploy(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, address(verifier_), verifier_))));
         sv_ = ChannelSettlementVerifier(_deploy(SALT_SV, _settlementVerifierInitcode()));
 

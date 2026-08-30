@@ -64,7 +64,7 @@ abstract contract WithdrawNativeE2EBase is Test {
             return;
         }
 
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(block.chainid);
 
         // Deploy with the VALIDITY VK (degreeBits > 0) + genesis state root.
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);

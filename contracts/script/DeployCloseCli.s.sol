@@ -96,7 +96,7 @@ contract DeployCloseCli is Script {
         // 1. Attach to the rollup that already escrows this channel's funds when
         // `EXISTING_ROLLUP` is supplied.  The fresh branch is retained for isolated/dev bootstrap,
         // but the production Rust driver always supplies the backing rollup.
-        MleVerifier verifier = new MleVerifier();
+        MleVerifier verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
         if (existingRollup == address(0)) {
             IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
             FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);

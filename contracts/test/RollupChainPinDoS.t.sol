@@ -26,7 +26,7 @@ contract RollupChainPinDoSTest is Test {
     address internal constant GRIEFER = address(0xBEEF);
 
     function setUp() public {
-        MleVerifier mle = new MleVerifier();
+        MleVerifier mle = new MleVerifier(block.chainid);
         IntmaxRollup.MleVk memory emptyVk;
         rollup = new IntmaxRollup(
             address(this),                 // fraudTreasury

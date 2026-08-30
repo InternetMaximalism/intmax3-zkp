@@ -81,7 +81,7 @@ contract MemberSetUpdateE2ETest is Test {
         oldPkGs = vm.parseJsonBytes32Array(desc, ".oldMemberPkGs");
         newPkGs = vm.parseJsonBytes32Array(desc, ".newMemberPkGs");
 
-        mle = new MleVerifier();
+        mle = new MleVerifier(block.chainid);
         settlementVerifier = new ChannelSettlementVerifier();
 
         // The shared wrapper rail comes from the close fixture (identical wrapper shape; only the

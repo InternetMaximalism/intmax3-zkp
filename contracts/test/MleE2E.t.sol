@@ -35,7 +35,7 @@ contract MleE2ETest is Test {
     }
 
     function setUp() public {
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(block.chainid);
     }
 
     function _loadFixture() internal view returns (string memory) {

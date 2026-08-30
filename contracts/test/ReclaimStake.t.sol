@@ -37,7 +37,7 @@ contract ReclaimStakeTest is Test {
             ready = false;
             return;
         }
-        verifier = new MleVerifier();
+        verifier = new MleVerifier(block.chainid);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(validityMleJson, verifier);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
