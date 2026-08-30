@@ -602,7 +602,8 @@ mod tests {
             0x494d_5353,                       // IMSS
             0x494d_4954,                       // IMIT (retired)
             0x494d_434c,                       // IMCL
-            0x494d_4349,                       // IMCI
+            0x494d_4349,                       // IMCI (retired)
+            0x494d_4353,                       // IMCS
             0x494d_5343,                       // IMSC
             0x494d_434e,                       // IMCN
             0x494d_4350,                       // IMCP

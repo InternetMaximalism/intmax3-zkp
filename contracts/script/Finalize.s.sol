@@ -9,10 +9,12 @@ import {FixtureLib} from "./FixtureLib.sol";
 /// @title Finalize
 /// @notice Smoke-finalize step: reconstructs the REAL ValidityPublicInputs
 ///         (vpi_fixture.json) + the REAL MleProof (mle_fixture.json, parsed
-///         byte-identically to MleFinalizeE2E.t.sol) and calls
-///         `finalize(0, finalStateRoot, vpis, mleProof)` under broadcast.
+///         byte-identically to MleFinalizeE2E.t.sol), attests the exact blob-backed
+///         proof bytes, then finalizes in a second transaction.
 ///
-///         Reads the rollup address from env `ROLLUP_ADDR`.
+///         Reads the rollup address from env `ROLLUP_ADDR` and the standard blob sidecar evidence
+///         from `BLOB_SIDECARS` as compact hex:
+///         `commitment0(48) || proof0(48) [|| commitment1(48) || proof1(48)]`.
 ///         (`postBlockAndSubmit` is a blob tx done separately via `cast send`
 ///          — see docs/sepolia-smoke-runbook.md — it cannot be a Forge script
 ///          because Forge scripts cannot attach EIP-4844 blobs.)
@@ -27,6 +29,7 @@ contract Finalize is Script {
         bytes32 finalStateRoot = vm.parseJsonBytes32(FixtureLib.loadBlock(), ".final_state_root");
         IntmaxRollup.ValidityPublicInputs memory vpis = FixtureLib.parseValidityPIs(FixtureLib.loadVpi());
         MleVerifier.MleProof memory mleProof = FixtureLib.parseProof(FixtureLib.loadMle());
+        bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
 
         console2.log("=== IntmaxRollup smoke finalize ===");
         console2.log("rollup        :", rollupAddr);
@@ -35,6 +38,7 @@ contract Finalize is Script {
         console2.logBytes32(finalStateRoot);
 
         vm.startBroadcast();
+        rollup.attestProofData(SUBMISSION_ID, abi.encode(mleProof), blobSidecars);
         bool ok = rollup.finalize(SUBMISSION_ID, finalStateRoot, vpis, mleProof);
         vm.stopBroadcast();
 

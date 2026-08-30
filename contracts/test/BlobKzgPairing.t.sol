@@ -2,292 +2,319 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {BlobKZGVerifier, BlobKZGVerifierExt, KZGProof} from "../src/BlobKZGVerifier.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
+import {FixtureLib} from "../script/FixtureLib.sol";
 
-/// @title BlobKzgPairing
-/// @notice Regression tests for round-2 findings B-1 and B-2, and the FIRST real exercise of
-///         `BlobKZGVerifier`'s general (non-degenerate) pairing branch.
-///
-///  Round 1 asserted "the pairing precompile is unavailable in Foundry 1.5.x, verified
-///  empirically". It had measured `address(0x11)`, which under the final EIP-2537 is
-///  MAP_FP2_TO_G2 — of course it rejects a 768-byte pairing instance. The real map is
-///
-///    0x0b G1ADD | 0x0c G1MSM | 0x0d G2ADD | 0x0e G2MSM
-///    0x0f PAIRING_CHECK | 0x10 MAP_FP_TO_G1 | 0x11 MAP_FP2_TO_G2
-///
-///  and PAIRING_CHECK at 0x0f works fine in this EVM. Compounding it, the shipped `G2_GENERATOR`
-///  laid X out as (x_c1 || x_c0) instead of EIP-2537's (x_c0 || x_c1), so even at the right
-///  address the general branch fed the precompile an invalid point.
-///
-///  Every test in this file FAILS on the pre-fix contracts.
-contract BlobKzgPairingTest is Test {
-    address constant PAIRING_CHECK = address(0x0f);
-    address constant G1ADD         = address(0x0b);
-    address constant G1MSM         = address(0x0c);
-    address constant G2ADD         = address(0x0d);
-    address constant MAP_FP2_TO_G2 = address(0x11); // what BLS12_PAIRING used to be
-
-    uint256 internal constant BLS12_SCALAR_R =
-        0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
-    bytes32 internal constant NEG_ONE =
-        bytes32(0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000);
-
-    // =======================================================================
-    // B-1 — PAIRING_CHECK is 0x0f, and it runs
-    // =======================================================================
-
-    /// @dev The general pairing branch is now RUNNABLE, and it discriminates:
-    ///        e(P,Q)·e(−P,Q) = 1  is ACCEPTED
-    ///        e(P,Q)·e(P,Q)  ≠ 1  is REJECTED
-    ///      Round 1 could not make this assertion at all, which is why the general branch shipped
-    ///      broken for two releases.
-    function test_B1_pairingCheckAt0x0fRunsAndDiscriminates() public view {
-        bytes memory P = _g1Gen();
-        bytes memory Q = BlobKZGVerifier.G2_GENERATOR;
-
-        (bool ok, bytes memory ret) =
-            PAIRING_CHECK.staticcall{gas: 3_000_000}(bytes.concat(P, Q, _g1Neg(P), Q));
-        assertTrue(ok, "0x0f (PAIRING_CHECK) is available in this EVM");
-        assertEq(ret.length, 32, "PAIRING_CHECK returns one word");
-        assertEq(abi.decode(ret, (uint256)), 1, "e(P,Q)*e(-P,Q) == 1 is ACCEPTED");
-
-        (bool ok2, bytes memory ret2) =
-            PAIRING_CHECK.staticcall{gas: 3_000_000}(bytes.concat(P, Q, P, Q));
-        assertTrue(ok2, "PAIRING_CHECK evaluates the false instance too");
-        assertEq(abi.decode(ret2, (uint256)), 0, "e(P,Q)^2 != 1 is REJECTED");
-    }
-
-    /// @dev 0x11 is a different, present precompile (MAP_FP2_TO_G2). It returns a 256-byte G2
-    ///      point for a 128-byte input and cannot evaluate a pairing instance at all — which is
-    ///      exactly the observation round 1 mistook for "the pairing precompile is unavailable".
-    function test_B1_theOldAddressWasMapFp2ToG2() public view {
-        (bool okMap, bytes memory retMap) = MAP_FP2_TO_G2.staticcall{gas: 3_000_000}(new bytes(128));
-        assertTrue(okMap, "0x11 is present");
-        assertEq(retMap.length, 256, "0x11 maps Fp2 -> G2; it is not a pairing check");
-
-        bytes memory P = _g1Gen();
-        bytes memory Q = BlobKZGVerifier.G2_GENERATOR;
-        (bool okBad,) = MAP_FP2_TO_G2.staticcall{gas: 3_000_000}(bytes.concat(P, Q, _g1Neg(P), Q));
-        assertFalse(okBad, "0x11 cannot evaluate a 768-byte pairing instance");
-    }
-
-    // =======================================================================
-    // B-2 — the shipped G2_GENERATOR is now a valid EIP-2537 encoding
-    // =======================================================================
-
-    function test_B2_shippedG2GeneratorIsAValidPoint() public view {
-        bytes memory shipped = BlobKZGVerifier.G2_GENERATOR;
-        assertEq(shipped.length, 256, "G2 point is 256 bytes");
-
-        // G2ADD accepts it (it rejects the pre-fix (x_c1 || x_c0) layout outright).
-        (bool okAdd, bytes memory sum) =
-            G2ADD.staticcall{gas: 3_000_000}(bytes.concat(shipped, shipped));
-        assertTrue(okAdd && sum.length == 256, "G2ADD accepts the shipped generator");
-
-        // And it is byte-equal to the canonical EIP-2537 encoding.
-        assertEq(keccak256(shipped), keccak256(_g2GenCanonical()), "shipped == canonical");
-
-        // The pre-fix constant is rejected by both, pinning that this was a real defect.
-        bytes memory preFix = _g2GenPreFix();
-        assertTrue(keccak256(preFix) != keccak256(shipped), "the constant actually changed");
-        (bool okOldAdd,) = G2ADD.staticcall{gas: 3_000_000}(bytes.concat(preFix, preFix));
-        assertFalse(okOldAdd, "G2ADD rejects the pre-fix constant");
-        (bool okOldPair,) = PAIRING_CHECK.staticcall{gas: 3_000_000}(
-            bytes.concat(_g1Gen(), preFix, _g1Neg(_g1Gen()), preFix)
-        );
-        assertFalse(okOldPair, "PAIRING_CHECK rejects the pre-fix constant");
-    }
-
-    // =======================================================================
-    // B-1+B-2 — the general branch of the LIBRARY, on a PRODUCTION satellite
-    // =======================================================================
-
-    /// @dev A well-formed NON-degenerate opening (Z(τ) = 2, so the degenerate guard does not fire)
-    ///      is accepted by `BlobKZGVerifierExt(false)` — the configuration all six deploy scripts
-    ///      use. Pre-fix this reverted `BKV_PairingCheckFailed`, which is what made
-    ///      `IntmaxRollup._verifyFraud` pre-condition 2 unsatisfiable (finding B-3).
-    function test_B1B2_productionSatelliteAcceptsAWellFormedGeneralOpening() public {
-        BlobKZGVerifierExt prod = new BlobKZGVerifierExt(false);
-        bytes memory blob = _sampleBlob();
-        (KZGProof memory kzg, bytes32 blobHash) = generalOpening(blob);
-
-        // Not the degenerate instance: the guard is not what is letting this through.
-        assertTrue(
-            keccak256(kzg.vanishingG2) != keccak256(BlobKZGVerifier.G2_GENERATOR),
-            "the opening must exercise the GENERAL branch, not the Z(tau)=1 fast path"
-        );
-        prod.verify(blobHash, kzg, blob); // must not revert
-    }
-
-    /// @dev ...and the same branch still REJECTS an opening that does not match the bytes: flip
-    ///      one byte of the blob and the pairing equation fails. Without this the "acceptance"
-    ///      test above would be satisfied by a vacuous branch.
-    function test_B1B2_productionSatelliteRejectsATamperedBlob() public {
-        BlobKZGVerifierExt prod = new BlobKZGVerifierExt(false);
-        bytes memory blob = _sampleBlob();
-        (KZGProof memory kzg, bytes32 blobHash) = generalOpening(blob);
-
-        bytes memory tampered = _sampleBlob();
-        tampered[7] = bytes1(uint8(tampered[7]) ^ 0x01); // same length, different contents
-
-        vm.expectRevert(BlobKZGVerifier.BKV_PairingFailed.selector);
-        prod.verify(blobHash, kzg, tampered);
-    }
-
-    // =======================================================================
-    // Helpers
-    // =======================================================================
-
-    /// @dev Build a mathematically valid, NON-degenerate KZG multi-point opening for `data`.
-    ///
-    ///      The verifier equation is  e(C − [I(τ)]₁, G2) · e(−π, [Z(τ)]₂) = 1, i.e. in scalars
-    ///      C − I = z·π where z = Z(τ). Nothing on-chain constrains the trusted-setup points, so
-    ///      a self-consistent instance is built by choosing them:
-    ///        lagrangeBasisG1[i] = G1        ⇒ [I(τ)]₁ = (Σ fᵢ)·G1 = S·G1
-    ///        z = 2                          ⇒ vanishingG2 = G2ADD(G2, G2)  (NOT the generator,
-    ///                                         so the degenerate guard does not fire)
-    ///        π = q·G1 with q = 7            ⇒ C = (S + 2q)·G1
-    ///      Then C − I = 14·G1 = 2·π and the pairing holds.
-    ///
-    ///      NOTE (residual B-6): this is exactly why the trusted-setup data must not stay
-    ///      caller-supplied. The instance here is honest in FORM — it proves the general branch
-    ///      computes the right equation — but the same freedom is what lets an attacker forge one.
-    ///      See `RedTeamFraudBreaks::test_RT4_*` and the RESIDUAL RISK note in BlobKZGVerifier.
-    function generalOpening(bytes memory data)
-        public view returns (KZGProof memory kzg, bytes32 blobHash)
+contract BlobKZGVerifierHarness is BlobKZGVerifierExt {
+    function blobWord(bytes calldata proofBytes, uint256 blobIndex, uint256 wordIndex)
+        external
+        pure
+        returns (bytes32 word)
     {
-        bytes32[] memory fes = _toFieldElements(data);
-        uint256 N = fes.length;
+        bytes memory blob = new bytes(BYTES_PER_BLOB);
+        uint256 ptr;
+        assembly ("memory-safe") { ptr := add(blob, 32) }
+        _fillSimpleCoderBlob(proofBytes, blobIndex, ptr);
+        assembly ("memory-safe") { word := mload(add(ptr, mul(wordIndex, 32))) }
+    }
 
-        uint256 S = 0;
-        for (uint256 i = 0; i < N; i++) S = addmod(S, uint256(fes[i]), BLS12_SCALAR_R);
+    function evaluation(bytes calldata proofBytes, uint256 blobIndex, bytes calldata commitment)
+        external
+        view
+        returns (bytes32 versionedHash, uint256 z, uint256 y)
+    {
+        return _blobEvaluation(proofBytes, blobIndex, commitment);
+    }
 
-        bytes memory g1 = _g1Gen();
-        bytes memory pi = _g1Mul(g1, bytes32(uint256(7)));            // π = 7·G1
-        bytes memory C  = _g1Mul(g1, bytes32(addmod(S, 14, BLS12_SCALAR_R))); // C = (S+14)·G1
+    function count(uint256 proofLength) external pure returns (uint8) {
+        return _blobCount(proofLength);
+    }
 
-        bytes memory basis = new bytes(N * 128);
-        for (uint256 i = 0; i < N; i++) {
-            assembly {
-                let src := add(g1, 32)
-                let dst := add(add(basis, 32), mul(i, 128))
-                mstore(dst,          mload(src))
-                mstore(add(dst, 32), mload(add(src, 32)))
-                mstore(add(dst, 64), mload(add(src, 64)))
-                mstore(add(dst, 96), mload(add(src, 96)))
-            }
+    function commitment(
+        bytes32 blobHash0,
+        bytes32 blobHash1,
+        uint8 blobCount,
+        bytes32 stateRoot,
+        uint64 submittedAtBlock,
+        uint256 submissionId
+    ) external pure returns (bytes32) {
+        return _commitment(
+            blobHash0,
+            blobHash1,
+            blobCount,
+            stateRoot,
+            submittedAtBlock,
+            submissionId
+        );
+    }
+}
+
+/// @notice Proof-DA v2 regression tests. The first vector was generated by Foundry 1.5.1's
+///         `cast mktx --blob --path` and therefore joins the exact Alloy SimpleCoder blob to the
+///         standard Ethereum-ceremony commitment/proof consumed by precompile 0x0a.
+contract BlobKzgPairingTest is Test {
+    BlobKZGVerifierHarness internal verifier;
+
+    uint256 internal constant BLS_MODULUS =
+        0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
+    bytes32 internal constant PROOF_DA_DOMAIN = keccak256("INTMAX3_PROOF_DA_V3");
+
+    function setUp() public {
+        verifier = new BlobKZGVerifierHarness();
+    }
+
+    function test_castSimpleCoderGolden_standardPointEvaluationProof() public view {
+        // The source file contained the four bytes "abc\n". Cast produced FE0/FE1 exactly as
+        // asserted below, then the standard c-kzg commitment and blob proof embedded here.
+        bytes memory payload = hex"6162630a";
+        assertEq(
+            verifier.blobWord(payload, 0, 0),
+            0x0000000000000000040000000000000000000000000000000000000000000000,
+            "FE0 must be 0x00 || u64_be(length) || 23 zero bytes"
+        );
+        assertEq(
+            verifier.blobWord(payload, 0, 1),
+            0x006162630a000000000000000000000000000000000000000000000000000000,
+            "FE1 must be 0x00 || payload[0:31]"
+        );
+
+        bytes memory commitment =
+            hex"99286fb3dd61b63bade1c18561ea7c312f52efa4a8dd8b5b2bf4cd238bae270d0503e3d3aca779414c00312c8fd85596";
+        bytes memory proof =
+            hex"993e421e329cae93d0bc282910dc6999fe1a66a763c21ac31df45faf792746c042fd8e7f3095531188c77dc457f987ae";
+
+        (bytes32 evaluatedHash, uint256 z, uint256 y) = verifier.evaluation(payload, 0, commitment);
+        assertEq(evaluatedHash, 0x01a8ca638239641d743640160da7cfa710d92709bbdd27c340b92d57b6f9e19a);
+        assertEq(z, 0x6502fe7bc276889ec93bfe7a0f598ef512a8b0613e328a9889b12d5fe93853c6);
+        assertEq(y, 0x7116fe3ddee33c4664b3cbb07d74470b3644180971194792b21548d8e8b09fd7);
+
+        (bytes32 blobHash, bytes32 second, uint8 count) = verifier.verify(
+            payload, bytes.concat(commitment, proof)
+        );
+        assertEq(blobHash, 0x01a8ca638239641d743640160da7cfa710d92709bbdd27c340b92d57b6f9e19a);
+        assertEq(second, bytes32(0));
+        assertEq(count, 1);
+    }
+
+    function test_castProductionArtifactTwoBlob_standardPointEvaluationProofs() public view {
+        // Reproducible generation:
+        //   forge script script/PrepareProofDa.s.sol:PrepareProofDa --offline
+        //   cast mktx --blob --path ../proof-da-output/validity-proof.bin <signed tx args>
+        //   | cast decode-transaction --json
+        // The payload is regenerated from the tracked source fixture here, not checked in as a
+        // 130 KiB opaque binary. Both c-kzg blob proofs execute against the real 0x0a precompile.
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle.json")
+        );
+        MleVerifier.MleProof memory mleProof = FixtureLib.parseProof(json);
+        bytes memory payload = abi.encode(mleProof);
+        assertEq(payload.length, 130_592);
+        assertEq(
+            keccak256(payload),
+            0x93b18c568e154d895a698da7712cea7f88e195e110501cca65e2f28c1a3d691b
+        );
+
+        bytes memory commitment0 =
+            hex"8eb25df2c6262ffa4885ae2bb491a2488c718d6b50ce6bf9be315a3e0bcf6092e33a7120a658f10dc8ec771dca6a6ac2";
+        bytes memory proof0 =
+            hex"b9543e26c5c9d7f94bcf664472e65f242afae1d853269259a51e9d60be873ac2b7e9db72d4520d55769e49cd62131b29";
+        bytes memory commitment1 =
+            hex"abaa69d3c82e25709971900eaa27c2d63bbd159a05f089a8cb299d64436101cafc8470e9e0c56d785a28174bf5e54bbb";
+        bytes memory proof1 =
+            hex"affa4a1516425bbcb59bb07f58499f29cd519bc7decdffbd4cf22fa59280763ebcab82d7d246fb33de2fe34174954c3a";
+
+        (bytes32 blobHash0, bytes32 blobHash1, uint8 count) = verifier.verify(
+            payload, bytes.concat(commitment0, proof0, commitment1, proof1)
+        );
+        assertEq(blobHash0, 0x013aece36c6d6fd1c086a3be3fa73da5bc44b4e8e9b0eef108c58e980ced6681);
+        assertEq(blobHash1, 0x0145cdb30fad5803d3895ef8ef47569b296448f1b6864f3311f02ab3163fbc74);
+        assertEq(count, 2);
+    }
+
+    function test_independentChallengeAndBarycentricVector() public view {
+        bytes memory payload =
+            hex"80ff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        bytes memory commitment = new bytes(48);
+        for (uint256 i = 0; i < 48; i++) commitment[i] = 0x11;
+
+        assertEq(
+            verifier.blobWord(payload, 0, 0),
+            0x0000000000000000230000000000000000000000000000000000000000000000
+        );
+        assertEq(
+            verifier.blobWord(payload, 0, 1),
+            0x0080ff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c
+        );
+        assertEq(
+            verifier.blobWord(payload, 0, 2),
+            0x001d1e1f20000000000000000000000000000000000000000000000000000000
+        );
+
+        (bytes32 blobHash, uint256 z, uint256 y) = verifier.evaluation(payload, 0, commitment);
+        assertEq(blobHash, 0x01a127dff9f9bbfa1dff5275a99464123998e95bf11dd579f2ffcab301bc7350);
+        assertEq(z, 0x65fa4ca37ebeadade08c959a8d1f0cf28a5061156ea9228f857bab035cc8e9ce);
+        assertEq(y, 0x30343f60c266a5b9e985184f9c4f6a4d9619fa646ea1734159dea36316556adb);
+    }
+
+    function test_exactOneOrTwoBlobBoundaries() public {
+        assertEq(verifier.count(126_945), 1);
+        assertEq(verifier.count(126_946), 2);
+        assertEq(verifier.count(253_921), 2);
+
+        vm.expectRevert(BlobKZGVerifierExt.EmptyProofPayload.selector);
+        verifier.count(0);
+        vm.expectRevert(
+            abi.encodeWithSelector(BlobKZGVerifierExt.ProofPayloadTooLarge.selector, 253_922)
+        );
+        verifier.count(253_922);
+    }
+
+    function test_twoBlobSplitContinuesPayloadWithoutSecondHeader() public view {
+        bytes memory payload = new bytes(126_946);
+        payload[126_944] = 0xaa;
+        payload[126_945] = 0xbb;
+
+        assertEq(
+            verifier.blobWord(payload, 0, 4095),
+            0x00000000000000000000000000000000000000000000000000000000000000aa
+        );
+        assertEq(
+            verifier.blobWord(payload, 1, 0),
+            0x00bb000000000000000000000000000000000000000000000000000000000000
+        );
+    }
+
+    function test_highBitPayloadIsLosslessAndCannotMaskCollide() public view {
+        bytes memory high = new bytes(31);
+        bytes memory low = new bytes(31);
+        high[0] = 0x80;
+
+        bytes32 highWord = verifier.blobWord(high, 0, 1);
+        bytes32 lowWord = verifier.blobWord(low, 0, 1);
+        assertEq(highWord, 0x0080000000000000000000000000000000000000000000000000000000000000);
+        assertTrue(highWord != lowWord, "SimpleCoder must not mask high payload bits");
+        assertTrue(uint256(highWord) < BLS_MODULUS, "31-byte payload is a canonical Fr element");
+    }
+
+    function test_blobMetadataRejectsMissingAndExtraBlobs() public {
+        bytes32[] memory none = new bytes32[](0);
+        vm.blobhashes(none);
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.MissingBlob.selector, 0));
+        verifier.blobMetadata(1);
+
+        bytes32[] memory two = new bytes32[](2);
+        two[0] = bytes32(uint256(1));
+        two[1] = bytes32(uint256(2));
+        vm.blobhashes(two);
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.ExtraBlob.selector, 1));
+        verifier.blobMetadata(1);
+
+        bytes32[] memory one = new bytes32[](1);
+        one[0] = bytes32(uint256(1));
+        vm.blobhashes(one);
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.MissingBlob.selector, 1));
+        verifier.blobMetadata(126_946);
+    }
+
+    function test_compactSidecarRejectsMissingAndExtraEvidence() public {
+        bytes memory payload = hex"01";
+        vm.expectRevert(
+            abi.encodeWithSelector(BlobKZGVerifierExt.SidecarLengthMismatch.selector, 96, 0)
+        );
+        verifier.verify(payload, "");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(BlobKZGVerifierExt.SidecarLengthMismatch.selector, 96, 192)
+        );
+        verifier.verify(payload, new bytes(192));
+    }
+
+    function test_twoBlobSidecarsAreOrderBound() public {
+        bytes memory payload = new bytes(126_946);
+        payload[0] = 0x41;
+        payload[126_945] = 0x42;
+
+        bytes memory commitment0 = new bytes(48);
+        bytes memory proof0 = new bytes(48);
+        bytes memory commitment1 = new bytes(48);
+        bytes memory proof1 = new bytes(48);
+        for (uint256 i = 0; i < 48; i++) {
+            commitment0[i] = 0x11;
+            proof0[i] = 0x22;
+            commitment1[i] = 0x33;
+            proof1[i] = 0x44;
         }
 
-        bytes memory c48 = _compressG1(C);
-        (bool okSha, bytes memory hb) = address(0x02).staticcall(c48);
-        require(okSha && hb.length >= 32, "sha256 failed");
-        blobHash = bytes32((uint256(0x01) << 248) | (uint256(bytes32(hb)) & (type(uint256).max >> 8)));
-
-        kzg = KZGProof({
-            kzgCommitment48: c48,
-            kzgCommitmentG1: C,
-            openingProof:    pi,
-            vanishingG2:     _g2Times2(),
-            lagrangeBasisG1: basis
-        });
-    }
-
-    function _sampleBlob() internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            keccak256("intmax3 blob word 0"),
-            keccak256("intmax3 blob word 1"),
-            keccak256("intmax3 blob word 2")
+        (bytes32 h0, uint256 z0, uint256 y0) = verifier.evaluation(payload, 0, commitment0);
+        (bytes32 h1, uint256 z1, uint256 y1) = verifier.evaluation(payload, 1, commitment1);
+        bytes memory success = abi.encode(uint256(4096), BLS_MODULUS);
+        vm.mockCall(
+            address(0x0a),
+            bytes.concat(h0, bytes32(z0), bytes32(y0), commitment0, proof0),
+            success
         );
-    }
-
-    function _g1Gen() internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            hex"0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0f",
-            hex"c3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
-            hex"0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4",
-            hex"fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1"
+        vm.mockCall(
+            address(0x0a),
+            bytes.concat(h1, bytes32(z1), bytes32(y1), commitment1, proof1),
+            success
         );
-    }
 
-    /// @dev The canonical EIP-2537 G2 generator: x_c0 || x_c1 || y_c0 || y_c1.
-    function _g2GenCanonical() internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051",
-            hex"c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
-            hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65",
-            hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
-            hex"000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351a",
-            hex"adfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
-            hex"000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99",
-            hex"cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+        (bytes32 opened0, bytes32 opened1, uint8 count) = verifier.verify(
+            payload, bytes.concat(commitment0, proof0, commitment1, proof1)
         );
+        assertEq(opened0, h0);
+        assertEq(opened1, h1);
+        assertEq(count, 2);
+
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.PointEvaluationFailed.selector, 0));
+        verifier.verify(payload, bytes.concat(commitment1, proof1, commitment0, proof0));
     }
 
-    /// @dev The constant `BlobKZGVerifier.G2_GENERATOR` used to hold: X as (x_c1 || x_c0).
-    function _g2GenPreFix() internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            hex"0000000000000000000000000000000013e02b6052719f607dacd3a088274f65",
-            hex"596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
-            hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051",
-            hex"c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
-            hex"000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351a",
-            hex"adfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
-            hex"000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99",
-            hex"cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+    function test_standardProofRejectsOneBitPayloadCommitmentAndProofMutations() public {
+        bytes memory payload = hex"6162630a";
+        bytes memory commitment =
+            hex"99286fb3dd61b63bade1c18561ea7c312f52efa4a8dd8b5b2bf4cd238bae270d0503e3d3aca779414c00312c8fd85596";
+        bytes memory proof =
+            hex"993e421e329cae93d0bc282910dc6999fe1a66a763c21ac31df45faf792746c042fd8e7f3095531188c77dc457f987ae";
+
+        payload[0] ^= 0x01;
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.PointEvaluationFailed.selector, 0));
+        verifier.verify(payload, bytes.concat(commitment, proof));
+        payload[0] ^= 0x01;
+
+        commitment[0] ^= 0x01;
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.PointEvaluationFailed.selector, 0));
+        verifier.verify(payload, bytes.concat(commitment, proof));
+        commitment[0] ^= 0x01;
+
+        proof[0] ^= 0x01;
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.PointEvaluationFailed.selector, 0));
+        verifier.verify(payload, bytes.concat(commitment, proof));
+    }
+
+    function test_commitmentIsDomainSeparatedAndBindsEveryField() public view {
+        bytes32 h0 = keccak256("blob 0");
+        bytes32 h1 = keccak256("blob 1");
+        bytes32 root = keccak256("root");
+        bytes32 expected = keccak256(
+            abi.encode(PROOF_DA_DOMAIN, h0, h1, uint8(2), root, uint64(9), uint256(7))
         );
+        assertEq(verifier.commitment(h0, h1, 2, root, 9, 7), expected);
+        assertTrue(verifier.commitment(h1, h0, 2, root, 9, 7) != expected);
+        assertTrue(verifier.commitment(h0, h1, 1, root, 9, 7) != expected);
+        assertTrue(verifier.commitment(h0, h1, 2, root, 10, 7) != expected);
+        assertTrue(verifier.commitment(h0, h1, 2, root, 9, 8) != expected);
     }
 
-    function _g2Times2() internal view returns (bytes memory out) {
-        bytes memory g2 = BlobKZGVerifier.G2_GENERATOR;
-        bool ok;
-        (ok, out) = G2ADD.staticcall(bytes.concat(g2, g2));
-        require(ok && out.length == 256, "G2ADD failed");
-    }
+    function test_pointEvaluationNoCodeOrShortReturnFailsClosed() public {
+        bytes memory payload = hex"01";
+        bytes memory sidecar = new bytes(96);
 
-    function _g1Mul(bytes memory pt, bytes32 s) internal view returns (bytes memory out) {
-        bool ok;
-        (ok, out) = G1MSM.staticcall(abi.encodePacked(pt, s));
-        require(ok && out.length == 128, "G1MSM failed");
-    }
-
-    function _g1Neg(bytes memory pt) internal view returns (bytes memory) {
-        return _g1Mul(pt, NEG_ONE);
-    }
-
-    function _toFieldElements(bytes memory data) internal pure returns (bytes32[] memory fes) {
-        uint256 FIELD_MASK = type(uint256).max >> 3;
-        uint256 n = (data.length + 31) / 32;
-        fes = new bytes32[](n);
-        for (uint256 i = 0; i < n; i++) {
-            bytes32 word;
-            uint256 off = i * 32;
-            uint256 rem = data.length - off;
-            if (rem >= 32) {
-                assembly { word := mload(add(add(data, 32), off)) }
-            } else {
-                bytes memory tmp = new bytes(32);
-                for (uint256 j = 0; j < rem; j++) tmp[j] = data[off + j];
-                assembly { word := mload(add(tmp, 32)) }
-            }
-            fes[i] = bytes32(uint256(word) & FIELD_MASK);
-        }
-    }
-
-    function _compressG1(bytes memory pt128) internal pure returns (bytes memory c48) {
-        require(pt128.length == 128, "compressG1: bad length");
-        bytes32 x0; bytes32 x1; bytes32 y0; bytes32 y1;
-        assembly {
-            let p := add(pt128, 32)
-            x0 := mload(add(p, 16))
-            x1 := mload(add(p, 48))
-            y0 := mload(add(p, 80))
-            y1 := mload(add(p, 112))
-        }
-        bytes32 halfQ0 = 0x0d0088f51cbff34d258dd3db21a5d66bb23ba5c279c2895fb39869507b587b12;
-        bytes16 halfQ1 = bytes16(0x0f55ffff58a9ffffdcff7fffffffd555);
-        bytes16 yEnd   = bytes16(y1);
-        bool signBit = (y0 > halfQ0) || (y0 == halfQ0 && yEnd > halfQ1);
-        c48 = abi.encodePacked(x0, bytes16(x1));
-        c48[0] = bytes1(uint8(c48[0]) | 0x80 | (signBit ? uint8(0x20) : uint8(0)));
+        // An empty-success response (the behavior of a no-code address) cannot pass: the
+        // satellite requires exactly the 64-byte EIP-4844 precompile result.
+        vm.mockCall(address(0x0a), bytes(""), bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(BlobKZGVerifierExt.PointEvaluationFailed.selector, 0));
+        verifier.verify(payload, sidecar);
     }
 }

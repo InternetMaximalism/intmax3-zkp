@@ -25,11 +25,16 @@ contract RedTeamRound3Test is CloseSettlementBase {
     function _cancelProof(ChannelSettlementManager.CancelCloseRequest memory request)
         internal view returns (MleVerifier.MleProof memory)
     {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
+        uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
+            ? pending.finalStateVersion
+            : manager.pendingPartialWithdrawalStateVersion();
         return CloseTestLib.proofWithLimbs(
             verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
                 request.closeIntentDigest,
                 manager.registeredMemberSetCommitment(),
+                closeFinalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest
             )
@@ -51,6 +56,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
     {
         intent = _intent(1, epoch, 22, 1);
         intent.finalStateVersion = stateVersion;
+        intent.finalChannelStateDigest = keccak256(abi.encodePacked("final_state", epoch, stateVersion));
     }
 
     function _baseRecipient(address recipient) internal pure returns (bytes32) {

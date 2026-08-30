@@ -71,7 +71,7 @@ contract DeployTestnetBlockProducer is Script {
             false // production-shaped: reject a disabled (degreeBits==0) validity VK
         );
         // Pin the KZG blob-binding satellite (fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
 
         // Restrict block posting to `bpAdmin` + its designees. `bpAdmin` can post directly and
         // can call setBlockProducer to designate more producers; nobody else can post.

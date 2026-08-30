@@ -21,15 +21,18 @@
 //!   balance
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{exit, Command, Stdio},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::{
+    fd::AsRawFd as _,
+    unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+};
 
 use intmax3_zkp::{
     block_producer::ProductionDepositRequest,
@@ -62,8 +65,8 @@ use intmax3_zkp::{
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash, BalanceState},
         channel::{
-            burn_descriptor, ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal,
-            InterChannelTx, MemberSignature,
+            burn_descriptor, close_member_set_commitment, ChannelRecord, ChannelState,
+            CloseIntent, CloseWithdrawal, InterChannelTx, MemberSignature,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -77,6 +80,10 @@ use intmax3_zkp::{
         address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait as _,
     },
     regev::{encrypt_amount, RegevCiphertext, RegevPk, RegevSecurityLevel},
+    proof_da::{
+        submitted_id_from_receipt, validate_decoded_blob_transaction,
+        DecodedBlobTransaction, ValidatedBlobSidecars,
+    },
     utils::{
         conversion::ToU64 as _,
         serialize::{deserialize_verifier_data, serialize_verifier_data},
@@ -119,6 +126,9 @@ const BD: usize = 2;
 
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const STATE_FILE: &str = "cli_state.json";
+const STATE_PROCESS_LOCK_FILE: &str = ".cli_state.process.lock";
+const DETACHED_PRECOMPUTE_LOCK_BYPASS_ENV: &str =
+    "INTMAX_DETACHED_PRECOMPUTE_LOCK_BYPASS";
 const FALCON_AGG_CACHE_DIR: &str = "falcon_aggregate_cache";
 // Which channel this CLI process operates. The relay runs ONE process per channel (channels 7 and
 // 8), each in its own working directory, selecting the channel via the `INTMAX_CHANNEL` env var.
@@ -250,7 +260,7 @@ struct ControlledMember {
 /// `applied_tx_identities` and the old entries were dropped without a diagnostic. A security
 /// ledger that resets itself in silence is worse than no ledger, because the operator believes it
 /// is running. Bump this whenever the on-disk shape of a ledger changes.
-const STATE_SCHEMA_VERSION: u32 = 1;
+const STATE_SCHEMA_VERSION: u32 = 2;
 
 /// The replay-ledger keys `cli_state.json` MUST carry. SECURITY: `load_state` checks for these BY
 /// NAME and fails LOUDLY on absence — the enumeration is deliberately in one auditable place. Add
@@ -261,6 +271,55 @@ const REQUIRED_LEDGER_KEYS: [&str; 3] = [
     "spent_tx_identities",
     "imported_deposits",
 ];
+const SETTLEMENT_BINDING_KEY: &str = "settlement_binding";
+
+/// Durable, sticky proof that this channel's participant identity has been frozen into an L1
+/// settlement manager.  It lives in the crash-safe private state rather than `settlement.json`:
+/// deleting a convenience address file or starting the CLI from another directory cannot turn a
+/// post-deployment channel back into one that admits new delegate keys.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettlementBinding {
+    status: SettlementBindingStatus,
+    channel_id: u32,
+    snapshot_state_digest: Bytes32,
+    participant_root: Bytes32,
+    participant_count: u16,
+    rollup: String,
+    verifier: Option<String>,
+    manager: Option<String>,
+    /// Production-only crash-recovery identity.  This is persisted in the PREPARED write before
+    /// `forge --broadcast` starts.  A missing value on a PREPARED real-chain binding is not
+    /// interpreted as permission to start over: it is a legacy/incomplete deployment that needs
+    /// operator recovery.
+    #[serde(default)]
+    deployment: Option<SettlementDeploymentIntent>,
+    /// The canonical durable head at which every production deployment readback was pinned.
+    /// Devnet bindings leave this empty; a real-chain binding may become ACTIVE only with one.
+    #[serde(default)]
+    activation_checkpoint: Option<intmax3_zkp::l1_finality::L1FinalizedCheckpoint>,
+}
+
+/// Everything needed to prove that a Foundry `run-latest.json` belongs to this exact settlement
+/// attempt.  In particular, `start_nonce` makes an old run for the same channel distinguishable
+/// from this one, while `plan_digest` commits the live registration, script and VK fixtures.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettlementDeploymentIntent {
+    chain_id: u64,
+    broadcaster: String,
+    start_nonce: u64,
+    start_block: u64,
+    broadcast_artifact_path: String,
+    plan_digest: Bytes32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SettlementBindingStatus {
+    Prepared,
+    Active,
+}
 
 /// Always serialize the CURRENT schema version, whatever the in-memory value says, so no write can
 /// ever stamp a file with an older schema than it actually has.
@@ -288,6 +347,10 @@ struct CliState {
     state_schema_version: u32,
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
+    /// No serde default: absence is a schema/migration event, never an implicit "not frozen".
+    /// `load_state` names the missing key and `migrate-state` may add null only while no local
+    /// settlement record exists.  Once Some, no command clears it.
+    settlement_binding: Option<SettlementBinding>,
     /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
     /// (`InterChannelTx::replay_identity()` — the token-FREE fold over
     /// `(source, dest, tx_tree_root, tx_leaf)`) already CREDITED into THIS channel (the
@@ -530,6 +593,7 @@ fn require_contracts_dir(cmd: &str, scripts: &[&str]) -> std::path::PathBuf {
             missing.join(", ")
         ));
     }
+
     // Observable, not silent: the resolved path is printed BEFORE the heavy work so an operator
     // can see which checkout a live run is about to stage into.
     eprintln!(
@@ -912,6 +976,62 @@ fn secure_private_path(path: &Path) {
     }
 }
 
+/// One process at a time may observe and replace `cli_state.json` in a channel directory.
+///
+/// Atomic rename prevents a torn file, but it does not prevent the classic lost-update race:
+/// process A can read an unfrozen state, process B can fsync a PREPARED settlement binding, and A
+/// can then atomically replace the file with its older `settlement_binding: None`.  Every normal
+/// CLI command takes this advisory lock before recovery or state reads, so the PREPARED join
+/// freeze and all later mutations are serialized across processes as well as crash-safe.
+#[cfg(unix)]
+struct CliStateProcessLock(fs::File);
+
+#[cfg(unix)]
+impl CliStateProcessLock {
+    fn acquire() -> Self {
+        let path = Path::new(STATE_PROCESS_LOCK_FILE);
+        secure_private_path(path);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap_or_else(|error| die(format!("open state process lock {STATE_PROCESS_LOCK_FILE}: {error}")));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap_or_else(|error| {
+            die(format!(
+                "chmod 0600 state process lock {STATE_PROCESS_LOCK_FILE}: {error}"
+            ))
+        });
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            die(format!(
+                "another channel_member process holds {STATE_PROCESS_LOCK_FILE}; refusing a concurrent state read/write"
+            ));
+        }
+        Self(file)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CliStateProcessLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct CliStateProcessLock;
+
+#[cfg(not(unix))]
+impl CliStateProcessLock {
+    fn acquire() -> Self {
+        die("channel_member requires an OS advisory file lock; this build target is unsupported")
+    }
+}
+
 fn read_private_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     secure_private_path(Path::new(path));
     read_json(path)
@@ -921,6 +1041,12 @@ fn read_private_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
 /// fsync the parent directory. A failed/partial write never truncates the last committed state.
 fn write_private_json_at<T: Serialize>(path: &Path, value: &T) {
     let bytes = serde_json::to_vec(value).unwrap_or_else(|e| die(e));
+    write_private_bytes_at(path, &bytes);
+}
+
+/// Crash-safe byte writer used for proof artifacts as well as JSON journals. The operation
+/// journal must never point at a proof file that was only partially copied when the process died.
+fn write_private_bytes_at(path: &Path, bytes: &[u8]) {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1336,6 +1462,15 @@ fn load_state() -> CliState {
         ));
     }
 
+    if !obj.contains_key(SETTLEMENT_BINDING_KEY) {
+        die(format!(
+            "REFUSING to load {STATE_FILE}: `{SETTLEMENT_BINDING_KEY}` is ABSENT. Treating an \
+             unknown settlement state as unfrozen would let a new delegate join after the L1 \
+             participant root was fixed. Run `channel_member migrate-state` in the original \
+             channel directory; migration refuses if settlement.json already records a deploy."
+        ));
+    }
+
     // 3. STRICT deserialization. `deny_unknown_fields` turns a ledger that is present under an OLD
     //    name into a hard error too, instead of an ignored key plus an empty set.
     let mut state: CliState = serde_json::from_value(serde_json::Value::Object(obj))
@@ -1380,6 +1515,86 @@ fn save_state(state: &CliState) {
     }
 }
 
+/// Resolve settlement authority from the crash-safe channel state, never from a convenience JSON
+/// file or a caller-supplied address alone.  Every close/claim/withdraw command calls this before
+/// proving or broadcasting, so a stale `settlement.json`, copied CLI argument, or local path mixup
+/// cannot redirect a valid proof or channel funds to a different manager/verifier/rollup.
+fn require_active_settlement_binding(
+    rpc: &str,
+    supplied_manager: &str,
+    supplied_verifier: Option<&str>,
+    supplied_rollup: Option<&str>,
+) -> SettlementBinding {
+    let state = load_state();
+    let binding = state
+        .settlement_binding
+        .clone()
+        .unwrap_or_else(|| die("no durable settlement binding; run deploy-settlement first"));
+    if binding.status != SettlementBindingStatus::Active {
+        die("settlement binding is PREPARED, not ACTIVE; refusing every close/fund-moving route");
+    }
+    let manager = binding
+        .manager
+        .as_deref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no manager"));
+    let verifier = binding
+        .verifier
+        .as_deref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no verifier"));
+    if strip0x(manager) != strip0x(supplied_manager) {
+        die(format!(
+            "supplied manager {supplied_manager} differs from durable ACTIVE manager {manager}"
+        ));
+    }
+    if supplied_verifier.is_some_and(|value| strip0x(value) != strip0x(verifier)) {
+        die(format!(
+            "supplied settlement verifier {:?} differs from durable ACTIVE verifier {verifier}",
+            supplied_verifier
+        ));
+    }
+    if supplied_rollup.is_some_and(|value| strip0x(value) != strip0x(&binding.rollup)) {
+        die(format!(
+            "supplied rollup {:?} differs from durable ACTIVE rollup {}",
+            supplied_rollup, binding.rollup
+        ));
+    }
+
+    // Member-set updates are fail-closed in this release. Therefore the deployed participant
+    // root/count must still equal the live signed snapshot on every use; any accidental local
+    // mutation after deployment is detected before it can construct an L1 proof/call.
+    let reg = build_live_settlement_reg_record(&state);
+    let (participant_root, participant_count) = staged_settlement_identity(&reg);
+    if binding.channel_id != channel_id_env()
+        || binding.participant_root != participant_root
+        || binding.participant_count != participant_count
+    {
+        die("live signed participant identity differs from the durable ACTIVE settlement binding");
+    }
+
+    let chain_id = rpc_chain_id(rpc);
+    if chain_id != DEVNET_CHAIN_ID {
+        let deployment = binding.deployment.as_ref().unwrap_or_else(|| {
+            die(
+                "production ACTIVE settlement has no pinned deployment intent; legacy state is \
+                 not trusted for fund-moving operations",
+            )
+        });
+        let checkpoint = binding.activation_checkpoint.as_ref().unwrap_or_else(|| {
+            die(
+                "production ACTIVE settlement has no finalized activation checkpoint; legacy \
+                 state is not trusted for fund-moving operations",
+            )
+        });
+        if deployment.chain_id != chain_id || checkpoint.chain_id != chain_id {
+            die("ACTIVE settlement deployment/checkpoint belongs to a different RPC chain");
+        }
+        revalidate_l1_checkpoint(rpc, checkpoint);
+    } else if binding.deployment.is_some() || binding.activation_checkpoint.is_some() {
+        die("devnet ACTIVE settlement unexpectedly carries production deployment authority");
+    }
+    binding
+}
+
 /// Kick off `precompute-falcon-aggregate` as a DETACHED child of this binary and return at once.
 ///
 /// PERF: the Falcon aggregate proof itself is ~0.1 s, but `FalconProverContext::new()` builds the
@@ -1412,6 +1627,11 @@ fn spawn_detached_falcon_precompute_in(digest: Bytes32, work_dir: &std::path::Pa
     };
     match std::process::Command::new(exe)
         .arg("precompute-falcon-aggregate")
+        // The parent already holds the channel-wide process lock until this command exits.  The
+        // detached precompute only reads one atomic snapshot and writes a digest-keyed cache file;
+        // it never mutates cli_state.json, so it may safely bypass that lock (and the mutation
+        // recovery pass) instead of racing the parent and immediately failing.
+        .env(DETACHED_PRECOMPUTE_LOCK_BYPASS_ENV, "1")
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1518,7 +1738,15 @@ fn cmd_precompute_falcon_aggregate() {
 /// derivation (finding-7 invariant). The rotated slot's `ControlledMember.keygen_seed` is updated
 /// so every later `cosign`/`close` signs with the NEW key; the old seed's key simply stops being
 /// referenced (the record no longer contains its pk_g — `rotate_sets_new_key`).
-fn cmd_member_update(args: &[String]) {
+fn cmd_member_update(_args: &[String]) {
+    die(
+        "member-update is disabled in this release because settlement and validity member roots are not atomically anchored",
+    );
+}
+
+/// Retained for future cross-layer atomicity work; deliberately unreachable from the release CLI.
+#[allow(dead_code)]
+fn cmd_member_update_future(args: &[String]) {
     let sub = args
         .get(1)
         .map(String::as_str)
@@ -1652,7 +1880,12 @@ fn cmd_migrate_state(args: &[String]) {
     let acked = args.iter().any(|a| a == ACK);
 
     let mut obj = read_state_object();
-    let known: [&str; 3] = ["state_schema_version", "controlled", "snapshot"];
+    let known: [&str; 4] = [
+        "state_schema_version",
+        "controlled",
+        "snapshot",
+        SETTLEMENT_BINDING_KEY,
+    ];
     let unknown: Vec<&String> = obj
         .keys()
         .filter(|k| !known.contains(&k.as_str()) && !REQUIRED_LEDGER_KEYS.contains(&k.as_str()))
@@ -1676,7 +1909,8 @@ fn cmd_migrate_state(args: &[String]) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
         < u64::from(STATE_SCHEMA_VERSION);
-    if missing.is_empty() && !stale_version {
+    let missing_settlement_binding = !obj.contains_key(SETTLEMENT_BINDING_KEY);
+    if missing.is_empty() && !stale_version && !missing_settlement_binding {
         println!(
             "migrate-state: nothing to do — {STATE_FILE} already carries every replay ledger at \
              schema v{STATE_SCHEMA_VERSION}."
@@ -1696,6 +1930,17 @@ fn cmd_migrate_state(args: &[String]) {
 
     for k in &missing {
         obj.insert((*k).to_string(), serde_json::Value::Array(Vec::new()));
+    }
+    if missing_settlement_binding {
+        if Path::new("settlement.json").exists() {
+            die(format!(
+                "REFUSING to migrate {STATE_FILE}: `{SETTLEMENT_BINDING_KEY}` is absent while \
+                 settlement.json exists. The channel may already have an immutable L1 participant \
+                 root; writing null would reopen delegate joins. Reconstruct the binding from the \
+                 deployed manager instead."
+            ));
+        }
+        obj.insert(SETTLEMENT_BINDING_KEY.to_string(), serde_json::Value::Null);
     }
     obj.insert(
         "state_schema_version".to_string(),
@@ -2440,20 +2685,13 @@ struct CloseIntentDescriptor {
     token_count: u8,
 }
 
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
 /// A-3 P3: build the channel's REAL close-intent proof from the wallet's final signed state + the N
 /// co-signing members' keys + the base-layer balance proof, write the on-chain artifacts, and
 /// submit the close to L1: `requestClose` (cast) then `submitCloseIntent` (the wrapped-close MLE
 /// proof is large struct calldata, so it goes through the `RunClose` forge step). Usage:
 ///   channel_member close <manager_addr> [rpc_url]
-/// env: CLOSE_NONCE, CLOSE_SNAPSHOT_MBN, CLOSE_BURN_TX (members agree), CLOSE_SV (settlement
-/// verifier).
+/// env: CLOSE_SV (settlement verifier). Close nonce/snapshot/burn metadata is canonical and has no
+/// caller input: nonce = signed close_freeze_nonce + 1, snapshot = 0, burn hash = 0.
 fn cmd_close(args: &[String]) {
     let manager = args
         .get(1)
@@ -2463,6 +2701,17 @@ fn cmd_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    let supplied_sv = std::env::var("CLOSE_SV")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let settlement_binding =
+        require_active_settlement_binding(&rpc, &manager, supplied_sv.as_deref(), None);
+    let sv = supplied_sv.unwrap_or_else(|| {
+        settlement_binding
+            .verifier
+            .clone()
+            .unwrap_or_else(|| die("ACTIVE settlement binding has no verifier"))
+    });
     let l1_signer = LazyL1Signer::new(&rpc);
 
     // Phase control (opt-in; default = the combined requestClose + submitCloseIntent flow):
@@ -2497,13 +2746,6 @@ fn cmd_close(args: &[String]) {
     // that branch is a pure `cast send` and legitimately needs no checkout.)
     let contracts_dir = require_contracts_dir("close", &["script/RunClose.s.sol"]);
 
-    let close_nonce = env_u64("CLOSE_NONCE", 1);
-    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
-    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
-        .ok()
-        .and_then(|s| Bytes32::from_hex(&s).ok())
-        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
-
     // Load the final signed state and the base-layer balance proof.
     //
     // SECURITY (detached close signing, design Option A): this command derives NO co-signer key.
@@ -2517,6 +2759,12 @@ fn cmd_close(args: &[String]) {
     let record = st.snapshot.record.clone();
     let member_count = state.balance_state.member_count as usize;
     let (balance_vd, att, backing) = load_backing();
+    if strip0x(&backing.rollup) != strip0x(&settlement_binding.rollup) {
+        die(format!(
+            "channel backing rollup {} differs from durable ACTIVE rollup {}",
+            backing.rollup, settlement_binding.rollup
+        ));
+    }
     let balance_proof = ProofWithPublicInputs::<BF, BC, BD>::from_bytes(
         att.balance_proof.clone(),
         &balance_vd.common,
@@ -2535,9 +2783,6 @@ fn cmd_close(args: &[String]) {
             &state,
             &falcon_artifact,
             balance_proof,
-            close_nonce,
-            burn_tx_hash,
-            snapshot_mbn,
         )
         .unwrap_or_else(|e| die(format!("build close witness: {}", e.0)));
     let close_proof = prover
@@ -2596,18 +2841,18 @@ fn cmd_close(args: &[String]) {
 
     // A30 prerequisite: persist the EXACT pending `CloseIntent` (lossless serde) so a later
     // `cancel-close` reconstructs the same close_intent_digest the manager just froze on-chain.
-    // Reconstructed identically to `cmd_claim` (same close params + the state that was closed); the
-    // `CloseIntent::new` binding checks fail closed if the params disagree with the state.
+    // Reconstructed identically to `cmd_claim` from the state that was closed; all legacy
+    // metadata fields are derived canonically by `CloseIntent::new`.
     let close_tx = CloseWithdrawal {
         channel_id: state.channel_id,
         final_channel_state_digest: state.digest,
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
-        burn_tx_hash,
+        burn_tx_hash: Bytes32::default(),
         burn_amount: state.channel_fund.amounts[0],
         zkp: Vec::new(),
     };
-    let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
+    let close_intent = CloseIntent::new(&state, &close_tx)
         .unwrap_or_else(|e| die(format!("reconstruct close intent for persistence: {e:?}")));
     write_json(CLOSE_INTENT_FULL_FILE, &close_intent);
     println!(
@@ -2654,7 +2899,6 @@ fn cmd_close(args: &[String]) {
         data_dir.join("sepolia_close_intent_mle.json"),
     )
     .unwrap_or_else(|e| die(format!("stage close_intent_mle.json: {e}")));
-    let sv = std::env::var("CLOSE_SV").unwrap_or_default();
     eprintln!("[close] submitCloseIntent via forge RunClose step…");
     let mut forge = std::process::Command::new("forge");
     forge.current_dir(&contracts_dir).args([
@@ -2695,6 +2939,7 @@ fn cmd_settle(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    require_active_settlement_binding(&rpc, &manager, None, None);
     let l1_signer = LazyL1Signer::new(&rpc);
     eprintln!(
         "[settle] finalizeClose() on manager {manager} (the challenge period must have elapsed)…"
@@ -2813,11 +3058,11 @@ fn claim_keys_for_slot(
              master ({COSIGNER_KEYFILE_ENV}) — i.e. the CLI co-signer slots this process controls \
              (0..{}), plus a DEMO delegate created by `gen-contribution` with a DELEGATE_SEED this \
              host can reproduce.\n\
-             WHO CANNOT: a REAL BROWSER DELEGATE. It generates its own Regev keypair with \
-             `wallet_keygen` and that secret NEVER leaves the browser, and `src/wasm_wallet.rs` \
-             exports no claim entry point — so a browser delegate's claim cannot be produced by \
-             this command, and cannot currently be produced anywhere. That is a MISSING FEATURE, \
-             not a misconfiguration: see doc/audit/exit-path-facade-sweep.md F8.\n\
+             WHO CANNOT USE THIS CLI: a REAL BROWSER/NODE DELEGATE. It generates its own Regev \
+             keypair with `wallet_keygen[_seeded]` and that secret NEVER leaves the WASM session. \
+             Such a delegate must use `wallet_withdrawal_claim`, which proves and self-verifies \
+             inside WASM and exports only public claim/MLE calldata; this native CLI intentionally \
+             cannot reproduce that secret-owned claim.\n\
              \n\
              REFUSING before proving rather than spending minutes building a claim for an identity \
              that is not the slot owner's. If you believe this host does own the slot under a \
@@ -2845,8 +3090,7 @@ fn claim_keys_for_slot(
 /// pull-credit step below pulls the ETH credit (`claimWithdrawalCredit()`); an ERC-20 credit is
 /// pulled with the Manager's per-token pull entry point instead.
 /// env: CLAIM_RECIPIENT (the member's registered L1 address; also the claimWithdrawalCredit
-/// caller),      CLOSE_NONCE / CLOSE_BURN_TX / CLOSE_SNAPSHOT_MBN (MUST equal the values used at
-/// `close`).
+/// caller). Close metadata is reconstructed canonically from the finalized signed state.
 fn cmd_claim(args: &[String]) {
     let manager = args
         .get(1)
@@ -2864,6 +3108,7 @@ fn cmd_claim(args: &[String]) {
         .get(4)
         .map(|s| s.parse().unwrap_or_else(|_| die("bad [token_slot]")))
         .unwrap_or(0);
+    require_active_settlement_binding(&rpc, &manager, None, None);
     let recipient = std::env::var("CLAIM_RECIPIENT")
         .ok()
         .and_then(|s| Address::from_hex(&s).ok())
@@ -2895,13 +3140,6 @@ fn cmd_claim(args: &[String]) {
     // deliberately stays above this line.
     let contracts_dir = require_contracts_dir("claim", &["script/RunClose.s.sol"]);
 
-    let close_nonce = env_u64("CLOSE_NONCE", 1);
-    let snapshot_mbn = env_u64("CLOSE_SNAPSHOT_MBN", 1);
-    let burn_tx_hash = std::env::var("CLOSE_BURN_TX")
-        .ok()
-        .and_then(|s| Bytes32::from_hex(&s).ok())
-        .unwrap_or_else(|| Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap());
-
     let st = load_state();
     let state = st.snapshot.state.clone();
     let final_balance_state = state.balance_state.clone();
@@ -2911,11 +3149,11 @@ fn cmd_claim(args: &[String]) {
         final_channel_state_digest: state.digest,
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
-        burn_tx_hash,
+        burn_tx_hash: Bytes32::default(),
         burn_amount: state.channel_fund.amounts[0],
         zkp: Vec::new(),
     };
-    let close_intent = CloseIntent::new(close_nonce, &state, &close_tx, snapshot_mbn)
+    let close_intent = CloseIntent::new(&state, &close_tx)
         .unwrap_or_else(|e| die(format!("reconstruct close intent: {e:?}")));
 
     // F8: the claimant's identity is the one the SIGNED slot leaf commits, or this command refuses.
@@ -3087,6 +3325,7 @@ fn cmd_cancel_close(args: &[String]) {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    require_active_settlement_binding(&rpc, &manager, None, None);
     let l1_signer = LazyL1Signer::new(&rpc);
     // F4: resolve + validate the contracts checkout BEFORE the heavy cancel proof (see
     // `require_contracts_dir`). A cancel that dies on a path lookup after proving is worse than a
@@ -3226,7 +3465,7 @@ struct PostCloseClaimDescriptor {
 /// caller),      POST_CLOSE_SOURCE_TX (path to the persisted source InterChannelTransferDescriptor
 /// JSON;      default `inter_descriptor.json`).
 /// The finalized close digest is read from `close_intent_full.json` (persisted by `close`), so no
-/// CLOSE_NONCE/CLOSE_BURN_TX re-derivation is needed (and no env-var footgun).
+/// close-metadata re-derivation is needed (and no env-var footgun).
 fn cmd_post_close_claim(args: &[String]) {
     let manager = args.get(1).cloned().unwrap_or_else(|| {
         die("post-close-claim needs <manager_addr> <receiver_slot> <incoming_tx_index> [rpc_url]")
@@ -3242,6 +3481,7 @@ fn cmd_post_close_claim(args: &[String]) {
         .get(4)
         .cloned()
         .unwrap_or_else(|| "http://localhost:8545".to_string());
+    require_active_settlement_binding(&rpc, &manager, None, None);
     let recipient = std::env::var("CLAIM_RECIPIENT")
         .ok()
         .and_then(|s| Address::from_hex(&s).ok())
@@ -3260,9 +3500,8 @@ fn cmd_post_close_claim(args: &[String]) {
 
     // The finalized close's digest — read from the EXACT pending `CloseIntent` persisted by `close`
     // (`close_intent_full.json`), the SAME lossless source `cancel-close` uses, so the proof's
-    // `close_intent_digest` PI equals on-chain `finalizedCloseIntentDigest`. (No env-var
-    // re-derivation footgun: a digest from differing CLOSE_NONCE/CLOSE_BURN_TX would silently
-    // fail-close on-chain.)
+    // `close_intent_digest` PI equals on-chain `finalizedCloseIntentDigest`. (No metadata
+    // re-derivation footgun: the close constructor now has one canonical representation.)
     let close_intent: CloseIntent = read_json(CLOSE_INTENT_FULL_FILE);
     let close_intent_digest = close_intent.signing_digest();
 
@@ -3421,9 +3660,677 @@ fn cmd_post_close_claim(args: &[String]) {
 //
 // env: ROLLUP (rollup addr; falls back to channel_backing.json), INTMAX_CHANNEL (channel id),
 //      INTMAX_L1_ACCOUNT (Foundry keystore account off-devnet; local Anvil may use its dev key),
-//      WD_DEPOSIT_AMOUNT / WD_AMOUNT (native units; default 10 / 3),
-//      SUB_ID (overrides the finalize submission id; default = the 3rd of our posts).
-const BLOB_FILE: &str = "blob.bin";
+//      WD_DEPOSIT_AMOUNT / WD_AMOUNT (native units; default 10 / 3).
+const PROOF_DA_DIR: &str = "proof-da-output";
+const PROOF_DA_FILE: &str = "validity-proof.bin";
+const PROOF_DA_METADATA_FILE: &str = "validity-proof.json";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct ProofDaMetadata {
+    codec: String,
+    proof_hash: String,
+    proof_length: u64,
+    blob_count: u8,
+}
+
+const PROOF_DA_POST_JOURNAL_VERSION: u32 = 1;
+const FULL_WITHDRAWAL_JOURNAL_VERSION: u32 = 1;
+const POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
+
+/// Stable, semantic identity of one full-withdrawal lifecycle.  Unlike the validity proof hash,
+/// these fields do not change when the randomized MLE/WHIR prover is invoked again.  There is one
+/// journal slot per (chain, rollup, channel, depositor); changing any economic field while that
+/// slot exists is refused rather than silently starting a second lifecycle.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalOperationKey {
+    chain_id: u64,
+    rollup: String,
+    manager: String,
+    depositor: String,
+    channel_id: u32,
+    integrated: bool,
+    deposit_amount: u64,
+    withdrawal_amount: u64,
+    erc20_token_index: Option<u32>,
+    erc20_amount: Option<u64>,
+    erc20_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalArtifactDigest {
+    file_name: String,
+    byte_length: u64,
+    keccak256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalArtifactManifest {
+    files: Vec<FullWithdrawalArtifactDigest>,
+    proof_da: ProofDaMetadata,
+    final_state_root: String,
+    native_withdrawal_nullifier: String,
+    erc20_withdrawal_nullifier: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalCallConfirmation {
+    transaction_hash: String,
+    block_hash: String,
+    block_number: u64,
+    finalized_checkpoint: intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+}
+
+/// A write-ahead L1 call.  Exact target/calldata/value and sender nonce are fsynced before the
+/// first broadcast.  A restart first scans canonical finalized blocks for that exact tuple; it can
+/// therefore bridge the otherwise unknowable crash between `eth_sendRawTransaction` succeeding
+/// and the RPC response reaching this process without ever creating a duplicate deposit/payout.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalCallIntent {
+    caller: String,
+    target: String,
+    calldata: String,
+    value: u64,
+    caller_nonce: u64,
+    start_block: u64,
+    transaction_hashes: Vec<String>,
+    confirmation: Option<FullWithdrawalCallConfirmation>,
+    #[serde(default)]
+    external_completion: Option<FullWithdrawalCallConfirmation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullWithdrawalOperationJournal {
+    version: u32,
+    key: FullWithdrawalOperationKey,
+    artifacts: Option<FullWithdrawalArtifactManifest>,
+    calls: BTreeMap<String, FullWithdrawalCallIntent>,
+    complete: bool,
+}
+
+struct PersistedFullWithdrawalArtifacts {
+    lifecycle_json: Vec<u8>,
+    validity_mle_json: Vec<u8>,
+    withdrawal_mle_json: Vec<u8>,
+    payout_json: Vec<u8>,
+    erc20_withdrawal_mle_json: Option<Vec<u8>>,
+    erc20_payout_json: Option<Vec<u8>>,
+    proof_da_path: PathBuf,
+    proof_da_payload: Vec<u8>,
+    proof_da: ProofDaMetadata,
+}
+
+struct DryRunL1Call {
+    target: String,
+    calldata: String,
+    value: u64,
+}
+
+fn full_withdrawal_operation_dir(key: &FullWithdrawalOperationKey) -> PathBuf {
+    // Deliberately exclude manager/amounts from the slot id.  Those values are compared against
+    // `journal.key`, so changing them while a lifecycle is incomplete fails closed instead of
+    // allocating a second slot and repeating the deposit.
+    let scope = format!(
+        "INTMAX3/FULL-WITHDRAWAL/v1|{}|{}|{}|{}",
+        key.chain_id,
+        key.rollup.to_ascii_lowercase(),
+        key.channel_id,
+        key.depositor.to_ascii_lowercase()
+    );
+    let digest = hex::encode(keccak_hash::keccak(scope.as_bytes()).0);
+    Path::new(PROOF_DA_DIR).join(format!("withdrawal-operation-{digest}"))
+}
+
+fn load_or_create_full_withdrawal_operation(
+    key: FullWithdrawalOperationKey,
+) -> (PathBuf, PathBuf, FullWithdrawalOperationJournal) {
+    let operation_dir = full_withdrawal_operation_dir(&key);
+    let journal_path = operation_dir.join("operation.json");
+    if journal_path.exists() {
+        secure_private_path(&journal_path);
+        let bytes = fs::read(&journal_path)
+            .unwrap_or_else(|error| die(format!("read {}: {error}", journal_path.display())));
+        let journal: FullWithdrawalOperationJournal = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| die(format!("parse {}: {error}", journal_path.display())));
+        if journal.version != FULL_WITHDRAWAL_JOURNAL_VERSION || journal.key != key {
+            die(format!(
+                "withdrawal operation slot {} already contains a different chain/rollup/channel/manager/amount/token lifecycle; refusing a second deposit",
+                journal_path.display()
+            ));
+        }
+        return (operation_dir, journal_path, journal);
+    }
+    let journal = FullWithdrawalOperationJournal {
+        version: FULL_WITHDRAWAL_JOURNAL_VERSION,
+        key,
+        artifacts: None,
+        calls: BTreeMap::new(),
+        complete: false,
+    };
+    write_private_json_at(&journal_path, &journal);
+    (operation_dir, journal_path, journal)
+}
+
+fn full_withdrawal_artifact_digest(
+    file_name: &str,
+    bytes: &[u8],
+) -> FullWithdrawalArtifactDigest {
+    FullWithdrawalArtifactDigest {
+        file_name: file_name.to_string(),
+        byte_length: bytes.len() as u64,
+        keccak256: format!("0x{}", hex::encode(keccak_hash::keccak(bytes).0)),
+    }
+}
+
+fn persist_full_withdrawal_artifact(
+    operation_dir: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> FullWithdrawalArtifactDigest {
+    if file_name.contains('/') || file_name.contains('\\') || file_name.starts_with('.') {
+        die(format!("unsafe withdrawal artifact filename {file_name:?}"));
+    }
+    write_private_bytes_at(&operation_dir.join(file_name), bytes);
+    full_withdrawal_artifact_digest(file_name, bytes)
+}
+
+fn read_verified_full_withdrawal_artifact(
+    operation_dir: &Path,
+    manifest: &FullWithdrawalArtifactManifest,
+    file_name: &str,
+) -> Vec<u8> {
+    let expected = manifest
+        .files
+        .iter()
+        .find(|file| file.file_name == file_name)
+        .unwrap_or_else(|| die(format!("withdrawal manifest is missing {file_name}")));
+    let path = operation_dir.join(file_name);
+    secure_private_path(&path);
+    let bytes = fs::read(&path)
+        .unwrap_or_else(|error| die(format!("read {}: {error}", path.display())));
+    let actual = full_withdrawal_artifact_digest(file_name, &bytes);
+    if actual != *expected {
+        die(format!(
+            "persisted withdrawal artifact {} changed after its manifest was fsynced",
+            path.display()
+        ));
+    }
+    bytes
+}
+
+fn payout_nullifier(json: &[u8], what: &str) -> String {
+    let value: serde_json::Value = serde_json::from_slice(json)
+        .unwrap_or_else(|error| die(format!("parse {what}: {error}")));
+    value["withdrawals"][0]["nullifier"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| die(format!("{what} has no withdrawals[0].nullifier")))
+        .to_string()
+}
+
+fn load_persisted_full_withdrawal_artifacts(
+    operation_dir: &Path,
+    manifest: &FullWithdrawalArtifactManifest,
+) -> PersistedFullWithdrawalArtifacts {
+    let lifecycle_json =
+        read_verified_full_withdrawal_artifact(operation_dir, manifest, "lifecycle.json");
+    let validity_mle_json = read_verified_full_withdrawal_artifact(
+        operation_dir,
+        manifest,
+        "lifecycle_validity_mle.json",
+    );
+    let withdrawal_mle_json =
+        read_verified_full_withdrawal_artifact(operation_dir, manifest, "withdrawal_mle.json");
+    let payout_json =
+        read_verified_full_withdrawal_artifact(operation_dir, manifest, "withdrawal_payout.json");
+    let erc20_withdrawal_mle_json = manifest
+        .files
+        .iter()
+        .any(|file| file.file_name == "erc20_withdrawal_mle.json")
+        .then(|| {
+            read_verified_full_withdrawal_artifact(
+                operation_dir,
+                manifest,
+                "erc20_withdrawal_mle.json",
+            )
+        });
+    let erc20_payout_json = manifest
+        .files
+        .iter()
+        .any(|file| file.file_name == "erc20_withdrawal_payout.json")
+        .then(|| {
+            read_verified_full_withdrawal_artifact(
+                operation_dir,
+                manifest,
+                "erc20_withdrawal_payout.json",
+            )
+        });
+    if payout_nullifier(&payout_json, "withdrawal_payout.json")
+        != manifest.native_withdrawal_nullifier
+    {
+        die("native withdrawal nullifier differs from the operation manifest");
+    }
+    match (&erc20_payout_json, &manifest.erc20_withdrawal_nullifier) {
+        (Some(json), Some(expected))
+            if payout_nullifier(json, "erc20_withdrawal_payout.json") == *expected => {}
+        (None, None) => {}
+        _ => die("ERC-20 withdrawal artifacts/nullifier differ from the operation manifest"),
+    }
+    let proof_da_payload =
+        read_verified_full_withdrawal_artifact(operation_dir, manifest, PROOF_DA_FILE);
+    let proof_da_metadata_bytes =
+        read_verified_full_withdrawal_artifact(operation_dir, manifest, PROOF_DA_METADATA_FILE);
+    let proof_da: ProofDaMetadata = serde_json::from_slice(&proof_da_metadata_bytes)
+        .unwrap_or_else(|error| die(format!("parse persisted proof DA metadata: {error}")));
+    if proof_da != manifest.proof_da
+        || proof_da.proof_length != proof_da_payload.len() as u64
+        || !same_hex_value(
+            &proof_da.proof_hash,
+            &format!(
+                "0x{}",
+                hex::encode(keccak_hash::keccak(&proof_da_payload).0)
+            ),
+        )
+    {
+        die("persisted proof DA payload/metadata differs from the operation manifest");
+    }
+    PersistedFullWithdrawalArtifacts {
+        lifecycle_json,
+        validity_mle_json,
+        withdrawal_mle_json,
+        payout_json,
+        erc20_withdrawal_mle_json,
+        erc20_payout_json,
+        proof_da_path: operation_dir.join(PROOF_DA_FILE),
+        proof_da_payload,
+        proof_da,
+    }
+}
+
+/// One blob post, persisted after signing and before publishing.  The raw network transaction
+/// includes its blobs, commitments and KZG proofs, so a crash can never leave an unknowable
+/// transaction between local intent and L1.  `receipt` is filled only after finalized canonical
+/// read-back and exact `Submitted` event validation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofDaPostRoundJournal {
+    round_index: usize,
+    pending_chains_pin: String,
+    calldata: String,
+    raw_signed_transaction: String,
+    transaction_hash: String,
+    blob_versioned_hashes: Vec<String>,
+    compact_sidecars: String,
+    submission_id: Option<String>,
+    receipt_block_hash: Option<String>,
+    receipt_block_number: Option<u64>,
+    finalized_checkpoint: Option<intmax3_zkp::l1_finality::L1FinalizedCheckpoint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofDaPostJournal {
+    version: u32,
+    chain_id: u64,
+    rollup: String,
+    submitter: String,
+    proof_hash: String,
+    proof_length: u32,
+    state_root: String,
+    rounds: Vec<ProofDaPostRoundJournal>,
+}
+
+fn same_hex_value(left: &str, right: &str) -> bool {
+    left.trim_start_matches("0x")
+        .eq_ignore_ascii_case(right.trim_start_matches("0x"))
+}
+
+fn validate_durable_checkpoint_advancement(
+    stored: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+    current: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) -> Result<(), String> {
+    stored.validate()?;
+    current.validate()?;
+    if current.chain_id != stored.chain_id || current.source != stored.source {
+        return Err("durable checkpoint changed chain or finality source".into());
+    }
+    if current.block_number < stored.block_number {
+        return Err("durable checkpoint regressed".into());
+    }
+    if current.block_number == stored.block_number
+        && (current.block_hash != stored.block_hash || current.parent_hash != stored.parent_hash)
+    {
+        return Err("durable checkpoint was replaced at the same height".into());
+    }
+    Ok(())
+}
+
+fn load_or_create_proof_da_post_journal(
+    path: &Path,
+    chain_id: u64,
+    rollup: &str,
+    submitter: &str,
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+) -> ProofDaPostJournal {
+    if path.exists() {
+        secure_private_path(path);
+        let bytes = fs::read(path)
+            .unwrap_or_else(|error| die(format!("read {}: {error}", path.display())));
+        let journal: ProofDaPostJournal = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| die(format!("parse {}: {error}", path.display())));
+        if journal.version != PROOF_DA_POST_JOURNAL_VERSION
+            || journal.chain_id != chain_id
+            || !same_hex_value(&journal.rollup, rollup)
+            || !same_hex_value(&journal.submitter, submitter)
+            || !same_hex_value(&journal.proof_hash, proof_hash)
+            || journal.proof_length != proof_length
+            || !same_hex_value(&journal.state_root, state_root)
+            || journal.rounds.len() > 3
+            || journal
+                .rounds
+                .iter()
+                .enumerate()
+                .any(|(index, round)| round.round_index != index)
+        {
+            die(format!(
+                "proof-DA journal {} does not describe this exact chain/rollup/proof lifecycle",
+                path.display()
+            ));
+        }
+        return journal;
+    }
+    let journal = ProofDaPostJournal {
+        version: PROOF_DA_POST_JOURNAL_VERSION,
+        chain_id,
+        rollup: rollup.to_string(),
+        submitter: submitter.to_string(),
+        proof_hash: proof_hash.to_string(),
+        proof_length,
+        state_root: state_root.to_string(),
+        rounds: Vec::new(),
+    };
+    write_private_json_at(path, &journal);
+    journal
+}
+
+fn stage_persisted_full_withdrawal_artifacts(
+    artifacts: &PersistedFullWithdrawalArtifacts,
+    contracts_dir: &Path,
+) {
+    let write = |path: &Path, bytes: &[u8]| {
+        fs::write(path, bytes)
+            .unwrap_or_else(|error| die(format!("stage {}: {error}", path.display())));
+    };
+    write(Path::new("lifecycle.json"), &artifacts.lifecycle_json);
+    write(
+        Path::new("lifecycle_validity_mle.json"),
+        &artifacts.validity_mle_json,
+    );
+    write(
+        Path::new("withdrawal_mle.json"),
+        &artifacts.withdrawal_mle_json,
+    );
+    write(
+        Path::new("withdrawal_payout.json"),
+        &artifacts.payout_json,
+    );
+    let data_dir = contracts_dir.join("test/data");
+    write(
+        &data_dir.join("sepolia_lifecycle.json"),
+        &artifacts.lifecycle_json,
+    );
+    write(
+        &data_dir.join("sepolia_lifecycle_validity_mle.json"),
+        &artifacts.validity_mle_json,
+    );
+    write(
+        &data_dir.join("sepolia_withdrawal_mle.json"),
+        &artifacts.withdrawal_mle_json,
+    );
+    write(
+        &data_dir.join("sepolia_withdrawal_payout.json"),
+        &artifacts.payout_json,
+    );
+    match (
+        &artifacts.erc20_withdrawal_mle_json,
+        &artifacts.erc20_payout_json,
+    ) {
+        (Some(mle), Some(payout)) => {
+            write(Path::new("erc20_withdrawal_mle.json"), mle);
+            write(Path::new("erc20_withdrawal_payout.json"), payout);
+            write(&data_dir.join("sepolia_erc20_withdrawal_mle.json"), mle);
+            write(
+                &data_dir.join("sepolia_erc20_withdrawal_payout.json"),
+                payout,
+            );
+        }
+        (None, None) => {}
+        _ => die("persisted ERC-20 withdrawal artifact pair is incomplete"),
+    }
+}
+
+fn run_close_materialized_call(
+    contracts_dir: &Path,
+    step: &str,
+    journal_path: &Path,
+    expected_target: &str,
+    environment: &[(&str, &str)],
+) -> DryRunL1Call {
+    let materialize_step = match step {
+        "attestProofDataStep()" => "materializeAttestProofDataCalldataStep()",
+        "finalizeStep()" => "materializeFinalizeCalldataStep()",
+        "withdrawNativeStep()" => "materializeWithdrawNativeCalldataStep()",
+        "withdrawErc20Step()" => "materializeWithdrawErc20CalldataStep()",
+        _ => die(format!("no deterministic calldata materializer is defined for {step}")),
+    };
+    let output_path = journal_path
+        .parent()
+        .unwrap_or_else(|| die("withdrawal journal has no operation directory"))
+        .join(format!("{}.calldata", step.trim_end_matches("()")));
+    // Poison any stale helper output before running Forge.  Only a successful script that replaces
+    // this sentinel with valid hex can cross the durable-intent boundary below.
+    write_private_bytes_at(&output_path, b"INVALID");
+    let mut forge = Command::new("forge");
+    forge
+        .current_dir(contracts_dir)
+        .args([
+            "script",
+            "script/RunClose.s.sol:RunClose",
+            "--sig",
+            materialize_step,
+        ]);
+    for (name, value) in environment {
+        forge.env(name, value);
+    }
+    forge.env("CALLDATA_OUT", &output_path);
+    let output = forge
+        .output()
+        .unwrap_or_else(|error| die(format!("forge {step} calldata materializer failed to start: {error}")));
+    if !output.status.success() {
+        die(format!(
+            "forge {step} calldata materialization FAILED before any broadcast:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let calldata = fs::read_to_string(&output_path)
+        .unwrap_or_else(|error| die(format!("read {}: {error}", output_path.display())))
+        .trim()
+        .to_string();
+    let body = calldata
+        .strip_prefix("0x")
+        .or_else(|| calldata.strip_prefix("0X"))
+        .unwrap_or_else(|| die(format!("forge {step} materialized calldata has no 0x prefix")));
+    if body.len() < 8 || body.len() % 2 != 0 || !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        die(format!("forge {step} materialized malformed calldata"));
+    }
+    DryRunL1Call {
+        target: expected_target.to_string(),
+        calldata,
+        value: 0,
+    }
+}
+
+fn execute_run_close_full_withdrawal_step(
+    contracts_dir: &Path,
+    rpc: &str,
+    chain_id: u64,
+    signer: &L1Signer,
+    journal_path: &Path,
+    journal: &mut FullWithdrawalOperationJournal,
+    journal_step: &str,
+    forge_step: &str,
+    expected_target: &str,
+    environment: &[(&str, &str)],
+) -> FullWithdrawalCallConfirmation {
+    let intent = prepare_run_close_full_withdrawal_step(
+        contracts_dir,
+        rpc,
+        chain_id,
+        signer,
+        journal_path,
+        journal,
+        journal_step,
+        forge_step,
+        expected_target,
+        environment,
+        None,
+    );
+    execute_full_withdrawal_call(
+        rpc,
+        chain_id,
+        signer,
+        journal_path,
+        journal,
+        journal_step,
+        &intent.target,
+        &intent.calldata,
+        intent.value,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_run_close_full_withdrawal_step(
+    contracts_dir: &Path,
+    rpc: &str,
+    chain_id: u64,
+    signer: &L1Signer,
+    journal_path: &Path,
+    journal: &mut FullWithdrawalOperationJournal,
+    journal_step: &str,
+    forge_step: &str,
+    expected_target: &str,
+    environment: &[(&str, &str)],
+    observation_start_block: Option<u64>,
+) -> FullWithdrawalCallIntent {
+    if let Some(intent) = journal.calls.get(journal_step).cloned() {
+        if !same_hex_value(&intent.target, expected_target) {
+            die(format!(
+                "persisted {journal_step} target differs from the expected contract"
+            ));
+        }
+        return intent;
+    }
+    let dry = run_close_materialized_call(
+        contracts_dir,
+        forge_step,
+        journal_path,
+        expected_target,
+        environment,
+    );
+    if !same_hex_value(&dry.target, expected_target) {
+        die(format!(
+            "forge {forge_step} dry-run targets {}, expected {expected_target}",
+            dry.target
+        ));
+    }
+    ensure_full_withdrawal_call_intent(
+        rpc,
+        chain_id,
+        signer,
+        journal_path,
+        journal,
+        journal_step,
+        &dry.target,
+        &dry.calldata,
+        dry.value,
+        observation_start_block,
+    )
+}
+
+/// Materialize the exact `abi.encode(MleProof)` byte stream before any on-chain lifecycle
+/// mutation. `cast send --blob --path` feeds this raw stream to Foundry's SimpleCoder, which adds
+/// its length header, losslessly packs 31 payload bytes per field element and splits it across
+/// blobs. The Solidity script is the single ABI encoder; Rust independently re-checks its length,
+/// keccak and expected blob count so a stale/malformed output cannot be posted.
+fn prepare_validity_proof_da(contracts_dir: &Path) -> (PathBuf, ProofDaMetadata) {
+    let repo_root = contracts_dir
+        .parent()
+        .unwrap_or_else(|| die("contracts checkout has no parent directory"));
+    let output_dir = repo_root.join(PROOF_DA_DIR);
+    fs::create_dir_all(&output_dir)
+        .unwrap_or_else(|e| die(format!("create {}: {e}", output_dir.display())));
+
+    let status = Command::new("forge")
+        .current_dir(contracts_dir)
+        .args([
+            "script",
+            "script/PrepareProofDa.s.sol:PrepareProofDa",
+            "--sig",
+            "run()",
+        ])
+        .status()
+        .unwrap_or_else(|e| die(format!("forge proof-DA encoder failed to start: {e}")));
+    if !status.success() {
+        die("forge proof-DA encoder failed; no on-chain withdrawal step was attempted");
+    }
+
+    let payload_path = output_dir.join(PROOF_DA_FILE);
+    let metadata_path = output_dir.join(PROOF_DA_METADATA_FILE);
+    let payload = fs::read(&payload_path)
+        .unwrap_or_else(|e| die(format!("read {}: {e}", payload_path.display())));
+    let metadata: ProofDaMetadata = serde_json::from_slice(
+        &fs::read(&metadata_path)
+            .unwrap_or_else(|e| die(format!("read {}: {e}", metadata_path.display()))),
+    )
+    .unwrap_or_else(|e| die(format!("parse {}: {e}", metadata_path.display())));
+
+    if metadata.codec != "alloy-simple-coder-v1" {
+        die(format!("unsupported proof-DA codec {}", metadata.codec));
+    }
+    if payload.len() as u64 != metadata.proof_length {
+        die(format!(
+            "proof-DA length mismatch: file {} != metadata {}",
+            payload.len(), metadata.proof_length
+        ));
+    }
+    let actual_hash = format!("0x{}", hex::encode(keccak_hash::keccak(&payload).0));
+    if !metadata.proof_hash.eq_ignore_ascii_case(&actual_hash) {
+        die(format!(
+            "proof-DA hash mismatch: file {actual_hash} != metadata {}",
+            metadata.proof_hash
+        ));
+    }
+    // SimpleCoder consumes one field element for the u64 length header, then ceil(len/31)
+    // elements for payload. Each blob has exactly 4096 elements.
+    let payload_elements = (payload.len() + 30) / 31;
+    let expected_blobs = (1 + payload_elements).div_ceil(4096);
+    if expected_blobs == 0 || expected_blobs > 2 || metadata.blob_count as usize != expected_blobs {
+        die(format!(
+            "proof-DA blob count mismatch/overflow: expected {expected_blobs}, metadata {}",
+            metadata.blob_count
+        ));
+    }
+
+    (payload_path, metadata)
+}
 
 /// Render a serde_json array of hex/decimal strings as a cast array literal `[a,b,c]`.
 fn json_str_array(v: &serde_json::Value) -> String {
@@ -3455,8 +4362,1360 @@ fn json_num_array(v: &serde_json::Value) -> String {
     format!("[{}]", items.join(","))
 }
 
-/// Post one block (index `i` into `lifecycle.blocks`) as its own blob submission round.
-fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, signer: &L1Signer, rpc: &str) {
+fn lifecycle_registration_commitment(registration: &serde_json::Value) -> String {
+    let active = registration["member_pk_gs"]
+        .as_array()
+        .unwrap_or_else(|| die("registration.member_pk_gs must be an array"));
+    if active.is_empty() || active.len() > MAX_SIG_CLUSTER {
+        die("registration.member_pk_gs has an invalid cosigner count");
+    }
+    let mut hashes = [Bytes32::default(); MAX_SIG_CLUSTER];
+    for (index, value) in active.iter().enumerate() {
+        hashes[index] = value
+            .as_str()
+            .unwrap_or_else(|| die("registration.member_pk_gs entry is not a string"))
+            .parse::<Bytes32>()
+            .unwrap_or_else(|error| die(format!("parse registration pk_g: {error}")));
+    }
+    close_member_set_commitment(&hashes, active.len() as u8).to_string()
+}
+
+fn decode_signed_blob_transaction(raw_transaction: &str) -> DecodedBlobTransaction {
+    let raw = raw_transaction.trim();
+    if raw.len() < 4
+        || raw.len() > 2 * 1024 * 1024
+        || !raw.starts_with("0x03")
+        || !raw[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        die("cast mktx returned a malformed or oversized signed blob transaction");
+    }
+    let mut child = Command::new("cast")
+        .args(["decode-transaction", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| die(format!("cast decode-transaction failed to start: {error}")));
+    child
+        .stdin
+        .take()
+        .expect("piped cast decoder stdin")
+        .write_all(raw.as_bytes())
+        .unwrap_or_else(|error| die(format!("write signed transaction to cast decoder: {error}")));
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|error| die(format!("wait for cast transaction decoder: {error}")));
+    if !output.status.success() || output.stdout.len() > 2 * 1024 * 1024 {
+        die(format!(
+            "cast decode-transaction rejected the signed blob transaction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| die(format!("parse decoded signed blob transaction: {error}")))
+}
+
+fn sign_blob_post(
+    rollup: &str,
+    signer: &L1Signer,
+    rpc: &str,
+    sub_block: &str,
+    proof_da_path: &str,
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+    pending_pin: &str,
+) -> (String, String) {
+    const POST_SIG: &str =
+        "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)";
+    let proof_length = proof_length.to_string();
+    let intended_calldata = cast(&[
+        "calldata",
+        POST_SIG,
+        sub_block,
+        proof_hash,
+        &proof_length,
+        state_root,
+        pending_pin,
+    ])
+    .trim()
+    .to_string();
+
+    let mut command = Command::new("cast");
+    command.args([
+        "mktx",
+        rollup,
+        POST_SIG,
+        sub_block,
+        proof_hash,
+        &proof_length,
+        state_root,
+        pending_pin,
+        "--value",
+        "1ether",
+        "--blob",
+        "--path",
+        proof_da_path,
+        "--rpc-url",
+        rpc,
+        "--json",
+    ]);
+    signer.append_to_command(&mut command);
+    let output = command
+        .output()
+        .unwrap_or_else(|error| die(format!("cast mktx blob post failed to start: {error}")));
+    if !output.status.success() {
+        die(format!(
+            "cast mktx blob post failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let raw = String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| die(format!("signed blob transaction is not UTF-8 hex: {error}")))
+        .trim()
+        .to_string();
+    (raw, intended_calldata)
+}
+
+fn rpc_knows_transaction(rpc: &str, tx_hash: &str) -> bool {
+    let output = Command::new("cast")
+        .args([
+            "rpc",
+            "eth_getTransactionByHash",
+            tx_hash,
+            "--rpc-url",
+            rpc,
+        ])
+        .output()
+        .unwrap_or_else(|error| die(format!("query blob transaction failed to start: {error}")));
+    output.status.success()
+        && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .is_ok_and(|value| !value.is_null())
+}
+
+fn full_withdrawal_intent_tx_hash_in_block(
+    block: &serde_json::Value,
+    intent: &FullWithdrawalCallIntent,
+) -> Result<Option<String>, String> {
+    let transactions = block["transactions"]
+        .as_array()
+        .ok_or_else(|| "full block has no transactions array".to_string())?;
+    for transaction in transactions {
+        let Some(from) = transaction["from"].as_str() else {
+            continue;
+        };
+        if !from.eq_ignore_ascii_case(&intent.caller) {
+            continue;
+        }
+        let nonce = json_u64_quantity(&transaction["nonce"], "transaction nonce")?;
+        if nonce != intent.caller_nonce {
+            continue;
+        }
+        let target = transaction["to"].as_str().unwrap_or_default();
+        let calldata = transaction["input"]
+            .as_str()
+            .or_else(|| transaction["data"].as_str())
+            .ok_or_else(|| "transaction at intended nonce has no calldata".to_string())?;
+        let value = json_u64_quantity(&transaction["value"], "transaction value")?;
+        if !target.eq_ignore_ascii_case(&intent.target)
+            || !same_hex_value(calldata, &intent.calldata)
+            || value != intent.value
+        {
+            return Err(format!(
+                "sender nonce {} was replaced: target={target}, value={value}",
+                intent.caller_nonce
+            ));
+        }
+        return transaction["hash"]
+            .as_str()
+            .filter(|hash| !hash.is_empty())
+            .map(|hash| Some(hash.to_string()))
+            .ok_or_else(|| "exact transaction has no hash".to_string());
+    }
+    Ok(None)
+}
+
+fn scan_finalized_full_withdrawal_intent(
+    rpc: &str,
+    intent: &FullWithdrawalCallIntent,
+) -> Option<String> {
+    let durable = read_durable_l1_checkpoint(rpc, rpc_chain_id(rpc));
+    if durable.block_number < intent.start_block {
+        return None;
+    }
+    for block_number in intent.start_block..=durable.block_number {
+        let block_arg = block_number.to_string();
+        let raw = cast(&["block", &block_arg, "--full", "--json", "--rpc-url", rpc]);
+        let block: serde_json::Value = serde_json::from_str(raw.trim())
+            .unwrap_or_else(|error| die(format!("parse full block {block_number}: {error}")));
+        match full_withdrawal_intent_tx_hash_in_block(&block, intent) {
+            Ok(Some(hash)) => return Some(hash),
+            Ok(None) => {}
+            Err(error) => die(format!(
+                "full-withdrawal transaction at persisted sender nonce is not the exact intended call: {error}"
+            )),
+        }
+    }
+    None
+}
+
+fn wait_for_finalized_full_withdrawal_call(
+    rpc: &str,
+    chain_id: u64,
+    transaction_hash: &str,
+    intent: &FullWithdrawalCallIntent,
+) -> FullWithdrawalCallConfirmation {
+    let timeout_secs = std::env::var("INTMAX_L1_FINALITY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(3_600)
+        .clamp(1, 86_400);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(receipt) = try_blob_receipt(rpc, transaction_hash) {
+            let receipt_hash = receipt["transactionHash"]
+                .as_str()
+                .unwrap_or_else(|| die("full-withdrawal receipt has no transactionHash"));
+            let from = receipt["from"]
+                .as_str()
+                .unwrap_or_else(|| die("full-withdrawal receipt has no from"));
+            let to = receipt["to"]
+                .as_str()
+                .unwrap_or_else(|| die("full-withdrawal receipt has no to"));
+            if !same_hex_value(receipt_hash, transaction_hash)
+                || !same_hex_value(from, &intent.caller)
+                || !same_hex_value(to, &intent.target)
+            {
+                die("full-withdrawal receipt identity differs from the durable intent");
+            }
+            let status = receipt["status"]
+                .as_str()
+                .map(|status| status == "0x1" || status == "1")
+                .or_else(|| receipt["status"].as_u64().map(|status| status == 1))
+                .unwrap_or(false);
+            if !status {
+                die(format!(
+                    "full-withdrawal transaction {transaction_hash} reverted; the operation journal is retained and no alternative call will be attempted"
+                ));
+            }
+
+            let transaction_raw = cast(&["tx", transaction_hash, "--json", "--rpc-url", rpc]);
+            let transaction: serde_json::Value = serde_json::from_str(transaction_raw.trim())
+                .unwrap_or_else(|error| die(format!("parse full-withdrawal transaction: {error}")));
+            let synthetic_block = serde_json::json!({ "transactions": [transaction] });
+            match full_withdrawal_intent_tx_hash_in_block(&synthetic_block, intent) {
+                Ok(Some(hash)) if same_hex_value(&hash, transaction_hash) => {}
+                Ok(_) => die("full-withdrawal transaction does not match its durable intent"),
+                Err(error) => die(format!("validate full-withdrawal transaction: {error}")),
+            }
+
+            let block_hash_text = receipt["blockHash"]
+                .as_str()
+                .unwrap_or_else(|| die("full-withdrawal receipt has no blockHash"));
+            let block_hash = block_hash_text
+                .parse::<Bytes32>()
+                .unwrap_or_else(|error| die(format!("parse receipt block hash: {error}")));
+            let block_number = receipt_quantity(&receipt, "blockNumber");
+            let durable_before = read_durable_l1_checkpoint(rpc, chain_id);
+            if block_number <= durable_before.block_number {
+                let block_tag = format!("0x{block_number:x}");
+                let canonical = rpc_block_json(rpc, &block_tag)
+                    .and_then(|raw| {
+                        parse_l1_checkpoint_block(&raw, chain_id, durable_before.source)
+                    })
+                    .unwrap_or_else(|error| {
+                        die(format!("read canonical full-withdrawal receipt block: {error}"))
+                    });
+                validate_receipt_block_evidence(
+                    block_number,
+                    block_hash,
+                    &canonical,
+                    &durable_before,
+                )
+                .unwrap_or_else(|error| {
+                    die(format!(
+                        "full-withdrawal transaction {transaction_hash} is not canonical/final: {error}"
+                    ))
+                });
+                let second = try_blob_receipt(rpc, transaction_hash).unwrap_or_else(|| {
+                    die("full-withdrawal receipt disappeared during final read-back")
+                });
+                for field in [
+                    "transactionHash",
+                    "blockHash",
+                    "blockNumber",
+                    "status",
+                    "from",
+                    "to",
+                    "logs",
+                ] {
+                    if receipt[field] != second[field] {
+                        die(format!(
+                            "full-withdrawal receipt field {field} changed during final read-back"
+                        ));
+                    }
+                }
+                revalidate_l1_checkpoint(rpc, &durable_before);
+                let durable_after = read_durable_l1_checkpoint(rpc, chain_id);
+                if durable_after.source != durable_before.source
+                    || durable_after.block_number < durable_before.block_number
+                    || (durable_after.block_number == durable_before.block_number
+                        && (durable_after.block_hash != durable_before.block_hash
+                            || durable_after.parent_hash != durable_before.parent_hash))
+                {
+                    die("durable L1 head regressed or changed during full-withdrawal receipt read-back");
+                }
+                durable_after
+                    .covers_receipt(block_number, block_hash)
+                    .unwrap_or_else(|error| die(format!("receipt lost finality: {error}")));
+                return FullWithdrawalCallConfirmation {
+                    transaction_hash: transaction_hash.to_string(),
+                    block_hash: block_hash_text.to_string(),
+                    block_number,
+                    finalized_checkpoint: durable_after,
+                };
+            }
+        }
+        if started.elapsed().as_secs() >= timeout_secs {
+            die(format!(
+                "full-withdrawal transaction {transaction_hash} is not covered by a canonical durable head after {timeout_secs}s; its exact intent/nonce is safely persisted"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(6));
+    }
+}
+
+fn revalidate_full_withdrawal_confirmation(
+    rpc: &str,
+    chain_id: u64,
+    intent: &FullWithdrawalCallIntent,
+    stored: &FullWithdrawalCallConfirmation,
+) {
+    if !intent
+        .transaction_hashes
+        .iter()
+        .any(|hash| same_hex_value(hash, &stored.transaction_hash))
+    {
+        die("full-withdrawal confirmation names a transaction outside its intent journal");
+    }
+    revalidate_l1_checkpoint(rpc, &stored.finalized_checkpoint);
+    let reread = wait_for_finalized_full_withdrawal_call(
+        rpc,
+        chain_id,
+        &stored.transaction_hash,
+        intent,
+    );
+    validate_durable_checkpoint_advancement(
+        &stored.finalized_checkpoint,
+        &reread.finalized_checkpoint,
+    )
+    .unwrap_or_else(|error| die(format!("full-withdrawal checkpoint progression: {error}")));
+    // A later finalized head is expected.  Receipt identity must remain exact; requiring the head
+    // struct itself to remain byte-identical would make every healthy restart fail as L1 advances.
+    if !same_hex_value(&reread.transaction_hash, &stored.transaction_hash)
+        || !same_hex_value(&reread.block_hash, &stored.block_hash)
+        || reread.block_number != stored.block_number
+    {
+        die("stored full-withdrawal receipt changed or was orphaned");
+    }
+}
+
+fn publish_full_withdrawal_call(
+    rpc: &str,
+    signer: &L1Signer,
+    intent: &FullWithdrawalCallIntent,
+) -> String {
+    let nonce = intent.caller_nonce.to_string();
+    let value = intent.value.to_string();
+    let mut command = Command::new("cast");
+    command.args([
+        "send",
+        &intent.target,
+        &intent.calldata,
+        "--value",
+        &value,
+        "--nonce",
+        &nonce,
+        "--async",
+        "--rpc-url",
+        rpc,
+    ]);
+    signer.append_to_command(&mut command);
+    let output = command
+        .output()
+        .unwrap_or_else(|error| die(format!("broadcast full-withdrawal call: {error}")));
+    if !output.status.success() {
+        die(format!(
+            "full-withdrawal broadcast returned an error after its intent was safely journaled: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hex_body(&hash, 64, "full-withdrawal transaction hash").len() != 64 {
+        unreachable!("hex_body either validates or terminates")
+    }
+    hash
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_full_withdrawal_call_intent(
+    rpc: &str,
+    chain_id: u64,
+    signer: &L1Signer,
+    journal_path: &Path,
+    journal: &mut FullWithdrawalOperationJournal,
+    step: &str,
+    target: &str,
+    calldata: &str,
+    value: u64,
+    observation_start_block: Option<u64>,
+) -> FullWithdrawalCallIntent {
+    let caller = signer.address();
+    if let Some(intent) = journal.calls.get(step) {
+        if !same_hex_value(&intent.caller, &caller)
+            || !same_hex_value(&intent.target, target)
+            || !same_hex_value(&intent.calldata, calldata)
+            || intent.value != value
+        {
+            die(format!(
+                "full-withdrawal step {step} differs from its durable target/calldata/value intent"
+            ));
+        }
+        return intent.clone();
+    }
+
+    let checkpoint = read_durable_l1_checkpoint(rpc, chain_id);
+    require_stable_durable_l1_checkpoint(rpc, &checkpoint);
+    let start_block = observation_start_block.unwrap_or(checkpoint.block_number);
+    if start_block > checkpoint.block_number {
+        die(format!(
+            "full-withdrawal step {step} observation start {start_block} is ahead of durable L1 block {}",
+            checkpoint.block_number
+        ));
+    }
+    let intent = FullWithdrawalCallIntent {
+        caller,
+        target: target.to_string(),
+        calldata: calldata.to_string(),
+        value,
+        caller_nonce: read_account_nonce(rpc, &signer.address(), "latest"),
+        start_block,
+        transaction_hashes: Vec::new(),
+        confirmation: None,
+        external_completion: None,
+    };
+    journal.calls.insert(step.to_string(), intent.clone());
+    // Irreversible ordering: exact call + value + nonce reach durable storage before either an
+    // observation of a permissionless equivalent or our first broadcast.
+    write_private_json_at(journal_path, journal);
+    intent
+}
+
+fn execute_full_withdrawal_call(
+    rpc: &str,
+    chain_id: u64,
+    signer: &L1Signer,
+    journal_path: &Path,
+    journal: &mut FullWithdrawalOperationJournal,
+    step: &str,
+    target: &str,
+    calldata: &str,
+    value: u64,
+) -> FullWithdrawalCallConfirmation {
+    let caller = signer.address();
+    let mut intent = ensure_full_withdrawal_call_intent(
+        rpc,
+        chain_id,
+        signer,
+        journal_path,
+        journal,
+        step,
+        target,
+        calldata,
+        value,
+        None,
+    );
+    if let Some(confirmation) = &intent.confirmation {
+        revalidate_full_withdrawal_confirmation(rpc, chain_id, &intent, confirmation);
+        return confirmation.clone();
+    }
+
+    let known = intent
+        .transaction_hashes
+        .iter()
+        .rev()
+        .find(|hash| rpc_knows_transaction(rpc, hash))
+        .cloned();
+    let transaction_hash = known
+        .or_else(|| scan_finalized_full_withdrawal_intent(rpc, &intent))
+        .unwrap_or_else(|| {
+            require_nonce_free_for_exact_rebroadcast(rpc, &caller, intent.caller_nonce);
+            let hash = publish_full_withdrawal_call(rpc, signer, &intent);
+            intent.transaction_hashes.push(hash.clone());
+            journal.calls.insert(step.to_string(), intent.clone());
+            write_private_json_at(journal_path, journal);
+            hash
+        });
+    if !intent
+        .transaction_hashes
+        .iter()
+        .any(|hash| same_hex_value(hash, &transaction_hash))
+    {
+        intent.transaction_hashes.push(transaction_hash.clone());
+        journal.calls.insert(step.to_string(), intent.clone());
+        write_private_json_at(journal_path, journal);
+    }
+    let confirmation =
+        wait_for_finalized_full_withdrawal_call(rpc, chain_id, &transaction_hash, &intent);
+    intent.confirmation = Some(confirmation.clone());
+    journal.calls.insert(step.to_string(), intent);
+    write_private_json_at(journal_path, journal);
+    confirmation
+}
+
+const NATIVE_WITHDRAWN_TOPIC0: &str =
+    "0x0dcdc8824ca42304db65c0f3d90130322c57c0f555020903b0093ae53a63cb83";
+const ERC20_WITHDRAWN_TOPIC0: &str =
+    "0x8f44e01a37a9f44336a841309918a3d5ba2899c0707d8cbea326b68dfd84796e";
+const CHANNEL_FUNDS_PULLED_TOPIC0: &str =
+    "0x9553ce64219459d216d4165bfe5b52b4c4495e00b24a1fc57afcb4a0d38e5d50";
+const WITHDRAWAL_CREDITED_TOPIC0: &str =
+    "0x459f560336b72d57e46610439b7c1a8426cf7b7a2a0428d5fb5c7b0b7528b60d";
+const FINALIZED_TOPIC0: &str =
+    "0xa05a0e9561eff1f01a29e7a680d5957bb7312e5766a8da1f494b6d6ac18031f4";
+const PROOF_DATA_ATTESTED_TOPIC0: &str =
+    "0x7ede6b2f9f8a23acaf8c0e62b696ec12ae1bc8df6da2a0816238ee2909768993";
+
+#[derive(Clone, Debug)]
+enum FullWithdrawalEventExpectation {
+    ProofDataAttested {
+        rollup: String,
+        submission_id: u64,
+        submission_commitment: String,
+        proof_hash: String,
+        proof_length: u32,
+    },
+    Finalized {
+        submission_id: u64,
+        state_root: String,
+    },
+    WithdrawalCredited {
+        recipient: String,
+        amount: u64,
+    },
+    NativeWithdrawn {
+        recipient: String,
+        amount: u64,
+        nullifier: String,
+        intmax_block_number: u64,
+    },
+    Erc20Withdrawn {
+        recipient: String,
+        token_index: u32,
+        amount: u64,
+        nullifier: String,
+        intmax_block_number: u64,
+    },
+    ChannelFundsPulled {
+        token_index: u32,
+        minimum_amount: u64,
+    },
+}
+
+impl FullWithdrawalEventExpectation {
+    fn topic0(&self) -> &'static str {
+        match self {
+            Self::ProofDataAttested { .. } => PROOF_DATA_ATTESTED_TOPIC0,
+            Self::Finalized { .. } => FINALIZED_TOPIC0,
+            Self::WithdrawalCredited { .. } => WITHDRAWAL_CREDITED_TOPIC0,
+            Self::NativeWithdrawn { .. } => NATIVE_WITHDRAWN_TOPIC0,
+            Self::Erc20Withdrawn { .. } => ERC20_WITHDRAWN_TOPIC0,
+            Self::ChannelFundsPulled { .. } => CHANNEL_FUNDS_PULLED_TOPIC0,
+        }
+    }
+
+    fn matches(&self, log: &serde_json::Value) -> Result<bool, String> {
+        if log["removed"].as_bool().unwrap_or(false) {
+            return Ok(false);
+        }
+        let topics = log["topics"]
+            .as_array()
+            .ok_or_else(|| "event log has no topics".to_string())?;
+        let topic = |index: usize| -> Result<&str, String> {
+            topics
+                .get(index)
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| format!("event log has no topic {index}"))
+        };
+        if !same_hex_value(topic(0)?, self.topic0()) {
+            return Ok(false);
+        }
+        let data = log["data"]
+            .as_str()
+            .ok_or_else(|| "event log has no data".to_string())?
+            .trim_start_matches("0x");
+        let address_topic_matches = |actual: &str, expected: &str| -> Result<bool, String> {
+            let actual = hex_body(actual, 64, "indexed address topic");
+            let expected = hex_body(expected, 40, "expected address");
+            Ok(actual[..24].bytes().all(|byte| byte == b'0')
+                && actual[24..].eq_ignore_ascii_case(expected))
+        };
+        match self {
+            Self::ProofDataAttested {
+                rollup,
+                submission_id,
+                submission_commitment,
+                proof_hash,
+                proof_length,
+            } => Ok(
+                address_topic_matches(topic(1)?, rollup)?
+                    && abi_word_u64(topic(2)?, "ProofDataAttested.submissionId")
+                        == *submission_id
+                    && same_hex_value(topic(3)?, submission_commitment)
+                    && same_hex_value(abi_word(data, 1), proof_hash)
+                    && abi_word_u64(abi_word(data, 2), "ProofDataAttested.proofLength")
+                        == u64::from(*proof_length),
+            ),
+            Self::Finalized {
+                submission_id,
+                state_root,
+            } => Ok(
+                abi_word_u64(topic(1)?, "Finalized.submissionId") == *submission_id
+                    && same_hex_value(abi_word(data, 0), state_root),
+            ),
+            Self::WithdrawalCredited { recipient, amount } => Ok(
+                address_topic_matches(topic(1)?, recipient)?
+                    && abi_word_u64(abi_word(data, 0), "WithdrawalCredited.amount") == *amount,
+            ),
+            Self::NativeWithdrawn {
+                recipient,
+                amount,
+                nullifier,
+                intmax_block_number,
+            } => Ok(
+                address_topic_matches(topic(1)?, recipient)?
+                    && same_hex_value(topic(2)?, nullifier)
+                    && abi_word_u64(abi_word(data, 0), "NativeWithdrawn.amount") == *amount
+                    && abi_word_u64(abi_word(data, 1), "NativeWithdrawn.blockNumber")
+                        == *intmax_block_number,
+            ),
+            Self::Erc20Withdrawn {
+                recipient,
+                token_index,
+                amount,
+                nullifier,
+                intmax_block_number,
+            } => Ok(
+                address_topic_matches(topic(1)?, recipient)?
+                    && abi_word_u64(topic(2)?, "Erc20Withdrawn.tokenIndex")
+                        == u64::from(*token_index)
+                    && same_hex_value(topic(3)?, nullifier)
+                    && abi_word_u64(abi_word(data, 0), "Erc20Withdrawn.amount") == *amount
+                    && abi_word_u64(abi_word(data, 1), "Erc20Withdrawn.blockNumber")
+                        == *intmax_block_number,
+            ),
+            Self::ChannelFundsPulled {
+                token_index,
+                minimum_amount,
+            } => Ok(
+                abi_word_u64(topic(1)?, "ChannelFundsPulled.tokenIndex")
+                    == u64::from(*token_index)
+                    && abi_word_u64(abi_word(data, 0), "ChannelFundsPulled.amount")
+                        >= *minimum_amount,
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FullWithdrawalDescriptor {
+    recipient: String,
+    token_index: u32,
+    amount: u64,
+    nullifier: String,
+    intmax_block_number: u64,
+}
+
+fn full_withdrawal_descriptor(payout_json: &[u8], what: &str) -> FullWithdrawalDescriptor {
+    let value: serde_json::Value = serde_json::from_slice(payout_json)
+        .unwrap_or_else(|error| die(format!("parse {what}: {error}")));
+    let withdrawal = &value["withdrawals"][0];
+    FullWithdrawalDescriptor {
+        recipient: withdrawal["recipient"]
+            .as_str()
+            .unwrap_or_else(|| die(format!("{what} has no recipient")))
+            .to_string(),
+        token_index: u32::try_from(
+            withdrawal["token_index"]
+                .as_u64()
+                .unwrap_or_else(|| die(format!("{what} has no token_index"))),
+        )
+        .unwrap_or_else(|_| die(format!("{what} token_index exceeds u32"))),
+        amount: withdrawal["amount"]
+            .as_str()
+            .unwrap_or_else(|| die(format!("{what} has no amount")))
+            .parse()
+            .unwrap_or_else(|error| die(format!("parse {what} amount: {error}"))),
+        nullifier: withdrawal["nullifier"]
+            .as_str()
+            .unwrap_or_else(|| die(format!("{what} has no nullifier")))
+            .to_string(),
+        intmax_block_number: value["block_number"]
+            .as_u64()
+            .unwrap_or_else(|| die(format!("{what} has no block_number"))),
+    }
+}
+
+fn proof_data_attestation_state(
+    rpc: &str,
+    rollup: &str,
+    submission_id: u64,
+    proof_hash: &str,
+    proof_length: u32,
+    block_number: Option<u64>,
+) -> (String, String, bool) {
+    let submission = submission_id.to_string();
+    let kzg = block_number.map_or_else(
+        || cast_call(rpc, rollup, "kzgVerifier()(address)", &[]),
+        |block| cast_call_at(rpc, rollup, "kzgVerifier()(address)", &[], block),
+    );
+    let commitment = block_number.map_or_else(
+        || {
+            cast_call(
+                rpc,
+                rollup,
+                "getCommitment(uint256)(bytes32)",
+                &[&submission],
+            )
+        },
+        |block| {
+            cast_call_at(
+                rpc,
+                rollup,
+                "getCommitment(uint256)(bytes32)",
+                &[&submission],
+                block,
+            )
+        },
+    );
+    if strip0x(&kzg).trim_matches('0').is_empty()
+        || strip0x(&commitment).trim_matches('0').is_empty()
+    {
+        die("proof-DA attestation lookup found a zero verifier or submission commitment");
+    }
+    // `BlobKZGVerifier.isProofDataAttested` namespaces its lookup by msg.sender.  eth_call permits
+    // an explicit `from`; using the rollup address reproduces the actual call context without
+    // adding another byte to the EIP-170-constrained rollup runtime.
+    let length = proof_length.to_string();
+    let mut command = Command::new("cast");
+    command.args([
+        "call",
+        &kzg,
+        "isProofDataAttested(uint256,bytes32,bytes32,uint256)(bool)",
+        &submission,
+        &commitment,
+        proof_hash,
+        &length,
+        "--from",
+        rollup,
+        "--rpc-url",
+        rpc,
+    ]);
+    let block = block_number.map(|number| number.to_string());
+    if let Some(block) = &block {
+        command.args(["--block", block]);
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| die(format!("query proof-DA attestation: {error}")));
+    if !output.status.success() {
+        die(format!(
+            "query proof-DA attestation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let attested = match String::from_utf8_lossy(&output.stdout).trim() {
+        "true" => true,
+        "false" => false,
+        other => die(format!("proof-DA attestation returned {other:?}")),
+    };
+    (kzg, commitment, attested)
+}
+
+fn finalized_external_event_confirmation(
+    rpc: &str,
+    chain_id: u64,
+    log: &serde_json::Value,
+    intent: &FullWithdrawalCallIntent,
+) -> FullWithdrawalCallConfirmation {
+    let transaction_hash = log["transactionHash"]
+        .as_str()
+        .unwrap_or_else(|| die("external completion log has no transactionHash"));
+    let block_hash_text = log["blockHash"]
+        .as_str()
+        .unwrap_or_else(|| die("external completion log has no blockHash"));
+    let block_hash = block_hash_text
+        .parse::<Bytes32>()
+        .unwrap_or_else(|error| die(format!("parse external completion block hash: {error}")));
+    let block_number = json_u64_quantity(&log["blockNumber"], "external event blockNumber")
+        .unwrap_or_else(|error| die(error));
+    let receipt = try_blob_receipt(rpc, transaction_hash)
+        .unwrap_or_else(|| die("external completion event transaction has no mined receipt"));
+    let status = receipt["status"]
+        .as_str()
+        .map(|status| status == "0x1" || status == "1")
+        .or_else(|| receipt["status"].as_u64().map(|status| status == 1))
+        .unwrap_or(false);
+    if !status
+        || !same_hex_value(
+            receipt["transactionHash"].as_str().unwrap_or_default(),
+            transaction_hash,
+        )
+        || !same_hex_value(receipt["blockHash"].as_str().unwrap_or_default(), block_hash_text)
+        || receipt_quantity(&receipt, "blockNumber") != block_number
+    {
+        die("external completion receipt identity/status differs from its event log");
+    }
+    // A matching event alone is not sufficient: the same contract may emit the same payout tuple
+    // for another operation.  The transaction that carried it must be the exact target/calldata/
+    // value we durably intended.  The sender is deliberately *not* pinned because these protocol
+    // effects are permissionless and this branch exists to adopt a copied/front-run call.
+    let transaction_raw = cast(&["tx", transaction_hash, "--json", "--rpc-url", rpc]);
+    let transaction: serde_json::Value = serde_json::from_str(transaction_raw.trim())
+        .unwrap_or_else(|error| die(format!("parse external-completion transaction: {error}")));
+    let transaction_target = transaction["to"].as_str().unwrap_or_default();
+    let transaction_calldata = transaction["input"]
+        .as_str()
+        .or_else(|| transaction["data"].as_str())
+        .unwrap_or_else(|| die("external-completion transaction has no calldata"));
+    let transaction_value = json_u64_quantity(
+        &transaction["value"],
+        "external-completion transaction value",
+    )
+    .unwrap_or_else(|error| die(error));
+    if !same_hex_value(transaction["hash"].as_str().unwrap_or_default(), transaction_hash)
+        || !same_hex_value(transaction_target, &intent.target)
+        || !same_hex_value(transaction_calldata, &intent.calldata)
+        || transaction_value != intent.value
+        || !same_hex_value(
+            transaction["blockHash"].as_str().unwrap_or_default(),
+            block_hash_text,
+        )
+        || json_u64_quantity(
+            &transaction["blockNumber"],
+            "external-completion transaction blockNumber",
+        )
+        .unwrap_or_else(|error| die(error))
+            != block_number
+    {
+        die("external completion transaction differs from the durable target/calldata/value intent");
+    }
+    let log_index = log["logIndex"].clone();
+    let receipt_log = receipt["logs"]
+        .as_array()
+        .and_then(|logs| logs.iter().find(|candidate| candidate["logIndex"] == log_index))
+        .unwrap_or_else(|| die("external completion event is absent from its transaction receipt"));
+    for field in ["address", "topics", "data", "transactionHash", "blockHash", "blockNumber"] {
+        if receipt_log[field] != log[field] {
+            die(format!("external completion event field {field} differs from its receipt"));
+        }
+    }
+    let durable_before = read_durable_l1_checkpoint(rpc, chain_id);
+    let tag = format!("0x{block_number:x}");
+    let canonical = rpc_block_json(rpc, &tag)
+        .and_then(|raw| parse_l1_checkpoint_block(&raw, chain_id, durable_before.source))
+        .unwrap_or_else(|error| die(format!("read external completion block: {error}")));
+    validate_receipt_block_evidence(block_number, block_hash, &canonical, &durable_before)
+        .unwrap_or_else(|error| die(format!("external completion is not canonical/final: {error}")));
+    let second = try_blob_receipt(rpc, transaction_hash)
+        .unwrap_or_else(|| die("external completion receipt disappeared during read-back"));
+    for field in [
+        "transactionHash",
+        "blockHash",
+        "blockNumber",
+        "status",
+        "from",
+        "to",
+        "logs",
+    ] {
+        if receipt[field] != second[field] {
+            die(format!("external completion receipt field {field} changed during read-back"));
+        }
+    }
+    revalidate_l1_checkpoint(rpc, &durable_before);
+    let durable_after = read_durable_l1_checkpoint(rpc, chain_id);
+    validate_durable_checkpoint_advancement(&durable_before, &durable_after)
+        .unwrap_or_else(|error| die(format!("external completion checkpoint: {error}")));
+    durable_after
+        .covers_receipt(block_number, block_hash)
+        .unwrap_or_else(|error| die(format!("external completion lost finality: {error}")));
+    FullWithdrawalCallConfirmation {
+        transaction_hash: transaction_hash.to_string(),
+        block_hash: block_hash_text.to_string(),
+        block_number,
+        finalized_checkpoint: durable_after,
+    }
+}
+
+fn reconcile_external_full_withdrawal_effect(
+    rpc: &str,
+    chain_id: u64,
+    journal_path: &Path,
+    journal: &mut FullWithdrawalOperationJournal,
+    step: &str,
+    contract: &str,
+    expectation: &FullWithdrawalEventExpectation,
+) -> Option<FullWithdrawalCallConfirmation> {
+    let intent = journal.calls.get(step)?.clone();
+    if intent.confirmation.is_some() {
+        return None;
+    }
+    let durable = read_durable_l1_checkpoint(rpc, chain_id);
+    let filter = serde_json::json!({
+        "fromBlock": format!("0x{:x}", intent.start_block),
+        "toBlock": format!("0x{:x}", durable.block_number),
+        "address": contract,
+        "topics": [expectation.topic0()],
+    })
+    .to_string();
+    let raw = cast(&["rpc", "eth_getLogs", &filter, "--rpc-url", rpc]);
+    let logs: Vec<serde_json::Value> = serde_json::from_str(raw.trim())
+        .unwrap_or_else(|error| die(format!("parse external-completion logs: {error}")));
+    let mut matches = Vec::new();
+    for log in logs {
+        if expectation
+            .matches(&log)
+            .unwrap_or_else(|error| die(format!("parse external-completion event: {error}")))
+        {
+            matches.push(log);
+        }
+    }
+    let stored = intent.external_completion.as_ref();
+    let chosen = if let Some(stored) = stored {
+        matches.into_iter().find(|log| {
+            same_hex_value(
+                log["transactionHash"].as_str().unwrap_or_default(),
+                &stored.transaction_hash,
+            ) && same_hex_value(
+                log["blockHash"].as_str().unwrap_or_default(),
+                &stored.block_hash,
+            ) && json_u64_quantity(&log["blockNumber"], "event block")
+                .ok()
+                .is_some_and(|number| number == stored.block_number)
+        })
+        .unwrap_or_else(|| die("stored external completion event disappeared or was replaced"))
+    } else {
+        matches
+            .into_iter()
+            .max_by_key(|log| {
+                (
+                    json_u64_quantity(&log["blockNumber"], "event block").unwrap_or(0),
+                    json_u64_quantity(&log["logIndex"], "event log index").unwrap_or(0),
+                )
+            })
+            ?
+    };
+    let confirmation = finalized_external_event_confirmation(rpc, chain_id, &chosen, &intent);
+    if let Some(stored) = stored {
+        validate_durable_checkpoint_advancement(
+            &stored.finalized_checkpoint,
+            &confirmation.finalized_checkpoint,
+        )
+        .unwrap_or_else(|error| die(format!("external completion checkpoint: {error}")));
+        if !same_hex_value(&stored.transaction_hash, &confirmation.transaction_hash)
+            || !same_hex_value(&stored.block_hash, &confirmation.block_hash)
+            || stored.block_number != confirmation.block_number
+        {
+            die("stored external completion receipt changed");
+        }
+    } else {
+        let mut updated = intent;
+        updated.external_completion = Some(confirmation.clone());
+        journal.calls.insert(step.to_string(), updated);
+        write_private_json_at(journal_path, journal);
+        eprintln!(
+            "[withdraw] {step}: adopted permissionless completion {} after exact finalized event/postcondition validation",
+            confirmation.transaction_hash
+        );
+    }
+    Some(confirmation)
+}
+
+/// Release gate for the fixture-backed full-withdrawal pipeline.
+///
+/// `build_channel_withdrawal` currently constructs a fresh three-block history beginning at
+/// genesis.  It does not import the rollup's finalized state or the live pending deposit/channel
+/// accumulators.  `pendingChainsPin()` only prevents those accumulators from changing between the
+/// pin read and block inclusion; it cannot make an already-built proof commit to their values.
+/// Running this flow on a shared production rollup can therefore deposit funds and post blocks
+/// that the generated validity proof can never finalize.  Keep the deterministic Anvil E2E path,
+/// but fail closed everywhere else until withdrawal blocks are built by the live producer.
+fn full_withdrawal_release_gate(chain_id: u64) -> Result<(), &'static str> {
+    if chain_id == DEVNET_CHAIN_ID {
+        Ok(())
+    } else {
+        Err(
+            "production full withdrawal is disabled: the current withdrawal builder starts from \
+             a fresh genesis history and does not import the live finalized state or pending \
+             deposit/channel accumulators; pendingChainsPin only detects movement after its read \
+             and cannot bind the prebuilt proof to those accumulators",
+        )
+    }
+}
+
+#[cfg(test)]
+mod full_withdrawal_journal_tests {
+    use super::*;
+    use intmax3_zkp::{
+        ethereum_types::bytes32::Bytes32,
+        l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
+    };
+
+    fn word(value: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[value; 8]).expect("bytes32")
+    }
+
+    #[test]
+    fn full_withdrawal_release_gate_is_devnet_only() {
+        assert_eq!(full_withdrawal_release_gate(DEVNET_CHAIN_ID), Ok(()));
+        for chain_id in [1, 10, 11_155_111, u64::MAX] {
+            let error = full_withdrawal_release_gate(chain_id)
+                .expect_err("every non-devnet chain must fail closed");
+            assert!(error.contains("fresh genesis history"));
+            assert!(error.contains("pendingChainsPin"));
+        }
+    }
+
+    fn key() -> FullWithdrawalOperationKey {
+        FullWithdrawalOperationKey {
+            chain_id: 1,
+            rollup: "0x1111111111111111111111111111111111111111".into(),
+            manager: "0x2222222222222222222222222222222222222222".into(),
+            depositor: "0x3333333333333333333333333333333333333333".into(),
+            channel_id: 7,
+            integrated: true,
+            deposit_amount: 10,
+            withdrawal_amount: 3,
+            erc20_token_index: None,
+            erc20_amount: None,
+            erc20_token: None,
+        }
+    }
+
+    fn intent() -> FullWithdrawalCallIntent {
+        FullWithdrawalCallIntent {
+            caller: "0x3333333333333333333333333333333333333333".into(),
+            target: "0x1111111111111111111111111111111111111111".into(),
+            calldata: "0x12345678".into(),
+            value: 10,
+            caller_nonce: 9,
+            start_block: 100,
+            transaction_hashes: Vec::new(),
+            confirmation: None,
+            external_completion: None,
+        }
+    }
+
+    #[test]
+    fn semantic_slot_cannot_be_escaped_by_changing_amount_or_manager() {
+        let original = key();
+        let mut changed = original.clone();
+        changed.manager = "0x4444444444444444444444444444444444444444".into();
+        changed.deposit_amount = 999;
+        assert_eq!(
+            full_withdrawal_operation_dir(&original),
+            full_withdrawal_operation_dir(&changed),
+            "one chain/rollup/channel/depositor must have one operation slot"
+        );
+        changed.channel_id += 1;
+        assert_ne!(
+            full_withdrawal_operation_dir(&original),
+            full_withdrawal_operation_dir(&changed)
+        );
+    }
+
+    #[test]
+    fn crash_after_publish_is_recovered_by_exact_sender_nonce_tuple() {
+        let intent = intent();
+        let exact = serde_json::json!({
+            "transactions": [{
+                "from": intent.caller.clone(),
+                "to": intent.target.clone(),
+                "nonce": "0x9",
+                "input": intent.calldata.clone(),
+                "value": "0xa",
+                "hash": format!("0x{}", "ab".repeat(32)),
+            }]
+        });
+        assert_eq!(
+            full_withdrawal_intent_tx_hash_in_block(&exact, &intent)
+                .expect("exact transaction")
+                .expect("hash"),
+            format!("0x{}", "ab".repeat(32))
+        );
+
+        for (field, replacement) in [
+            ("to", serde_json::json!("0x9999999999999999999999999999999999999999")),
+            ("input", serde_json::json!("0xdeadbeef")),
+            ("value", serde_json::json!("0xb")),
+        ] {
+            let mut replaced = exact.clone();
+            replaced["transactions"][0][field] = replacement;
+            assert!(
+                full_withdrawal_intent_tx_hash_in_block(&replaced, &intent).is_err(),
+                "same-nonce replacement of {field} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_finalized_head_is_accepted_but_reorg_or_regression_is_not() {
+        let stored = L1FinalizedCheckpoint {
+            chain_id: 1,
+            block_number: 100,
+            block_hash: word(100),
+            parent_hash: word(99),
+            source: L1FinalitySource::RpcFinalized,
+        };
+        let advanced = L1FinalizedCheckpoint {
+            block_number: 101,
+            block_hash: word(101),
+            parent_hash: word(100),
+            ..stored
+        };
+        assert!(validate_durable_checkpoint_advancement(&stored, &advanced).is_ok());
+        assert!(validate_durable_checkpoint_advancement(&advanced, &stored).is_err());
+        let replaced = L1FinalizedCheckpoint {
+            block_hash: word(777),
+            ..stored
+        };
+        assert!(validate_durable_checkpoint_advancement(&stored, &replaced).is_err());
+    }
+
+    #[test]
+    fn artifact_manifest_detects_any_byte_change() {
+        let expected = full_withdrawal_artifact_digest("proof.bin", b"canonical-proof");
+        let changed = full_withdrawal_artifact_digest("proof.bin", b"canonical-proog");
+        assert_ne!(expected, changed);
+    }
+
+    #[test]
+    fn intent_roundtrip_preserves_write_ahead_fields_before_any_hash_exists() {
+        let mut journal = FullWithdrawalOperationJournal {
+            version: FULL_WITHDRAWAL_JOURNAL_VERSION,
+            key: key(),
+            artifacts: None,
+            calls: BTreeMap::new(),
+            complete: false,
+        };
+        journal.calls.insert("deposit-native".into(), intent());
+        let bytes = serde_json::to_vec(&journal).expect("serialize");
+        let decoded: FullWithdrawalOperationJournal =
+            serde_json::from_slice(&bytes).expect("deserialize");
+        let recovered = &decoded.calls["deposit-native"];
+        assert_eq!(recovered.caller_nonce, 9);
+        assert_eq!(recovered.value, 10);
+        assert!(recovered.transaction_hashes.is_empty());
+        assert!(recovered.confirmation.is_none());
+    }
+}
+
+fn publish_blob_transaction(rpc: &str, raw_transaction: &str, expected_hash: &str) {
+    if rpc_knows_transaction(rpc, expected_hash) {
+        eprintln!("[withdraw] signed blob transaction {expected_hash} is already known; reconciling");
+        return;
+    }
+    let output = Command::new("cast")
+        .args([
+            "publish",
+            raw_transaction,
+            "--async",
+            "--rpc-url",
+            rpc,
+        ])
+        .output()
+        .unwrap_or_else(|error| die(format!("cast publish blob transaction failed to start: {error}")));
+    if !output.status.success() {
+        // The RPC may have accepted the transaction but disconnected before answering.  Adopt it
+        // only when an independent hash lookup sees the exact signed hash.
+        if rpc_knows_transaction(rpc, expected_hash) {
+            return;
+        }
+        die(format!(
+            "cast publish blob transaction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let published = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !same_hex_value(&published, expected_hash) {
+        die(format!(
+            "RPC published blob transaction {published}, but signed transaction hash is {expected_hash}"
+        ));
+    }
+}
+
+fn try_blob_receipt(rpc: &str, tx_hash: &str) -> Option<serde_json::Value> {
+    let output = Command::new("cast")
+        .args(["receipt", tx_hash, "--json", "--async", "--rpc-url", rpc])
+        .output()
+        .unwrap_or_else(|error| die(format!("cast receipt failed to start: {error}")));
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .filter(|value| !value.is_null())
+}
+
+fn receipt_quantity(receipt: &serde_json::Value, field: &str) -> u64 {
+    let value = &receipt[field];
+    if let Some(raw) = value.as_str() {
+        parse_u64_quantity(raw, field)
+    } else {
+        value
+            .as_u64()
+            .unwrap_or_else(|| die(format!("blob-post receipt has no numeric {field}")))
+    }
+}
+
+fn wait_for_finalized_blob_submission(
+    rpc: &str,
+    chain_id: u64,
+    tx_hash: &str,
+    rollup: &str,
+    submitter: &str,
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+) -> (
+    String,
+    String,
+    u64,
+    intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) {
+    let timeout_secs = std::env::var("INTMAX_L1_FINALITY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(3_600)
+        .clamp(1, 86_400);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(receipt) = try_blob_receipt(rpc, tx_hash) {
+            let receipt_hash = receipt["transactionHash"]
+                .as_str()
+                .unwrap_or_else(|| die("blob-post receipt has no transactionHash"));
+            if !same_hex_value(receipt_hash, tx_hash) {
+                die("blob-post receipt hash differs from the signed transaction hash");
+            }
+            let from = receipt["from"]
+                .as_str()
+                .unwrap_or_else(|| die("blob-post receipt has no from"));
+            let to = receipt["to"]
+                .as_str()
+                .unwrap_or_else(|| die("blob-post receipt has no to"));
+            if !same_hex_value(from, submitter) || !same_hex_value(to, rollup) {
+                die("blob-post receipt sender/target differs from the signed transaction");
+            }
+            let block_hash_text = receipt["blockHash"]
+                .as_str()
+                .unwrap_or_else(|| die("blob-post receipt has no blockHash"));
+            let block_hash = block_hash_text
+                .parse::<Bytes32>()
+                .unwrap_or_else(|error| die(format!("parse blob-post block hash: {error}")));
+            let block_number = receipt_quantity(&receipt, "blockNumber");
+            let durable_before = read_durable_l1_checkpoint(rpc, chain_id);
+            if block_number <= durable_before.block_number {
+                let receipt_block_tag = format!("0x{block_number:x}");
+                let canonical_receipt_block = rpc_block_json(rpc, &receipt_block_tag)
+                    .and_then(|raw| {
+                        parse_l1_checkpoint_block(&raw, chain_id, durable_before.source)
+                    })
+                    .unwrap_or_else(|error| {
+                        die(format!("read canonical blob receipt block: {error}"))
+                    });
+                validate_receipt_block_evidence(
+                    block_number,
+                    block_hash,
+                    &canonical_receipt_block,
+                    &durable_before,
+                )
+                .unwrap_or_else(|error| {
+                    die(format!("blob transaction {tx_hash} is not canonical/final: {error}"))
+                });
+
+                let second = try_blob_receipt(rpc, tx_hash)
+                    .unwrap_or_else(|| die("blob-post receipt disappeared during final read-back"));
+                for field in [
+                    "transactionHash",
+                    "blockHash",
+                    "blockNumber",
+                    "status",
+                    "from",
+                    "to",
+                    "logs",
+                ] {
+                    if receipt[field] != second[field] {
+                        die(format!(
+                            "blob-post receipt field {field} changed during final read-back"
+                        ));
+                    }
+                }
+                revalidate_l1_checkpoint(rpc, &durable_before);
+                let durable_after = read_durable_l1_checkpoint(rpc, chain_id);
+                if durable_after.source != durable_before.source
+                    || durable_after.block_number < durable_before.block_number
+                    || (durable_after.block_number == durable_before.block_number
+                        && (durable_after.block_hash != durable_before.block_hash
+                            || durable_after.parent_hash != durable_before.parent_hash))
+                {
+                    die("durable L1 head regressed or changed during blob receipt read-back");
+                }
+                durable_after
+                    .covers_receipt(block_number, block_hash)
+                    .unwrap_or_else(|error| die(format!("blob receipt lost finality: {error}")));
+                let submission_id = submitted_id_from_receipt(
+                    &receipt,
+                    rollup,
+                    submitter,
+                    proof_hash,
+                    proof_length,
+                    state_root,
+                )
+                .unwrap_or_else(|error| die(format!("validate Submitted event: {error}")));
+                return (
+                    submission_id,
+                    block_hash_text.to_string(),
+                    block_number,
+                    durable_after,
+                );
+            }
+        }
+        if started.elapsed().as_secs() >= timeout_secs {
+            die(format!(
+                "blob transaction {tx_hash} is not covered by a canonical durable head after \
+                 {timeout_secs}s; its signed raw transaction is safely persisted, so retry the \
+                 exact lifecycle after L1 finality advances"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(6));
+    }
+}
+
+/// Post one block (index `i` into `lifecycle.blocks`) as its own blob submission round.  Returns
+/// the finalized event-derived submission id and the compact sidecars for this exact transaction.
+fn post_block_round(
+    rollup: &str,
+    lc: &serde_json::Value,
+    i: usize,
+    signer: &L1Signer,
+    rpc: &str,
+    proof_da_path: &str,
+    proof_payload: &[u8],
+    proof_hash: &str,
+    proof_length: u32,
+    journal_path: &Path,
+    journal: &mut ProofDaPostJournal,
+) -> (String, String) {
     let block = &lc["blocks"][i];
     let channel_id = block["channel_id"]
         .as_u64()
@@ -3469,13 +5728,6 @@ fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, signer: &L1S
         .unwrap_or_else(|| die("block tx_tree_root"));
     let key_ids = json_num_array(&block["key_ids"]);
     let sub_block = format!("[({channel_id},{timestamp},{tx_tree_root},{key_ids})]");
-    let proof_hash = lc["proof_hash"]
-        .as_str()
-        .unwrap_or_else(|| die("proof_hash"));
-    let proof_length = lc["proof_length"]
-        .as_u64()
-        .unwrap_or_else(|| die("proof_length"))
-        .to_string();
     let state_root = lc["final_state_root"]
         .as_str()
         .unwrap_or_else(|| die("final_state_root"));
@@ -3484,28 +5736,140 @@ fn post_block_round(rollup: &str, lc: &serde_json::Value, i: usize, signer: &L1S
     // any `deposit()` or `registerChannel()` landing in between would make the posted block commit a
     // chain the proof does not cover — `finalize` would then fail SILENTLY and block every
     // withdrawal until the ~12 h timeout. With the pin the race is a clean revert and we retry.
-    let pending_pin = cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[]);
-    let pending_pin = pending_pin.trim().to_string();
-    eprintln!("[withdraw] postBlockAndSubmit round {i} (blob tx, 1 ETH stake), chain pin {pending_pin}…");
-    cast_signed(
-        rpc,
-        signer,
-        &[
-            "send",
-            rollup,
-            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)",
-            &sub_block,
-            proof_hash,
-            &proof_length,
-            state_root,
-            &pending_pin,
-            "--value",
-            "1ether",
-            "--blob",
-            "--path",
-            BLOB_FILE,
-        ],
+    let existing = journal.rounds.get(i).cloned();
+    let (mut round, validated): (ProofDaPostRoundJournal, ValidatedBlobSidecars) =
+        if let Some(round) = existing {
+            let expected_calldata = cast(&[
+                "calldata",
+                "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)",
+                &sub_block,
+                proof_hash,
+                &proof_length.to_string(),
+                state_root,
+                &round.pending_chains_pin,
+            ])
+            .trim()
+            .to_string();
+            if round.round_index != i || !same_hex_value(&round.calldata, &expected_calldata) {
+                die(format!("persisted proof-DA round {i} has different calldata"));
+            }
+            let decoded = decode_signed_blob_transaction(&round.raw_signed_transaction);
+            let checked = validate_decoded_blob_transaction(
+                &decoded,
+                proof_payload,
+                journal.chain_id,
+                &journal.submitter,
+                rollup,
+                POST_BLOCK_STAKE_WEI,
+                &round.calldata,
+            )
+            .unwrap_or_else(|error| die(format!("revalidate persisted proof-DA round {i}: {error}")));
+            if !same_hex_value(&checked.transaction_hash, &round.transaction_hash)
+                || checked.blob_versioned_hashes != round.blob_versioned_hashes
+                || !same_hex_value(&checked.compact_sidecars, &round.compact_sidecars)
+            {
+                die(format!("persisted proof-DA round {i} sidecar metadata was modified"));
+            }
+            (round, checked)
+        } else {
+            if journal.rounds.len() != i {
+                die("proof-DA round journal is not a contiguous 0,1,2 sequence");
+            }
+            let pending_pin = cast_call(rpc, rollup, "pendingChainsPin()(bytes32)", &[])
+                .trim()
+                .to_string();
+            let (raw_signed_transaction, calldata) = sign_blob_post(
+                rollup,
+                signer,
+                rpc,
+                &sub_block,
+                proof_da_path,
+                proof_hash,
+                proof_length,
+                state_root,
+                &pending_pin,
+            );
+            let decoded = decode_signed_blob_transaction(&raw_signed_transaction);
+            let checked = validate_decoded_blob_transaction(
+                &decoded,
+                proof_payload,
+                journal.chain_id,
+                &journal.submitter,
+                rollup,
+                POST_BLOCK_STAKE_WEI,
+                &calldata,
+            )
+            .unwrap_or_else(|error| die(format!("validate signed proof-DA round {i}: {error}")));
+            let round = ProofDaPostRoundJournal {
+                round_index: i,
+                pending_chains_pin: pending_pin,
+                calldata,
+                raw_signed_transaction,
+                transaction_hash: checked.transaction_hash.clone(),
+                blob_versioned_hashes: checked.blob_versioned_hashes.clone(),
+                compact_sidecars: checked.compact_sidecars.clone(),
+                submission_id: None,
+                receipt_block_hash: None,
+                receipt_block_number: None,
+                finalized_checkpoint: None,
+            };
+            // Irreversible ordering: signed raw tx + sidecars hit durable storage first.  Only the
+            // next line after this branch may publish it.
+            journal.rounds.push(round.clone());
+            write_private_json_at(journal_path, journal);
+            (round, checked)
+        };
+
+    eprintln!(
+        "[withdraw] postBlockAndSubmit round {i}: signed {} blob(s), tx {} (journaled before publish)…",
+        validated.blob_versioned_hashes.len(),
+        validated.transaction_hash
     );
+    publish_blob_transaction(
+        rpc,
+        &round.raw_signed_transaction,
+        &round.transaction_hash,
+    );
+    let (submission_id, block_hash, block_number, finalized_checkpoint) =
+        wait_for_finalized_blob_submission(
+            rpc,
+            journal.chain_id,
+            &round.transaction_hash,
+            rollup,
+            &journal.submitter,
+            proof_hash,
+            proof_length,
+            state_root,
+        );
+    if let Some(stored) = &round.submission_id {
+        if !same_hex_value(stored, &submission_id)
+            || round.receipt_block_hash.as_deref() != Some(block_hash.as_str())
+            || round.receipt_block_number != Some(block_number)
+        {
+            die(format!("proof-DA round {i} finalized receipt changed after persistence"));
+        }
+        let stored_checkpoint = round.finalized_checkpoint.as_ref().unwrap_or_else(|| {
+            die(format!(
+                "proof-DA round {i} has a stored receipt without its finalized checkpoint"
+            ))
+        });
+        // The durable head is expected to advance between runs.  Revalidate the old checkpoint
+        // and exact receipt block, then accept the newer monotonically-covering checkpoint returned
+        // above; byte-equality here used to make every otherwise healthy restart fail.
+        revalidate_l1_checkpoint(rpc, stored_checkpoint);
+        validate_durable_checkpoint_advancement(stored_checkpoint, &finalized_checkpoint)
+            .unwrap_or_else(|error| {
+                die(format!("proof-DA round {i} checkpoint progression: {error}"))
+            });
+    } else {
+        round.submission_id = Some(submission_id.clone());
+        round.receipt_block_hash = Some(block_hash);
+        round.receipt_block_number = Some(block_number);
+        round.finalized_checkpoint = Some(finalized_checkpoint);
+        journal.rounds[i] = round.clone();
+        write_private_json_at(journal_path, journal);
+    }
+    (submission_id, round.compact_sidecars)
 }
 
 fn cmd_withdraw(args: &[String]) {
@@ -3521,7 +5885,10 @@ fn cmd_withdraw(args: &[String]) {
     // this binary (channel-withdrawal proof set, then 3 blob posts, then finalize) and it did not
     // touch the checkout until the `finalize` step near the end — so a path error used to cost the
     // entire proof AND leave real on-chain state half-advanced. See `require_contracts_dir`.
-    let contracts_dir = require_contracts_dir("withdraw", &["script/RunClose.s.sol"]);
+    let contracts_dir = require_contracts_dir(
+        "withdraw",
+        &["script/RunClose.s.sol", "script/PrepareProofDa.s.sol"],
+    );
     // Rollup address: explicit ROLLUP env, else the backing record from `setup-backing`.
     let rollup = std::env::var("ROLLUP")
         .ok()
@@ -3529,20 +5896,12 @@ fn cmd_withdraw(args: &[String]) {
         .or_else(|| backing_exists().then(|| load_backing().2.rollup))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| die("set ROLLUP=0x<rollup addr> (or run setup-backing first)"));
+    require_active_settlement_binding(&rpc, &manager, None, Some(&rollup));
     // Resolve every local prerequisite before touching the network. Besides making diagnostics
     // deterministic, this keeps an unavailable RPC from hiding an unusable checkout or missing
     // rollup configuration before the expensive withdrawal proof path starts.
     let chain_id = rpc_chain_id(&rpc);
-    if chain_id != DEVNET_CHAIN_ID {
-        die(format!(
-            "refusing withdrawal lifecycle posting on chain id {chain_id}: the current path \
-             attaches an all-zero demo blob, while fraudProof requires a lossless \
-             abi.encode(MleProof) payload. The checked-in validity proof encodes to 131264 bytes \
-             (192 bytes larger than one EIP-4844 blob), and the current 32-byte FIELD_MASK \
-             packing is not reversible. Use local chain 31337 only until the proof-DA format and \
-             commitment are upgraded"
-        ));
-    }
+    full_withdrawal_release_gate(chain_id).unwrap_or_else(|error| die(error));
     let l1_signer = L1Signer::for_chain_id(chain_id);
     let channel_id = channel_id_env();
 
@@ -3624,89 +5983,196 @@ fn cmd_withdraw(args: &[String]) {
         std::env::var("WD_ERC20_AMOUNT").ok(),
         std::env::var("WD_ERC20_TOKEN_ADDR").ok(),
     ) {
-        (Some(t), Some(a), Some(addr)) => Some((
-            t.parse().unwrap_or_else(|_| die("bad WD_ERC20_TOKEN")),
-            a.parse().unwrap_or_else(|_| die("bad WD_ERC20_AMOUNT")),
-            addr,
-        )),
+        (Some(t), Some(a), Some(addr)) => {
+            let token_address = addr
+                .parse::<Address>()
+                .unwrap_or_else(|error| die(format!("bad WD_ERC20_TOKEN_ADDR: {error}")))
+                .to_string();
+            Some((
+                t.parse().unwrap_or_else(|_| die("bad WD_ERC20_TOKEN")),
+                a.parse().unwrap_or_else(|_| die("bad WD_ERC20_AMOUNT")),
+                token_address,
+            ))
+        }
         (None, None, None) => None,
         _ => die("set ALL of WD_ERC20_TOKEN / WD_ERC20_AMOUNT / WD_ERC20_TOKEN_ADDR, or none"),
     };
 
-    // ── Build the artifacts (HEAVY proving). recipient = manager so the payout credits it. ──
-    eprintln!(
-        "[withdraw] building channel-withdrawal proof set (channel {channel_id}, deposit \
-         {deposit_amount}, withdraw {withdrawal_amount} → manager {manager}) — HEAVY…"
-    );
-    let params = ChannelWithdrawalParams {
+    let operation_key = FullWithdrawalOperationKey {
+        chain_id,
+        rollup: rollup.to_ascii_lowercase(),
+        manager: manager_addr.to_string().to_ascii_lowercase(),
+        depositor: depositor_hex.to_ascii_lowercase(),
         channel_id,
+        integrated,
         deposit_amount,
         withdrawal_amount,
-        depositor: Some(depositor),
-        withdrawal_recipient: Some(manager_addr),
-        deposit_salt,
-        erc20_lane: erc20_env.as_ref().map(|(t, a, _)| Erc20LaneParams {
-            token_index: *t,
-            deposit_amount: *a,
-            withdrawal_amount: *a,
-            deposit_salt: None,
-        }),
-        burn_aux_data: None,
+        erc20_token_index: erc20_env.as_ref().map(|(token, _, _)| *token),
+        erc20_amount: erc20_env.as_ref().map(|(_, amount, _)| *amount),
+        erc20_token: erc20_env
+            .as_ref()
+            .map(|(_, _, address)| address.to_ascii_lowercase()),
     };
-    // SECURITY (Phase-3 review finding 7, CLOSED in Phase 4): the withdrawal builder registers
-    // the identities read off the `MemberKeys` handed to it — the SAME objects
-    // `export-reg-record` puts on L1 and `close` signs with. No seed slice, no second derivation.
-    let artifacts = build_channel_withdrawal(&params, cli_members.as_deref())
-        .unwrap_or_else(|e| die(format!("build withdrawal: {e}")));
+    let (operation_dir, operation_journal_path, mut operation_journal) =
+        load_or_create_full_withdrawal_operation(operation_key);
 
-    // Write the artifacts locally and stage them for the forge finalize / withdrawNative steps
-    // (RunClose reads `contracts/test/data/sepolia_*`). Each step's inputs are staged before it
-    // runs.
-    fs::write("lifecycle.json", &artifacts.lifecycle_json)
-        .unwrap_or_else(|e| die(format!("write lifecycle.json: {e}")));
-    fs::write("lifecycle_validity_mle.json", &artifacts.validity_mle_json)
-        .unwrap_or_else(|e| die(format!("write lifecycle_validity_mle.json: {e}")));
-    fs::write("withdrawal_mle.json", &artifacts.withdrawal_mle_json)
-        .unwrap_or_else(|e| die(format!("write withdrawal_mle.json: {e}")));
-    fs::write("withdrawal_payout.json", &artifacts.payout_json)
-        .unwrap_or_else(|e| die(format!("write withdrawal_payout.json: {e}")));
-    let data_dir = contracts_dir.join("test/data");
-    let stage = |src: &str, dst: &str| {
-        fs::copy(src, data_dir.join(dst)).unwrap_or_else(|e| die(format!("stage {src}: {e}")));
-    };
-    stage("lifecycle.json", "sepolia_lifecycle.json");
-    stage(
-        "lifecycle_validity_mle.json",
-        "sepolia_lifecycle_validity_mle.json",
-    );
-    stage("withdrawal_mle.json", "sepolia_withdrawal_mle.json");
-    stage("withdrawal_payout.json", "sepolia_withdrawal_payout.json");
-    if let (Some(mle), Some(payout)) = (
-        &artifacts.erc20_withdrawal_mle_json,
-        &artifacts.erc20_payout_json,
-    ) {
-        fs::write("erc20_withdrawal_mle.json", mle)
-            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_mle.json: {e}")));
-        fs::write("erc20_withdrawal_payout.json", payout)
-            .unwrap_or_else(|e| die(format!("write erc20_withdrawal_payout.json: {e}")));
-        stage(
-            "erc20_withdrawal_mle.json",
-            "sepolia_erc20_withdrawal_mle.json",
+    if operation_journal.artifacts.is_none() {
+        // Only a PREPARED operation without any L1 mutation may invoke the randomized prover.
+        // Once these exact bytes are manifested, every restart loads them from the stable semantic
+        // operation slot and proof regeneration is impossible.
+        eprintln!(
+            "[withdraw] building channel-withdrawal proof set (channel {channel_id}, deposit \
+             {deposit_amount}, withdraw {withdrawal_amount} → manager {manager}) — HEAVY…"
         );
-        stage(
-            "erc20_withdrawal_payout.json",
-            "sepolia_erc20_withdrawal_payout.json",
+        let params = ChannelWithdrawalParams {
+            channel_id,
+            deposit_amount,
+            withdrawal_amount,
+            depositor: Some(depositor),
+            withdrawal_recipient: Some(manager_addr),
+            deposit_salt,
+            erc20_lane: erc20_env.as_ref().map(|(t, a, _)| Erc20LaneParams {
+                token_index: *t,
+                deposit_amount: *a,
+                withdrawal_amount: *a,
+                deposit_salt: None,
+            }),
+            burn_aux_data: None,
+        };
+        let built = build_channel_withdrawal(&params, cli_members.as_deref())
+            .unwrap_or_else(|error| die(format!("build withdrawal: {error}")));
+
+        // PrepareProofDa reads this exact staged MLE file.  No L1 action has happened yet, so a
+        // crash anywhere in this preflight may safely rebuild; the manifest below is the boundary
+        // after which rebuilding is forbidden.
+        let data_dir = contracts_dir.join("test/data");
+        fs::write(
+            data_dir.join("sepolia_lifecycle_validity_mle.json"),
+            &built.validity_mle_json,
+        )
+        .unwrap_or_else(|error| die(format!("stage validity MLE for proof DA: {error}")));
+        let (prepared_proof_path, proof_da) = prepare_validity_proof_da(&contracts_dir);
+        let proof_da_payload = fs::read(&prepared_proof_path).unwrap_or_else(|error| {
+            die(format!("read canonical proof DA payload: {error}"))
+        });
+        let proof_da_metadata_bytes = fs::read(Path::new(PROOF_DA_DIR).join(PROOF_DA_METADATA_FILE))
+            .unwrap_or_else(|error| die(format!("read canonical proof DA metadata: {error}")));
+
+        let lifecycle_value: serde_json::Value = serde_json::from_str(&built.lifecycle_json)
+            .unwrap_or_else(|error| die(format!("parse generated lifecycle JSON: {error}")));
+        let final_state_root = lifecycle_value["final_state_root"]
+            .as_str()
+            .unwrap_or_else(|| die("generated lifecycle has no final_state_root"))
+            .to_string();
+        let native_nullifier =
+            payout_nullifier(built.payout_json.as_bytes(), "generated withdrawal payout");
+        let erc20_nullifier = built.erc20_payout_json.as_ref().map(|json| {
+            payout_nullifier(json.as_bytes(), "generated ERC-20 withdrawal payout")
+        });
+        let mut files = vec![
+            persist_full_withdrawal_artifact(
+                &operation_dir,
+                "lifecycle.json",
+                built.lifecycle_json.as_bytes(),
+            ),
+            persist_full_withdrawal_artifact(
+                &operation_dir,
+                "lifecycle_validity_mle.json",
+                built.validity_mle_json.as_bytes(),
+            ),
+            persist_full_withdrawal_artifact(
+                &operation_dir,
+                "withdrawal_mle.json",
+                built.withdrawal_mle_json.as_bytes(),
+            ),
+            persist_full_withdrawal_artifact(
+                &operation_dir,
+                "withdrawal_payout.json",
+                built.payout_json.as_bytes(),
+            ),
+        ];
+        match (
+            &built.erc20_withdrawal_mle_json,
+            &built.erc20_payout_json,
+        ) {
+            (Some(mle), Some(payout)) => {
+                files.push(persist_full_withdrawal_artifact(
+                    &operation_dir,
+                    "erc20_withdrawal_mle.json",
+                    mle.as_bytes(),
+                ));
+                files.push(persist_full_withdrawal_artifact(
+                    &operation_dir,
+                    "erc20_withdrawal_payout.json",
+                    payout.as_bytes(),
+                ));
+            }
+            (None, None) => {}
+            _ => die("generated ERC-20 withdrawal artifact pair is incomplete"),
+        }
+        files.push(persist_full_withdrawal_artifact(
+            &operation_dir,
+            PROOF_DA_FILE,
+            &proof_da_payload,
+        ));
+        files.push(persist_full_withdrawal_artifact(
+            &operation_dir,
+            PROOF_DA_METADATA_FILE,
+            &proof_da_metadata_bytes,
+        ));
+        operation_journal.artifacts = Some(FullWithdrawalArtifactManifest {
+            files,
+            proof_da,
+            final_state_root,
+            native_withdrawal_nullifier: native_nullifier,
+            erc20_withdrawal_nullifier: erc20_nullifier,
+        });
+        write_private_json_at(&operation_journal_path, &operation_journal);
+    } else {
+        eprintln!(
+            "[withdraw] resuming the exact manifested proof artifacts from {} (no proof regeneration)",
+            operation_dir.display()
         );
     }
 
-    let lc: serde_json::Value = serde_json::from_str(&artifacts.lifecycle_json)
+    let persisted_artifacts = load_persisted_full_withdrawal_artifacts(
+        &operation_dir,
+        operation_journal
+            .artifacts
+            .as_ref()
+            .unwrap_or_else(|| die("withdrawal artifact manifest disappeared")),
+    );
+    stage_persisted_full_withdrawal_artifacts(&persisted_artifacts, &contracts_dir);
+    let proof_da_path = persisted_artifacts
+        .proof_da_path
+        .to_str()
+        .unwrap_or_else(|| die("proof-DA output path is not valid UTF-8"))
+        .to_string();
+    let proof_da = persisted_artifacts.proof_da.clone();
+    let proof_payload = persisted_artifacts.proof_da_payload.clone();
+    let proof_length = u32::try_from(proof_da.proof_length)
+        .unwrap_or_else(|_| die("canonical proof DA payload exceeds the uint32 protocol limit"));
+    eprintln!(
+        "[withdraw] canonical proof DA: {} bytes / {} blob(s) / {}",
+        proof_da.proof_length, proof_da.blob_count, proof_da.proof_hash
+    );
+
+    let lc: serde_json::Value = serde_json::from_slice(&persisted_artifacts.lifecycle_json)
         .unwrap_or_else(|e| die(format!("parse lifecycle json: {e}")));
     let reg = &lc["registration"];
-
-    // Local-demo-only placeholder. `cmd_withdraw` refuses every non-devnet chain above because
-    // this is not the lossless MLE proof payload required by the fraud-proof path.
-    fs::write(BLOB_FILE, vec![0u8; 131072])
-        .unwrap_or_else(|e| die(format!("write {BLOB_FILE}: {e}")));
+    let final_state_root = lc["final_state_root"]
+        .as_str()
+        .unwrap_or_else(|| die("final_state_root"));
+    let proof_da_journal_path = operation_dir.join("proof-da-posts.json");
+    let mut proof_da_journal = load_or_create_proof_da_post_journal(
+        &proof_da_journal_path,
+        chain_id,
+        &rollup,
+        &depositor_hex,
+        &proof_da.proof_hash,
+        proof_length,
+        final_state_root,
+    );
 
     // 1. registerChannel (one-time per channel; skip if already registered so re-runs are
     //    idempotent and the close-lifecycle path — where the channel is already registered —
@@ -3724,54 +6190,93 @@ fn cmd_withdraw(args: &[String]) {
         .trim_start_matches("0x")
         .chars()
         .any(|c| c != '0');
+    let expected_registration_commitment = lifecycle_registration_commitment(reg);
+    let bp_slot = reg["bp_member_slot"]
+        .as_u64()
+        .unwrap_or_else(|| die("bp_member_slot"))
+        .to_string();
+    let expected_bp_pk_g = reg["member_pk_gs"]
+        .as_array()
+        .and_then(|values| values.get(bp_slot.parse::<usize>().unwrap_or(usize::MAX)))
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| die("registration bp_member_slot does not select a member pk_g"));
     if already_registered {
-        eprintln!("[withdraw] channel {channel_id} already registered — skipping registerChannel");
+        let observed_bp_slot = cast_call(
+            &rpc,
+            &rollup,
+            "channelBpMemberSlot(uint32)(uint8)",
+            &[&channel_id.to_string()],
+        );
+        let observed_bp_pk_g = cast_call(
+            &rpc,
+            &rollup,
+            "channelBpPkG(uint32)(bytes32)",
+            &[&channel_id.to_string()],
+        );
+        if !same_hex_value(existing.trim(), &expected_registration_commitment)
+            || observed_bp_slot.trim() != bp_slot
+            || !same_hex_value(&observed_bp_pk_g, expected_bp_pk_g)
+        {
+            die(format!(
+                "channel {channel_id} is already registered with a different member set/BP identity; refusing to post or deposit against it"
+            ));
+        }
+        eprintln!(
+            "[withdraw] channel {channel_id} exact registration already exists — reconciled"
+        );
     } else {
         eprintln!("[withdraw] registerChannel({channel_id})…");
-        let bp_slot = reg["bp_member_slot"]
-            .as_u64()
-            .unwrap_or_else(|| die("bp_member_slot"))
-            .to_string();
         let pk_gs = json_str_array(&reg["member_pk_gs"]);
         let pk_bs = json_str_array(&reg["member_pk_bs"]);
         let regev = json_str_array(&reg["regev_pk_digests"]);
         let recipients = json_str_array(&reg["recipients"]);
-        cast_signed(
+        let registration_calldata = cast(&[
+            "calldata",
+            "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
+            &channel_id.to_string(),
+            &bp_slot,
+            "0",
+            &pk_gs,
+            &pk_bs,
+            &regev,
+            &recipients,
+        ]);
+        execute_full_withdrawal_call(
             &rpc,
+            chain_id,
             &l1_signer,
-            &[
-                "send",
-                &rollup,
-                "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
-                &channel_id.to_string(),
-                &bp_slot,
-                "0",
-                &pk_gs,
-                &pk_bs,
-                &regev,
-                &recipients,
-            ],
+            &operation_journal_path,
+            &mut operation_journal,
+            "register-channel",
+            &rollup,
+            registration_calldata.trim(),
+            0,
         );
+        let observed = cast_call(
+            &rpc,
+            &rollup,
+            "channelMemberSetCommitment(uint32)(bytes32)",
+            &[&channel_id.to_string()],
+        );
+        if !same_hex_value(&observed, &expected_registration_commitment) {
+            die("registerChannel receipt finalized but exact member-set commitment read-back failed");
+        }
     }
 
-    // Capture the base submission id so we finalize the LAST of our three posts.
-    let base_sub: u64 = {
-        let out = cast(&[
-            "call",
-            &rollup,
-            "nextSubmissionId()(uint256)",
-            "--rpc-url",
-            &rpc,
-        ]);
-        out.trim()
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| die(format!("parse nextSubmissionId: {out:?}")))
-    };
-
     // 2. Registration block.
-    post_block_round(&rollup, &lc, 0, &l1_signer, &rpc);
+    let (registration_submission, _) = post_block_round(
+        &rollup,
+        &lc,
+        0,
+        &l1_signer,
+        &rpc,
+        &proof_da_path,
+        &proof_payload,
+        &proof_da.proof_hash,
+        proof_length,
+        &proof_da_journal_path,
+        &mut proof_da_journal,
+    );
 
     // 3. Deposit (P5-B 案B: `withdraw` ALWAYS makes the deposit here, between the registration
     //    block and the deposit block — the standalone fold order the withdrawal proof models. In
@@ -3783,35 +6288,64 @@ fn cmd_withdraw(args: &[String]) {
         let dep_recipient = dep["recipient"]
             .as_str()
             .unwrap_or_else(|| die("deposit.recipient"));
-        let dep_token = dep["token_index"]
-            .as_u64()
-            .unwrap_or_else(|| die("deposit.token_index"))
-            .to_string();
-        let dep_amount = dep["amount"]
+        let dep_token = u32::try_from(
+            dep["token_index"]
+                .as_u64()
+                .unwrap_or_else(|| die("deposit.token_index")),
+        )
+        .unwrap_or_else(|_| die("deposit.token_index exceeds u32"));
+        let dep_amount_text = dep["amount"]
             .as_str()
             .unwrap_or_else(|| die("deposit.amount"));
+        let dep_amount = dep_amount_text
+            .parse::<u64>()
+            .unwrap_or_else(|error| die(format!("parse deposit.amount: {error}")));
         let dep_aux = dep["aux_data"]
             .as_str()
             .unwrap_or_else(|| die("deposit.aux_data"));
         eprintln!(
             "[withdraw] deposit{{value: {dep_amount}}}(recipient,…) as depositor {depositor_hex}…"
         );
-        let dep_out = cast_signed(
+        let deposit_calldata = cast(&[
+            "calldata",
+            "deposit(bytes32,uint32,uint256,bytes32)",
+            dep_recipient,
+            &dep_token.to_string(),
+            dep_amount_text,
+            dep_aux,
+        ]);
+        let deposit_confirmation = execute_full_withdrawal_call(
             &rpc,
+            chain_id,
             &l1_signer,
-            &[
-                "send",
-                &rollup,
-                "deposit(bytes32,uint32,uint256,bytes32)",
-                dep_recipient,
-                &dep_token,
-                dep_amount,
-                dep_aux,
-                "--value",
-                dep_amount,
-                "--json",
-            ],
+            &operation_journal_path,
+            &mut operation_journal,
+            "deposit-native",
+            &rollup,
+            deposit_calldata.trim(),
+            dep_amount,
         );
+        let deposit_recipient = dep_recipient
+            .parse::<Bytes32>()
+            .unwrap_or_else(|error| die(format!("parse deposit recipient: {error}")));
+        let observed = fetch_onchain_deposit(
+            &rpc,
+            &deposit_confirmation.transaction_hash,
+            &rollup,
+            deposit_recipient,
+            Some(1),
+        );
+        let expected_aux = dep_aux
+            .parse::<Bytes32>()
+            .unwrap_or_else(|error| die(format!("parse deposit aux data: {error}")));
+        if observed.chain_id != chain_id
+            || observed.depositor != depositor
+            || observed.token_index != dep_token
+            || observed.amount != dep_amount
+            || observed.aux_data != expected_aux
+        {
+            die("canonical native Deposited event differs from the manifested lifecycle");
+        }
         // SECURITY (§10.4 Finding B): capture and PERSIST this hash before doing anything else.
         // It is a real `Deposited` log from this rollup to the channel's own `deposit_recipient`,
         // so it passes every check on the import path; only the backing-deposit guard can refuse
@@ -3819,7 +6353,7 @@ fn cmd_withdraw(args: &[String]) {
         // is no backing file to record into (and no import path either, since
         // `cosign-l1-deposit-import` requires the backing).
         if integrated {
-            record_backing_deposit_tx(&parse_cast_tx_hash(&dep_out, "withdraw native deposit"));
+            record_backing_deposit_tx(&deposit_confirmation.transaction_hash);
         }
 
         // Multitoken Phase 5b: the ERC-20 lane's deposit — SECOND in the block, matching the
@@ -3830,13 +6364,18 @@ fn cmd_withdraw(args: &[String]) {
             let dep2_recipient = dep2["recipient"]
                 .as_str()
                 .unwrap_or_else(|| die("deposit_erc20.recipient"));
-            let dep2_token = dep2["token_index"]
-                .as_u64()
-                .unwrap_or_else(|| die("deposit_erc20.token_index"))
-                .to_string();
-            let dep2_amount = dep2["amount"]
+            let dep2_token = u32::try_from(
+                dep2["token_index"]
+                    .as_u64()
+                    .unwrap_or_else(|| die("deposit_erc20.token_index")),
+            )
+            .unwrap_or_else(|_| die("deposit_erc20.token_index exceeds u32"));
+            let dep2_amount_text = dep2["amount"]
                 .as_str()
                 .unwrap_or_else(|| die("deposit_erc20.amount"));
+            let dep2_amount = dep2_amount_text
+                .parse::<u64>()
+                .unwrap_or_else(|error| die(format!("parse deposit_erc20.amount: {error}")));
             let dep2_aux = dep2["aux_data"]
                 .as_str()
                 .unwrap_or_else(|| die("deposit_erc20.aux_data"));
@@ -3844,142 +6383,759 @@ fn cmd_withdraw(args: &[String]) {
                 "[withdraw] approve + ERC-20 deposit (token {dep2_token}, amount {dep2_amount}) as \
                  depositor {depositor_hex}…"
             );
-            cast_signed(
+            let approval_calldata = cast(&[
+                "calldata",
+                "approve(address,uint256)",
+                &rollup,
+                dep2_amount_text,
+            ]);
+            execute_full_withdrawal_call(
                 &rpc,
+                chain_id,
                 &l1_signer,
-                &[
-                    "send",
-                    token_addr,
-                    "approve(address,uint256)",
-                    &rollup,
-                    dep2_amount,
-                ],
+                &operation_journal_path,
+                &mut operation_journal,
+                "approve-erc20-deposit",
+                token_addr,
+                approval_calldata.trim(),
+                0,
             );
-            let dep2_out = cast_signed(
+            let erc20_deposit_calldata = cast(&[
+                "calldata",
+                "deposit(bytes32,uint32,uint256,bytes32)",
+                dep2_recipient,
+                &dep2_token.to_string(),
+                dep2_amount_text,
+                dep2_aux,
+            ]);
+            let erc20_deposit_confirmation = execute_full_withdrawal_call(
                 &rpc,
+                chain_id,
                 &l1_signer,
-                &[
-                    "send",
-                    &rollup,
-                    "deposit(bytes32,uint32,uint256,bytes32)",
-                    dep2_recipient,
-                    &dep2_token,
-                    dep2_amount,
-                    dep2_aux,
-                    "--json",
-                ],
+                &operation_journal_path,
+                &mut operation_journal,
+                "deposit-erc20",
+                &rollup,
+                erc20_deposit_calldata.trim(),
+                0,
             );
+            let observed = fetch_onchain_deposit(
+                &rpc,
+                &erc20_deposit_confirmation.transaction_hash,
+                &rollup,
+                dep2_recipient
+                    .parse::<Bytes32>()
+                    .unwrap_or_else(|error| die(format!("parse ERC-20 deposit recipient: {error}"))),
+                Some(1),
+            );
+            if observed.chain_id != chain_id
+                || observed.depositor != depositor
+                || observed.token_index != dep2_token
+                || observed.amount != dep2_amount
+                || observed.aux_data
+                    != dep2_aux.parse::<Bytes32>().unwrap_or_else(|error| {
+                        die(format!("parse ERC-20 deposit aux data: {error}"))
+                    })
+            {
+                die("canonical ERC-20 Deposited event differs from the manifested lifecycle");
+            }
             // SECURITY: the ERC-20 lane's deposit is recorded for the SAME reason as the native
             // one — its value is already spoken for by the withdrawal proof, so importing it into
             // the channel balance would credit value twice against one escrow.
             if integrated {
-                record_backing_deposit_tx(&parse_cast_tx_hash(
-                    &dep2_out,
-                    "withdraw ERC-20 lane deposit",
-                ));
+                record_backing_deposit_tx(&erc20_deposit_confirmation.transaction_hash);
             }
         }
     }
 
     // 4. Deposit block, then 5. Withdrawal block.
-    post_block_round(&rollup, &lc, 1, &l1_signer, &rpc);
-    post_block_round(&rollup, &lc, 2, &l1_signer, &rpc);
-    let final_sub = std::env::var("SUB_ID").unwrap_or_else(|_| (base_sub + 2).to_string());
-
-    // 6. finalize (forge RunClose step; reads the staged sepolia_lifecycle* files).
-    eprintln!("[withdraw] finalize submission {final_sub} (real validity MLE)…");
-    let mut forge = Command::new("forge");
-    forge.current_dir(&contracts_dir).args([
-        "script",
-        "script/RunClose.s.sol",
-        "--sig",
-        "finalizeStep()",
-        "--rpc-url",
+    let (deposit_submission, _) = post_block_round(
+        &rollup,
+        &lc,
+        1,
+        &l1_signer,
         &rpc,
-        "--broadcast",
-    ]);
-    l1_signer.append_to_command(&mut forge);
-    let status = forge
-        .env("ROLLUP", &rollup)
-        .env("SUB_ID", &final_sub)
-        .status()
-        .unwrap_or_else(|e| die(format!("forge finalizeStep failed to start: {e}")));
-    if !status.success() {
-        die(
-            "forge finalizeStep failed (ensure the validity VK + genesis match this rollup, and the 3 blocks posted in order)",
+        &proof_da_path,
+        &proof_payload,
+        &proof_da.proof_hash,
+        proof_length,
+        &proof_da_journal_path,
+        &mut proof_da_journal,
+    );
+    let (final_sub, final_blob_sidecars) = post_block_round(
+        &rollup,
+        &lc,
+        2,
+        &l1_signer,
+        &rpc,
+        &proof_da_path,
+        &proof_payload,
+        &proof_da.proof_hash,
+        proof_length,
+        &proof_da_journal_path,
+        &mut proof_da_journal,
+    );
+
+    // 6. Split proof-DA attestation and MLE finalization.  Each call has its own durable intent and
+    // canonical finalized receipt; combining the ~22M KZG opening with the ~11M MLE verification
+    // in one transaction exceeds the supported Ethereum block gas budget.
+    let final_submission_id = parse_u64_quantity(&final_sub, "final submission id");
+    let final_post_block = proof_da_journal
+        .rounds
+        .get(2)
+        .and_then(|round| round.receipt_block_number)
+        .unwrap_or_else(|| die("final proof-DA post has no canonical receipt block"));
+    eprintln!("[withdraw] attest proof DA for submission {final_sub}…");
+    let attest_intent = prepare_run_close_full_withdrawal_step(
+        &contracts_dir,
+        &rpc,
+        chain_id,
+        &l1_signer,
+        &operation_journal_path,
+        &mut operation_journal,
+        "attest-proof-data",
+        "attestProofDataStep()",
+        &rollup,
+        &[
+            ("ROLLUP", &rollup),
+            ("SUB_ID", &final_sub),
+            ("BLOB_SIDECARS", &final_blob_sidecars),
+        ],
+        Some(final_post_block),
+    );
+    let (kzg, submission_commitment, proof_already_attested) = proof_data_attestation_state(
+        &rpc,
+        &rollup,
+        final_submission_id,
+        &proof_da.proof_hash,
+        proof_length,
+        None,
+    );
+    let attestation_confirmation = if attest_intent.confirmation.is_some() {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "attest-proof-data",
+            &attest_intent.target,
+            &attest_intent.calldata,
+            attest_intent.value,
+        )
+    } else if attest_intent.external_completion.is_some() || proof_already_attested {
+        reconcile_external_full_withdrawal_effect(
+            &rpc,
+            chain_id,
+            &operation_journal_path,
+            &mut operation_journal,
+            "attest-proof-data",
+            &kzg,
+            &FullWithdrawalEventExpectation::ProofDataAttested {
+                rollup: rollup.clone(),
+                submission_id: final_submission_id,
+                submission_commitment,
+                proof_hash: proof_da.proof_hash.clone(),
+                proof_length,
+            },
+        )
+        .unwrap_or_else(|| {
+            die(
+                "the exact proof-DA attestation is visible but its event is not yet covered by the durable L1 head; retry after finality",
+            )
+        })
+    } else {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "attest-proof-data",
+            &attest_intent.target,
+            &attest_intent.calldata,
+            attest_intent.value,
+        )
+    };
+    let (_, _, attested_at_receipt) = proof_data_attestation_state(
+        &rpc,
+        &rollup,
+        final_submission_id,
+        &proof_da.proof_hash,
+        proof_length,
+        Some(attestation_confirmation.block_number),
+    );
+    if !attested_at_receipt {
+        die("canonical proof-DA attestation receipt did not authenticate the manifested proof bytes");
+    }
+
+    eprintln!("[withdraw] finalize submission {final_sub} (real validity MLE)…");
+    let finalize_intent = prepare_run_close_full_withdrawal_step(
+        &contracts_dir,
+        &rpc,
+        chain_id,
+        &l1_signer,
+        &operation_journal_path,
+        &mut operation_journal,
+        "finalize-validity",
+        "finalizeStep()",
+        &rollup,
+        &[("ROLLUP", &rollup), ("SUB_ID", &final_sub)],
+        Some(attestation_confirmation.block_number),
+    );
+    let already_finalized = cast_call(
+        &rpc,
+        &rollup,
+        "isFinalized(uint256)(bool)",
+        &[&final_sub],
+    )
+    .trim()
+    .eq_ignore_ascii_case("true");
+    let finalize_confirmation = if finalize_intent.confirmation.is_some() {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "finalize-validity",
+            &finalize_intent.target,
+            &finalize_intent.calldata,
+            finalize_intent.value,
+        )
+    } else if finalize_intent.external_completion.is_some() || already_finalized {
+        reconcile_external_full_withdrawal_effect(
+            &rpc,
+            chain_id,
+            &operation_journal_path,
+            &mut operation_journal,
+            "finalize-validity",
+            &rollup,
+            &FullWithdrawalEventExpectation::Finalized {
+                submission_id: final_submission_id,
+                state_root: final_state_root.to_string(),
+            },
+        )
+        .unwrap_or_else(|| {
+            die(
+                "submission is finalized but its exact Finalized event is not yet covered by the durable L1 head; retry after finality",
+            )
+        })
+    } else {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "finalize-validity",
+            &finalize_intent.target,
+            &finalize_intent.calldata,
+            finalize_intent.value,
+        )
+    };
+    if !read_bool_view_at(
+        &rpc,
+        &rollup,
+        "isFinalized(uint256)",
+        &final_sub,
+        finalize_confirmation.block_number,
+    ) || !read_bool_view_at(
+        &rpc,
+        &rollup,
+        "isFinalizedStateRoot(bytes32)",
+        final_state_root,
+        finalize_confirmation.block_number,
+    ) {
+        die("finalized submission/root canonical receipt-block read-back failed");
+    }
+
+    // One aggregate proof finalizes all three rounds but `finalize` refunds only the selected
+    // submission. Reclaim the first two now that their block ranges are finalized, then pull all
+    // three credits. A zero submitter means the exact bond was already refunded/reclaimed; this
+    // makes crash recovery idempotent without trusting a local completion flag.
+    for submission in [&registration_submission, &deposit_submission] {
+        let step = format!("reclaim-stake-{submission}");
+        let calldata = cast(&["calldata", "reclaimStake(uint256)", submission]);
+        let intent = ensure_full_withdrawal_call_intent(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            &step,
+            &rollup,
+            calldata.trim(),
+            0,
+            Some(finalize_confirmation.block_number),
+        );
+        let stake = cast_call(
+            &rpc,
+            &rollup,
+            "stakeInfo(uint256)(address,bool)",
+            &[submission],
+        );
+        let submitter = stake
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| die("stakeInfo returned no submitter"));
+        let stake_cleared = same_hex_value(
+            submitter,
+            "0x0000000000000000000000000000000000000000",
+        );
+        let reclaim_confirmation = if intent.confirmation.is_some() {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                &step,
+                &intent.target,
+                &intent.calldata,
+                intent.value,
+            )
+        } else if intent.external_completion.is_some() || stake_cleared {
+            reconcile_external_full_withdrawal_effect(
+                &rpc,
+                chain_id,
+                &operation_journal_path,
+                &mut operation_journal,
+                &step,
+                &rollup,
+                &FullWithdrawalEventExpectation::WithdrawalCredited {
+                    recipient: depositor_hex.clone(),
+                    amount: POST_BLOCK_STAKE_WEI,
+                },
+            )
+            .unwrap_or_else(|| {
+                die(format!(
+                    "stake {submission} is cleared but the exact permissionless reclaim event is not yet durable"
+                ))
+            })
+        } else {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                &step,
+                &rollup,
+                calldata.trim(),
+                0,
+            )
+        };
+        let after = cast_call_at(
+            &rpc,
+            &rollup,
+            "stakeInfo(uint256)(address,bool)",
+            &[submission],
+            reclaim_confirmation.block_number,
+        );
+        let after_submitter = after
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| die("stakeInfo read-back returned no submitter"));
+        if !same_hex_value(
+            after_submitter,
+            "0x0000000000000000000000000000000000000000",
+        ) {
+            die(format!("stake {submission} was not cleared after canonical reclaim"));
+        }
+    }
+    let pending_stake_refund = cast_call(
+        &rpc,
+        &rollup,
+        "pendingWithdrawals(address)(uint256)",
+        &[&depositor_hex],
+    );
+    let pending_stake_refund = pending_stake_refund
+        .split_whitespace()
+        .next()
+        .unwrap_or_else(|| die("pendingWithdrawals returned no amount"));
+    if let Some(intent) = operation_journal.calls.get("pull-stake-refunds").cloned() {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "pull-stake-refunds",
+            &intent.target,
+            &intent.calldata,
+            intent.value,
+        );
+    } else if parse_u64_quantity(pending_stake_refund, "pending stake refund") != 0 {
+        let calldata = cast(&["calldata", "withdraw()"]);
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "pull-stake-refunds",
+            &rollup,
+            calldata.trim(),
+            0,
         );
     }
 
-    // 7. withdrawNative (forge RunClose step; credits pendingWithdrawals[manager]).
+    // 7. withdrawNative.  Dry-run only materializes the exact large calldata; the durable
+    // write-ahead intent owns the actual broadcast and restart reconciliation.
     eprintln!("[withdraw] withdrawNative (real withdrawal MLE) → manager {manager}…");
-    let mut forge = Command::new("forge");
-    forge.current_dir(&contracts_dir).args([
-        "script",
-        "script/RunClose.s.sol",
-        "--sig",
-        "withdrawNativeStep()",
-        "--rpc-url",
+    let native_descriptor = full_withdrawal_descriptor(
+        &persisted_artifacts.payout_json,
+        "withdrawal_payout.json",
+    );
+    let native_nullifier = native_descriptor.nullifier.clone();
+    let native_intent = prepare_run_close_full_withdrawal_step(
+        &contracts_dir,
         &rpc,
-        "--broadcast",
-    ]);
-    l1_signer.append_to_command(&mut forge);
-    let status = forge
-        .env("ROLLUP", &rollup)
-        .env("MANAGER", &manager)
-        .status()
-        .unwrap_or_else(|e| die(format!("forge withdrawNativeStep failed to start: {e}")));
-    if !status.success() {
-        die(
-            "forge withdrawNativeStep failed (ensure the withdrawal VK is initialized on this rollup)",
-        );
+        chain_id,
+        &l1_signer,
+        &operation_journal_path,
+        &mut operation_journal,
+        "withdraw-native",
+        "withdrawNativeStep()",
+        &rollup,
+        &[("ROLLUP", &rollup), ("MANAGER", &manager)],
+        Some(finalize_confirmation.block_number),
+    );
+    let native_used = cast_call(
+        &rpc,
+        &rollup,
+        "withdrawalNullifierUsed(bytes32)(bool)",
+        &[&native_nullifier],
+    )
+    .trim()
+    .eq_ignore_ascii_case("true");
+    let native_withdrawal_confirmation = if native_intent.confirmation.is_some() {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "withdraw-native",
+            &native_intent.target,
+            &native_intent.calldata,
+            native_intent.value,
+        )
+    } else if native_intent.external_completion.is_some() || native_used {
+        reconcile_external_full_withdrawal_effect(
+            &rpc,
+            chain_id,
+            &operation_journal_path,
+            &mut operation_journal,
+            "withdraw-native",
+            &rollup,
+            &FullWithdrawalEventExpectation::NativeWithdrawn {
+                recipient: native_descriptor.recipient.clone(),
+                amount: native_descriptor.amount,
+                nullifier: native_descriptor.nullifier.clone(),
+                intmax_block_number: native_descriptor.intmax_block_number,
+            },
+        )
+        .unwrap_or_else(|| {
+            die(
+                "native withdrawal nullifier is used but its exact event is not yet covered by the durable L1 head",
+            )
+        })
+    } else {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "withdraw-native",
+            &native_intent.target,
+            &native_intent.calldata,
+            native_intent.value,
+        )
+    };
+    if !read_bool_view_at(
+        &rpc,
+        &rollup,
+        "withdrawalNullifierUsed(bytes32)",
+        &native_nullifier,
+        native_withdrawal_confirmation
+            .finalized_checkpoint
+            .block_number,
+    ) {
+        die("canonical withdrawNative receipt did not consume the manifested nullifier");
     }
 
     // 7b. Multitoken Phase 5b: the ERC-20 lane — withdrawERC20 (its own chain + the SAME
     //     withdrawal VK) credits pendingTokenWithdrawals[t][manager].
-    if let Some((token_index, ..)) = &erc20_env {
+    let erc20_withdrawal_confirmation = if let Some((token_index, ..)) = &erc20_env {
         eprintln!(
             "[withdraw] withdrawERC20 (real withdrawal MLE, token {token_index}) → manager {manager}…"
         );
-        let mut forge = Command::new("forge");
-        forge.current_dir(&contracts_dir).args([
-            "script",
-            "script/RunClose.s.sol",
-            "--sig",
-            "withdrawErc20Step()",
-            "--rpc-url",
+        let erc20_descriptor = full_withdrawal_descriptor(
+            persisted_artifacts
+                .erc20_payout_json
+                .as_deref()
+                .unwrap_or_else(|| die("ERC-20 lane has no persisted payout artifact")),
+            "erc20_withdrawal_payout.json",
+        );
+        let erc20_nullifier = erc20_descriptor.nullifier.clone();
+        let erc20_intent = prepare_run_close_full_withdrawal_step(
+            &contracts_dir,
             &rpc,
-            "--broadcast",
-        ]);
-        l1_signer.append_to_command(&mut forge);
-        let status = forge
-            .env("ROLLUP", &rollup)
-            .env("MANAGER", &manager)
-            .status()
-            .unwrap_or_else(|e| die(format!("forge withdrawErc20Step failed to start: {e}")));
-        if !status.success() {
-            die(
-                "forge withdrawErc20Step failed (ensure the token index is registered and the ERC-20 deposit escrowed)",
-            );
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "withdraw-erc20",
+            "withdrawErc20Step()",
+            &rollup,
+            &[("ROLLUP", &rollup), ("MANAGER", &manager)],
+            Some(finalize_confirmation.block_number),
+        );
+        let erc20_used = cast_call(
+            &rpc,
+            &rollup,
+            "withdrawalNullifierUsed(bytes32)(bool)",
+            &[&erc20_nullifier],
+        )
+        .trim()
+        .eq_ignore_ascii_case("true");
+        let confirmation = if erc20_intent.confirmation.is_some() {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                "withdraw-erc20",
+                &erc20_intent.target,
+                &erc20_intent.calldata,
+                erc20_intent.value,
+            )
+        } else if erc20_intent.external_completion.is_some() || erc20_used {
+            reconcile_external_full_withdrawal_effect(
+                &rpc,
+                chain_id,
+                &operation_journal_path,
+                &mut operation_journal,
+                "withdraw-erc20",
+                &rollup,
+                &FullWithdrawalEventExpectation::Erc20Withdrawn {
+                    recipient: erc20_descriptor.recipient.clone(),
+                    token_index: erc20_descriptor.token_index,
+                    amount: erc20_descriptor.amount,
+                    nullifier: erc20_descriptor.nullifier.clone(),
+                    intmax_block_number: erc20_descriptor.intmax_block_number,
+                },
+            )
+            .unwrap_or_else(|| {
+                die(
+                    "ERC-20 withdrawal nullifier is used but its exact event is not yet covered by the durable L1 head",
+                )
+            })
+        } else {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                "withdraw-erc20",
+                &erc20_intent.target,
+                &erc20_intent.calldata,
+                erc20_intent.value,
+            )
+        };
+        if !read_bool_view_at(
+            &rpc,
+            &rollup,
+            "withdrawalNullifierUsed(bytes32)",
+            &erc20_nullifier,
+            confirmation.finalized_checkpoint.block_number,
+        ) {
+            die("canonical withdrawERC20 receipt did not consume the manifested nullifier");
         }
-    }
+        Some(confirmation)
+    } else {
+        None
+    };
 
     // 8. pullChannelFunds (manager pulls its escrowed credit out of the rollup).
     eprintln!("[withdraw] pullChannelFunds() on manager {manager}…");
-    cast_signed(&rpc, &l1_signer, &["send", &manager, "pullChannelFunds()"]);
+    let pull_native_calldata = cast(&["calldata", "pullChannelFunds()"]);
+    let pull_native_intent = ensure_full_withdrawal_call_intent(
+        &rpc,
+        chain_id,
+        &l1_signer,
+        &operation_journal_path,
+        &mut operation_journal,
+        "manager-pull-native",
+        &manager,
+        pull_native_calldata.trim(),
+        0,
+        Some(native_withdrawal_confirmation.block_number),
+    );
+    let pending_native = cast_call(
+        &rpc,
+        &rollup,
+        "pendingWithdrawals(address)(uint256)",
+        &[&manager],
+    );
+    let pending_native = parse_u64_quantity(
+        pending_native.split_whitespace().next().unwrap_or_default(),
+        "manager native pending credit",
+    );
+    let pull_native_confirmation = if pull_native_intent.confirmation.is_some() {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "manager-pull-native",
+            &pull_native_intent.target,
+            &pull_native_intent.calldata,
+            pull_native_intent.value,
+        )
+    } else if pull_native_intent.external_completion.is_some() || pending_native == 0 {
+        reconcile_external_full_withdrawal_effect(
+            &rpc,
+            chain_id,
+            &operation_journal_path,
+            &mut operation_journal,
+            "manager-pull-native",
+            &manager,
+            &FullWithdrawalEventExpectation::ChannelFundsPulled {
+                token_index: 0,
+                minimum_amount: native_descriptor.amount,
+            },
+        )
+        .unwrap_or_else(|| {
+            die(
+                "manager native credit is zero but the exact permissionless pull event is not yet durable",
+            )
+        })
+    } else {
+        execute_full_withdrawal_call(
+            &rpc,
+            chain_id,
+            &l1_signer,
+            &operation_journal_path,
+            &mut operation_journal,
+            "manager-pull-native",
+            &pull_native_intent.target,
+            &pull_native_intent.calldata,
+            pull_native_intent.value,
+        )
+    };
+    if read_u64_view_at(
+        &rpc,
+        &rollup,
+        "pendingWithdrawals(address)",
+        &manager,
+        pull_native_confirmation.finalized_checkpoint.block_number,
+    ) != 0
+    {
+        die("manager native pending credit remained after canonical pullChannelFunds receipt");
+    }
     // 8b. pullChannelTokenFunds(t) — the ERC-20 mirror (measured balanceOf delta).
     if let Some((token_index, ..)) = &erc20_env {
         eprintln!("[withdraw] pullChannelTokenFunds({token_index}) on manager {manager}…");
-        cast_signed(
+        let token_index_text = token_index.to_string();
+        let calldata = cast(&[
+            "calldata",
+            "pullChannelTokenFunds(uint32)",
+            &token_index_text,
+        ]);
+        let intent = ensure_full_withdrawal_call_intent(
             &rpc,
+            chain_id,
             &l1_signer,
-            &[
-                "send",
-                &manager,
-                "pullChannelTokenFunds(uint32)",
-                &token_index.to_string(),
-            ],
+            &operation_journal_path,
+            &mut operation_journal,
+            "manager-pull-erc20",
+            &manager,
+            calldata.trim(),
+            0,
+            Some(
+                erc20_withdrawal_confirmation
+                    .as_ref()
+                    .unwrap_or_else(|| die("ERC-20 pull has no causal withdrawal confirmation"))
+                    .block_number,
+            ),
         );
+        let pending_token = cast_call(
+            &rpc,
+            &rollup,
+            "pendingTokenWithdrawals(uint32,address)(uint256)",
+            &[&token_index_text, &manager],
+        );
+        let pending_token = parse_u64_quantity(
+            pending_token.split_whitespace().next().unwrap_or_default(),
+            "manager ERC-20 pending credit",
+        );
+        let confirmation = if intent.confirmation.is_some() {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                "manager-pull-erc20",
+                &intent.target,
+                &intent.calldata,
+                intent.value,
+            )
+        } else if intent.external_completion.is_some() || pending_token == 0 {
+            reconcile_external_full_withdrawal_effect(
+                &rpc,
+                chain_id,
+                &operation_journal_path,
+                &mut operation_journal,
+                "manager-pull-erc20",
+                &manager,
+                &FullWithdrawalEventExpectation::ChannelFundsPulled {
+                    token_index: *token_index,
+                    minimum_amount: erc20_env
+                        .as_ref()
+                        .map(|(_, amount, _)| *amount)
+                        .unwrap_or(0),
+                },
+            )
+            .unwrap_or_else(|| {
+                die(
+                    "manager ERC-20 credit is zero but the exact permissionless pull event is not yet durable",
+                )
+            })
+        } else {
+            execute_full_withdrawal_call(
+                &rpc,
+                chain_id,
+                &l1_signer,
+                &operation_journal_path,
+                &mut operation_journal,
+                "manager-pull-erc20",
+                &intent.target,
+                &intent.calldata,
+                intent.value,
+            )
+        };
+        if read_u64_view2_at(
+            &rpc,
+            &rollup,
+            "pendingTokenWithdrawals(uint32,address)",
+            &token_index_text,
+            &manager,
+            confirmation.finalized_checkpoint.block_number,
+        ) != 0
+        {
+            die("manager ERC-20 pending credit remained after canonical token pull receipt");
+        }
     }
+    operation_journal.complete = true;
+    write_private_json_at(&operation_journal_path, &operation_journal);
     println!(
         "[withdraw] OK: {withdrawal_amount} native withdrawn from the rollup into manager {manager} \
          (now `claim` per member to distribute)."
@@ -4057,15 +7213,104 @@ fn build_reg_record() -> serde_json::Value {
     )
 }
 
+/// Build the production settlement input from the one authenticated, fully signed live snapshot.
+/// No deterministic-key fallback and no derived recipient formula is permitted here: the exact
+/// slot recipient committed inside `BalanceState::h1()` is what the manager root freezes.
+fn build_live_settlement_reg_record(state: &CliState) -> serde_json::Value {
+    verify_snapshot(&state.snapshot, None)
+        .unwrap_or_else(|e| die(format!("settlement live-snapshot verification failed: {e}")));
+    verify_all_signatures(
+        &state.snapshot.record,
+        &state.snapshot.members,
+        &state.snapshot.state,
+    )
+    .unwrap_or_else(|e| die(format!("settlement N-of-N signature verification failed: {e}")));
+
+    let channel_id = channel_id_env();
+    let record = &state.snapshot.record;
+    let balance = &state.snapshot.state.balance_state;
+    if record.channel_id.as_u64() != u64::from(channel_id)
+        || balance.channel_id.as_u64() != u64::from(channel_id)
+    {
+        die("settlement snapshot channel id does not match INTMAX_CHANNEL");
+    }
+    if record.member_count != balance.member_count
+        || record.delegate_count != balance.delegate_count
+    {
+        die("settlement snapshot record/balance participant counts disagree");
+    }
+    let member_count = record.member_count as usize;
+    let delegate_count = record.delegate_count as usize;
+    let active = member_count + delegate_count;
+    if active > MAX_CHANNEL_MEMBERS {
+        die(format!("settlement snapshot has {active} participants, maximum is 1024"));
+    }
+
+    let mut by_slot: Vec<Option<&MemberInfo>> = vec![None; active];
+    for member in &state.snapshot.members {
+        let slot = member.slot as usize;
+        if slot >= active || by_slot[slot].replace(member).is_some() {
+            die(format!("settlement snapshot has invalid/duplicate participant slot {slot}"));
+        }
+    }
+
+    let mut pk_gs = Vec::with_capacity(active);
+    let mut pk_bs = Vec::with_capacity(active);
+    let mut regev_digests = Vec::with_capacity(active);
+    let mut recipients = Vec::with_capacity(active);
+    for slot in 0..active {
+        let member = by_slot[slot]
+            .unwrap_or_else(|| die(format!("settlement snapshot is missing active slot {slot}")));
+        if member.pk_g != record.member_pk_gs[slot] {
+            die(format!("settlement snapshot pk_g mismatch at slot {slot}"));
+        }
+        let recipient = balance.recipients[slot];
+        if recipient == Address::default() {
+            die(format!("settlement snapshot has zero signed recipient at slot {slot}"));
+        }
+        pk_gs.push(member.pk_g.to_hex());
+        pk_bs.push(member.pk_b.to_hex());
+        regev_digests.push(member.regev_pk.digest().to_hex());
+        recipients.push(recipient.to_hex());
+    }
+    settlement_reg_json(
+        channel_id,
+        member_count,
+        delegate_count,
+        &pk_gs,
+        &pk_bs,
+        &regev_digests,
+        &recipients,
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
+    // Release MSU gate must run before *every* mutation-capable prelude too. In particular, the
+    // normal process startup rolls a PREPARED inter-channel 2PC journal forward before dispatch;
+    // leaving the rejection only in the match arm meant invoking the disabled command could still
+    // replace two channel states and retire a recovery journal before printing "disabled". Those
+    // writes were not an MSU, but they violated the stronger operational invariant promised by
+    // this entry point: a disabled MSU request has no side effects at all.
+    if cmd == "member-update" {
+        cmd_member_update(&args);
+    }
+    let detached_precompute_bypass = cmd == "precompute-falcon-aggregate"
+        && std::env::var(DETACHED_PRECOMPUTE_LOCK_BYPASS_ENV).as_deref() == Ok("1");
+    // SECURITY: this lock is deliberately process-wide and acquired before recovery.  Per-file
+    // atomic writes prevent torn JSON, but only serialization prevents an older init/cosign image
+    // from overwriting a settlement PREPARED by another process.  The sole bypass is the
+    // digest-keyed detached proof-cache worker described at its spawn site above.
+    let _state_process_lock = (!detached_precompute_bypass).then(CliStateProcessLock::acquire);
     // A prepared two-channel transfer is a global mutation barrier for every channel CLI command,
     // not merely for the next inter-transfer. If the previous process died after replacing A but
     // before replacing B, allowing (for example) a burn or token registration to extend either
     // half-head would make deterministic roll-forward impossible and leave value one-sided.
     // Recovery is idempotent and a no-op when the sibling journal directory does not exist.
-    recover_pending_inter_transfers();
+    if !detached_precompute_bypass {
+        recover_pending_inter_transfers();
+    }
     match cmd {
         "setup-backing" => cmd_setup_backing(&args),
         "init" => cmd_init(&args),
@@ -4180,6 +7425,18 @@ fn cmd_init(args: &[String]) {
             );
             return;
         }
+        if let Some(binding) = &prev.settlement_binding {
+            die(format!(
+                "delegate join is frozen: settlement {:?} ({:?}) already committed participant \
+                 root {} for {} active slots at state {}. Re-running init with an EXISTING pk_g \
+                 remains idempotent, but a new pk_g can never be added after settlement.",
+                binding.manager,
+                binding.status,
+                binding.participant_root,
+                binding.participant_count,
+                binding.snapshot_state_digest,
+            ));
+        }
     }
 
     // SECURITY: every replay ledger must SURVIVE a delegate join — dropping one here would let a
@@ -4228,6 +7485,7 @@ fn cmd_init(args: &[String]) {
         applied_tx_identities: prior_applied,
         spent_tx_identities: prior_spent,
         imported_deposits: prior_imported,
+        settlement_binding: None,
     });
     write_json(out_path, &snapshot);
     println!(
@@ -6292,16 +9550,51 @@ fn cmd_deploy_settlement(args: &[String]) {
 ///     never matched the proof either. `deploy-settlement`'s devnet path used to pass the LIVE
 ///     snapshot count here (`wallet-live-work/chN/channel_snapshot.json` carries delegates), which
 ///     is the conflation this function removes.
-///   * `active_delegate_count` — the LIVE count, for the `ChannelSettlementManager` ONLY. It is the
-///     B-2 delegate-close FLOOR (close PI limb 94 must be `>= activeDelegateCount`) and it sizes
-///     the delegate `MemberBinding[]` that writes `registeredRecipientOf` / `isMemberRecipient`.
-///     Zeroing it to "match" the registration would silently retire that fence and drop every
-///     delegate's recipient binding — a WEAKENED CHECK, not a cleanup.
+///   * `active_delegate_count` — the LIVE count frozen by the `ChannelSettlementManager`. Close PI
+///     limb 94 must equal this count, and the full participant identity below is committed by one
+///     immutable Merkle root. Delegates prove their `(slot, pk_g, recipient)` leaf when requesting
+///     a unilateral close; they are intentionally not expanded into deployment-time SSTOREs.
 ///
 /// The four arrays carry the ACTIVE participants, MEMBERS FIRST (`0..member_count`) then delegates
 /// (`member_count..member_count + active_delegate_count`). `RegRecordLib.sol` — the single reader
 /// on the Solidity side — hands `registerChannel` the leading cosigner slice with a CONSTANT zero
 /// delegate count, and hands the manager the whole set with `active_delegate_count`.
+fn settlement_participant_root(pk_gs: &[String], recipients: &[String]) -> Bytes32 {
+    const LEAF_DOMAIN: [u8; 4] = *b"IMPR";
+    const NODE_DOMAIN: [u8; 4] = *b"IMPN";
+    assert_eq!(pk_gs.len(), recipients.len());
+    assert!(pk_gs.len() <= MAX_CHANNEL_MEMBERS);
+
+    let mut nodes = vec![[0u8; 32]; MAX_CHANNEL_MEMBERS];
+    for (slot, (pk_g_hex, recipient_hex)) in pk_gs.iter().zip(recipients).enumerate() {
+        let pk_g = Bytes32::from_hex(pk_g_hex)
+            .unwrap_or_else(|e| die(format!("participant slot {slot} pk_g: {e:?}")));
+        let recipient = Address::from_hex(recipient_hex)
+            .unwrap_or_else(|e| die(format!("participant slot {slot} recipient: {e:?}")));
+        if pk_g == Bytes32::default() || recipient == Address::default() {
+            die(format!("participant slot {slot} has a zero pk_g or recipient"));
+        }
+        let mut preimage = Vec::with_capacity(4 + 2 + 32 + 20);
+        preimage.extend_from_slice(&LEAF_DOMAIN);
+        preimage.extend_from_slice(&(slot as u16).to_be_bytes());
+        preimage.extend_from_slice(&pk_g.to_bytes_be());
+        preimage.extend_from_slice(&recipient.to_bytes_be());
+        nodes[slot] = keccak_hash::keccak(preimage).0;
+    }
+    let mut width = MAX_CHANNEL_MEMBERS;
+    while width > 1 {
+        for i in (0..width).step_by(2) {
+            let mut preimage = Vec::with_capacity(68);
+            preimage.extend_from_slice(&NODE_DOMAIN);
+            preimage.extend_from_slice(&nodes[i]);
+            preimage.extend_from_slice(&nodes[i + 1]);
+            nodes[i >> 1] = keccak_hash::keccak(preimage).0;
+        }
+        width >>= 1;
+    }
+    Bytes32::from_bytes_be(&nodes[0]).expect("32-byte participant root")
+}
+
 fn settlement_reg_json(
     channel_id: u32,
     member_count: usize,
@@ -6324,6 +9617,8 @@ fn settlement_reg_json(
         regev_pk_digests.len(),
         recipients.len()
     );
+    assert!(active <= MAX_CHANNEL_MEMBERS, "active participants exceed 1024");
+    let participant_root = settlement_participant_root(pk_gs, recipients);
     serde_json::json!({
         "channel_id": channel_id,
         "bp_member_slot": BP_SLOT,
@@ -6331,6 +9626,7 @@ fn settlement_reg_json(
         // SECURITY: a LITERAL zero, never a variable. See the doc comment above.
         "reg_delegate_count": 0,
         "active_delegate_count": active_delegate_count,
+        "participant_root": participant_root.to_hex(),
         "member_pk_gs": pk_gs,
         "member_pk_bs": pk_bs,
         "regev_pk_digests": regev_pk_digests,
@@ -6349,7 +9645,7 @@ mod settlement_reg_record_tests {
     /// A record for a channel with `m` cosigners and `d` LIVE delegates.
     fn sample(m: usize, d: usize) -> serde_json::Value {
         let n = m + d;
-        let hex = |tag: &str, i: usize| format!("0x{tag}{i:062x}");
+        let hex = |tag: &str, i: usize| format!("0x{tag}{i:063x}");
         let pk_gs: Vec<String> = (0..n).map(|i| hex("a", i)).collect();
         let pk_bs: Vec<String> = (0..n).map(|i| hex("b", i)).collect();
         let regev: Vec<String> = (0..n).map(|i| hex("c", i)).collect();
@@ -6391,24 +9687,21 @@ mod settlement_reg_record_tests {
 
     /// DIRECTION 2 — the manager side must NOT be zeroed to match the registration.
     ///
-    /// SECURITY: `active_delegate_count` is the B-2 delegate-close FLOOR (close PI limb 94 must be
-    /// `>= activeDelegateCount`) and it sizes the delegate bindings that write
-    /// `registeredRecipientOf` / `isMemberRecipient`. Achieving the Option B invariant by lowering
-    /// this to zero would silently retire the fence added for the delegate-close threat model —
-    /// the exact "fix by weakening a check" this test exists to fail on.
+    /// SECURITY: `active_delegate_count` is an exact frozen close-PI count and contributes to the
+    /// immutable participant-root active prefix. Lowering it to zero would authenticate a
+    /// different participant set — the exact "fix by weakening a check" this test rejects.
     #[test]
     fn manager_delegate_count_keeps_the_live_value() {
         for (m, d) in [(3usize, 1usize), (3, 2), (2, 14)] {
             let reg = sample(m, d);
             assert_eq!(
                 reg["active_delegate_count"], d,
-                "the manager's delegate count must stay the LIVE count (B-2 close floor + delegate \
-                 bindings), not the registration's zero"
+                "the manager's delegate count must stay the exact LIVE frozen count, not the \
+                 registration's zero"
             );
-            // ...and the delegate KEY MATERIAL must still be in the record: the manager binds
-            // `pk_gs[member_count + i]` / `recipients[member_count + i]`. Truncating the arrays to
-            // the cosigner slice would leave the floor naming delegates it could not bind, and the
-            // manager constructor would revert `InvalidMemberCount`.
+            // ...and the delegate key material must still be in the record so RegRecordLib can
+            // recompute the authenticated participant root. Solidity stores only the root/count,
+            // avoiding O(1024) constructor SSTOREs.
             assert_eq!(
                 reg["member_pk_gs"].as_array().map(|a| a.len()),
                 Some(m + d),
@@ -6430,6 +9723,1195 @@ mod settlement_reg_record_tests {
     }
 }
 
+fn staged_settlement_identity(reg: &serde_json::Value) -> (Bytes32, u16) {
+    let root = reg["participant_root"]
+        .as_str()
+        .and_then(|s| Bytes32::from_hex(s).ok())
+        .unwrap_or_else(|| die("staged settlement record has no valid participant_root"));
+    let count = reg["member_count"]
+        .as_u64()
+        .and_then(|m| reg["active_delegate_count"].as_u64().map(|d| m + d))
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or_else(|| die("staged settlement record has an invalid participant count"));
+    (root, count)
+}
+
+/// Phase 1: persist the irreversible delegate-join freeze BEFORE any deployment broadcast.  A
+/// failed or interrupted deployment conservatively leaves the channel frozen.  A retry may resume
+/// only this exact snapshot/root/count/rollup identity; it can never deploy a newer join set.
+fn prepare_settlement_binding(state: &mut CliState, reg: &serde_json::Value, rollup: &str) {
+    let (participant_root, participant_count) = staged_settlement_identity(reg);
+    let expected_digest = state.snapshot.state.digest;
+    if let Some(existing) = &state.settlement_binding {
+        let same = existing.channel_id == channel_id_env()
+            && existing.snapshot_state_digest == expected_digest
+            && existing.participant_root == participant_root
+            && existing.participant_count == participant_count
+            && strip0x(&existing.rollup) == strip0x(rollup);
+        if !same {
+            die(format!(
+                "settlement PREPARED identity mismatch: cli_state freezes root {} / state {} / \
+                 count {} / rollup {}, while this run proposes root {} / state {} / count {} / \
+                 rollup {}. Refusing a different participant set after the crash boundary.",
+                existing.participant_root,
+                existing.snapshot_state_digest,
+                existing.participant_count,
+                existing.rollup,
+                participant_root,
+                expected_digest,
+                participant_count,
+                rollup,
+            ));
+        }
+        if existing.status == SettlementBindingStatus::Active {
+            die("settlement binding is already ACTIVE in cli_state.json");
+        }
+        eprintln!("[deploy-settlement] resuming the identical fsynced PREPARED participant identity");
+        return;
+    }
+    state.settlement_binding = Some(SettlementBinding {
+        status: SettlementBindingStatus::Prepared,
+        channel_id: channel_id_env(),
+        snapshot_state_digest: expected_digest,
+        participant_root,
+        participant_count,
+        rollup: rollup.to_string(),
+        verifier: None,
+        manager: None,
+        deployment: None,
+        activation_checkpoint: None,
+    });
+    save_state(state);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RealSettlementDeployMode {
+    Fresh,
+    Resume,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettlementBroadcastAddresses {
+    verifier: String,
+    manager: String,
+    registration_tx_hash: Bytes32,
+    registration_calldata_hash: Bytes32,
+    registration_nonce: u64,
+}
+
+const SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const SETTLEMENT_PLAN_DOMAIN: &[u8] = b"INTMAX_SETTLEMENT_DEPLOY_PLAN_V1";
+
+fn append_deployment_digest_field(preimage: &mut Vec<u8>, field: &[u8]) {
+    preimage.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    preimage.extend_from_slice(field);
+}
+
+/// Commit the PREPARED record to every local input which determines the broadcast.  This is not a
+/// substitute for inspecting `run-latest.json` (done separately); it prevents a retry after an
+/// upgrade or fixture replacement from silently treating a different build as the same attempt.
+fn settlement_deployment_plan_digest(
+    contracts_dir: &Path,
+    chain_id: u64,
+    broadcaster: &str,
+    start_nonce: u64,
+    rollup: &str,
+    state_digest: Bytes32,
+    reg: &serde_json::Value,
+) -> Result<Bytes32, String> {
+    const PLAN_FILES: [&str; 12] = [
+        "foundry.toml",
+        "script/DeployCloseCli.s.sol",
+        "script/DeployConfig.sol",
+        "script/FixtureLib.sol",
+        "script/RegRecordLib.sol",
+        "src/BlobKZGVerifier.sol",
+        "src/ChannelSettlementManager.sol",
+        "src/ChannelSettlementVerifier.sol",
+        "src/IntmaxRollup.sol",
+        "lib/polygon-plonky2/mle/contracts/src/MleVerifier.sol",
+        "lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluator.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishWhirVerify.sol",
+    ];
+
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(SETTLEMENT_PLAN_DOMAIN);
+    append_deployment_digest_field(&mut preimage, &chain_id.to_be_bytes());
+    append_deployment_digest_field(&mut preimage, strip0x(broadcaster).as_bytes());
+    append_deployment_digest_field(&mut preimage, &start_nonce.to_be_bytes());
+    append_deployment_digest_field(&mut preimage, strip0x(rollup).as_bytes());
+    append_deployment_digest_field(&mut preimage, &state_digest.to_bytes_be());
+    let reg_bytes = serde_json::to_vec(reg).map_err(|e| format!("serialize settlement record: {e}"))?;
+    append_deployment_digest_field(&mut preimage, &reg_bytes);
+
+    for relative in PLAN_FILES {
+        let bytes = fs::read(contracts_dir.join(relative))
+            .map_err(|e| format!("read settlement plan input {relative}: {e}"))?;
+        append_deployment_digest_field(&mut preimage, relative.as_bytes());
+        append_deployment_digest_field(&mut preimage, &bytes);
+    }
+    for relative in CLOSE_CLI_FIXTURES {
+        let relative = format!("test/data/{relative}");
+        let bytes = fs::read(contracts_dir.join(&relative))
+            .map_err(|e| format!("read settlement fixture {relative}: {e}"))?;
+        append_deployment_digest_field(&mut preimage, relative.as_bytes());
+        append_deployment_digest_field(&mut preimage, &bytes);
+    }
+
+    Bytes32::from_bytes_be(&keccak_hash::keccak(preimage).0)
+        .map_err(|e| format!("construct settlement plan digest: {e:?}"))
+}
+
+fn settlement_broadcast_artifact_relative_path(chain_id: u64) -> String {
+    format!("broadcast/DeployCloseCli.s.sol/{chain_id}/run-latest.json")
+}
+
+fn expected_settlement_deployment_intent(
+    contracts_dir: &Path,
+    chain_id: u64,
+    broadcaster: &str,
+    start_nonce: u64,
+    start_block: u64,
+    rollup: &str,
+    state_digest: Bytes32,
+    reg: &serde_json::Value,
+) -> Result<SettlementDeploymentIntent, String> {
+    Ok(SettlementDeploymentIntent {
+        chain_id,
+        broadcaster: broadcaster.to_string(),
+        start_nonce,
+        start_block,
+        broadcast_artifact_path: settlement_broadcast_artifact_relative_path(chain_id),
+        plan_digest: settlement_deployment_plan_digest(
+            contracts_dir,
+            chain_id,
+            broadcaster,
+            start_nonce,
+            rollup,
+            state_digest,
+            reg,
+        )?,
+    })
+}
+
+fn settlement_deploy_mode_for_intent(
+    prepared_binding_exists: bool,
+    existing: Option<&SettlementDeploymentIntent>,
+    expected: &SettlementDeploymentIntent,
+) -> Result<RealSettlementDeployMode, String> {
+    match (prepared_binding_exists, existing) {
+        (false, None) => Ok(RealSettlementDeployMode::Fresh),
+        (true, None) => Err(
+            "PREPARED settlement has no broadcast recovery identity; fresh rerun forbidden"
+                .to_string(),
+        ),
+        (false, Some(_)) => {
+            Err("deployment intent exists without a PREPARED settlement binding".to_string())
+        }
+        (true, Some(existing)) if existing == expected => Ok(RealSettlementDeployMode::Resume),
+        (true, Some(existing)) => Err(format!(
+            "persisted settlement broadcast identity {:?} does not match this run {:?}",
+            existing, expected
+        )),
+    }
+}
+
+/// Production phase 1.  The nonce/chain/signer/artifact identity is included in the SAME fsynced
+/// write that freezes joins, so there is no state in which transactions may have started but a
+/// retry is still allowed to invent a new Foundry run.
+fn prepare_real_settlement_binding(
+    rpc: &str,
+    contracts_dir: &Path,
+    state: &mut CliState,
+    reg: &serde_json::Value,
+    rollup: &str,
+    chain_id: u64,
+    broadcaster: &str,
+) -> RealSettlementDeployMode {
+    let (participant_root, participant_count) = staged_settlement_identity(reg);
+    let state_digest = state.snapshot.state.digest;
+
+    if let Some(existing) = &state.settlement_binding {
+        let same_binding = existing.channel_id == channel_id_env()
+            && existing.snapshot_state_digest == state_digest
+            && existing.participant_root == participant_root
+            && existing.participant_count == participant_count
+            && strip0x(&existing.rollup) == strip0x(rollup);
+        if !same_binding {
+            die(
+                "settlement PREPARED identity differs from the live snapshot/rollup; refusing to \
+                 resume or create a replacement deployment",
+            );
+        }
+        if existing.status == SettlementBindingStatus::Active {
+            die("settlement binding is already ACTIVE in cli_state.json");
+        }
+        let persisted = existing.deployment.as_ref().unwrap_or_else(|| {
+            die(
+                "real-chain settlement is PREPARED but has no broadcast recovery identity. \
+                 Refusing a fresh forge run: transactions may already have been sent. Operator \
+                 migration must reconcile the chain and the original broadcast artifact.",
+            )
+        });
+        let expected = expected_settlement_deployment_intent(
+            contracts_dir,
+            chain_id,
+            broadcaster,
+            persisted.start_nonce,
+            persisted.start_block,
+            rollup,
+            state_digest,
+            reg,
+        )
+        .unwrap_or_else(|e| die(e));
+        settlement_deploy_mode_for_intent(true, Some(persisted), &expected)
+            .unwrap_or_else(|e| die(format!("cannot resume settlement deployment: {e}")))
+    } else {
+        let latest_nonce = read_account_nonce(rpc, broadcaster, "latest");
+        let pending_nonce = read_account_nonce(rpc, broadcaster, "pending");
+        if latest_nonce != pending_nonce {
+            die(format!(
+                "settlement broadcaster {broadcaster} has outstanding transactions \
+                 (latest nonce {latest_nonce}, pending nonce {pending_nonce}); refusing to pin an \
+                 ambiguous Foundry start nonce"
+            ));
+        }
+        let deployment_start = read_durable_l1_checkpoint(rpc, chain_id);
+        require_stable_durable_l1_checkpoint(rpc, &deployment_start);
+        let deployment = expected_settlement_deployment_intent(
+            contracts_dir,
+            chain_id,
+            broadcaster,
+            latest_nonce,
+            deployment_start.block_number,
+            rollup,
+            state_digest,
+            reg,
+        )
+        .unwrap_or_else(|e| die(e));
+        debug_assert_eq!(
+            settlement_deploy_mode_for_intent(false, None, &deployment),
+            Ok(RealSettlementDeployMode::Fresh)
+        );
+        state.settlement_binding = Some(SettlementBinding {
+            status: SettlementBindingStatus::Prepared,
+            channel_id: channel_id_env(),
+            snapshot_state_digest: state_digest,
+            participant_root,
+            participant_count,
+            rollup: rollup.to_string(),
+            verifier: None,
+            manager: None,
+            deployment: Some(deployment),
+            activation_checkpoint: None,
+        });
+        save_state(state);
+        RealSettlementDeployMode::Fresh
+    }
+}
+
+fn settlement_artifact_quantity(value: &serde_json::Value, what: &str) -> Result<u64, String> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    let raw = value
+        .as_str()
+        .ok_or_else(|| format!("{what} is neither a JSON integer nor a quantity string"))?;
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| format!("parse {what} {raw:?}: {e}"))
+    } else {
+        raw.parse::<u64>()
+            .map_err(|e| format!("parse {what} {raw:?}: {e}"))
+    }
+}
+
+fn settlement_artifact_string<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+    what: &str,
+) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{what} has no string field {key:?}"))
+}
+
+fn settlement_artifact_args<'a>(
+    tx: &'a serde_json::Value,
+    what: &str,
+) -> Result<Vec<&'a str>, String> {
+    tx.get("arguments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{what} has no arguments array"))?
+        .iter()
+        .enumerate()
+        .map(|(i, value)| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{what} argument {i} is not a string"))
+        })
+        .collect()
+}
+
+fn normalize_abi_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn abi_array(values: &[String]) -> String {
+    format!("[{}]", values.join(","))
+}
+
+fn cast_encode_settlement_calldata(function: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("cast")
+        .arg("calldata")
+        .arg(function)
+        .args(args)
+        .output()
+        .map_err(|e| format!("start `cast calldata` for {function}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`cast calldata` rejected Foundry metadata for {function}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn cast_encode_settlement_constructor(args: &[&str]) -> Result<String, String> {
+    const SIGNATURE: &str = "constructor(bytes4,uint8,bytes32,uint16,bytes32,uint64,uint256,uint256,address,address,(bytes32,address)[])";
+    let output = Command::new("cast")
+        .arg("abi-encode")
+        .arg(SIGNATURE)
+        .args(args)
+        .output()
+        .map_err(|e| format!("start `cast abi-encode` for settlement manager: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`cast abi-encode` rejected manager constructor metadata: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn validate_settlement_call_input(tx: &serde_json::Value, what: &str) -> Result<(), String> {
+    let function = settlement_artifact_string(tx, "function", what)?;
+    let args = settlement_artifact_args(tx, what)?;
+    let expected = cast_encode_settlement_calldata(function, &args)?;
+    let actual = tx
+        .get("transaction")
+        .and_then(|value| value.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{what} has no transaction.input"))?;
+    if strip0x(actual) != strip0x(&expected) {
+        return Err(format!(
+            "{what} calldata does not encode its inspected function/arguments"
+        ));
+    }
+    Ok(())
+}
+
+fn settlement_reg_string_vec(
+    reg: &serde_json::Value,
+    key: &str,
+    expected_len: usize,
+) -> Result<Vec<String>, String> {
+    let values = reg
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("staged record has no {key} array"))?;
+    if values.len() != expected_len {
+        return Err(format!(
+            "staged record {key} length {} != active participant count {expected_len}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, value)| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("staged record {key}[{i}] is not a string"))
+        })
+        .collect()
+}
+
+fn settlement_artifact_contract_address(
+    tx: &serde_json::Value,
+    what: &str,
+) -> Result<String, String> {
+    let raw = settlement_artifact_string(tx, "contractAddress", what)?;
+    let address = Address::from_hex(raw).map_err(|e| format!("{what} contract address: {e:?}"))?;
+    if address == Address::default() {
+        return Err(format!("{what} has the zero contract address"));
+    }
+    Ok(address.to_hex())
+}
+
+fn validate_settlement_tx_shape(
+    tx: &serde_json::Value,
+    expected_type: &str,
+    expected_contract: &str,
+    expected_function_prefix: Option<&str>,
+    what: &str,
+) -> Result<(), String> {
+    if settlement_artifact_string(tx, "transactionType", what)? != expected_type {
+        return Err(format!("{what} is not a {expected_type} transaction"));
+    }
+    if settlement_artifact_string(tx, "contractName", what)? != expected_contract {
+        return Err(format!("{what} is not for {expected_contract}"));
+    }
+    if let Some(prefix) = expected_function_prefix {
+        let function = settlement_artifact_string(tx, "function", what)?;
+        if !function.starts_with(prefix) || !function.ends_with(')') {
+            return Err(format!("{what} has unexpected function {function:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_settlement_call_target(
+    tx: &serde_json::Value,
+    expected: &str,
+    what: &str,
+) -> Result<(), String> {
+    let transaction = tx
+        .get("transaction")
+        .ok_or_else(|| format!("{what} has no transaction object"))?;
+    let to = settlement_artifact_string(transaction, "to", what)?;
+    let annotated = settlement_artifact_string(tx, "contractAddress", what)?;
+    if strip0x(to) != strip0x(expected) || strip0x(annotated) != strip0x(expected) {
+        return Err(format!(
+            "{what} targets to={to}, contractAddress={annotated}; expected {expected}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the complete semantic transaction plan and also re-encode every CALL from Foundry's
+/// inspected metadata.  This closes the dangerous gap where a forged/stale JSON annotation says
+/// "register this channel" while `transaction.input` actually registers another one.
+fn validate_settlement_broadcast_value(
+    artifact: &serde_json::Value,
+    intent: &SettlementDeploymentIntent,
+    reg: &serde_json::Value,
+    rollup: &str,
+) -> Result<SettlementBroadcastAddresses, String> {
+    let artifact_chain = artifact
+        .get("chain")
+        .ok_or_else(|| "broadcast artifact has no chain".to_string())?;
+    if settlement_artifact_quantity(artifact_chain, "broadcast chain")? != intent.chain_id {
+        return Err(format!(
+            "broadcast artifact chain does not match pinned chain {}",
+            intent.chain_id
+        ));
+    }
+    let transactions = artifact
+        .get("transactions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "broadcast artifact has no transactions array".to_string())?;
+
+    for (i, tx) in transactions.iter().enumerate() {
+        let what = format!("broadcast transaction {i}");
+        let transaction = tx
+            .get("transaction")
+            .ok_or_else(|| format!("{what} has no transaction object"))?;
+        let from = settlement_artifact_string(transaction, "from", &what)?;
+        if strip0x(from) != strip0x(&intent.broadcaster) {
+            return Err(format!(
+                "{what} sender {from} != pinned broadcaster {}",
+                intent.broadcaster
+            ));
+        }
+        let nonce = transaction
+            .get("nonce")
+            .ok_or_else(|| format!("{what} has no nonce"))?;
+        let nonce = settlement_artifact_quantity(nonce, &format!("{what} nonce"))?;
+        let expected_nonce = intent
+            .start_nonce
+            .checked_add(i as u64)
+            .ok_or_else(|| "broadcast nonce overflow".to_string())?;
+        if nonce != expected_nonce {
+            return Err(format!(
+                "{what} nonce {nonce} != pinned contiguous nonce {expected_nonce}"
+            ));
+        }
+        let tx_chain = transaction
+            .get("chainId")
+            .ok_or_else(|| format!("{what} has no chainId"))?;
+        if settlement_artifact_quantity(tx_chain, &format!("{what} chainId"))?
+            != intent.chain_id
+        {
+            return Err(format!("{what} chainId differs from the pinned chain"));
+        }
+        if transaction
+            .get("value")
+            .map(|value| settlement_artifact_quantity(value, &format!("{what} value")))
+            .transpose()?
+            .unwrap_or(0)
+            != 0
+        {
+            return Err(format!("{what} unexpectedly transfers native value"));
+        }
+    }
+
+    // Solidity libraries may already exist at their deterministic CREATE2 addresses, so Foundry
+    // may emit zero, one or both.  No other prelude transaction is permitted.
+    let mut core_start = 0usize;
+    let mut libraries = HashSet::new();
+    while core_start < transactions.len()
+        && transactions[core_start]["transactionType"].as_str() == Some("CREATE2")
+    {
+        let tx = &transactions[core_start];
+        let what = format!("broadcast transaction {core_start}");
+        let name = settlement_artifact_string(tx, "contractName", &what)?;
+        if !matches!(name, "Plonky2GateEvaluator" | "SpongefishWhirVerify")
+            || !libraries.insert(name)
+        {
+            return Err(format!("{what} is an unexpected/duplicate CREATE2 library {name}"));
+        }
+        let transaction = tx
+            .get("transaction")
+            .ok_or_else(|| format!("{what} has no transaction object"))?;
+        let to = settlement_artifact_string(transaction, "to", &what)?;
+        if strip0x(to) != "4e59b44847b379578588920ca78fbf26c0b4956c" {
+            return Err(format!("{what} does not use the canonical CREATE2 deployer"));
+        }
+        settlement_artifact_contract_address(tx, &what)?;
+        core_start += 1;
+    }
+    const CORE_TRANSACTION_COUNT: usize = 9;
+    if transactions.len() != core_start + CORE_TRANSACTION_COUNT {
+        return Err(format!(
+            "broadcast artifact has {} core transactions after {core_start} library creates; \
+             expected exactly {CORE_TRANSACTION_COUNT}",
+            transactions.len().saturating_sub(core_start)
+        ));
+    }
+    let core = &transactions[core_start..];
+
+    validate_settlement_tx_shape(&core[0], "CREATE", "MleVerifier", None, "MleVerifier deploy")?;
+    let mle = settlement_artifact_contract_address(&core[0], "MleVerifier deploy")?;
+    validate_settlement_tx_shape(
+        &core[1],
+        "CREATE",
+        "ChannelSettlementVerifier",
+        None,
+        "settlement verifier deploy",
+    )?;
+    let verifier = settlement_artifact_contract_address(&core[1], "settlement verifier deploy")?;
+
+    for (offset, function) in [
+        "initializeCloseVk(",
+        "initializeWithdrawalClaimVk(",
+        "initializePostCloseClaimVk(",
+        "initializeCancelCloseVk(",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let tx = &core[2 + offset];
+        let what = format!("settlement verifier initializer {function}");
+        validate_settlement_tx_shape(
+            tx,
+            "CALL",
+            "ChannelSettlementVerifier",
+            Some(function),
+            &what,
+        )?;
+        validate_settlement_call_target(tx, &verifier, &what)?;
+        let args = settlement_artifact_args(tx, &what)?;
+        if args.first().is_none_or(|arg| strip0x(arg) != strip0x(&mle)) {
+            return Err(format!("{what} is not bound to the MleVerifier created by this run"));
+        }
+        validate_settlement_call_input(tx, &what)?;
+    }
+
+    let member_count = reg["member_count"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "staged record member_count is invalid".to_string())?;
+    let delegate_count = reg["active_delegate_count"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "staged record active_delegate_count is invalid".to_string())?;
+    let active_count = member_count
+        .checked_add(delegate_count)
+        .ok_or_else(|| "staged participant count overflow".to_string())?;
+    let pk_gs = settlement_reg_string_vec(reg, "member_pk_gs", active_count)?;
+    let pk_bs = settlement_reg_string_vec(reg, "member_pk_bs", active_count)?;
+    let regev = settlement_reg_string_vec(reg, "regev_pk_digests", active_count)?;
+    let recipients = settlement_reg_string_vec(reg, "recipients", active_count)?;
+    if member_count == 0 || BP_SLOT as usize >= member_count {
+        return Err("staged record has no valid block-proposer member".to_string());
+    }
+
+    let register = &core[6];
+    validate_settlement_tx_shape(
+        register,
+        "CALL",
+        "IntmaxRollup",
+        Some("registerChannel("),
+        "registerChannel",
+    )?;
+    validate_settlement_call_target(register, rollup, "registerChannel")?;
+    let register_args = settlement_artifact_args(register, "registerChannel")?;
+    if register_args.len() != 7
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(register_args[0].to_string()),
+            "registerChannel channel id",
+        )? != reg["channel_id"].as_u64().ok_or_else(|| "staged channel_id is invalid".to_string())?
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(register_args[1].to_string()),
+            "registerChannel bp slot",
+        )? != BP_SLOT as u64
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(register_args[2].to_string()),
+            "registerChannel delegate count",
+        )? != 0
+        || normalize_abi_text(register_args[3]) != normalize_abi_text(&abi_array(&pk_gs[..member_count]))
+        || normalize_abi_text(register_args[4]) != normalize_abi_text(&abi_array(&pk_bs[..member_count]))
+        || normalize_abi_text(register_args[5]) != normalize_abi_text(&abi_array(&regev[..member_count]))
+        || normalize_abi_text(register_args[6])
+            != normalize_abi_text(&abi_array(&recipients[..member_count]))
+    {
+        return Err(
+            "registerChannel does not carry the staged cosigner-only channel registration"
+                .to_string(),
+        );
+    }
+    validate_settlement_call_input(register, "registerChannel")?;
+
+    let manager_deploy = &core[7];
+    validate_settlement_tx_shape(
+        manager_deploy,
+        "CREATE",
+        "ChannelSettlementManager",
+        None,
+        "settlement manager deploy",
+    )?;
+    let manager = settlement_artifact_contract_address(manager_deploy, "settlement manager deploy")?;
+    let manager_args = settlement_artifact_args(manager_deploy, "settlement manager deploy")?;
+    let expected_channel = format!(
+        "0x{:08x}",
+        reg["channel_id"]
+            .as_u64()
+            .ok_or_else(|| "staged channel_id is invalid".to_string())?
+    );
+    let expected_bindings = format!(
+        "[{}]",
+        pk_gs[..member_count]
+            .iter()
+            .zip(&recipients[..member_count])
+            .map(|(pk_g, recipient)| format!("({pk_g},{recipient})"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let expected_root = reg["participant_root"]
+        .as_str()
+        .ok_or_else(|| "staged participant_root is invalid".to_string())?;
+    if manager_args.len() != 11
+        || normalize_abi_text(manager_args[0]) != normalize_abi_text(&expected_channel)
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(manager_args[1].to_string()),
+            "manager bp slot",
+        )? != BP_SLOT as u64
+        || normalize_abi_text(manager_args[2]) != normalize_abi_text(&pk_gs[BP_SLOT as usize])
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(manager_args[3].to_string()),
+            "manager delegate count",
+        )? != delegate_count as u64
+        || normalize_abi_text(manager_args[4]) != normalize_abi_text(expected_root)
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(manager_args[5].to_string()),
+            "manager challenge period",
+        )? != 86_400
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(manager_args[6].to_string()),
+            "manager special-close penalty",
+        )? != 0
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(manager_args[7].to_string()),
+            "manager initial BP bond",
+        )? != 0
+        || strip0x(manager_args[8]) != strip0x(&verifier)
+        || strip0x(manager_args[9]) != strip0x(rollup)
+        || normalize_abi_text(manager_args[10]) != normalize_abi_text(&expected_bindings)
+    {
+        return Err(
+            "ChannelSettlementManager constructor does not match the pinned snapshot/root/count/rollup"
+                .to_string(),
+        );
+    }
+    let encoded_constructor = cast_encode_settlement_constructor(&manager_args)?;
+    let manager_input = manager_deploy
+        .get("transaction")
+        .and_then(|value| value.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "manager deploy has no transaction.input".to_string())?;
+    if !strip0x(manager_input).ends_with(&strip0x(&encoded_constructor)) {
+        return Err("manager creation input does not end in the inspected constructor ABI".to_string());
+    }
+
+    let register_manager = &core[8];
+    validate_settlement_tx_shape(
+        register_manager,
+        "CALL",
+        "IntmaxRollup",
+        Some("registerSettlementManager("),
+        "registerSettlementManager",
+    )?;
+    validate_settlement_call_target(register_manager, rollup, "registerSettlementManager")?;
+    let register_manager_args =
+        settlement_artifact_args(register_manager, "registerSettlementManager")?;
+    if register_manager_args.len() != 1
+        || strip0x(register_manager_args[0]) != strip0x(&manager)
+    {
+        return Err(
+            "registerSettlementManager does not register the manager created by this run"
+                .to_string(),
+        );
+    }
+    validate_settlement_call_input(register_manager, "registerSettlementManager")?;
+
+    let registration_tx_hash = settlement_artifact_string(
+        register_manager,
+        "hash",
+        "registerSettlementManager",
+    )?
+    .parse::<Bytes32>()
+    .map_err(|error| format!("registerSettlementManager transaction hash: {error}"))?;
+    if registration_tx_hash == Bytes32::default() {
+        return Err("registerSettlementManager transaction hash is zero".to_string());
+    }
+    let registration_transaction = register_manager
+        .get("transaction")
+        .ok_or_else(|| "registerSettlementManager has no transaction object".to_string())?;
+    let registration_input = settlement_artifact_string(
+        registration_transaction,
+        "input",
+        "registerSettlementManager",
+    )?;
+    let registration_input_bytes = hex::decode(strip0x(registration_input))
+        .map_err(|error| format!("decode registerSettlementManager calldata: {error}"))?;
+    let registration_calldata_hash =
+        Bytes32::from_bytes_be(&keccak_hash::keccak(registration_input_bytes).0)
+            .map_err(|error| format!("construct registration calldata hash: {error:?}"))?;
+    let registration_nonce = settlement_artifact_quantity(
+        registration_transaction
+            .get("nonce")
+            .ok_or_else(|| "registerSettlementManager has no nonce".to_string())?,
+        "registerSettlementManager nonce",
+    )?;
+
+    Ok(SettlementBroadcastAddresses {
+        verifier,
+        manager,
+        registration_tx_hash,
+        registration_calldata_hash,
+        registration_nonce,
+    })
+}
+
+fn validate_settlement_broadcast_artifact(
+    contracts_dir: &Path,
+    intent: &SettlementDeploymentIntent,
+    reg: &serde_json::Value,
+    rollup: &str,
+) -> Result<SettlementBroadcastAddresses, String> {
+    let expected_relative = settlement_broadcast_artifact_relative_path(intent.chain_id);
+    if intent.broadcast_artifact_path != expected_relative {
+        return Err(format!(
+            "persisted broadcast path {:?} != deterministic path {:?}",
+            intent.broadcast_artifact_path, expected_relative
+        ));
+    }
+    let path = contracts_dir.join(&intent.broadcast_artifact_path);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|e| format!("read broadcast artifact metadata {}: {e}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "broadcast artifact {} is not a regular non-symlink file",
+            path.display()
+        ));
+    }
+    if metadata.len() > SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES {
+        return Err(format!(
+            "broadcast artifact {} is {} bytes, above the {} byte safety limit",
+            path.display(),
+            metadata.len(),
+            SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES
+        ));
+    }
+    let bytes = fs::read(&path)
+        .map_err(|e| format!("read broadcast artifact {}: {e}", path.display()))?;
+    let artifact: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse broadcast artifact {}: {e}", path.display()))?;
+    validate_settlement_broadcast_value(&artifact, intent, reg, rollup)
+}
+
+/// Adopt the exact final transaction from the pinned Foundry artifact only after its receipt is
+/// successful, canonical and covered by the durable L1 head.  A `latest` code/readback is not
+/// evidence: it can disappear in a reorg and it can be assembled from a different branch than the
+/// transaction which actually registered the manager.
+fn settlement_registration_receipt(
+    rpc: &str,
+    intent: &SettlementDeploymentIntent,
+    rollup: &str,
+    addresses: &SettlementBroadcastAddresses,
+) -> Option<intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt> {
+    use intmax3_zkp::partial_withdrawal_payout::L1CallKind;
+
+    let receipt = try_read_l1_receipt(
+        rpc,
+        &addresses.registration_tx_hash.to_string(),
+        L1CallKind::RegisterSettlementManager,
+    )?;
+    let expected_from = Address::from_hex(&intent.broadcaster)
+        .unwrap_or_else(|error| die(format!("parse settlement broadcaster: {error:?}")));
+    let expected_to = Address::from_hex(rollup)
+        .unwrap_or_else(|error| die(format!("parse settlement rollup: {error:?}")));
+    if !receipt.success
+        || receipt.chain_id != intent.chain_id
+        || receipt.from != expected_from
+        || receipt.to != expected_to
+        || receipt.call_kind != L1CallKind::RegisterSettlementManager
+        || receipt.calldata_hash != addresses.registration_calldata_hash
+        || receipt.transaction_nonce != addresses.registration_nonce
+        || receipt.block_number < intent.start_block
+    {
+        die(format!(
+            "pinned registerSettlementManager receipt does not match the PREPARED deployment: {:?}",
+            receipt
+        ));
+    }
+    require_stable_durable_l1_checkpoint(rpc, &receipt.finalized_checkpoint);
+    Some(receipt)
+}
+
+#[cfg(test)]
+mod settlement_broadcast_recovery_tests {
+    use super::*;
+
+    const CHAIN_ID: u64 = 1;
+    const START_NONCE: u64 = 41;
+    const BROADCASTER: &str = "0x0000000000000000000000000000000000000055";
+    const ROLLUP: &str = "0x0000000000000000000000000000000000000044";
+    const MLE: &str = "0x0000000000000000000000000000000000000011";
+    const VERIFIER: &str = "0x0000000000000000000000000000000000000022";
+    const MANAGER: &str = "0x0000000000000000000000000000000000000033";
+
+    fn intent() -> SettlementDeploymentIntent {
+        SettlementDeploymentIntent {
+            chain_id: CHAIN_ID,
+            broadcaster: BROADCASTER.to_string(),
+            start_nonce: START_NONCE,
+            start_block: 100,
+            broadcast_artifact_path: settlement_broadcast_artifact_relative_path(CHAIN_ID),
+            plan_digest: Bytes32::default(),
+        }
+    }
+
+    fn reg() -> serde_json::Value {
+        let pk_gs = (1..=3)
+            .map(|i| format!("0x{i:064x}"))
+            .collect::<Vec<_>>();
+        let pk_bs = (11..=13)
+            .map(|i| format!("0x{i:064x}"))
+            .collect::<Vec<_>>();
+        let regev = (21..=23)
+            .map(|i| format!("0x{i:064x}"))
+            .collect::<Vec<_>>();
+        let recipients = vec![
+            BROADCASTER.to_string(),
+            "0x0000000000000000000000000000000000000066".to_string(),
+            "0x0000000000000000000000000000000000000077".to_string(),
+        ];
+        settlement_reg_json(7, 2, 1, &pk_gs, &pk_bs, &regev, &recipients)
+    }
+
+    fn create_tx(
+        nonce: u64,
+        contract_name: &str,
+        contract_address: &str,
+        args: Option<Vec<String>>,
+        input: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "hash": format!("0x{:064x}", nonce + 1),
+            "transactionType": "CREATE",
+            "contractName": contract_name,
+            "contractAddress": contract_address,
+            "function": null,
+            "arguments": args,
+            "transaction": {
+                "from": BROADCASTER,
+                "nonce": format!("0x{nonce:x}"),
+                "chainId": format!("0x{CHAIN_ID:x}"),
+                "input": input,
+            }
+        })
+    }
+
+    fn call_tx(
+        nonce: u64,
+        contract_name: &str,
+        target: &str,
+        function: &str,
+        args: Vec<String>,
+    ) -> serde_json::Value {
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let input = cast_encode_settlement_calldata(function, &refs).unwrap();
+        serde_json::json!({
+            "hash": format!("0x{:064x}", nonce + 1),
+            "transactionType": "CALL",
+            "contractName": contract_name,
+            "contractAddress": target,
+            "function": function,
+            "arguments": args,
+            "transaction": {
+                "from": BROADCASTER,
+                "to": target,
+                "nonce": format!("0x{nonce:x}"),
+                "chainId": format!("0x{CHAIN_ID:x}"),
+                "input": input,
+            }
+        })
+    }
+
+    fn artifact() -> (serde_json::Value, serde_json::Value) {
+        let reg = reg();
+        let pk_gs = settlement_reg_string_vec(&reg, "member_pk_gs", 3).unwrap();
+        let pk_bs = settlement_reg_string_vec(&reg, "member_pk_bs", 3).unwrap();
+        let regev = settlement_reg_string_vec(&reg, "regev_pk_digests", 3).unwrap();
+        let recipients = settlement_reg_string_vec(&reg, "recipients", 3).unwrap();
+        let root = reg["participant_root"].as_str().unwrap().to_string();
+        let member_bindings = format!(
+            "[({},{}),({},{})]",
+            pk_gs[0], recipients[0], pk_gs[1], recipients[1]
+        );
+        let manager_args = vec![
+            "0x00000007".to_string(),
+            "0".to_string(),
+            pk_gs[0].clone(),
+            "1".to_string(),
+            root,
+            "86400".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            VERIFIER.to_string(),
+            ROLLUP.to_string(),
+            member_bindings,
+        ];
+        let manager_refs = manager_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
+        let manager_input = format!("0x60006000{}", strip0x(&constructor));
+
+        let mut transactions = vec![
+            create_tx(START_NONCE, "MleVerifier", MLE, None, "0x6000"),
+            create_tx(
+                START_NONCE + 1,
+                "ChannelSettlementVerifier",
+                VERIFIER,
+                None,
+                "0x6001",
+            ),
+        ];
+        for (offset, function) in [
+            "initializeCloseVk(address)",
+            "initializeWithdrawalClaimVk(address)",
+            "initializePostCloseClaimVk(address)",
+            "initializeCancelCloseVk(address)",
+        ]
+        .iter()
+        .enumerate()
+        {
+            transactions.push(call_tx(
+                START_NONCE + 2 + offset as u64,
+                "ChannelSettlementVerifier",
+                VERIFIER,
+                function,
+                vec![MLE.to_string()],
+            ));
+        }
+        transactions.push(call_tx(
+            START_NONCE + 6,
+            "IntmaxRollup",
+            ROLLUP,
+            "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
+            vec![
+                "7".to_string(),
+                "0".to_string(),
+                "0".to_string(),
+                abi_array(&pk_gs[..2]),
+                abi_array(&pk_bs[..2]),
+                abi_array(&regev[..2]),
+                abi_array(&recipients[..2]),
+            ],
+        ));
+        transactions.push(create_tx(
+            START_NONCE + 7,
+            "ChannelSettlementManager",
+            MANAGER,
+            Some(manager_args),
+            &manager_input,
+        ));
+        transactions.push(call_tx(
+            START_NONCE + 8,
+            "IntmaxRollup",
+            ROLLUP,
+            "registerSettlementManager(address)",
+            vec![MANAGER.to_string()],
+        ));
+        (
+            serde_json::json!({"chain": CHAIN_ID, "transactions": transactions}),
+            reg,
+        )
+    }
+
+    #[test]
+    fn prepared_retry_never_selects_a_fresh_run() {
+        let expected = intent();
+        assert_eq!(
+            settlement_deploy_mode_for_intent(false, None, &expected),
+            Ok(RealSettlementDeployMode::Fresh)
+        );
+        assert!(settlement_deploy_mode_for_intent(true, None, &expected).is_err());
+        assert_eq!(
+            settlement_deploy_mode_for_intent(true, Some(&expected), &expected),
+            Ok(RealSettlementDeployMode::Resume)
+        );
+
+        let mut stale = expected.clone();
+        stale.start_nonce -= 1;
+        assert!(settlement_deploy_mode_for_intent(true, Some(&stale), &expected).is_err());
+        let mut wrong_chain = expected.clone();
+        wrong_chain.chain_id = 10;
+        assert!(
+            settlement_deploy_mode_for_intent(true, Some(&wrong_chain), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_is_bound_to_chain_sender_nonce_rollup_and_snapshot_constructor() {
+        let (artifact, reg) = artifact();
+        let addresses =
+            validate_settlement_broadcast_value(&artifact, &intent(), &reg, ROLLUP).unwrap();
+        assert_eq!(strip0x(&addresses.verifier), strip0x(VERIFIER));
+        assert_eq!(strip0x(&addresses.manager), strip0x(MANAGER));
+        assert_eq!(addresses.registration_nonce, START_NONCE + 8);
+        assert_ne!(addresses.registration_tx_hash, Bytes32::default());
+        assert_ne!(addresses.registration_calldata_hash, Bytes32::default());
+
+        let mut wrong_nonce = artifact.clone();
+        wrong_nonce["transactions"][4]["transaction"]["nonce"] =
+            serde_json::json!(format!("0x{:x}", START_NONCE + 99));
+        assert!(
+            validate_settlement_broadcast_value(&wrong_nonce, &intent(), &reg, ROLLUP).is_err()
+        );
+
+        let mut wrong_rollup = artifact.clone();
+        wrong_rollup["transactions"][6]["transaction"]["to"] =
+            serde_json::json!("0x0000000000000000000000000000000000000099");
+        assert!(
+            validate_settlement_broadcast_value(&wrong_rollup, &intent(), &reg, ROLLUP).is_err()
+        );
+
+        let mut wrong_root = artifact.clone();
+        wrong_root["transactions"][7]["arguments"][4] =
+            serde_json::json!(format!("0x{:064x}", 999));
+        assert!(
+            validate_settlement_broadcast_value(&wrong_root, &intent(), &reg, ROLLUP).is_err()
+        );
+
+        let mut annotated_call_with_other_input = artifact.clone();
+        annotated_call_with_other_input["transactions"][8]["transaction"]["input"] =
+            serde_json::json!("0xa01b29350000000000000000000000000000000000000000000000000000000000000099");
+        assert!(validate_settlement_broadcast_value(
+            &annotated_call_with_other_input,
+            &intent(),
+            &reg,
+            ROLLUP,
+        )
+        .is_err());
+
+        let mut zero_final_hash = artifact.clone();
+        zero_final_hash["transactions"][8]["hash"] =
+            serde_json::json!(format!("0x{:064x}", 0));
+        assert!(
+            validate_settlement_broadcast_value(&zero_final_hash, &intent(), &reg, ROLLUP)
+                .is_err()
+        );
+
+        let mut value_bearing_registration = artifact.clone();
+        value_bearing_registration["transactions"][8]["transaction"]["value"] =
+            serde_json::json!("0x1");
+        assert!(validate_settlement_broadcast_value(
+            &value_bearing_registration,
+            &intent(),
+            &reg,
+            ROLLUP,
+        )
+        .is_err());
+    }
+}
+
+/// Phase 2: after every canonical on-chain readback passes, fill the deployed addresses and mark
+/// ACTIVE.  This is fsynced before `settlement.json` is published.
+fn activate_settlement_binding(
+    state: &mut CliState,
+    reg: &serde_json::Value,
+    rollup: &str,
+    verifier: &str,
+    manager: &str,
+    activation_checkpoint: Option<intmax3_zkp::l1_finality::L1FinalizedCheckpoint>,
+) {
+    let (participant_root, participant_count) = staged_settlement_identity(reg);
+    let binding = state
+        .settlement_binding
+        .as_mut()
+        .unwrap_or_else(|| die("settlement activation without a fsynced PREPARED binding"));
+    if binding.status != SettlementBindingStatus::Prepared
+        || binding.snapshot_state_digest != state.snapshot.state.digest
+        || binding.participant_root != participant_root
+        || binding.participant_count != participant_count
+        || strip0x(&binding.rollup) != strip0x(rollup)
+    {
+        die("settlement activation does not match the fsynced PREPARED identity");
+    }
+    if binding.deployment.is_some() && activation_checkpoint.is_none() {
+        die("production settlement activation requires a canonical finalized checkpoint");
+    }
+    if binding.deployment.is_none() && activation_checkpoint.is_some() {
+        die("devnet settlement activation must not claim a production finality checkpoint");
+    }
+    if let Some(checkpoint) = activation_checkpoint {
+        checkpoint
+            .validate()
+            .unwrap_or_else(|error| die(format!("invalid settlement activation checkpoint: {error}")));
+        let deployment = binding
+            .deployment
+            .as_ref()
+            .unwrap_or_else(|| die("activation checkpoint without deployment intent"));
+        if checkpoint.chain_id != deployment.chain_id
+            || checkpoint.block_number < deployment.start_block
+        {
+            die("settlement activation checkpoint does not cover the PREPARED deployment window");
+        }
+        binding.activation_checkpoint = Some(checkpoint);
+    }
+    binding.status = SettlementBindingStatus::Active;
+    binding.verifier = Some(verifier.to_string());
+    binding.manager = Some(manager.to_string());
+    save_state(state);
+}
+
 /// The anvil path, UNCHANGED: MockMleVerifier + ChannelSettlementVerifier +
 /// ChannelSettlementManager attached to the EXISTING rollup in `channel_backing.json`, with the
 /// LIVE channel member set from the snapshot (including any runtime-joined delegates).
@@ -6437,50 +10919,15 @@ mod settlement_reg_record_tests {
 /// SECURITY: `chain_id` is taken as an argument and re-checked below rather than assumed, so the
 /// mock stack cannot be installed off-devnet even if a future refactor mis-wires the dispatcher.
 fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
-    let state = load_state();
+    let mut state = load_state();
     let (_, _, backing) = load_backing();
     let rollup = &backing.rollup;
     if rollup.is_empty() {
         die("no rollup address in channel_backing.json — run setup-backing first");
     }
 
-    let channel_id = channel_id_env();
-    let members = &state.snapshot.members;
-    let record = &state.snapshot.record;
-    let member_count = record.member_count as usize;
-    // The LIVE delegate count. It reaches the SETTLEMENT MANAGER only (its B-2 close floor and its
-    // delegate bindings) — never the L1 registration record, which `settlement_reg_json` pins to
-    // zero. See that function for the full argument; this is the path where the two used to be the
-    // same value.
-    let delegate_count = record.delegate_count as usize;
-    let active = member_count + delegate_count;
-
-    let mut pk_gs = Vec::new();
-    let mut pk_bs = Vec::new();
-    let mut regev_digests = Vec::new();
-    let mut recipients = Vec::new();
-    for m in members.iter().take(active) {
-        pk_gs.push(m.pk_g.to_hex());
-        pk_bs.push(m.pk_b.to_hex());
-        regev_digests.push(m.regev_pk.digest().to_hex());
-        let recipient_addr = Address::from_u32_slice(
-            &[0xAAAA_0000u32
-                .wrapping_add(channel_id.wrapping_mul(16))
-                .wrapping_add(m.slot as u32); 5],
-        )
-        .expect("address from u32 slice");
-        recipients.push(format!("0x{}", hex::encode(recipient_addr.to_bytes_be())));
-    }
-
-    let reg = settlement_reg_json(
-        channel_id,
-        member_count,
-        delegate_count,
-        &pk_gs,
-        &pk_bs,
-        &regev_digests,
-        &recipients,
-    );
+    let reg = build_live_settlement_reg_record(&state);
+    prepare_settlement_binding(&mut state, &reg, rollup);
     // The pattern the five exit commands now share (F4): resolve from the executable, validate,
     // announce. Kept identical here so there is ONE implementation rather than three copies.
     let plan = SettlementDeployPlan::MockDevnet;
@@ -6560,6 +11007,7 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
             ))
         });
 
+    activate_settlement_binding(&mut state, &reg, rollup, &verifier, &manager, None);
     write_json(
         "settlement.json",
         &serde_json::json!({
@@ -6596,6 +11044,21 @@ fn cast_call(rpc: &str, to: &str, sig: &str, args: &[&str]) -> String {
     cast(&argv).trim().to_string()
 }
 
+fn cast_call_at(rpc: &str, to: &str, sig: &str, args: &[&str], block_number: u64) -> String {
+    let block = format!("0x{block_number:x}");
+    let mut argv: Vec<&str> = vec!["call", to, sig];
+    argv.extend_from_slice(args);
+    argv.extend_from_slice(&["--block", &block, "--rpc-url", rpc]);
+    cast(&argv).trim().to_string()
+}
+
+fn cast_code_at(rpc: &str, address: &str, block_number: u64) -> String {
+    let block = format!("0x{block_number:x}");
+    cast(&["code", address, "--block", &block, "--rpc-url", rpc])
+        .trim()
+        .to_string()
+}
+
 /// Read back ONE boolean latch, refusing anything that is not exactly `true`.
 ///
 /// SECURITY / LIVENESS: fail-closed on purpose. `cast` decodes `(bool)` to `true`/`false`; any
@@ -6614,23 +11077,31 @@ fn require_true(rpc: &str, to: &str, sig: &str, what: &str) {
     }
 }
 
+fn require_true_at(
+    rpc: &str,
+    to: &str,
+    sig: &str,
+    what: &str,
+    checkpoint: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) {
+    let got = cast_call_at(rpc, to, sig, &[], checkpoint.block_number);
+    if got != "true" {
+        die(format!(
+            "post-deploy check FAILED at finalized block {} ({}): {to} `{sig}` returned \
+             {got:?}, expected \"true\".\n{what}\nThe stack is NOT usable end to end; \
+             cli_state remains PREPARED.",
+            checkpoint.block_number, checkpoint.block_hash
+        ));
+    }
+}
+
 /// Deploy a REAL settlement stack (real MLE/WHIR verifier data for all four settlement statements)
 /// via `DeployCloseCli.s.sol`, after checking every precondition a real deployment needs.
 ///
-/// SCOPE — what this path does and does NOT do (verified against `DeployCloseCli.s.sol`, not
-/// assumed):
-///   * It deploys a NEW `IntmaxRollup` together with the settlement stack, because that is what the
-///     only real-VK script does. It cannot attach a settlement stack to an EXISTING rollup — no
-///     script in `contracts/script/` does that with real VKs (`DeployWalletSettlement.s.sol` does,
-///     but only with mock verifiers, and is devnet-gated). Consequence: on a real chain this
-///     command must run BEFORE `setup-backing`, and it REFUSES to run once a backing exists,
-///     because the deposit backing the channel would be left on the previous rollup while the
-///     manager, the channel registration and the exit path all lived on the new one.
-///   * What it does install (all re-read from chain below before this returns): the validity VK +
-///     genesis, the KZG satellite, the block producer, the rollup's WITHDRAWAL VK, the four
-///     settlement VKs (close, withdrawal-claim, post-close-claim, cancel-close), `registerChannel`
-///     for THIS channel id, and `registerSettlementManager` — the last of which is what
-///     `pw-finalize` needs and what every pre-2026-08-13 real deployment lacked.
+/// This is stage two of production deployment: the already-live rollup continues to own validity,
+/// KZG, withdrawal verification and the channel's escrow; this command attaches the four real
+/// settlement VKs, the cosigner-only registration and one manager whose immutable participant
+/// root is derived from the current N-of-N-signed snapshot.
 fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let plan = SettlementDeployPlan::RealChain;
     let channel_id = channel_id_env();
@@ -6641,35 +11112,9 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     if std::path::Path::new("settlement.json").exists() {
         die(
             "settlement.json already exists in this working directory — refusing to deploy a \
-             SECOND settlement stack.\n\
-             On a real chain a second run would deploy a new rollup + manager and leave the \
-             channel's funds and registration on the first one. If you really intend to replace \
-             it, move settlement.json aside deliberately.",
+             SECOND settlement stack. The durable cli_state.json settlement binding is the \
+             authoritative freeze; deleting this address file does not permit a redeploy or join.",
         );
-    }
-
-    // The orphan guard, FIRST because it is about this channel's money rather than about the
-    // host's provisioning. `DeployCloseCli.s.sol` always deploys its OWN rollup, so running it for
-    // a channel that is ALREADY backed would register the channel + manager on a rollup that holds
-    // none of its money while the deposit stayed on the old one. Both halves would look healthy in
-    // isolation; the user would only find out at `withdraw`, after the proofs.
-    if std::path::Path::new(BACKING_FILE).exists() {
-        let backed: serde_json::Value = read_private_json(BACKING_FILE);
-        let backed_rollup = backed["rollup"].as_str().unwrap_or("").to_string();
-        die(format!(
-            "this channel is already backed (rollup {backed_rollup}) and the only real-VK deploy \
-             script available, {}, deploys its OWN rollup — refusing.\n\
-             Running it now would put the channel registration, the settlement manager and the \
-             exit path on a NEW rollup while the deposit stayed on {backed_rollup}: the funds \
-             would be unreachable through this stack.\n\
-             Correct order on a real chain: `deploy-settlement <rpc>` FIRST (in an empty channel \
-             work dir), then `setup-backing <rpc> <the rollup it prints>`, then `init`.\n\
-             Attaching a real settlement stack to an ALREADY-DEPLOYED rollup needs a forge script \
-             that does not exist yet (registerChannel + ChannelSettlementVerifier with the four \
-             real VKs + ChannelSettlementManager + registerSettlementManager, against an existing \
-             rollup address). Reported, not silently worked around.",
-            plan.script()
-        ));
     }
 
     let contracts_dir = require_contracts_dir("deploy-settlement", &[plan.script()]);
@@ -6690,25 +11135,6 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         ));
     }
 
-    // FRAUD_TREASURY is a CONSTRUCTOR argument of IntmaxRollup and the script hard-reverts without
-    // it off-devnet. Checked here so the operator sees the name of the variable, not a decoded
-    // revert string after gas has been spent on the simulation.
-    let treasury_raw = std::env::var("FRAUD_TREASURY").unwrap_or_default();
-    let treasury = Address::from_hex(treasury_raw.trim()).unwrap_or_else(|_| {
-        die(format!(
-            "FRAUD_TREASURY must be a 20-byte hex address for a real-chain deploy (got {:?}).\n\
-             It is the IntmaxRollup constructor's fraud-proof treasury and has no default off \
-             chain id {DEVNET_CHAIN_ID}; `{}` reverts without it.",
-            treasury_raw.trim(),
-            plan.script()
-        ))
-    });
-    if treasury == Address::default() {
-        die(
-            "FRAUD_TREASURY is the zero address — refusing (the script requires a real treasury off-devnet).",
-        );
-    }
-
     let l1_signer = L1Signer::for_chain_id(chain_id);
 
     // SECURITY: the member set this deploy REGISTERS on L1 is derived from the co-signer key
@@ -6725,13 +11151,75 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         ));
     }
 
+    let mut state = load_state();
+    if let Some(binding) = &state.settlement_binding {
+        if binding.status == SettlementBindingStatus::Active {
+            die(format!(
+                "settlement is already durably ACTIVE at manager {:?} on rollup {}; deleting \
+                 settlement.json cannot reopen deployment or delegate joins",
+                binding.manager, binding.rollup
+            ));
+        }
+    }
+    let (_, _, backing) = load_backing();
+    let backing_rollup = Address::from_hex(backing.rollup.trim()).unwrap_or_else(|_| {
+        die(format!(
+            "{BACKING_FILE} rollup is not a 20-byte address: {:?}",
+            backing.rollup
+        ))
+    });
+    if backing_rollup == Address::default() {
+        die(format!("{BACKING_FILE} has a zero rollup address"));
+    }
+    let backing_rollup_hex = backing_rollup.to_hex();
+    let broadcaster = l1_signer.address();
+
     // ── Stage the ONE input the script takes that is not checked in. ──
     //
     // LIVENESS: `DeployCloseCli.s.sol` reads `test/data/cli_reg_record.json`. Only the Rust E2Es
     // ever staged it (they copy it after `export-reg-record` runs in the repo root); no product
     // driver did, so the real script was unreachable from the CLI at all. Same record, same single
-    // derivation — `build_reg_record()` is what `export-reg-record` itself writes.
-    let reg = build_reg_record();
+    // derivation: every identity and recipient comes from the fully verified live snapshot.
+    let reg = build_live_settlement_reg_record(&state);
+    let broadcaster_is_active = reg["recipients"]
+        .as_array()
+        .is_some_and(|recipients| {
+            recipients.iter().any(|r| {
+                r.as_str()
+                    .is_some_and(|s| strip0x(s) == strip0x(&broadcaster))
+            })
+        });
+    if !broadcaster_is_active {
+        die(format!(
+            "settlement broadcaster {broadcaster} is not an active recipient in the N-of-N-signed \
+             live BalanceState. Align INTMAX_L1_ACCOUNT with a signed-state recipient before deploy."
+        ));
+    }
+    let rollup_deployer = cast_call(rpc, &backing_rollup_hex, "deployer()(address)", &[]);
+    if !rollup_deployer.eq_ignore_ascii_case(&broadcaster) {
+        die(format!(
+            "settlement broadcaster {broadcaster} is not the deployer of backing rollup \
+             {backing_rollup_hex} (on-chain deployer {rollup_deployer}); registerChannel and \
+             registerSettlementManager would revert"
+        ));
+    }
+    let validity_bypass = cast_call(rpc, &backing_rollup_hex, "allowMleDisabled()(bool)", &[]);
+    if validity_bypass != "false" {
+        die(format!(
+            "backing rollup {backing_rollup_hex} is not production-validity enabled \
+             (allowMleDisabled returned {validity_bypass:?})"
+        ));
+    }
+    require_true(
+        rpc,
+        &backing_rollup_hex,
+        "withdrawalVkInitialized()(bool)",
+        "The existing rollup must have its real withdrawal VK before a settlement manager is attached.",
+    );
+    let kzg = cast_call(rpc, &backing_rollup_hex, "kzgVerifier()(address)", &[]);
+    if strip0x(&kzg).trim_matches('0').is_empty() {
+        die(format!("backing rollup {backing_rollup_hex} has no KZG verifier"));
+    }
     let data_dir = contracts_dir.join("test").join("data");
     let reg_path = data_dir.join("cli_reg_record.json");
     fs::write(
@@ -6740,60 +11228,133 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     )
     .unwrap_or_else(|e| die(format!("write {}: {e}", reg_path.display())));
     eprintln!(
-        "[deploy-settlement] staged {} (channel {channel_id}, {} registered members, treasury {})",
+        "[deploy-settlement] staged {} (channel {channel_id}, {} cosigners + {} delegates, existing rollup {})",
         reg_path.display(),
         reg["member_count"],
-        treasury.to_hex()
+        reg["active_delegate_count"],
+        backing_rollup_hex
     );
 
-    let contracts_dir = contracts_dir.to_string_lossy().to_string();
-    let mut forge = Command::new("forge");
-    forge.current_dir(&contracts_dir).args([
-        "script",
-        plan.script(),
-        "--tc",
-        plan.contract(),
-        "--rpc-url",
+    // The PREPARED write below is the point of no return for participant joins.  It includes the
+    // exact chain/signer/start nonce and local-input digest, and is fsynced before Forge can send
+    // transaction zero.  An existing PREPARED binding always selects --resume; it never starts a
+    // fresh script run with shifted nonces and orphan CREATE addresses.
+    let deploy_mode = prepare_real_settlement_binding(
         rpc,
-        "--broadcast",
-        // Sequential broadcast: the deploy's transactions are dependent (VK latches and
-        // registrations target contracts created earlier in the same run), and a public
-        // network can reorder or drop a parallel batch.
-        "--slow",
-        "--code-size-limit",
-        "50000",
-    ]);
-    l1_signer.append_to_command(&mut forge);
-    let forge_out = forge
-        .env("FRAUD_TREASURY", treasury_raw.trim())
-        .output()
-        .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
-    let out = String::from_utf8_lossy(&forge_out.stdout);
-    let err = String::from_utf8_lossy(&forge_out.stderr);
-    if !forge_out.status.success() {
-        die(format!(
-            "forge deploy-settlement ({}) FAILED:\nstdout: {out}\nstderr: {err}",
-            plan.script()
-        ));
+        &contracts_dir,
+        &mut state,
+        &reg,
+        &backing_rollup_hex,
+        chain_id,
+        &broadcaster,
+    );
+    let deployment_intent = state
+        .settlement_binding
+        .as_ref()
+        .and_then(|binding| binding.deployment.clone())
+        .unwrap_or_else(|| die("PREPARED production settlement lost its deployment identity"));
+
+    let before_resume = if deploy_mode == RealSettlementDeployMode::Resume {
+        Some(
+            validate_settlement_broadcast_artifact(
+                &contracts_dir,
+                &deployment_intent,
+                &reg,
+                &backing_rollup_hex,
+            )
+            .unwrap_or_else(|e| {
+                die(format!(
+                    "refusing `forge --resume`: the pinned broadcast artifact failed validation: \
+                     {e}. No fresh deployment will be attempted."
+                ))
+            }),
+        )
+    } else {
+        None
+    };
+    let already_complete = before_resume.as_ref().is_some_and(|addresses| {
+        settlement_registration_receipt(
+            rpc,
+            &deployment_intent,
+            &backing_rollup_hex,
+            addresses,
+        )
+        .is_some()
+    });
+
+    if already_complete {
+        eprintln!(
+            "[deploy-settlement] the pinned final registerSettlementManager transaction is already \
+             canonical and finalized; skipping --resume and proceeding to checkpoint-pinned readback"
+        );
+    } else {
+        let mut forge = Command::new("forge");
+        forge.current_dir(&contracts_dir).args([
+            "script",
+            plan.script(),
+            "--tc",
+            plan.contract(),
+            "--rpc-url",
+            rpc,
+            "--broadcast",
+            // Sequential broadcast: the deploy's transactions are dependent (VK latches and
+            // registrations target contracts created earlier in the same run), and a public
+            // network can reorder or drop a parallel batch.
+            "--slow",
+            "--code-size-limit",
+            "50000",
+        ]);
+        if deploy_mode == RealSettlementDeployMode::Resume {
+            forge.arg("--resume");
+            eprintln!(
+                "[deploy-settlement] resuming the validated pinned Foundry run at start nonce {}",
+                deployment_intent.start_nonce
+            );
+        }
+        l1_signer.append_to_command(&mut forge);
+        let forge_out = forge
+            .env("EXISTING_ROLLUP", &backing_rollup_hex)
+            .env("EXPECTED_BROADCASTER", &broadcaster)
+            .output()
+            .unwrap_or_else(|e| die(format!("forge script failed to start: {e}")));
+        if !forge_out.status.success() {
+            die(format!(
+                "forge deploy-settlement ({}) FAILED while cli_state remains PREPARED. A retry \
+                 will validate and resume only the pinned artifact; it will never start a new \
+                 nonce sequence.\nstdout: {}\nstderr: {}",
+                plan.script(),
+                String::from_utf8_lossy(&forge_out.stdout),
+                String::from_utf8_lossy(&forge_out.stderr)
+            ));
+        }
     }
 
-    let parse = |tag: &str| -> String {
-        out.lines()
-            .chain(err.lines())
-            .find_map(|l| {
-                l.contains(tag)
-                    .then(|| l.split(tag).nth(1).unwrap_or("").trim().to_string())
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                die(format!(
-                    "could not parse {tag} from forge output:\n{out}\n{err}"
-                ))
-            })
-    };
-    let rollup = parse("IntmaxRollup:");
-    let verifier = parse("SettlementVerifier:");
-    let manager = parse("CLOSE_MANAGER_ADDRESS:");
+    // Never trust console text for addresses, especially on --resume (which may print none). The
+    // exact transaction artifact names the CREATE results and is checked against every CALL target
+    // and ABI payload before any address reaches the durable ACTIVE record.
+    let addresses = validate_settlement_broadcast_artifact(
+        &contracts_dir,
+        &deployment_intent,
+        &reg,
+        &backing_rollup_hex,
+    )
+    .unwrap_or_else(|e| die(format!("post-broadcast artifact validation failed: {e}")));
+    let rollup = backing_rollup_hex;
+    let registration_receipt = settlement_registration_receipt(
+        rpc,
+        &deployment_intent,
+        &rollup,
+        &addresses,
+    )
+    .unwrap_or_else(|| {
+        die(
+            "the pinned registerSettlementManager transaction has no canonical finalized receipt; \
+             cli_state remains PREPARED and a retry will reconcile the same artifact",
+        )
+    });
+    let activation_checkpoint = registration_receipt.finalized_checkpoint;
+    let verifier = addresses.verifier;
+    let manager = addresses.manager;
 
     // ── Read the whole exit checklist back FROM THE CHAIN. ──
     //
@@ -6804,18 +11365,28 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     // deploy "succeeded": the withdrawal VK (money in, no money out), `registerSettlementManager`
     // (pw-finalize reverts after the user waited out the challenge period), and the
     // cancel-close / post-close-claim VKs (audit622 A-M4).
-    require_true(
+    for address in [&verifier, &manager] {
+        if strip0x(&cast_code_at(rpc, address, activation_checkpoint.block_number)).is_empty() {
+            die(format!(
+                "post-deploy check FAILED: {address} has no code at finalized activation block {}",
+                activation_checkpoint.block_number
+            ));
+        }
+    }
+    require_true_at(
         rpc,
         &rollup,
         "withdrawalVkInitialized()(bool)",
         "Without the rollup's withdrawal VK, `withdrawNative`/`withdrawERC20` revert \
          WithdrawalVkNotSet() forever and the rollup can accept deposits it can never pay out.",
+        &activation_checkpoint,
     );
-    let registered = cast_call(
+    let registered = cast_call_at(
         rpc,
         &rollup,
         "isRegisteredSettlementManager(address)(bool)",
         &[&manager],
+        activation_checkpoint.block_number,
     );
     if registered != "true" {
         die(format!(
@@ -6825,11 +11396,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
              user submitted an intent and waited out the full challenge period."
         ));
     }
-    let commitment = cast_call(
+    let commitment = cast_call_at(
         rpc,
         &rollup,
         "channelMemberSetCommitment(uint32)(bytes32)",
         &[&channel_id.to_string()],
+        activation_checkpoint.block_number,
     );
     if commitment
         .trim_start_matches("0x")
@@ -6860,9 +11432,15 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             "Without the post-close-claim VK, `post-close-claim` reverts PostCloseClaimVkNotSet(): a member who missed the close can never claim.",
         ),
     ] {
-        require_true(rpc, &verifier, sig, what);
+        require_true_at(rpc, &verifier, sig, what, &activation_checkpoint);
     }
-    let bound_verifier = cast_call(rpc, &manager, "verifier()(address)", &[]);
+    let bound_verifier = cast_call_at(
+        rpc,
+        &manager,
+        "verifier()(address)",
+        &[],
+        activation_checkpoint.block_number,
+    );
     if !bound_verifier.eq_ignore_ascii_case(&verifier) {
         die(format!(
             "post-deploy check FAILED: manager {manager} is bound to verifier {bound_verifier}, \
@@ -6870,7 +11448,13 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
              DIFFERENT contract than the one the manager consults."
         ));
     }
-    let bound_channel = cast_call(rpc, &manager, "channelId()(bytes4)", &[]);
+    let bound_channel = cast_call_at(
+        rpc,
+        &manager,
+        "channelId()(bytes4)",
+        &[],
+        activation_checkpoint.block_number,
+    );
     let expect_channel = format!("0x{channel_id:08x}");
     if !bound_channel.eq_ignore_ascii_case(&expect_channel) {
         die(format!(
@@ -6879,30 +11463,152 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
              INTMAX_CHANNEL and the deployed manager disagree."
         ));
     }
+    let expected_root = reg["participant_root"]
+        .as_str()
+        .unwrap_or_else(|| die("staged record missing participant_root"));
+    let bound_root = cast_call_at(
+        rpc,
+        &manager,
+        "participantRoot()(bytes32)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    if !bound_root.eq_ignore_ascii_case(expected_root) {
+        die(format!(
+            "post-deploy check FAILED: manager participant root {bound_root} != signed snapshot \
+             root {expected_root}"
+        ));
+    }
+    let expected_members = reg["member_count"]
+        .as_u64()
+        .unwrap_or_else(|| die("staged record missing member_count"));
+    let expected_delegates = reg["active_delegate_count"]
+        .as_u64()
+        .unwrap_or_else(|| die("staged record missing active_delegate_count"));
+    let bound_participants = cast_call_at(
+        rpc,
+        &manager,
+        "activeParticipantCount()(uint16)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    let bound_members = cast_call_at(
+        rpc,
+        &manager,
+        "activeMemberCount()(uint8)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    let bound_delegates = cast_call_at(
+        rpc,
+        &manager,
+        "activeDelegateCount()(uint16)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    if bound_participants != (expected_members + expected_delegates).to_string()
+        || bound_members != expected_members.to_string()
+        || bound_delegates != expected_delegates.to_string()
+    {
+        die(format!(
+            "post-deploy check FAILED: manager counts participant={bound_participants}, \
+             member={bound_members}, delegate={bound_delegates}; signed snapshot requires \
+             participant={}, member={expected_members}, delegate={expected_delegates}",
+            expected_members + expected_delegates
+        ));
+    }
+    let active_count = usize::try_from(expected_members + expected_delegates)
+        .unwrap_or_else(|_| die("signed participant count does not fit usize"));
+    let member_count = usize::try_from(expected_members)
+        .unwrap_or_else(|_| die("signed member count does not fit usize"));
+    let pk_gs = settlement_reg_string_vec(&reg, "member_pk_gs", active_count)
+        .unwrap_or_else(|e| die(e));
+    let recipients = settlement_reg_string_vec(&reg, "recipients", active_count)
+        .unwrap_or_else(|e| die(e));
+    for slot in 0..member_count {
+        let bound_recipient = cast_call_at(
+            rpc,
+            &manager,
+            "registeredRecipientOf(bytes32)(address)",
+            &[&pk_gs[slot]],
+            activation_checkpoint.block_number,
+        );
+        let bound_index = cast_call_at(
+            rpc,
+            &manager,
+            "registeredMemberIndexPlusOne(bytes32)(uint256)",
+            &[&pk_gs[slot]],
+            activation_checkpoint.block_number,
+        );
+        let recipient_is_member = cast_call_at(
+            rpc,
+            &manager,
+            "isMemberRecipient(address)(bool)",
+            &[&recipients[slot]],
+            activation_checkpoint.block_number,
+        );
+        if strip0x(&bound_recipient) != strip0x(&recipients[slot])
+            || bound_index != (slot + 1).to_string()
+            || recipient_is_member != "true"
+        {
+            die(format!(
+                "post-deploy check FAILED: signed cosigner slot {slot} pk_g {} / recipient {} \
+                 was not preserved exactly (recipient={bound_recipient}, index={bound_index}, \
+                 memberRecipient={recipient_is_member})",
+                pk_gs[slot], recipients[slot]
+            ));
+        }
+    }
 
     // Reported, not asserted: the floor is enforced by the manager's own constructor off-devnet
     // (`CHALLENGE_PERIOD_SECS_FLOOR`), so re-checking it here would duplicate a gate rather than
     // add one — but an operator must be told, because it is the delay before `settle` can succeed.
-    let challenge_period = cast_call(rpc, &manager, "challengePeriod()(uint64)", &[]);
+    let challenge_period = cast_call_at(
+        rpc,
+        &manager,
+        "challengePeriod()(uint64)",
+        &[],
+        activation_checkpoint.block_number,
+    );
 
+    // One final reread proves every historical call above came from one still-current durable
+    // authority. If `finalized` advanced or the stored height changed while the checklist ran,
+    // keep PREPARED and repeat all reads from the new checkpoint rather than mixing heads.
+    require_stable_durable_l1_checkpoint(rpc, &activation_checkpoint);
+
+    // Complete the PREPARED freeze. `save_state` is atomic + fsync-backed; only after ACTIVE lands
+    // may the convenience address file announce success. The join gate was already closed before
+    // broadcast, so a crash at either boundary remains fail-closed.
+    activate_settlement_binding(
+        &mut state,
+        &reg,
+        &rollup,
+        &verifier,
+        &manager,
+        Some(activation_checkpoint),
+    );
     write_json(
         "settlement.json",
         &serde_json::json!({
             "manager": manager,
             "verifier": verifier,
             "rollup": rollup,
+            "activation_checkpoint": activation_checkpoint,
         }),
     );
     println!(
         "deploy-settlement OK (real chain {chain_id}): manager={manager}, verifier={verifier}, \
          rollup={rollup}\n\
          Verified on-chain: withdrawal VK set, all four settlement VKs set, channel {channel_id} \
-         registered, manager registered as a settlement authorizer.\n\
-         NEXT: this rollup is NEW and holds no money yet. Run\n\
-         \x20 INTMAX_CHANNEL={channel_id} INTMAX_L1_ACCOUNT=<keystore-name> channel_member setup-backing {rpc} {rollup}\n\
-         then `init`. Do NOT point this channel at a different rollup afterwards.\n\
+         registered, manager registered as a settlement authorizer, participant root/count match \
+         the signed live snapshot, and delegate joins are durably frozen in cli_state.json. All \
+         activation reads were pinned to finalized block {} ({}).\n\
+         The manager is attached to the EXISTING backing rollup {rollup}; no escrow moved and no \
+         replacement rollup was created.\n\
          NOTE: this manager's challenge period is {challenge_period} seconds (read back from the \
-         chain) — off-devnet a close takes that long to finalize, by design."
+         chain) — off-devnet a close takes that long to finalize, by design.",
+        activation_checkpoint.block_number,
+        activation_checkpoint.block_hash,
     );
 }
 
@@ -7714,18 +12420,13 @@ fn cmd_pw_submit(args: &[String]) {
     let verifier = settlement["verifier"]
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing verifier"));
+    require_active_settlement_binding(&rpc, manager, Some(verifier), None);
     let l1_signer = LazyL1Signer::new(&rpc);
 
     let burn: serde_json::Value = read_json("last_burn.json");
     let burn_amount: u64 = burn["amount"]
         .as_u64()
         .unwrap_or_else(|| die("last_burn.json missing amount"));
-    let burn_tx_hash = Bytes32::from_hex(
-        burn["tx_hash"]
-            .as_str()
-            .unwrap_or_else(|| die("last_burn.json missing tx_hash")),
-    )
-    .unwrap_or_else(|e| die(format!("parse last_burn.json tx_hash: {e:?}")));
     let source_pk_g = Bytes32::from_hex(
         burn["source_pk_g"]
             .as_str()
@@ -7903,8 +12604,6 @@ fn cmd_pw_submit(args: &[String]) {
         ));
     }
 
-    let close_nonce = env_u64("PW_CLOSE_NONCE", 1);
-    let snapshot_mbn = env_u64("PW_SNAPSHOT_MBN", head.small_block_number);
     eprintln!(
         "pw-submit: building REAL close proof + MLE for post-burn state_version {} (HEAVY)…",
         head.balance_state.state_version
@@ -7919,9 +12618,6 @@ fn cmd_pw_submit(args: &[String]) {
             head,
             &falcon_artifact,
             balance_proof,
-            close_nonce,
-            burn_tx_hash,
-            snapshot_mbn,
         )
         .unwrap_or_else(|e| die(format!("build real PW close witness: {}", e.0)));
     let close_proof = close_prover
@@ -8055,6 +12751,7 @@ fn cmd_pw_finalize(args: &[String]) {
     let rollup = settlement["rollup"]
         .as_str()
         .unwrap_or_else(|| die("settlement.json missing rollup"));
+    require_active_settlement_binding(&rpc, manager, None, Some(rollup));
 
     // The payout leg (partial-withdrawal-payout-design Phase 3). History: the old
     // `claimAuthorizedWithdrawal` door was REMOVED 2026-07-28 (it paid the GLOBAL escrow against
@@ -8087,9 +12784,8 @@ fn run_partial_withdrawal_payout(
 ) {
     use intmax3_zkp::partial_withdrawal_payout::{
         partial_withdrawal_resume_action, BroadcastIntent, L1CallKind,
-        PartialWithdrawalPayoutStore, PartialWithdrawalProofArtifacts,
-        PartialWithdrawalResumeAction, PayoutConfirmation, PreparePartialWithdrawalPayout,
-        PullConfirmation,
+        PartialWithdrawalPayoutStore, PartialWithdrawalProofArtifacts, PartialWithdrawalResumeAction,
+        PayoutConfirmation, PreparePartialWithdrawalPayout, PullConfirmation,
     };
 
     let contracts_dir =
@@ -8105,6 +12801,9 @@ fn run_partial_withdrawal_payout(
     let rollup_addr = rollup
         .parse::<Address>()
         .unwrap_or_else(|e| die(format!("parse rollup address: {e}")));
+    let manager_addr = manager
+        .parse::<Address>()
+        .unwrap_or_else(|e| die(format!("parse manager address: {e}")));
     let auth_digest_b32 = auth_digest
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("parse auth digest: {e}")));
@@ -8135,10 +12834,11 @@ fn run_partial_withdrawal_payout(
 
     let mut store = PartialWithdrawalPayoutStore::open("pw_payout_store.bin")
         .unwrap_or_else(|e| die(format!("open payout store: {e}")));
-    let candidate = store
+    let mut candidate = store
         .prepare(PreparePartialWithdrawalPayout {
             chain_id,
             rollup: rollup_addr,
+            manager: manager_addr,
             channel_id,
             signed_head_digest,
             burn_base_nonce,
@@ -8153,28 +12853,58 @@ fn run_partial_withdrawal_payout(
         candidate.lane
     );
 
+    // A serialized confirmation is not self-authenticating: its receipt or the finalized head
+    // that covered it may have been replaced while this process was down.  Revalidate before any
+    // stored `ContinueAfterPayout`/`Done` state is allowed to influence the next fund action.
+    revalidate_candidate_l1_confirmations(rpc, &candidate);
+    let mut authority = read_durable_l1_checkpoint(rpc, chain_id);
+
     let nullifier_hex = candidate.artifacts.withdrawal.nullifier.to_string();
-    let mut chain_state =
-        read_partial_withdrawal_onchain_state(rpc, rollup, manager, auth_digest, &nullifier_hex);
+    let mut chain_state = read_partial_withdrawal_onchain_state(
+        rpc,
+        rollup,
+        manager,
+        auth_digest,
+        &nullifier_hex,
+        authority.block_number,
+    );
+    require_stable_durable_l1_checkpoint(rpc, &authority);
     let mut resume_action = partial_withdrawal_resume_action(&candidate, chain_state)
         .unwrap_or_else(|e| die(format!("unsafe partial-withdrawal resume state: {e}")));
     if resume_action == PartialWithdrawalResumeAction::FinalizePending {
-        finalize_pending_partial_withdrawal(rpc, l1_signer, manager);
+        finalize_pending_partial_withdrawal(
+            rpc,
+            l1_signer,
+            rollup,
+            manager,
+            auth_digest,
+            &nullifier_hex,
+            &mut store,
+            candidate_id,
+        );
+        candidate = store
+            .active()
+            .unwrap_or_else(|e| die(format!("payout store active: {e}")))
+            .unwrap_or_else(|| die("payout store lost the active candidate"));
+        revalidate_candidate_l1_confirmations(rpc, &candidate);
+        authority = read_durable_l1_checkpoint(rpc, chain_id);
         chain_state = read_partial_withdrawal_onchain_state(
             rpc,
             rollup,
             manager,
             auth_digest,
             &nullifier_hex,
+            authority.block_number,
         );
-        if !chain_state.authorization || chain_state.nullifier_used {
-            die(
-                "finalizePartialWithdrawal completed without creating an unused one-shot IPW2 \
-                 authorization; the logical burn may already have been consumed",
-            );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
+        resume_action = partial_withdrawal_resume_action(&candidate, chain_state)
+            .unwrap_or_else(|e| die(format!("unsafe finalized partial-withdrawal state: {e}")));
+        if resume_action != PartialWithdrawalResumeAction::BroadcastPayout {
+            die(format!(
+                "manager finalization was journaled, but the only safe next action is {resume_action:?} instead of a fresh proof payout"
+            ));
         }
-        resume_action = PartialWithdrawalResumeAction::BroadcastPayout;
-        eprintln!("pw-finalize: one-shot authorization recorded on-chain.");
+        eprintln!("pw-finalize: one-shot authorization recorded by a canonical finalized receipt.");
     }
 
     let recipient = candidate.artifacts.withdrawal.recipient;
@@ -8242,15 +12972,19 @@ fn run_partial_withdrawal_payout(
                 }
                 intent
             } else {
+                let credit_before = read_pending_credit_at(
+                    rpc,
+                    rollup,
+                    &current.artifacts.withdrawal,
+                    authority.block_number,
+                );
+                require_stable_durable_l1_checkpoint(rpc, &authority);
                 let intent = BroadcastIntent {
                     caller,
-                    start_block: cast(&["block-number", "--rpc-url", rpc])
-                        .trim()
-                        .parse()
-                        .unwrap_or_else(|e| die(format!("parse payout start block: {e}"))),
+                    start_block: authority.block_number,
                     caller_nonce: read_account_nonce(rpc, &caller_hex, "latest"),
                     calldata_hash,
-                    credit_before: read_pending_credit(rpc, rollup, &current.artifacts.withdrawal),
+                    credit_before,
                 };
                 store
                     .mark_payout_broadcast(candidate_id, intent.clone())
@@ -8301,28 +13035,41 @@ fn run_partial_withdrawal_payout(
             .as_str()
             .unwrap_or_else(|| die("candidate payout json missing ext_commitment"))
             .to_string();
+        let authorization_observed = read_bool_view_at(
+            rpc,
+            rollup,
+            "partialWithdrawalAuthorized(bytes32)",
+            auth_digest,
+            receipt.finalized_checkpoint.block_number,
+        );
+        let finalized_anchor_observed = read_bool_view_at(
+            rpc,
+            rollup,
+            "isFinalizedStateRoot(bytes32)",
+            &ext_commitment,
+            receipt.finalized_checkpoint.block_number,
+        );
+        let nullifier_used_observed = read_bool_view_at(
+            rpc,
+            rollup,
+            "withdrawalNullifierUsed(bytes32)",
+            &nullifier_hex,
+            receipt.finalized_checkpoint.block_number,
+        );
+        let credit_after = read_pending_credit_at(
+            rpc,
+            rollup,
+            &candidate.artifacts.withdrawal,
+            receipt.finalized_checkpoint.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &receipt.finalized_checkpoint);
         let confirmation = PayoutConfirmation {
-            receipt,
-            authorization_observed: read_bool_view(
-                rpc,
-                rollup,
-                "partialWithdrawalAuthorized(bytes32)",
-                auth_digest,
-            ),
-            finalized_anchor_observed: read_bool_view(
-                rpc,
-                rollup,
-                "isFinalizedStateRoot(bytes32)",
-                &ext_commitment,
-            ),
-            nullifier_used_observed: read_bool_view(
-                rpc,
-                rollup,
-                "withdrawalNullifierUsed(bytes32)",
-                &nullifier_hex,
-            ),
+            authorization_observed,
+            finalized_anchor_observed,
+            nullifier_used_observed,
             credit_before: intent.credit_before,
-            credit_after: read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal),
+            credit_after,
+            receipt,
         };
         store
             .confirm_payout(candidate_id, confirmation)
@@ -8377,7 +13124,14 @@ fn run_partial_withdrawal_payout(
         }
         intent
     } else {
-        let current_credit = read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal);
+        authority = read_durable_l1_checkpoint(rpc, chain_id);
+        let current_credit = read_pending_credit_at(
+            rpc,
+            rollup,
+            &candidate.artifacts.withdrawal,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
         if current_credit != payout_conf.credit_after {
             die(format!(
                 "recipient credit changed before pull intent: expected {}, observed {}",
@@ -8386,10 +13140,7 @@ fn run_partial_withdrawal_payout(
         }
         let intent = BroadcastIntent {
             caller: recipient,
-            start_block: cast(&["block-number", "--rpc-url", rpc])
-                .trim()
-                .parse()
-                .unwrap_or_else(|e| die(format!("parse pull block number: {e}"))),
+            start_block: authority.block_number,
             caller_nonce: read_account_nonce(rpc, &caller_hex, "latest"),
             calldata_hash,
             credit_before: payout_conf.credit_after,
@@ -8414,7 +13165,14 @@ fn run_partial_withdrawal_payout(
         let hash = receipt.tx_hash.to_string();
         (receipt, hash)
     } else {
-        let credit = read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal);
+        authority = read_durable_l1_checkpoint(rpc, chain_id);
+        let credit = read_pending_credit_at(
+            rpc,
+            rollup,
+            &candidate.artifacts.withdrawal,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
         if credit != intent.credit_before {
             die(format!(
                 "pull credit changed without an exact canonical receipt: expected {}, observed {}",
@@ -8444,13 +13202,20 @@ fn run_partial_withdrawal_payout(
             .unwrap_or_else(|e| die(format!("persist pull tx hash: {e}")));
         (read_l1_receipt(rpc, &tx_hash, pull_kind), tx_hash)
     };
+    let credit_after = read_pending_credit_at(
+        rpc,
+        rollup,
+        &candidate.artifacts.withdrawal,
+        receipt.finalized_checkpoint.block_number,
+    );
+    require_stable_durable_l1_checkpoint(rpc, &receipt.finalized_checkpoint);
     store
         .confirm_pull(
             candidate.candidate_id,
             PullConfirmation {
-                receipt,
                 credit_before: intent.credit_before,
-                credit_after: read_pending_credit(rpc, rollup, &candidate.artifacts.withdrawal),
+                credit_after,
+                receipt,
             },
         )
         .unwrap_or_else(|e| die(format!("confirm pull: {e}")));
@@ -8517,14 +13282,22 @@ fn build_partial_withdrawal_payout_calldata(
     (calldata, calldata_hash)
 }
 
-fn read_pending_credit(rpc: &str, rollup: &str, withdrawal: &Withdrawal) -> U256 {
+fn read_pending_credit_at(
+    rpc: &str,
+    rollup: &str,
+    withdrawal: &Withdrawal,
+    block_number: u64,
+) -> U256 {
     let recipient = withdrawal.recipient.to_string();
+    let block = format!("0x{block_number:x}");
     let raw = if withdrawal.token_index == 0 {
         cast(&[
             "call",
             rollup,
             "pendingWithdrawals(address)",
             &recipient,
+            "--block",
+            &block,
             "--rpc-url",
             rpc,
         ])
@@ -8536,6 +13309,8 @@ fn read_pending_credit(rpc: &str, rollup: &str, withdrawal: &Withdrawal) -> U256
             "pendingTokenWithdrawals(uint32,address)",
             &token_index,
             &recipient,
+            "--block",
+            &block,
             "--rpc-url",
             rpc,
         ])
@@ -8551,17 +13326,22 @@ fn read_partial_withdrawal_onchain_state(
     manager: &str,
     auth_digest: &str,
     nullifier: &str,
+    block_number: u64,
 ) -> intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalOnchainState {
     use intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalOnchainState;
+    let block = format!("0x{block_number:x}");
 
     // Omit return types so `cast call` returns the raw ABI word consumed by the parsers below.
     // With `(bool)` / `(uint256)`, cast pretty-prints decoded values (for example `true` or a
     // decimal), which must not be compared with or parsed as a 32-byte ABI word.
-    let manager_pending = read_bool_view0(rpc, manager, "partialWithdrawalPending()");
+    let manager_pending =
+        read_bool_view0_at(rpc, manager, "partialWithdrawalPending()", block_number);
     let pending_auth_digest = cast(&[
         "call",
         manager,
         "pendingPartialWithdrawalAuthDigest()",
+        "--block",
+        &block,
         "--rpc-url",
         rpc,
     ])
@@ -8571,22 +13351,224 @@ fn read_partial_withdrawal_onchain_state(
     PartialWithdrawalOnchainState {
         manager_pending,
         pending_auth_digest,
-        authorization: read_bool_view(
+        authorization: read_bool_view_at(
             rpc,
             rollup,
             "partialWithdrawalAuthorized(bytes32)",
             auth_digest,
+            block_number,
         ),
-        nullifier_used: read_bool_view(
+        nullifier_used: read_bool_view_at(
             rpc,
             rollup,
             "withdrawalNullifierUsed(bytes32)",
             nullifier,
+            block_number,
         ),
     }
 }
 
-fn finalize_pending_partial_withdrawal(rpc: &str, l1_signer: &LazyL1Signer, manager: &str) {
+fn finalize_pending_partial_withdrawal(
+    rpc: &str,
+    l1_signer: &LazyL1Signer,
+    rollup: &str,
+    manager: &str,
+    auth_digest: &str,
+    nullifier: &str,
+    store: &mut intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalPayoutStore,
+    candidate_id: Bytes32,
+) {
+    use intmax3_zkp::partial_withdrawal_payout::{
+        BroadcastIntent, FinalizeConfirmation, L1CallKind,
+    };
+
+    let current = store
+        .active()
+        .unwrap_or_else(|error| die(format!("payout store active: {error}")))
+        .unwrap_or_else(|| die("payout store lost the active candidate"));
+    if current.candidate_id != candidate_id {
+        die("payout store switched candidates before manager finalization");
+    }
+    let manager_address = manager
+        .parse::<Address>()
+        .unwrap_or_else(|error| die(format!("parse manager address: {error}")));
+    let rollup_address = rollup
+        .parse::<Address>()
+        .unwrap_or_else(|error| die(format!("parse rollup address: {error}")));
+    let auth_digest_bytes = auth_digest
+        .parse::<Bytes32>()
+        .unwrap_or_else(|error| die(format!("parse partial-withdrawal auth digest: {error}")));
+    if current.manager != manager_address
+        || current.rollup != rollup_address
+        || current.auth_digest != auth_digest_bytes
+        || current.artifacts.withdrawal.nullifier.to_string() != nullifier
+    {
+        die("manager-finalization arguments differ from the durable payout candidate");
+    }
+    if current.finalize_confirmation.is_some() {
+        return;
+    }
+
+    let calldata_owned = cast(&["calldata", "finalizePartialWithdrawal()"]);
+    let calldata = calldata_owned.trim();
+    let calldata_hash = cast(&["keccak", calldata])
+        .trim()
+        .parse::<Bytes32>()
+        .unwrap_or_else(|error| die(format!("keccak manager-finalization calldata: {error}")));
+    let caller_hex = l1_signer.get().address();
+    let caller = caller_hex
+        .parse::<Address>()
+        .unwrap_or_else(|error| die(format!("parse manager-finalization caller: {error}")));
+
+    let intent = if let Some(intent) = current.finalize_broadcast.clone() {
+        if intent.caller != caller
+            || intent.calldata_hash != calldata_hash
+            || intent.credit_before != U256::default()
+        {
+            die(
+                "persisted manager-finalization intent differs from the current signer or exact calldata",
+            );
+        }
+        intent
+    } else {
+        let authority = read_durable_l1_checkpoint(rpc, current.chain_id);
+        let state = read_partial_withdrawal_onchain_state(
+            rpc,
+            rollup,
+            manager,
+            auth_digest,
+            nullifier,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
+        require_exact_pending_partial_withdrawal(state, current.auth_digest);
+        wait_until_partial_withdrawal_finalizable(rpc, manager);
+
+        // Bind the durable intent only after the challenge window is ready.  Re-read every fund
+        // authority fact at one stable finalized checkpoint so an intervening replacement/payout
+        // cannot be justified by the older observation.
+        let authority = read_durable_l1_checkpoint(rpc, current.chain_id);
+        let state = read_partial_withdrawal_onchain_state(
+            rpc,
+            rollup,
+            manager,
+            auth_digest,
+            nullifier,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
+        require_exact_pending_partial_withdrawal(state, current.auth_digest);
+        let intent = BroadcastIntent {
+            caller,
+            start_block: authority.block_number,
+            caller_nonce: read_account_nonce(rpc, &caller_hex, "latest"),
+            calldata_hash,
+            credit_before: U256::default(),
+        };
+        store
+            .mark_finalize_broadcast(candidate_id, intent.clone())
+            .unwrap_or_else(|error| die(format!("persist manager-finalization intent: {error}")));
+        intent
+    };
+
+    let current = store
+        .active()
+        .unwrap_or_else(|error| die(format!("payout store active: {error}")))
+        .unwrap_or_else(|| die("payout store lost the active candidate"));
+    let reconciled = reconcile_confirmed_l1_call(
+        rpc,
+        manager,
+        &intent,
+        &current.finalize_tx_hashes,
+        L1CallKind::FinalizePartialWithdrawal,
+    );
+    let (receipt, tx_hash) = if let Some(receipt) = reconciled {
+        let tx_hash = receipt.tx_hash.to_string();
+        (receipt, tx_hash)
+    } else {
+        let authority = read_durable_l1_checkpoint(rpc, current.chain_id);
+        let state = read_partial_withdrawal_onchain_state(
+            rpc,
+            rollup,
+            manager,
+            auth_digest,
+            nullifier,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
+        require_exact_pending_partial_withdrawal(state, current.auth_digest);
+        wait_until_partial_withdrawal_finalizable(rpc, manager);
+
+        let authority = read_durable_l1_checkpoint(rpc, current.chain_id);
+        let state = read_partial_withdrawal_onchain_state(
+            rpc,
+            rollup,
+            manager,
+            auth_digest,
+            nullifier,
+            authority.block_number,
+        );
+        require_stable_durable_l1_checkpoint(rpc, &authority);
+        require_exact_pending_partial_withdrawal(state, current.auth_digest);
+        require_nonce_free_for_exact_rebroadcast(rpc, &caller_hex, intent.caller_nonce);
+        let nonce_arg = intent.caller_nonce.to_string();
+        let send_out = cast_signed(
+            rpc,
+            l1_signer.get(),
+            &["send", manager, calldata, "--nonce", &nonce_arg, "--json"],
+        );
+        let tx_hash = extract_tx_hash(&send_out);
+        let tx_hash_bytes = tx_hash
+            .parse::<Bytes32>()
+            .unwrap_or_else(|error| die(format!("parse manager-finalization tx hash: {error}")));
+        store
+            .record_finalize_tx_hash(candidate_id, tx_hash_bytes)
+            .unwrap_or_else(|error| die(format!("persist manager-finalization tx hash: {error}")));
+        (
+            read_l1_receipt(rpc, &tx_hash, L1CallKind::FinalizePartialWithdrawal),
+            tx_hash,
+        )
+    };
+
+    let state = read_partial_withdrawal_onchain_state(
+        rpc,
+        rollup,
+        manager,
+        auth_digest,
+        nullifier,
+        receipt.finalized_checkpoint.block_number,
+    );
+    require_stable_durable_l1_checkpoint(rpc, &receipt.finalized_checkpoint);
+    store
+        .confirm_finalize(
+            candidate_id,
+            FinalizeConfirmation {
+                receipt,
+                manager_pending_observed: state.manager_pending,
+                authorization_observed: state.authorization,
+                nullifier_used_observed: state.nullifier_used,
+            },
+        )
+        .unwrap_or_else(|error| die(format!("confirm manager finalization: {error}")));
+    eprintln!("pw-finalize: manager finalization confirmed (tx {tx_hash}).");
+}
+
+fn require_exact_pending_partial_withdrawal(
+    state: intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalOnchainState,
+    expected_auth_digest: Bytes32,
+) {
+    if !state.manager_pending
+        || state.pending_auth_digest != expected_auth_digest
+        || state.authorization
+        || state.nullifier_used
+    {
+        die(
+            "manager no longer has this exact pending, unauthorized, unused partial withdrawal at the durable L1 head",
+        );
+    }
+}
+
+fn wait_until_partial_withdrawal_finalizable(rpc: &str, manager: &str) {
     // finalizePartialWithdrawal requires block.timestamp > deadline. Anvil needs explicit time
     // travel; a real chain advances naturally and is polled for at most five minutes here.
     let deadline_hex = cast(&[
@@ -8629,21 +13611,89 @@ fn finalize_pending_partial_withdrawal(rpc: &str, l1_signer: &LazyL1Signer, mana
             waited += 6;
         }
     }
-    cast_signed(
+}
+
+fn read_bool_view_at(
+    rpc: &str,
+    rollup: &str,
+    sig: &str,
+    arg: &str,
+    block_number: u64,
+) -> bool {
+    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    let block = format!("0x{block_number:x}");
+    cast(&[
+        "call",
+        rollup,
+        sig,
+        arg,
+        "--block",
+        &block,
+        "--rpc-url",
         rpc,
-        l1_signer.get(),
-        &["send", manager, "finalizePartialWithdrawal()"],
-    );
+    ])
+    .trim()
+        == TRUE_WORD
 }
 
-fn read_bool_view(rpc: &str, rollup: &str, sig: &str, arg: &str) -> bool {
-    const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
-    cast(&["call", rollup, sig, arg, "--rpc-url", rpc]).trim() == TRUE_WORD
+fn read_u64_view_at(
+    rpc: &str,
+    contract: &str,
+    sig: &str,
+    arg: &str,
+    block_number: u64,
+) -> u64 {
+    let block = format!("0x{block_number:x}");
+    let raw = cast(&[
+        "call",
+        contract,
+        sig,
+        arg,
+        "--block",
+        &block,
+        "--rpc-url",
+        rpc,
+    ]);
+    abi_word_u64(raw.trim().trim_start_matches("0x"), sig)
 }
 
-fn read_bool_view0(rpc: &str, contract: &str, sig: &str) -> bool {
+fn read_u64_view2_at(
+    rpc: &str,
+    contract: &str,
+    sig: &str,
+    arg0: &str,
+    arg1: &str,
+    block_number: u64,
+) -> u64 {
+    let block = format!("0x{block_number:x}");
+    let raw = cast(&[
+        "call",
+        contract,
+        sig,
+        arg0,
+        arg1,
+        "--block",
+        &block,
+        "--rpc-url",
+        rpc,
+    ]);
+    abi_word_u64(raw.trim().trim_start_matches("0x"), sig)
+}
+
+fn read_bool_view0_at(rpc: &str, contract: &str, sig: &str, block_number: u64) -> bool {
     const TRUE_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
-    cast(&["call", contract, sig, "--rpc-url", rpc]).trim() == TRUE_WORD
+    let block = format!("0x{block_number:x}");
+    cast(&[
+        "call",
+        contract,
+        sig,
+        "--block",
+        &block,
+        "--rpc-url",
+        rpc,
+    ])
+    .trim()
+        == TRUE_WORD
 }
 
 fn parse_u64_quantity(raw: &str, what: &str) -> u64 {
@@ -8653,6 +13703,213 @@ fn parse_u64_quantity(raw: &str, what: &str) -> u64 {
     } else {
         raw.parse::<u64>()
             .unwrap_or_else(|e| die(format!("parse {what}: {e}")))
+    }
+}
+
+const UNFINALIZED_DEVNET_ESCAPE_ENV: &str = "INTMAX_ALLOW_UNFINALIZED_DEVNET";
+
+fn unfinalized_devnet_escape_enabled() -> bool {
+    std::env::var(UNFINALIZED_DEVNET_ESCAPE_ENV).as_deref() == Ok("1")
+}
+
+fn rpc_block_json(rpc: &str, tag: &str) -> Result<String, String> {
+    let out = Command::new("cast")
+        .args([
+            "rpc",
+            "eth_getBlockByNumber",
+            tag,
+            "false",
+            "--rpc-url",
+            rpc,
+        ])
+        .output()
+        .map_err(|error| format!("start finalized-head RPC read: {error}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "RPC returned status {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    if out.stdout.len() > 16 * 1024 * 1024 {
+        return Err("RPC block response exceeds 16 MiB".into());
+    }
+    String::from_utf8(out.stdout).map_err(|error| format!("RPC block response is not UTF-8: {error}"))
+}
+
+fn parse_l1_checkpoint_block(
+    raw: &str,
+    chain_id: u64,
+    source: intmax3_zkp::l1_finality::L1FinalitySource,
+) -> Result<intmax3_zkp::l1_finality::L1FinalizedCheckpoint, String> {
+    use intmax3_zkp::l1_finality::L1FinalizedCheckpoint;
+
+    let value: serde_json::Value =
+        serde_json::from_str(raw.trim()).map_err(|error| format!("parse block JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "block response is null or not an object".to_string())?;
+    let field = |name: &str| {
+        object
+            .get(name)
+            .ok_or_else(|| format!("block response has no {name}"))
+    };
+    let block_number = json_u64_quantity(field("number")?, "block number")?;
+    let block_hash = field("hash")?
+        .as_str()
+        .ok_or_else(|| "block hash is not a string".to_string())?
+        .parse::<Bytes32>()
+        .map_err(|error| format!("parse block hash: {error}"))?;
+    let parent_hash = field("parentHash")?
+        .as_str()
+        .ok_or_else(|| "block parentHash is not a string".to_string())?
+        .parse::<Bytes32>()
+        .map_err(|error| format!("parse block parentHash: {error}"))?;
+    let checkpoint = L1FinalizedCheckpoint {
+        chain_id,
+        block_number,
+        block_hash,
+        parent_hash,
+        source,
+    };
+    checkpoint.validate()?;
+    Ok(checkpoint)
+}
+
+/// Return the only L1 head permitted to authorize durable fund state. Public networks require the
+/// RPC's `finalized` tag. An RPC without that capability is rejected; `latest` is available only
+/// when the endpoint itself reports chain 31337 and the operator explicitly sets the escape env.
+fn read_durable_l1_checkpoint(
+    rpc: &str,
+    expected_chain_id: u64,
+) -> intmax3_zkp::l1_finality::L1FinalizedCheckpoint {
+    use intmax3_zkp::l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource};
+
+    let observed_chain_id = rpc_chain_id(rpc);
+    if observed_chain_id != expected_chain_id {
+        die(format!(
+            "L1 RPC chain id changed from {expected_chain_id} to {observed_chain_id}; refusing durable state"
+        ));
+    }
+    let finalized = rpc_block_json(rpc, "finalized").and_then(|raw| {
+        parse_l1_checkpoint_block(&raw, observed_chain_id, L1FinalitySource::RpcFinalized)
+    });
+    match finalized {
+        Ok(checkpoint) => checkpoint,
+        Err(finalized_error)
+            if observed_chain_id == ANVIL_CHAIN_ID && unfinalized_devnet_escape_enabled() =>
+        {
+            eprintln!(
+                "WARNING: {UNFINALIZED_DEVNET_ESCAPE_ENV}=1 on chain {ANVIL_CHAIN_ID}; using latest as a non-finalized development checkpoint ({finalized_error})"
+            );
+            rpc_block_json(rpc, "latest")
+                .and_then(|raw| {
+                    parse_l1_checkpoint_block(
+                        &raw,
+                        observed_chain_id,
+                        L1FinalitySource::DevnetLatest,
+                    )
+                })
+                .unwrap_or_else(|error| die(format!("read development L1 checkpoint: {error}")))
+        }
+        Err(error) => die(format!(
+            "RPC cannot supply a valid `finalized` block ({error}); refusing to adopt L1 fund state. Only chain {ANVIL_CHAIN_ID} may explicitly set {UNFINALIZED_DEVNET_ESCAPE_ENV}=1 for local testing."
+        )),
+    }
+}
+
+fn revalidate_l1_checkpoint(
+    rpc: &str,
+    checkpoint: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) -> intmax3_zkp::l1_finality::L1FinalizedCheckpoint {
+    checkpoint
+        .validate()
+        .unwrap_or_else(|error| die(format!("stored L1 checkpoint is invalid: {error}")));
+    let tag = format!("0x{:x}", checkpoint.block_number);
+    let canonical = rpc_block_json(rpc, &tag)
+        .and_then(|raw| parse_l1_checkpoint_block(&raw, checkpoint.chain_id, checkpoint.source))
+        .unwrap_or_else(|error| die(format!("re-read stored L1 checkpoint: {error}")));
+    if canonical.block_hash != checkpoint.block_hash
+        || canonical.parent_hash != checkpoint.parent_hash
+        || canonical.block_number != checkpoint.block_number
+    {
+        die(format!(
+            "stored L1 checkpoint {} was replaced (reorg detected); refusing all payout progress",
+            checkpoint.block_number
+        ));
+    }
+    let current = read_durable_l1_checkpoint(rpc, checkpoint.chain_id);
+    if current.source != checkpoint.source
+        || current.block_number < checkpoint.block_number
+        || (current.block_number == checkpoint.block_number
+            && (current.block_hash != checkpoint.block_hash
+                || current.parent_hash != checkpoint.parent_hash))
+    {
+        die("durable L1 head regressed or changed at the stored height; refusing all payout progress");
+    }
+    current
+}
+
+/// A state read that authorizes a new action must be made at the current durable head, not merely
+/// at some still-canonical historical checkpoint. If finality advances during the read, retry from
+/// a fresh head so intervening credit/authorization changes cannot be missed.
+fn require_stable_durable_l1_checkpoint(
+    rpc: &str,
+    checkpoint: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) {
+    let current = revalidate_l1_checkpoint(rpc, checkpoint);
+    if current != *checkpoint {
+        die("durable L1 head advanced during the pinned state read; retry from the new finalized head");
+    }
+}
+
+fn same_l1_receipt_identity(
+    left: &intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt,
+    right: &intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt,
+) -> bool {
+    left.tx_hash == right.tx_hash
+        && left.block_hash == right.block_hash
+        && left.block_number == right.block_number
+        && left.chain_id == right.chain_id
+        && left.from == right.from
+        && left.to == right.to
+        && left.success == right.success
+        && left.call_kind == right.call_kind
+        && left.calldata_hash == right.calldata_hash
+        && left.transaction_nonce == right.transaction_nonce
+        && left.manager_finalized_auth_digest == right.manager_finalized_auth_digest
+}
+
+fn revalidate_stored_l1_receipt(
+    rpc: &str,
+    stored: &intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt,
+) {
+    revalidate_l1_checkpoint(rpc, &stored.finalized_checkpoint);
+    stored
+        .finalized_checkpoint
+        .covers_receipt(stored.block_number, stored.block_hash)
+        .unwrap_or_else(|error| die(format!("stored receipt is outside its checkpoint: {error}")));
+    let reread = read_l1_receipt(rpc, &stored.tx_hash.to_string(), stored.call_kind);
+    if !same_l1_receipt_identity(stored, &reread) {
+        die(format!(
+            "stored receipt {} changed or was orphaned; refusing all payout progress",
+            stored.tx_hash
+        ));
+    }
+}
+
+fn revalidate_candidate_l1_confirmations(
+    rpc: &str,
+    candidate: &intmax3_zkp::partial_withdrawal_payout::PartialWithdrawalCandidate,
+) {
+    if let Some(confirmation) = &candidate.finalize_confirmation {
+        revalidate_stored_l1_receipt(rpc, &confirmation.receipt);
+    }
+    if let Some(confirmation) = &candidate.payout_confirmation {
+        revalidate_stored_l1_receipt(rpc, &confirmation.receipt);
+    }
+    if let Some(confirmation) = &candidate.pull_confirmation {
+        revalidate_stored_l1_receipt(rpc, &confirmation.receipt);
     }
 }
 
@@ -8702,21 +13959,11 @@ fn reconcile_confirmed_l1_call(
         }
     }
 
-    let latest: u64 = cast(&["block-number", "--rpc-url", rpc])
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| {
-            die(format!(
-                "parse latest block for receipt reconciliation: {e}"
-            ))
-        });
-    if latest < intent.start_block {
-        die(format!(
-            "canonical head {latest} is below persisted broadcast start block {}",
-            intent.start_block
-        ));
+    let durable_head = read_durable_l1_checkpoint(rpc, rpc_chain_id(rpc));
+    if durable_head.block_number < intent.start_block {
+        return None;
     }
-    for block_number in intent.start_block..=latest {
+    for block_number in intent.start_block..=durable_head.block_number {
         let block_arg = block_number.to_string();
         let raw = cast(&["block", &block_arg, "--full", "--json", "--rpc-url", rpc]);
         let block: serde_json::Value = serde_json::from_str(raw.trim())
@@ -8806,7 +14053,16 @@ fn read_l1_receipt(
     tx_hash: &str,
     call_kind: intmax3_zkp::partial_withdrawal_payout::L1CallKind,
 ) -> intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt {
-    let receipt_raw = cast(&["receipt", tx_hash, "--json", "--rpc-url", rpc]);
+    // `cast receipt` waits by default. A previously persisted hash can disappear after a reorg,
+    // so waiting here would hang recovery forever instead of failing closed on missing evidence.
+    let receipt_raw = cast(&[
+        "receipt",
+        tx_hash,
+        "--json",
+        "--async",
+        "--rpc-url",
+        rpc,
+    ]);
     parse_l1_receipt(rpc, tx_hash, call_kind, &receipt_raw)
 }
 
@@ -8835,6 +14091,16 @@ fn parse_l1_receipt(
     use intmax3_zkp::partial_withdrawal_payout::L1TransactionReceipt;
     let r: serde_json::Value = serde_json::from_str(receipt_raw.trim())
         .unwrap_or_else(|e| die(format!("parse cast receipt: {e}")));
+    let receipt_tx_hash = r["transactionHash"]
+        .as_str()
+        .unwrap_or_else(|| die("receipt missing transactionHash"));
+    if !receipt_tx_hash.eq_ignore_ascii_case(tx_hash) {
+        die(format!(
+            "receipt transaction hash {receipt_tx_hash} differs from requested {tx_hash}"
+        ));
+    }
+    let observed_chain_id = rpc_chain_id(rpc);
+    let durable_before = read_durable_l1_checkpoint(rpc, observed_chain_id);
     let tx_raw = cast(&["tx", tx_hash, "--json", "--rpc-url", rpc]);
     let t: serde_json::Value =
         serde_json::from_str(tx_raw.trim()).unwrap_or_else(|e| die(format!("parse cast tx: {e}")));
@@ -8855,31 +14121,128 @@ fn parse_l1_receipt(
         .parse::<Bytes32>()
         .unwrap_or_else(|e| die(format!("keccak tx input: {e}")));
     let chain_id = if t["chainId"].is_null() {
-        rpc_chain_id(rpc)
+        observed_chain_id
     } else {
         json_u64_quantity(&t["chainId"], "chainId").unwrap_or_else(|e| die(e))
     };
+    if chain_id != observed_chain_id {
+        die(format!(
+            "transaction chain id {chain_id} differs from RPC chain id {observed_chain_id}"
+        ));
+    }
+    let from = r["from"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Address>()
+        .unwrap_or_else(|e| die(format!("from: {e}")));
+    let to = r["to"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Address>()
+        .unwrap_or_else(|e| die(format!("to: {e}")));
+    let tx_object_hash = t["hash"]
+        .as_str()
+        .unwrap_or_else(|| die("tx object missing hash"));
+    let tx_from = t["from"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Address>()
+        .unwrap_or_else(|error| die(format!("tx object from: {error}")));
+    let tx_to = t["to"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Address>()
+        .unwrap_or_else(|error| die(format!("tx object to: {error}")));
+    validate_tx_receipt_identity(
+        tx_hash,
+        receipt_tx_hash,
+        tx_object_hash,
+        from,
+        to,
+        tx_from,
+        tx_to,
+    )
+    .unwrap_or_else(|error| die(error));
+    let manager_finalized_auth_digest =
+        if call_kind
+            == intmax3_zkp::partial_withdrawal_payout::L1CallKind::FinalizePartialWithdrawal
+        {
+            Some(
+                manager_finalized_auth_digest_from_receipt(&r, to)
+                    .unwrap_or_else(|error| die(format!("manager-finalization receipt: {error}"))),
+            )
+        } else {
+            None
+        };
+    let block_hash = r["blockHash"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Bytes32>()
+        .unwrap_or_else(|e| die(format!("block hash: {e}")));
+    let block_number = hex_u64(&r["blockNumber"], "blockNumber");
+    let receipt_block_tag = format!("0x{block_number:x}");
+    let canonical_receipt_block = rpc_block_json(rpc, &receipt_block_tag)
+        .and_then(|raw| {
+            parse_l1_checkpoint_block(&raw, observed_chain_id, durable_before.source)
+        })
+        .unwrap_or_else(|error| die(format!("read canonical receipt block: {error}")));
+    if let Err(error) = validate_receipt_block_evidence(
+        block_number,
+        block_hash,
+        &canonical_receipt_block,
+        &durable_before,
+    )
+    {
+        if block_number > durable_before.block_number {
+            die(format!(
+                "transaction {tx_hash} is canonical but not finalized yet: {error}; its durable intent/hash journal is retained, retry after the finalized head advances"
+            ));
+        }
+        die(format!(
+            "transaction {tx_hash} is not canonical/final: {error}"
+        ));
+    }
+
+    // The receipt and durable head are read twice around all auxiliary transaction reads. This
+    // closes the same-height replacement window where a provider changes its answer mid-check.
+    let second_raw = cast(&[
+        "receipt",
+        tx_hash,
+        "--json",
+        "--async",
+        "--rpc-url",
+        rpc,
+    ]);
+    let second: serde_json::Value = serde_json::from_str(second_raw.trim())
+        .unwrap_or_else(|error| die(format!("parse second cast receipt: {error}")));
+    validate_receipt_readback_identity(&r, &second).unwrap_or_else(|field| {
+        die(format!(
+            "transaction {tx_hash} receipt field {field} changed during read-back (reorg detected)"
+        ))
+    });
+    revalidate_l1_checkpoint(rpc, &durable_before);
+    let durable_after = read_durable_l1_checkpoint(rpc, observed_chain_id);
+    if durable_after.source != durable_before.source
+        || durable_after.block_number < durable_before.block_number
+        || (durable_after.block_number == durable_before.block_number
+            && (durable_after.block_hash != durable_before.block_hash
+                || durable_after.parent_hash != durable_before.parent_hash))
+    {
+        die("durable L1 head regressed or changed during receipt read-back");
+    }
+    durable_after
+        .covers_receipt(block_number, block_hash)
+        .unwrap_or_else(|error| die(format!("receipt lost durable coverage: {error}")));
+
     L1TransactionReceipt {
         tx_hash: tx_hash
             .parse()
             .unwrap_or_else(|e| die(format!("tx hash: {e}"))),
-        block_hash: r["blockHash"]
-            .as_str()
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or_else(|e| die(format!("block hash: {e}"))),
-        block_number: hex_u64(&r["blockNumber"], "blockNumber"),
+        block_hash,
+        block_number,
         chain_id,
-        from: r["from"]
-            .as_str()
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or_else(|e| die(format!("from: {e}"))),
-        to: r["to"]
-            .as_str()
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or_else(|e| die(format!("to: {e}"))),
+        from,
+        to,
         success: r["status"]
             .as_str()
             .map(|s| s == "0x1" || s == "1")
@@ -8887,13 +14250,153 @@ fn parse_l1_receipt(
         call_kind,
         calldata_hash,
         transaction_nonce: hex_u64(&t["nonce"], "nonce"),
+        finalized_checkpoint: durable_after,
+        manager_finalized_auth_digest,
     }
+}
+
+fn validate_tx_receipt_identity(
+    requested_hash: &str,
+    receipt_hash: &str,
+    tx_object_hash: &str,
+    receipt_from: Address,
+    receipt_to: Address,
+    tx_from: Address,
+    tx_to: Address,
+) -> Result<(), String> {
+    if !tx_object_hash.eq_ignore_ascii_case(requested_hash)
+        || !tx_object_hash.eq_ignore_ascii_case(receipt_hash)
+        || tx_from != receipt_from
+        || tx_to != receipt_to
+    {
+        return Err(
+            "cast tx object hash/from/to differs from the requested receipt; refusing mixed RPC evidence"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_receipt_readback_identity(
+    first: &serde_json::Value,
+    second: &serde_json::Value,
+) -> Result<(), &'static str> {
+    for field in [
+        "transactionHash",
+        "blockHash",
+        "blockNumber",
+        "status",
+        "from",
+        "to",
+        // Includes every topic, emitting address, data, log index and the nested `removed` flag.
+        // The manager authDigest is extracted from these logs, so omitting them would allow the
+        // exact evidence used for the binding to change between the two receipt reads.
+        "logs",
+    ] {
+        if first[field] != second[field] {
+            return Err(field);
+        }
+    }
+    Ok(())
+}
+
+const PARTIAL_WITHDRAWAL_FINALIZED_TOPIC: &str =
+    "0xd1a13162df7b47389414f1cb86675a13490c1aea4abe185d1fc644ad30f69685";
+
+/// Extract the candidate identity from the manager's canonical receipt.  The finalized manager
+/// function is intentionally zero-argument, so sender/nonce/calldata identify the call but not the
+/// pending request it consumed.  The indexed `authDigest` event is the only transaction-local
+/// evidence that closes that ambiguity.
+fn manager_finalized_auth_digest_from_receipt(
+    receipt: &serde_json::Value,
+    expected_manager: Address,
+) -> Result<Bytes32, String> {
+    let logs = receipt["logs"]
+        .as_array()
+        .ok_or_else(|| "receipt has no logs array".to_string())?;
+    let expected_manager = expected_manager.to_string();
+    let mut observed = None;
+    for log in logs {
+        let Some(address) = log["address"].as_str() else {
+            continue;
+        };
+        if !address.eq_ignore_ascii_case(&expected_manager) {
+            continue;
+        }
+        let Some(topics) = log["topics"].as_array() else {
+            continue;
+        };
+        let Some(topic0) = topics.first().and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !topic0.eq_ignore_ascii_case(PARTIAL_WITHDRAWAL_FINALIZED_TOPIC) {
+            continue;
+        }
+        if log["removed"].as_bool() == Some(true) {
+            return Err("manager-finalization event is marked removed".into());
+        }
+        if topics.len() != 3 {
+            return Err("manager-finalization event has the wrong indexed-topic count".into());
+        }
+        let auth_digest = topics[1]
+            .as_str()
+            .ok_or_else(|| "manager-finalization auth digest topic is not a string".to_string())?
+            .parse::<Bytes32>()
+            .map_err(|error| format!("parse manager-finalization auth digest: {error}"))?;
+        topics[2]
+            .as_str()
+            .ok_or_else(|| "manager-finalization chain key topic is not a string".to_string())?
+            .parse::<Bytes32>()
+            .map_err(|error| format!("parse manager-finalization chain key: {error}"))?;
+        if observed.replace(auth_digest).is_some() {
+            return Err("receipt contains more than one manager-finalization event".into());
+        }
+    }
+    observed.ok_or_else(|| "receipt lacks the manager's PartialWithdrawalFinalized event".into())
+}
+
+/// A finalized head only authenticates its own hash directly. For any lower receipt height we
+/// still require an exact `eth_getBlockByNumber(height)` answer and compare that canonical hash.
+/// Keeping this as a pure predicate makes the lower-height reorg boundary regression-testable.
+fn validate_receipt_block_evidence(
+    receipt_block_number: u64,
+    receipt_block_hash: Bytes32,
+    canonical_receipt_block: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+    durable_head: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
+) -> Result<(), String> {
+    durable_head.covers_receipt(receipt_block_number, receipt_block_hash)?;
+    if canonical_receipt_block.chain_id != durable_head.chain_id {
+        return Err("canonical receipt block belongs to a different chain".into());
+    }
+    if canonical_receipt_block.block_number != receipt_block_number
+        || canonical_receipt_block.block_hash != receipt_block_hash
+    {
+        return Err("receipt block hash was replaced (reorg detected)".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod partial_withdrawal_reconcile_tests {
     use super::*;
-    use intmax3_zkp::partial_withdrawal_payout::BroadcastIntent;
+    use intmax3_zkp::{
+        l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
+        partial_withdrawal_payout::BroadcastIntent,
+    };
+
+    fn word(tag: u32) -> Bytes32 {
+        Bytes32::from_u32_slice(&[tag; 8]).expect("bytes32")
+    }
+
+    fn checkpoint(block_number: u64, block_hash: Bytes32) -> L1FinalizedCheckpoint {
+        L1FinalizedCheckpoint {
+            chain_id: 1,
+            block_number,
+            block_hash,
+            parent_hash: word(block_number.saturating_sub(1) as u32),
+            source: L1FinalitySource::RpcFinalized,
+        }
+    }
 
     fn intent(calldata: &[u8]) -> BroadcastIntent {
         BroadcastIntent {
@@ -8948,6 +14451,141 @@ mod partial_withdrawal_reconcile_tests {
         )
         .unwrap_err();
         assert!(error.contains("replaced"));
+    }
+
+    #[test]
+    fn lower_height_receipt_requires_its_own_canonical_block_hash() {
+        let receipt_hash = word(100);
+        let durable_head = checkpoint(103, word(103));
+
+        // Coverage by a higher finalized head proves only the height bound. It must not make an
+        // arbitrary lower-height hash authoritative without the exact canonical block query.
+        assert!(durable_head.covers_receipt(100, receipt_hash).is_ok());
+        let replaced = checkpoint(100, word(999));
+        assert!(validate_receipt_block_evidence(
+            100,
+            receipt_hash,
+            &replaced,
+            &durable_head,
+        )
+        .is_err());
+
+        let canonical = checkpoint(100, receipt_hash);
+        validate_receipt_block_evidence(100, receipt_hash, &canonical, &durable_head)
+            .expect("exact lower-height canonical block evidence");
+    }
+
+    #[test]
+    fn zero_argument_manager_finalize_requires_one_exact_auth_digest_event() {
+        let manager = "0x0000000000000000000000000000000000000043"
+            .parse::<Address>()
+            .unwrap();
+        let auth = word(0xa11);
+        let chain_key = word(0xc11);
+        let log = serde_json::json!({
+            "address": manager.to_string(),
+            "topics": [
+                PARTIAL_WITHDRAWAL_FINALIZED_TOPIC,
+                auth.to_string(),
+                chain_key.to_string()
+            ],
+            "removed": false
+        });
+        let receipt = serde_json::json!({ "logs": [log.clone()] });
+        assert_eq!(
+            manager_finalized_auth_digest_from_receipt(&receipt, manager).unwrap(),
+            auth
+        );
+
+        let wrong_manager = "0x0000000000000000000000000000000000000044"
+            .parse::<Address>()
+            .unwrap();
+        assert!(manager_finalized_auth_digest_from_receipt(&receipt, wrong_manager).is_err());
+
+        let duplicate = serde_json::json!({ "logs": [log.clone(), log] });
+        assert!(manager_finalized_auth_digest_from_receipt(&duplicate, manager).is_err());
+
+        let removed = serde_json::json!({
+            "logs": [{
+                "address": manager.to_string(),
+                "topics": [
+                    PARTIAL_WITHDRAWAL_FINALIZED_TOPIC,
+                    auth.to_string(),
+                    chain_key.to_string()
+                ],
+                "removed": true
+            }]
+        });
+        assert!(manager_finalized_auth_digest_from_receipt(&removed, manager).is_err());
+    }
+
+    #[test]
+    fn receipt_reread_binds_logs_and_removed_flag_exactly() {
+        let first = serde_json::json!({
+            "transactionHash": word(1).to_string(),
+            "blockHash": word(2).to_string(),
+            "blockNumber": "0x2",
+            "status": "0x1",
+            "from": "0x0000000000000000000000000000000000000071",
+            "to": "0x0000000000000000000000000000000000000043",
+            "logs": [{
+                "address": "0x0000000000000000000000000000000000000043",
+                "topics": [PARTIAL_WITHDRAWAL_FINALIZED_TOPIC, word(3).to_string(), word(4).to_string()],
+                "data": "0x",
+                "removed": false
+            }]
+        });
+        validate_receipt_readback_identity(&first, &first).unwrap();
+
+        let mut changed_digest = first.clone();
+        changed_digest["logs"][0]["topics"][1] = serde_json::json!(word(99).to_string());
+        assert_eq!(
+            validate_receipt_readback_identity(&first, &changed_digest),
+            Err("logs")
+        );
+
+        let mut removed = first.clone();
+        removed["logs"][0]["removed"] = serde_json::json!(true);
+        assert_eq!(
+            validate_receipt_readback_identity(&first, &removed),
+            Err("logs")
+        );
+    }
+
+    #[test]
+    fn tx_object_cannot_be_mixed_with_a_different_receipt() {
+        let tx_hash = word(1).to_string();
+        let from = "0x0000000000000000000000000000000000000071"
+            .parse::<Address>()
+            .unwrap();
+        let to = "0x0000000000000000000000000000000000000043"
+            .parse::<Address>()
+            .unwrap();
+        validate_tx_receipt_identity(&tx_hash, &tx_hash, &tx_hash, from, to, from, to).unwrap();
+        assert!(
+            validate_tx_receipt_identity(
+                &tx_hash,
+                &tx_hash,
+                &word(2).to_string(),
+                from,
+                to,
+                from,
+                to,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_tx_receipt_identity(
+                &tx_hash,
+                &tx_hash,
+                &tx_hash,
+                from,
+                to,
+                to,
+                from,
+            )
+            .is_err()
+        );
     }
 }
 

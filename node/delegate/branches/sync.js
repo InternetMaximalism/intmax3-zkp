@@ -5,6 +5,7 @@
 const { checkHeadMonotonic } = require('../verify');
 const dsm = require('../state-machine');
 const wire = require('../../common/wire');
+const { buildParticipantCloseProof } = require('../participant-close');
 
 function headOf(snapshot) {
   const st = (snapshot && snapshot.state) || {};
@@ -33,7 +34,7 @@ function recordBalance(store, bal) {
 }
 
 async function importAndVerify(event, ctx) {
-  const { api, wallet, ch, store, log, raiseSignal } = ctx;
+  const { api, wallet, ch, store, log, raiseSignal, snapshotVault } = ctx;
   let snapshot = event.snapshot;
   if (!snapshot) snapshot = await api.getSnapshot(ch.id);
   const incoming = headOf(snapshot);
@@ -51,6 +52,18 @@ async function importAndVerify(event, ctx) {
   if (wallet.available()) {
     wallet.importChannel(snapshot, ctx.slot);
     const bal = wallet.balance(ctx.slot);
+    if (!bal || Number(bal.slot) !== Number(ctx.slot)) {
+      throw new Error(`WASM wallet owns slot ${bal && bal.slot}, not configured delegate slot ${ctx.slot}`);
+    }
+    if (!ctx.recipient) throw new Error('delegate recipient is required for unilateral close recovery');
+    // Only derive/store this proof AFTER the WASM importer has authenticated the N-of-N snapshot
+    // and located our own key. The proof contains no secret; it is the immutable L1 authentication
+    // path the recipient will use for requestCloseAsParticipant.
+    const participantCloseProof = buildParticipantCloseProof(snapshot, ctx.slot, ctx.recipient);
+    store.set('participantCloseProof', participantCloseProof);
+    // Archive only AFTER WASM accepted every signature/root and confirmed ownership of our slot.
+    // This keeps a stale-but-valid finalized close independently claimable after restart.
+    if (snapshotVault) snapshotVault.save(snapshot);
     recordBalance(store, bal);
     log.info({ event: 'SNAPSHOT_IMPORTED', channel: ch.id, head: incoming, balance: bal && bal.balance });
   } else {

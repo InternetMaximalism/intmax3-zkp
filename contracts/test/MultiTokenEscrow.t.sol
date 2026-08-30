@@ -3,12 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {IERC20, SafeERC20Lib} from "../src/SafeERC20.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
 import {MockMleVerifier} from "./CloseTestLib.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 import {
     SimpleERC20,
     FeeOnTransferERC20,
@@ -89,6 +91,7 @@ contract MultiTokenEscrowTest is Test {
             bytes32(0),
             true // A-2 test opt-in for the degreeBits==0 validity bypass
         );
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         // Withdrawal VK: degreeBits = 1 (never disabled) — the mock verifier supplies the verdict.
         IntmaxRollup.MleVk memory wVk;
         wVk.degreeBits = 1;
@@ -141,7 +144,9 @@ contract MultiTokenEscrowTest is Test {
             probeBlobs[0] = keccak256("mt_blob_probe");
             vm.blobhashes(probeBlobs);
             vm.deal(address(this), address(this).balance + 1 ether);
-            rollup.postBlockAndSubmit{value: 1 ether}(batch0, keccak256("probe"), 1, finalizedRoot);
+            rollup.postBlockAndSubmit{value: 1 ether}(
+                batch0, keccak256("probe"), 1, finalizedRoot, rollup.pendingChainsPin()
+            );
             vpis.finalBlockNumber = rollup.blockNumber();
             vpis.finalBlockChain = rollup.blockHashChain();
             vm.revertToState(snap);
@@ -164,7 +169,7 @@ contract MultiTokenEscrowTest is Test {
         vm.blobhashes(blobs);
         vm.deal(address(this), 10 ether);
         rollup.postBlockAndSubmit{value: 1 ether}(
-            batch0, keccak256("proof"), 1, finalizedRoot
+            batch0, keccak256("proof"), 1, finalizedRoot, rollup.pendingChainsPin()
         );
         assertTrue(rollup.finalize(0, finalizedRoot, vpis, mleProof), "finalize must succeed");
     }

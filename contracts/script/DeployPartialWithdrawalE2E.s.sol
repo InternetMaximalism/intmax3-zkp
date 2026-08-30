@@ -4,9 +4,14 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
@@ -20,7 +25,10 @@ contract E2EMockMleVerifier {
         MleVerifier.VerifyParams memory,
         SpongefishWhirVerify.WhirParams memory,
         bytes32
-    ) external pure returns (bool) {
+    ) external view returns (bool) {
+        // The script entrypoint is also local-only, but deployed code/state can
+        // be migrated without re-running it. Keep the mock itself fail-closed.
+        if (block.chainid != 31337) revert MleProofEngineUnavailable(block.chainid);
         return true;
     }
 }
@@ -68,11 +76,19 @@ contract DeployPartialWithdrawalE2E is Script {
         IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(mleJson, realVerifier);
         FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(mleJson);
         rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, realVerifier, genesis, false
+            fraudTreasury,
+            vvk,
+            vdd.whirParams,
+            vdd.protocolId,
+            vdd.sessionId,
+            vdd.kIs,
+            vdd.subgroupGenPowers,
+            realVerifier,
+            genesis,
+            false
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
@@ -91,8 +107,7 @@ contract DeployPartialWithdrawalE2E is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeCloseVk(
-                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
         {
@@ -105,8 +120,7 @@ contract DeployPartialWithdrawalE2E is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeCancelCloseVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
 
@@ -138,17 +152,20 @@ contract DeployPartialWithdrawalE2E is Script {
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](r.memberCount);
         for (uint256 i = 0; i < r.memberCount; i++) {
-            mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: r.pkGs[i],
-                recipient: r.recipients[i]
-            });
+            mBind[i] = ChannelSettlementManager.MemberBinding({pkG: r.pkGs[i], recipient: r.recipients[i]});
         }
         manager = new ChannelSettlementManager(
-            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
+            bytes4(r.channelId),
+            r.bpSlot,
+            r.pkGs[r.bpSlot],
+            r.activeDelegateCount,
+            r.participantRoot,
             DeployConfig.challengePeriodSecs(),
-            SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
-            mBind, new ChannelSettlementManager.MemberBinding[](0)
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(sv)),
+            IChannelRegistry(address(rollup)),
+            mBind
         );
 
         // 6. Register settlement manager on rollup (critical for authorizePartialWithdrawal).
@@ -170,12 +187,10 @@ contract DeployPartialWithdrawalE2E is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeWithdrawalClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
             sv.initializePostCloseClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
 

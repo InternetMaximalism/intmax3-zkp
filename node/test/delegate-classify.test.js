@@ -28,6 +28,11 @@ test('delegate: hard signals route to abnormal branches in any mode', () => {
 test('delegate: chain close/finalize route to exit-related branches', () => {
   assert.equal(classify({ source: 'chain', kind: 'CloseSubmitted' }, {}), BRANCHES.CHAIN_CLOSE_SEEN);
   assert.equal(classify({ source: 'chain', kind: 'CloseFinalized' }, {}), BRANCHES.CHAIN_FINALIZED);
+  assert.equal(classify({ source: 'chain', kind: 'WithdrawalClaimed' }, {}), BRANCHES.CHAIN_CREDIT);
+  assert.equal(classify({ source: 'chain', kind: 'WithdrawalCredited' }, {}), BRANCHES.IGNORE);
+  assert.equal(classify({ source: 'chain', kind: 'NativeWithdrawn' }, {}), BRANCHES.IGNORE);
+  assert.equal(classify({ source: 'chain', kind: 'Erc20Withdrawn' }, {}), BRANCHES.IGNORE);
+  assert.equal(classify({ source: 'chain', kind: 'TokenWithdrawalClaimed' }, {}), BRANCHES.IGNORE);
   assert.equal(classify({ source: 'chain', kind: 'FraudConfirmed' }, {}), BRANCHES.EQUIVOCATION);
   assert.equal(classify({ source: 'chain', kind: 'BlockPosted' }, {}), BRANCHES.IGNORE);
 });

@@ -339,7 +339,11 @@ mod tests {
                 0x494d_4954,
             ),
             ("IMCL CLOSE_TX_DOMAIN (channel.rs)", 0x494d_434c),
-            ("IMCI CLOSE_INTENT_DOMAIN (channel.rs)", 0x494d_4349),
+            (
+                "IMCI CLOSE_INTENT_DOMAIN v1 (retired; metadata-derived identities)",
+                0x494d_4349,
+            ),
+            ("IMCS CLOSE_STATE_ID_DOMAIN (channel.rs)", 0x494d_4353),
             ("IMSC SPECIAL_CLOSE_DOMAIN (channel.rs)", 0x494d_5343),
             ("IMCN CANCEL_CLOSE_DOMAIN (channel.rs)", 0x494d_434e),
             ("IMCP POST_CLOSE_CLAIM_DOMAIN (channel.rs)", 0x494d_4350),

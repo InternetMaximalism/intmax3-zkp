@@ -13,11 +13,9 @@ import {VmSafe} from "forge-std/Vm.sol";
 ///              this is COSIGNERS-ONLY: it carries exactly `member_count` participants and its
 ///              `delegateCount` limb is ZERO. It is the preimage the validity `channel_reg_step`
 ///              circuit must reproduce.
-///           2. `new ChannelSettlementManager(..., delegateCount, ..., mBind, dBind)` — the
-///              SETTLEMENT BINDING. Its `activeDelegateCount` is the LIVE channel's delegate count:
-///              it is the B-2 floor for close/partial-withdrawal (close PI limb 94 must be
-///              `>= activeDelegateCount`) and it sizes the delegate `MemberBinding[]` that writes
-///              `registeredRecipientOf` / `isMemberRecipient`.
+///           2. `new ChannelSettlementManager(..., delegateCount, participantRoot, ..., mBind)` —
+///              the SETTLEMENT BINDING. Its count/root freeze the LIVE slot-ordered participant
+///              snapshot without an O(delegate_count) constructor-storage write.
 ///
 ///         Every script read ONE `delegate_count` field and fed it to both. That conflation is a
 ///         defect in each direction:
@@ -59,6 +57,9 @@ library RegRecordLib {
     /// Minimum co-signing members, mirroring `IntmaxRollup.MIN_CHANNEL_MEMBERS`. Checked here too
     /// so a malformed record fails on a readable message before it costs a broadcast.
     uint8 internal constant MIN_MEMBERS = 2;
+    uint256 internal constant MAX_PARTICIPANTS = 1024;
+    uint32 internal constant PARTICIPANT_LEAF_DOMAIN = 0x494d5052; // "IMPR"
+    uint32 internal constant PARTICIPANT_NODE_DOMAIN = 0x494d504e; // "IMPN"
 
     /// A parsed registration record. `pkGs`/`pkBs`/`regevDigests`/`recipients` are the ACTIVE set
     /// (`memberCount + activeDelegateCount` entries, members first).
@@ -67,7 +68,12 @@ library RegRecordLib {
         uint8 bpSlot;
         uint8 memberCount;
         /// The LIVE delegate count — for the SETTLEMENT MANAGER only. Never for `registerChannel`.
-        uint8 activeDelegateCount;
+        uint16 activeDelegateCount;
+        bytes32 participantRoot;
+        /// Production records written from an authenticated live snapshot must carry the root
+        /// explicitly. Legacy/dev fixtures may omit it; `parse` still derives it so older mock
+        /// scripts remain usable, while `DeployCloseCli` requires this flag.
+        bool participantRootDeclared;
         bytes32[] pkGs;
         bytes32[] pkBs;
         bytes32[] regevDigests;
@@ -88,11 +94,11 @@ library RegRecordLib {
         require(channelId <= type(uint32).max, "reg record: channel_id exceeds uint32");
         require(bpSlot <= type(uint8).max, "reg record: bp_member_slot exceeds uint8");
         require(memberCount <= type(uint8).max, "reg record: member_count exceeds uint8");
-        require(activeDelegateCount <= type(uint8).max, "reg record: active_delegate_count exceeds uint8");
+        require(activeDelegateCount <= type(uint16).max, "reg record: active_delegate_count exceeds uint16");
         r.channelId = uint32(channelId);
         r.bpSlot = uint8(bpSlot);
         r.memberCount = uint8(memberCount);
-        r.activeDelegateCount = uint8(activeDelegateCount);
+        r.activeDelegateCount = uint16(activeDelegateCount);
         require(
             vm.parseJsonUint(json, ".reg_delegate_count") == 0,
             "reg record: reg_delegate_count must be 0 (Option B: L1 registration is cosigner-only; a nonzero registration is unprovable by channel_reg_step)"
@@ -106,11 +112,19 @@ library RegRecordLib {
         require(r.memberCount >= MIN_MEMBERS, "reg record: member_count < MIN_CHANNEL_MEMBERS");
         require(r.bpSlot < r.memberCount, "reg record: bp_member_slot must be a co-signing member");
         uint256 active = uint256(r.memberCount) + uint256(r.activeDelegateCount);
+        require(active <= MAX_PARTICIPANTS, "reg record: active participants exceed 1024");
         require(
             r.pkGs.length == active && r.pkBs.length == active && r.regevDigests.length == active
                 && r.recipients.length == active,
             "reg record: arrays must hold member_count + active_delegate_count entries (members first)"
         );
+        bytes32 derivedRoot = _participantRoot(r.pkGs, r.recipients);
+        r.participantRootDeclared = vm.keyExistsJson(json, ".participant_root");
+        if (r.participantRootDeclared) {
+            bytes32 declaredRoot = vm.parseJsonBytes32(json, ".participant_root");
+            require(declaredRoot == derivedRoot, "reg record: participant_root does not match active bindings");
+        }
+        r.participantRoot = derivedRoot;
     }
 
     // ── the REGISTRATION view: the leading cosigner slice, nothing else ────────────────────────
@@ -139,5 +153,29 @@ library RegRecordLib {
         for (uint256 i = 0; i < n; i++) {
             out[i] = a[i];
         }
+    }
+
+    function _participantRoot(bytes32[] memory pkGs, address[] memory recipients)
+        private
+        pure
+        returns (bytes32)
+    {
+        bytes32[1024] memory nodes;
+        for (uint256 i = 0; i < pkGs.length; i++) {
+            require(pkGs[i] != bytes32(0) && recipients[i] != address(0), "reg record: zero participant binding");
+            nodes[i] = keccak256(
+                abi.encodePacked(bytes4(PARTICIPANT_LEAF_DOMAIN), uint16(i), pkGs[i], recipients[i])
+            );
+        }
+        uint256 width = MAX_PARTICIPANTS;
+        while (width > 1) {
+            for (uint256 i = 0; i < width; i += 2) {
+                nodes[i >> 1] = keccak256(
+                    abi.encodePacked(bytes4(PARTICIPANT_NODE_DOMAIN), nodes[i], nodes[i + 1])
+                );
+            }
+            width >>= 1;
+        }
+        return nodes[0];
     }
 }

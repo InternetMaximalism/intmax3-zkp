@@ -4,7 +4,11 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
@@ -45,8 +49,9 @@ contract DeployCloseCli is Script {
     }
 
     /// @return rollup  the deployed IntmaxRollup
-    /// @return sv      the deployed ChannelSettlementVerifier (all FIVE settlement VKs keyed —
-    ///                 close, withdrawalClaim, postCloseClaim, cancelClose, memberSetUpdate)
+    /// @return sv      the deployed ChannelSettlementVerifier (the four live settlement VKs keyed:
+    ///                 close, withdrawalClaim, postCloseClaim and cancelClose; member-set-update
+    ///                 is intentionally left unkeyed for the release)
     /// @return manager the deployed ChannelSettlementManager, registered on `rollup`
     /// @dev The return values exist so `test/DeployGuards.t.sol` can assert on what this script
     ///      actually deployed. `forge script --sig run` is unaffected (return types are not part of
@@ -63,35 +68,68 @@ contract DeployCloseCli is Script {
         // place that decides which delegate count reaches `registerChannel` (a constant zero) and
         // which reaches the manager (the record's live `active_delegate_count`).
         RegRecordLib.Record memory r = RegRecordLib.parse(_read("cli_reg_record.json"));
+        address existingRollup = vm.envOr("EXISTING_ROLLUP", address(0));
+        address expectedBroadcaster = vm.envOr("EXPECTED_BROADCASTER", address(0));
+        if (existingRollup != address(0)) {
+            require(r.participantRootDeclared, "production reg record must declare authenticated participant_root");
+            require(expectedBroadcaster != address(0), "EXPECTED_BROADCASTER required for existing-rollup attach");
+            bool broadcasterIsParticipant = false;
+            for (uint256 i = 0; i < r.recipients.length; i++) {
+                if (r.recipients[i] == expectedBroadcaster) {
+                    broadcasterIsParticipant = true;
+                    break;
+                }
+            }
+            require(broadcasterIsParticipant, "settlement broadcaster is not an active signed-state recipient");
+        }
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        // SECURITY (#6): require FRAUD_TREASURY on real chains; anvil (31337) may default it.
+        // SECURITY (#6): a fresh rollup needs a fraud treasury.  An attach does not create or
+        // mutate this immutable and therefore must not demand an unrelated value.
         address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
-        if (fraudTreasury == address(0)) {
+        if (existingRollup == address(0) && fraudTreasury == address(0)) {
             require(block.chainid == 31337, "FRAUD_TREASURY must be set for non-local deploys");
             fraudTreasury = msg.sender;
         }
 
         vm.startBroadcast();
 
-        // 1. Rollup with the VALIDITY VK + genesis (production: reject a disabled VK).
+        // 1. Attach to the rollup that already escrows this channel's funds when
+        // `EXISTING_ROLLUP` is supplied.  The fresh branch is retained for isolated/dev bootstrap,
+        // but the production Rust driver always supplies the backing rollup.
         MleVerifier verifier = new MleVerifier();
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
-        rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis, false
-        );
-        // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
-        // Authorize the block producer used by the CLI withdraw flow (the selected Foundry signer).
-        // Defaults to the broadcaster; set BLOCK_PRODUCER to the CLI poster address when they differ.
-        rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
+        if (existingRollup == address(0)) {
+            IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
+            FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
+            rollup = new IntmaxRollup(
+                fraudTreasury,
+                vvk,
+                vdd.whirParams,
+                vdd.protocolId,
+                vdd.sessionId,
+                vdd.kIs,
+                vdd.subgroupGenPowers,
+                verifier,
+                genesis,
+                false
+            );
+            // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
+            rollup.setKzgVerifier(new BlobKZGVerifierExt());
+            // Authorize the block producer used by the CLI withdraw flow (the selected Foundry signer).
+            rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
-        // 2. Withdrawal VK (deployer == EOA == msg.sender).
-        {
+            // Withdrawal VK (deployer == EOA == broadcaster).
             FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(wJson);
             IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(wJson, verifier);
-            rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
+            rollup.initializeWithdrawalVk(
+                wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers
+            );
+        } else {
+            require(existingRollup.code.length != 0, "EXISTING_ROLLUP has no code");
+            rollup = IntmaxRollup(payable(existingRollup));
+            require(rollup.deployer() == expectedBroadcaster, "broadcaster is not existing rollup deployer");
+            require(!rollup.allowMleDisabled(), "existing rollup has test-only validity bypass enabled");
+            require(rollup.withdrawalVkInitialized(), "existing rollup withdrawal VK is not initialized");
+            require(address(rollup.kzgVerifier()) != address(0), "existing rollup KZG verifier is not set");
         }
 
         // 3. Settlement verifier + the REAL close VK (the close circuit's MLE/WHIR verifier data).
@@ -113,7 +151,9 @@ contract DeployCloseCli is Script {
                 numRoutedWires: cdd.numRoutedWires,
                 gatesDigest: gatesDigest
             });
-            sv.initializeCloseVk(verifier, cvk, cdd.whirParams, cdd.protocolId, cdd.sessionId, cdd.kIs, cdd.subgroupGenPowers);
+            sv.initializeCloseVk(
+                verifier, cvk, cdd.whirParams, cdd.protocolId, cdd.sessionId, cdd.kIs, cdd.subgroupGenPowers
+            );
         }
 
         // 3b. Withdrawal-claim VK (the claim circuit's MLE/WHIR verifier data — channel-independent,
@@ -137,7 +177,9 @@ contract DeployCloseCli is Script {
                 numRoutedWires: wcdd.numRoutedWires,
                 gatesDigest: wcGatesDigest
             });
-            sv.initializeWithdrawalClaimVk(verifier, wcvk, wcdd.whirParams, wcdd.protocolId, wcdd.sessionId, wcdd.kIs, wcdd.subgroupGenPowers);
+            sv.initializeWithdrawalClaimVk(
+                verifier, wcvk, wcdd.whirParams, wcdd.protocolId, wcdd.sessionId, wcdd.kIs, wcdd.subgroupGenPowers
+            );
         }
 
         // 3b. Post-close-claim VK. SECURITY/LIVENESS (audit622 A-M4, reported 2026-06-22, open until
@@ -165,7 +207,9 @@ contract DeployCloseCli is Script {
                 numRoutedWires: pcdd.numRoutedWires,
                 gatesDigest: pcGatesDigest
             });
-            sv.initializePostCloseClaimVk(verifier, pcvk, pcdd.whirParams, pcdd.protocolId, pcdd.sessionId, pcdd.kIs, pcdd.subgroupGenPowers);
+            sv.initializePostCloseClaimVk(
+                verifier, pcvk, pcdd.whirParams, pcdd.protocolId, pcdd.sessionId, pcdd.kIs, pcdd.subgroupGenPowers
+            );
         }
 
         // 3c. Cancel-close VK. SECURITY/LIVENESS (audit622 A-M4): without this,
@@ -191,7 +235,9 @@ contract DeployCloseCli is Script {
                 numRoutedWires: ccdd.numRoutedWires,
                 gatesDigest: ccGatesDigest
             });
-            sv.initializeCancelCloseVk(verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers);
+            sv.initializeCancelCloseVk(
+                verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers
+            );
         }
 
         // 4. registerChannel with the CLI COSIGNER set — the L1 registration record is
@@ -216,40 +262,15 @@ contract DeployCloseCli is Script {
             RegRecordLib.regRecipients(r)
         );
 
-        // 5. Manager bound to the SAME active set: member bindings (the first `memberCount`) +
-        //    delegate bindings (the remainder). The close member-set commitment + delegate_count limb
-        //    then match the close proof.
-        //
-        //    Member slot 0's binding recipient is the broadcasting EOA. SECURITY / SCOPE — what
-        //    this override does and does NOT do, post-B-1b/B-2 (one source of truth per property):
-        //      * It does NOT route the CLAIM payout. `submitWithdrawalClaim` credits
-        //        `withdrawalCredits[claim.tokenIndex][claim.recipient]` with the PROOF-BOUND
-        //        recipient — the cosigner-signed balance-slot LEAF address (B-1b) — and
-        //        `claimWithdrawalCredit` pays `msg.sender`. `registeredRecipientOf` (the only place
-        //        `MemberBinding.recipient` is stored per-pk_g) has ZERO runtime reads since 6d2b9d8
-        //        removed the registration-based claim gates. Claim routing therefore lives in the
-        //        CHANNEL STATE and is set at genesis by the CLI (`CLI_RECIPIENT_SLOT_<slot>`),
-        //        NOT here.
-        //      * It IS still load-bearing for the two paths that gate on `isMemberRecipient`
-        //        (also written from these bindings): `requestClose()` — which the CLI sends from
-        //        this same EOA — and `submitPartialWithdrawal`'s "payout address is a registered
-        //        participant" check. Without it the EOA could not open the close at all.
-        //    The registration record (`recipients[i]`, fed to `registerChannel` above and hashed
-        //    into the reg chain the validity proof reproduces) is deliberately left UNCHANGED.
+        // 5. Manager bound to the SAME active snapshot.  Recipients are copied EXACTLY from the
+        // cosigner-signed BalanceState leaves; there is no broadcaster override.  Only cosigners
+        // become mappings/SSTOREs.  The full member+delegate identity is one immutable Merkle root,
+        // so 1024 participants remain deployable within ordinary block gas limits.
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](r.memberCount);
         for (uint256 i = 0; i < r.memberCount; i++) {
             mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: r.pkGs[i],
-                recipient: (i == 0) ? msg.sender : r.recipients[i]
-            });
-        }
-        ChannelSettlementManager.MemberBinding[] memory dBind =
-            new ChannelSettlementManager.MemberBinding[](r.activeDelegateCount);
-        for (uint256 i = 0; i < r.activeDelegateCount; i++) {
-            dBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: r.pkGs[r.memberCount + i],
-                recipient: r.recipients[r.memberCount + i]
+                pkG: r.pkGs[i], recipient: r.recipients[i]
             });
         }
         // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `activeDelegateCount` is a FLOOR for
@@ -268,10 +289,17 @@ contract DeployCloseCli is Script {
         // so this cannot guarantee that any NAMED delegate registered here is present in the closed
         // state — only that the active region was not shrunk below this count.
         manager = new ChannelSettlementManager(
-            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
-            DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), mBind,
-            dBind
+            bytes4(r.channelId),
+            r.bpSlot,
+            r.pkGs[r.bpSlot],
+            r.activeDelegateCount,
+            r.participantRoot,
+            DeployConfig.challengePeriodSecs(),
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(sv)),
+            IChannelRegistry(address(rollup)),
+            mBind
         );
 
         // 6. Register the manager just deployed as an authorized partial-withdrawal authorizer.
@@ -311,51 +339,15 @@ contract DeployCloseCli is Script {
         // address as the payout recipient inside the proof.
         rollup.registerSettlementManager(address(manager));
 
-        // 7. Member-set-update VK (detail2 §Q-4 key rotation).
+        // 7. Member-set-update is deliberately NOT keyed in the production release.
         //
-        // SECURITY / LIVENESS — audit28-08-2026 M-3, the FOURTH occurrence of the class audit622
-        // A-M4 first reported 2026-06-22 (a fail-closed check that protects soundness while making
-        // an HONEST path impossible). `ChannelSettlementVerifier.verifyMemberSetUpdate` opens with
-        // `if (!memberSetUpdateVkInitialized) revert MemberSetUpdateVkNotSet();`, so until this
-        // call existed EVERY real deployment shipped with `applyMemberSetUpdate` reverting forever:
-        // no key rotation, no co-signer addition, and — because `applyMemberSetUpdate` is the ONLY
-        // post-constructor write to `isMemberRecipient` — no way to move the set of addresses that
-        // may `requestClose()` or receive a partial withdrawal. `initializeMemberSetUpdateVk` is
-        // deployer-only and set-once, exactly like the other five, so a deployment that omits it is
-        // repairable only by a manual call from the surviving deployer key.
-        //
-        // ORDERING (two independent constraints, both satisfied here):
-        //   * It MUST come after step 3: `initializeMemberSetUpdateVk` itself `require`s
-        //     `closeVkInitialized` — the msu VK stores only its own per-circuit anchors and reuses
-        //     the close statement's WHIR/MLE rail (see the storage doc on `memberSetUpdateVk`).
-        //   * It MUST NOT come before the `new ChannelSettlementManager` in step 5. A broadcast
-        //     call bumps the deployer EOA's nonce, and the manager's address is CREATE-derived from
-        //     that nonce; inserting this anywhere earlier would MOVE the manager address that the
-        //     close/withdrawal fixtures bake into their proofs as the payout recipient. Placing it
-        //     here — after every CREATE in the script — moves no address at all.
-        //
-        // No fail-closed check is weakened: the revert stays; we supply the VK it was demanding.
-        {
-            string memory msuJson = _read("member_set_update_mle.json");
-            FixtureLib.DeployData memory mdd = FixtureLib.parseDeployData(msuJson);
-            MleVerifier.MleProof memory mproof = FixtureLib.parseProof(msuJson);
-            bytes32 msuGatesDigest = verifier.computeGatesDigest(
-                mproof.gates,
-                mproof.witnessIndividualEvalsAtRGateV2.length,
-                mproof.numSelectors,
-                mproof.numGateConstraints,
-                mproof.quotientDegreeFactor
-            );
-            sv.initializeMemberSetUpdateVk(
-                ChannelSettlementVerifier.CloseVk({
-                    degreeBits: mdd.degreeBits,
-                    preprocessedRoot: mdd.preCommitRoot,
-                    numConstants: mdd.numConstants,
-                    numRoutedWires: mdd.numRoutedWires,
-                    gatesDigest: msuGatesDigest
-                })
-            );
-        }
+        // The current IMMS proof authenticates a transition approved by the old signers, but does
+        // not anchor that transition to the canonical finalized validity-tree action. Enabling the
+        // verifier would therefore permit `ChannelSettlementManager` and the Rollup/validity layer
+        // to advance independently. The Manager entry point is also an unconditional
+        // `MemberSetUpdateDisabled` revert, so manually keying this parked verifier cannot revive a
+        // one-layer mutation path. The checked-in circuit/VK fixture remains available for future
+        // cross-layer protocol work; production deploy does not read or initialize it.
 
         vm.stopBroadcast();
 
@@ -368,32 +360,10 @@ contract DeployCloseCli is Script {
             "settlement manager not registered: partial withdrawal cannot finalize"
         );
 
-        // Same read-back discipline for the msu VK (M-3): a deploy that reaches the console2 lines
-        // below has a working key-rotation path, and one that does not aborts loudly.
-        require(
-            sv.memberSetUpdateVkInitialized(),
-            "member-set-update VK not set: applyMemberSetUpdate would revert forever"
-        );
-
-        // M-11 (deploy-time half of the rail-agreement check). `_verifyMsuMle` verifies the msu
-        // proof under the CLOSE statement's whirParams / kIs / protocolId / sessionId, carrying
-        // only the msu VK's own degreeBits / preprocessedRoot / gatesDigest. That reuse is sound
-        // ONLY while the two circuits really do wrap to the same shape, and the VERIFIER performs
-        // no such check at runtime. Assert it here, off the deployed storage, so a fixture
-        // regeneration that changes the wrapper shape for one circuit and not the other aborts the
-        // DEPLOY instead of surfacing as an unverifiable rotation proof much later.
-        //
-        // SCOPE — this is a deploy-time and test-time check only. There is still NO on-chain
-        // agreement check inside `ChannelSettlementVerifier`; a manually-keyed verifier (or any
-        // deployment not made by this script) can still install a msu VK whose rail disagrees.
-        // A mismatch is fail-closed (verification fails; no foreign proof is accepted), so this is
-        // a liveness fence, not a soundness one.
-        {
-            (uint256 msuDegreeBits,,,, bytes32 msuGates) = sv.memberSetUpdateVk();
-            (uint256 closeDegreeBits,,,, bytes32 closeGates) = sv.closeVk();
-            require(msuDegreeBits == closeDegreeBits, "msu/close wrapper degreeBits disagree");
-            require(msuGates == closeGates, "msu/close wrapper gatesDigest disagree");
-        }
+        // Release invariant: this script must not silently turn the parked MSU verifier back into a
+        // production feature. Keeping the negative read-back here makes an accidental initializer
+        // fail during script simulation, before any broadcast is accepted by the operator.
+        require(!sv.memberSetUpdateVkInitialized(), "member-set-update VK must remain unset in release");
 
         console2.log("=== close-lifecycle CLI deploy ===");
         console2.log("IntmaxRollup:", address(rollup));

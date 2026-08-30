@@ -8,6 +8,8 @@ import {SumcheckVerifier} from "@mle/SumcheckVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title Full real on-chain path: deploy → postBlockAndSubmit → finalize with
 ///        REAL MLE verification (mleVk.degreeBits > 0).
@@ -79,8 +81,11 @@ contract MleFinalizeE2ETest is Test {
             dd.subgroupGenPowers,
             verifier,
             genesisStateRoot,
-            true // A-2: test opt-in for the degreeBits==0 bypass (this test uses a real VK anyway)
+            false // production-shaped: the degreeBits==0 test bypass is unavailable
         );
+        // This suite isolates the real MLE boundary. Production Proof-DA is covered by the
+        // BlobKzgPairing and ProofDaRollup suites.
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
 
         // Sanity: MLE verification really is ON.
@@ -96,6 +101,24 @@ contract MleFinalizeE2ETest is Test {
     ///      Returns the submissionId, the final state root, the parsed VPIs and the final block
     ///      number so both the positive and the negative finalize tests reuse one posting path.
     function _postBlockForFinalize()
+        internal
+        returns (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+            uint64 finalBlockNumber
+        )
+    {
+        string memory blockJson = _loadBlock();
+
+        return _postBlock(
+            vm.parseJsonBytes32(blockJson, ".proof_hash"),
+            uint32(vm.parseJsonUint(blockJson, ".proof_length")),
+            keccak256("smoke_blob")
+        );
+    }
+
+    function _postBlock(bytes32 proofHash, uint32 proofLength, bytes32 blobHash)
         internal
         returns (
             uint256 submissionId,
@@ -122,21 +145,20 @@ contract MleFinalizeE2ETest is Test {
         }
 
         finalStateRoot = vm.parseJsonBytes32(blockJson, ".final_state_root");
-        bytes32 proofHash = vm.parseJsonBytes32(blockJson, ".proof_hash");
-        uint32 proofLength = uint32(vm.parseJsonUint(blockJson, ".proof_length"));
         finalBlockNumber = uint64(vm.parseJsonUint(blockJson, ".final_block_number"));
         bytes32 expectedFinalBlockChain = vm.parseJsonBytes32(blockJson, ".final_block_chain");
 
         // postBlockAndSubmit reads blobhash(0); mock a non-zero blob (env setup).
         bytes32[] memory blobs = new bytes32[](1);
-        blobs[0] = keccak256("smoke_blob");
+        blobs[0] = blobHash;
         vm.blobhashes(blobs);
 
         vm.deal(poster, 1 ether);
         submissionId = rollup.nextSubmissionId();
+        bytes32 pin = rollup.pendingChainsPin();
         vm.prank(poster);
         rollup.postBlockAndSubmit{value: 1 ether}(
-            subBlocks, proofHash, proofLength, finalStateRoot
+            subBlocks, proofHash, proofLength, finalStateRoot, pin
         );
 
         // The on-chain recomputed block hash MUST equal the Rust-proved final block chain.
@@ -201,6 +223,108 @@ contract MleFinalizeE2ETest is Test {
             rollup.latestFinalizedStateRoot() != finalStateRoot,
             "tampered proof MUST NOT advance latestFinalizedStateRoot to the posted root"
         );
+    }
+
+    /// @notice A single committed proof mutation reaches the production verifier's authenticated
+    ///         negative verdict and therefore the rollup's conviction path. This is the missing
+    ///         real-verifier bridge that return-false stubs could not establish.
+    function test_fraudProof_realVerifier_singleEvalMutationConvicts() public {
+        MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
+        require(mleProof.witnessIndividualEvals.length != 0, "fixture has no witness evals");
+        mleProof.witnessIndividualEvals[0] ^= 1;
+        bytes memory proofBytes = abi.encode(mleProof);
+        bytes32 blobHash = keccak256("mutated_real_mle_blob");
+
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlock(keccak256(proofBytes), uint32(proofBytes.length), blobHash);
+
+        vm.prank(makeAddr("fraudProver"));
+        assertTrue(
+            rollup.fraudProof(submissionId, finalStateRoot, vpis, proofBytes),
+            "one proof-field mutation must reach conviction"
+        );
+        assertEq(rollup.nextSubmissionId(), 0, "convicted submission must be removed");
+    }
+
+    function test_fraudProof_invalidProofCannotHideBehindPiMismatch() public {
+        MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
+        require(mleProof.publicInputs.length == 8, "fixture PI width");
+        // These limbs are transcript-bound. Mutating one makes the authenticated proof invalid and
+        // also makes it disagree with the caller's valid PI preimage. Verification must run first:
+        // the mismatch cannot mask the proof-dependent InvalidMleProof verdict.
+        mleProof.publicInputs[0] ^= 1;
+        bytes memory proofBytes = abi.encode(mleProof);
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlock(keccak256(proofBytes), uint32(proofBytes.length), keccak256("invalid_pi_blob"));
+
+        vm.prank(makeAddr("fraudProver"));
+        assertTrue(
+            rollup.fraudProof(submissionId, finalStateRoot, vpis, proofBytes),
+            "an invalid proof remains slashable even when its embedded PI limbs have no supplied preimage"
+        );
+    }
+
+    function test_fraudProof_realVerifier_validCanonicalRawDoesNotConvict() public {
+        MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
+        bytes memory proofBytes = abi.encode(mleProof);
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlock(keccak256(proofBytes), uint32(proofBytes.length), keccak256("valid_raw"));
+
+        vm.prank(makeAddr("fraudProver"));
+        assertFalse(
+            rollup.fraudProof(submissionId, finalStateRoot, vpis, proofBytes),
+            "a valid canonical raw proof must not be convicted"
+        );
+        assertTrue(rollup.getCommitment(submissionId) != bytes32(0), "submission must survive");
+    }
+
+    function test_fraudProof_realVerifier_undecodableAuthenticatedRawConvicts() public {
+        bytes memory proofBytes = hex"deadbeef";
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlock(keccak256(proofBytes), uint32(proofBytes.length), keccak256("bad_abi_raw"));
+
+        vm.prank(makeAddr("fraudProver"));
+        assertTrue(
+            rollup.fraudProof(submissionId, finalStateRoot, vpis, proofBytes),
+            "authenticated bytes that cannot decode as MleProof must be convictable"
+        );
+        assertEq(rollup.nextSubmissionId(), 0, "malformed submission must be removed");
+    }
+
+    function test_fraudProof_realVerifier_noncanonicalAbiRawConvicts() public {
+        MleVerifier.MleProof memory mleProof = _parseProof(_loadMle());
+        bytes memory proofBytes = bytes.concat(abi.encode(mleProof), bytes32(0));
+        (
+            uint256 submissionId,
+            bytes32 finalStateRoot,
+            IntmaxRollup.ValidityPublicInputs memory vpis,
+
+        ) = _postBlock(
+            keccak256(proofBytes), uint32(proofBytes.length), keccak256("noncanonical_abi_raw")
+        );
+
+        vm.prank(makeAddr("fraudProver"));
+        assertTrue(
+            rollup.fraudProof(submissionId, finalStateRoot, vpis, proofBytes),
+            "authenticated non-canonical ABI must be convictable"
+        );
+        assertEq(rollup.nextSubmissionId(), 0, "non-canonical submission must be removed");
     }
 
     // ═══════════════════════════════════════════════════════════════════

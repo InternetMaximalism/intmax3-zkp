@@ -834,11 +834,11 @@ pub mod test_fixture {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         let member = ChannelMember {
             pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
             member_slot: 0,
@@ -994,11 +994,11 @@ pub mod test_fixture {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         let member = ChannelMember {
             pk_g: Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap(),
             member_slot: 0,

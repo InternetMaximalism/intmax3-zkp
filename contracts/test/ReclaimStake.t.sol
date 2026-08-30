@@ -3,9 +3,10 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
-import {KZGProof} from "../src/BlobKZGVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title `reclaimStake` — recover a POST_BLOCK_STAKE bond once its submission is finalized history.
 /// @notice Fixes the stranded-stake fund loss: one aggregate validity proof finalizes many posted
@@ -45,6 +46,7 @@ contract ReclaimStakeTest is Test {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
     }
 
@@ -134,10 +136,8 @@ contract ReclaimStakeTest is Test {
         vm.roll(block.number + 3601);
         address reporter = makeAddr("reporter");
         IntmaxRollup.ValidityPublicInputs memory emptyPis;
-        MleVerifier.MleProof memory emptyProof;
-        KZGProof memory emptyKzg;
         vm.prank(reporter);
-        assertTrue(rollup.fraudProof(0, bytes32(0), bytes32(0), "", emptyPis, emptyProof, emptyKzg), "timeout removal");
+        assertTrue(rollup.fraudProof(0, bytes32(0), emptyPis, ""), "timeout removal");
 
         // Bond was slashed to the reporter, stakeInfo cleared → reclaim must revert (no double pay).
         (address afterAddr,) = rollup.stakeInfo(0);
@@ -181,10 +181,8 @@ contract ReclaimStakeTest is Test {
         vm.roll(block.number + 3601);
         address reporter = makeAddr("reporter");
         IntmaxRollup.ValidityPublicInputs memory emptyPis;
-        MleVerifier.MleProof memory emptyProof;
-        KZGProof memory emptyKzg;
         vm.prank(reporter);
-        rollup.fraudProof(0, bytes32(0), bytes32(0), "", emptyPis, emptyProof, emptyKzg);
+        rollup.fraudProof(0, bytes32(0), emptyPis, "");
         assertEq(rollup.nextSubmissionId(), 0, "id rewound for reuse");
         assertEq(rollup.blockNumber(), 0, "blockNumber rewound (still >= latestFinalized=0)");
 
@@ -276,8 +274,9 @@ contract ReclaimStakeTest is Test {
             keyIds: keyIds
         });
         subId = rollup.nextSubmissionId();
+        bytes32 pin = rollup.pendingChainsPin();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: STAKE}(sb, bytes32(0), 0, stateRoot);
+        rollup.postBlockAndSubmit{value: STAKE}(sb, bytes32(0), 0, stateRoot, pin);
     }
 
     function _parseVpis() internal view returns (IntmaxRollup.ValidityPublicInputs memory vpis) {

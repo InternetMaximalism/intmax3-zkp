@@ -4,10 +4,12 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title M-8 — `finalize()` must not fail silently.
 ///
@@ -72,6 +74,7 @@ contract RollupFinalizeDiagnosticsTest is Test {
             bytes32(0),
             true // A-2 test opt-in; irrelevant once degreeBits > 0
         );
+        r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(poster, true);
     }
 
@@ -134,9 +137,10 @@ contract RollupFinalizeDiagnosticsTest is Test {
         vm.blobhashes(hashes);
 
         id = r.nextSubmissionId();
+        bytes32 pin = r.pendingChainsPin();
         vm.prank(poster);
         r.postBlockAndSubmit{value: 1 ether}(
-            batch, keccak256(abi.encodePacked("proof", channelId)), 1024, stateRoot
+            batch, keccak256(abi.encodePacked("proof", channelId)), 1024, stateRoot, pin
         );
     }
 

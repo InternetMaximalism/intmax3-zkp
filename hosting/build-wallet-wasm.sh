@@ -19,9 +19,9 @@ echo "[1/3] cargo rustc (cdylib, build-std, release)…"
 CARGO_UNSTABLE_BUILD_STD=std,panic_abort \
   cargo rustc --release --lib --target "$TARGET" \
   -Z build-std=std,panic_abort \
-  --features regev-parallel \
+  --features wasm-threads \
   --crate-type cdylib
-  # `regev-parallel` enables rayon-parallel Regev STARK proving. On wasm it runs on the
+  # `wasm-threads` enables rayon-parallel Plonky2, WHIR, and Regev proving. On wasm it runs on the
   # wasm-bindgen-rayon global pool (the worker calls initThreadPool first); regev's pool.rs
   # build_global() is then a harmless no-op. Multithreaded proving = the requested speedup.
 

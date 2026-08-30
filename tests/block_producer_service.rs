@@ -5,8 +5,13 @@ use std::{
 };
 
 use intmax3_zkp::{
-    block_producer::{ProductionBlockProducerError, ProductionDepositRequest},
-    block_producer_service::{BlockProducerService, BlockProducerServiceError},
+    block_producer::{
+        ProductionBlockProducer, ProductionBlockProducerError, ProductionDepositRequest,
+    },
+    circuits::witness::block_witness_generator::BlockTxV2Witness,
+    block_producer_service::{
+        BlockProducerCommand, BlockProducerService, BlockProducerServiceError,
+    },
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash},
         channel::{
@@ -17,6 +22,7 @@ use intmax3_zkp::{
         channel_id::ChannelId,
         deposit::Deposit,
         u63::{BlockNumber, U63},
+        tx::TxV2,
     },
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
@@ -24,9 +30,12 @@ use intmax3_zkp::{
     regev::RegevCiphertext,
     wallet_core::{
         ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
-        MemberKeys, assemble_genesis_state, build_record, cosign_member_set_update,
-        default_settled_tx_accumulator, inter_channel_base_transfer, inter_channel_tx_v2,
-        member_set_update_block_root, propose_rotate_key, sign_state, verify_member_set_update,
+        MemberKeys, assemble_genesis_state, build_record,
+        canonical_member_set_update_action_index, canonical_member_set_update_block,
+        cosign_member_set_update, default_settled_tx_accumulator, inter_channel_base_transfer,
+        inter_channel_tx_v2, member_set_update_block_root, propose_rotate_key,
+        registered_cosigner_leaves, registered_cosigner_root_hash, sign_state,
+        verify_member_set_update,
     },
 };
 use rand010::SeedableRng as _;
@@ -532,12 +541,11 @@ fn a_second_daemon_cannot_share_the_journal() {
 }
 
 
-/// detail2 §Q-3 end to end at the SERVICE layer: a rotate update — proposed, self-consented,
-/// N-of-N-signed at the wallet layer, its block root signed into the state's h2_tag — is admitted
-/// as a durable MemberSetUpdate block, and the producer's registry ADVANCES: afterwards the OLD
-/// set's signatures no longer authorize this channel's blocks, the NEW set's do.
+/// Release gate: even a structurally valid, fully N-of-N-authorized update must not advance the
+/// validity-side registry while the settlement manager's member set is immutable. The direct
+/// producer API, typed service API, command dispatcher and legacy journal replay all fail closed.
 #[test]
-fn member_set_update_rotates_the_registry_and_retires_the_old_key() {
+fn member_set_update_is_disabled_across_all_production_paths() {
     let directory = TestDirectory::new("member-set-update");
     let journal = directory.journal();
     let (keys, snapshot) = signed_snapshot(21);
@@ -589,94 +597,162 @@ fn member_set_update_rotates_the_registry_and_retires_the_old_key() {
         .map(|(slot, k)| sign_state(k, slot as u8, &state).expect("old set signs the update"))
         .collect();
 
-    let receipt = service
+    let before_service = service.status().expect("status before refused update");
+    let refused = service
         .post_member_set_update(
             "msu-21-0".to_string(),
             state.clone(),
             snapshot.members.clone(),
             new_record.clone(),
             new_members.clone(),
-        )
-        .expect("the member-set update block is admitted");
-
-    // Idempotency: replaying the same request returns the SAME receipt, no second block.
-    let replay = service
-        .post_member_set_update(
-            "msu-21-0".to_string(),
-            state.clone(),
-            snapshot.members.clone(),
-            new_record.clone(),
-            new_members.clone(),
-        )
-        .expect("idempotent replay");
+        );
+    assert!(matches!(
+        refused,
+        Err(BlockProducerServiceError::InvalidRequest(ref reason))
+            if reason.contains("disabled in this release")
+    ));
     assert_eq!(
-        serde_json::to_string(&receipt).unwrap(),
-        serde_json::to_string(&replay).unwrap()
+        service.status().expect("status after refused update"),
+        before_service,
+        "typed service rejection must not mutate the journal or producer head"
     );
 
-    // The registry ADVANCED: a second rotation authorized by the OLD set (stale record) is
-    // refused — its N-of-N no longer matches the registered cluster.
-    let stale_keys2 = MemberKeys::generate(&mut rng);
-    let mut stale_update = propose_rotate_key(
-        &keys[0],
-        &stale_keys2,
-        &snapshot.record,
-        &snapshot.members,
-        0,
-    )
-    .expect("propose against the stale record");
-    stale_update.member_signatures = keys
-        .iter()
-        .enumerate()
-        .map(|(slot, k)| cosign_member_set_update(k, slot as u8, &stale_update))
-        .collect();
-    let stale_root = member_set_update_block_root(
-        &snapshot.record,
+    let command_refused = service.execute(BlockProducerCommand::PostMemberSetUpdate {
+        request_id: "msu-21-command".to_string(),
+        signed_state: state.clone(),
+        old_members: snapshot.members.clone(),
+        new_record: new_record.clone(),
+        new_members: new_members.clone(),
+    });
+    assert!(matches!(
+        command_refused,
+        Err(BlockProducerServiceError::InvalidRequest(ref reason))
+            if reason.contains("disabled in this release")
+    ));
+    assert_eq!(service.status().unwrap(), before_service);
+
+    let mut producer = ProductionBlockProducer::new(&[2]);
+    producer
+        .register_snapshot(&snapshot, 1)
+        .expect("direct producer registration");
+    let direct_before = (
+        producer.block_number(),
+        producer.last_timestamp(),
+        producer.current_extended_public_state().commitment(),
+        producer.channel_heads(),
+    );
+    let direct_refused = producer.produce_member_set_update_block(
+        &state,
         &snapshot.members,
         &new_record,
         &new_members,
-    )
-    .expect("root");
-    let mut stale_state = state.clone();
-    stale_state.epoch += 1;
-    stale_state.small_block_number += 1;
-    stale_state.balance_state.state_version += 1;
-    stale_state.h2_tag = stale_root;
-    stale_state.prev_digest = state.digest;
-    stale_state.member_signatures.clear();
-    stale_state = stale_state.with_computed_digest();
-    stale_state.member_signatures = keys
-        .iter()
-        .enumerate()
-        .map(|(slot, k)| sign_state(k, slot as u8, &stale_state).expect("stale signs"))
-        .collect();
-    let refused = service.post_member_set_update(
-        "msu-21-stale".to_string(),
-        stale_state,
-        snapshot.members.clone(),
-        new_record.clone(),
-        new_members.clone(),
+        2,
     );
-    assert!(
-        refused.is_err(),
-        "after the rotation the OLD slot-1 key's signature must no longer authorize a block \
-         (ChannelSafetyQ.rotate_sets_new_key made effective in the producer registry)"
+    assert!(matches!(
+        direct_refused,
+        Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+    ));
+    assert_eq!(
+        (
+            producer.block_number(),
+            producer.last_timestamp(),
+            producer.current_extended_public_state().commitment(),
+            producer.channel_heads(),
+        ),
+        direct_before,
+        "direct producer rejection must leave every public head unchanged"
     );
 
-    // Durability: reopening the journal replays the update and lands on the SAME advanced state.
-    drop(service);
-    let mut reopened = BlockProducerService::open(&journal, &[2]).expect("reopen");
-    let replayed = reopened
-        .post_member_set_update(
-            "msu-21-0".to_string(),
-            state,
-            snapshot.members.clone(),
-            new_record,
-            new_members,
-        )
-        .expect("recovered journal still answers idempotently");
+    // Attack the generic lower-level facade directly. Before the release gate was duplicated at
+    // this boundary, a caller could skip `produce_member_set_update_block`, embed the canonical
+    // MSU action/new leaves in a caller-built BlockTxV2Witness, and advance the validity member
+    // root despite every named MSU entry point returning Disabled.
+    let prev_root = registered_cosigner_root_hash(&snapshot.record, &snapshot.members)
+        .expect("old registered root");
+    let next_root = registered_cosigner_root_hash(&new_record, &new_members)
+        .expect("new registered root");
+    let (action, action_tree, tx_v2, tx_v2_tree, smuggled_root) =
+        canonical_member_set_update_block(snapshot.record.channel_id, prev_root, next_root);
     assert_eq!(
-        serde_json::to_string(&receipt).unwrap(),
-        serde_json::to_string(&replayed).unwrap()
+        smuggled_root, root,
+        "attack witness must be the signed MSU block"
     );
+    let tx_v2_proof = tx_v2_tree.prove(snapshot.record.channel_id.as_u64());
+    let action_index = canonical_member_set_update_action_index();
+    let action_proof = action_tree.prove(action_index);
+    let new_leaves =
+        registered_cosigner_leaves(&new_record, &new_members).expect("new registered leaves");
+    let smuggled_witness = BlockTxV2Witness {
+        tx_v2_indices: vec![snapshot.record.channel_id.as_u64(), 0],
+        tx_v2s: vec![tx_v2, TxV2::default()],
+        tx_v2_merkle_proofs: vec![tx_v2_proof; 2],
+        new_member_leaves: Some(new_leaves),
+        channel_action_indices: Some(vec![action_index; 2]),
+        channel_actions: Some(vec![action; 2]),
+        channel_action_merkle_proofs: Some(vec![action_proof; 2]),
+    };
+    let mut action_only = smuggled_witness.clone();
+    action_only.new_member_leaves = None;
+    let mut leaves_only = smuggled_witness.clone();
+    leaves_only.channel_actions = None;
+    for attack_witness in [smuggled_witness, action_only, leaves_only] {
+        let smuggled_refused = producer.produce_cosigned_block(
+            &state,
+            &[1],
+            2,
+            smuggled_root,
+            attack_witness,
+        );
+        assert!(matches!(
+            smuggled_refused,
+            Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+        ));
+    }
+    assert_eq!(
+        (
+            producer.block_number(),
+            producer.last_timestamp(),
+            producer.current_extended_public_state().commitment(),
+            producer.channel_heads(),
+        ),
+        direct_before,
+        "generic facade rejection must leave every public head unchanged"
+    );
+
+    // Simulate an authenticated journal written by an older release. Startup must identify the
+    // disabled action before replaying it; it must never silently advance the validity registry.
+    drop(service);
+    let mut disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journal).expect("read journal")).expect("parse journal");
+    let first_entry = disk["entries"][0].clone();
+    let legacy_entry = serde_json::json!({
+        "generation": 2,
+        "requestId": "legacy-msu-21",
+        "requestFingerprint": Bytes32::default(),
+        "prevEntryHash": Bytes32::default(),
+        "action": {
+            "kind": "postMemberSetUpdate",
+            "signed_state": state,
+            "old_members": snapshot.members,
+            "new_record": new_record,
+            "new_members": new_members,
+            "timestamp": 2
+        },
+        "result": first_entry["result"].clone(),
+        "entryHash": Bytes32::default()
+    });
+    disk["generation"] = serde_json::json!(2);
+    disk["entries"]
+        .as_array_mut()
+        .expect("journal entries")
+        .push(legacy_entry);
+    fs::write(&journal, serde_json::to_vec_pretty(&disk).unwrap()).expect("write legacy journal");
+
+    match BlockProducerService::open(&journal, &[2]) {
+        Err(BlockProducerServiceError::Journal(reason)) => {
+            assert!(reason.contains("disabled legacy member-set update"), "{reason}");
+        }
+        Err(other) => panic!("unexpected legacy replay error: {other}"),
+        Ok(_) => panic!("legacy member-set update journal must fail closed at startup"),
+    }
 }

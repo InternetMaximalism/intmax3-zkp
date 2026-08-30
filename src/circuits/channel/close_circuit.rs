@@ -7,7 +7,7 @@
 //! 1. the recomputed `BalanceState.h1()` (IMBS keccak) — anchoring `final_settled_tx_chain` and
 //!    `final_state_version` as the UNIQUE values inside the signed H1 preimage;
 //! 2. the recomputed `ChannelState::signing_digest()` (IMCH keccak, h1 in the balance-root slot,
-//!    h2_tag + state_version appended) and the IMCL / IMCI digests derived from it;
+//!    h2_tag + state_version appended), the IMCL metadata digest, and canonical IMCS closeStateId;
 //! 3. a recursively verified final BALANCE proof whose `settled_tx_chain` and `channel_id` public
 //!    inputs equal the close PIs (detail2 §H-2 chain binding);
 //! 4. the N active members' Falcon-512/Poseidon signatures over the recomputed
@@ -74,7 +74,7 @@ use crate::{
 
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348;
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c;
-const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349;
+const CLOSE_STATE_ID_DOMAIN: u32 = 0x494d4353; // "IMCS"
 /// "IMCM" — domain separator for the F5 member-set commitment. MUST equal
 /// `common::channel::CLOSE_MEMBER_SET_DOMAIN` so the in-circuit keccak agrees with the native
 /// `close_member_set_commitment` helper byte-for-byte.
@@ -121,14 +121,14 @@ pub struct ChannelClosePublicInputsTarget {
     /// token_count, amounts(80)])` commitment to the per-token fund vector. Appended at the very
     /// END of the close PI vector (limbs 95..103). Recomputed IN-CIRCUIT from the witnessed
     /// registry/count/amounts — the SAME wires that feed the signed H1 header (registry + count,
-    /// TM-9) and the IMCH/IMCI digests (amounts), so the exposed digest cannot diverge from the
+    /// TM-9) and the IMCH/TFD commitments (amounts), so the exposed digest cannot diverge from the
     /// member-signed state.
     pub token_funds_digest: Bytes32Target,
 }
 
 impl ChannelClosePublicInputsTarget {
     /// Allocates the PI targets. Every limb is range-checked to 32 bits: the limbs feed the
-    /// IMBS/IMCH/IMCL/IMCI keccak preimages and the keccak gadget does NOT range-check its
+    /// IMBS/IMCH/IMCL/IMCS keccak preimages and the keccak gadget does NOT range-check its
     /// inputs (see `plonky2_keccak::builder` NOTICE), so the checks here are load-bearing for
     /// the digest constraints below.
     pub fn new<F: RichField + Extendable<D>, const D: usize>(
@@ -412,8 +412,8 @@ where
     /// bound inside the signed H1 header and re-hashed into the TFD keccak.
     token_registry: [Target; MAX_CHANNEL_TOKENS],
     /// Multi-token (§N-6): the FULL per-token fund vector `channel_fund.amounts` (10 U256
-    /// targets). Witnessed; hashed into the IMCH + IMCI digests (widened v2 preimages) and the
-    /// TFD keccak; `amounts[0]` is connected to the `channel_fund_amount` PI (the genesis-token
+    /// targets). Witnessed; hashed into the IMCH digest and TFD commitment; `amounts[0]` is
+    /// connected to the `channel_fund_amount` PI (the genesis-token
     /// burn denomination).
     channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
     /// Per-token-slot activeness flags `token_active_bits[t] = (t < token_count)` (length
@@ -482,7 +482,7 @@ where
         let slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
         // Multi-token witnesses (§N): the signed token_count + full zero-padded registry (both
         // ride in the H1 header, TM-9) and the full per-token fund vector (hashed into
-        // IMCH/IMCI/TFD, TM-11). Every limb is 32-bit range-checked — they feed keccak preimages
+        // IMCH/TFD, TM-11). Every limb is 32-bit range-checked — they feed keccak preimages
         // and the keccak gadget does NOT range-check its inputs.
         let u32_limb = |builder: &mut CircuitBuilder<F, D>| {
             let t = builder.add_virtual_target();
@@ -593,7 +593,7 @@ where
         // The `channel_fund_amount` PI is the GENESIS-token fund (`amounts[0]`, the L2 close-burn
         // denomination — `CloseIntent::new` binds burn_amount == amounts[0] natively). Connecting
         // it here makes the PI and the witnessed vector one wire, so the IMCL burn segment, the
-        // IMCH/IMCI amount vectors and the TFD all agree on token 0.
+        // IMCH amount vector and the TFD agree on token 0.
         channel_fund_amounts[0].connect(&mut builder, public_inputs.channel_fund_amount);
 
         let one = U64Target::constant(&mut builder, U64::from(1u64));
@@ -601,19 +601,33 @@ where
         incremented_close_freeze_nonce.connect(&mut builder, public_inputs.close_freeze_nonce);
 
         let zero = builder.zero();
+        // M-9: every close-metadata field that is not independently authenticated by the signed
+        // state has one canonical representation. `close_nonce` is the same checked successor as
+        // `close_freeze_nonce`; the close circuit proves no medium-block snapshot or live L2 burn,
+        // so both fields are explicit zero sentinels. This prevents a holder of one IMCH signature
+        // set from manufacturing arbitrary proof-valid metadata while preserving unilateral close.
+        public_inputs
+            .close_nonce
+            .connect(&mut builder, public_inputs.close_freeze_nonce);
+        for limb in public_inputs.snapshot_medium_block_number.to_vec() {
+            builder.connect(limb, zero);
+        }
+        for limb in public_inputs.burn_tx_hash.to_vec() {
+            builder.connect(limb, zero);
+        }
         for limb in final_state_unallocated_confirmed_incoming.to_vec() {
             builder.connect(limb, zero);
         }
 
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
         let close_tx_domain = builder.constant(F::from_canonical_u32(CLOSE_TX_DOMAIN));
-        let close_intent_domain = builder.constant(F::from_canonical_u32(CLOSE_INTENT_DOMAIN));
+        let close_state_id_domain = builder.constant(F::from_canonical_u32(CLOSE_STATE_ID_DOMAIN));
 
         // ── (b) H1 in-circuit recompute (Poseidon-root form; SHARED `h1_gadget`) ──────────
         //
         // SECURITY: this anchors `final_settled_tx_chain`, `final_settled_tx_accumulator_root`,
         // `final_state_version`, `member_count` AND `delegate_count` as the unique values inside
-        // the signed H1 — the same PI targets feed the O(1) H1 header, the IMCH/IMCI tails AND
+        // the signed H1 — the same PI targets feed the O(1) H1 header and the IMCH tail, and
         // the balance-proof equality below, so no two of those bindings can diverge. The
         // per-slot data is committed by the witnessed `slot_tree_root` (inside the signed H1;
         // the close statement never opens individual slots) — see
@@ -677,59 +691,25 @@ where
             Bytes32Target::from_slice(&builder.keccak256::<C>(&close_withdrawal_inputs));
         close_withdrawal_digest.connect(&mut builder, public_inputs.close_withdrawal_digest);
 
-        // ── (d) IMCI recompute (`CloseIntent::signing_digest()`) ────────────
+        // ── (d) canonical IMCS close-state identity ─────────────────────────
         //
-        // The v2 tail appends `final_state_version` + `final_settled_tx_chain` (detail2 §C-8) —
-        // the SAME PI targets that were hashed into H1 above, so the IMCI values are
-        // constrained equal to the H1-anchored ones by construction. Byte-identical to the Rust
-        // IMCI preimage (and hence to Solidity `computeCloseIntentDigest`, shared test vector in
-        // `common::channel::tests`).
-        //
-        // SECURITY (M-9 — three inputs of this preimage are UNCONSTRAINED free witnesses;
-        // audit28-08-2026 §M-9, `doc/tasks/close-detached-signing-design.md` T-5). Every other
-        // limb below is either a wire of the recomputed IMCH `state_digest` / H1 (hence covered by
-        // the verified N-of-N Falcon aggregate in block (f)) or is derived from one. These three
-        // are NOT:
-        //   * `close_nonce`                  — never connected to anything. `close_freeze_nonce`
-        //                                      is the era fence and IS pinned above to
-        //                                      `final_state.close_freeze_nonce + 1`, but
-        //                                      `close_nonce` is an independent PI.
-        //   * `burn_tx_hash`                 — also feeds the IMCL preimage above, so the
-        //                                      `close_withdrawal_digest` limbs inherit its
-        //                                      freedom. The circuit proves NO L2 burn; the hash is
-        //                                      carried, not verified.
-        //   * `snapshot_medium_block_number` — never connected to anything.
-        // Consequence: `close_intent_digest` is NOT a function of the member-signed state — one
-        // signature set over one `ChannelState` satisfies this circuit for arbitrary values of all
-        // three, i.e. for unboundedly many distinct `close_intent_digest`s. Closing this needs a
-        // member-signed message that COVERS them (design-doc Option C: members sign IMCI, which
-        // costs unilateral close / T-4) or an L1 pin; neither is a circuit-local change and both
-        // change the close VK. Until then treat `close_intent_digest` as an INDEX, never as an
-        // authorization — see the caller obligation on `CloseIntent::signing_digest`.
-        let close_intent_inputs = [
-            vec![close_intent_domain],
+        // `keccak([IMCS, channel_id, final_channel_state_digest, close_freeze_nonce])`.
+        // `state_digest` is the IMCH digest recomputed above and authenticated by the existing
+        // N-of-N Falcon aggregate; `close_freeze_nonce` is constrained to the signed state's nonce
+        // + 1. ABI-retained metadata stays outside this identity, but is no longer free:
+        // `close_nonce == close_freeze_nonce`, burn/snapshot are zero sentinels, and IMCL is
+        // recomputed above from those canonical values. This preserves unilateral close without a
+        // fresh close-signature round while preventing misleading proof-bound variants.
+        let close_state_id_inputs = [
+            vec![close_state_id_domain],
             public_inputs.channel_id.to_vec(),
-            public_inputs.close_nonce.to_vec(),
-            public_inputs.final_epoch.to_vec(),
-            public_inputs.final_small_block_number.to_vec(),
+            state_digest.to_vec(),
             public_inputs.close_freeze_nonce.to_vec(),
-            public_inputs.final_channel_state_digest.to_vec(),
-            public_inputs.final_balance_state_h1.to_vec(),
-            public_inputs.channel_id.to_vec(),
-            // Multi-token (TM-11): the IMCI fund segment is the FULL 80-limb amounts vector,
-            // element-identical to native `CloseIntent::signing_digest`.
-            channel_fund_amounts_flat.clone(),
-            public_inputs.channel_fund_intmax_state_root.to_vec(),
-            public_inputs.burn_tx_hash.to_vec(),
-            public_inputs.close_withdrawal_digest.to_vec(),
-            public_inputs.snapshot_medium_block_number.to_vec(),
-            public_inputs.final_state_version.to_vec(),
-            public_inputs.final_settled_tx_chain.to_vec(),
         ]
         .concat();
-        let close_intent_digest =
-            Bytes32Target::from_slice(&builder.keccak256::<C>(&close_intent_inputs));
-        close_intent_digest.connect(&mut builder, public_inputs.close_intent_digest);
+        let close_state_id =
+            Bytes32Target::from_slice(&builder.keccak256::<C>(&close_state_id_inputs));
+        close_state_id.connect(&mut builder, public_inputs.close_intent_digest);
 
         // ── (d') token_funds_digest recompute (detail2 §N-6, TM-11) ────────
         //
@@ -737,7 +717,7 @@ where
         // amounts (10 x U256 = 80 limbs, zero-padded)])` — the FIXED 92-word preimage,
         // byte-identical to native `common::channel::token_funds_digest`. The registry and
         // token_count wires are the SAME targets hashed into the signed H1 header above (TM-9),
-        // and the amounts wires are the SAME targets hashed into IMCH/IMCI — so the exposed
+        // and the amounts wires are the SAME targets hashed into IMCH — so the exposed
         // per-token commitment cannot diverge from the member-signed state on any coordinate.
         let token_funds_domain = builder.constant(F::from_canonical_u32(TOKEN_FUNDS_DIGEST_DOMAIN));
         let token_funds_inputs = [
@@ -995,7 +975,7 @@ where
         self.slot_tree_root
             .set_witness(&mut witness, state.balance_state.slot_tree_root());
         // Multi-token witnesses: the signed token_count/registry (H1 header) + the full
-        // per-token fund vector (IMCH/IMCI/TFD) + the token-slot activeness flags.
+        // per-token fund vector (IMCH/TFD) + the token-slot activeness flags.
         witness
             .set_target(
                 self.token_count,
@@ -1356,11 +1336,11 @@ pub mod test_fixture {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         ChannelCloseWitness {
             final_channel_state: state,
             close_tx,
@@ -1469,11 +1449,11 @@ pub mod test_fixture {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         let close = ChannelCloseWitness {
             final_channel_state: state,
             close_tx,
@@ -1599,11 +1579,11 @@ mod tests {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         ChannelCloseWitness {
             final_channel_state: state,
             close_tx,
@@ -1873,6 +1853,48 @@ mod tests {
         );
     }
 
+    /// M-9 negative: bypass the native `CloseIntent::new` constructor and feed self-consistent
+    /// public inputs directly to the circuit. None of the legacy coordinator metadata variants is
+    /// provable: nonce must equal the derived freeze nonce, snapshot is zero, and even a nonzero
+    /// burn hash paired with its correctly recomputed IMCL digest is rejected.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn channel_close_circuit_rejects_noncanonical_close_metadata() {
+        let fx = fixture();
+        let witness = full_witness();
+        let mut canonical = witness.close.to_public_inputs().unwrap();
+        canonical.member_set_commitment = member_set_commitment_for_auth(&witness.member_auth);
+
+        let mut bad_nonce = canonical.clone();
+        bad_nonce.close_nonce += 1;
+
+        let mut bad_snapshot = canonical.clone();
+        bad_snapshot.snapshot_medium_block_number = 1;
+
+        let mut bad_burn = canonical.clone();
+        let mut burn_tx = witness.close.close_tx.clone();
+        burn_tx.burn_tx_hash =
+            Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap();
+        bad_burn.burn_tx_hash = burn_tx.burn_tx_hash;
+        bad_burn.close_withdrawal_digest = burn_tx.signing_digest();
+
+        for (label, public_inputs) in [
+            ("close_nonce", bad_nonce),
+            ("snapshot_medium_block_number", bad_snapshot),
+            ("burn_tx_hash with matching IMCL", bad_burn),
+        ] {
+            let pw = fx
+                .close_circuit
+                .fill_witness(&public_inputs, &witness)
+                .unwrap();
+            let result = catch_unwind(AssertUnwindSafe(|| fx.close_circuit.data.prove(pw)));
+            assert!(
+                result.is_err() || result.unwrap().is_err(),
+                "noncanonical {label} must be rejected in-circuit"
+            );
+        }
+    }
+
     /// F5 negative — member-set binding: substituting ANY signing key changes
     /// `member_set_commitment`, so a non-member key set can no longer pass the L1 member-set
     /// match. We assert (a) the value commits exactly the keys that signed, (b) a different key
@@ -2044,7 +2066,7 @@ mod tests {
 
     /// Negative (iii) — H1/version anchoring: claiming a `final_state_version` PI different
     /// from the one inside the signed H1 preimage must fail — the version PI feeds the H1, IMCH
-    /// and IMCI keccaks, so the tampered value breaks the recomputed-digest connections.
+    /// and therefore the IMCH keccak, so the tampered value breaks the recomputed-digest connection.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_rejects_tampered_final_state_version() {

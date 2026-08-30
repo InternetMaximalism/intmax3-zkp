@@ -602,9 +602,6 @@ fn partial_withdrawal_e2e_anvil() {
             &next_state,
             &next_state.member_signatures,
             live_balance_proof,
-            1,
-            desc.tx_hash,
-            next_state.small_block_number,
         )
         .expect("real PW close witness");
     eprintln!(

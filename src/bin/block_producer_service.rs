@@ -56,9 +56,13 @@ struct Args {
     #[arg(long, requires = "validity_snapshot")]
     l1_rollup: Option<String>,
 
-    /// Required canonical L1 depth before a candidate may become finalized locally.
+    /// Required depth only for the explicit chain-31337 unfinalized development escape.
     #[arg(long, default_value_t = 3, requires = "validity_snapshot")]
     l1_confirmations: u64,
+
+    /// Permit `latest` when the local RPC cannot serve `finalized`. Valid only with chain id 31337.
+    #[arg(long, default_value_t = false, requires = "validity_snapshot")]
+    l1_allow_unfinalized_devnet: bool,
 
     /// Directory of per-channel durable live-balance snapshots. When set, the `live*` commands are
     /// available and this process is the SOLE base-state authority for those channels (the
@@ -320,13 +324,15 @@ fn configure_validity(
         })?,
         rollup,
         minimum_confirmations: args.l1_confirmations,
+        allow_unfinalized_devnet: args.l1_allow_unfinalized_devnet,
     };
     l1.validate()?;
-    let service = if snapshot.exists() {
+    let mut service = if snapshot.exists() {
         ValidityProverService::open(snapshot, &args.supported_user_counts, prover, producer)?
     } else {
         ValidityProverService::initialize(snapshot, &args.supported_user_counts, prover, producer)?
     };
+    service.bind_or_revalidate_l1_authority(&l1)?;
     Ok((Some(service), Some(l1)))
 }
 
@@ -553,6 +559,20 @@ fn execute_validity_command(
     validity: &mut ValidityProverService,
     l1: Option<&L1FinalizationRpcConfig>,
 ) -> Result<serde_json::Value, ValidityProverServiceError> {
+    // Every command can expose or derive fund-authoritative state.  Revalidate the current
+    // finalized head, canonical checkpoint and persisted finalization receipt on every command,
+    // rather than trusting the one-time startup check for the lifetime of the daemon.  A new
+    // acknowledgement is the sole exception here: L1 has necessarily advanced beyond the local
+    // finalized state, so its method verifies and adopts that exact receipt atomically.  The
+    // idempotent acknowledgement branch performs this same preflight internally before replay.
+    if validity_command_requires_preflight(&command) {
+        let l1 = l1.ok_or_else(|| {
+            ValidityProverServiceError::InvalidConfiguration(
+                "L1 finalization read-back is not configured".into(),
+            )
+        })?;
+        validity.bind_or_revalidate_l1_authority(l1)?;
+    }
     let value = match command {
         ValidityCommand::ValidityStatus => serde_json::to_value(validity.status()?),
         ValidityCommand::ProveValidity { request_id } => {
@@ -605,6 +625,12 @@ fn execute_validity_command(
         ValidityProverServiceError::Snapshot(format!("serialize validity response: {error}"))
     })?;
     Ok(value)
+}
+
+/// A new acknowledgement must first compare the candidate against the newly advanced L1 state;
+/// all other commands require the local finalized state to match current L1 before execution.
+fn validity_command_requires_preflight(command: &ValidityCommand) -> bool {
+    !matches!(command, ValidityCommand::AcknowledgeValidity { .. })
 }
 
 fn write_error(writer: &mut impl io::Write, code: &str, message: String) {
@@ -687,5 +713,27 @@ mod tests {
             serde_json::from_str::<ServiceCommand>(&forged).is_err(),
             "the JSONL boundary must never deserialize caller-asserted L1 evidence"
         );
+    }
+
+    #[test]
+    fn every_non_ack_validity_command_requires_continuous_l1_preflight() {
+        let candidate_id = Bytes32::default();
+        for command in [
+            ValidityCommand::ValidityStatus,
+            ValidityCommand::ProveValidity {
+                request_id: "prove".into(),
+            },
+            ValidityCommand::ValidityArtifact,
+            ValidityCommand::ValidityFinalizeArtifact,
+        ] {
+            assert!(validity_command_requires_preflight(&command));
+        }
+        assert!(!validity_command_requires_preflight(
+            &ValidityCommand::AcknowledgeValidity {
+                request_id: "ack".into(),
+                candidate_id,
+                transaction_hash: candidate_id,
+            }
+        ));
     }
 }

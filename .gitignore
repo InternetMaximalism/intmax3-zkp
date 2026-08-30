@@ -13,6 +13,7 @@ contracts/cache/
 contracts/out/
 contracts/broadcast/
 contracts/foundry.lock
+proof-da-output/
 
 # =============================================================================
 # Test artifacts (binary fixtures, log noise)
@@ -34,6 +35,7 @@ contracts/lib/polygon-plonky2/
 # =============================================================================
 node_modules/
 pkg/
+pkg-node/
 dist/
 build/
 .npm/
@@ -91,6 +93,7 @@ wallet-e2e-work/
 wallet-live-work/
 wallet-live-work.*/
 cli_state.json
+.cli_state.process.lock
 # Digest-keyed, verified Falcon aggregate proofs generated beside a CLI state's runtime files.
 falcon_aggregate_cache/
 # Persisted by `channel_member close` (CLOSE_INTENT_FULL_FILE) and consumed by

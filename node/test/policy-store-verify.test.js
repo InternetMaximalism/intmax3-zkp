@@ -65,6 +65,32 @@ test('store: cursor advances monotonically', () => {
   } finally { fs.rmSync(f, { force: true }); }
 });
 
+test('store: state and nonce reservation fsync their renamed parent directory', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-store-durable-'));
+  const f = path.join(directory, 'state.json');
+  const originalFsync = fs.fsyncSync;
+  let directoryFsyncs = 0;
+  fs.fsyncSync = function observedFsync(fd) {
+    if (fs.fstatSync(fd).isDirectory()) directoryFsyncs += 1;
+    return originalFsync.call(fs, fd);
+  };
+  try {
+    const store = new Store(f);
+    store.set('mode', 'defensive');
+    assert.equal(store.reserveOutgoingBaseNonce(7, 'send:7'), true);
+    assert.ok(
+      directoryFsyncs >= 3,
+      `expected directory fsync after state and reservation renames, saw ${directoryFsyncs}`,
+    );
+    const reopened = new Store(f);
+    assert.equal(reopened.get('mode'), 'defensive');
+    assert.equal(reopened.get('outgoingBaseNonceReservation').nonce, 7);
+  } finally {
+    fs.fsyncSync = originalFsync;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // ---- delegate verifyCosigned gate ----
 const HEAD = '0x' + '11'.repeat(32);
 const PREV = { digest: HEAD, epoch: 1, stateVersion: 4 };

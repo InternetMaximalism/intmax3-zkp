@@ -3,8 +3,10 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title Cheap on-chain validation of the c2c block-hash chain (no proofs).
 /// @notice De-risks the Sepolia c2c run before spending 5x postBlock stakes: replays the exact
@@ -37,6 +39,7 @@ contract C2CBlockHashTest is Test {
             makeAddr("ft"), vk, dd.whirParams, dd.protocolId, dd.sessionId, dd.kIs, dd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
     }
 
@@ -100,7 +103,8 @@ contract C2CBlockHashTest is Test {
             txTreeRoot: vm.parseJsonBytes32(lc, string.concat(base, ".tx_tree_root")),
             keyIds: keyIds
         });
+        bytes32 pin = rollup.pendingChainsPin();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: 1 ether}(sb, bytes32(0), 0, bytes32(0));
+        rollup.postBlockAndSubmit{value: 1 ether}(sb, bytes32(0), 0, bytes32(0), pin);
     }
 }

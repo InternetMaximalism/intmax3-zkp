@@ -108,6 +108,9 @@ cd contracts && forge install && forge test -vvv
 # Browser wallet (proving runs in your browser via WASM + multi-threading)
 bash hosting/build-wallet-wasm.sh              # build the wasm package (needs cdylib at invocation)
 node hosting/wallet/wallet-relay.js            # https://localhost:8000/wallet-live.html (2 channels)
+
+# Delegate node wallet (CommonJS WASM; sequential because the rayon helper is web-only)
+bash hosting/build-wallet-node-wasm.sh
 ```
 
 The browser wallet does the ZK proving locally; a small relay co‑signs as the other members. Join a
@@ -116,6 +119,23 @@ demo to Sepolia + AWS is documented in [`doc/docs/deploy-runbook.md`](doc/docs/d
 
 > Requires Rust nightly (pinned in `rust-toolchain.toml`) and Foundry. Tests use
 > `#[cfg_attr(debug_assertions, ignore)]` — always pass `--release`.
+
+### L1 finality boundary
+
+Production recovery never treats `latest` as durable fund state. The validity daemon requires the
+RPC `finalized` block tag at startup and binds the local finalized block number and extended-state
+commitment to `IntmaxRollup.latestFinalizedBlockNumber`, `latestFinalizedStateRoot`, and
+`isFinalizedStateRoot` at that exact canonical block. Stored receipt block hashes and checkpoints
+are re-read after restart; missing, orphaned, replaced, or merely mined-but-unfinalized receipts are
+rejected.
+
+For local Anvil only (chain id `31337`), `block-producer-service` may explicitly use
+`--l1-allow-unfinalized-devnet`; the partial-withdrawal CLI uses the equivalent
+`INTMAX_ALLOW_UNFINALIZED_DEVNET=1` escape. Both escapes are rejected on public chain ids. Validity
+Validity snapshots use the finality-bound v2 format. Partial-withdrawal snapshots use v3, which
+also journals the exact `finalizePartialWithdrawal` intent, transaction hashes and canonical
+finalized receipt before payout; older payout snapshots must be regenerated rather than silently
+trusted or migrated.
 
 ---
 

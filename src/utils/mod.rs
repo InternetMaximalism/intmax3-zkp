@@ -15,5 +15,4 @@ pub mod wrapper;
 
 /// MLE-based Plonky2 prover — replaces FRI with multilinear PCS.
 /// Uses plonky2_mle crate for proving and verification.
-#[cfg(not(target_arch = "wasm32"))]
 pub mod mle_prover;

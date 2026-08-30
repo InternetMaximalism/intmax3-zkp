@@ -1401,6 +1401,7 @@ dependencies = [
  "serde",
  "serde-big-array",
  "serde_json",
+ "sha2",
  "starky",
  "subtle",
  "thiserror",

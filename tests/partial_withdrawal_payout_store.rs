@@ -11,9 +11,10 @@ use intmax3_zkp::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
+    l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
     partial_withdrawal_payout::{
-        BroadcastIntent, L1CallKind, L1TransactionReceipt, PartialWithdrawalOnchainState,
-        PartialWithdrawalPayoutError, PartialWithdrawalPayoutStore,
+        BroadcastIntent, FinalizeConfirmation, L1CallKind, L1TransactionReceipt,
+        PartialWithdrawalOnchainState, PartialWithdrawalPayoutError, PartialWithdrawalPayoutStore,
         PartialWithdrawalProofArtifacts, PartialWithdrawalProofMetrics,
         PartialWithdrawalResumeAction, PayoutConfirmation, PreparePartialWithdrawalPayout,
         PullConfirmation, partial_withdrawal_resume_action,
@@ -94,6 +95,7 @@ fn request(token_index: u32, amount: u64, nullifier: u32) -> PreparePartialWithd
     PreparePartialWithdrawalPayout {
         chain_id: 31337,
         rollup: addr(0x42),
+        manager: addr(0x43),
         channel_id,
         signed_head_digest: b32(nullifier + 100),
         burn_base_nonce: nullifier,
@@ -150,13 +152,51 @@ fn receipt(kind: L1CallKind, token: u32) -> L1TransactionReceipt {
         call_kind: kind,
         calldata_hash: b32(0xca11),
         transaction_nonce: 3,
+        finalized_checkpoint: L1FinalizedCheckpoint {
+            chain_id: 31337,
+            block_number: 22,
+            block_hash: b32(0x300 + token),
+            parent_hash: b32(0x2ff + token),
+            source: L1FinalitySource::DevnetLatest,
+        },
+        manager_finalized_auth_digest: None,
     }
+}
+
+fn finalize_receipt(auth_digest: Bytes32, token: u32) -> L1TransactionReceipt {
+    let mut receipt = receipt(L1CallKind::FinalizePartialWithdrawal, token);
+    receipt.tx_hash = b32(0xf000 + token);
+    receipt.to = addr(0x43);
+    receipt.manager_finalized_auth_digest = Some(auth_digest);
+    receipt
+}
+
+fn finalize_candidate(
+    store: &mut PartialWithdrawalPayoutStore,
+    candidate_id: Bytes32,
+) {
+    let auth_digest = store.active().unwrap().unwrap().auth_digest;
+    store
+        .mark_finalize_broadcast(candidate_id, intent())
+        .unwrap();
+    store
+        .confirm_finalize(
+            candidate_id,
+            FinalizeConfirmation {
+                receipt: finalize_receipt(auth_digest, 0),
+                manager_pending_observed: false,
+                authorization_observed: true,
+                nullifier_used_observed: false,
+            },
+        )
+        .unwrap();
 }
 
 fn complete(store: &mut PartialWithdrawalPayoutStore, request: PreparePartialWithdrawalPayout) {
     let amount = request.artifacts.withdrawal.amount;
     let token = request.artifacts.withdrawal.token_index;
     let candidate = store.prepare(request).unwrap();
+    finalize_candidate(store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
@@ -237,6 +277,7 @@ fn native_and_erc20_require_success_receipts_and_recipient_pull() {
         let amount = request.artifacts.withdrawal.amount;
         let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
         let candidate = store.prepare(request).unwrap();
+        finalize_candidate(&mut store, candidate.candidate_id);
         store
             .mark_payout_broadcast(candidate.candidate_id, intent())
             .unwrap();
@@ -301,6 +342,109 @@ fn native_and_erc20_require_success_receipts_and_recipient_pull() {
         );
         complete_after_payout(&mut store, candidate.candidate_id, token, amount);
     }
+}
+
+#[test]
+fn manager_finalize_requires_exact_finalized_canonical_receipt_before_payout() {
+    let path = TempSnapshot::new("manager-finalize-finality");
+    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
+    let candidate = store.prepare(request(0, 6, 19)).unwrap();
+
+    assert!(
+        store
+            .mark_payout_broadcast(candidate.candidate_id, intent())
+            .is_err()
+    );
+    store
+        .mark_finalize_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+
+    let confirmation = |receipt| FinalizeConfirmation {
+        receipt,
+        manager_pending_observed: false,
+        authorization_observed: true,
+        nullifier_used_observed: false,
+    };
+    let mut unfinalized = finalize_receipt(candidate.auth_digest, 0);
+    unfinalized.finalized_checkpoint.block_number = unfinalized.block_number - 1;
+    assert!(
+        store
+            .confirm_finalize(candidate.candidate_id, confirmation(unfinalized))
+            .is_err()
+    );
+
+    let mut wrong_manager = finalize_receipt(candidate.auth_digest, 0);
+    wrong_manager.to = addr(0x44);
+    assert!(
+        store
+            .confirm_finalize(candidate.candidate_id, confirmation(wrong_manager))
+            .is_err()
+    );
+
+    let wrong_auth = finalize_receipt(b32(0xbad), 0);
+    assert!(
+        store
+            .confirm_finalize(candidate.candidate_id, confirmation(wrong_auth))
+            .is_err(),
+        "a zero-argument manager call must be bound to this candidate by its finalized event"
+    );
+
+    let mut replaced = finalize_receipt(candidate.auth_digest, 0);
+    replaced.finalized_checkpoint.block_number = replaced.block_number;
+    replaced.finalized_checkpoint.block_hash = b32(0xdead);
+    assert!(
+        store
+            .confirm_finalize(candidate.candidate_id, confirmation(replaced))
+            .is_err()
+    );
+
+    store
+        .confirm_finalize(
+            candidate.candidate_id,
+            confirmation(finalize_receipt(candidate.auth_digest, 0)),
+        )
+        .unwrap();
+    store
+        .mark_payout_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+}
+
+#[test]
+fn orphaned_or_unfinalized_payout_receipt_cannot_be_adopted() {
+    let path = TempSnapshot::new("receipt-finality");
+    let request = request(0, 6, 1);
+    let amount = request.artifacts.withdrawal.amount;
+    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
+    let candidate = store.prepare(request).unwrap();
+    finalize_candidate(&mut store, candidate.candidate_id);
+    store
+        .mark_payout_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+
+    let mut unfinalized = receipt(L1CallKind::WithdrawNative, 0);
+    unfinalized.finalized_checkpoint.block_number = unfinalized.block_number - 1;
+    let confirmation = |receipt| PayoutConfirmation {
+        receipt,
+        authorization_observed: false,
+        finalized_anchor_observed: true,
+        nullifier_used_observed: true,
+        credit_before: U256::default(),
+        credit_after: amount,
+    };
+    assert!(
+        store
+            .confirm_payout(candidate.candidate_id, confirmation(unfinalized))
+            .is_err()
+    );
+
+    let mut replaced = receipt(L1CallKind::WithdrawNative, 0);
+    replaced.finalized_checkpoint.block_number = replaced.block_number;
+    replaced.finalized_checkpoint.block_hash = b32(0xdead);
+    assert!(
+        store
+            .confirm_payout(candidate.candidate_id, confirmation(replaced))
+            .is_err()
+    );
 }
 
 fn complete_after_payout(
@@ -403,13 +547,14 @@ fn resume_state_machine_distinguishes_pending_authorized_and_consumed() {
         .unwrap(),
         PartialWithdrawalResumeAction::FinalizePending
     );
-    assert_eq!(
+    // An authorization without our pre-broadcast journal is not adopted as local recovery
+    // evidence; it could come from an orphaned or unrelated manager transaction.
+    assert!(
         partial_withdrawal_resume_action(
             &candidate,
             onchain(candidate.auth_digest, false, true, false),
         )
-        .unwrap(),
-        PartialWithdrawalResumeAction::BroadcastPayout
+        .is_err()
     );
     assert!(
         partial_withdrawal_resume_action(
@@ -437,6 +582,53 @@ fn resume_state_machine_distinguishes_pending_authorized_and_consumed() {
         )
         .is_err()
     );
+
+    store
+        .mark_finalize_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+    let journaled = store.active().unwrap().unwrap();
+    assert_eq!(
+        partial_withdrawal_resume_action(
+            &journaled,
+            onchain(journaled.auth_digest, false, true, false),
+        )
+        .unwrap(),
+        PartialWithdrawalResumeAction::FinalizePending
+    );
+    store
+        .confirm_finalize(
+            candidate.candidate_id,
+            FinalizeConfirmation {
+                receipt: finalize_receipt(candidate.auth_digest, 0),
+                manager_pending_observed: false,
+                authorization_observed: true,
+                nullifier_used_observed: false,
+            },
+        )
+        .unwrap();
+    let finalized = store.active().unwrap().unwrap();
+    assert_eq!(
+        partial_withdrawal_resume_action(
+            &finalized,
+            onchain(finalized.auth_digest, false, true, false),
+        )
+        .unwrap(),
+        PartialWithdrawalResumeAction::BroadcastPayout
+    );
+    assert_eq!(
+        partial_withdrawal_resume_action(
+            &finalized,
+            PartialWithdrawalOnchainState {
+                manager_pending: true,
+                pending_auth_digest: b32(0xbeef),
+                authorization: true,
+                nullifier_used: false,
+            },
+        )
+        .unwrap(),
+        PartialWithdrawalResumeAction::BroadcastPayout,
+        "a later manager request must not invalidate this candidate's finalized authorization"
+    );
 }
 
 #[test]
@@ -445,7 +637,46 @@ fn crash_boundaries_reopen_broadcast_hash_and_consumed_confirmation() {
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 12)).unwrap();
     store
-        .mark_payout_broadcast(candidate.candidate_id, intent())
+        .mark_finalize_broadcast(candidate.candidate_id, intent())
+        .unwrap();
+    drop(store); // crash after manager-finalization intent, before send/hash persistence
+
+    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
+    let resumed = store.active().unwrap().unwrap();
+    assert_eq!(
+        partial_withdrawal_resume_action(
+            &resumed,
+            onchain(resumed.auth_digest, true, false, false),
+        )
+        .unwrap(),
+        PartialWithdrawalResumeAction::FinalizePending
+    );
+    let finalize_hash = finalize_receipt(resumed.auth_digest, 0).tx_hash;
+    store
+        .record_finalize_tx_hash(resumed.candidate_id, finalize_hash)
+        .unwrap();
+    drop(store); // crash after manager send returned, before finalized receipt adoption
+
+    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
+    let resumed = store.active().unwrap().unwrap();
+    assert_eq!(resumed.finalize_tx_hashes, [finalize_hash]);
+    store
+        .confirm_finalize(
+            resumed.candidate_id,
+            FinalizeConfirmation {
+                receipt: finalize_receipt(resumed.auth_digest, 0),
+                manager_pending_observed: false,
+                authorization_observed: true,
+                nullifier_used_observed: false,
+            },
+        )
+        .unwrap();
+    drop(store); // crash after finalized manager receipt, before proof-payout intent
+
+    let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
+    let resumed = store.active().unwrap().unwrap();
+    store
+        .mark_payout_broadcast(resumed.candidate_id, intent())
         .unwrap();
     drop(store); // crash after the durable intent, before send/hash persistence
 
@@ -511,6 +742,7 @@ fn payout_confirmation_requires_the_authorization_to_be_consumed() {
     let path = TempSnapshot::new("auth-consumed");
     let mut store = PartialWithdrawalPayoutStore::open(&path.0).unwrap();
     let candidate = store.prepare(request(0, 6, 13)).unwrap();
+    finalize_candidate(&mut store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();
@@ -542,6 +774,7 @@ fn external_recipient_handoff_completes_workflow_without_a_fake_pull_receipt() {
             .mark_recipient_pull_delegated(candidate.candidate_id)
             .is_err()
     );
+    finalize_candidate(&mut store, candidate.candidate_id);
     store
         .mark_payout_broadcast(candidate.candidate_id, intent())
         .unwrap();

@@ -121,7 +121,7 @@ contract DeployClose is Script {
             false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
-        rollup.setKzgVerifier(new BlobKZGVerifierExt(false));
+        rollup.setKzgVerifier(new BlobKZGVerifierExt());
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
@@ -149,9 +149,8 @@ contract DeployClose is Script {
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: sphincs[i], recipient: r});
         }
         manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings,
-            new ChannelSettlementManager.MemberBinding[](0) // no delegates
+            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, bytes32(0), DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings
         );
 
         // Withdrawal VK (deployer == EOA == msg.sender here, so the deployer-only guard passes).

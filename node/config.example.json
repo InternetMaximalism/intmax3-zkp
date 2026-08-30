@@ -3,8 +3,11 @@
   "rpcUrl": "http://127.0.0.1:8545",
   "chainId": 31337,
   "confirmations": 2,
+  "allowUnfinalizedDevnet": true,
+  "l1TxConfirmations": 1,
   "pollIntervalMs": 4000,
-  "apiBaseUrl": "http://127.0.0.1:8100",
+  "coordinatorApiBaseUrl": "http://127.0.0.1:8100",
+  "cosignerApiBaseUrl": "http://127.0.0.1:8200",
   "cosignerHost": "127.0.0.1",
   "cosignerPort": 8200,
   "cosignerMaxBodyBytes": 1048576,
@@ -12,6 +15,14 @@
   "channels": [
     { "id": 7, "rollup": "0x0000000000000000000000000000000000000000", "manager": "0x0000000000000000000000000000000000000000", "verifier": "0x0000000000000000000000000000000000000000", "workDir": "../wallet-live-work/ch7" }
   ],
+  "account": {
+    "id": 7,
+    "slot": 3,
+    "recipient": "0x0000000000000000000000000000000000000000",
+    "rollup": "0x0000000000000000000000000000000000000000",
+    "manager": "0x0000000000000000000000000000000000000000",
+    "workDir": "../wallet-live-work/ch7"
+  },
   "policy": {
     "maxInFlightPerChannel": 8,
     "invalidScoreThreshold": 5,
@@ -22,6 +33,6 @@
     "staleCloseResponse": "cancel"
   },
   "keys": {
-    "seedSource": "env:DELEGATE_SEED"
+    "seedSource": "env:DELEGATE_SEED_HEX"
   }
 }

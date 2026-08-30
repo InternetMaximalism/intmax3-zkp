@@ -1,4 +1,4 @@
-//! Browser wallet `#[wasm_bindgen]` entry points (Regev channel model).
+//! Browser/Node wallet `#[wasm_bindgen]` entry points (Regev channel model).
 //!
 //! Thin JSON wrappers over [`crate::wallet_core`]. All secret material (SPHINCS+ seeds, Regev
 //! secret key, balance encryption witnesses) lives ONLY in the in-memory [`Session`] and is never
@@ -16,13 +16,19 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use crate::{
-    common::channel::{ChannelState, MemberSignature},
+    circuits::channel::withdrawal_claim_pis::{
+        WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
+    },
+    common::channel::{
+        ChannelState, CloseIntent, CloseWithdrawal, MemberSignature, close_state_id,
+    },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     regev::{AmountWitness, RegevSecurityLevel, encrypt_amount},
+    utils::conversion::ToU64 as _,
     wallet_core::{
-        BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, add_signature, build_refresh,
-        build_send_token, decrypt_balance_token, resolve_local_token_slot, sign_state,
-        verify_send_transition, verify_snapshot,
+        BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, WithdrawalClaimProver, add_signature,
+        build_refresh, build_send_token, decrypt_balance_token, resolve_local_token_slot,
+        sign_state, verify_send_transition, verify_snapshot,
     },
 };
 
@@ -94,10 +100,11 @@ pub fn wallet_keygen() -> Result<String, JsValue> {
 /// 32-byte master seed (hex). Same seed ⇒ same `(pk_g, pk_b, regev_pk)` ⇒ same channel slot on
 /// re-import, so the browser can restore the SAME account/slot across reloads.
 ///
-/// SECURITY (testnet only): this relaxes the module's "secrets are session-only, never persisted"
-/// default — the caller (JS) generates and stores the seed (localStorage) and is responsible for
-/// it. The seed deterministically derives the Goldilocks/BabyBear/Regev secret keys, so anyone who
-/// reads the seed controls the account. Do NOT use seed-persistence for mainnet-value keys.
+/// SECURITY: this relaxes the module's "secrets are session-only, never persisted" default. The
+/// caller is responsible for the recovery seed: anyone who reads it controls the account, while
+/// losing it makes the signed slot unspendable. Browser `localStorage` persistence is testnet-only;
+/// a production Node daemon must inject the seed from an operator-controlled secret store. The
+/// derived secret keys remain inside this WASM session and are never serialized.
 #[wasm_bindgen]
 pub fn wallet_keygen_seeded(seed_hex: String) -> Result<String, JsValue> {
     use rand010::SeedableRng;
@@ -425,6 +432,168 @@ pub fn wallet_balance() -> Result<String, JsValue> {
             .ok_or_else(|| js_err("no channel imported"))?;
         let report = balance_report(session, &snapshot, slot)?;
         serde_json::to_string(&report).map_err(js_err)
+    })
+}
+
+/// Chain-authoritative fields needed to bind a local withdrawal proof to the manager's finalized
+/// close.  The caller reads these from `ChannelSettlementManager` at a finalized block.  They are
+/// all public; no key material ever crosses this boundary.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FinalizedClaimContext {
+    close_intent_digest: Bytes32,
+    final_channel_state_digest: Bytes32,
+    final_balance_state_h1: Bytes32,
+}
+
+/// Exact `ChannelSettlementManager.WithdrawalClaim` calldata, derived only from proved public
+/// inputs. `amount` is a decimal string so JavaScript cannot round a legitimate u64 wei value.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WithdrawalClaimDescriptor {
+    close_intent_digest: String,
+    member_pk_g: String,
+    recipient: String,
+    user_amount_digest: String,
+    #[serde(serialize_with = "ser_u64_dec_string")]
+    amount: u64,
+    token_slot: u8,
+    token_index: u32,
+    withdrawal_nullifier: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WithdrawalClaimArtifact {
+    claim: WithdrawalClaimDescriptor,
+    /// Full MLE fixture object. It contains the public proof and verifier metadata, never the
+    /// Regev secret witness. The Node submitter projects its fields into `MleVerifier.MleProof`.
+    mle_proof: serde_json::Value,
+}
+
+/// Produce a complete on-chain withdrawal-claim artifact without exporting the Regev secret.
+///
+/// Fail-closed binding order:
+/// 1. the in-memory snapshot has already passed `wallet_import_channel`'s signature/root checks;
+/// 2. its state digest and H1 must equal the manager's finalized values supplied by the caller;
+/// 3. the close state-id is recomputed from the signed state and its next freeze nonce, and must
+///    equal the manager's finalized close-intent digest;
+/// 4. the claim circuit opens this wallet's active slot, binds its signed recipient and Regev pk,
+///    and proves decryption of the selected token ciphertext;
+/// 5. both the inner proof and the MLE/WHIR wrapper self-verify before any artifact is returned.
+///
+/// The caller may import an older, locally archived signed snapshot before calling this function
+/// when an adversary finalized a stale close. That import is authenticated exactly like a live
+/// snapshot and the three finalized bindings above prevent proving against the wrong history.
+#[wasm_bindgen]
+pub fn wallet_withdrawal_claim(
+    finalized_context_json: String,
+    token_slot: u8,
+) -> Result<String, JsValue> {
+    with_session(|session| {
+        let finalized: FinalizedClaimContext =
+            serde_json::from_str(&finalized_context_json).map_err(js_err)?;
+        let slot = session.slot.ok_or_else(|| js_err("no channel imported"))?;
+        let snapshot = session
+            .snapshot
+            .clone()
+            .ok_or_else(|| js_err("no channel imported"))?;
+        let state = &snapshot.state;
+
+        if state.digest != finalized.final_channel_state_digest {
+            return Err(js_err(
+                "imported signed snapshot is not the manager's finalized channel state",
+            ));
+        }
+        let balance_h1 = state.balance_state.h1();
+        if balance_h1 != finalized.final_balance_state_h1 {
+            return Err(js_err(
+                "imported signed snapshot balance H1 is not the manager's finalized H1",
+            ));
+        }
+        let finalized_freeze_nonce = state
+            .close_freeze_nonce
+            .checked_add(1)
+            .ok_or_else(|| js_err("finalized close freeze nonce overflow"))?;
+        let expected_close_id =
+            close_state_id(state.channel_id, state.digest, finalized_freeze_nonce);
+        if expected_close_id != finalized.close_intent_digest {
+            return Err(js_err(
+                "manager finalized close-intent digest is not the close state-id of the imported signed snapshot",
+            ));
+        }
+
+        // WithdrawalClaimProver's native builder also validates a mutually-bound CloseIntent /
+        // CloseWithdrawal. Claim verification only exposes their canonical close state-id + H1;
+        // transport metadata (nonce, burn hash, snapshot MBN) is deliberately excluded from that
+        // state-id. Reconstruct a valid local carrier from the already matched signed state.
+        let close_tx = CloseWithdrawal {
+            channel_id: state.channel_id,
+            final_channel_state_digest: state.digest,
+            final_balance_state_h1: balance_h1,
+            intmax_state_root: state.channel_fund.intmax_state_root,
+            burn_tx_hash: Bytes32::default(),
+            burn_amount: state.channel_fund.amounts[0],
+            zkp: Vec::new(),
+        };
+        let close_intent = CloseIntent::new(state, &close_tx).map_err(js_err)?;
+        if close_intent.signing_digest() != finalized.close_intent_digest {
+            return Err(js_err(
+                "locally reconstructed finalized close state-id mismatch",
+            ));
+        }
+
+        let recipient = state.balance_state.recipients[slot as usize];
+        let prover = WithdrawalClaimProver::new();
+        let witness = prover
+            .build_full_witness(
+                &state.balance_state,
+                slot as usize,
+                token_slot,
+                session.keys.pk_g(),
+                &session.keys.regev_pk,
+                &session.keys.regev_sk,
+                recipient,
+                &close_intent,
+                &close_tx,
+                LEVEL,
+            )
+            .map_err(js_err)?;
+        let proof = prover.prove(&witness).map_err(js_err)?;
+        prover
+            .vd()
+            .verify(proof.clone())
+            .map_err(|e| js_err(format!("withdrawal claim self-verification failed: {e:?}")))?;
+        let mle_json = prover.prove_mle(&proof).map_err(js_err)?;
+
+        let pi_limbs = proof.public_inputs[..WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN].to_u64_vec();
+        let pis = WithdrawalClaimPublicInputs::from_u64_slice(&pi_limbs).map_err(js_err)?;
+        if pis.close_intent_digest != finalized.close_intent_digest
+            || pis.final_balance_state_h1 != finalized.final_balance_state_h1
+            || pis.channel_id != state.channel_id
+            || pis.recipient != recipient
+            || pis.token_slot != token_slot
+        {
+            return Err(js_err(
+                "proved withdrawal public inputs differ from the finalized local statement",
+            ));
+        }
+
+        let artifact = WithdrawalClaimArtifact {
+            claim: WithdrawalClaimDescriptor {
+                close_intent_digest: pis.close_intent_digest.to_string(),
+                member_pk_g: pis.member_pk_g.to_string(),
+                recipient: pis.recipient.to_hex(),
+                user_amount_digest: pis.user_amount_digest.to_string(),
+                amount: pis.amount,
+                token_slot: pis.token_slot,
+                token_index: pis.token_index,
+                withdrawal_nullifier: pis.withdrawal_nullifier.to_string(),
+            },
+            mle_proof: serde_json::from_str(&mle_json)
+                .map_err(|e| js_err(format!("invalid MLE exporter JSON: {e}")))?,
+        };
+        serde_json::to_string(&artifact).map_err(js_err)
     })
 }
 

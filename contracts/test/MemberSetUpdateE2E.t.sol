@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-// detail2 §Q-4 (stage Q3, slice C): applyMemberSetUpdate against a REAL MemberSetUpdateCircuit
-// MLE proof — the R2 discipline from audit25-08-2026 (every verifier-gated entry point gets a
-// real-proof on-chain test; a mock in the oracle role is the class that hid gate-8).
+// Release fail-closed guard for member-set updates, exercised with a REAL MemberSetUpdateCircuit
+// MLE proof. The proof/verifier fixture is retained for future cross-layer work, but the Manager
+// must reject every update before proof verification because this statement does not establish
+// inclusion/finality of the corresponding validity-tree action.
 //
 // The fixture (`member_set_update{,_mle}.json`, generate_member_set_update_fixture) is a REAL
 // rotation of slot 1 on a 3-member cluster: proposed and IMKR-self-consented at the wallet gate,
@@ -12,7 +13,12 @@ pragma solidity ^0.8.24;
 // SHARED wrapper rail; the msu VK carries this circuit's own preprocessedRoot anchor.
 
 import {Test} from "forge-std/Test.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry, IERC20} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry,
+    IERC20
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
@@ -27,21 +33,19 @@ contract MsuMockRegistry is IChannelRegistry {
         verifier = verifier_;
     }
 
-    function register(uint32 channelId, uint8 bpMemberSlot, bytes32[] memory activeHashes)
-        external
-    {
+    function register(uint32 channelId, uint8 bpMemberSlot, bytes32[] memory activeHashes) external {
         bytes32[8] memory padded;
         for (uint256 i = 0; i < activeHashes.length; i++) {
             padded[i] = activeHashes[i];
         }
-        channelMemberSetCommitment[channelId] =
-            verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
+        channelMemberSetCommitment[channelId] = verifier.closeMemberSetCommitment(padded, uint8(activeHashes.length));
         channelBpMemberSlot[channelId] = bpMemberSlot;
         channelBpPkG[channelId] = activeHashes[bpMemberSlot];
     }
 
     function withdraw() external {}
     function withdrawToken(uint32) external {}
+
     function tokenAddressOf(uint32) external pure returns (IERC20) {
         return IERC20(address(0));
     }
@@ -136,81 +140,107 @@ contract MemberSetUpdateE2ETest is Test {
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](oldPkGs.length);
         for (uint256 i = 0; i < oldPkGs.length; i++) {
-            bindings[i] = ChannelSettlementManager.MemberBinding({
-                pkG: oldPkGs[i],
-                recipient: address(uint160(0x1000 + i))
-            });
+            bindings[i] =
+                ChannelSettlementManager.MemberBinding({pkG: oldPkGs[i], recipient: address(uint160(0x1000 + i))});
         }
         manager = new ChannelSettlementManager(
             bytes4(channelId),
             0, // bp slot
             oldPkGs[0],
             0, // no delegates
+            bytes32(0),
             1 days,
             0,
             0,
             IChannelSettlementVerifier(address(settlementVerifier)),
             IChannelRegistry(address(registry)),
-            bindings,
-            new ChannelSettlementManager.MemberBinding[](0)
+            bindings
         );
     }
 
-    /// The REAL rotation applies: version advances, slot 1's key changes, the commitment moves to
-    /// the exact set the OLD cluster signed, bpPkG (slot 0) is untouched.
-    function test_applyMemberSetUpdate_realProof_rotatesSlot1() external {
+    /// Even a real, valid rotation proof under an initialized MSU VK cannot mutate the Manager.
+    /// This pins every field/map the former implementation wrote, so the release guard cannot be
+    /// weakened into an early-return or a verifier-dependent path that leaves partial state.
+    function test_applyMemberSetUpdate_realProof_releaseDisabledAndStateUnchanged() external {
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
-        bytes32 before = manager.registeredMemberSetCommitment();
-
-        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
-
-        assertEq(manager.memberSetVersion(), setVersion, "version advanced");
-        assertEq(manager.activeMemberCount(), newCount, "count unchanged by a rotation");
-        assertEq(manager.memberPkGs(1), newPkGs[1], "slot 1 rotated");
-        assertEq(manager.memberPkGs(0), oldPkGs[0], "slot 0 untouched");
-        assertEq(manager.bpPkG(), oldPkGs[0], "bp key (slot 0) untouched");
-        assertTrue(
-            manager.registeredMemberSetCommitment() != before,
-            "commitment moved"
-        );
-        // The pkG-keyed registration maps migrated: old key unbound, new key at the same index.
-        assertEq(manager.registeredMemberIndexPlusOne(oldPkGs[1]), 0, "old key unbound");
-        assertEq(manager.registeredMemberIndexPlusOne(newPkGs[1]), 2, "new key bound at slot 1");
-    }
-
-    /// Replay is dead: after the apply, the same proof speaks about a commitment the Manager no
-    /// longer holds AND a version that is no longer monotone.
-    function test_applyMemberSetUpdate_replay_reverts() external {
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
-        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
-        vm.expectRevert(ChannelSettlementManager.MemberSetVersionNotMonotone.selector);
-        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
-    }
-
-    /// A different new set than the proof committed: the recomputed newCommitment limb mismatches.
-    function test_applyMemberSetUpdate_wrongNewSet_reverts() external {
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
-        bytes32[] memory tampered = new bytes32[](newPkGs.length);
-        for (uint256 i = 0; i < newPkGs.length; i++) {
-            tampered[i] = newPkGs[i];
+        bytes32 beforeCommitment = manager.registeredMemberSetCommitment();
+        bytes32 beforeBpPkG = manager.bpPkG();
+        uint8 beforeCount = manager.activeMemberCount();
+        uint64 beforeVersion = manager.memberSetVersion();
+        uint256 beforeMemberCount = manager.memberCount();
+        ChannelSettlementManager.ChannelLifecycleStatus beforeStatus = manager.channelStatus();
+        bytes32[8] memory beforeSlots;
+        for (uint256 i = 0; i < beforeSlots.length; i++) {
+            beforeSlots[i] = manager.memberPkGs(i);
         }
-        tampered[2] = bytes32(uint256(0xdeadbeef));
-        vm.expectRevert(bytes("msu limb mismatch"));
-        manager.applyMemberSetUpdate(tampered, newCount, address(0), setVersion, proof);
+
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
+        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
+
+        assertEq(manager.registeredMemberSetCommitment(), beforeCommitment, "commitment changed");
+        assertEq(manager.bpPkG(), beforeBpPkG, "BP key changed");
+        assertEq(manager.activeMemberCount(), beforeCount, "active member count changed");
+        assertEq(manager.memberSetVersion(), beforeVersion, "member-set version changed");
+        assertEq(manager.memberCount(), beforeMemberCount, "registered member array length changed");
+        assertEq(uint8(manager.channelStatus()), uint8(beforeStatus), "channel status changed");
+        for (uint256 i = 0; i < beforeSlots.length; i++) {
+            assertEq(manager.memberPkGs(i), beforeSlots[i], "member slot changed");
+        }
+        for (uint256 i = 0; i < oldPkGs.length; i++) {
+            address recipient = address(uint160(0x1000 + i));
+            assertEq(manager.registeredMemberPkGs(i), oldPkGs[i], "registered key array changed");
+            assertEq(manager.registeredMemberIndexPlusOne(oldPkGs[i]), i + 1, "old key index changed");
+            assertEq(manager.registeredRecipientOf(oldPkGs[i]), recipient, "old key recipient changed");
+            assertTrue(manager.isMemberRecipient(recipient), "old recipient permission changed");
+        }
+        assertEq(manager.registeredMemberIndexPlusOne(newPkGs[1]), 0, "new key was registered");
+        assertEq(manager.registeredRecipientOf(newPkGs[1]), address(0), "new recipient was registered");
     }
 
-    /// A tampered proof limb dies in the strict bind before any WHIR work.
-    function test_applyMemberSetUpdate_tamperedLimb_reverts() external {
+    /// Repeated submissions remain the same named release error; no first call can advance state.
+    function test_applyMemberSetUpdate_repeatedValidProof_staysDisabled() external {
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
+        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
+        manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
+        assertEq(manager.memberSetVersion(), 0, "disabled calls advanced the version");
+    }
+
+    /// The former add-cosigner branch cannot install a key or grant its recipient close/withdrawal
+    /// authority while the release gate is active.
+    function test_applyMemberSetUpdate_addCannotGrantNewRecipient() external {
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
+        bytes32[] memory proposed = new bytes32[](oldPkGs.length + 1);
+        for (uint256 i = 0; i < oldPkGs.length; i++) {
+            proposed[i] = oldPkGs[i];
+        }
+        bytes32 addedPkG = keccak256("disabled-add-pk-g");
+        address addedRecipient = address(0xdeadbeef);
+        proposed[oldPkGs.length] = addedPkG;
+
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
+        manager.applyMemberSetUpdate(proposed, oldCount + 1, addedRecipient, setVersion, proof);
+
+        assertEq(manager.activeMemberCount(), oldCount, "disabled add changed count");
+        assertEq(manager.memberSetVersion(), 0, "disabled add changed version");
+        assertEq(manager.registeredMemberIndexPlusOne(addedPkG), 0, "disabled add installed key");
+        assertEq(manager.registeredRecipientOf(addedPkG), address(0), "disabled add bound recipient");
+        assertFalse(manager.isMemberRecipient(addedRecipient), "disabled add granted recipient authority");
+    }
+
+    /// Proof validation is unreachable while the release gate is active.
+    function test_applyMemberSetUpdate_tamperedLimb_returnsDisabled() external {
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
         proof.publicInputs[3] ^= 1; // a limb of oldCommitment
-        vm.expectRevert(bytes("msu limb mismatch"));
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
         manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
     }
 
-    /// The version gate is strict monotone +1.
-    function test_applyMemberSetUpdate_skippedVersion_reverts() external {
+    /// Even a nonsensical version gets the single named release error.
+    function test_applyMemberSetUpdate_skippedVersion_returnsDisabled() external {
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
-        vm.expectRevert(ChannelSettlementManager.MemberSetVersionNotMonotone.selector);
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
         manager.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion + 1, proof);
     }
 
@@ -238,8 +268,7 @@ contract MemberSetUpdateE2ETest is Test {
     /// missing on-chain check is a liveness fence, not a soundness one.
     function test_msuAndCloseFixturesShareTheEntireWhirRail() external view {
         FixtureLib.DeployData memory mdd = FixtureLib.parseDeployData(msuJson);
-        FixtureLib.DeployData memory cdd =
-            FixtureLib.parseDeployData(vm.readFile(_dataPath("close_intent_mle.json")));
+        FixtureLib.DeployData memory cdd = FixtureLib.parseDeployData(vm.readFile(_dataPath("close_intent_mle.json")));
 
         // The rail the Verifier substitutes wholesale, compared in one shot so a NEW WhirParams
         // field cannot slip past this test the way a hand-listed comparison would let it.
@@ -274,8 +303,7 @@ contract MemberSetUpdateE2ETest is Test {
     /// verifier for the msu proof is the WRAPPER's, so it must equal the close circuit's.
     function test_msuAndCloseWrapperGatesDigestsAgree() external view {
         MleVerifier.MleProof memory mproof = FixtureLib.parseProof(msuJson);
-        MleVerifier.MleProof memory cproof =
-            FixtureLib.parseProof(vm.readFile(_dataPath("close_intent_mle.json")));
+        MleVerifier.MleProof memory cproof = FixtureLib.parseProof(vm.readFile(_dataPath("close_intent_mle.json")));
         assertEq(
             mle.computeGatesDigest(
                 mproof.gates,
@@ -295,34 +323,36 @@ contract MemberSetUpdateE2ETest is Test {
         );
     }
 
-    /// Without the msu VK there is NO seam — the entry reverts (V3-class structurally excluded).
-    function test_applyMemberSetUpdate_withoutVk_reverts() external {
+    /// The Manager owns the release gate: it returns the same named error without consulting an
+    /// uninitialized verifier. This prevents a deploy/manual-keying difference from changing the
+    /// release semantics.
+    function test_applyMemberSetUpdate_withoutVk_returnsManagerDisabled() external {
         ChannelSettlementVerifier fresh = new ChannelSettlementVerifier();
         MsuMockRegistry reg2 = new MsuMockRegistry(IChannelSettlementVerifier(address(fresh)));
         reg2.register(channelId, 0, oldPkGs);
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](oldPkGs.length);
         for (uint256 i = 0; i < oldPkGs.length; i++) {
-            bindings[i] = ChannelSettlementManager.MemberBinding({
-                pkG: oldPkGs[i],
-                recipient: address(uint160(0x2000 + i))
-            });
+            bindings[i] =
+                ChannelSettlementManager.MemberBinding({pkG: oldPkGs[i], recipient: address(uint160(0x2000 + i))});
         }
         ChannelSettlementManager m2 = new ChannelSettlementManager(
             bytes4(channelId),
             0,
             oldPkGs[0],
             0,
+            bytes32(0),
             1 days,
             0,
             0,
             IChannelSettlementVerifier(address(fresh)),
             IChannelRegistry(address(reg2)),
-            bindings,
-            new ChannelSettlementManager.MemberBinding[](0)
+            bindings
         );
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(msuJson);
-        vm.expectRevert(ChannelSettlementVerifier.MemberSetUpdateVkNotSet.selector);
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
         m2.applyMemberSetUpdate(newPkGs, newCount, address(0), setVersion, proof);
+        assertEq(m2.memberSetVersion(), 0, "disabled call advanced the version");
+        assertEq(m2.registeredMemberSetCommitment(), manager.registeredMemberSetCommitment(), "set changed");
     }
 }

@@ -10,6 +10,7 @@ const BRANCHES = {
   PEER_REFRESH_REQUEST: 'PEER_REFRESH_REQUEST',
   PEER_INTER_REQUEST: 'PEER_INTER_REQUEST',
   PEER_BURN_REQUEST: 'PEER_BURN_REQUEST',
+  PEER_CLOSE_CLAIM: 'PEER_CLOSE_CLAIM',
   CHAIN_DEPOSITED: 'CHAIN_DEPOSITED',
   CHAIN_BLOCK_FINALIZED: 'CHAIN_BLOCK_FINALIZED',
   CHAIN_OBSERVE: 'CHAIN_OBSERVE',
@@ -21,6 +22,8 @@ const BRANCHES = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   CHAIN_CLOSE_REQUESTED: 'CHAIN_CLOSE_REQUESTED',
   CHAIN_CLOSE_SUBMITTED: 'CHAIN_CLOSE_SUBMITTED',
+  CHAIN_CLOSE_CANCELLED: 'CHAIN_CLOSE_CANCELLED',
+  CHAIN_CLOSE_FINALIZED: 'CHAIN_CLOSE_FINALIZED',
   CHAIN_PW_SUBMITTED: 'CHAIN_PW_SUBMITTED',
   ATTACK_SUSPECTED: 'ATTACK_SUSPECTED',
 };
@@ -30,6 +33,7 @@ const API_KIND_TO_BRANCH = {
   'cosign-refresh': BRANCHES.PEER_REFRESH_REQUEST,
   inter: BRANCHES.PEER_INTER_REQUEST,
   burn: BRANCHES.PEER_BURN_REQUEST,
+  'close-claim': BRANCHES.PEER_CLOSE_CLAIM,
   snapshot: BRANCHES.SNAPSHOT_POLL,
 };
 
@@ -51,6 +55,8 @@ const CHAIN_KIND_TO_BRANCH = {
   CloseRequested: BRANCHES.CHAIN_CLOSE_REQUESTED,
   CloseSubmitted: BRANCHES.CHAIN_CLOSE_SUBMITTED,
   SpecialCloseSubmitted: BRANCHES.CHAIN_CLOSE_SUBMITTED,
+  CloseCancelled: BRANCHES.CHAIN_CLOSE_CANCELLED,
+  CloseFinalized: BRANCHES.CHAIN_CLOSE_FINALIZED,
   PartialWithdrawalSubmitted: BRANCHES.CHAIN_PW_SUBMITTED,
   FraudConfirmed: BRANCHES.ATTACK_SUSPECTED,
   // benign / informational — observed for reconciliation, no defensive action by themselves
@@ -64,8 +70,6 @@ const CHAIN_KIND_TO_BRANCH = {
   TokenRegistered: BRANCHES.CHAIN_OBSERVE,
   Erc20Withdrawn: BRANCHES.CHAIN_OBSERVE,
   TokenWithdrawalClaimed: BRANCHES.CHAIN_OBSERVE,
-  CloseCancelled: BRANCHES.CHAIN_OBSERVE,
-  CloseFinalized: BRANCHES.CHAIN_OBSERVE,
   WithdrawalClaimAccepted: BRANCHES.CHAIN_OBSERVE,
   PostCloseClaimAccepted: BRANCHES.CHAIN_OBSERVE,
   WithdrawalClaimed: BRANCHES.CHAIN_OBSERVE,
@@ -74,7 +78,8 @@ const CHAIN_KIND_TO_BRANCH = {
 };
 
 // event: { source: 'api'|'chain'|'timer', kind, invalid? }
-// ctx: { status: 'active'|'close_pending'|'close_submitted'|'closed'|'settled', mode: 'normal'|'defensive'|'exiting' }
+// ctx: { status: 'active'|'close_pending'|'close_submitted'|'closed'|'settled',
+//        mode: 'normal'|'defensive'|'exiting', closeFinalized?: boolean }
 function classify(event, ctx = {}) {
   const status = ctx.status || 'active';
   const mode = ctx.mode || 'normal';
@@ -89,6 +94,13 @@ function classify(event, ctx = {}) {
     const branch = API_KIND_TO_BRANCH[event.kind];
     if (!branch) return BRANCHES.ATTACK_SUSPECTED; // unknown API kind = suspicious
     if (branch === BRANCHES.SNAPSHOT_POLL) return branch; // read-only, always allowed
+    // Claim proving is not a co-sign operation and remains useful in defensive mode, but the
+    // Manager can accept it only after CloseFinalized. Refuse an early proxy request locally.
+    if (branch === BRANCHES.PEER_CLOSE_CLAIM) {
+      return status === 'closed' || status === 'settled' || ctx.closeFinalized === true
+        ? branch
+        : BRANCHES.INVALID_REQUEST;
+    }
     // explicit invalidity flag (failed pre-policy upstream)
     if (event.invalid) return BRANCHES.INVALID_REQUEST;
     // defensive mode refuses all co-signing for this channel

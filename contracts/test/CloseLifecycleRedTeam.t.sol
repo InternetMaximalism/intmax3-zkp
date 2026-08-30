@@ -41,11 +41,23 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     function _cancelProof(ChannelSettlementManager.CancelCloseRequest memory request)
         internal view returns (MleVerifier.MleProof memory)
     {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
+        uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
+            ? pending.finalStateVersion
+            : manager.pendingPartialWithdrawalStateVersion();
+        return _cancelProofAt(request, closeFinalStateVersion);
+    }
+
+    function _cancelProofAt(
+        ChannelSettlementManager.CancelCloseRequest memory request,
+        uint64 closeFinalStateVersion
+    ) internal view returns (MleVerifier.MleProof memory) {
         return CloseTestLib.proofWithLimbs(
             verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
                 request.closeIntentDigest,
                 manager.registeredMemberSetCommitment(),
+                closeFinalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest
             )
@@ -67,6 +79,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     {
         intent = _intent(1, epoch, 22, 1);
         intent.finalStateVersion = stateVersion;
+        intent.finalChannelStateDigest = keccak256(abi.encodePacked("final_state", epoch, stateVersion));
     }
 
     function _baseRecipient(address recipient) internal pure returns (bytes32) {
@@ -158,7 +171,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory honestIntent = _intentAt(9, 20);
         bytes32 digest = manager.computeCloseIntentDigest(honestIntent);
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(digest, 21);
-        MleVerifier.MleProof memory replayedProof = _cancelProof(req);
+        MleVerifier.MleProof memory replayedProof = _cancelProofAt(req, honestIntent.finalStateVersion);
 
         // NOTE: read via the cheatcode, not `block.timestamp` — under via-IR the Yul
         // optimizer treats TIMESTAMP as movable and CSEs the two reads to a constant 0 delta.
@@ -227,7 +240,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _intentAt(9, 20);
         bytes32 digest = manager.computeCloseIntentDigest(intent);
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(digest, 21);
-        MleVerifier.MleProof memory proof = _cancelProof(req);
+        MleVerifier.MleProof memory proof = _cancelProofAt(req, intent.finalStateVersion);
 
         _requestCloseAndElapseGrace();
         manager.submitCloseIntent(intent, _closeProof(intent));

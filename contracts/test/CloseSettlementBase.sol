@@ -146,13 +146,13 @@ abstract contract CloseSettlementBase is Test {
             BP_MEMBER_SLOT,
             USER_A,
             0,
+            bytes32(0),
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(reg)),
-            bindings,
-            new ChannelSettlementManager.MemberBinding[](0)
+            bindings
         );
     }
 
@@ -214,12 +214,12 @@ abstract contract CloseSettlementBase is Test {
 
     // ── intent + proof builders ──
 
-    function _intent(uint64 closeNonce, uint64 finalEpoch, uint64 finalSmallBlockNumber, uint64 closeFreezeNonce)
+    function _intent(uint64 _closeNonce, uint64 finalEpoch, uint64 finalSmallBlockNumber, uint64 closeFreezeNonce)
         internal
         pure
         returns (ChannelSettlementManager.CloseIntent memory intent)
     {
-        intent = _intentWithFund(closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce, DEFAULT_FUND_AMOUNT);
+        intent = _intentWithFund(_closeNonce, finalEpoch, finalSmallBlockNumber, closeFreezeNonce, DEFAULT_FUND_AMOUNT);
     }
 
     /// Single-token (genesis ETH) fund vector: amount at slot 0, zero elsewhere.
@@ -235,14 +235,14 @@ abstract contract CloseSettlementBase is Test {
     /// Intent with a custom declared genesis-token channel-fund amount (single-token close — the
     /// v1-state embedding: registry=[ETH], all funds at token slot 0).
     function _intentWithFund(
-        uint64 closeNonce,
+        uint64 _closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce,
         uint256 channelFundAmount
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = _intentWithTokens(
-            closeNonce,
+            _closeNonce,
             finalEpoch,
             finalSmallBlockNumber,
             closeFreezeNonce,
@@ -254,7 +254,7 @@ abstract contract CloseSettlementBase is Test {
 
     /// Multi-token intent: full (amounts, registry, count) vectors (multitoken Phase 3).
     function _intentWithTokens(
-        uint64 closeNonce,
+        uint64 _closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce,
@@ -263,7 +263,9 @@ abstract contract CloseSettlementBase is Test {
         uint8 tokenCount
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = ChannelSettlementManager.CloseIntent({
-            closeNonce: closeNonce,
+            // M-9: the ABI retains closeNonce, but its only accepted representation is the
+            // circuit-derived closeFreezeNonce successor.
+            closeNonce: closeFreezeNonce,
             finalEpoch: finalEpoch,
             finalSmallBlockNumber: finalSmallBlockNumber,
             closeFreezeNonce: closeFreezeNonce,
@@ -273,9 +275,9 @@ abstract contract CloseSettlementBase is Test {
             tokenRegistry: tokenRegistry,
             tokenCount: tokenCount,
             channelFundIntmaxStateRoot: keccak256("intmax_root"),
-            burnTxHash: keccak256("burn_tx"),
+            burnTxHash: bytes32(0),
             closeWithdrawalDigest: keccak256("burn_backed_close"),
-            snapshotMediumBlockNumber: 77,
+            snapshotMediumBlockNumber: 0,
             finalStateVersion: 12,
             finalSettledTxChain: keccak256("settled_tx_chain"),
             finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root")

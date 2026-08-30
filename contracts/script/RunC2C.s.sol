@@ -12,7 +12,7 @@ import {FixtureLib} from "./FixtureLib.sol";
 ///         CORRECT ORDER (cumulative reg+deposit chains — see C2CBlockHash.t.sol):
 ///           register1Step -> [cast postBlock b0] -> depositStep -> [cast postBlock b1] ->
 ///           register2Step -> [cast postBlock b2] -> [cast postBlock b3] -> [cast postBlock b4] ->
-///           finalizeStep (SUB_ID=4) -> withdrawNativeStep -> withdrawStep
+///           attestProofDataStep (SUB_ID=4) -> finalizeStep -> withdrawNativeStep -> withdrawStep
 ///         ROLLUP from env. SUB_ID defaults to 4 (block 5 = 5th posting round → submission id 4).
 contract RunC2C is Script {
     function _rollup() internal view returns (IntmaxRollup) { return IntmaxRollup(payable(vm.envAddress("ROLLUP"))); }
@@ -54,7 +54,21 @@ contract RunC2C is Script {
         console2.log("deposit OK; totalEscrowed:", _rollup().totalEscrowed());
     }
 
-    /// finalize the 5-block chain (submission id via SUB_ID env, default 4 = the 5th posting round).
+    /// Authenticate the exact blob-backed proof bytes in a separate transaction so the standard
+    /// two-blob KZG check and the MLE verifier never have to fit in the same L1 block.
+    function attestProofDataStep() external {
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
+        bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
+        uint256 subId = vm.envOr("SUB_ID", uint256(4));
+
+        vm.startBroadcast();
+        bytes32 digest = _rollup().attestProofData(subId, abi.encode(proof), blobSidecars);
+        vm.stopBroadcast();
+        console2.log("proof DA attested:");
+        console2.logBytes32(digest);
+    }
+
+    /// finalize the 5-block chain after `attestProofDataStep` has journaled the same proof bytes.
     function finalizeStep() external {
         string memory lc = _lc();
         IntmaxRollup.ValidityPublicInputs memory vpis;

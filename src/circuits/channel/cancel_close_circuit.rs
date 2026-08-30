@@ -14,8 +14,9 @@
 //!  - Finding D (member binding): `member_set_commitment` is exposed and matched on L1 against the
 //!    channel's registered member set, so a third party cannot forge a cancel with their own keys.
 //!  - Finding B (staleness): `revived_state_version > close.final_state_version` is enforced
-//!    in-circuit (u64 strict-greater via `U64Target::is_lt`), with the operands anchored inside the
-//!    revived IMCH (via H1) and the recomputed `close_intent_digest` respectively.
+//!    in-circuit (u64 strict-greater via `U64Target::is_lt`). The revived operand is anchored in
+//!    the signed revived IMCH; the close operand is a strict public input injected from the
+//!    Manager's stored pending close.
 //!  - Finding C (era fence): `revived.close_freeze_nonce + 1 == close.close_freeze_nonce` (kept;
 //!    not relaxed to `>=`).
 
@@ -68,8 +69,7 @@ use crate::{
 
 // Domain constants — MUST equal the native ones in `common::channel` / `common::balance_state`.
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348; // "IMCH"
-const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
-const CLOSE_WITHDRAWAL_DOMAIN: u32 = 0x494d434c; // "IMCL"
+const CLOSE_STATE_ID_DOMAIN: u32 = 0x494d4353; // "IMCS"
 const CANCEL_MEMBER_SET_DOMAIN: u32 = 0x494d434d; // "IMCM" (same as the close member-set domain)
 
 /// In-circuit public-input targets for the cancel-close statement. Every limb is 32-bit
@@ -80,6 +80,7 @@ pub struct CancelClosePublicInputsTarget {
     pub channel_id: [Target; 1],
     pub close_intent_digest: Bytes32Target,
     pub member_set_commitment: Bytes32Target,
+    pub close_final_state_version: U64Target,
     pub revived_state_version: U64Target,
     pub revived_channel_state_digest: Bytes32Target,
 }
@@ -97,6 +98,7 @@ impl CancelClosePublicInputsTarget {
             channel_id: [u32_limb(builder)],
             close_intent_digest: Bytes32Target::new(builder, true),
             member_set_commitment: Bytes32Target::new(builder, true),
+            close_final_state_version: U64Target::new(builder, true),
             revived_state_version: U64Target::new(builder, true),
             revived_channel_state_digest: Bytes32Target::new(builder, true),
         }
@@ -107,6 +109,7 @@ impl CancelClosePublicInputsTarget {
             self.channel_id.to_vec(),
             self.close_intent_digest.to_vec(),
             self.member_set_commitment.to_vec(),
+            self.close_final_state_version.to_vec(),
             self.revived_state_version.to_vec(),
             self.revived_channel_state_digest.to_vec(),
         ]
@@ -130,6 +133,8 @@ impl CancelClosePublicInputsTarget {
             .set_witness(witness, value.close_intent_digest);
         self.member_set_commitment
             .set_witness(witness, value.member_set_commitment);
+        self.close_final_state_version
+            .set_witness(witness, U64::from(value.close_final_state_version));
         self.revived_state_version
             .set_witness(witness, U64::from(value.revived_state_version));
         self.revived_channel_state_digest
@@ -220,23 +225,9 @@ where
     /// slots. Replaces the retired MAX_CHANNEL_MEMBERS-wide slot target vectors.
     revived_slot_tree_root: PoseidonHashOutTarget,
 
-    // ── close CloseIntent auxiliary fields (drive the IMCI recompute) ──
-    close_nonce: U64Target,
-    close_final_epoch: U64Target,
-    close_final_small_block_number: U64Target,
+    // ── pending-close coordinates needed for canonical IMCS + era fence ──
     close_freeze_nonce: U64Target,
     close_final_channel_state_digest: Bytes32Target,
-    close_final_balance_state_h1: Bytes32Target,
-    /// Multi-token (§N-6, TM-11): the close snapshot's FULL per-token fund vector — hashed into
-    /// the widened v2 IMCI preimage (80 limbs); position 0 (the genesis-token amount) doubles as
-    /// the IMCL burn-amount segment (native `CloseIntent::new` binds burn_amount == amounts[0]).
-    close_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS],
-    close_channel_fund_intmax_state_root: Bytes32Target,
-    close_burn_tx_hash: Bytes32Target,
-    close_withdrawal_digest: Bytes32Target,
-    close_snapshot_medium_block_number: U64Target,
-    close_final_state_version: U64Target,
-    close_final_settled_tx_chain: Bytes32Target,
 
     // ── member auth / recursively verified Falcon aggregation proof (falcon-sig Phase 2) ──
     /// The recursively verified `FalconAggCircuit` proof. Its pk-list PI slices ARE the
@@ -300,21 +291,9 @@ where
         // witnessed directly — attested by the cosigner signatures over the revived H1.
         let revived_slot_tree_root = PoseidonHashOutTarget::new(&mut builder);
 
-        // ── close CloseIntent auxiliary targets ──
-        let close_nonce = U64Target::new(&mut builder, true);
-        let close_final_epoch = U64Target::new(&mut builder, true);
-        let close_final_small_block_number = U64Target::new(&mut builder, true);
+        // ── pending-close coordinates for canonical IMCS + era fence ──
         let close_freeze_nonce = U64Target::new(&mut builder, true);
         let close_final_channel_state_digest = Bytes32Target::new(&mut builder, true);
-        let close_final_balance_state_h1 = Bytes32Target::new(&mut builder, true);
-        let close_channel_fund_amounts: [U256Target; MAX_CHANNEL_TOKENS] =
-            std::array::from_fn(|_| U256Target::new(&mut builder, true));
-        let close_channel_fund_intmax_state_root = Bytes32Target::new(&mut builder, true);
-        let close_burn_tx_hash = Bytes32Target::new(&mut builder, true);
-        let close_withdrawal_digest = Bytes32Target::new(&mut builder, true);
-        let close_snapshot_medium_block_number = U64Target::new(&mut builder, true);
-        let close_final_state_version = U64Target::new(&mut builder, true);
-        let close_final_settled_tx_chain = Bytes32Target::new(&mut builder, true);
 
         let zero_t = builder.zero();
         let one = builder.one();
@@ -358,9 +337,7 @@ where
         // close circuit). It is hashed into the IMCH as-is.
 
         let channel_state_domain = builder.constant(F::from_canonical_u32(CHANNEL_STATE_DOMAIN));
-        let close_intent_domain = builder.constant(F::from_canonical_u32(CLOSE_INTENT_DOMAIN));
-        let close_withdrawal_domain =
-            builder.constant(F::from_canonical_u32(CLOSE_WITHDRAWAL_DOMAIN));
+        let close_state_id_domain = builder.constant(F::from_canonical_u32(CLOSE_STATE_ID_DOMAIN));
 
         // ── (a) revived H1 recompute (Poseidon-root form; SHARED `h1_gadget`) ──
         //
@@ -412,74 +389,38 @@ where
             Bytes32Target::from_slice(&builder.keccak256::<C>(&revived_state_digest_inputs));
         revived_state_digest.connect(&mut builder, public_inputs.revived_channel_state_digest);
 
-        // ── (c) close IMCL recompute (`CloseWithdrawal::signing_digest`) → close_withdrawal_digest
-        // ──
-        let close_withdrawal_inputs = [
-            vec![close_withdrawal_domain],
+        // ── (c) canonical IMCS close-state identity ─────────────────────────
+        //
+        // Metadata-free and byte-identical to `common::channel::close_state_id` and Solidity:
+        // `keccak([IMCS, channel_id, closing IMCH digest, close_freeze_nonce])`. The close IMCH is
+        // opaque here (the original close proof authenticated it); L1 binds the resulting ID to
+        // the pending close. The freeze nonce is also the era-fence operand below.
+        let close_state_id_inputs = [
+            vec![close_state_id_domain],
             public_inputs.channel_id.to_vec(),
             close_final_channel_state_digest.to_vec(),
-            close_final_balance_state_h1.to_vec(),
-            close_channel_fund_intmax_state_root.to_vec(),
-            close_burn_tx_hash.to_vec(),
-            // The IMCL burn amount is the GENESIS-token fund (`amounts[0]` — the same wire the
-            // IMCI amounts vector carries at position 0, mirroring native `CloseIntent::new`'s
-            // burn_amount == amounts[0] binding).
-            close_channel_fund_amounts[0].to_vec(),
-        ]
-        .concat();
-        let recomputed_close_withdrawal_digest =
-            Bytes32Target::from_slice(&builder.keccak256::<C>(&close_withdrawal_inputs));
-        recomputed_close_withdrawal_digest.connect(&mut builder, close_withdrawal_digest);
-
-        // ── (d) close IMCI recompute (`CloseIntent::signing_digest`) → close_intent_digest PI ──
-        //
-        // SECURITY: this is the Finding-B/era-fence anchor. `close_final_state_version` and
-        // `close_freeze_nonce` are the SAME wires used in the staleness comparison and era fence
-        // below, AND they are hashed into `close_intent_digest`, which the manager binds against
-        // `pendingClose.closeIntentDigest`. So the prover cannot supply a real close digest while
-        // using a different (lower) version or wrong era in the comparison.
-        let close_intent_inputs = [
-            vec![close_intent_domain],
-            public_inputs.channel_id.to_vec(),
-            close_nonce.to_vec(),
-            close_final_epoch.to_vec(),
-            close_final_small_block_number.to_vec(),
             close_freeze_nonce.to_vec(),
-            close_final_channel_state_digest.to_vec(),
-            close_final_balance_state_h1.to_vec(),
-            public_inputs.channel_id.to_vec(),
-            // Multi-token (TM-11): the IMCI fund segment is the FULL 80-limb amounts vector,
-            // element-identical to the widened native `CloseIntent::signing_digest`.
-            close_channel_fund_amounts
-                .iter()
-                .flat_map(|amount| amount.to_vec())
-                .collect(),
-            close_channel_fund_intmax_state_root.to_vec(),
-            close_burn_tx_hash.to_vec(),
-            close_withdrawal_digest.to_vec(),
-            close_snapshot_medium_block_number.to_vec(),
-            close_final_state_version.to_vec(),
-            close_final_settled_tx_chain.to_vec(),
         ]
         .concat();
-        let recomputed_close_intent_digest =
-            Bytes32Target::from_slice(&builder.keccak256::<C>(&close_intent_inputs));
-        recomputed_close_intent_digest.connect(&mut builder, public_inputs.close_intent_digest);
+        let recomputed_close_state_id =
+            Bytes32Target::from_slice(&builder.keccak256::<C>(&close_state_id_inputs));
+        recomputed_close_state_id.connect(&mut builder, public_inputs.close_intent_digest);
 
-        // ── (e) Finding B: revived_state_version > close_final_state_version (strict) ──
+        // ── (d) Finding B: revived_state_version > close_final_state_version (strict) ──
         //
-        // `a > b` ⟺ `b < a`. `U64Target::is_lt` is the U64-correct comparator (both limbs,
-        // internal range-check, `[hi, lo]` lexicographic order).
-        let revived_gt_close =
-            close_final_state_version.is_lt(&mut builder, &public_inputs.revived_state_version);
+        // The close operand is an explicit PI which L1 strict-binds to the stored pending close's
+        // finalStateVersion. `a > b` iff `b < a`; `U64Target::is_lt` is the U64-correct comparator.
+        let revived_gt_close = public_inputs
+            .close_final_state_version
+            .is_lt(&mut builder, &public_inputs.revived_state_version);
         builder.assert_one(revived_gt_close.target);
 
-        // ── (f) Finding C: era fence revived.close_freeze_nonce + 1 == close.close_freeze_nonce ──
+        // ── (e) Finding C: era fence revived.close_freeze_nonce + 1 == close.close_freeze_nonce ──
         let one_u64 = U64Target::constant(&mut builder, U64::from(1u64));
         let revived_nonce_plus_one = revived_close_freeze_nonce.add(&mut builder, &one_u64);
         revived_nonce_plus_one.connect(&mut builder, close_freeze_nonce);
 
-        // ── (g) N-member revived-IMCH Falcon signatures via the recursively verified
+        // ── (f) N-member revived-IMCH Falcon signatures via the recursively verified
         // FalconAggCircuit proof (falcon-sig Phase 2) ──
         //
         // Message = the RECOMPUTED revived IMCH digest; all N active members sign it. We verify
@@ -588,19 +529,8 @@ where
             revived_settled_tx_chain,
             revived_settled_tx_accumulator_root,
             revived_slot_tree_root,
-            close_nonce,
-            close_final_epoch,
-            close_final_small_block_number,
             close_freeze_nonce,
             close_final_channel_state_digest,
-            close_final_balance_state_h1,
-            close_channel_fund_amounts,
-            close_channel_fund_intmax_state_root,
-            close_burn_tx_hash,
-            close_withdrawal_digest,
-            close_snapshot_medium_block_number,
-            close_final_state_version,
-            close_final_settled_tx_chain,
             agg_proof,
             active_bits,
             member_insertion_proofs,
@@ -710,35 +640,12 @@ where
         self.revived_slot_tree_root
             .set_witness(&mut witness, revived.balance_state.slot_tree_root());
 
-        // close CloseIntent fields.
-        self.close_nonce
-            .set_witness(&mut witness, U64::from(close.close_nonce));
-        self.close_final_epoch
-            .set_witness(&mut witness, U64::from(close.final_epoch));
-        self.close_final_small_block_number
-            .set_witness(&mut witness, U64::from(close.final_small_block_number));
+        // Pending-close coordinates used by canonical IMCS and the era fence. The close version is
+        // set through the public-input target above and strict-bound by L1.
         self.close_freeze_nonce
             .set_witness(&mut witness, U64::from(close.close_freeze_nonce));
         self.close_final_channel_state_digest
             .set_witness(&mut witness, close.final_channel_state_digest);
-        self.close_final_balance_state_h1
-            .set_witness(&mut witness, close.final_balance_state_h1);
-        // Multi-token (v2): the close snapshot's FULL per-token fund vector (widened IMCI).
-        for (t, amount) in close.channel_fund_snapshot.amounts.iter().enumerate() {
-            self.close_channel_fund_amounts[t].set_witness(&mut witness, *amount);
-        }
-        self.close_channel_fund_intmax_state_root
-            .set_witness(&mut witness, close.channel_fund_snapshot.intmax_state_root);
-        self.close_burn_tx_hash
-            .set_witness(&mut witness, close.burn_tx_hash);
-        self.close_withdrawal_digest
-            .set_witness(&mut witness, close.close_withdrawal_digest);
-        self.close_snapshot_medium_block_number
-            .set_witness(&mut witness, U64::from(close.snapshot_medium_block_number));
-        self.close_final_state_version
-            .set_witness(&mut witness, U64::from(close.final_state_version));
-        self.close_final_settled_tx_chain
-            .set_witness(&mut witness, close.final_settled_tx_chain);
 
         // The FalconAggCircuit proof. The in-circuit member key vector is sliced from THIS
         // proof's pk-list PIs — `member_auth` must mirror the aggregation slot order or the
@@ -1014,11 +921,11 @@ pub mod test_fixture {
             final_channel_state_digest: closing_state.digest,
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![7],
         };
-        let close_intent = CloseIntent::new(5, &closing_state, &close_withdrawal, 123).unwrap();
+        let close_intent = CloseIntent::new(&closing_state, &close_withdrawal).unwrap();
 
         let (member_auth, agg_proof) =
             member_auth_for_digest_n(revived_state.signing_digest(), seed_for(active), active);
@@ -1088,6 +995,10 @@ mod tests {
         let expected = witness.cancel.to_public_inputs().expect("native pis");
         assert_eq!(pis.channel_id, expected.channel_id);
         assert_eq!(pis.close_intent_digest, expected.close_intent_digest);
+        assert_eq!(
+            pis.close_final_state_version,
+            expected.close_final_state_version
+        );
         assert_eq!(pis.revived_state_version, expected.revived_state_version);
         assert_eq!(
             pis.revived_channel_state_digest,
@@ -1107,6 +1018,32 @@ mod tests {
         let witness = build_full_witness_n(3, 0, 0, 5, 7);
         let err = fx.cancel_circuit.prove(&witness).err();
         assert!(err.is_some(), "stale revived version must be rejected");
+    }
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn cancel_close_circuit_rejects_tampered_public_close_version() {
+        // The canonical IMCS ID deliberately commits to the signed final-state digest rather than
+        // duplicating the state's version as a separate coordinate. L1 therefore injects the
+        // version stored with the pending close as an explicit public input. Pin the circuit side
+        // of that seam: making the closing version equal to the revived version must make the
+        // strict-greater constraint unsatisfiable even though every other witness field is valid.
+        let fx = fixture();
+        let witness = build_full_witness();
+        let mut pis = witness.cancel.to_public_inputs().unwrap();
+        pis.member_set_commitment = super::member_set_commitment_for_auth(&witness.member_auth);
+        pis.close_final_state_version = pis.revived_state_version;
+        let pw = fx.cancel_circuit.fill_witness(&pis, &witness);
+        let proof = pw.and_then(|w| {
+            fx.cancel_circuit
+                .data
+                .prove(w)
+                .map_err(|e| super::CancelCloseCircuitError::FailedToProve(e.to_string()))
+        });
+        assert!(
+            proof.is_err(),
+            "tampered close_final_state_version must violate strict cancel ordering"
+        );
     }
 
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
@@ -1133,6 +1070,7 @@ mod tests {
             channel_id: close.channel_id,
             close_intent_digest: close.signing_digest(),
             member_set_commitment: super::member_set_commitment_for_auth(&witness.member_auth),
+            close_final_state_version: close.final_state_version,
             revived_state_version: revived.balance_state.state_version,
             revived_channel_state_digest: revived.signing_digest(),
         };

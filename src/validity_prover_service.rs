@@ -51,12 +51,13 @@ use crate::{
         agg::{FalconAggCircuit, FalconAggWitness},
         agg_list::{agg_list_commitment, AggListCircuit},
     },
+    l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource, L1FinalizedCheckpoint},
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{C, D, F},
 };
 
-const SNAPSHOT_MAGIC: &[u8; 16] = b"IMVALIDITYPROV01";
-pub const VALIDITY_PROVER_SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_MAGIC: &[u8; 16] = b"IMVALIDITYPROV02";
+pub const VALIDITY_PROVER_SNAPSHOT_VERSION: u32 = 2;
 const SNAPSHOT_HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -110,8 +111,10 @@ impl From<BlockProducerServiceError> for ValidityProverServiceError {
 pub struct L1ValidityAcknowledgement {
     pub chain_id: u64,
     pub transaction_hash: Bytes32,
+    pub block_hash: Bytes32,
     pub block_number: u64,
     pub final_extended_state_commitment: Bytes32,
+    pub finalized_checkpoint: L1FinalizedCheckpoint,
 }
 
 /// Operator-owned L1 read configuration. It is process configuration, never accepted from a
@@ -122,6 +125,9 @@ pub struct L1FinalizationRpcConfig {
     pub expected_chain_id: u64,
     pub rollup: Address,
     pub minimum_confirmations: u64,
+    /// Explicit local-test escape. Production always requires the RPC `finalized` tag; this may
+    /// select `latest` only when `expected_chain_id == 31337`.
+    pub allow_unfinalized_devnet: bool,
 }
 
 impl L1FinalizationRpcConfig {
@@ -145,6 +151,11 @@ impl L1FinalizationRpcConfig {
             return Err(ValidityProverServiceError::InvalidConfiguration(
                 "minimum L1 confirmations must be at least one".into(),
             ));
+        }
+        if self.allow_unfinalized_devnet && self.expected_chain_id != ANVIL_CHAIN_ID {
+            return Err(ValidityProverServiceError::InvalidConfiguration(format!(
+                "unfinalized development mode is restricted to chain {ANVIL_CHAIN_ID}"
+            )));
         }
         Ok(())
     }
@@ -273,6 +284,10 @@ struct ValidityProverSnapshot {
     supported_user_counts: Vec<u32>,
     prover: Address,
     circuit_fingerprint: Bytes32,
+    /// Canonical L1 authority last checked by the production daemon. A newly initialized genesis
+    /// snapshot is bound before the daemon accepts commands; every acknowledged snapshot must
+    /// carry this field.
+    l1_authority: Option<L1FinalizedCheckpoint>,
     finalized: FinalizedCheckpoint,
     candidate: Option<CandidateCheckpoint>,
     acknowledgements: Vec<AcknowledgementRecord>,
@@ -336,6 +351,7 @@ impl ValidityProverService {
             supported_user_counts: supported_user_counts.to_vec(),
             prover,
             circuit_fingerprint: circuits.fingerprint,
+            l1_authority: None,
             finalized: FinalizedCheckpoint {
                 anchor: genesis_anchor,
                 extended_state: genesis.to_u64_vec(),
@@ -435,6 +451,80 @@ impl ValidityProverService {
     ) -> Result<(), ValidityProverServiceError> {
         self.ensure_healthy()?;
         validate_snapshot(&self.disk, &self.circuits, producer)
+    }
+
+    /// Bind a fresh snapshot to L1, or revalidate the persisted authority before the daemon accepts
+    /// commands.  Internal proof consistency is necessary but not sufficient after a restart: an
+    /// old local snapshot must not become the fund-state authority when L1 finalized a different
+    /// state, and a stored receipt must not survive an RPC-side canonical replacement.
+    pub fn bind_or_revalidate_l1_authority(
+        &mut self,
+        l1: &L1FinalizationRpcConfig,
+    ) -> Result<(), ValidityProverServiceError> {
+        self.ensure_healthy()?;
+        l1.validate()?;
+        let current = read_l1_authority_checkpoint(l1)?;
+
+        if let Some(stored) = self.disk.l1_authority {
+            validate_stored_l1_checkpoint(l1, &stored, &current)?;
+        } else if !self.disk.acknowledgements.is_empty()
+            || self.disk.finalized.acknowledgement.is_some()
+        {
+            return Err(ValidityProverServiceError::Snapshot(
+                "acknowledged validity snapshot has no durable L1 authority".into(),
+            ));
+        }
+
+        // This check is deliberately unconditional. A fresh snapshot has no receipt yet, but it
+        // is still untrusted local disk state: another prover may already have advanced the
+        // rollup. Bind the local finalized cursor/root to the rollup at a stable finalized block
+        // before this daemon accepts even its first command.
+        let finalized = decode_extended_state(&self.disk.finalized.extended_state)?;
+        let locally_bound = verify_local_finalized_state_at_l1(
+            l1,
+            &current,
+            finalized.commitment(),
+            finalized.inner.block_number.as_u64(),
+        )?;
+
+        let next_authority = if let Some(acknowledgement) =
+            self.disk.finalized.acknowledgement.as_ref()
+        {
+            let reread = revalidate_historical_l1_finalization(
+                l1,
+                acknowledgement.transaction_hash,
+                acknowledgement.final_extended_state_commitment,
+                finalized.inner.block_number.as_u64(),
+            )?;
+            if reread.chain_id != acknowledgement.chain_id
+                || reread.transaction_hash != acknowledgement.transaction_hash
+                || reread.block_number != acknowledgement.block_number
+                || reread.block_hash != acknowledgement.block_hash
+                || reread.final_extended_state_commitment
+                    != acknowledgement.final_extended_state_commitment
+            {
+                return Err(l1_rejected(
+                    "persisted finalization receipt changed or was orphaned after restart",
+                ));
+            }
+            validate_stored_l1_checkpoint(l1, &locally_bound, &reread.finalized_checkpoint)?;
+            validate_checkpoint_progression(&locally_bound, &reread.finalized_checkpoint)?;
+            reread.finalized_checkpoint
+        } else {
+            locally_bound
+        };
+
+        if self.disk.l1_authority == Some(next_authority) {
+            return Ok(());
+        }
+        let mut next_disk = self.disk.clone();
+        next_disk.l1_authority = Some(next_authority);
+        if let Err(error) = persist_snapshot(&self.snapshot_path, &next_disk) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.disk = next_disk;
+        Ok(())
     }
 
     /// Prove every producer block after the L1-finalized cursor up to the current journal head.
@@ -760,11 +850,17 @@ impl ValidityProverService {
         producer: &BlockProducerService,
     ) -> Result<ValidityFinalizationReceipt, ValidityProverServiceError> {
         self.ensure_healthy()?;
+        // An idempotent acknowledgement is still a production command, not a trusted read from
+        // local disk.  Revalidate the persisted finalized receipt, its canonical block, the
+        // durable L1 head and the rollup's latest root before returning it.  Without this branch a
+        // receipt orphaned while the daemon was running could be replayed forever merely because
+        // its request id was already present in the snapshot.
         if let Some(existing) = self
             .disk
             .acknowledgements
             .iter()
             .find(|record| record.request_id == request_id)
+            .cloned()
         {
             if existing.candidate_id != candidate_id
                 || existing.acknowledgement.transaction_hash != transaction_hash
@@ -773,8 +869,25 @@ impl ValidityProverService {
                     "acknowledgement request id {request_id:?} was reused for different content"
                 )));
             }
+            self.bind_or_revalidate_l1_authority(l1)?;
+            let reread = verify_l1_finalization(
+                l1,
+                existing.acknowledgement.transaction_hash,
+                existing.acknowledgement.final_extended_state_commitment,
+                existing.finalized_anchor.block_number,
+            )?;
+            validate_replayed_acknowledgement(&existing.acknowledgement, &reread)?;
+            validate_stored_l1_checkpoint(
+                l1,
+                &existing.acknowledgement.finalized_checkpoint,
+                &reread.finalized_checkpoint,
+            )?;
+            validate_checkpoint_progression(
+                &existing.acknowledgement.finalized_checkpoint,
+                &reread.finalized_checkpoint,
+            )?;
             verify_anchor(producer, &existing.finalized_anchor)?;
-            return Ok(finalization_receipt(existing));
+            return Ok(finalization_receipt(&existing));
         }
         let candidate = self.disk.candidate.as_ref().ok_or_else(|| {
             ValidityProverServiceError::InvalidRequest(
@@ -792,6 +905,17 @@ impl ValidityProverService {
             candidate.receipt.final_extended_state_commitment,
             candidate.receipt.final_block_number,
         )?;
+        let stored_authority = self.disk.l1_authority.as_ref().ok_or_else(|| {
+            ValidityProverServiceError::Snapshot(
+                "production acknowledgement requires a startup-bound L1 authority".into(),
+            )
+        })?;
+        validate_stored_l1_checkpoint(
+            l1,
+            stored_authority,
+            &acknowledgement.finalized_checkpoint,
+        )?;
+        validate_checkpoint_progression(stored_authority, &acknowledgement.finalized_checkpoint)?;
         self.acknowledge_candidate_unchecked_for_test(
             request_id,
             candidate_id,
@@ -834,6 +958,19 @@ impl ValidityProverService {
                 "L1 acknowledgement requires a nonzero chainId and transactionHash".into(),
             ));
         }
+        acknowledgement
+            .finalized_checkpoint
+            .covers_receipt(acknowledgement.block_number, acknowledgement.block_hash)
+            .map_err(|error| {
+                ValidityProverServiceError::InvalidRequest(format!(
+                    "L1 acknowledgement lacks durable receipt coverage: {error}"
+                ))
+            })?;
+        if acknowledgement.finalized_checkpoint.chain_id != acknowledgement.chain_id {
+            return Err(ValidityProverServiceError::InvalidRequest(
+                "L1 acknowledgement checkpoint belongs to a different chain".into(),
+            ));
+        }
         let candidate = self.disk.candidate.as_ref().ok_or_else(|| {
             ValidityProverServiceError::InvalidRequest(
                 "there is no pending candidate to acknowledge".into(),
@@ -861,6 +998,7 @@ impl ValidityProverService {
             finalized_anchor: candidate.receipt.producer_anchor.clone(),
             acknowledgement: acknowledgement.clone(),
         };
+        let next_authority = acknowledgement.finalized_checkpoint;
         let next_finalized = FinalizedCheckpoint {
             anchor: candidate.receipt.producer_anchor.clone(),
             extended_state: candidate.final_extended_state.clone(),
@@ -871,6 +1009,7 @@ impl ValidityProverService {
             acknowledgement: Some(acknowledgement),
         };
         let mut next_disk = self.disk.clone();
+        next_disk.l1_authority = Some(next_authority);
         next_disk.finalized = next_finalized;
         next_disk.candidate = None;
         next_disk.acknowledgements.push(record.clone());
@@ -915,6 +1054,7 @@ struct ParsedReceipt {
 struct ParsedBlock {
     number: u64,
     hash: Bytes32,
+    parent_hash: Bytes32,
 }
 
 #[derive(Clone, Debug)]
@@ -924,6 +1064,7 @@ struct L1FinalizationEvidence {
     second_receipt: ParsedReceipt,
     head_before: ParsedBlock,
     head_after: ParsedBlock,
+    canonical_head_before: ParsedBlock,
     canonical_receipt_block: ParsedBlock,
     rollup_has_code: bool,
     root_membership: bool,
@@ -931,14 +1072,217 @@ struct L1FinalizationEvidence {
     latest_finalized_block_number: u64,
 }
 
+/// Receipt-independent authority evidence used on every daemon start, including a brand-new
+/// snapshot which has no acknowledgement yet.
+#[derive(Clone, Debug)]
+struct L1StateAuthorityEvidence {
+    chain_id: u64,
+    source: L1FinalitySource,
+    head_before: ParsedBlock,
+    canonical_head_before: ParsedBlock,
+    head_after: ParsedBlock,
+    rollup_has_code: bool,
+    root_membership: bool,
+    latest_finalized_root: Bytes32,
+    latest_finalized_block_number: u64,
+}
+
+fn verify_local_finalized_state_at_l1(
+    config: &L1FinalizationRpcConfig,
+    checkpoint: &L1FinalizedCheckpoint,
+    expected_root: Bytes32,
+    expected_intmax_block: u64,
+) -> Result<L1FinalizedCheckpoint, ValidityProverServiceError> {
+    checkpoint
+        .validate()
+        .map_err(|error| l1_rejected(&format!("invalid initial L1 authority: {error}")))?;
+    let block_tag = format!("0x{:x}", checkpoint.block_number);
+    let code = run_cast(
+        config,
+        &[
+            "code",
+            &config.rollup.to_string(),
+            "--block",
+            &block_tag,
+        ],
+    )?;
+    let rollup_has_code = code
+        .trim()
+        .strip_prefix("0x")
+        .is_some_and(|hex| !hex.is_empty() && hex.as_bytes().iter().any(|byte| *byte != b'0'));
+    let root_membership = parse_bool_text(&run_cast(
+        config,
+        &[
+            "call",
+            &config.rollup.to_string(),
+            "isFinalizedStateRoot(bytes32)(bool)",
+            &expected_root.to_string(),
+            "--block",
+            &block_tag,
+        ],
+    )?)?;
+    let latest_finalized_root = Bytes32::from_hex(
+        run_cast(
+            config,
+            &[
+                "call",
+                &config.rollup.to_string(),
+                "latestFinalizedStateRoot()(bytes32)",
+                "--block",
+                &block_tag,
+            ],
+        )?
+        .trim(),
+    )
+    .map_err(|error| {
+        l1_rejected(&format!(
+            "parse latestFinalizedStateRoot authority read-back: {error}"
+        ))
+    })?;
+    let latest_finalized_block_number = parse_quantity_text(
+        &run_cast(
+            config,
+            &[
+                "call",
+                &config.rollup.to_string(),
+                "latestFinalizedBlockNumber()(uint64)",
+                "--block",
+                &block_tag,
+            ],
+        )?,
+        "latestFinalizedBlockNumber authority read-back",
+    )?;
+    let canonical_head_before = parse_block(
+        &run_cast(
+            config,
+            &["rpc", "eth_getBlockByNumber", &block_tag, "false"],
+        )?,
+        "canonical L1 authority block",
+    )?;
+    let after = read_l1_authority_checkpoint(config)?;
+    let evidence = L1StateAuthorityEvidence {
+        chain_id: checkpoint.chain_id,
+        source: checkpoint.source,
+        head_before: ParsedBlock {
+            number: checkpoint.block_number,
+            hash: checkpoint.block_hash,
+            parent_hash: checkpoint.parent_hash,
+        },
+        canonical_head_before,
+        head_after: ParsedBlock {
+            number: after.block_number,
+            hash: after.block_hash,
+            parent_hash: after.parent_hash,
+        },
+        rollup_has_code,
+        root_membership,
+        latest_finalized_root,
+        latest_finalized_block_number,
+    };
+    validate_l1_state_authority_evidence(
+        &evidence,
+        config,
+        expected_root,
+        expected_intmax_block,
+    )?;
+    Ok(after)
+}
+
+fn validate_l1_state_authority_evidence(
+    evidence: &L1StateAuthorityEvidence,
+    config: &L1FinalizationRpcConfig,
+    expected_root: Bytes32,
+    expected_intmax_block: u64,
+) -> Result<(), ValidityProverServiceError> {
+    if evidence.chain_id != config.expected_chain_id
+        || evidence.source != configured_finality_source(config)
+    {
+        return Err(l1_rejected(
+            "L1 state authority belongs to a different chain/finality mode",
+        ));
+    }
+    if !evidence.rollup_has_code {
+        return Err(l1_rejected("configured rollup address has no bytecode"));
+    }
+    if evidence.canonical_head_before != evidence.head_before {
+        return Err(l1_rejected(
+            "L1 authority block was replaced during state binding (reorg detected)",
+        ));
+    }
+    // All rollup reads above were pinned to `head_before`. Do not label a newer head authoritative
+    // without reading the state at that newer block too; retrying performs a clean new binding.
+    if evidence.head_after != evidence.head_before {
+        return Err(l1_rejected(
+            "durable L1 head changed during state binding; retry against one stable finalized block",
+        ));
+    }
+    if !evidence.root_membership {
+        return Err(l1_rejected(
+            "local finalized root is not a member of the rollup finalized-root set",
+        ));
+    }
+    if evidence.latest_finalized_block_number != expected_intmax_block {
+        return Err(l1_rejected(
+            "rollup latest finalized block differs from the local finalized snapshot",
+        ));
+    }
+    if evidence.latest_finalized_root != expected_root {
+        return Err(l1_rejected(
+            "rollup latest finalized root differs from the local finalized snapshot",
+        ));
+    }
+    if expected_root == Bytes32::default() {
+        return Err(l1_rejected("local finalized state root is zero"));
+    }
+    Ok(())
+}
+
 /// Read and cross-check the finalization twice. The transaction receipt is not trusted by itself:
 /// the canonical receipt block hash, rollup event address, permanent root-membership getter,
-/// latest finalized cursor, chain id and confirmation depth must all agree after the read-back.
+/// latest finalized cursor and chain id must all agree after the read-back. Production uses the
+/// RPC `finalized` tag; depth-based `latest` is restricted to an explicit chain-31337 escape.
 fn verify_l1_finalization(
     config: &L1FinalizationRpcConfig,
     transaction_hash: Bytes32,
     expected_root: Bytes32,
     expected_intmax_block: u64,
+) -> Result<L1ValidityAcknowledgement, ValidityProverServiceError> {
+    verify_l1_finalization_with_position(
+        config,
+        transaction_hash,
+        expected_root,
+        expected_intmax_block,
+        FinalizationPosition::Latest,
+    )
+}
+
+fn revalidate_historical_l1_finalization(
+    config: &L1FinalizationRpcConfig,
+    transaction_hash: Bytes32,
+    expected_root: Bytes32,
+    expected_intmax_block: u64,
+) -> Result<L1ValidityAcknowledgement, ValidityProverServiceError> {
+    verify_l1_finalization_with_position(
+        config,
+        transaction_hash,
+        expected_root,
+        expected_intmax_block,
+        FinalizationPosition::Historical,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinalizationPosition {
+    Latest,
+    Historical,
+}
+
+fn verify_l1_finalization_with_position(
+    config: &L1FinalizationRpcConfig,
+    transaction_hash: Bytes32,
+    expected_root: Bytes32,
+    expected_intmax_block: u64,
+    position: FinalizationPosition,
 ) -> Result<L1ValidityAcknowledgement, ValidityProverServiceError> {
     config.validate()?;
     if transaction_hash == Bytes32::default() {
@@ -947,6 +1291,11 @@ fn verify_l1_finalization(
         ));
     }
     let chain_id = parse_quantity_text(&run_cast(config, &["chain-id"])?, "cast chain-id")?;
+    let (finality_tag, source) = if config.allow_unfinalized_devnet {
+        ("latest", L1FinalitySource::DevnetLatest)
+    } else {
+        ("finalized", L1FinalitySource::RpcFinalized)
+    };
     let first_receipt = parse_receipt(
         &run_cast(
             config,
@@ -959,10 +1308,19 @@ fn verify_l1_finalization(
         config.rollup,
     )?;
     let head_before = parse_block(
-        &run_cast(config, &["rpc", "eth_getBlockByNumber", "latest", "false"])?,
-        "head before finalization read-back",
+        &run_cast(config, &["rpc", "eth_getBlockByNumber", finality_tag, "false"])?,
+        "durable head before finalization read-back",
     )?;
-    let code = run_cast(config, &["code", &config.rollup.to_string()])?;
+    let head_block_tag = format!("0x{:x}", head_before.number);
+    let code = run_cast(
+        config,
+        &[
+            "code",
+            &config.rollup.to_string(),
+            "--block",
+            &head_block_tag,
+        ],
+    )?;
     let rollup_has_code = code
         .trim()
         .strip_prefix("0x")
@@ -974,6 +1332,8 @@ fn verify_l1_finalization(
             &config.rollup.to_string(),
             "isFinalizedStateRoot(bytes32)(bool)",
             &expected_root.to_string(),
+            "--block",
+            &head_block_tag,
         ],
     )?)?;
     let latest_finalized_root = Bytes32::from_hex(
@@ -983,6 +1343,8 @@ fn verify_l1_finalization(
                 "call",
                 &config.rollup.to_string(),
                 "latestFinalizedStateRoot()(bytes32)",
+                "--block",
+                &head_block_tag,
             ],
         )?
         .trim(),
@@ -999,6 +1361,8 @@ fn verify_l1_finalization(
                 "call",
                 &config.rollup.to_string(),
                 "latestFinalizedBlockNumber()(uint64)",
+                "--block",
+                &head_block_tag,
             ],
         )?,
         "latestFinalizedBlockNumber read-back",
@@ -1012,6 +1376,13 @@ fn verify_l1_finalization(
         )?,
         "canonical receipt block",
     )?;
+    let canonical_head_before = parse_block(
+        &run_cast(
+            config,
+            &["rpc", "eth_getBlockByNumber", &head_block_tag, "false"],
+        )?,
+        "canonical durable head read-back",
+    )?;
     let second_receipt = parse_receipt(
         &run_cast(
             config,
@@ -1024,8 +1395,8 @@ fn verify_l1_finalization(
         config.rollup,
     )?;
     let head_after = parse_block(
-        &run_cast(config, &["rpc", "eth_getBlockByNumber", "latest", "false"])?,
-        "head after finalization read-back",
+        &run_cast(config, &["rpc", "eth_getBlockByNumber", finality_tag, "false"])?,
+        "durable head after finalization read-back",
     )?;
     let evidence = L1FinalizationEvidence {
         chain_id,
@@ -1033,24 +1404,34 @@ fn verify_l1_finalization(
         second_receipt,
         head_before,
         head_after,
+        canonical_head_before,
         canonical_receipt_block,
         rollup_has_code,
         root_membership,
         latest_finalized_root,
         latest_finalized_block_number,
     };
-    validate_l1_finalization_evidence(
+    validate_l1_finalization_evidence_at_position(
         &evidence,
         config,
         transaction_hash,
         expected_root,
         expected_intmax_block,
+        position,
     )?;
     Ok(L1ValidityAcknowledgement {
         chain_id: evidence.chain_id,
         transaction_hash,
+        block_hash: evidence.first_receipt.block_hash,
         block_number: evidence.first_receipt.block_number,
         final_extended_state_commitment: expected_root,
+        finalized_checkpoint: L1FinalizedCheckpoint {
+            chain_id: evidence.chain_id,
+            block_number: evidence.head_after.number,
+            block_hash: evidence.head_after.hash,
+            parent_hash: evidence.head_after.parent_hash,
+            source,
+        },
     })
 }
 
@@ -1060,6 +1441,24 @@ fn validate_l1_finalization_evidence(
     transaction_hash: Bytes32,
     expected_root: Bytes32,
     expected_intmax_block: u64,
+) -> Result<(), ValidityProverServiceError> {
+    validate_l1_finalization_evidence_at_position(
+        evidence,
+        config,
+        transaction_hash,
+        expected_root,
+        expected_intmax_block,
+        FinalizationPosition::Latest,
+    )
+}
+
+fn validate_l1_finalization_evidence_at_position(
+    evidence: &L1FinalizationEvidence,
+    config: &L1FinalizationRpcConfig,
+    transaction_hash: Bytes32,
+    expected_root: Bytes32,
+    expected_intmax_block: u64,
+    position: FinalizationPosition,
 ) -> Result<(), ValidityProverServiceError> {
     if evidence.chain_id != config.expected_chain_id {
         return Err(l1_rejected(&format!(
@@ -1100,13 +1499,38 @@ fn validate_l1_finalization_evidence(
             "receipt block hash is no longer canonical (reorg detected)",
         ));
     }
-    if evidence.head_after.number < evidence.head_before.number
-        || (evidence.head_after.number == evidence.head_before.number
-            && evidence.head_after.hash != evidence.head_before.hash)
-    {
+    if evidence.canonical_head_before != evidence.head_before {
         return Err(l1_rejected(
-            "L1 head moved backward or changed during read-back",
+            "durable L1 head was replaced during read-back (reorg detected)",
         ));
+    }
+    // Rollup state getters were pinned to `head_before`; persisting a different `head_after` as
+    // authority would ascribe those answers to a block at which they were never read.
+    if evidence.head_after != evidence.head_before {
+        return Err(l1_rejected(
+            "durable L1 head changed during receipt read-back; retry against one stable finalized block",
+        ));
+    }
+    let source = if config.allow_unfinalized_devnet {
+        L1FinalitySource::DevnetLatest
+    } else {
+        L1FinalitySource::RpcFinalized
+    };
+    for (label, head) in [
+        ("initial", &evidence.head_before),
+        ("final", &evidence.head_after),
+    ] {
+        L1FinalizedCheckpoint {
+            chain_id: evidence.chain_id,
+            block_number: head.number,
+            block_hash: head.hash,
+            parent_hash: head.parent_hash,
+            source,
+        }
+        .covers_receipt(receipt.block_number, receipt.block_hash)
+        .map_err(|error| l1_rejected(&format!(
+            "receipt is not covered by the {label} durable head: {error}"
+        )))?;
     }
     let confirmations = evidence
         .head_after
@@ -1114,7 +1538,7 @@ fn validate_l1_finalization_evidence(
         .checked_sub(receipt.block_number)
         .and_then(|depth| depth.checked_add(1))
         .ok_or_else(|| l1_rejected("receipt block is ahead of the current L1 head"))?;
-    if confirmations < config.minimum_confirmations {
+    if config.allow_unfinalized_devnet && confirmations < config.minimum_confirmations {
         return Err(l1_rejected(&format!(
             "finalization has {confirmations} confirmations; {} required",
             config.minimum_confirmations
@@ -1125,17 +1549,33 @@ fn validate_l1_finalization_evidence(
             "isFinalizedStateRoot(candidate) returned false",
         ));
     }
-    if evidence.latest_finalized_block_number < expected_intmax_block {
-        return Err(l1_rejected(
-            "rollup latest finalized block is behind the candidate",
-        ));
-    }
-    if evidence.latest_finalized_block_number == expected_intmax_block
-        && evidence.latest_finalized_root != expected_root
-    {
-        return Err(l1_rejected(
-            "latest finalized root differs at the candidate's final block",
-        ));
+    match position {
+        FinalizationPosition::Latest => {
+            if evidence.latest_finalized_block_number != expected_intmax_block {
+                return Err(l1_rejected(
+                    "rollup latest finalized block differs from the local candidate (stale or divergent snapshot)",
+                ));
+            }
+            if evidence.latest_finalized_root != expected_root {
+                return Err(l1_rejected(
+                    "rollup latest finalized root differs from the local candidate",
+                ));
+            }
+        }
+        FinalizationPosition::Historical => {
+            if evidence.latest_finalized_block_number < expected_intmax_block {
+                return Err(l1_rejected(
+                    "rollup latest finalized block regressed behind the replayed acknowledgement",
+                ));
+            }
+            if evidence.latest_finalized_block_number == expected_intmax_block
+                && evidence.latest_finalized_root != expected_root
+            {
+                return Err(l1_rejected(
+                    "rollup root at the replayed latest height differs from its acknowledgement",
+                ));
+            }
+        }
     }
     if evidence.latest_finalized_root == Bytes32::default() {
         return Err(l1_rejected("rollup latest finalized root is zero"));
@@ -1147,6 +1587,137 @@ fn l1_rejected(message: &str) -> ValidityProverServiceError {
     ValidityProverServiceError::ProducerReconciliation(format!(
         "L1 finalization read-back rejected: {message}"
     ))
+}
+
+fn configured_finality_source(config: &L1FinalizationRpcConfig) -> L1FinalitySource {
+    if config.allow_unfinalized_devnet {
+        L1FinalitySource::DevnetLatest
+    } else {
+        L1FinalitySource::RpcFinalized
+    }
+}
+
+fn read_l1_authority_checkpoint(
+    config: &L1FinalizationRpcConfig,
+) -> Result<L1FinalizedCheckpoint, ValidityProverServiceError> {
+    config.validate()?;
+    let chain_id = parse_quantity_text(&run_cast(config, &["chain-id"])?, "cast chain-id")?;
+    if chain_id != config.expected_chain_id {
+        return Err(l1_rejected(&format!(
+            "RPC chain id {chain_id} differs from configured {}",
+            config.expected_chain_id
+        )));
+    }
+    let source = configured_finality_source(config);
+    let tag = if source == L1FinalitySource::DevnetLatest {
+        "latest"
+    } else {
+        "finalized"
+    };
+    let block = parse_block(
+        &run_cast(config, &["rpc", "eth_getBlockByNumber", tag, "false"])?,
+        "durable L1 authority",
+    )?;
+    let checkpoint = L1FinalizedCheckpoint {
+        chain_id,
+        block_number: block.number,
+        block_hash: block.hash,
+        parent_hash: block.parent_hash,
+        source,
+    };
+    checkpoint
+        .validate()
+        .map_err(|error| l1_rejected(&format!("invalid durable L1 authority: {error}")))?;
+    Ok(checkpoint)
+}
+
+fn validate_stored_l1_checkpoint(
+    config: &L1FinalizationRpcConfig,
+    stored: &L1FinalizedCheckpoint,
+    current: &L1FinalizedCheckpoint,
+) -> Result<(), ValidityProverServiceError> {
+    stored
+        .validate()
+        .map_err(|error| l1_rejected(&format!("stored L1 authority is invalid: {error}")))?;
+    if stored.chain_id != config.expected_chain_id
+        || stored.source != configured_finality_source(config)
+        || current.chain_id != stored.chain_id
+        || current.source != stored.source
+    {
+        return Err(l1_rejected(
+            "stored L1 authority differs from the configured chain/finality mode",
+        ));
+    }
+    let block_tag = format!("0x{:x}", stored.block_number);
+    let canonical = parse_block(
+        &run_cast(
+            config,
+            &["rpc", "eth_getBlockByNumber", &block_tag, "false"],
+        )?,
+        "stored L1 authority block",
+    )?;
+    if canonical.number != stored.block_number
+        || canonical.hash != stored.block_hash
+        || canonical.parent_hash != stored.parent_hash
+    {
+        return Err(l1_rejected(
+            "stored L1 authority block was replaced (reorg detected)",
+        ));
+    }
+    if current.block_number < stored.block_number
+        || (current.block_number == stored.block_number
+            && (current.block_hash != stored.block_hash
+                || current.parent_hash != stored.parent_hash))
+    {
+        return Err(l1_rejected(
+            "current durable L1 head regressed or changed at the stored height",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_progression(
+    earlier: &L1FinalizedCheckpoint,
+    later: &L1FinalizedCheckpoint,
+) -> Result<(), ValidityProverServiceError> {
+    earlier
+        .validate()
+        .map_err(|error| l1_rejected(&format!("invalid earlier L1 checkpoint: {error}")))?;
+    later
+        .validate()
+        .map_err(|error| l1_rejected(&format!("invalid later L1 checkpoint: {error}")))?;
+    if later.chain_id != earlier.chain_id || later.source != earlier.source {
+        return Err(l1_rejected(
+            "durable L1 checkpoint changed chain/finality mode",
+        ));
+    }
+    if later.block_number < earlier.block_number
+        || (later.block_number == earlier.block_number
+            && (later.block_hash != earlier.block_hash
+                || later.parent_hash != earlier.parent_hash))
+    {
+        return Err(l1_rejected(
+            "durable L1 checkpoint regressed or changed at the same height",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_replayed_acknowledgement(
+    stored: &L1ValidityAcknowledgement,
+    reread: &L1ValidityAcknowledgement,
+) -> Result<(), ValidityProverServiceError> {
+    if reread.chain_id != stored.chain_id
+        || reread.transaction_hash != stored.transaction_hash
+        || reread.block_number != stored.block_number
+        || reread.block_hash != stored.block_hash
+        || reread.final_extended_state_commitment != stored.final_extended_state_commitment
+    {
+        return Err(l1_rejected(
+            "replayed acknowledgement receipt changed or was orphaned",
+        ));
+    }
+    Ok(())
 }
 
 fn run_cast(
@@ -1261,6 +1832,7 @@ fn parse_block(json: &str, label: &str) -> Result<ParsedBlock, ValidityProverSer
     Ok(ParsedBlock {
         number: parse_quantity_field(object, "number")?,
         hash: parse_bytes32_field(object, "hash")?,
+        parent_hash: parse_bytes32_field(object, "parentHash")?,
     })
 }
 
@@ -1385,6 +1957,28 @@ fn circuit_digest(vd: &VerifierCircuitData<F, C, D>) -> Bytes32 {
     PoseidonHashOut::from(vd.verifier_only.circuit_digest).into()
 }
 
+fn validate_acknowledgement_checkpoint(
+    acknowledgement: &L1ValidityAcknowledgement,
+) -> Result<(), ValidityProverServiceError> {
+    if acknowledgement.chain_id == 0
+        || acknowledgement.transaction_hash == Bytes32::default()
+        || acknowledgement.block_hash == Bytes32::default()
+        || acknowledgement.finalized_checkpoint.chain_id != acknowledgement.chain_id
+    {
+        return Err(ValidityProverServiceError::Snapshot(
+            "L1 acknowledgement has zero or cross-chain receipt metadata".into(),
+        ));
+    }
+    acknowledgement
+        .finalized_checkpoint
+        .covers_receipt(acknowledgement.block_number, acknowledgement.block_hash)
+        .map_err(|error| {
+            ValidityProverServiceError::Snapshot(format!(
+                "L1 acknowledgement is outside its durable checkpoint: {error}"
+            ))
+        })
+}
+
 fn validate_snapshot(
     disk: &ValidityProverSnapshot,
     circuits: &ResidentCircuits,
@@ -1399,6 +1993,17 @@ fn validate_snapshot(
         return Err(ValidityProverServiceError::Snapshot(format!(
             "acknowledgement history exceeds {MAX_ACK_HISTORY} entries"
         )));
+    }
+    if let Some(authority) = disk.l1_authority {
+        authority.validate().map_err(|error| {
+            ValidityProverServiceError::Snapshot(format!(
+                "invalid durable L1 authority: {error}"
+            ))
+        })?;
+    } else if !disk.acknowledgements.is_empty() {
+        return Err(ValidityProverServiceError::Snapshot(
+            "acknowledged snapshot has no durable L1 authority".into(),
+        ));
     }
     verify_anchor(producer, &disk.finalized.anchor)?;
     let finalized = decode_extended_state(&disk.finalized.extended_state)?;
@@ -1440,6 +2045,7 @@ fn validate_snapshot(
                     "finalized L1 acknowledgement commits to a different state".into(),
                 ));
             }
+            validate_acknowledgement_checkpoint(ack)?;
         }
         _ => {
             return Err(ValidityProverServiceError::Snapshot(
@@ -1454,6 +2060,7 @@ fn validate_snapshot(
             "producer generation-zero anchor is absent".into(),
         )
     })?;
+    let mut previous_l1_checkpoint: Option<L1FinalizedCheckpoint> = None;
     let mut request_ids = std::collections::HashSet::new();
     for (index, record) in disk.acknowledgements.iter().enumerate() {
         validate_request_id(&record.request_id).map_err(|e| {
@@ -1478,6 +2085,23 @@ fn validate_snapshot(
                 index + 1
             )));
         }
+        validate_acknowledgement_checkpoint(&record.acknowledgement)?;
+        if let Some(previous) = previous_l1_checkpoint {
+            let current = record.acknowledgement.finalized_checkpoint;
+            if current.chain_id != previous.chain_id
+                || current.source != previous.source
+                || current.block_number < previous.block_number
+                || (current.block_number == previous.block_number
+                    && (current.block_hash != previous.block_hash
+                        || current.parent_hash != previous.parent_hash))
+            {
+                return Err(ValidityProverServiceError::Snapshot(format!(
+                    "acknowledgement {} regresses or replaces its durable L1 checkpoint",
+                    index + 1
+                )));
+            }
+        }
+        previous_l1_checkpoint = Some(record.acknowledgement.finalized_checkpoint);
         verify_anchor(producer, &record.finalized_anchor)?;
         previous_anchor = record.finalized_anchor.clone();
     }
@@ -1485,6 +2109,24 @@ fn validate_snapshot(
         return Err(ValidityProverServiceError::Snapshot(
             "acknowledgement history tail differs from the finalized anchor".into(),
         ));
+    }
+    if let Some(tail) = previous_l1_checkpoint {
+        let authority = disk.l1_authority.ok_or_else(|| {
+            ValidityProverServiceError::Snapshot(
+                "acknowledgement history has no snapshot L1 authority".into(),
+            )
+        })?;
+        if authority.chain_id != tail.chain_id
+            || authority.source != tail.source
+            || authority.block_number < tail.block_number
+            || (authority.block_number == tail.block_number
+                && (authority.block_hash != tail.block_hash
+                    || authority.parent_hash != tail.parent_hash))
+        {
+            return Err(ValidityProverServiceError::Snapshot(
+                "snapshot L1 authority does not cover its acknowledgement history".into(),
+            ));
+        }
     }
 
     if let Some(candidate) = &disk.candidate {
@@ -2103,6 +2745,7 @@ mod l1_evidence_tests {
             expected_chain_id: 11_155_111,
             rollup: rollup(),
             minimum_confirmations: 3,
+            allow_unfinalized_devnet: false,
         }
     }
 
@@ -2122,19 +2765,46 @@ mod l1_evidence_tests {
             head_before: ParsedBlock {
                 number: 102,
                 hash: word(102),
+                parent_hash: word(101),
             },
             head_after: ParsedBlock {
-                number: 103,
-                hash: word(103),
+                number: 102,
+                hash: word(102),
+                parent_hash: word(101),
+            },
+            canonical_head_before: ParsedBlock {
+                number: 102,
+                hash: word(102),
+                parent_hash: word(101),
             },
             canonical_receipt_block: ParsedBlock {
                 number: 100,
                 hash: word(100),
+                parent_hash: word(99),
             },
             rollup_has_code: true,
             root_membership: true,
             latest_finalized_root: root,
             latest_finalized_block_number: 7,
+        }
+    }
+
+    fn authority_evidence(root: Bytes32, intmax_block: u64) -> L1StateAuthorityEvidence {
+        let head = ParsedBlock {
+            number: 102,
+            hash: word(102),
+            parent_hash: word(101),
+        };
+        L1StateAuthorityEvidence {
+            chain_id: 11_155_111,
+            source: L1FinalitySource::RpcFinalized,
+            head_before: head.clone(),
+            canonical_head_before: head.clone(),
+            head_after: head,
+            rollup_has_code: true,
+            root_membership: true,
+            latest_finalized_root: root,
+            latest_finalized_block_number: intmax_block,
         }
     }
 
@@ -2144,6 +2814,135 @@ mod l1_evidence_tests {
         let tx = word(9);
         validate_l1_finalization_evidence(&evidence(root, tx), &config(), tx, root, 7)
             .expect("complete evidence");
+    }
+
+    #[test]
+    fn fresh_snapshot_is_bound_to_current_rollup_state_without_an_acknowledgement() {
+        let root = word(7);
+        validate_l1_state_authority_evidence(&authority_evidence(root, 7), &config(), root, 7)
+            .expect("fresh snapshot matches current finalized rollup state");
+
+        // This is the attack path that receipt-only restart validation missed: local disk still
+        // contains genesis/old state while another prover has advanced the rollup.
+        let mut stale = authority_evidence(word(8), 8);
+        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7).is_err());
+
+        stale.latest_finalized_root = root;
+        stale.latest_finalized_block_number = 7;
+        stale.root_membership = false;
+        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7).is_err());
+    }
+
+    #[test]
+    fn state_binding_rejects_head_change_after_pinned_rollup_reads() {
+        let root = word(7);
+        let mut moved = authority_evidence(root, 7);
+        moved.head_after = ParsedBlock {
+            number: 103,
+            hash: word(103),
+            parent_hash: word(102),
+        };
+        assert!(validate_l1_state_authority_evidence(&moved, &config(), root, 7).is_err());
+    }
+
+    #[test]
+    fn acknowledgement_cannot_regress_or_replace_startup_authority() {
+        let earlier = L1FinalizedCheckpoint {
+            chain_id: 11_155_111,
+            block_number: 102,
+            block_hash: word(102),
+            parent_hash: word(101),
+            source: L1FinalitySource::RpcFinalized,
+        };
+        let mut later = earlier;
+        later.block_hash = word(999);
+        assert!(validate_checkpoint_progression(&earlier, &later).is_err());
+
+        later = earlier;
+        later.block_number = 101;
+        later.block_hash = word(101);
+        later.parent_hash = word(100);
+        assert!(validate_checkpoint_progression(&earlier, &later).is_err());
+
+        later.block_number = 103;
+        later.block_hash = word(103);
+        later.parent_hash = word(102);
+        validate_checkpoint_progression(&earlier, &later).expect("monotonic durable authority");
+    }
+
+    #[test]
+    fn replayed_acknowledgement_must_match_its_exact_canonical_receipt() {
+        let stored = L1ValidityAcknowledgement {
+            chain_id: 11_155_111,
+            transaction_hash: word(9),
+            block_hash: word(100),
+            block_number: 100,
+            final_extended_state_commitment: word(7),
+            finalized_checkpoint: L1FinalizedCheckpoint {
+                chain_id: 11_155_111,
+                block_number: 102,
+                block_hash: word(102),
+                parent_hash: word(101),
+                source: L1FinalitySource::RpcFinalized,
+            },
+        };
+        validate_replayed_acknowledgement(&stored, &stored).expect("exact receipt replay");
+
+        let mut orphaned = stored.clone();
+        orphaned.block_hash = word(999);
+        assert!(validate_replayed_acknowledgement(&stored, &orphaned).is_err());
+
+        let mut substituted = stored.clone();
+        substituted.transaction_hash = word(10);
+        assert!(validate_replayed_acknowledgement(&stored, &substituted).is_err());
+    }
+
+    #[test]
+    fn historical_ack_replay_allows_later_roots_but_not_orphaned_membership_or_regression() {
+        let root = word(7);
+        let tx = word(9);
+        let mut historical = evidence(root, tx);
+        historical.latest_finalized_block_number = 8;
+        historical.latest_finalized_root = word(8);
+        assert!(
+            validate_l1_finalization_evidence(&historical, &config(), tx, root, 7).is_err(),
+            "a new acknowledgement must still be the latest rollup state"
+        );
+        validate_l1_finalization_evidence_at_position(
+            &historical,
+            &config(),
+            tx,
+            root,
+            7,
+            FinalizationPosition::Historical,
+        )
+        .expect("a canonical historical receipt remains replayable after later finalization");
+
+        historical.root_membership = false;
+        assert!(
+            validate_l1_finalization_evidence_at_position(
+                &historical,
+                &config(),
+                tx,
+                root,
+                7,
+                FinalizationPosition::Historical,
+            )
+            .is_err()
+        );
+        historical.root_membership = true;
+        historical.latest_finalized_block_number = 6;
+        assert!(
+            validate_l1_finalization_evidence_at_position(
+                &historical,
+                &config(),
+                tx,
+                root,
+                7,
+                FinalizationPosition::Historical,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2170,18 +2969,46 @@ mod l1_evidence_tests {
     }
 
     #[test]
-    fn reorged_receipt_or_insufficient_confirmations_is_rejected() {
+    fn reorged_or_not_yet_finalized_receipt_is_rejected() {
         let root = word(7);
         let tx = word(9);
         let mut reorged = evidence(root, tx);
         reorged.canonical_receipt_block.hash = word(101);
         assert!(validate_l1_finalization_evidence(&reorged, &config(), tx, root, 7).is_err());
 
-        let mut shallow = evidence(root, tx);
-        shallow.head_before.number = 100;
-        shallow.head_before.hash = word(100);
-        shallow.head_after.number = 100;
-        shallow.head_after.hash = word(100);
-        assert!(validate_l1_finalization_evidence(&shallow, &config(), tx, root, 7).is_err());
+        let mut above_finalized = evidence(root, tx);
+        above_finalized.head_before.number = 99;
+        above_finalized.head_before.hash = word(99);
+        above_finalized.head_before.parent_hash = word(98);
+        above_finalized.canonical_head_before = above_finalized.head_before.clone();
+        assert!(
+            validate_l1_finalization_evidence(&above_finalized, &config(), tx, root, 7).is_err()
+        );
+    }
+
+    #[test]
+    fn same_height_finalized_replacement_and_stale_local_snapshot_are_rejected() {
+        let root = word(7);
+        let tx = word(9);
+        let mut replacement = evidence(root, tx);
+        replacement.canonical_head_before.hash = word(999);
+        assert!(
+            validate_l1_finalization_evidence(&replacement, &config(), tx, root, 7).is_err()
+        );
+
+        let mut stale = evidence(root, tx);
+        stale.latest_finalized_block_number = 8;
+        stale.latest_finalized_root = word(8);
+        assert!(validate_l1_finalization_evidence(&stale, &config(), tx, root, 7).is_err());
+    }
+
+    #[test]
+    fn unfinalized_escape_is_restricted_to_anvil() {
+        let mut public = config();
+        public.allow_unfinalized_devnet = true;
+        assert!(public.validate().is_err());
+
+        public.expected_chain_id = ANVIL_CHAIN_ID;
+        assert!(public.validate().is_ok());
     }
 }

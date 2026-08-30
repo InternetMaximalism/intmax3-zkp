@@ -40,7 +40,11 @@ const SIGNED_SMALL_BLOCK_DOMAIN: u32 = 0x494d5353; // "IMSS"
 // salt. No circuit or Solidity code recomputes this variable-tail preimage; native consumers
 // share this method.
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c; // "IMCL"
-const CLOSE_INTENT_DOMAIN: u32 = 0x494d4349; // "IMCI"
+/// "IMCS" — canonical close-state identity. The retired IMCI digest included coordinator-chosen
+/// close metadata and therefore let one member-signed state mint arbitrarily many identities.
+/// IMCS is deliberately a function only of the channel, the member-signed final IMCH digest, and
+/// the next freeze nonce.
+pub const CLOSE_STATE_ID_DOMAIN: u32 = 0x494d4353; // "IMCS"
 const SPECIAL_CLOSE_DOMAIN: u32 = 0x494d5343; // "IMSC"
 const CANCEL_CLOSE_DOMAIN: u32 = 0x494d434e; // "IMCN"
 const POST_CLOSE_CLAIM_DOMAIN: u32 = 0x494d4350; // "IMCP"
@@ -528,6 +532,31 @@ pub fn token_funds_digest(
         words.extend(amount.to_u32_vec());
     }
     hash_words(&words)
+}
+
+/// Canonical identity for one channel-close state.
+///
+/// `keccak([IMCS, channel_id, final_channel_state_digest, close_freeze_nonce_hi,
+/// close_freeze_nonce_lo])`
+///
+/// The final state digest is the N-of-N-authorized IMCH digest, while `close_freeze_nonce` is
+/// constrained by the close circuit to `final_state.close_freeze_nonce + 1`. Coordinator-chosen
+/// transport/DA metadata is intentionally absent, so changing it cannot mint a fresh replay,
+/// cancel, claim, or nullifier namespace for the same signed state.
+pub fn close_state_id(
+    channel_id: ChannelId,
+    final_channel_state_digest: Bytes32,
+    close_freeze_nonce: u64,
+) -> Bytes32 {
+    hash_words(
+        &[
+            vec![CLOSE_STATE_ID_DOMAIN],
+            channel_id.to_u32_vec(),
+            final_channel_state_digest.to_u32_vec(),
+            split_u64(close_freeze_nonce),
+        ]
+        .concat(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1018,6 +1047,8 @@ impl CloseWithdrawal {
 #[serde(rename_all = "camelCase")]
 pub struct CloseIntent {
     pub channel_id: ChannelId,
+    /// Canonical close-era nonce. This is not coordinator metadata: it is exactly
+    /// `final_state.close_freeze_nonce + 1`, the same value carried by `close_freeze_nonce`.
     pub close_nonce: u64,
     pub final_epoch: u64,
     pub final_small_block_number: u64,
@@ -1026,18 +1057,14 @@ pub struct CloseIntent {
     /// `h1()` of the final `BalanceState` (rename of the legacy `final_channel_balance_root`).
     pub final_balance_state_h1: Bytes32,
     pub channel_fund_snapshot: ChannelFund,
-    /// SECURITY (M-9, UNSIGNED): supplied by the closing coordinator at close time. It is NOT a
-    /// field of `ChannelState`, so it is absent from the member-signed IMCH preimage, and L1
-    /// only stores/emits it (`finalizedBurnTxHash` is written by `finalizeClose` and never
-    /// read). See the `signing_digest` SECURITY block below.
+    /// Canonical sentinel. A close proof does not prove a live L2 withdrawal/burn transaction;
+    /// therefore this MUST be zero. A real withdrawal is authorized by the separate withdrawal
+    /// proof/nullifier path and must never be inferred from this field.
     pub burn_tx_hash: Bytes32,
-    /// SECURITY (M-9, UNSIGNED, transitively): IMCL is a function of the signed state EXCEPT for
-    /// `burn_tx_hash`, so this digest inherits that field's freedom. Removing `burn_tx_hash` from
-    /// the IMCI preimage alone would therefore NOT make IMCI a function of the signed state.
+    /// Canonical IMCL commitment recomputed with the zero `burn_tx_hash` sentinel.
     pub close_withdrawal_digest: Bytes32,
-    /// SECURITY (M-9, UNSIGNED): likewise coordinator-chosen and absent from IMCH. There is no
-    /// on-chain block-number -> medium-block-state-root lookup to pin it against either
-    /// (`IntmaxRollup` exposes only `isFinalizedStateRoot(bytes32)`).
+    /// Canonical zero sentinel. `ChannelState` contains no authenticated medium-block snapshot;
+    /// using `small_block_number` here would falsely equate two distinct block domains.
     pub snapshot_medium_block_number: u64,
     /// `state_version` of the final balance state — L1 challenge ordering compares
     /// `(final_epoch, final_state_version)` (detail2 §H-4).
@@ -1049,10 +1076,8 @@ pub struct CloseIntent {
 
 impl CloseIntent {
     pub fn new(
-        close_nonce: u64,
         final_channel_state: &ChannelState,
         close_withdrawal: &CloseWithdrawal,
-        snapshot_medium_block_number: u64,
     ) -> Result<Self, ChannelError> {
         if final_channel_state.channel_id != close_withdrawal.channel_id {
             return Err(ChannelError::InvalidCloseBinding(format!(
@@ -1081,14 +1106,25 @@ impl CloseIntent {
                 close_withdrawal.intmax_state_root
             )));
         }
+        // M-9: a close proof does not contain the live L2 withdrawal proof needed to authenticate
+        // an actual burn transaction. Keeping a caller-selected hash here would let any holder of
+        // the already-signed state publish arbitrary proof-bound `burnTxHash` telemetry. Zero is an
+        // explicit "no live burn proven" sentinel; the real partial-withdrawal lane is bound
+        // independently by IMD2 + the signed settled-tx chain + the withdrawal proof/nullifier.
+        if close_withdrawal.burn_tx_hash != Bytes32::default() {
+            return Err(ChannelError::InvalidCloseBinding(
+                "close burn_tx_hash must be zero: the close proof does not authenticate a live withdrawal"
+                    .to_string(),
+            ));
+        }
         // SECURITY (multitoken §N-6, TM-3/TM-11 — per-token close semantics): the L2 close BURN
         // leg denominates ONLY the GENESIS token position (local slot 0): `burn_amount` must
         // equal `amounts[0]` exactly, and the close circuit connects `amounts[0]` to the
         // `channel_fund_amount` PI (Phase 2a). Non-genesis token funds (`amounts[1..]`) are NOT
         // burned — they settle via per-(member, token) withdrawal claims against the Manager's
-        // per-base-token accounting: the FULL `amounts[0..10]` vector rides in this intent
-        // (IMCI, 80 limbs) and is bound — with the registry and token_count — to the
-        // member-signed close PI `token_funds_digest` by the verifier's on-chain recompute;
+        // per-base-token accounting: the FULL `amounts[0..10]` vector rides in this intent and
+        // is bound — with the registry and token_count — through the member-signed IMCH and
+        // close PI `token_funds_digest` (TFD) by the verifier's on-chain recompute;
         // `finalizeClose` accrues `finalizedChannelFundAmount[registry[t]] += amounts[t]` per
         // token and `pullChannelTokenFunds(t)` moves the ERC-20 escrow (Phase 3, landed). The
         // former Phase-1/3 fail-closed refusal of nonzero non-genesis funds is LIFTED here
@@ -1106,81 +1142,46 @@ impl CloseIntent {
                 "close requires unallocated_confirmed_incoming = 0".to_string(),
             ));
         }
+        let close_nonce = final_channel_state
+            .close_freeze_nonce
+            .checked_add(1)
+            .ok_or_else(|| {
+                ChannelError::InvalidCloseBinding(
+                    "close_freeze_nonce overflow while deriving canonical close nonce".to_string(),
+                )
+            })?;
         Ok(Self {
             channel_id: final_channel_state.channel_id,
             close_nonce,
             final_epoch: final_channel_state.epoch,
             final_small_block_number: final_channel_state.small_block_number,
-            close_freeze_nonce: final_channel_state.close_freeze_nonce + 1,
+            close_freeze_nonce: close_nonce,
             final_channel_state_digest: final_channel_state.digest,
             final_balance_state_h1: final_channel_state.balance_state.h1(),
             channel_fund_snapshot: final_channel_state.channel_fund.clone(),
             burn_tx_hash: close_withdrawal.burn_tx_hash,
             close_withdrawal_digest: close_withdrawal.signing_digest(),
-            snapshot_medium_block_number,
+            snapshot_medium_block_number: 0,
             final_state_version: final_channel_state.balance_state.state_version,
             final_settled_tx_chain: final_channel_state.balance_state.settled_tx_chain,
         })
     }
 
-    /// IMCI signing digest. `final_state_version` and `final_settled_tx_chain` are appended at
-    /// the END of the legacy preimage (detail2 §C-8).
-    ///
-    /// SECURITY (multitoken, TM-11): the former single 8-limb `channel_fund_snapshot.amount`
-    /// segment is widened IN PLACE to the flat, ALWAYS-full-width 80-limb `amounts[0..10]`
-    /// vector — same rationale as `ChannelState::signing_digest` (fixed-width injective; the
-    /// registry alignment is bound via `final_balance_state_h1` in this same preimage; §N/§G-2
-    /// do not re-version IMCI). The Solidity mirror (`computeCloseIntentDigest`) is updated in
-    /// Phase 3; until then the shared-vector cross-check is `#[ignore]`d (see
-    /// `close_intent_digest_matches_solidity_shared_vector`).
-    ///
-    /// SECURITY (M-9 — this digest is NOT a member-authorized commitment; audit28-08-2026 §M-9,
-    /// `doc/tasks/close-detached-signing-design.md` T-5 / §8.3). The ONLY message any member ever
-    /// signs on the close path is `ChannelState::signing_digest()` (IMCH). Three fields of this
-    /// preimage are outside it and are chosen freely by whoever builds the close:
-    ///   * `close_nonce`                    (close PI limbs 1..2)
-    ///   * `burn_tx_hash`                   (close PI limbs 41..48, and, transitively, the
-    ///                                       `close_withdrawal_digest` slot)
-    ///   * `snapshot_medium_block_number`   (close PI limbs 65..66)
-    /// The close circuit recomputes this keccak over them but constrains NONE of them against the
-    /// signed state (`close_circuit.rs` block (d)), and `ChannelSettlementManager` only stores and
-    /// emits them. So one N-of-N signature set over a single `ChannelState` yields UNBOUNDEDLY
-    /// MANY distinct `close_intent_digest` values.
-    ///
-    /// CALLER OBLIGATION: do NOT treat `close_intent_digest` as a stable, N-of-N-authorized
-    /// identity for a close. It is safe today ONLY because `_isNewer` is strict on
-    /// `(finalEpoch, finalStateVersion)` and `closeFreezeNonce` — which IS inside IMCH — fences
-    /// the era; both of those are properties of the SIGNED state, not of this digest. Any new
-    /// digest-keyed replay/dedup or cancel-addressing logic must re-derive its fence from the
-    /// signed state (`final_channel_state_digest` / `close_freeze_nonce`) rather than assume a
-    /// fresh digest implies a fresh signature. Pinned by
-    /// `m9_one_signature_set_mints_many_distinct_close_intent_digests`.
-    pub fn signing_digest(&self) -> Bytes32 {
-        hash_words(
-            &[
-                vec![CLOSE_INTENT_DOMAIN],
-                self.channel_id.to_u32_vec(),
-                split_u64(self.close_nonce),
-                split_u64(self.final_epoch),
-                split_u64(self.final_small_block_number),
-                split_u64(self.close_freeze_nonce),
-                self.final_channel_state_digest.to_u32_vec(),
-                self.final_balance_state_h1.to_u32_vec(),
-                self.channel_fund_snapshot.channel_id.to_u32_vec(),
-                self.channel_fund_snapshot
-                    .amounts
-                    .iter()
-                    .flat_map(U256::to_u32_vec)
-                    .collect(),
-                self.channel_fund_snapshot.intmax_state_root.to_u32_vec(),
-                self.burn_tx_hash.to_u32_vec(),
-                self.close_withdrawal_digest.to_u32_vec(),
-                split_u64(self.snapshot_medium_block_number),
-                split_u64(self.final_state_version),
-                self.final_settled_tx_chain.to_u32_vec(),
-            ]
-            .concat(),
+    /// Canonical close-state identity. This is the preferred semantic name; the externally visible
+    /// `closeIntentDigest` field name is retained for ABI/storage compatibility.
+    pub fn state_id(&self) -> Bytes32 {
+        close_state_id(
+            self.channel_id,
+            self.final_channel_state_digest,
+            self.close_freeze_nonce,
         )
+    }
+
+    /// Legacy API name for [`Self::state_id`]. This is no longer a digest of all `CloseIntent`
+    /// metadata and is not a separately signed message. It is the stable, state-derived IMCS key
+    /// used by close replay, cancellation, claims, and nullifiers.
+    pub fn signing_digest(&self) -> Bytes32 {
+        self.state_id()
     }
 }
 
@@ -1252,13 +1253,13 @@ impl WithdrawalClaim {
     /// SECURITY (domain handling): the "IMCW" domain is RETAINED for this digest per detail2
     /// §G-2 ("IMCW remains for the claim signing_digest"; only the NULLIFIER re-versioned to
     /// "IMW2"). The in-place widening is sound by the same argument the Phase 1 review ACCEPTED
-    /// for IMCH/IMCI: exactly one message type hashes under this domain, keccak collision
-    /// resistance covers the differing fixed prefix widths, and the v3 reset retires every
-    /// v1-signed claim digest. PRECISION (Phase 2a review note): because this preimage ends in a
-    /// variable-length, length-prefixed `claim_proof` tail, a v1 and a v2 preimage CAN have
-    /// equal total length (the v2 limb consuming one tail word under a realigned parse); for
-    /// that equal-total-length realignment case the non-aliasing argument rests on the v3 reset
-    /// ALONE, not on keccak collision resistance.
+    /// for IMCH/the retired IMCI scheme: exactly one message type hashes under this domain, keccak
+    /// collision resistance covers the differing fixed prefix widths, and the v3 reset retires
+    /// every v1-signed claim digest. PRECISION (Phase 2a review note): because this preimage
+    /// ends in a variable-length, length-prefixed `claim_proof` tail, a v1 and a v2 preimage
+    /// CAN have equal total length (the v2 limb consuming one tail word under a realigned
+    /// parse); for that equal-total-length realignment case the non-aliasing argument rests on
+    /// the v3 reset ALONE, not on keccak collision resistance.
     pub fn signing_digest(&self) -> Bytes32 {
         hash_words(
             &[
@@ -1966,86 +1967,54 @@ mod tests {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 1, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![1, 2, 3],
         }
     }
 
-    /// M-9 CHARACTERIZATION (audit28-08-2026 §M-9; `close-detached-signing-design.md` T-5/§8.3).
-    ///
-    /// This test asserts the CURRENT, DEFECTIVE behaviour on purpose, so that M-9 is executable
-    /// and so that whichever remediation lands (members sign IMCI — design-doc Option C — or an
-    /// L1 pin of the three fields) breaks this test loudly and forces the assertions to be
-    /// inverted. It is the "two witnesses differing only in `burn_tx_hash` /
-    /// `snapshot_medium_block_number`" pair, at the native layer: the close circuit's IMCI
-    /// recompute is byte-identical to `CloseIntent::signing_digest` and constrains none of these
-    /// fields, so a native pair that produces distinct digests off ONE signed state is exactly a
-    /// pair of circuit witnesses that both verify under the SAME member signatures.
-    ///
-    /// The load-bearing assertion is the first one: the members' ONLY message — the IMCH state
-    /// digest — is byte-identical across every variant.
+    /// M-9 regression: close metadata is derived canonically from the member-signed state. This
+    /// preserves unilateral close without letting a coordinator mint misleading proof-bound
+    /// metadata from one N-of-N IMCH signature set.
     #[test]
-    fn m9_one_signature_set_mints_many_distinct_close_intent_digests() {
+    fn m9_close_metadata_is_canonical_and_nonzero_burn_is_rejected() {
         let state = sample_state();
         let close_tx = sample_close_withdrawal(&state);
-        let baseline = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let intent = CloseIntent::new(&state, &close_tx).unwrap();
+        assert_eq!(intent.close_nonce, state.close_freeze_nonce + 1);
+        assert_eq!(intent.close_freeze_nonce, intent.close_nonce);
+        assert_eq!(intent.snapshot_medium_block_number, 0);
+        assert_eq!(intent.burn_tx_hash, Bytes32::default());
+        assert_eq!(intent.close_withdrawal_digest, close_tx.signing_digest());
+        assert_eq!(intent.state_id(), intent.signing_digest());
 
-        // Variant 1: `burn_tx_hash` only (this also moves `close_withdrawal_digest`, which is the
-        // transitive half of the same freedom).
+        // The close circuit has no live withdrawal proof, so accepting a caller-chosen burn hash
+        // would falsely present arbitrary telemetry as member-authorized withdrawal data.
         let mut burn_tx = close_tx.clone();
         burn_tx.burn_tx_hash = Bytes32::from_u32_slice(&[0xdead, 0xbeef, 0, 0, 0, 0, 0, 0]).unwrap();
-        let variant_burn = CloseIntent::new(5, &state, &burn_tx, 123).unwrap();
+        assert!(matches!(
+            CloseIntent::new(&state, &burn_tx),
+            Err(ChannelError::InvalidCloseBinding(_))
+        ));
 
-        // Variant 2: `snapshot_medium_block_number` only.
-        let variant_mbn = CloseIntent::new(5, &state, &close_tx, 124).unwrap();
-
-        // Variant 3: `close_nonce` only.
-        let variant_nonce = CloseIntent::new(6, &state, &close_tx, 123).unwrap();
-
-        // The ONLY message the members sign is the IMCH state digest, and it is identical for
-        // every variant — so ONE N-of-N signature set authorizes all four.
-        let imch = state.signing_digest();
-        assert_eq!(state.digest, imch, "sample state's cached digest must be IMCH");
-        for intent in [&baseline, &variant_burn, &variant_mbn, &variant_nonce] {
-            assert_eq!(
-                intent.final_channel_state_digest, imch,
-                "M-9: every variant closes the SAME member-signed state"
-            );
-            assert_eq!(
-                intent.close_freeze_nonce,
-                state.close_freeze_nonce + 1,
-                "M-9: the era fence is identical too — it comes from the signed state"
-            );
-        }
-
-        // Yet all four close-intent digests differ. This is M-9: the digest the whole cancel lane
-        // is addressed by is NOT a function of the member-signed state.
-        let digests = [
-            baseline.signing_digest(),
-            variant_burn.signing_digest(),
-            variant_mbn.signing_digest(),
-            variant_nonce.signing_digest(),
-        ];
-        for i in 0..digests.len() {
-            for j in (i + 1)..digests.len() {
-                assert_ne!(
-                    digests[i], digests[j],
-                    "M-9 (expected while unremediated): variants {i} and {j} mint distinct \
-                     close_intent_digests from ONE signature set. If this now FAILS, the fix has \
-                     landed — invert this test to assert digest stability."
-                );
-            }
-        }
+        let mut exhausted = state.clone();
+        exhausted.close_freeze_nonce = u64::MAX;
+        let exhausted = exhausted.with_computed_digest();
+        let exhausted_tx = sample_close_withdrawal(&exhausted);
+        assert!(matches!(
+            CloseIntent::new(&exhausted, &exhausted_tx),
+            Err(ChannelError::InvalidCloseBinding(_))
+        ));
     }
 
-    /// M-9 positive control: the fences that DO hold are the ones carried by the signed state.
-    /// A different `close_freeze_nonce` (era) or a different final state digest requires a
-    /// genuinely different N-of-N signature set, because both live inside the IMCH preimage.
-    /// This is what any digest-keyed logic must key its freshness off, not `close_intent_digest`.
+    /// M-9 separation control: changing either signed state or freeze era changes the canonical
+    /// ID. Both coordinates are member-authorized: IMCH commits the state and its current nonce;
+    /// `CloseIntent::new` deterministically advances that nonce by one.
     #[test]
-    fn m9_era_and_state_fences_are_inside_the_signed_imch_preimage() {
+    fn m9_state_or_freeze_change_produces_a_distinct_close_state_id() {
         let state = sample_state();
+        let close_tx = sample_close_withdrawal(&state);
+        let baseline = CloseIntent::new(&state, &close_tx).unwrap();
 
         let mut next_era = state.clone();
         next_era.close_freeze_nonce += 1;
@@ -2054,6 +2023,9 @@ mod tests {
             next_era.digest, state.digest,
             "close_freeze_nonce IS inside IMCH: a new era needs a new signature set"
         );
+        let next_era_tx = sample_close_withdrawal(&next_era);
+        let next_era_intent = CloseIntent::new(&next_era, &next_era_tx).unwrap();
+        assert_ne!(baseline.state_id(), next_era_intent.state_id());
 
         let mut next_version = state.clone();
         next_version.balance_state.state_version += 1;
@@ -2062,14 +2034,17 @@ mod tests {
             next_version.digest, state.digest,
             "state_version IS inside IMCH: a new version needs a new signature set"
         );
+        let next_version_tx = sample_close_withdrawal(&next_version);
+        let next_version_intent = CloseIntent::new(&next_version, &next_version_tx).unwrap();
+        assert_ne!(baseline.state_id(), next_version_intent.state_id());
     }
 
     #[test]
     fn close_intent_is_stable_and_carries_balance_state_bindings() {
         let state = sample_state();
         let close_tx = sample_close_withdrawal(&state);
-        let intent_a = CloseIntent::new(9, &state, &close_tx, 123).unwrap();
-        let intent_b = CloseIntent::new(9, &state, &close_tx, 123).unwrap();
+        let intent_a = CloseIntent::new(&state, &close_tx).unwrap();
+        let intent_b = CloseIntent::new(&state, &close_tx).unwrap();
         assert_eq!(intent_a, intent_b);
         assert_eq!(
             intent_a.final_state_version,
@@ -2080,30 +2055,23 @@ mod tests {
             state.balance_state.settled_tx_chain
         );
 
-        // The appended IMCI fields are signature-binding.
+        // Legacy metadata fields no longer mint a different identity by themselves.
         let mut tampered = intent_a.clone();
         tampered.final_state_version += 1;
-        assert_ne!(tampered.signing_digest(), intent_a.signing_digest());
+        assert_eq!(tampered.signing_digest(), intent_a.signing_digest());
         let mut tampered = intent_a.clone();
         tampered.final_settled_tx_chain =
             Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        assert_ne!(tampered.signing_digest(), intent_a.signing_digest());
+        assert_eq!(tampered.signing_digest(), intent_a.signing_digest());
     }
 
-    /// Shared Rust<->Solidity test vector: the SAME fully-populated `CloseIntent` is hashed by
+    /// Shared Rust<->Solidity/circuit test vector: the same canonical state coordinates are hashed by
     /// `ChannelSettlementManager.computeCloseIntentDigest` /
-    /// `ChannelSettlementVerifier.closePIHash` (inner keccak) in
+    /// `ChannelSettlementVerifier._closeIntentDigest` in
     /// contracts/test/ChannelSettlementManager.t.sol
     /// (`test_close_intent_digest_matches_rust_shared_vector`) and MUST produce the same
-    /// constant. If the two sides disagree, the Solidity `abi.encodePacked` mirror of the IMCI
+    /// constant. If the two sides disagree, the Solidity `abi.encodePacked` mirror of the IMCS
     /// preimage is stale — fix Solidity, not this digest.
-    ///
-    /// MULTITOKEN PHASE 3 RE-PIN (2026-07-27): the IMCI preimage carries the 80-limb
-    /// `amounts[0..10]` vector (detail2 §N-6, in-place widening) and the Solidity mirror
-    /// (`ChannelSettlementManager.computeCloseIntentDigest` /
-    /// `ChannelSettlementVerifier._closeIntentDigest`) was updated to match. The constant below
-    /// was REGENERATED FROM THIS RUST SIDE (the native layout is the source of truth) and is
-    /// asserted by the Solidity twin — never re-pin by copying a Solidity result here.
     #[test]
     fn close_intent_digest_matches_solidity_shared_vector() {
         let words = |base: u32| -> Vec<u32> { (base..base + 8).collect() };
@@ -2129,7 +2097,7 @@ mod tests {
             final_settled_tx_chain: Bytes32::from_u32_slice(&words(49)).unwrap(),
         };
         let expected =
-            Bytes32::from_hex("0x9fc3ced58e9f82428e4b8a20f6e7755e1c0145facd2824f57d112cef86be42fb")
+            Bytes32::from_hex("0x02dd6084b2c3921fb635639fab58406994068a7cdfca286992eac9e57c373778")
                 .unwrap();
         assert_eq!(intent.signing_digest(), expected);
     }
@@ -2183,7 +2151,7 @@ mod tests {
         close_tx.final_balance_state_h1 =
             Bytes32::from_u32_slice(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert!(matches!(
-            CloseIntent::new(9, &state, &close_tx, 123),
+            CloseIntent::new(&state, &close_tx),
             Err(ChannelError::InvalidCloseBinding(_))
         ));
     }
@@ -2456,7 +2424,7 @@ mod tests {
         let state = sample_state();
         let tx = sample_inter_channel_tx(&state);
         let close_tx = sample_close_withdrawal(&state);
-        let close_intent = CloseIntent::new(1, &state, &close_tx, 5).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         let cancel = CancelClose::new(&close_intent, &tx, vec![9]);
         assert_eq!(
             cancel.revived_small_block_root,
@@ -2960,7 +2928,7 @@ mod tests {
     /// carrying nonzero non-genesis-token funds — those settle via per-token withdrawal claims
     /// (Manager per-base-token accounting, Phase 3), NOT the burn leg. The intent must still
     /// (a) bind the burn amount to `amounts[0]` (the genesis-token burn denomination) and
-    /// (b) snapshot the FULL fund vector into the IMCI preimage (TFD-bound on-chain).
+    /// (b) snapshot the FULL fund vector for the TFD/IMCH bindings checked on-chain/in-circuit.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn close_intent_accepts_nonzero_non_genesis_funds_and_binds_the_full_vector() {
@@ -2970,9 +2938,9 @@ mod tests {
         state.channel_fund.amounts[1] = U256::from(5u32);
         let state = state.with_computed_digest();
         let close_tx = sample_close_withdrawal(&state);
-        let intent = CloseIntent::new(9, &state, &close_tx, 123)
+        let intent = CloseIntent::new(&state, &close_tx)
             .expect("multi-token close intent must build (per-token settlement landed, Phase 3)");
-        // The full per-token vector is snapshotted (TFD/IMCI binding source).
+        // The full per-token vector is snapshotted (TFD/IMCH binding source).
         assert_eq!(
             intent.channel_fund_snapshot.amounts,
             state.channel_fund.amounts
@@ -2982,17 +2950,17 @@ mod tests {
         let mut bad_burn = sample_close_withdrawal(&state);
         bad_burn.burn_amount = state.channel_fund.amounts[0] + state.channel_fund.amounts[1];
         assert!(matches!(
-            CloseIntent::new(9, &state, &bad_burn, 123),
+            CloseIntent::new(&state, &bad_burn),
             Err(ChannelError::InvalidCloseBinding(_))
         ));
-        // And the two intents over different non-genesis funds hash differently (IMCI binds the
-        // widened 80-limb vector).
+        // The states' member-signed IMCH digests differ, so their canonical close-state IDs differ;
+        // TFD separately binds the widened 80-limb settlement vector.
         let mut state_b = sample_state();
         state_b.balance_state.apply_token_register(55).unwrap();
         state_b.channel_fund.amounts[1] = U256::from(6u32);
         let state_b = state_b.with_computed_digest();
         let close_tx_b = sample_close_withdrawal(&state_b);
-        let intent_b = CloseIntent::new(9, &state_b, &close_tx_b, 123).unwrap();
+        let intent_b = CloseIntent::new(&state_b, &close_tx_b).unwrap();
         assert_ne!(intent.signing_digest(), intent_b.signing_digest());
     }
 

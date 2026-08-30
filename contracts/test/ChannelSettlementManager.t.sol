@@ -131,13 +131,10 @@ contract ChannelSettlementManagerTest is Test {
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 9;
     uint256 internal constant INITIAL_BP_BOND = 25;
 
-    // Shared Rust<->Solidity CloseIntent digest test vector. The same fully-populated intent is
-    // hashed by `CloseIntent::signing_digest()` in src/common/channel.rs
-    // (close_intent_digest_matches_solidity_shared_vector) and MUST produce this constant.
-    // Multitoken Phase 3 re-pin (2026-07-27): regenerated FROM THE RUST SIDE after the IMCI
-    // preimage widened to the 80-word amounts[0..10] vector (§N-6, TM-11).
+    // Shared Rust<->circuit<->Solidity canonical closeStateId vector. The legacy ABI method name
+    // remains `computeCloseIntentDigest`, but the value is IMCS(channelId, final IMCH, freeze).
     bytes32 internal constant SHARED_VECTOR_DIGEST =
-        0x9fc3ced58e9f82428e4b8a20f6e7755e1c0145facd2824f57d112cef86be42fb;
+        0x02dd6084b2c3921fb635639fab58406994068a7cdfca286992eac9e57c373778;
 
     function setUp() external {
         verifier = new ChannelSettlementVerifier();
@@ -179,18 +176,46 @@ contract ChannelSettlementManagerTest is Test {
             BP_MEMBER_SLOT,
             USER_A, // block-proposer pubkey hash = member at BP_MEMBER_SLOT
             0, // delegate_count (Phase 1: member-only)
+            bytes32(0),
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
-            bindings,
-            new ChannelSettlementManager.MemberBinding[](0) // no delegates
+            bindings
         );
     }
 
     function _proofFor(bytes32 piHash) internal pure returns (bytes memory) {
         return abi.encode(piHash);
+    }
+
+    function _participantTree(bytes32[] memory pkGs, address[] memory recipients, uint16 targetSlot)
+        internal
+        pure
+        returns (bytes32 root, bytes32[10] memory siblings)
+    {
+        bytes32[1024] memory nodes;
+        for (uint256 i = 0; i < pkGs.length; i++) {
+            nodes[i] = keccak256(
+                abi.encodePacked(bytes4(0x494d5052), uint16(i), pkGs[i], recipients[i])
+            );
+        }
+        uint256 width = 1024;
+        uint256 target = uint256(targetSlot);
+        uint256 level = 0;
+        while (width > 1) {
+            siblings[level] = nodes[target ^ 1];
+            for (uint256 i = 0; i < width; i += 2) {
+                nodes[i >> 1] = keccak256(
+                    abi.encodePacked(bytes4(0x494d504e), nodes[i], nodes[i + 1])
+                );
+            }
+            width >>= 1;
+            target >>= 1;
+            level++;
+        }
+        root = nodes[0];
     }
 
     /// @dev Initialize a verifier's close VK with the shared mock MLE verifier (set-once). Mirrors
@@ -255,16 +280,18 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     /// @dev Build a cancel-close `MleProof` whose `publicInputs` equal the verifier's expected
-    ///      27-limb vector for `request`. The `memberSetCommitment` limbs use the channel's
+    ///      29-limb vector for `request`. The `memberSetCommitment` limbs use the channel's
     ///      REGISTERED member-set commitment (what `cancelClose` injects — Finding D), so the strict
     ///      bind passes only when the proof claims the registered set.
     function _cancelCloseProof(ChannelSettlementManager.CancelCloseRequest memory request)
         internal view returns (MleVerifier.MleProof memory)
     {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         uint256[] memory limbs = verifier.expectedCancelCloseLimbs(
             CHANNEL_ID,
             request.closeIntentDigest,
             manager.registeredMemberSetCommitment(),
+            pending.finalStateVersion,
             request.revivedStateVersion,
             request.revivedChannelStateDigest
         );
@@ -353,13 +380,13 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function _intent(
-        uint64 closeNonce,
+        uint64 _closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = _intentWithVersion(
-            closeNonce,
+            _closeNonce,
             finalEpoch,
             finalSmallBlockNumber,
             closeFreezeNonce,
@@ -377,14 +404,14 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function _intentWithVersion(
-        uint64 closeNonce,
+        uint64 _closeNonce,
         uint64 finalEpoch,
         uint64 finalSmallBlockNumber,
         uint64 closeFreezeNonce,
         uint64 finalStateVersion
     ) internal pure returns (ChannelSettlementManager.CloseIntent memory intent) {
         intent = ChannelSettlementManager.CloseIntent({
-            closeNonce: closeNonce,
+            closeNonce: closeFreezeNonce,
             finalEpoch: finalEpoch,
             finalSmallBlockNumber: finalSmallBlockNumber,
             closeFreezeNonce: closeFreezeNonce,
@@ -394,9 +421,9 @@ contract ChannelSettlementManagerTest is Test {
             tokenRegistry: _singleRegistry(),
             tokenCount: 1,
             channelFundIntmaxStateRoot: keccak256("intmax_root"),
-            burnTxHash: keccak256("burn_tx"),
+            burnTxHash: bytes32(0),
             closeWithdrawalDigest: keccak256("burn_backed_close"),
-            snapshotMediumBlockNumber: 77,
+            snapshotMediumBlockNumber: 0,
             finalStateVersion: finalStateVersion,
             finalSettledTxChain: keccak256("settled_tx_chain"),
             finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root")
@@ -555,11 +582,12 @@ contract ChannelSettlementManagerTest is Test {
                 CHANNEL_ID,
                 keccak256("close"),
                 keccak256("member_set"),
+                7,
                 9,
                 keccak256("revived_state")
             ).length,
-            27,
-            "cancel-close PI is 27 raw limbs"
+            29,
+            "cancel-close PI is 29 raw limbs"
         );
 
         assertEq(
@@ -580,10 +608,34 @@ contract ChannelSettlementManagerTest is Test {
         );
     }
 
+    /// M-9: even a mock-verifier proof rebuilt to match caller-selected metadata cannot enter the
+    /// close lifecycle. The production circuit enforces the same three equalities.
+    function test_close_rejects_noncanonical_close_metadata_before_verification() external {
+        _requestCloseAndElapseGrace();
+
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        intent.closeNonce = 2;
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        vm.expectRevert(ChannelSettlementManager.NonCanonicalCloseMetadata.selector);
+        manager.submitCloseIntent(intent, proof);
+
+        intent = _intent(1, 9, 22, 1);
+        intent.burnTxHash = keccak256("unproven live burn");
+        proof = _closeProof(intent);
+        vm.expectRevert(ChannelSettlementManager.NonCanonicalCloseMetadata.selector);
+        manager.submitCloseIntent(intent, proof);
+
+        intent = _intent(1, 9, 22, 1);
+        intent.snapshotMediumBlockNumber = 77;
+        proof = _closeProof(intent);
+        vm.expectRevert(ChannelSettlementManager.NonCanonicalCloseMetadata.selector);
+        manager.submitCloseIntent(intent, proof);
+    }
+
     /// Shared Rust<->Solidity test vector: `computeCloseIntentDigest` must be byte-identical to
-    /// Rust `CloseIntent::signing_digest()` (IMCI). The Rust side asserts the same constant in
+    /// Rust `CloseIntent::signing_digest()` (canonical IMCS). The Rust side asserts the same constant in
     /// src/common/channel.rs::close_intent_digest_matches_solidity_shared_vector. The intent's
-    /// channel id slots (header + channel_fund_snapshot) are this manager's CHANNEL_ID (9).
+    /// channel id is this manager's CHANNEL_ID (9).
     function test_close_intent_digest_matches_rust_shared_vector() external view {
         ChannelSettlementManager.CloseIntent memory intent = ChannelSettlementManager.CloseIntent({
             closeNonce: 0x1111111122222222,
@@ -605,11 +657,30 @@ contract ChannelSettlementManagerTest is Test {
             snapshotMediumBlockNumber: 0x99999999aaaaaaaa,
             finalStateVersion: 0xbbbbbbbbcccccccc,
             finalSettledTxChain: 0x0000003100000032000000330000003400000035000000360000003700000038,
-            // Stage 3: the accumulator root is NOT part of the IMCI close-intent digest preimage
-            // (the digest predates Stage 3), so its value here does not affect the shared vector.
+            // Free transport metadata is intentionally outside the canonical IMCS state identity,
+            // so its value here does not affect the shared vector.
             finalSettledTxAccumulatorRoot: keccak256("settled_tx_accumulator_root")
         });
         assertEq(manager.computeCloseIntentDigest(intent), SHARED_VECTOR_DIGEST);
+
+        ChannelSettlementManager.CloseIntent memory metadataVariant = intent;
+        metadataVariant.closeNonce += 1;
+        metadataVariant.burnTxHash = keccak256("different burn transport metadata");
+        metadataVariant.closeWithdrawalDigest = keccak256("different IMCL metadata");
+        metadataVariant.snapshotMediumBlockNumber += 1;
+        assertEq(
+            manager.computeCloseIntentDigest(metadataVariant),
+            SHARED_VECTOR_DIGEST,
+            "free metadata must not mint a new closeStateId"
+        );
+
+        // Solidity memory structs alias on assignment, so mutate and restore one copy explicitly.
+        metadataVariant.finalChannelStateDigest = keccak256("different member-signed state");
+        assertTrue(manager.computeCloseIntentDigest(metadataVariant) != SHARED_VECTOR_DIGEST);
+        metadataVariant.finalChannelStateDigest =
+            0x0000000100000002000000030000000400000005000000060000000700000008;
+        metadataVariant.closeFreezeNonce += 1;
+        assertTrue(manager.computeCloseIntentDigest(metadataVariant) != SHARED_VECTOR_DIGEST);
     }
 
     /// @dev sentinel bytes32 = the 8 consecutive big-endian u32 words [tag, tag+1, …, tag+7], the
@@ -685,34 +756,13 @@ contract ChannelSettlementManagerTest is Test {
         _assertSentinelRange(v, 33, 0x4000); // channel_fund_intmax_state_root 33..40
         _assertSentinelRange(v, 41, 0x5000); // burn_tx_hash 41..48
         _assertSentinelRange(v, 49, 0x6000); // close_withdrawal_digest 49..56
-        // close_intent_digest 57..64 — RECOMPUTED; assert == split of the IMCI digest. We recompute
-        // the SAME inner keccak the verifier's `_closeIntentDigest` uses (IMCI domain 0x494d4349 +
-        // the close-intent fields incl. the second channelId from the fund snapshot and the
-        // finalStateVersion / finalSettledTxChain tail).
+        // close_intent_digest 57..64 — RECOMPUTED canonical IMCS closeStateId.
         bytes32 digest = keccak256(
             abi.encodePacked(
-                abi.encodePacked(
-                    bytes4(uint32(0x494d4349)),
-                    fields.channelId,
-                    fields.closeNonce,
-                    fields.finalEpoch,
-                    fields.finalSmallBlockNumber,
-                    fields.closeFreezeNonce,
-                    fields.finalChannelStateDigest,
-                    fields.finalBalanceStateH1,
-                    fields.channelId
-                ),
-                // Multi-token: the FULL 80-word amounts vector (10 x 32 BE bytes) in the IMCI
-                // preimage — an independent second encoding of the widened segment.
-                abi.encodePacked(fields.channelFundAmounts),
-                abi.encodePacked(
-                    fields.channelFundIntmaxStateRoot,
-                    fields.burnTxHash,
-                    fields.closeWithdrawalDigest,
-                    fields.snapshotMediumBlockNumber,
-                    fields.finalStateVersion,
-                    fields.finalSettledTxChain
-                )
+                bytes4(uint32(0x494d4353)),
+                fields.channelId,
+                fields.finalChannelStateDigest,
+                fields.closeFreezeNonce
             )
         );
         for (uint256 i = 0; i < 8; i++) {
@@ -879,13 +929,13 @@ contract ChannelSettlementManagerTest is Test {
             bpSlot,
             bpHash,
             0, // delegate_count (Phase 1: member-only)
+            bytes32(0),
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
-            b,
-            new ChannelSettlementManager.MemberBinding[](0) // no delegates
+            b
         );
     }
 
@@ -908,6 +958,42 @@ contract ChannelSettlementManagerTest is Test {
             h8[i] = keccak256(abi.encodePacked("member", i));
         }
         assertEq(m8.registeredMemberSetCommitment(), verifier.closeMemberSetCommitment(h8, 8));
+    }
+
+    /// A capacity-sized snapshot costs one root/count immutable, not 1016 delegate SSTOREs.  The
+    /// bound leaves ample headroom below a 30M mainnet block even including the manager's large
+    /// runtime-code deposit.
+    function test_1024ParticipantDeploymentGas_isBoundedAndStoresOnlyCosigners() external {
+        ChannelSettlementManager.MemberBinding[] memory b =
+            new ChannelSettlementManager.MemberBinding[](8);
+        bytes32[] memory hashes = new bytes32[](8);
+        for (uint256 i = 0; i < 8; i++) {
+            hashes[i] = keccak256(abi.encodePacked("capacity-cosigner", i));
+            b[i] = ChannelSettlementManager.MemberBinding({
+                pkG: hashes[i], recipient: address(uint160(0xCA00 + i))
+            });
+        }
+        registry.register(uint32(CHANNEL_ID), 0, hashes);
+        uint256 gasBefore = gasleft();
+        ChannelSettlementManager maxed = new ChannelSettlementManager(
+            CHANNEL_ID,
+            0,
+            hashes[0],
+            1016,
+            keccak256("authenticated-1024-participant-root"),
+            CHALLENGE_PERIOD,
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)),
+            IChannelRegistry(address(registry)),
+            b
+        );
+        uint256 used = gasBefore - gasleft();
+        assertLt(used, 10_000_000, "1024-participant manager must fit comfortably in one block");
+        assertEq(uint256(maxed.activeParticipantCount()), 1024);
+        assertEq(uint256(maxed.activeDelegateCount()), 1016);
+        assertEq(maxed.memberCount(), 8, "only cosigners may be materialized");
+        assertEq(maxed.registeredMemberIndexPlusOne(keccak256("delegate-not-stored")), 0);
     }
 
     function test_member_count_out_of_range_reverts() external {
@@ -947,13 +1033,13 @@ contract ChannelSettlementManagerTest is Test {
             BP_MEMBER_SLOT,
             USER_A,
             0, // delegate_count (Phase 1: member-only)
+            bytes32(0),
             CHALLENGE_PERIOD,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             reg,
-            b,
-            new ChannelSettlementManager.MemberBinding[](0) // no delegates
+            b
         );
     }
 
@@ -1318,29 +1404,42 @@ contract ChannelSettlementManagerTest is Test {
             new ChannelSettlementManager.MemberBinding[](2);
         mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
         mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
-        ChannelSettlementManager.MemberBinding[] memory db =
-            new ChannelSettlementManager.MemberBinding[](1);
-        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_D, recipient: dave});
+        bytes32[] memory participantPkGs = new bytes32[](3);
+        participantPkGs[0] = USER_A;
+        participantPkGs[1] = USER_B;
+        participantPkGs[2] = USER_D;
+        address[] memory participantRecipients = new address[](3);
+        participantRecipients[0] = alice;
+        participantRecipients[1] = bob;
+        participantRecipients[2] = dave;
+        (bytes32 participantRoot, bytes32[10] memory daveProof) =
+            _participantTree(participantPkGs, participantRecipients, 2);
 
         ChannelSettlementManager m = new ChannelSettlementManager(
-            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, // delegate_count = 1
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, participantRoot,
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
         );
 
-        // The delegate is in the withdrawal lookup + payout authorization, NOT in the member set.
+        // Only the two cosigners are materialized. The delegate identity remains available through
+        // the immutable root/proof without any per-delegate constructor SSTORE.
         assertEq(uint256(m.activeMemberCount()), 2);
         assertEq(uint256(m.activeDelegateCount()), 1);
+        assertEq(uint256(m.activeParticipantCount()), 3);
+        assertEq(m.participantRoot(), participantRoot);
         assertEq(m.memberCount(), 2, "registeredMemberPkGs is member-only (delegate excluded)");
-        assertTrue(m.registeredMemberIndexPlusOne(USER_D) != 0, "delegate present");
-        assertEq(m.registeredRecipientOf(USER_D), dave, "delegate recipient bound");
-        assertTrue(m.isMemberRecipient(dave), "delegate recipient can transact");
+        assertEq(m.registeredMemberIndexPlusOne(USER_D), 0, "delegate must not consume mapping storage");
+        assertEq(m.registeredRecipientOf(USER_D), address(0), "delegate must not consume recipient storage");
+        assertFalse(m.isMemberRecipient(dave), "delegate close authorization is proof-based");
         // IMCM commits ONLY the 2 members (delegate excluded) — matches the registry.
         assertEq(m.registeredMemberSetCommitment(), reg.channelMemberSetCommitment(uint32(CHANNEL_ID)));
 
-        // Drive the close to Closed.
-        vm.prank(alice);
-        m.requestClose();
+        // A wrong recipient cannot reuse Dave's path, while Dave retains unilateral close.
+        vm.prank(mallory);
+        vm.expectRevert(ChannelSettlementManager.InvalidParticipantProof.selector);
+        m.requestCloseAsParticipant(2, USER_D, daveProof);
+        vm.prank(dave);
+        m.requestCloseAsParticipant(2, USER_D, daveProof);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         m.submitCloseIntent(intent, _closeProofFor(m, intent));
@@ -1377,9 +1476,8 @@ contract ChannelSettlementManagerTest is Test {
         mockMle.setVerdict(true);
     }
 
-    /// Delegate account: a delegate pk_g that collides with a MEMBER pk_g is rejected at
-    /// construction (no shared-key claim across the active set).
-    function test_delegate_pkg_collision_with_member_reverts() external {
+    /// A delegate-bearing manager cannot silently fall back to a member-only derived root.
+    function test_delegate_count_without_authenticated_root_reverts() external {
         MockChannelRegistry reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
         bytes32[] memory members = new bytes32[](2);
         members[0] = USER_A;
@@ -1390,15 +1488,11 @@ contract ChannelSettlementManagerTest is Test {
             new ChannelSettlementManager.MemberBinding[](2);
         mb[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
         mb[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
-        ChannelSettlementManager.MemberBinding[] memory db =
-            new ChannelSettlementManager.MemberBinding[](1);
-        db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: makeAddr("dave")}); // collides with member 0
-
-        vm.expectRevert(ChannelSettlementManager.DuplicateRegisteredMember.selector);
+        vm.expectRevert(ChannelSettlementManager.InvalidParticipantRoot.selector);
         new ChannelSettlementManager(
-            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1,
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, bytes32(0),
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
         );
     }
 
@@ -1486,6 +1580,7 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             closeIntentDigest,
             keccak256("attacker_member_set"),
+            intent.finalStateVersion,
             request.revivedStateVersion,
             request.revivedChannelStateDigest
         );
@@ -1648,9 +1743,8 @@ contract ChannelSettlementManagerTest is Test {
         b[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
         b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         m = new ChannelSettlementManager(
-            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 0, CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b,
-            new ChannelSettlementManager.MemberBinding[](0) // no delegates
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 0, bytes32(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
         );
     }
 
@@ -1867,16 +1961,16 @@ contract ChannelSettlementManagerTest is Test {
     //     never out-of-bounds and never a raw arithmetic panic (A-4 / A-5).
     // =====================================================================
 
-    /// §8.1 POSITIVE (the live case the old strict equality bricked): a close proof whose
-    /// `delegateCount` limb is ABOVE the manager's registered count is ACCEPTED. Under Option B, L1
-    /// registration is cosigners-only and there is no per-join transaction, so any delegate that
-    /// joined after deployment makes the proof's count exceed the registered one.
-    function test_verifyClose_delegateCountAboveFloor_accepted() external {
+    /// Settlement freezes joins, so a proof cannot widen the active region beyond the immutable
+    /// participant root/count.
+    function test_verifyClose_delegateCountAboveFrozenCount_reverts() external {
         CloseProofFields memory f = this._validCloseFields();
-        assertEq(uint256(f.minDelegateCount), 0, "default manager registers 0 delegates");
-        // 1 and 5 post-deploy joiners: both accepted, no upper bound short of the capacity.
-        assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, 1)));
-        assertTrue(verifier.verifyCloseIntent(f, _proofForFieldsWithDc(f, 5)));
+        MleVerifier.MleProof memory one = _proofForFieldsWithDc(f, 1);
+        MleVerifier.MleProof memory five = _proofForFieldsWithDc(f, 5);
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        verifier.verifyCloseIntent(f, one);
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
+        verifier.verifyCloseIntent(f, five);
     }
 
     /// §8.2 NEGATIVE (floor): `delegateCount < minDelegateCount` ⇒ `CloseDelegateCountOutOfRange`.
@@ -1908,13 +2002,18 @@ contract ChannelSettlementManagerTest is Test {
         MleVerifier.MleProof memory atCap = _proofForFieldsWithDc(f, 1024 - mc);
         MleVerifier.MleProof memory overCap = _proofForFieldsWithDc(f, 1024 - mc + 1);
         MleVerifier.MleProof memory huge = _proofForFieldsWithDc(f, type(uint32).max);
+        // The frozen count must match each direct-verifier case. This isolates the structural
+        // ceiling from the earlier exact-snapshot-count check.
+        f.minDelegateCount = 1024 - mc;
         // active == 1024 exactly: accepted.
         assertTrue(verifier.verifyCloseIntent(f, atCap));
         // active == 1025: rejected.
+        f.minDelegateCount = 1024 - mc + 1;
         vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
         verifier.verifyCloseIntent(f, overCap);
         // A huge-but-CANONICAL limb (2**32 - 1) is rejected by the ceiling, not by an overflow
         // panic — the explicit error is the failure mode (A-5).
+        f.minDelegateCount = type(uint32).max;
         vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
         verifier.verifyCloseIntent(f, huge);
     }
@@ -1969,13 +2068,9 @@ contract ChannelSettlementManagerTest is Test {
         verifier.verifyCloseIntent(f, CloseTestLib.proofWithLimbs(pis));
     }
 
-    /// §8.1/§8.7 MANAGER-LEVEL POSITIVE + §8.2 MANAGER-LEVEL NEGATIVE, and the full post-deploy-join
-    /// lane end to end: a manager deployed with ONE registered delegate accepts a close whose proof
-    /// carries TWO delegates (a second browser joined after deployment), finalizes, and the
-    /// POST-DEPLOY (unregistered) delegate then collects its member-attested balance. This is
-    /// exactly the scenario the former strict equality bricked. A close carrying ZERO delegates
-    /// (which would exclude the registered one) is refused.
-    function test_b2_postDeployDelegateJoin_closesAndClaims() external {
+    /// Both shrinking and widening the delegate region are refused after the live identity root is
+    /// frozen. The exact count closes and the frozen delegate can still claim.
+    function test_frozenDelegateCount_requiresExactCloseAndClaims() external {
         bytes32 USER_D = keccak256("delegate_d_pubkey_hash");  // registered at deployment
         bytes32 USER_E = keccak256("delegate_e_pubkey_hash");  // joined AFTER deployment
         address dave = makeAddr("b2_dave");
@@ -1996,9 +2091,9 @@ contract ChannelSettlementManagerTest is Test {
         db[0] = ChannelSettlementManager.MemberBinding({pkG: USER_D, recipient: dave});
 
         ChannelSettlementManager m = new ChannelSettlementManager(
-            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, // registered delegate_count = 1 (the FLOOR)
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, keccak256("b2_delegate_snapshot"),
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb, db
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
         );
 
         vm.prank(alice);
@@ -2013,31 +2108,27 @@ contract ChannelSettlementManagerTest is Test {
         MleVerifier.MleProof memory withJoiner = this._closeProofCd(
             intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 2
         );
+        MleVerifier.MleProof memory exact = this._closeProofCd(
+            intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 1
+        );
 
         // A close carrying delegate_count = 0 would EXCLUDE the registered delegate ⇒ refused.
         // The floor error propagates as a revert out of the manager's `_checkCloseProof`.
         vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
         m.submitCloseIntent(intent, excludesDelegate);
 
-        // delegate_count = 2 (one post-deploy joiner) ⇒ ACCEPTED.
+        vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
         m.submitCloseIntent(intent, withJoiner);
+
+        m.submitCloseIntent(intent, exact);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         m.finalizeClose();
         bytes32 cid = m.finalizedCloseIntentDigest();
 
-        // Both delegates collect. The POST-DEPLOY one has no constructor binding at all — its
-        // authorization is entirely the proof-bound `recipient` claim PI (the claim-side B-2, commit
-        // 6d2b9d8, removed the `registeredRecipientOf` gate), which is hashed into the slot leaf
-        // in-circuit and so provably equals the cosigner-signed exit address.
-        assertTrue(m.registeredMemberIndexPlusOne(USER_E) == 0, "post-deploy joiner is unregistered");
         ChannelSettlementManager.WithdrawalClaim memory dClaim =
             _withdrawalClaim(cid, USER_D, dave, 30);
         m.submitWithdrawalClaim(dClaim, _withdrawalClaimProofFor(m, dClaim));
-        ChannelSettlementManager.WithdrawalClaim memory eClaim =
-            _withdrawalClaim(cid, USER_E, erin, 20);
-        m.submitWithdrawalClaim(eClaim, _withdrawalClaimProofFor(m, eClaim));
-        assertEq(m.withdrawalCredits(0, dave), 30, "registered delegate credited");
-        assertEq(m.withdrawalCredits(0, erin), 20, "POST-DEPLOY delegate credited (B-2 unblocks)");
+        assertEq(m.withdrawalCredits(0, dave), 30, "frozen delegate credited");
     }
 
     /// The mock verifier returning `false` (crypto-invalid proof) ⇒ verifyCloseIntent returns false
@@ -2099,7 +2190,7 @@ contract ChannelSettlementManagerTest is Test {
     // Phase C1 — cancel-close REAL verification (verifier-level)
     // =====================================================================
 
-    /// @dev Build the 27-limb cancel vector + an accepting MleProof for the given args (member-set
+    /// @dev Build the 29-limb cancel vector + an accepting MleProof for the given args (member-set
     ///      commitment = the channel's registered set).
     function _cancelLimbs(
         bytes32 closeIntentDigest,
@@ -2110,22 +2201,24 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             closeIntentDigest,
             manager.registeredMemberSetCommitment(),
+            12,
             revivedStateVersion,
             revivedChannelStateDigest
         );
     }
 
-    /// GOLDEN- vector length + accepting proof: a proof whose publicInputs == expected 27 limbs
+    /// GOLDEN- vector length + accepting proof: a proof whose publicInputs == expected 29 limbs
     /// passes verifyCancelClose (mock verdict=true).
     function test_verifyCancelClose_validProof_passes() external view {
         uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
-        assertEq(pis.length, 27, "cancel PI is 27 raw limbs");
+        assertEq(pis.length, 29, "cancel PI is 29 raw limbs");
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
         assertTrue(
             verifier.verifyCancelClose(
                 CHANNEL_ID,
                 keccak256("close"),
                 manager.registeredMemberSetCommitment(),
+                12,
                 13,
                 keccak256("revived"),
                 proof
@@ -2141,18 +2234,30 @@ contract ChannelSettlementManagerTest is Test {
         // Expected vector uses a DIFFERENT revived digest than the proof's limbs.
         vm.expectRevert(bytes("claim limb mismatch"));
         verifier.verifyCancelClose(
-            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("OTHER_revived"), proof
+            CHANNEL_ID, keccak256("close"), msc, 12, 13, keccak256("OTHER_revived"), proof
         );
     }
 
-    /// publicInputs.length != 27 ⇒ reverts on the length guard.
+    /// The closing-version operand is L1-injected and strict-bound; a prover cannot lower it to
+    /// make an otherwise stale revived state satisfy the circuit comparison.
+    function test_verifyCancelClose_tamperedCloseFinalVersion_reverts() external {
+        bytes32 msc = manager.registeredMemberSetCommitment();
+        uint256[] memory pis = _cancelLimbs(keccak256("close"), 13, keccak256("revived"));
+        MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
+        vm.expectRevert(bytes("claim limb mismatch"));
+        verifier.verifyCancelClose(
+            CHANNEL_ID, keccak256("close"), msc, 11, 13, keccak256("revived"), proof
+        );
+    }
+
+    /// publicInputs.length != 29 ⇒ reverts on the length guard.
     function test_verifyCancelClose_wrongLength_reverts() external {
         bytes32 msc = manager.registeredMemberSetCommitment();
-        uint256[] memory shortPis = new uint256[](26);
+        uint256[] memory shortPis = new uint256[](28);
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(shortPis);
         vm.expectRevert(bytes("claim pi len"));
         verifier.verifyCancelClose(
-            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+            CHANNEL_ID, keccak256("close"), msc, 12, 13, keccak256("revived"), proof
         );
     }
 
@@ -2164,7 +2269,7 @@ contract ChannelSettlementManagerTest is Test {
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
         vm.expectRevert(bytes("claim limb range"));
         verifier.verifyCancelClose(
-            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+            CHANNEL_ID, keccak256("close"), msc, 12, 13, keccak256("revived"), proof
         );
     }
 
@@ -2178,6 +2283,7 @@ contract ChannelSettlementManagerTest is Test {
                 CHANNEL_ID,
                 keccak256("close"),
                 manager.registeredMemberSetCommitment(),
+                12,
                 13,
                 keccak256("revived"),
                 proof
@@ -2195,7 +2301,7 @@ contract ChannelSettlementManagerTest is Test {
         MleVerifier.MleProof memory proof = CloseTestLib.proofWithLimbs(pis);
         vm.expectRevert(ChannelSettlementVerifier.CancelCloseVkNotSet.selector);
         fresh.verifyCancelClose(
-            CHANNEL_ID, keccak256("close"), msc, 13, keccak256("revived"), proof
+            CHANNEL_ID, keccak256("close"), msc, 12, 13, keccak256("revived"), proof
         );
     }
 
@@ -2287,26 +2393,30 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(v[56], 0xdeadbeef);       // token_index (TM-16, anchored base token)
     }
 
-    /// GOLDEN VECTOR mirror for cancel-close (27 limbs). The Rust side asserts the SAME constant in
+    /// GOLDEN VECTOR mirror for cancel-close (29 limbs). The Rust side asserts the SAME constant in
     /// src/circuits/channel/cancel_close_pis.rs
     /// (`cancel_close_public_inputs_match_solidity_shared_vector`). Same sentinels.
     /// Layout: channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) |
-    /// revivedStateVersion(2 hi,lo) | revivedChannelStateDigest(8).
+    /// closeFinalStateVersion(2 hi,lo) | revivedStateVersion(2 hi,lo) |
+    /// revivedChannelStateDigest(8).
     function test_expectedCancelCloseLimbs_goldenVector() external view {
         uint256[] memory v = verifier.expectedCancelCloseLimbs(
             hex"0a0b0c0d",
             _b32(0x1000), // closeIntentDigest
             _b32(0x2000), // memberSetCommitment
+            0x0000003300000044, // closeFinalStateVersion (hi=0x33, lo=0x44)
             0x0000001100000022, // revivedStateVersion (hi=0x11, lo=0x22)
             _b32(0x3000) // revivedChannelStateDigest
         );
-        assertEq(v.length, 27);
+        assertEq(v.length, 29);
         assertEq(v[0], 0x0a0b0c0d); // channel_id
         _assertB32(v, 1, 0x1000); // close_intent_digest
         _assertB32(v, 9, 0x2000); // member_set_commitment
-        assertEq(v[17], 0x11); // revived_state_version hi
-        assertEq(v[18], 0x22); // revived_state_version lo
-        _assertB32(v, 19, 0x3000); // revived_channel_state_digest
+        assertEq(v[17], 0x33); // close_final_state_version hi
+        assertEq(v[18], 0x44); // close_final_state_version lo
+        assertEq(v[19], 0x11); // revived_state_version hi
+        assertEq(v[20], 0x22); // revived_state_version lo
+        _assertB32(v, 21, 0x3000); // revived_channel_state_digest
     }
 
     function _b32(uint32 tag) internal pure returns (bytes32) {

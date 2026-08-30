@@ -2,9 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {BlobKZGVerifier, BlobKZGVerifierExt, KZGProof} from "./BlobKZGVerifier.sol";
+import {BlobKZGVerifierExt} from "./BlobKZGVerifier.sol";
 import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 
 /// @title IntmaxRollup
@@ -118,8 +119,6 @@ contract IntmaxRollup {
     /// call. Fail CLEANLY here so the producer re-reads and retries, instead of posting a batch
     /// whose proof can never finalize.
     error PendingChainsMoved();
-    /// M-5: the unpinned `postBlockAndSubmit` overload is devnet-only.
-    error ChainPinRequired();
     error NotBlockProducerManager();
     error NothingToWithdraw();
     error SubmissionAlreadyFinalized();
@@ -149,12 +148,26 @@ contract IntmaxRollup {
     // (`_verifyMle` short-circuits to true). Reject such a VK at deploy time unless the deployer
     // explicitly opts in via `allowMleDisabled` (test-only). Mirrors the withdrawal VK guard above.
     error ValidityVkDegreeBitsZero();
+    /// @dev The validity-verification bypass exists solely for local unit and
+    ///      integration tests. Allowing it on a public chain would bypass the
+    ///      MleVerifier's fail-closed release guard entirely.
     // registerChannel validation (custom errors instead of require-strings — keeps IntmaxRollup
     // under the EIP-170 24,576-byte runtime limit after the delegate-account additions).
     error ChannelAlreadyRegistered();
     error DelegateCountExceedsActive();
     error MemberCountOrArrayLenInvalid();
     error MemberPubkeyHashesNotDistinct();
+    error ReleaseRuntimeUnavailable();
+
+    /// @dev The currently unreleased MLE engine makes the rollup local-only.
+    ///      Repeating this at the value boundary covers code/state migration
+    ///      that does not execute either constructor.
+    modifier releaseRuntime() {
+        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) {
+            revert ReleaseRuntimeUnavailable();
+        }
+        _;
+    }
 
     // -----------------------------------------------------------------------
     // Events
@@ -192,7 +205,7 @@ contract IntmaxRollup {
     event Submitted(
         uint256 indexed id,
         address indexed submitter,
-        bytes32 blobVersionedHash,
+        bytes32 submissionCommitment,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot
@@ -277,7 +290,9 @@ contract IntmaxRollup {
     }
 
     struct Submission {
-        bytes32 commitment; // keccak256(blobHash || proofHash || proofLength || stateRoot || ethBlockNumber)
+        // Domain-separated Proof-DA v2 commitment over both blob hashes, exact blob count,
+        // keccak256(abi.encode(mleProof)), exact byte length, state root and Eth block number.
+        bytes32 commitment;
         address submitter; // packed with `finalized` into one slot
         bool finalized;
         uint64 submittedAtBlock; // Eth block number when submitted
@@ -465,9 +480,17 @@ contract IntmaxRollup {
     uint256 private _status = _NOT_ENTERED;
 
     modifier nonReentrant() {
+        _nonReentrantBefore();
+        _;
+        _nonReentrantAfter();
+    }
+
+    function _nonReentrantBefore() private {
         if (_status == _ENTERED) revert ReentrantCall();
         _status = _ENTERED;
-        _;
+    }
+
+    function _nonReentrantAfter() private {
         _status = _NOT_ENTERED;
     }
 
@@ -657,10 +680,11 @@ contract IntmaxRollup {
     /// @notice Submissions not finalized within this many Eth blocks after posting
     ///         can be removed unconditionally via fraudProof (no proof needed).
     /// @dev `_mleVerdict` outcomes — see `_mleVerdict` for why three failure modes are kept apart.
-    uint8 private constant MLE_INVALID = 0; // verifier RETURNED false  (the only fraud evidence)
+    uint8 private constant MLE_INVALID = 0; // verifier reverted InvalidMleProof (only fraud evidence)
     uint8 private constant MLE_VALID = 1; // verifier RETURNED true
     uint8 private constant MLE_UNEVALUABLE = 2; // verification reverted deterministically
     uint8 private constant MLE_STARVED = 3; // verification was gas-starved
+    uint8 private constant MLE_PI_MISMATCH = 4; // fraud prover supplied the wrong PI preimage
 
     /// @dev SECURITY (C-1/B-4): floor on `gasleft()` before entering MLE verification. The repo's
     ///      own measurement of the real verifier on a real fixture is 11,019,291 gas
@@ -695,6 +719,12 @@ contract IntmaxRollup {
         bytes32 _genesisStateRoot,
         bool _allowMleDisabled
     ) {
+        // SECURITY: the zero-degree bypass never reaches MleVerifier.verify, so
+        // the verifier's own public-chain guard cannot protect this branch.
+        // Constrain the opt-in itself to the one local development chain.
+        if (_allowMleDisabled && block.chainid != 31337) {
+            revert MleProofEngineUnavailable(block.chainid);
+        }
         // SECURITY (A-2): reject a validity VK that disables MLE verification unless the deployer
         // explicitly opts in (test-only). Symmetric with `initializeWithdrawalVk`'s guard.
         if (!_allowMleDisabled && _mleVk.degreeBits == 0) revert ValidityVkDegreeBitsZero();
@@ -715,6 +745,11 @@ contract IntmaxRollup {
         }
         mleVerifier = _mleVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
+        // A non-zero genesis snapshot is already finalized by construction and must participate
+        // in the same permanent membership relation as later finalized roots. Keep zero out of the
+        // set: test deployments may use it as an unset sentinel, but it is never a withdrawable
+        // snapshot under the strict finalized-root API.
+        if (_genesisStateRoot != bytes32(0)) finalizedStateRoots[_genesisStateRoot] = true;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
     }
@@ -918,21 +953,8 @@ contract IntmaxRollup {
         uint32 proofLength,
         bytes32 stateRoot,
         bytes32 expectedPendingChains
-    ) external payable nonReentrant {
+    ) external payable releaseRuntime nonReentrant {
         if (pendingChainsPin() != expectedPendingChains) revert PendingChainsMoved();
-        _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
-    }
-
-    /// @notice Unpinned legacy overload — DEVNET ONLY.
-    /// @dev SECURITY (M-5): reverts on every chain but the local devnet, so the pin above cannot be
-    ///      skipped on a real deployment. Same shape as the settlement manager's challenge-period
-    ///      floor: the unsafe value is structurally unshippable rather than merely discouraged.
-    function postBlockAndSubmit(SubBlock[] calldata subBlocks, bytes32 proofHash, uint32 proofLength, bytes32 stateRoot)
-        external
-        payable
-        nonReentrant
-    {
-        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ChainPinRequired();
         _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
     }
 
@@ -1068,6 +1090,7 @@ contract IntmaxRollup {
     function deposit(bytes32 recipient, uint32 tokenIndex, uint256 amount, bytes32 auxData)
         external
         payable
+        releaseRuntime
         nonReentrant
     {
         // --- Native-ETH escrow (Phase 1) ---
@@ -1319,15 +1342,9 @@ contract IntmaxRollup {
 
     // -----------------------------------------------------------------------
     function _submit(bytes32 proofHash, uint32 proofLength, bytes32 stateRoot) internal returns (uint256 submissionId) {
-        bytes32 blobHash;
-        assembly {
-            blobHash := blobhash(0)
-        }
-        if (blobHash == bytes32(0)) revert NoBlobAttached();
-
         submissionId = nextSubmissionId++;
         uint64 ethBlock = uint64(block.number);
-        bytes32 commitment = keccak256(abi.encodePacked(blobHash, proofHash, proofLength, stateRoot, ethBlock));
+        bytes32 commitment = kzgVerifier.postCommitment(stateRoot, ethBlock, submissionId);
 
         _submissions[submissionId] = Submission({
             commitment: commitment,
@@ -1337,21 +1354,7 @@ contract IntmaxRollup {
             stateRoot: stateRoot
         });
 
-        emit Submitted(submissionId, msg.sender, blobHash, proofHash, proofLength, stateRoot);
-    }
-
-    // -----------------------------------------------------------------------
-    // verify()  —  pure WHIR verification (no binding)
-    // -----------------------------------------------------------------------
-
-    /// @notice MLE/WHIR verification from calldata. No KZG, no blob binding.
-    /// @dev v2: the WHIR ext3 evaluations previously passed as a separate
-    ///      `whirEvals` parameter are now embedded inside `mleProof`, so
-    ///      this surface gets one fewer argument and is safer (the prover
-    ///      can no longer supply mismatched evals). Groth16 is removed: on-chain
-    ///      verification is MLE/WHIR-only.
-    function verify(MleVerifier.MleProof calldata mleProof) external view returns (bool) {
-        return _verifyMle(mleProof);
+        emit Submitted(submissionId, msg.sender, commitment, proofHash, proofLength, stateRoot);
     }
 
     // -----------------------------------------------------------------------
@@ -1410,6 +1413,16 @@ contract IntmaxRollup {
             return _rejectFinalize(submissionId, ValidityPublicInputsMismatch.selector);
         }
 
+        // KZG work is journaled in a separate transaction so a two-blob opening (~22M gas) and
+        // real MLE verification (~11M gas) never need to fit in one Ethereum block.  Bind the
+        // typed proof to the exact raw bytes authenticated by `attestProofData`.
+        bytes memory canonicalProof = abi.encode(mleProof);
+        if (!kzgVerifier.isProofDataAttested(
+                submissionId, sub.commitment, keccak256(canonicalProof), canonicalProof.length
+            )) {
+            return _rejectFinalize(submissionId, CommitmentMismatch.selector);
+        }
+
         // SECURITY (M-8): `fullVerify` now reverts with a cause-specific error instead of returning
         // false, so the catch below recovers WHICH check failed. An empty `err` (no revert data) is
         // reported as reason `0x00000000` — "could not evaluate", never "invalid". The try/catch and
@@ -1420,9 +1433,6 @@ contract IntmaxRollup {
         try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
             valid = v;
         } catch {
-            // EIP-170: read the selector straight out of returndata rather than letting solc
-            // materialise a `bytes memory` copy of it. Scratch space (0x00-0x3f) only, so this stays
-            // memory-safe; it is zeroed first so a short/empty revert yields exactly 0x00000000.
             assembly ("memory-safe") {
                 mstore(0, 0)
                 if gt(returndatasize(), 3) { returndatacopy(0, 0, 4) }
@@ -1468,17 +1478,16 @@ contract IntmaxRollup {
     ///
     /// ## Normal fraud verification
     ///
-    ///   The fraud prover supplies the exact blob bytes (the MLE proof) that
-    ///   were committed, plus a KZG proof binding them to the blob.
+    ///   The fraud prover supplies the exact raw proof bytes that were committed,
+    ///   plus the standard EIP-4844 sidecar evidence for that SimpleCoder blob stream.
+    ///   The pinned MLE satellite decodes those authenticated bytes and rejects
+    ///   malformed or non-canonical ABI encodings as proof-invalid.
     ///   Fraud is confirmed when binding checks pass and the proof fails.
     function fraudProof(
         uint256 submissionId,
-        bytes32 blobVersionedHash,
         bytes32 stateRoot,
-        bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof,
-        KZGProof calldata kzg
+        bytes calldata proofBytes
     ) external nonReentrant returns (bool fraudConfirmed) {
         Submission storage sub = _submissions[submissionId];
         if (sub.commitment == bytes32(0)) return false;
@@ -1499,13 +1508,21 @@ contract IntmaxRollup {
             return true;
         }
 
-        bool confirmed =
-            _verifyFraud(submissionId, blobVersionedHash, stateRoot, proofBytes, validityPIs, mleProof, kzg);
+        bool confirmed = _verifyFraud(submissionId, stateRoot, validityPIs, proofBytes);
         if (!confirmed) return false;
 
         _truncateSubmissions(submissionId, msg.sender);
         emit FraudConfirmed(submissionId, msg.sender);
         return true;
+    }
+
+    /// @notice Permissionless first half of the split Proof-DA flow. The satellite authenticates
+    /// and journals the exact raw bytes; `finalize`/`fraudProof` consume that journal separately.
+    function attestProofData(uint256 submissionId, bytes calldata proofBytes, bytes calldata blobProofs)
+        external
+        returns (bytes32)
+    {
+        return kzgVerifier.attestProofData(address(this), submissionId, proofBytes, blobProofs);
     }
 
     // -----------------------------------------------------------------------
@@ -1533,7 +1550,7 @@ contract IntmaxRollup {
     /// @notice Pull-payment: claim pending withdrawals (stake refunds / fraud rewards).
     ///         Finalize and fraudProof credit amounts to pendingWithdrawals instead of
     ///         pushing ETH, so reverting recipients cannot block protocol operations.
-    function withdraw() external nonReentrant {
+    function withdraw() external releaseRuntime nonReentrant {
         uint256 amount = pendingWithdrawals[msg.sender];
         if (amount == 0) revert NothingToWithdraw();
         pendingWithdrawals[msg.sender] = 0;
@@ -1733,7 +1750,7 @@ contract IntmaxRollup {
     /// @dev SECURITY: CEI (credit zeroed before the token call) + `nonReentrant` — the token is
     ///      untrusted code (ERC-777-style hooks) but re-entering any guarded entry point reverts,
     ///      and the credit is already zero on reentry regardless.
-    function withdrawToken(uint32 tokenIndex) external nonReentrant {
+    function withdrawToken(uint32 tokenIndex) external releaseRuntime nonReentrant {
         IERC20 token = tokenAddressOf[tokenIndex];
         if (address(token) == address(0)) revert TokenIndexNotRegistered();
         uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
@@ -1932,76 +1949,36 @@ contract IntmaxRollup {
     /// @dev Fraud detection pipeline. Returns true if fraud is confirmed.
     ///
     ///   Pre-conditions (must pass — proves fraud prover supplied the real blob data):
-    ///     1. Commitment check
-    ///     2. KZG blob binding
-    ///     3. PI binding to on-chain state
-    ///     4. Proof params binding: blob == abi.encode(mleProof)
-    ///     5. PI preimage binding: mleProof.publicInputs encode keccak256(ValidityPublicInputs)
+    ///     1. Canonical proof bytes + standard blob KZG evidence open the submission commitment
+    ///     2. PI binding to on-chain state
+    ///     3. PI preimage binding: mleProof.publicInputs encode keccak256(ValidityPublicInputs)
     ///
     ///   Fraud confirmed if:
     ///     MLE/WHIR verification of the committed proof fails
     ///
-    ///   SECURITY (C-1): 5 is a PRE-CONDITION, never a fraud trigger. See the comment at the check.
+    ///   SECURITY (C-1): 3 is a PRE-CONDITION, never a fraud trigger. See the comment at the check.
     function _verifyFraud(
         uint256 submissionId,
-        bytes32 blobVersionedHash,
         bytes32 stateRoot,
-        bytes calldata proofBytes,
         ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof,
-        KZGProof calldata kzg
+        bytes calldata proofBytes
     ) internal view returns (bool) {
         // ── Pre-conditions ────────────────────────────────────────────────
 
-        // 1. Commitment check (includes Eth block number at submission time)
-        {
-            uint32 proofLength = uint32(proofBytes.length);
-            bytes32 proofHash = keccak256(proofBytes);
-            uint64 ethBlock = _submissions[submissionId].submittedAtBlock;
-            bytes32 commitment =
-                keccak256(abi.encodePacked(blobVersionedHash, proofHash, proofLength, stateRoot, ethBlock));
-            if (commitment != _submissions[submissionId].commitment) return false;
-        }
+        // 1. The exact raw bytes must already have been authenticated against the submission's
+        //    posted blob hashes by `attestProofData`. This keeps KZG and MLE in separate bounded-gas
+        //    transactions and prevents a different proof (valid or invalid) from steering verdicts.
+        if (!kzgVerifier.isProofDataAttested(
+                submissionId, _submissions[submissionId].commitment, keccak256(proofBytes), proofBytes.length
+            )) return false;
 
-        // 2. KZG blob binding (external satellite, see `setKzgVerifier`).
-        //    SECURITY (fail-closed): when the satellite is unset, the binding is NOT provable, so
-        //    no fraud can be confirmed — never vacuously pass (a call to an empty address would
-        //    succeed and enable false fraud confirmations / rollback griefing).
-        //
-        //    SCOPE (B-6): do NOT read this check as a sound data-availability proof. The KZG
-        //    trusted-setup data (`lagrangeBasisG1`, `vanishingG2`) is still caller-supplied, so a
-        //    caller who knows dlog(vanishingG2) can forge an accepting opening — see the
-        //    SECURITY (H-4 / B-6) block in BlobKZGVerifier.sol. This function's CONVICTION
-        //    soundness does not depend on it: pre-condition 1 recomputes the commitment over
-        //    keccak256(proofBytes) and pre-condition 4 pins mleProof to those same bytes, so an
-        //    attacker with a forged opening still cannot substitute different proof bytes. What a
-        //    forged opening costs is only the DA guarantee, and that is bounded by the
-        //    FINALIZE_DEADLINE_BLOCKS timeout. This check stays because it is the right shape and
-        //    becomes sound the moment the trusted-setup store lands.
-        if (address(kzgVerifier) == address(0)) return false;
-        try kzgVerifier.verify(blobVersionedHash, kzg, proofBytes) {}
-        catch {
-            return false;
-        }
-
-        // 3. PI binding to on-chain state
+        // 2. PI binding to on-chain state
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) return false;
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) return false;
         if (validityPIs.finalBlockChain != blockHashChainAt[validityPIs.finalBlockNumber]) return false;
         if (validityPIs.finalExtCommitment != stateRoot) return false;
 
-        // 4. Proof params binding — ensures we verify exactly what was committed.
-        //    SECURITY: v2 moves the WHIR ext3 evaluations INSIDE `mleProof`
-        //    (preprocessedWhirEval / witnessWhirEval / auxWhirEval + the R2-#1
-        //    and R2-#2 per-point fields), so a single keccak over `mleProof`
-        //    atomically pins them together with the rest of the proof. An
-        //    attacker can no longer substitute different WHIR evaluations to
-        //    falsely accuse a valid proof.
-        if (keccak256(abi.encode(mleProof)) != keccak256(proofBytes)) {
-            return false;
-        }
-
-        // 5. PI PREIMAGE binding — `validityPIs` must be THE public inputs of the committed proof.
+        // 3. PI PREIMAGE binding — `validityPIs` must be THE public inputs of the committed proof.
         //    SECURITY (C-1: false-fraud conviction of an honest submission): this comparison used to
         //    live below as a fraud TRIGGER ("the proof's PIs don't encode keccak256(validityPIs) ⇒
         //    fraud"). That was unsound, because `validityPIs` is caller-supplied and NOT uniquely
@@ -2015,16 +1992,14 @@ contract IntmaxRollup {
         //    proof, then truncating every later submission, stealing 90% of each bond and rolling
         //    the chain back, once per posting round.
         //
-        //    As a PRECONDITION it is exactly the right check: preconditions 1 and 4 already pin
-        //    `mleProof` to the committed blob bytes, so `mleProof.publicInputs` IS the submitter's
-        //    own committed claim about its proof's public inputs. Requiring the fraud prover to
-        //    supply a keccak PREIMAGE of those limbs is what makes `validityPIs` trustworthy enough
-        //    for checks 3 above to mean anything. A mismatch proves only that the fraud prover
-        //    supplied the wrong preimage — never that the submission is fraudulent.
+        //    As a PRECONDITION it is exactly the right check: precondition 1 pins `proofBytes` to
+        //    the submitted blobs.  The pinned satellite decodes those exact bytes, checks their
+        //    canonical ABI representation, and compares the decoded public inputs to `piHash`.
+        //    A mismatch proves only that the fraud prover supplied the wrong preimage — never that
+        //    the submission is fraudulent.
         bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) return false;
 
-        // ── Fraud detection (ONLY a returned `false` = fraud) ─────────────
+        // ── Fraud detection (ONLY InvalidMleProof() = fraud) ──────────────
 
         // SECURITY (C-1/B-4). The round-1 comment here read:
         //     "`mleProof` is pinned to the committed blob by preconditions 1 and 4, so this
@@ -2041,13 +2016,39 @@ contract IntmaxRollup {
         //     convictable by anyone.
         // Both routes produced a caught revert, and a caught revert used to read as fraud.
         //
-        // The rule now: fraud is confirmed ONLY when the verifier ran to completion and RETURNED
-        // false. "Could not evaluate" reverts the whole `fraudProof` transaction, so nothing is
-        // truncated, no bond moves, and the submission is left exactly as it was.
-        uint8 verdict = _mleVerdict(mleProof);
+        // The rule now: fraud is confirmed ONLY when the pinned verifier reaches a proof-dependent
+        // check and reverts `InvalidMleProof()`. "Could not evaluate" reverts the whole
+        // `fraudProof` transaction, so nothing is truncated, no bond moves, and the submission is
+        // left exactly as it was.
+        uint8 verdict = _encodedMleVerdict(proofBytes, piHash);
+        if (verdict == MLE_PI_MISMATCH) return false;
         if (verdict == MLE_STARVED) revert FraudProofGasStarved();
-        if (verdict == MLE_UNEVALUABLE) revert MleProofUnevaluable();
+        if (verdict > MLE_VALID) revert MleProofUnevaluable();
         return verdict == MLE_INVALID;
+    }
+
+    /// @dev Classify the exact raw bytes authenticated by `_verifyFraud` using the pinned MLE
+    /// satellite.  The satellite owns ABI decoding/canonicalization so malformed encodings can be
+    /// convicted without ever entering this contract's typed ABI decoder.  Both layers use an
+    /// explicit budget and retained-gas threshold: OOG/decoder starvation can never masquerade as
+    /// the satellite's INVALID verdict, while unknown return values/selectors remain unevaluable.
+    function _encodedMleVerdict(bytes calldata proofBytes, bytes32 piHash) private view returns (uint8) {
+        if (gasleft() < MIN_MLE_VERIFY_GAS) return MLE_STARVED;
+
+        uint256 reserve = gasleft() / 64;
+        uint256 budget = gasleft() - reserve;
+        try mleVerifier.fraudVerdictEncoded{gas: budget}(
+            proofBytes, piHash, this._verifyMleWithVk.selector, _mleBypassEnabled()
+        ) returns (
+            uint8 verdict
+        ) {
+            // `_verifyFraud` treats every value above VALID (except the explicit PI-mismatch and
+            // starvation codes) as unevaluable, so unknown future values are already fail-safe.
+            return verdict;
+        } catch {
+            if (gasleft() < reserve + budget / 8) return MLE_STARVED;
+            return MLE_UNEVALUABLE;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2056,104 +2057,23 @@ contract IntmaxRollup {
 
     /// @dev Verify MLE proof using the MleVerifier library.
     ///      SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
-    ///      true (a test-only opt-in enforced at construction). In production `allowMleDisabled` is
-    ///      false and the constructor already rejects a zero validity VK, so this branch is dead and
-    ///      every finalize runs real MLE/WHIR verification. The extra `allowMleDisabled` conjunct is
-    ///      defense-in-depth: even if a zero VK somehow reached storage, it would NOT skip here.
+    ///      true on chain id 31337. Both construction and runtime are checked because state/code can
+    ///      be migrated to a different chain without running this contract's initcode. In production
+    ///      `allowMleDisabled` is false and the constructor already rejects a zero validity VK, so
+    ///      every finalize runs real MLE/WHIR verification.
     function _verifyMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        return _mleVerdict(mleProof) == MLE_VALID;
+        if (_mleBypassEnabled()) return true;
+        try this._verifyMleWithVk(mleProof, false) returns (bool v) {
+            return v;
+        } catch {
+            // Finalization/standalone verification is fail-closed: unlike fraud, no caught
+            // failure can slash or roll back state, so it does not need a tri-state classifier.
+            return false;
+        }
     }
 
-    /// @dev SECURITY (C-1/B-4: "could not evaluate" must never read as "fraud").
-    ///
-    ///   `_verifyMle` used to collapse three distinct outcomes into one boolean:
-    ///
-    ///       try this._verifyMleWithVk(mleProof, false) returns (bool v) { return v; }
-    ///       catch { return false; }
-    ///
-    ///   and `_verifyFraud` read `false` as CONFIRMED FRAUD. Two demonstrated exploits:
-    ///
-    ///     (a) GAS STARVATION. EIP-150 forwards only 63/64 of the available gas to the inner
-    ///         call, so the transaction gas limit is a FREE attacker input — it never appears in
-    ///         `mleProof`, so the round-1 claim "the fraud prover has no free input left with
-    ///         which to steer it" was wrong. An attacker picks a limit at which the inner
-    ///         verification OOGs while the outer frame keeps the retained ~1/64 — plenty to run
-    ///         `_truncateSubmissions`. Measured on the red team's harness: honest non-convicting
-    ///         cost 4,889,847 gas, winning attack limit 2,836,161, real verifier ~11,019,291.
-    ///     (b) UNSUPPORTED GATE. `Plonky2GateEvaluator` reverts BY DESIGN on a gate the deployed
-    ///         evaluator cannot handle ("unsupported gate with non-zero filter"). An honest
-    ///         submission using such a gate was convictable by anyone.
-    ///
-    ///   Both are "the verifier could not reach a verdict", not "the verifier said no". This
-    ///   function keeps them apart:
-    ///
-    ///     MLE_VALID       the verifier RETURNED true
-    ///     MLE_INVALID     the verifier RETURNED false  — the ONLY fraud evidence
-    ///     MLE_UNEVALUABLE the call reverted deterministically
-    ///     MLE_STARVED     the call was gas-starved (floor not met, or the inner frame burned
-    ///                     the whole 63/64 it was forwarded)
-    ///
-    ///   `_verifyFraud` REVERTS on the last two; `fullVerify`/`verify` treat everything that is
-    ///   not MLE_VALID as not-valid (fail-CLOSED, unchanged).
-    ///
-    ///   SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
-    ///   true (a test-only opt-in enforced at construction). In production `allowMleDisabled` is
-    ///   false and the constructor already rejects a zero validity VK, so that branch is dead.
-    function _mleVerdict(MleVerifier.MleProof calldata mleProof) internal view returns (uint8) {
-        // SECURITY: Skip MLE verification only on an explicit test-only deployment.
-        if (allowMleDisabled && mleVk.degreeBits == 0) return MLE_VALID;
-
-        // 63/64 defence, part 1: refuse to even attempt the call without enough gas for the
-        // verifier to finish honestly. Without this a caller could size the transaction so the
-        // inner frame is guaranteed to fail.
-        if (gasleft() < MIN_MLE_VERIFY_GAS) return MLE_STARVED;
-
-        // 63/64 defence, part 2 — REWRITTEN (R3-4, round 3). Round 2 wrote
-        //
-        //     if (gasleft() <= gasBefore / 64) return MLE_STARVED;
-        //
-        // and justified it as "an inner frame that consumed everything it was forwarded leaves the
-        // outer frame at most gasBefore/64. That is the OOG signature." TRUE ONLY AT CALL DEPTH 1.
-        // `_verifyMleWithVk` ends in `mleVerifier.verify(...)`, an external call to the immutable
-        // satellite, so a real OOG happens at DEPTH 2 — and EIP-150's 1/64 retention ACCUMULATES:
-        // frame 1 keeps 1/64 of its own budget and hands it back when it bubbles the revert, so
-        // frame 0 ends with gasBefore * (1 - (63/64)^2) ≈ 1.98 * gasBefore/64. The branch could
-        // therefore NEVER FIRE in production. Measured at an identical `gasBefore`: depth-1 retained
-        // 312,443 against a 312,487 threshold (fires); depth-2 retained 619,988 (never fires). End
-        // to end, 16 of 17 genuine starvations were reported `MleProofUnevaluable` — "the deployed
-        // evaluator cannot evaluate this proof", the opposite diagnosis — leaving the 12M floor as
-        // the entire starvation defence. See
-        // `RedTeamRound3Fraud.t.sol::test_R3_BREAK_B4_the6364SignatureCannotFireAtDepthTwo`.
-        // (SOUNDNESS was never affected: both verdicts revert, and `MLE_INVALID` — the only fraud
-        // evidence — is reachable only from the try arm RETURNING false.)
-        //
-        // THE FIX: forward an EXPLICIT budget and classify on how much of THAT BUDGET came back,
-        // which is depth-independent. `reserve` is `gasBefore/64` — exactly what EIP-150 would have
-        // withheld anyway, so the success path is unchanged — and the inner subtree gets the rest.
-        // A starved subtree returns almost nothing of it: at nesting depth n a full OOG hands back
-        // `budget * (1 - (63/64)^n)`, which is 1.6% at depth 1, 3.1% at depth 2 (production) and
-        // still only 12% at depth 8. A deterministic revert (the gate-8 "unsupported gate" class)
-        // unwinds early and hands back nearly the whole budget. `budget / 8` sits between the two
-        // with an order of magnitude of headroom on each side and tolerates any nesting depth up to
-        // 8, so no plausible change to the satellite's internals can silently disable this branch
-        // the way the depth-1 assumption did.
-        //
-        // The residual misclassification is deliberately on the SAFE side: a deterministic revert
-        // that occurs so late it also consumed 7/8 of the budget is reported `FraudProofGasStarved`
-        // rather than `MleProofUnevaluable`. Both revert, neither convicts, and "send more gas" is
-        // the harmless diagnosis to give first — whereas the round-2 direction told a genuinely
-        // under-gassed honest prover that the evaluator could not evaluate their proof at all.
-        uint256 gasBefore = gasleft();
-        uint256 reserve = gasBefore / 64;
-        uint256 budget = gasBefore - reserve;
-        try this._verifyMleWithVk{gas: budget}(mleProof, false) returns (bool v) {
-            return v ? MLE_VALID : MLE_INVALID;
-        } catch {
-            // No subtraction of `gasleft()`: the comparison is written so it cannot underflow if
-            // the try/catch machinery itself dips into the reserve.
-            if (gasleft() <= reserve + budget / 8) return MLE_STARVED;
-            return MLE_UNEVALUABLE;
-        }
+    function _mleBypassEnabled() private view returns (bool) {
+        return allowMleDisabled && mleVk.degreeBits == 0 && block.chainid == ROLLUP_LOCAL_DEVNET_CHAIN_ID;
     }
 
     /// @dev External helper so `_verifyMle`/`_verifyMleWithdrawal` can try/catch on MLE verification.

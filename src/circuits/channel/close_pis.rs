@@ -41,18 +41,17 @@ use crate::{
 // `keccak([IMTF, token_registry (10 x u32, zero-padded), token_count, amounts (10 x U256,
 // zero-padded)])` — the ALWAYS-full-width commitment to the per-token fund vector and its
 // registry alignment, recomputed IN-CIRCUIT from the same witnessed registry/count/amounts that
-// feed the signed H1 and the IMCH/IMCI digests. The Solidity `closePIHash` mirror
-// (`ChannelSettlementVerifier.sol`) is re-pinned in multitoken Phase 3 (byte-for-byte
-// differential test, TM-11); until then the `#[ignore]`d IMCI shared-vector cross-check stays
-// ignored (see `common::channel::tests`).
+// feed the signed H1/IMCH and the TFD. The canonical close identity at limbs 57..65 is IMCS over
+// `(channelId, finalChannelStateDigest, closeFreezeNonce)` and intentionally does not duplicate
+// the full fund vector.
 pub const CHANNEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 103;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelClosePublicInputs {
     pub channel_id: ChannelId,
-    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 1..2): hashed into IMCI only; constrained by
-    /// nothing in `close_circuit.rs` and read for no decision on L1.
+    /// Canonical close-era nonce (limbs 1..2): exactly `close_freeze_nonce`, which is itself
+    /// constrained to the signed state's checked `close_freeze_nonce + 1`.
     pub close_nonce: u64,
     pub final_epoch: u64,
     pub final_small_block_number: u64,
@@ -61,17 +60,15 @@ pub struct ChannelClosePublicInputs {
     pub final_balance_state_h1: Bytes32,
     pub channel_fund_amount: U256,
     pub channel_fund_intmax_state_root: Bytes32,
-    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 41..48): hashed into IMCL and IMCI only. The close
-    /// circuit proves no L2 burn; `finalizeClose` writes `finalizedBurnTxHash` and nothing ever
-    /// reads it.
+    /// Canonical zero sentinel (limbs 41..48). The close circuit proves no live L2 burn;
+    /// withdrawal authorization remains on the separate withdrawal proof/nullifier path.
     pub burn_tx_hash: Bytes32,
     pub close_withdrawal_digest: Bytes32,
-    /// SECURITY (M-9): a pure function of the signed state ONLY if the three fields flagged in
-    /// this struct are; they are not. See `CloseIntent::signing_digest`'s caller obligation before
-    /// keying any replay/dedup/cancel logic on this value.
+    /// Canonical IMCS closeStateId. The legacy field name is retained for ABI compatibility.
+    /// Recomputed in-circuit solely from channel id, member-signed final IMCH, and freeze nonce.
     pub close_intent_digest: Bytes32,
-    /// SECURITY (M-9, UNSIGNED FREE PI, limbs 65..66): hashed into IMCI only; constrained by
-    /// nothing in-circuit and read for no decision on L1.
+    /// Canonical zero sentinel (limbs 65..66). The signed state has no authenticated medium-block
+    /// snapshot; its independent `small_block_number` must not be relabelled as one.
     pub snapshot_medium_block_number: u64,
     /// `state_version` of the final balance state (detail2 §H-4 L1 ordering key). Anchored
     /// in-circuit as the unique version inside the signed H1 preimage.
@@ -106,7 +103,7 @@ pub struct ChannelClosePublicInputs {
     /// amounts(10 x U256)])` — the fixed 92-word commitment to the per-token fund vector,
     /// appended at the very END of the close PI vector (limbs 95..103). Recomputed IN-CIRCUIT
     /// from the witnessed registry/count/amounts (the SAME wires that feed the signed H1 and
-    /// the IMCH/IMCI digests), so L1 can settle per-token funds against a member-signed
+    /// the IMCH/TFD commitments), so L1 can settle per-token funds against a member-signed
     /// commitment. Native mirror: [`crate::common::channel::token_funds_digest`].
     pub token_funds_digest: Bytes32,
 }
@@ -221,12 +218,7 @@ pub enum ChannelCloseWitnessError {
 
 impl ChannelCloseWitness {
     pub fn to_public_inputs(&self) -> Result<ChannelClosePublicInputs, ChannelCloseWitnessError> {
-        let expected_intent = CloseIntent::new(
-            self.close_intent.close_nonce,
-            &self.final_channel_state,
-            &self.close_tx,
-            self.close_intent.snapshot_medium_block_number,
-        )?;
+        let expected_intent = CloseIntent::new(&self.final_channel_state, &self.close_tx)?;
 
         if expected_intent != self.close_intent {
             return Err(ChannelCloseWitnessError::CloseIntentMismatch);
@@ -390,11 +382,11 @@ mod tests {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![9, 9, 9],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
         let witness = ChannelCloseWitness {
             final_channel_state: state,
             close_tx,
@@ -448,10 +440,18 @@ mod tests {
             .to_u64_vec()[..],
             "token_funds_digest occupies limbs 95..103 (multi-token §N-6)"
         );
+        // Canonical close metadata: close_nonce and close_freeze_nonce are the same checked
+        // successor of the signed state's nonce; burn_tx_hash and snapshot are zero sentinels.
+        assert_eq!(&limbs[1..3], &[0, 1], "canonical close_nonce limbs");
+        assert_eq!(&limbs[7..9], &[0, 1], "canonical close_freeze_nonce limbs");
+        assert!(
+            limbs[41..49].iter().all(|limb| *limb == 0),
+            "burn_tx_hash must be the canonical zero sentinel"
+        );
         // The P8-pinned tail: snapshotMediumBlockNumber(2) | finalStateVersion(2 hi,lo) |
         // finalSettledTxChain(8).
         assert_eq!(limbs[65], 0, "snapshot_medium_block_number hi limb");
-        assert_eq!(limbs[66], 123, "snapshot_medium_block_number lo limb");
+        assert_eq!(limbs[66], 0, "snapshot_medium_block_number lo limb");
         assert_eq!(limbs[67], 0, "final_state_version hi limb");
         assert_eq!(
             limbs[68], 12,

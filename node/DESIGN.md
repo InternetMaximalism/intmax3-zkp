@@ -1,6 +1,6 @@
 # INTMAX3 Node Programs — Design Specification
 
-**Status:** Draft v1 (design only — no code yet)
+**Status:** Implemented security design (delegate/co-signer runtime and recovery paths)
 **Scope:** Two long-running programs that compose the `api/` REST surface, the `channel_member`
 CLI, the WASM wallet, and the L1 contracts into autonomous agents:
 
@@ -9,7 +9,7 @@ CLI, the WASM wallet, and the L1 contracts into autonomous agents:
    reacts to abnormal/adversarial on-chain events.
 2. **Delegate account** (`node/delegate/`) — a send-only participant. Generates its own
    transactions + ZKPs, submits them for co-signing, verifies the co-signed results, refreshes
-   when required, and exits (partial/full withdrawal, post-close claim) when it must act alone.
+   when required, and exits through partial/full withdrawal when it must act alone.
 
 Both are structured as a single **supervisory event loop with explicit branches** for three
 regimes: **normal flow**, **own-transaction flow**, and **abnormal flow**.
@@ -52,7 +52,7 @@ Spec references: `doc/architecture-audit/design2.md` (design2), `doc/architectur
   (per-channel close/withdrawal game). Both are the ultimate soundness gate; the node programs can
   never mint a valid proof for a false statement.
 
-### 1.2 What is already built (this design only wires it)
+### 1.2 Components wired by the runtime
 - **REST API** (`api/`): per-channel endpoints — `init`/`join`, `snapshot`, `status`, `backing`,
   `deposit/*`, `cosign`, `cosign-refresh`, `inter-channel/send`, `burn/cosign`,
   `partial-withdrawal/{burn,submit,finalize,settle}`, `settlement/deploy`,
@@ -64,7 +64,8 @@ Spec references: `doc/architecture-audit/design2.md` (design2), `doc/architectur
   (with `CLAIM_PULL_ONLY`), `cancel-close`, `post-close-claim`, `pw-submit`, `pw-finalize`.
 - **WASM wallet** (delegate proving): `wallet_keygen[_seeded]`, `wallet_genesis_contribution`,
   `wallet_import_channel`, `wallet_balance`, `wallet_send`, `wallet_refresh`,
-  `wallet_send_inter_channel`, `wallet_burn_send`, `wallet_cosign`, `wallet_finalize`.
+  `wallet_send_inter_channel`, `wallet_burn_send`, `wallet_cosign`, `wallet_finalize`,
+  `wallet_withdrawal_claim` (secret-preserving inner + MLE/WHIR close claim).
 - **Contract events** (the chain-watcher's inputs):
   - `IntmaxRollup`: `Deposited`, `BlockPosted`, `ChannelRegistered`, `Submitted`, `Finalized`,
     `FraudConfirmed`, `WithdrawalCredited`, `PartialWithdrawalAuthorized`,
@@ -96,25 +97,32 @@ Both programs build on the same modules.
 - **Node.js** (matches `api/` and the existing relay). The heavy crypto stays in Rust/WASM:
   - Co-signer proving/verification → `channel_member` CLI via `execFile` (argv array; never a
     shell string — no injection).
-  - Delegate proving → the WASM wallet built with `wasm-pack --target nodejs`, loaded in-process.
+  - Delegate proving → the sequential CommonJS WASM wallet built by
+    `hosting/build-wallet-node-wasm.sh`, loaded in-process. Browser builds separately enable the
+    `wasm-threads` feature because wasm-bindgen-rayon's worker helper is web-only.
 - **Chain access** → `viem` (or `ethers`) read client for logs/getters; writes go through the
   existing CLI/forge paths (which already hold the deposit key safely), never by re-implementing
   signing in JS.
 
 ### 2.2 Modules
-- `chain-watcher.js` — subscribes to the contract events in §1.2 with a **confirmation depth**
-  (`CONFIRMATIONS`, default 2) and a **persisted cursor** (`lastProcessedBlock`). Emits normalized
-  `ChainEvent { kind, channelId, args, blockNumber, txHash, log }`. On reconnect it backfills from
-  the cursor (`getLogs(fromBlock=cursor)`) so no event is missed across restarts. Reorg handling:
-  events are only acted on after `CONFIRMATIONS`; if a reorg drops a confirmed event the watcher
-  re-derives state from getters (`getPendingClose`, balances) rather than trusting cached logs.
+- `chain-watcher.js` — subscribes to the contract events in §1.2 and, on public chains, dispatches
+  durable actions only at/below the RPC's **finalized head**. Its persisted progress is the atomic
+  pair `(nextBlock, {number, hash, parentHash})`; reconnect verifies `nextBlock - 1` before any
+  dispatch and backfills with `getLogs(fromBlock=nextBlock)`. A changed finalized checkpoint is a
+  sticky fail-stop that disables signing/actions. A fixed confirmation depth is available only via
+  the explicit chain-31337 `allowUnfinalizedDevnet` escape hatch; it is not a production reorg
+  policy. The co-signer HTTP surface is opened only after one complete scan; during every later scan
+  and after a transient poll failure, API signing and timer actions stay inhibited until a complete
+  scan succeeds. Emits normalized `ChainEvent { kind, channelId, args, blockNumber, blockHash,
+  txHash, logIndex }` and rejects a log whose block hash differs from the canonical block query.
 - `api-client.js` — typed wrapper over the `api/` endpoints (co-signer side) / the delegate uses it
   to reach the co-signer. Adds retries with backoff, idempotency keys, and timeout handling.
 - `cli.js` — `execFile('channel_member', argv, { cwd: chDir(ch), env })` with the same env
   conventions as the relay (`INTMAX_CHANNEL`, `CLOSE_*`, `CLAIM_*`, `PW_RECIPIENT`,
   `POST_CLOSE_SOURCE_TX`). Co-signer only.
 - `wallet.js` — WASM session wrapper (`wallet_*`). Delegate only. Holds secrets in memory; never
-  serializes private key material (matches `wasm_wallet.rs` session model).
+  serializes private key material. Withdrawal claims are proved and self-verified inside WASM; only
+  the public descriptor and MLE/WHIR proof cross into JavaScript.
 - `store.js` — durable JSON state per channel (cursor, tickets, pending intents, seen-nonce sets,
   alert log). Crash-safe (write-tmp-then-rename). The co-signer's authoritative channel state stays
   in `cli_state.json` (owned by the CLI); `store.js` holds only loop/orchestration metadata.
@@ -196,19 +204,23 @@ holds no metadata and everything is served as raw base indices.
   reconciles against contract getters, (d) resumes any in-flight ticket from its last step.
 
 ### 2.4 Configuration (`node/config.example.json`)
-`{ rpcUrl, chainId, channels:[{id, rollup, manager, verifier, workDir}], confirmations,
-role:"cosigner"|"delegate", apiBaseUrl, pollIntervalMs, tokensManifest,
+`{ rpcUrl, chainId, channels:[{id, rollup, manager, verifier, workDir}], account,
+confirmations, allowUnfinalizedDevnet, role:"cosigner"|"delegate", coordinatorApiBaseUrl,
+cosignerApiBaseUrl, pollIntervalMs, tokensManifest,
 cosignerHost, cosignerPort, cosignerMaxBodyBytes, policy:{...},
 keys:{seedSource} }` (`tokensManifest` → §2.5).
-Secrets (deposit key, delegate seed) come from env / gitignored files, never from this file —
-consistent with the repo's key-handling rules.
+Secrets (deposit key, delegate seed, and the `account.recipient` EVM key used only for
+`requestCloseAsParticipant`) come from env / gitignored files, never from this file — consistent
+with the repo's key-handling rules. The last is `INTMAX_DELEGATE_L1_PRIVATE_KEY`; startup rejects a
+configured key whose address differs from the signed recipient.
 
 The signing HTTP service binds `127.0.0.1` by default and caps request bodies at 1 MiB. Binding
 `cosignerHost` to any non-loopback address is fail-closed unless
 `INTMAX_COSIGNER_BEARER_TOKEN` is at least 32 characters; delegates use the same environment
 variable. A remote deployment must additionally protect that bearer in transit with TLS, a VPN,
-or a trusted local TLS reverse proxy. Request artifacts are action-id scoped, so two requests or
-processes cannot overwrite one another's CLI inputs.
+or a trusted local TLS reverse proxy. The co-signer's coordinator hop uses the distinct
+`INTMAX_API_TOKEN`; it is never replaced with the peer bearer. Request artifacts are action-id
+scoped, so two requests or processes cannot overwrite one another's CLI inputs.
 
 ---
 
@@ -278,7 +290,7 @@ loop never exposes a standalone credit that would trust a request-body signed st
 The destination channel is resolved locally; both legs persist only if both pass.
 
 ### 3.4 NORMAL — deposit import (A20 / W7)
-On a confirmed `Deposited(recipient, amount, …)` for a backed channel, this handler forwards ONLY
+On a finalized `Deposited(recipient, amount, …)` for a backed channel, this handler forwards ONLY
 the observed transaction hash — never an amount, depositor or token index. The CLI does the
 verification (doc/tasks/deposit-import-threat-model.md):
 1. `channel_member cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url>` reads the `Deposited`
@@ -367,8 +379,8 @@ PartialWithdrawal is an orthogonal sub-state on ACTIVE
 - Build and submit its own transactions (intra send, inter-channel send, burn) with real ZKPs,
   then **verify** the co-signed result before treating funds as moved.
 - Refresh its ciphertext when required (`canSend == false`).
-- Exit autonomously when it must not depend on the co-signer: partial withdrawal, cooperative full
-  withdrawal participation (claim), and post-close late claim.
+- Freeze unilaterally and produce/submit its finalized withdrawal claim without exposing its Regev
+  secret; once the manager's production rollup backing exists, pull that backing and its credit.
 - Detect co-signer misbehavior (withholding, equivocation, serving a non-extending head) and
   escalate to an on-chain exit.
 
@@ -455,11 +467,22 @@ a second failure ⇒ `COSIGNER_WITHHOLDING` or a genuine race — escalate per p
     own decryption ZKP — exit-liveness, detail2 H-2 §3.5.4).
   - If the close is **legitimate**, the delegate prepares to claim after finalization.
 - **`CHAIN_FINALIZED`** (`CloseFinalized`): the delegate claims its slot balance independently of
-  any other member — `close/claim { manager, slot, recipient }` builds the `withdrawClaimZKP`
-  (Regev decryption proof; amount derived, cannot over-claim) and pulls credit. If a late
-  inter-channel transfer landed after finalization, it files a **post-close claim** (A34) via
-  `close/post-close-claim` (needs the persisted source `InterChannelTx` + accumulator index). The
-  shared-native nullifier is recomputed on-chain (no double claim).
+  any other member. The node loads the archived WASM-authenticated snapshot whose digest the
+  manager finalized, re-imports it through WASM, and invokes `wallet_withdrawal_claim` once per
+  positive token slot. WASM rechecks the finalized state digest, H1, and canonical close state-id,
+  derives the amount by Regev decryption, self-verifies the inner and MLE/WHIR proofs, and returns
+  no secret material. JavaScript re-decodes all 50 public inputs before submitting the exact ABI.
+  If a production live withdrawal has already created the manager's rollup backing, it then
+  permissionlessly calls `pullChannelFunds` / `pullChannelTokenFunds` and pulls the recipient's own
+  credit. These calls move existing `pendingWithdrawals[manager]` backing; they do not create it.
+  Transaction hashes and per-token progress are persisted before
+  receipt waits; dropped/reverted transactions become retryable, while pending/mined hashes are
+  not blindly resent. Exit completion accepts only this manager's finalized `WithdrawalClaimed`,
+  matching the saved payout transaction hash, accepted claim, token, recipient, and exact amount;
+  channel-less rollup credit/withdrawal events cannot complete an exit. The old `close/claim` REST
+  route is compatibility-only. Post-close claims are
+  disabled on-chain: a closeable state has already applied the incoming transfer to the ordinary
+  slot balance, so a second post-close credit would be a double claim.
 
 ### 4.8 ABNORMAL — equivocation & exit mode
 - **`EQUIVOCATION`**: the delegate observed two conflicting heads at the same `(epoch,
@@ -467,10 +490,13 @@ a second failure ⇒ `COSIGNER_WITHHOLDING` or a genuine race — escalate per p
   prior finalized one. This is unambiguous member misbehavior. Action: stop sending, persist the
   conflicting evidence (both signed states — a publishable fraud proof), alert loudly, and enter
   **exit mode**.
-- **Exit mode**: the delegate's sole objective becomes recovering funds with no further dependence
-  on the co-signer: prefer a partial-withdrawal burn of the full balance if the channel is still
-  Active and PW is permitted; otherwise wait for (or rely on) channel finalization and use the
-  independent withdrawal claim. Exit mode is sticky until funds are confirmed on L1.
+- **Exit mode**: the delegate stops all sends and immediately derives the depth-10 participant path
+  from its WASM-verified snapshot. With `INTMAX_DELEGATE_L1_PRIVATE_KEY` it verifies the manager's
+  immutable root/count and submits `requestCloseAsParticipant` from the exact leaf-bound recipient.
+  Exit mode is sticky until every positive finalized token balance is paid on L1. Withdrawal-claim
+  proving/submission is delegate-owned; both fund-pull legs are delegate-owned after the manager's
+  production rollup backing exists. The close-intent proof and creation of that backing remain
+  separate availability requirements in §6.3.
 
 ### 4.9 Delegate state machine
 ```
@@ -553,7 +579,7 @@ node/
 3. **M2 — delegate normal + own-tx**: sync/verify, send/refresh/inter/burn with `verifyCosigned`.
    End-to-end happy path through both programs on anvil.
 4. **M3 — abnormal flows**: invalid-request scoring, defensive close game (challenge/cancel),
-   delegate exit mode (withholding/equivocation/independent claim/post-close claim). Adversarial +
+   delegate exit mode (withholding/equivocation/independent per-token claim). Adversarial +
    restart suites. Attacker-subagent review before merge.
 5. **M4 — hardening**: input validation, rate limits, observability/status surface, ops docs.
 
@@ -574,8 +600,9 @@ CRITICAL/HIGH and the actioned MED findings were fixed; re-audit confirmed:
   failed cosign is retryable while a success stays deduped.
 - **H3** (per-batch cursor → silent event loss): per-BLOCK cursor advance; dispatch rethrows
   chain/timer errors so the cursor never passes an unprocessed block.
-- **M5/M6** (delegate marked EXITED on a co-signer API 200; one-shot recovery): EXITED now gated on
-  an on-chain credit for our recipient (`CHAIN_CREDIT` branch); recovery retryable.
+- **M5/M6** (delegate marked EXITED on a co-signer API 200; one-shot recovery): EXITED now requires
+  this manager's finalized `WithdrawalClaimed`, matching the accepted claim, saved payout tx,
+  recipient, token, and amount; recovery is retryable.
 - **M2** (unknown chain event froze the channel): unmapped chain kind → `CHAIN_OBSERVE`.
 - **L1** (flag injection): deposit args shape-validated before becoming CLI argv.
 A re-audit then flagged residuals, all fixed in a second round:
@@ -591,12 +618,22 @@ A re-audit then flagged residuals, all fixed in a second round:
   (not just a warn).
 - **MED-4**: `onCreditConfirmed` requires the credit to name OUR recipient (an absent/foreign
   recipient never clears the sticky exit).
-Regression: 45 node unit tests pass (incl. `test/adversarial.test.js` guarding every fix).
+These paths are covered by the Node regression suite, including `test/adversarial.test.js`.
 
-### 6.3 Open questions (resolve before/early in implementation)
+### 6.3 Remaining availability seams
 - Transport for delegate→co-signer beyond REST (WebSocket push for `SNAPSHOT_UPDATED`?).
 - Where the delegate obtains a *newer N-of-N head* to request a challenge when it suspects the
   co-signer (today only the co-signer can produce member signatures — documents the single-operator
   trust boundary; revisit under multi-operator).
 - A45 PW-cancel remains blocked on the era-fence model; the co-signer's PW-defense branch is
   alert-only until then.
+- Make the public balance attestation/verifier data needed by close-intent proving durably
+  available to every participant, then expose the close prover locally. The delegate can already
+  freeze via `requestCloseAsParticipant`, and after finalization its secret-preserving WASM claim
+  and direct claim submission no longer depend on a co-signer. The remaining censorship seam here
+  is specifically the transition from `ClosePending` to a proved `CloseSubmitted`, not
+  withdrawal-claim secret ownership.
+- Run a production live-withdrawal producer after close to create the rollup's
+  `pendingWithdrawals[manager]` / per-token equivalent. `pullChannelFunds` and
+  `pullChannelTokenFunds` are permissionless only after that backing exists; they cannot create it,
+  and the current full-withdrawal CLI intentionally fails closed on public-chain production use.

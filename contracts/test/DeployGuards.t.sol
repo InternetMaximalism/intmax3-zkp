@@ -13,6 +13,7 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 import {MockChannelRegistry} from "./ChannelSettlementManager.t.sol";
@@ -20,8 +21,8 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {DeployTestnetBlockProducer} from "../script/DeployTestnetBlockProducer.s.sol";
 import {DeployClose} from "../script/DeployClose.s.sol";
 import {DeployCloseCli} from "../script/DeployCloseCli.s.sol";
-import {DeployPartialWithdrawalE2E} from "../script/DeployPartialWithdrawalE2E.s.sol";
-import {DeployWalletSettlement} from "../script/DeployWalletSettlement.s.sol";
+import {DeployPartialWithdrawalE2E, E2EMockMleVerifier} from "../script/DeployPartialWithdrawalE2E.s.sol";
+import {DeployWalletSettlement, WalletMockMleVerifier} from "../script/DeployWalletSettlement.s.sol";
 import {DeployConfig} from "../script/DeployConfig.sol";
 
 /// @notice `DeployCloseCli` with its ONE run-time-staged input redirected to a checked-in copy.
@@ -142,8 +143,7 @@ contract DeployGuardsTest is Test {
     // ── (1) challenge period: the constructor floor ────────────────────────────────────────────
 
     function _newManager(uint64 challengePeriod) internal returns (ChannelSettlementManager) {
-        ChannelSettlementManager.MemberBinding[] memory b =
-            new ChannelSettlementManager.MemberBinding[](3);
+        ChannelSettlementManager.MemberBinding[] memory b = new ChannelSettlementManager.MemberBinding[](3);
         b[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
         b[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
         b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
@@ -152,13 +152,13 @@ contract DeployGuardsTest is Test {
             BP_MEMBER_SLOT,
             USER_A,
             0,
+            bytes32(0),
             challengePeriod,
             SPECIAL_CLOSE_PENALTY,
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
-            b,
-            new ChannelSettlementManager.MemberBinding[](0)
+            b
         );
     }
 
@@ -169,9 +169,7 @@ contract DeployGuardsTest is Test {
         vm.chainId(REAL_CHAIN_ID);
         vm.expectRevert(
             abi.encodeWithSelector(
-                ChannelSettlementManager.ChallengePeriodTooShort.selector,
-                uint64(1),
-                CHALLENGE_PERIOD_SECS_FLOOR
+                ChannelSettlementManager.ChallengePeriodTooShort.selector, uint64(1), CHALLENGE_PERIOD_SECS_FLOOR
             )
         );
         _newManager(1);
@@ -213,6 +211,34 @@ contract DeployGuardsTest is Test {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         ChannelSettlementManager m = _newManager(1);
         assertEq(m.challengePeriod(), 1, "the devnet E2E value must still deploy on 31337");
+    }
+
+    /// A short-window dev manager must freeze if its code/state is moved to a
+    /// public chain. Guard the state transition plus every value-bearing sink,
+    /// including already-pending/credited state that needs no verifier call.
+    function test_manager_devnetShortWindow_runtimeSinksRefuseAfterChainIdChange() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
+        ChannelSettlementManager m = _newManager(1);
+        assertTrue(m.isNativeSendAllowed(0), "local manager should initially be active");
+
+        vm.chainId(REAL_CHAIN_ID);
+        bytes memory expected = abi.encodeWithSelector(
+            ChannelSettlementManager.ChallengePeriodTooShort.selector, uint64(1), CHALLENGE_PERIOD_SECS_FLOOR
+        );
+        assertFalse(m.isNativeSendAllowed(0), "migrated dev manager must not authorize sends");
+
+        vm.expectRevert(expected);
+        m.requestClose();
+        vm.expectRevert(expected);
+        m.finalizeClose();
+        vm.expectRevert(expected);
+        m.finalizePartialWithdrawal();
+        vm.expectRevert(expected);
+        m.pullChannelFunds();
+        vm.expectRevert(expected);
+        m.pullChannelTokenFunds(7);
+        vm.expectRevert(expected);
+        m.claimWithdrawalCredit(uint32(0));
     }
 
     /// Zero stays rejected on every chain, including the devnet — a same-block finalize voids the
@@ -282,15 +308,12 @@ contract DeployGuardsTest is Test {
     /// above. It used to target `DeployClose.s.sol`, which is now hard-gated to the devnet (see the
     /// HOLE-2 tests below), so this is strictly better coverage: the script under test is the one a
     /// real deployment actually uses.
-    function test_deployCloseCliScript_realChain_shipsSpecChallengePeriod() public {
+    function test_deployCloseCliScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
-        assertEq(
-            manager.challengePeriod(),
-            CHALLENGE_PERIOD_SECS_FLOOR,
-            "a real-chain settlement deploy must ship the 1-day challenge period"
-        );
+        DeployCloseCliHarness script = new DeployCloseCliHarness();
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        script.run();
     }
 
     /// `DeployClose.s.sol` on the devnet keeps the short window, so the local lifecycle E2Es that
@@ -311,42 +334,29 @@ contract DeployGuardsTest is Test {
     /// `Deploy.s.sol` is the script `doc/docs/deploy-runbook.md` uses for the live network. A
     /// rollup it produces MUST be able to pay out: without `initializeWithdrawalVk`, `deposit()`
     /// still works and both withdrawal entry points revert `WithdrawalVkNotSet()` forever.
-    function test_deployScript_realChain_initializesWithdrawalVk() public {
+    function test_deployScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         Deploy script = new Deploy();
-        (IntmaxRollup rollup,) = script.run();
-        assertTrue(
-            rollup.withdrawalVkInitialized(),
-            "a non-anvil Deploy.s.sol run must leave the rollup able to pay out"
-        );
-        assertEq(rollup.fraudTreasury(), fraudTreasury, "FRAUD_TREASURY must reach the constructor");
-        // The VK must be a REAL one: `initializeWithdrawalVk` rejects degreeBits == 0, so a
-        // non-zero degreeBits here also proves no disabled/placeholder VK was installed.
-        (uint256 degreeBits,,,,) = rollup.withdrawalMleVk();
-        assertGt(degreeBits, 0, "the installed withdrawal VK must have verification enabled");
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        script.run();
     }
 
     /// Same requirement for the other production-shaped deployer. It was missing the call too, and
     /// its own docstring positions it for a public testnet.
-    function test_deployTestnetBlockProducerScript_realChain_initializesWithdrawalVk() public {
+    function test_deployTestnetBlockProducerScript_realChain_refusesUnreleasedMleEngine() public {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployTestnetBlockProducer script = new DeployTestnetBlockProducer();
-        (IntmaxRollup rollup,) = script.run();
-        assertTrue(
-            rollup.withdrawalVkInitialized(),
-            "a non-anvil DeployTestnetBlockProducer run must leave the rollup able to pay out"
-        );
-        (uint256 degreeBits,,,,) = rollup.withdrawalMleVk();
-        assertGt(degreeBits, 0, "the installed withdrawal VK must have verification enabled");
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        script.run();
     }
 
     /// The withdrawal VK must be bound to the SAME `MleVerifier` the script deployed and must be
     /// set exactly once — a second call is refused, so a later "top-up" cannot silently swap the
     /// circuit a payout is checked against.
-    function test_deployScript_withdrawalVkIsSetOnce() public {
-        vm.chainId(REAL_CHAIN_ID);
+    function test_deployScript_localDevnet_withdrawalVkIsSetOnce() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         Deploy script = new Deploy();
         (IntmaxRollup rollup,) = script.run();
@@ -354,9 +364,7 @@ contract DeployGuardsTest is Test {
         SpongefishWhirVerify.WhirParams memory whir;
         vm.prank(rollup.deployer());
         vm.expectRevert(IntmaxRollup.WithdrawalVkAlreadySet.selector);
-        rollup.initializeWithdrawalVk(
-            zeroVk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-        );
+        rollup.initializeWithdrawalVk(zeroVk, whir, hex"", hex"", new uint256[](0), new uint256[](0));
     }
 
     // ── (3) HOLE 1 — the settlement manager must be REGISTERED on the rollup ───────────────────
@@ -374,8 +382,8 @@ contract DeployGuardsTest is Test {
     /// the rollup knows about the manager the very same script deployed. Deleting the
     /// `registerSettlementManager` call fails this assertion (and trips the script's own read-back
     /// `require` first).
-    function test_deployCloseCliScript_realChain_registersSettlementManager() public {
-        vm.chainId(REAL_CHAIN_ID);
+    function test_deployCloseCliScript_localDevnet_registersSettlementManager() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
         assertTrue(
@@ -387,8 +395,8 @@ contract DeployGuardsTest is Test {
     /// The property that actually matters, exercised rather than inferred: the deployed manager can
     /// perform the ONE rollup call `finalizePartialWithdrawal` makes. Asserting the mapping alone
     /// would pass even if the gate later moved to a different predicate.
-    function test_deployCloseCliScript_realChain_managerCanAuthorizePartialWithdrawal() public {
-        vm.chainId(REAL_CHAIN_ID);
+    function test_deployCloseCliScript_localDevnet_managerCanAuthorizePartialWithdrawal() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
         bytes32 authDigest = keccak256("guards_auth_digest");
@@ -403,22 +411,19 @@ contract DeployGuardsTest is Test {
     /// NOTHING IS WEAKENED: the fail-closed check still fires for everyone else. Registration is a
     /// per-address grant to the manager this deploy created, not a hole in the gate. If a future
     /// edit made `authorizePartialWithdrawal` permissive (or registered a wildcard), this fails.
-    function test_deployCloseCliScript_realChain_strangerStillRefusedAuthorization() public {
-        vm.chainId(REAL_CHAIN_ID);
+    function test_deployCloseCliScript_localDevnet_strangerStillRefusedAuthorization() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup,,) = new DeployCloseCliHarness().run();
-        assertFalse(
-            rollup.isRegisteredSettlementManager(alice),
-            "registration must be per-address, not blanket"
-        );
+        assertFalse(rollup.isRegisteredSettlementManager(alice), "registration must be per-address, not blanket");
         vm.prank(alice);
         vm.expectRevert(IntmaxRollup.NotRegisteredSettlementManager.selector);
         rollup.authorizePartialWithdrawal(keccak256("stranger_digest"));
     }
 
     /// ... and it is still deployer-only, so an unregistered party cannot register itself.
-    function test_deployCloseCliScript_realChain_registrationIsDeployerOnly() public {
-        vm.chainId(REAL_CHAIN_ID);
+    function test_deployCloseCliScript_localDevnet_registrationIsDeployerOnly() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup,,) = new DeployCloseCliHarness().run();
         vm.prank(alice);
@@ -426,21 +431,12 @@ contract DeployGuardsTest is Test {
         rollup.registerSettlementManager(alice);
     }
 
-    /// The rest of what a real settlement deployment needs, on the one script that claims to
-    /// provide it: the payout VK on the rollup and ALL FIVE statement VKs on the settlement
-    /// verifier. Each latch below is a `revert *VkNotSet()` on an HONEST path — close,
-    /// withdrawal-claim, post-close-claim, the only remedy against a stale close (cancel-close),
-    /// and the §Q key-rotation / co-signer-addition path (member-set-update).
-    /// Any of them left unkeyed strands a channel exactly as `DeployClose.s.sol` did.
-    ///
-    /// M-3 (audit28-08-2026): the member-set-update assertion is the one this test was written for
-    /// and did not have. `initializeMemberSetUpdateVk` existed in the Verifier and in exactly one
-    /// test, called by NO deploy script, so every real deployment reverted `MemberSetUpdateVkNotSet`
-    /// on `applyMemberSetUpdate` forever — the FOURTH occurrence of the audit622 A-M4 class, on a
-    /// guard written expressly to end that class. If a future edit drops the script's step 7, this
-    /// line fails.
-    function test_deployCloseCliScript_realChain_keysEveryVkARealDeploymentNeeds() public {
-        vm.chainId(REAL_CHAIN_ID);
+    /// A real settlement deployment keys every LIVE statement VK and deliberately leaves the
+    /// parked member-set-update VK unset. The current MSU proof authenticates signer intent but not
+    /// inclusion/finality of the matching validity-tree action, so keying it in production would
+    /// misrepresent a one-layer transition as a complete protocol feature.
+    function test_deployCloseCliScript_localDevnet_keysLiveVksAndLeavesMsuUnkeyed() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup, ChannelSettlementVerifier sv,) = new DeployCloseCliHarness().run();
         assertTrue(rollup.withdrawalVkInitialized(), "withdrawal VK: the rollup could never pay out");
@@ -450,46 +446,47 @@ contract DeployGuardsTest is Test {
         assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK: no remedy against a stale close");
         assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK: members could not collect");
         assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK: `post-close-claim` bricked");
-        assertTrue(
-            sv.memberSetUpdateVkInitialized(),
-            "memberSetUpdate VK: applyMemberSetUpdate reverts forever, so key rotation and every "
-            "post-constructor change to isMemberRecipient are bricked (M-3)"
-        );
-        (uint256 msuDegreeBits,,,,) = sv.memberSetUpdateVk();
-        assertGt(msuDegreeBits, 0, "the installed msu VK must have verification enabled");
+        assertFalse(sv.memberSetUpdateVkInitialized(), "release deploy must not initialize the msu VK");
+        (uint256 msuDegreeBits, bytes32 msuRoot, uint256 msuConstants, uint256 msuWires, bytes32 msuGates) =
+            sv.memberSetUpdateVk();
+        assertEq(msuDegreeBits, 0, "release deploy installed an msu degree");
+        assertEq(msuRoot, bytes32(0), "release deploy installed an msu root");
+        assertEq(msuConstants, 0, "release deploy installed msu constants");
+        assertEq(msuWires, 0, "release deploy installed msu wires");
+        assertEq(msuGates, bytes32(0), "release deploy installed an msu gates digest");
         assertTrue(address(rollup.kzgVerifier()).code.length > 0, "KZG satellite must be pinned");
     }
 
-    /// M-11 — the DEPLOY-TIME half of the rail-agreement check the Verifier does not perform.
-    ///
-    /// `ChannelSettlementVerifier._verifyMsuMle` verifies the member-set-update proof under the
-    /// CLOSE statement's rail (`_closeWhirParams`, `_closeKIs`, `closeWhirProtocolId`,
-    /// `closeWhirSplitSessionId`, `closeMleVerifier`), carrying only the msu VK's own
-    /// `degreeBits` / `preprocessedRoot` / `gatesDigest`. `initializeMemberSetUpdateVk` enforces
-    /// `closeVkInitialized` but NOTHING on chain checks the two rails actually agree.
-    ///
-    /// This asserts, off the storage of a real deploy, that the two circuits genuinely wrap to the
-    /// same shape — the premise the reuse rests on. `preprocessedRoot` is the ONE field that must
-    /// differ (it is the per-circuit soundness anchor); asserting that too makes this a check on
-    /// the rail rather than on the VK being a copy of the close VK.
-    ///
-    /// STILL OPEN: there is no RUNTIME check. This test and the script's `require` cover only
-    /// deployments made by `DeployCloseCli.s.sol`. A mismatch is fail-closed — verification would
-    /// fail, never accept a foreign proof — so what is missing is a liveness fence, not a
-    /// soundness one.
-    function test_deployCloseCliScript_realChain_msuVkSharesTheCloseWhirRail() public {
-        vm.chainId(REAL_CHAIN_ID);
+    /// The production-deployed Manager rejects MSU with its own named release error and leaves the
+    /// signer set/version/BP unchanged. An empty proof is intentional: the Manager must fail before
+    /// consulting either proof calldata or the uninitialized parked verifier.
+    function test_deployCloseCliScript_localDevnet_msuEntryIsDisabledAndCannotMutate() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (, ChannelSettlementVerifier sv,) = new DeployCloseCliHarness().run();
-        (uint256 msuDegreeBits, bytes32 msuRoot,,, bytes32 msuGates) = sv.memberSetUpdateVk();
-        (uint256 closeDegreeBits, bytes32 closeRoot,,, bytes32 closeGates) = sv.closeVk();
-        assertEq(msuDegreeBits, closeDegreeBits, "msu/close wrapper degreeBits must agree");
-        assertEq(msuGates, closeGates, "msu/close wrapper gatesDigest must agree");
-        assertTrue(
-            msuRoot != closeRoot,
-            "msu VK must carry its OWN preprocessedRoot -- an equal root means the deploy keyed the "
-            "close circuit under the msu latch"
-        );
+        (, ChannelSettlementVerifier sv, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
+        assertFalse(sv.memberSetUpdateVkInitialized(), "production verifier unexpectedly keyed msu");
+
+        uint8 beforeCount = manager.activeMemberCount();
+        uint64 beforeVersion = manager.memberSetVersion();
+        bytes32 beforeBp = manager.bpPkG();
+        bytes32 beforeCommitment = manager.registeredMemberSetCommitment();
+        bytes32[] memory proposed = new bytes32[](beforeCount);
+        for (uint256 i = 0; i < beforeCount; i++) {
+            proposed[i] = manager.memberPkGs(i);
+        }
+        proposed[beforeCount - 1] = keccak256("must-not-be-installed");
+        MleVerifier.MleProof memory noProof;
+
+        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
+        manager.applyMemberSetUpdate(proposed, beforeCount, address(0), beforeVersion + 1, noProof);
+
+        assertEq(manager.activeMemberCount(), beforeCount, "member count mutated");
+        assertEq(manager.memberSetVersion(), beforeVersion, "member-set version mutated");
+        assertEq(manager.bpPkG(), beforeBp, "BP key mutated");
+        assertEq(manager.registeredMemberSetCommitment(), beforeCommitment, "member commitment mutated");
+        for (uint256 i = 0; i < beforeCount; i++) {
+            assertTrue(manager.memberPkGs(i) != proposed[beforeCount - 1], "proposed key was installed");
+        }
     }
 
     // ── (4) HOLE 2 — the VK-less settlement deployer must not reach a public chain ─────────────
@@ -509,9 +506,11 @@ contract DeployGuardsTest is Test {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployClose script = new DeployClose();
-        vm.expectRevert(bytes(
-            "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
-        ));
+        vm.expectRevert(
+            bytes(
+                "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+            )
+        );
         script.run();
     }
 
@@ -521,9 +520,11 @@ contract DeployGuardsTest is Test {
         vm.chainId(1);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployClose script = new DeployClose();
-        vm.expectRevert(bytes(
-            "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
-        ));
+        vm.expectRevert(
+            bytes(
+                "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+            )
+        );
         script.run();
     }
 
@@ -556,10 +557,7 @@ contract DeployGuardsTest is Test {
         assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK");
         assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK");
         assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK");
-        assertTrue(
-            rollup.isRegisteredSettlementManager(address(manager)),
-            "the manager must be registered here too"
-        );
+        assertTrue(rollup.isRegisteredSettlementManager(address(manager)), "the manager must be registered here too");
     }
 
     /// The mock-verifier scripts must stay unreachable from a public chain — they wire an
@@ -571,6 +569,27 @@ contract DeployGuardsTest is Test {
         DeployPartialWithdrawalE2E script = new DeployPartialWithdrawalE2E();
         vm.expectRevert(bytes("local-devnet only: this script deploys mock verifiers"));
         script.run();
+    }
+
+    /// Script-entry guards do not protect already-deployed dev bytecode after
+    /// a chain-id change or state migration. Each always-true mock therefore
+    /// enforces the local chain again at proof-verification time.
+    function test_devSettlementMocks_runtimeGuardAfterChainIdChange() public {
+        vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
+        WalletMockMleVerifier walletMock = new WalletMockMleVerifier();
+        E2EMockMleVerifier e2eMock = new E2EMockMleVerifier();
+        MleVerifier.MleProof memory proof;
+        MleVerifier.VerifyParams memory params;
+        SpongefishWhirVerify.WhirParams memory whir;
+
+        assertTrue(walletMock.verify(proof, params, whir, bytes32(0)), "wallet mock must work locally");
+        assertTrue(e2eMock.verify(proof, params, whir, bytes32(0)), "E2E mock must work locally");
+
+        vm.chainId(REAL_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        walletMock.verify(proof, params, whir, bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        e2eMock.verify(proof, params, whir, bytes32(0));
     }
 
     // ── (6) the REGISTRATION delegate count and the MANAGER's are different things ─────────────
@@ -608,10 +627,10 @@ contract DeployGuardsTest is Test {
     {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (rollup, ) = new Deploy().run();
+        (rollup,) = new Deploy().run();
         vm.setEnv("ROLLUP", vm.toString(address(rollup)));
         vm.recordLogs();
-        (, , manager) = new DeployWalletSettlementHarness().run();
+        (,, manager) = new DeployWalletSettlementHarness().run();
         logs = vm.getRecordedLogs();
     }
 
@@ -627,10 +646,9 @@ contract DeployGuardsTest is Test {
     /// live count, and it fails if the delegates are folded into the active slots — the two halves
     /// of what the conflated script did.
     function test_deployWalletSettlementScript_registersCosignersOnly() public {
-        (IntmaxRollup rollup, , Vm.Log[] memory logs) = _runWalletSettlement();
+        (IntmaxRollup rollup,, Vm.Log[] memory logs) = _runWalletSettlement();
 
-        (bytes32[] memory eventPkGs, bytes32 memberPubkeysRoot, bytes32 newChainHash) =
-            _decodeChannelRegistered(logs);
+        (bytes32[] memory eventPkGs, bytes32 memberPubkeysRoot, bytes32 newChainHash) = _decodeChannelRegistered(logs);
 
         string memory json = _guardRecord();
         bytes32[] memory allPkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
@@ -641,9 +659,7 @@ contract DeployGuardsTest is Test {
         );
 
         assertEq(
-            eventPkGs.length,
-            GUARD_MEMBER_COUNT,
-            "the L1 registration record must carry the co-signing members ONLY"
+            eventPkGs.length, GUARD_MEMBER_COUNT, "the L1 registration record must carry the co-signing members ONLY"
         );
         for (uint256 i = 0; i < GUARD_MEMBER_COUNT; i++) {
             assertEq(eventPkGs[i], allPkGs[i], "registered key order must be the cosigner prefix");
@@ -676,37 +692,43 @@ contract DeployGuardsTest is Test {
         );
     }
 
-    /// DIRECTION 2: the manager keeps the LIVE delegate count and the delegate bindings.
+    /// DIRECTION 2: the manager keeps the LIVE delegate count and authenticated participant root.
     ///
     /// This is the test that fails if someone achieves the Option B invariant by zeroing the
     /// manager side instead of decoupling the two.
     function test_deployWalletSettlementScript_managerKeepsLiveDelegateCount() public {
-        (IntmaxRollup rollup, ChannelSettlementManager manager, ) = _runWalletSettlement();
+        (IntmaxRollup rollup, ChannelSettlementManager manager,) = _runWalletSettlement();
 
         assertEq(
             manager.activeDelegateCount(),
             GUARD_ACTIVE_DELEGATES,
             "the manager's delegate count is the B-2 close floor: it must stay the LIVE count, never the registration's zero"
         );
-        assertEq(
-            manager.activeMemberCount(),
-            GUARD_MEMBER_COUNT,
-            "the co-signing set is unchanged by the decoupling"
-        );
+        assertEq(manager.activeMemberCount(), GUARD_MEMBER_COUNT, "the co-signing set is unchanged by the decoupling");
 
-        // Counted is not enough — each delegate must actually be BOUND, since those bindings are
-        // the only place a delegate's payout address is recorded (`isMemberRecipient` gates
-        // `submitPartialWithdrawal`'s participant check).
+        // Counted is not enough: the immutable root must bind the full live pkG/recipient array.
+        // Delegates are deliberately NOT expanded into mappings (1024 SSTOREs would make the
+        // deployment unmineable); they open their fixed-depth leaf when requesting a close.
         string memory json = _guardRecord();
         bytes32[] memory pkGs = vm.parseJsonBytes32Array(json, ".member_pk_gs");
         address[] memory recipients = vm.parseJsonAddressArray(json, ".recipients");
+        bytes32 expectedRoot = _participantRoot(pkGs, recipients);
+        assertEq(manager.participantRoot(), expectedRoot, "manager lost the signed live participant root");
+        assertEq(
+            manager.activeParticipantCount(),
+            uint256(GUARD_MEMBER_COUNT) + uint256(GUARD_ACTIVE_DELEGATES),
+            "manager lost the signed live participant count"
+        );
         for (uint256 i = GUARD_MEMBER_COUNT; i < pkGs.length; i++) {
             assertEq(
-                manager.registeredRecipientOf(pkGs[i]),
-                recipients[i],
-                "a delegate lost its recipient binding"
+                manager.participantLeaf(uint16(i), pkGs[i], recipients[i]),
+                keccak256(abi.encodePacked(bytes4("IMPR"), uint16(i), pkGs[i], recipients[i])),
+                "delegate leaf encoding drifted"
             );
-            assertTrue(manager.isMemberRecipient(recipients[i]), "delegate recipient not authorized");
+            assertEq(
+                manager.registeredRecipientOf(pkGs[i]), address(0), "delegate unexpectedly consumed mapping SSTORE"
+            );
+            assertFalse(manager.isMemberRecipient(recipients[i]), "delegate unexpectedly consumed recipient SSTORE");
         }
 
         // And the manager is still bound to the (now cosigner-only) registration: the decoupling
@@ -716,6 +738,20 @@ contract DeployGuardsTest is Test {
             rollup.channelMemberSetCommitment(GUARD_REG_CHANNEL_ID),
             "manager and rollup must still agree on the member set"
         );
+    }
+
+    function _participantRoot(bytes32[] memory pkGs, address[] memory recipients) internal pure returns (bytes32) {
+        assert(pkGs.length == recipients.length && pkGs.length <= 1024);
+        bytes32[] memory nodes = new bytes32[](1024);
+        for (uint256 slot = 0; slot < pkGs.length; slot++) {
+            nodes[slot] = keccak256(abi.encodePacked(bytes4("IMPR"), uint16(slot), pkGs[slot], recipients[slot]));
+        }
+        for (uint256 width = 1024; width > 1; width >>= 1) {
+            for (uint256 i = 0; i < width; i += 2) {
+                nodes[i >> 1] = keccak256(abi.encodePacked(bytes4("IMPN"), nodes[i], nodes[i + 1]));
+            }
+        }
+        return nodes[0];
     }
 
     /// @dev Decode the one `ChannelRegistered` event out of a recorded log set.
@@ -729,10 +765,8 @@ contract DeployGuardsTest is Test {
         );
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == topic0) {
-                (, pkGs, , , memberPubkeysRoot, , newChainHash) = abi.decode(
-                    logs[i].data,
-                    (uint8, bytes32[], bytes32[], address[], bytes32, bytes32, bytes32)
-                );
+                (, pkGs,,, memberPubkeysRoot,, newChainHash) =
+                    abi.decode(logs[i].data, (uint8, bytes32[], bytes32[], address[], bytes32, bytes32, bytes32));
                 return (pkGs, memberPubkeysRoot, newChainHash);
             }
         }

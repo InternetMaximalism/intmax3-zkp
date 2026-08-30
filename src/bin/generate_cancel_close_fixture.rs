@@ -6,12 +6,12 @@
 //!
 //!   - contracts/test/data/cancel_close_mle.json — the wrapped MLE proof + VK params.
 //!   - contracts/test/data/cancel_close.json — a descriptor with every PI field value (channelId,
-//!     closeIntentDigest, memberSetCommitment, revivedStateVersion, revivedChannelStateDigest) plus
-//!     the member pk_g set, so the Solidity manager can fill the registered member-set commitment
-//!     and bind the expected limbs.
+//!     closeIntentDigest, memberSetCommitment, closeFinalStateVersion, revivedStateVersion,
+//!     revivedChannelStateDigest) plus the member pk_g set, so the Solidity manager can fill the
+//!     registered member-set commitment and bind the expected limbs.
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED circuit public inputs
-//! (the 27 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers verbatim).
+//! (the 29 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers verbatim).
 //! `member_set_commitment` is the value the circuit derived from the verified signing keys; on L1
 //! the manager injects `registeredMemberSetCommitment()` and the strict bind forces equality.
 //!
@@ -47,6 +47,7 @@ struct CancelCloseDescriptor {
     channel_id: u32,
     close_intent_digest: String,
     member_set_commitment: String,
+    close_final_state_version: u64,
     revived_state_version: u64,
     revived_channel_state_digest: String,
     /// The active members' signing pk_g hashes (slot order) — lets the Solidity test build the
@@ -100,7 +101,7 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved limb");
         }
-        eprintln!("[cancel] MLE publicInputs == 27 raw limbs (sanity OK)");
+        eprintln!("[cancel] MLE publicInputs == 29 raw limbs (sanity OK)");
     }
 
     let out_dir = Path::new("contracts/test/data");
@@ -112,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         channel_id: pis.channel_id.channel_id(),
         close_intent_digest: pis.close_intent_digest.to_string(),
         member_set_commitment: pis.member_set_commitment.to_string(),
+        close_final_state_version: pis.close_final_state_version,
         revived_state_version: pis.revived_state_version,
         revived_channel_state_digest: pis.revived_channel_state_digest.to_string(),
         member_pk_gs: witness

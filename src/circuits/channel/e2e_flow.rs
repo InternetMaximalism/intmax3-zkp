@@ -31,14 +31,19 @@
 
 use std::sync::OnceLock;
 
-use plonky2::{field::goldilocks_field::GoldilocksField, plonk::config::PoseidonGoldilocksConfig};
+use plonky2::{
+    field::{goldilocks_field::GoldilocksField, types::PrimeField64},
+    plonk::config::PoseidonGoldilocksConfig,
+};
 use rand010::{SeedableRng, rngs::SmallRng};
 
 use crate::{
     circuits::channel::{
         cancel_close_pis::CancelCloseWitness,
         close_circuit::{ChannelCloseFullWitness, test_fixture as close_fixture},
-        close_pis::ChannelCloseWitness,
+        close_pis::{
+            CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs, ChannelCloseWitness,
+        },
         post_close_claim_pis::PostCloseClaimWitness,
         state_update_verifier::{
             BalanceRefreshUpdateWitness, ChannelProofEnvelope, ChannelProofVerifier,
@@ -668,13 +673,13 @@ fn build_flow() -> FlowFixture {
     }
 }
 
-fn close_withdrawal_for(state: &ChannelState, burn_word: u32) -> CloseWithdrawal {
+fn close_withdrawal_for(state: &ChannelState) -> CloseWithdrawal {
     CloseWithdrawal {
         channel_id: state.channel_id,
         final_channel_state_digest: state.digest,
         final_balance_state_h1: state.balance_state.h1(),
         intmax_state_root: state.channel_fund.intmax_state_root,
-        burn_tx_hash: bytes32_word(burn_word),
+        burn_tx_hash: Bytes32::default(),
         burn_amount: state.channel_fund.amounts[0],
         zkp: vec![1, 2, 3],
     }
@@ -828,18 +833,18 @@ fn channel_native_regev_full_flow_e2e() {
     );
 
     // (f) Close on channel B: CloseWithdrawal + CloseIntent carry the v2 chain/version bindings.
-    let close_tx = close_withdrawal_for(&final_state, 701);
-    let close_intent = CloseIntent::new(1, &final_state, &close_tx, 4).unwrap();
+    let close_tx = close_withdrawal_for(&final_state);
+    let close_intent = CloseIntent::new(&final_state, &close_tx).unwrap();
     assert_eq!(close_intent.final_state_version, 3);
     assert_eq!(
         close_intent.final_settled_tx_chain,
         settled_tx_chain_push(Bytes32::default(), f.tx_leaf),
         "the close intent pins one base settle event for channel B"
     );
-    // IMCI digest stability: rebuilding the intent from the same data reproduces the digest.
+    // IMCS identity stability: rebuilding the intent from the same state reproduces the ID.
     assert_eq!(
         close_intent.signing_digest(),
-        CloseIntent::new(1, &final_state, &close_tx, 4)
+        CloseIntent::new(&final_state, &close_tx)
             .unwrap()
             .signing_digest()
     );
@@ -891,8 +896,8 @@ fn channel_native_regev_full_flow_e2e() {
     // in `cancel_close_circuit::tests`).
     let revived_state = f.send.next_state.clone();
     let stale_close_state = f.in_channel.next_state.clone();
-    let stale_close_tx = close_withdrawal_for(&stale_close_state, 711);
-    let stale_close_intent = CloseIntent::new(2, &stale_close_state, &stale_close_tx, 4).unwrap();
+    let stale_close_tx = close_withdrawal_for(&stale_close_state);
+    let stale_close_intent = CloseIntent::new(&stale_close_state, &stale_close_tx).unwrap();
     assert!(
         revived_state.balance_state.state_version > stale_close_intent.final_state_version,
         "revived state must post-date the stale close"
@@ -954,7 +959,8 @@ fn channel_native_regev_full_flow_e2e() {
 /// post-in-channel state of the shared flow fixture. Its settled_tx_chain is still genesis
 /// (= 0x00…00; in-channel transfers never advance the chain), so the REAL initial balance proof
 /// carries the matching `settled_tx_chain` / `channel_id` public inputs that the circuit
-/// constrains against the close PIs. On top of the IMCH/IMCL/IMCI digest chain the circuit
+/// constrains against the close PIs. On top of the IMCH/IMCL checks and canonical IMCS identity,
+/// the circuit
 /// recomputes H1 from the witnessed ciphertext digests and binds the recursively verified
 /// `FalconAggCircuit` proof carrying 3 REAL Falcon member signatures over the recomputed IMCH
 /// digest (falcon-sig Phase 2).
@@ -966,9 +972,10 @@ fn channel_native_regev_full_flow_e2e() {
 fn channel_full_close_circuit_proof_e2e() {
     let f = flow();
     let a1 = f.in_channel.next_state.clone();
-    let a1_close_tx = close_withdrawal_for(&a1, 721);
-    let a1_close_intent = CloseIntent::new(1, &a1, &a1_close_tx, 4).unwrap();
+    let a1_close_tx = close_withdrawal_for(&a1);
+    let a1_close_intent = CloseIntent::new(&a1, &a1_close_tx).unwrap();
     assert_eq!(a1_close_intent.final_settled_tx_chain, Bytes32::default());
+    let expected_close_state_id = a1_close_intent.state_id();
     let close_fx = close_fixture::fixture();
     let t_balance = std::time::Instant::now();
     let initial_balance_proof = close_fx
@@ -993,6 +1000,15 @@ fn channel_full_close_circuit_proof_e2e() {
     let t_close = std::time::Instant::now();
     let close_proof = close_fx.close_circuit.prove(&close_witness).unwrap();
     println!("[e2e] full close proof: {:?}", t_close.elapsed());
+    let limbs = close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN]
+        .iter()
+        .map(|value| value.to_canonical_u64())
+        .collect::<Vec<_>>();
+    let close_pis = ChannelClosePublicInputs::from_u64_slice(&limbs).unwrap();
+    assert_eq!(
+        close_pis.close_intent_digest, expected_close_state_id,
+        "the proven circuit PI must equal Rust's canonical IMCS close-state ID"
+    );
     close_fx.close_circuit.data.verify(close_proof).unwrap();
 }
 

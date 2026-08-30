@@ -67,7 +67,7 @@ impl ChannelStateUpdatePublicInputs {
     /// Keccak digest of the PI word stream. LAYOUT (multitoken Phase 2b): the two former 8-limb
     /// `channel_fund_{before,after}` scalars are widened IN PLACE to the flat, ALWAYS-full-width
     /// 80-limb `amounts[0..10]` vectors (before at the former before position, after at the
-    /// former after position) — same fixed-width injective discipline as the IMCH/IMCI amount
+    /// former after position) — same fixed-width injective discipline as the IMCH/TFD amount
     /// segment widening (each field keeps its own fixed-width slot; no length prefixes, so the
     /// stream stays prefix-free per field). This digest has no domain word and is not signed —
     /// it is the transport-proof PI hash rebuilt by both sides from independently checked data.

@@ -32,14 +32,12 @@ crate-type = ["rlib"]
 # refs (regardless of branch label) to the submodule path so everything in the
 # workspace resolves to the same code.
 plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = [
-    "parallel",
     "std",
 ] }
 starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = [
-    "parallel",
     "std",
 ] }
-plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main" }
+plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["std"] }
 # Sibling crates on the `wasm-main` branch (Result-returning
 # PartialWitness::set_target, matches polygon-plonky2 main HEAD incl. PR #11
 # wasm-webgpu-merkle).
@@ -57,6 +55,7 @@ plonky2_bn254 = { git = "https://github.com/InternetMaximalism/plonky2_bn254", b
 plonky2_keccak = { git = "https://github.com/InternetMaximalism/plonky2_keccak", branch = "wasm-main", default-features = false }
 
 keccak-hash = "0.8.0"
+sha2 = "0.10.9"
 hex = "0.4.3"
 rand = "0.8.5"
 rand09 = { package = "rand", version = "0.9.4" }
@@ -122,7 +121,7 @@ p3-uni-stark = "0.4.2"
 
 # Threading
 rayon = "1.8"
-wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"] }
+wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"], optional = true }
 
 # WASM bindings
 wasm-bindgen = "0.2"
@@ -165,9 +164,13 @@ getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"]
 # E-3 73.2 -> 34.2 ms, refresh 83.8 -> 42.1 ms, i.e. a flat ~2x for free.
 #
 # Cargo unions features across target sections, so this turns `parallel` on for non-wasm only;
-# the wasm build keeps deciding for itself via the `regev-parallel` feature.
+# browser wasm opts into all parallel provers through `wasm-threads`, while the CommonJS Node
+# build deliberately stays sequential.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 regev_plonky3 = { git = "https://github.com/leohio/regv-plonky3.git", rev = "5495eda", features = ["parallel"] }
+plonky2 = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
+starky = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", package = "starky", branch = "main", default-features = false, features = ["parallel", "std"] }
+plonky2_mle = { git = "https://github.com/InternetMaximalism/polygon-plonky2.git", branch = "main", default-features = false, features = ["parallel", "std"] }
 libc = "0.2"
 
 [features]
@@ -184,8 +187,20 @@ legacy_wasm_demo = []
 # `plonky2_keccak/wasm` does not expose a `gpu_merkle` feature flag, so we only
 # forward it to plonky2 + starky (which do).
 gpu_merkle = ["plonky2/gpu_merkle", "starky/gpu_merkle"]
-# Rayon-parallel Regev STARK proving (native only; do not enable for wasm).
+# Rayon-parallel Regev STARK proving. Native targets enable this above; kept as a
+# compatibility feature for callers that only need Regev parallelism.
 regev-parallel = ["regev_plonky3/parallel"]
+# Browser-only parallel wallet proving. wasm-bindgen-rayon currently supports
+# wasm-bindgen's `web` target, not its CommonJS `nodejs` target, so the Node wallet
+# deliberately omits this feature and uses the sequential fallbacks. The browser
+# release build enables it and awaits `init_thread_pool` before proving.
+wasm-threads = [
+    "dep:wasm-bindgen-rayon",
+    "plonky2/parallel",
+    "starky/parallel",
+    "plonky2_mle/parallel",
+    "regev_plonky3/parallel",
+]
 # Un-gates the SHARED close-circuit witness builders (`close_circuit::test_fixture`) for the
 # `generate_close_fixture` binary WITHOUT pulling them into normal `cargo build`. The builders are
 # otherwise `#[cfg(test)]`-only; this flag adds them to the non-test build so the fixture generator

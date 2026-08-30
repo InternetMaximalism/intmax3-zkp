@@ -20,8 +20,8 @@ struct CloseProofFields {
     /// Multi-token (§N-6, TM-11): the full registry-aligned per-token fund vector, ALWAYS full
     /// width (zero-padded past `tokenCount`). Replaces the single `channelFundAmount`; slot 0 (the
     /// genesis token) is the burn denomination and feeds the `channelFundAmount` close-PI limbs.
-    /// The 80-word segment enters the IMCI preimage, and together with `tokenRegistry` /
-    /// `tokenCount` it is bound to the close PI's `tokenFundsDigest` limbs (verifier recompute).
+    /// Together with `tokenRegistry` / `tokenCount`, the 80-word segment is bound through the
+    /// member-signed IMCH and close PI `tokenFundsDigest` limbs (verifier recompute).
     uint256[10] channelFundAmounts;
     bytes32 channelFundIntmaxStateRoot;
     bytes32 burnTxHash;
@@ -37,12 +37,11 @@ struct CloseProofFields {
     /// The channel's registered ACTIVE COSIGNER count. STRICT-equality-bound to close-PI limb 93 —
     /// see `ChannelSettlementVerifier._expectedCloseLimbs` (B-2 A-6: this one is non-negotiable).
     uint8 memberCount;
-    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): a FLOOR on close-PI limb 94, NOT an
-    /// exact expected value. The proof's own `delegateCount` limb must satisfy
-    /// `limb94 >= minDelegateCount` and `memberCount + limb94 <= 1024`; the limb itself is
-    /// authenticated by the N-of-N cosigner signature over the H1 it decommits, which is strictly
-    /// stronger authority than L1 has for this field under Option B. Widened from the old packed
-    /// `uint8` half so counts above 255 are representable at all (threat model A-10).
+    /// Exact expected value for close-PI limb 94. The legacy ABI name is retained, but the verifier
+    /// requires `limb94 == minDelegateCount` and also checks
+    /// `memberCount + limb94 <= 1024`. Settlement activation freezes joins before deploying this
+    /// manager, so accepting a post-deployment count increase would describe an unsupported state.
+    /// Widened from the old packed `uint8` half so counts above 255 remain representable.
     uint32 minDelegateCount;
     /// Multi-token (§N-6): channel-local slot t → BASE token index, zero-padded past `tokenCount`.
     /// Bound (with `tokenCount` and `channelFundAmounts`) to the member-signed close PI
@@ -106,6 +105,7 @@ interface IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 memberSetCommitment,
+        uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest,
         MleVerifier.MleProof calldata mleProof
@@ -185,6 +185,14 @@ contract ChannelSettlementManager {
     /// Rust `MAX_SIG_CLUSTER` constant (src/constants.rs); the 1024-slot balance capacity is separate.
     uint256 internal constant MAX_MEMBER_COUNT = 8;
     uint256 internal constant MIN_MEMBER_COUNT = 2;
+    /// Balance-state participant capacity.  Unlike `MAX_MEMBER_COUNT`, this includes delegates.
+    /// The participant identity tree has a fixed ten-level shape (2**10 leaves), matching Rust's
+    /// `MAX_CHANNEL_MEMBERS`.  Keeping the full set in ONE immutable root avoids an O(1024)
+    /// constructor SSTORE bill that cannot fit safely inside a mainnet block.
+    uint256 internal constant MAX_PARTICIPANT_COUNT = 1024;
+    uint256 internal constant PARTICIPANT_TREE_DEPTH = 10;
+    uint32 internal constant PARTICIPANT_LEAF_DOMAIN = 0x494d5052; // "IMPR"
+    uint32 internal constant PARTICIPANT_NODE_DOMAIN = 0x494d504e; // "IMPN"
     /// Fixed per-channel token capacity — the width of every `channelFundAmounts` / `tokenRegistry`
     /// array here. MUST equal Rust `MAX_CHANNEL_TOKENS` (src/constants.rs) and
     /// `ChannelSettlementVerifier.MAX_CHANNEL_TOKENS`, or the TFD recompute would disagree.
@@ -199,6 +207,8 @@ contract ChannelSettlementManager {
     error InvalidMemberBinding();
     error DuplicateRegisteredMember();
     error InvalidMemberCount();
+    error InvalidParticipantRoot();
+    error InvalidParticipantProof();
     /// Finding E: the manager's member set / bp does not equal the rollup's on-chain registration.
     error MemberSetMismatch();
     error BpMismatch();
@@ -226,6 +236,9 @@ contract ChannelSettlementManager {
     /// is deliberately gone rather than kept as a fail-closed stub: nothing may reintroduce a
     /// version-dependent revert on the only remaining exit. See the R3-1 block in `finalizeClose`.
     error CloseIntentDigestMismatch();
+    /// M-9: ABI-retained close metadata must use the single representation authenticated by the
+    /// close circuit: nonce == freeze nonce and zero snapshot/burn sentinels.
+    error NonCanonicalCloseMetadata();
     error NullifierAlreadyUsed();
     error WithdrawalCapExceeded();
     error NoWithdrawalCredit();
@@ -278,9 +291,6 @@ contract ChannelSettlementManager {
     /// `channelFundAmounts` still contains the burned amount; paying the burn too would draw the
     /// same value twice out of the rollup escrow.
     error PartialWithdrawalSupersededByClose();
-    /// The claimed payout address is not a registered participant (member or delegate) of this
-    /// channel (defence in depth — see `submitPartialWithdrawalIntent`).
-    error PartialWithdrawalRecipientNotParticipant();
     // --- Multi-token settlement (multitoken Phase 3, §N-6, TM-3/TM-8) ---
     /// A claim's `tokenSlot` must address an ACTIVE slot of the finalized registry (TM-8:
     /// `token_slot < token_count` is enforced at the circuit, the verifier bind AND here at the
@@ -380,8 +390,8 @@ contract ChannelSettlementManager {
     /// contract is per-channel; `channelId` is the immutable).
     ///
     /// Chain-matching division of labor (abstract2 §3.5.2, detail2 §H-2): L1 only CARRIES and
-    /// BINDS `finalSettledTxChain` (it is part of the IMCI digest and the close-proof public
-    /// inputs). The semantic equality `balance_pis.settled_tx_chain ==
+    /// BINDS `finalSettledTxChain` through the member-signed IMCH and close-proof public inputs.
+    /// The semantic equality `balance_pis.settled_tx_chain ==
     /// close_pis.final_settled_tx_chain` — i.e. that the closing balance state really settled
     /// exactly this tx chain — is enforced INSIDE the plonky2 close circuit (P7), not here.
     struct CloseIntent {
@@ -397,18 +407,20 @@ contract ChannelSettlementManager {
         /// `ChannelFund.amounts`), ALWAYS full 10-wide (zero-padded). Slot 0 = the genesis-token
         /// burn denomination. SECURITY: bound — together with `tokenRegistry`/`tokenCount` — to
         /// the close proof's `tokenFundsDigest` PI by the verifier's on-chain recompute (TM-11),
-        /// and the full 80-word vector enters the IMCI digest preimage.
+        /// while the member-signed IMCH also commits to the resulting balance state.
         uint256[10] channelFundAmounts;
         /// Multi-token (§N-6): channel-local slot → BASE token index (Rust
-        /// `BalanceState.token_registry`), zero-padded past `tokenCount`. NOT part of the IMCI
-        /// preimage — bound through the `tokenFundsDigest` PI recompute (and, in-circuit, through
-        /// the signed H1).
+        /// `BalanceState.token_registry`), zero-padded past `tokenCount`. Bound through the
+        /// `tokenFundsDigest` PI recompute and, in-circuit, through the member-signed H1.
         uint32[10] tokenRegistry;
         /// Multi-token (§N-6): number of ACTIVE token slots (1..=10).
         uint8 tokenCount;
         bytes32 channelFundIntmaxStateRoot;
+        /// Canonical zero sentinel: the close proof does not authenticate a live L2 burn. Actual
+        /// withdrawals are authorized through the independent withdrawal-proof/nullifier lane.
         bytes32 burnTxHash;
         bytes32 closeWithdrawalDigest;
+        /// Canonical zero sentinel: the signed ChannelState has no medium-block snapshot field.
         uint64 snapshotMediumBlockNumber;
         /// `state_version` of the final balance state — challenge ordering compares
         /// `(finalEpoch, finalStateVersion)` (detail2 §H-4).
@@ -635,9 +647,9 @@ contract ChannelSettlementManager {
     /// F7: the block-proposer member is identified by its slot (0..MEMBER_COUNT) and its SPHINCS+
     /// pubkey hash, replacing the legacy `bpKeyId`.
     uint8 public immutable bpMemberSlot;
-    /// §Q-4 (member-set updates): STORAGE, seeded by the constructor — a RotateKey on the bp slot
-    /// advances it via `applyMemberSetUpdate` (stage Q3 slice C). The slot index itself never
-    /// moves.
+    /// Release posture: seeded by the constructor and frozen for the lifetime of this deployment.
+    /// Member-set updates are fail-closed until the validity layer and this Manager can consume one
+    /// canonical, finalized transition atomically. The slot index itself never moves.
     bytes32 public bpPkG;
     uint64 public immutable challengePeriod;
     uint256 public immutable specialClosePenalty;
@@ -653,36 +665,33 @@ contract ChannelSettlementManager {
     IChannelRegistry public immutable registry;
 
     /// @notice The number of ACTIVE members (2..=MAX_MEMBER_COUNT). Mirrors the Rust
-    /// `ChannelRecord.member_count` (src/common/channel.rs).
-    /// §Q-4: STORAGE, seeded by the constructor at the genesis registration — an AddCosigner
-    /// advances it via `applyMemberSetUpdate` (stage Q3 slice C; no setter exists before that
-    /// entry lands, so behavior is identical to the former immutable today).
+    /// `ChannelRecord.member_count` (src/common/channel.rs). Seeded by the constructor and frozen
+    /// for this release; see `applyMemberSetUpdate`.
     uint8 public activeMemberCount;
 
-    /// @notice detail2 §Q-5: the channel's member-set version — genesis registration = 0,
-    /// strictly +1 per applied `MemberSetUpdate`. Mirrors `ChannelRecord.set_version`.
+    /// @notice The channel's member-set version. It remains at genesis version 0 while member-set
+    /// updates are release-disabled. Retained in storage/ABI for a future cross-layer protocol.
     uint64 public memberSetVersion;
 
-    /// @notice The number of delegates REGISTERED AT DEPLOYMENT (delegate account). Mirrors the Rust
+    /// @notice The number of delegates frozen into the authenticated live snapshot at deployment.
     /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count` AT THAT MOMENT. Delegates do
     /// NOT co-sign and are NOT part of `memberBindings`/`memberPkGs`/the IMCM commitment.
     ///
-    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md): this is a MONOTONE FLOOR for the close
-    /// path, NOT the channel's current delegate count. Under Option B, L1 registration is
-    /// cosigners-only and there is no per-join L1 transaction, so a channel's true delegate count
-    /// can (and normally does) exceed this value — every browser join after deployment increments it
-    /// off-chain. The close proof's own `delegateCount` limb carries N-of-N cosigner authority (it
-    /// decommits the signed H1); this immutable only lets L1 refuse a close whose active region is
-    /// NARROWER than the delegate population registered here. See `_checkCloseProof`.
-    /// SCOPE (review finding 6): a CARDINALITY bound, NOT an identity one — L1 binds no delegate to
-    /// a balance-slot INDEX (`delegateBindings` is an unordered `(pkG, recipient)` set as far as the
-    /// close PI is concerned), so this cannot protect a NAMED delegate from being displaced; it only
-    /// stops the active region being shrunk below the registered count. The old strict equality had
-    /// exactly the same property. See `ChannelSettlementVerifier.CloseDelegateCountOutOfRange`.
-    /// Deployment invariant (unchanged, separate from the close bound):
-    /// `activeMemberCount + activeDelegateCount <= MAX_MEMBER_COUNT` (the 8-slot on-chain binding
-    /// arrays); the close path's ceiling is the wider 1024-participant capacity.
-    uint8 public immutable activeDelegateCount;
+    /// This is the EXACT frozen delegate count for the close path. `prepare_settlement_binding`
+    /// disables join/membership mutation before the immutable manager/participant snapshot is
+    /// activated, and `ChannelSettlementVerifier` requires close-PI limb 94 to equal this value.
+    /// A state with either fewer or more delegates belongs to a different snapshot and is rejected;
+    /// post-deployment delegate joins are not supported in this release.
+    /// Deployment invariant: `activeMemberCount + activeDelegateCount <= 1024`.
+    uint16 public immutable activeDelegateCount;
+
+    /// @notice Number/root of the complete, slot-ordered member+delegate identity snapshot frozen
+    /// at deployment.  Leaves are `keccak256(IMPR || uint16(slot) || pkG || recipient)`, padded by
+    /// raw zero leaves to 1024; nodes are `keccak256(IMPN || left || right)`.  Only the at-most-eight
+    /// cosigners are materialized in mappings below.  Delegates prove their immutable slot binding
+    /// when requesting a close, so deploying a 1024-participant channel remains constant-storage.
+    uint16 public immutable activeParticipantCount;
+    bytes32 public immutable participantRoot;
 
     /// @notice The channel's registered member SPHINCS+ pubkey hashes in slot order, ZERO-padded to
     /// MAX_MEMBER_COUNT (D6 pad-to-MAX). Active slots (`< activeMemberCount`) are nonzero and
@@ -846,6 +855,17 @@ contract ChannelSettlementManager {
         _status = _NOT_ENTERED;
     }
 
+    /// @dev A short-window manager is a local-devnet artifact. Constructor
+    ///      checks alone do not cover state/code migration or a later chain-id
+    ///      transition, so every live state transition and value sink repeats
+    ///      the release boundary at runtime.
+    modifier releaseRuntime() {
+        if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod < CHALLENGE_PERIOD_SECS) {
+            revert ChallengePeriodTooShort(challengePeriod, CHALLENGE_PERIOD_SECS);
+        }
+        _;
+    }
+
     /// @notice Accept native ETH ONLY from the bound rollup (its `withdraw()` pays this manager via
     ///         a low-level call). SECURITY: restricting the sender keeps `receivedChannelFunds`
     ///         (measured as the `pullChannelFunds` balance delta) the sole source of payout capacity
@@ -860,17 +880,14 @@ contract ChannelSettlementManager {
         bytes4 channelId_,
         uint8 bpMemberSlot_,
         bytes32 bpPkG_,
-        uint8 delegateCount_,
+        uint16 delegateCount_,
+        bytes32 participantRoot_,
         uint64 challengePeriod_,
         uint256 specialClosePenalty_,
         uint256 initialBpBondCredits_,
         IChannelSettlementVerifier verifier_,
         IChannelRegistry registry_,
-        MemberBinding[] memory memberBindings,
-        // Delegate account: (pk_g -> recipient) bindings for the `delegateCount_` delegates. Empty
-        // when delegateCount_ == 0. Delegates are registered for the WITHDRAWAL path only — they are
-        // EXCLUDED from memberPkGs / the IMCM member-set commitment (they do not co-sign).
-        MemberBinding[] memory delegateBindings
+        MemberBinding[] memory memberBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
         // D6 pad-to-MAX: 2..=MAX_MEMBER_COUNT active members are registered, slot order. Slots
@@ -891,9 +908,9 @@ contract ChannelSettlementManager {
         // script in this repo used to hardcode 1 second because the anvil E2Es cannot wait a day;
         // that value is now confined to the local devnet BY THE CONTRACT, so it cannot be carried
         // to a public chain by a script edit, a copied script, or bespoke deploy tooling. This is a
-        // deployment-time floor only — it costs nothing at runtime and cannot be relaxed later,
-        // which is deliberate: `challengePeriod` is immutable and has no setter, so a channel
-        // deployed short can never be repaired.
+        // deployment-time floor is repeated by `releaseRuntime` because state/code can be migrated
+        // without executing this initcode. `challengePeriod` is immutable and has no setter, so a
+        // short manager moved off the devnet remains identifiable and fails closed.
         if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod_ < CHALLENGE_PERIOD_SECS) {
             revert ChallengePeriodTooShort(challengePeriod_, CHALLENGE_PERIOD_SECS);
         }
@@ -908,11 +925,12 @@ contract ChannelSettlementManager {
         registry = registry_;
         channelStatus = ChannelLifecycleStatus.Active;
         activeMemberCount = uint8(memberBindings.length);
-        // Delegate account: members + delegates must fit in the fixed MAX_MEMBER_COUNT slots.
-        if (uint256(memberBindings.length) + uint256(delegateCount_) > MAX_MEMBER_COUNT) {
+        uint256 participantCount = uint256(memberBindings.length) + uint256(delegateCount_);
+        if (participantCount > MAX_PARTICIPANT_COUNT) {
             revert InvalidMemberCount();
         }
         activeDelegateCount = delegateCount_;
+        activeParticipantCount = uint16(participantCount);
 
         for (uint256 i = 0; i < memberBindings.length; i++) {
             MemberBinding memory binding = memberBindings[i];
@@ -933,11 +951,17 @@ contract ChannelSettlementManager {
             revert InvalidBpMemberSlot();
         }
 
-        // Delegate account: register delegate (pk_g -> recipient) bindings for the withdrawal path.
-        // Extracted to its own frame (via-IR stack) and AFTER the member loop so delegate pk_g
-        // distinctness is checked against members too. Delegates are NOT pushed to
-        // registeredMemberPkGs / memberPkGs, so the IMCM member-set commitment stays member-only.
-        _registerDelegates(delegateBindings);
+        // A zero root is accepted only as a backwards-compatible constructor convenience for a
+        // member-only channel, where the contract can derive the complete tree itself.  A
+        // delegate-bearing deployment MUST supply the authenticated live-snapshot root: deriving
+        // it from an on-chain delegate array would reintroduce the unscalable deployment path this
+        // root replaces.
+        if (participantRoot_ == bytes32(0)) {
+            if (delegateCount_ != 0) revert InvalidParticipantRoot();
+            participantRoot_ = _memberOnlyParticipantRoot(memberBindings);
+        }
+        if (participantRoot_ == bytes32(0)) revert InvalidParticipantRoot();
+        participantRoot = participantRoot_;
 
         // Finding E: bind this manager's member set + bp to the rollup's on-chain registration (the
         // validity-path single source of truth). SECURITY: without this, the validity proof and the
@@ -959,32 +983,45 @@ contract ChannelSettlementManager {
         }
     }
 
-    /// @dev Register the delegate (pk_g -> recipient) bindings (delegate account). Delegates own a
-    /// balance slot and withdraw their member-attested final balance via the SAME WithdrawalClaim a
-    /// member uses, so their presence (`registeredMemberIndexPlusOne != 0`), recipient binding, and
-    /// payout authorization (`isMemberRecipient`) must be recorded. SECURITY: a delegate pk_g must be
-    /// distinct from every member AND every other delegate (the `!= 0` check covers both, since
-    /// members are registered first); delegates are NOT added to `registeredMemberPkGs`/`memberPkGs`,
-    /// so the IMCM member-set commitment and the N-of-N co-sign set stay member-only. The index value
-    /// is only a non-zero presence marker (the active-slot index+1); it is never used as an array
-    /// index. TRUST: delegate bindings are deployer-asserted (not re-checked against the registry
-    /// IMCM, which is member-only) — consistent with DLG-2 (the delegate already trusts the members
-    /// for its member-attested final balance).
-    function _registerDelegates(MemberBinding[] memory delegateBindings) private {
-        if (delegateBindings.length != activeDelegateCount) revert InvalidMemberCount();
-        for (uint256 j = 0; j < delegateBindings.length; j++) {
-            MemberBinding memory d = delegateBindings[j];
-            if (d.pkG == bytes32(0) || d.recipient == address(0)) {
-                revert InvalidMemberBinding();
-            }
-            if (registeredMemberIndexPlusOne[d.pkG] != 0) {
-                revert DuplicateRegisteredMember();
-            }
-            registeredRecipientOf[d.pkG] = d.recipient;
-            // Active-slot index+1 (members occupy 1..activeMemberCount): non-zero presence marker.
-            registeredMemberIndexPlusOne[d.pkG] = uint256(activeMemberCount) + j + 1;
-            isMemberRecipient[d.recipient] = true;
+    function participantLeaf(uint16 slot, bytes32 pkG_, address recipient_) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes4(PARTICIPANT_LEAF_DOMAIN), slot, pkG_, recipient_));
+    }
+
+    function _participantNode(bytes32 left, bytes32 right) private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes4(PARTICIPANT_NODE_DOMAIN), left, right));
+    }
+
+    function _memberOnlyParticipantRoot(MemberBinding[] memory bindings) private pure returns (bytes32) {
+        bytes32[1024] memory nodes;
+        for (uint256 i = 0; i < bindings.length; i++) {
+            nodes[i] = participantLeaf(uint16(i), bindings[i].pkG, bindings[i].recipient);
         }
+        uint256 width = MAX_PARTICIPANT_COUNT;
+        while (width > 1) {
+            for (uint256 i = 0; i < width; i += 2) {
+                nodes[i >> 1] = _participantNode(nodes[i], nodes[i + 1]);
+            }
+            width >>= 1;
+        }
+        return nodes[0];
+    }
+
+    function _isParticipant(uint16 slot, bytes32 pkG_, address recipient_, bytes32[10] calldata siblings)
+        private
+        view
+        returns (bool)
+    {
+        if (uint256(slot) >= uint256(activeParticipantCount) || pkG_ == bytes32(0) || recipient_ == address(0)) {
+            return false;
+        }
+        bytes32 node = participantLeaf(slot, pkG_, recipient_);
+        uint256 index = uint256(slot);
+        for (uint256 level = 0; level < PARTICIPANT_TREE_DEPTH; level++) {
+            node =
+                ((index & 1) == 0) ? _participantNode(node, siblings[level]) : _participantNode(siblings[level], node);
+            index >>= 1;
+        }
+        return node == participantRoot;
     }
 
     function memberCount() external view returns (uint256) {
@@ -1000,119 +1037,37 @@ contract ChannelSettlementManager {
         return verifier.closeMemberSetCommitment(memberPkGs, activeMemberCount);
     }
 
+    /// @dev Parked ABI declarations retained for forward compatibility. None are reachable while
+    /// `applyMemberSetUpdate` is release-disabled.
     event MemberSetUpdated(
         uint64 indexed newVersion, bytes32 oldCommitment, bytes32 newCommitment, uint8 newCount, address newRecipient
     );
-
     error MemberSetUpdateWhileNotActive();
     error MemberSetVersionNotMonotone();
     error MemberSetUpdateCountInvalid();
     error MemberSetUpdateProofInvalid();
     error MemberSetUpdateRecipientInvalid();
 
-    /// @notice detail2 §Q-4 (stage Q3, slice C): advance the channel's registered sig-cluster —
-    ///         rotate one member's signing key, or add a co-signer — under a REAL MLE-verified
-    ///         `MemberSetUpdateCircuit` proof. The proof's in-circuit statement (see the Rust
-    ///         module doc): the PREVIOUS set's full N-of-N (batch Falcon aggregate, recursively
-    ///         verified) signed the IMMS digest committing EXACTLY the
-    ///         (oldCommitment → newCommitment) transition at `newVersion`, with the §Q-3
-    ///         structural delta enforced in-circuit (one slot; rotation preserves the Regev
-    ///         digest; an add sits at the left-packed boundary; never a removal).
-    ///
-    /// @dev SECURITY:
-    ///  * `oldCommitment` is COMPUTED from this contract's own storage — the proof must speak
-    ///    about the set the Manager currently holds, so replay of an old update (or an update for
-    ///    a different channel — channelId is a bound limb) is impossible; `newVersion` must be
-    ///    strictly `memberSetVersion + 1`.
-    ///  * `newPkGs` is verified against the proof's `newCommitment` limb by recomputing the IMCM
-    ///    keccak over it — the stored array can only become the exact set the OLD cluster signed.
-    ///  * NO disable seam: `verifyMemberSetUpdate` reverts while the msu VK is uninitialized, and
-    ///    the VK latch enforces degreeBits > 0 (the audit's V3 class is structurally excluded).
-    ///  * Status gate: no set change while a close is pending or done — the close family binds
-    ///    against the registered set, and moving it mid-challenge would re-point the binding.
-    function applyMemberSetUpdate(
-        bytes32[] calldata newPkGs,
-        uint8 newCount,
-        address newRecipient,
-        uint64 newVersion,
-        MleVerifier.MleProof calldata mleProof
-    ) external nonReentrant {
-        if (channelStatus != ChannelLifecycleStatus.Active) {
-            revert MemberSetUpdateWhileNotActive();
-        }
-        if (newVersion != memberSetVersion + 1) revert MemberSetVersionNotMonotone();
-        if (newPkGs.length != newCount || newCount < 2 || newCount > MAX_MEMBER_COUNT) {
-            revert MemberSetUpdateCountInvalid();
-        }
-        // The proof-side delta allows only +0 (rotate) or +1 (add).
-        if (newCount != activeMemberCount && newCount != activeMemberCount + 1) {
-            revert MemberSetUpdateCountInvalid();
-        }
-        bool isAdd = newCount == activeMemberCount + 1;
-        if (isAdd) {
-            // B-1b: a joiner binds a fresh, unique exit address.
-            if (newRecipient == address(0) || isMemberRecipient[newRecipient]) {
-                revert MemberSetUpdateRecipientInvalid();
-            }
-        } else if (newRecipient != address(0)) {
-            // The proof zero-forces the recipient limbs for a rotation; mirror it here so the
-            // calldata cannot desynchronize from the bound limbs.
-            revert MemberSetUpdateRecipientInvalid();
-        }
+    /// @notice Member-set updates are intentionally unavailable in this release.
+    /// @dev The current IMMS proof authenticates the old signers' proposed transition, but it does
+    ///      not prove that the same transition was included in and finalized by the validity layer.
+    ///      Applying it here alone can therefore split the Manager's signer set/version/BP from the
+    ///      Rollup registry and the validity-tree leaf. Keep the function selector for forward
+    ///      compatibility, but fail before validating calldata, calling the verifier, or writing
+    ///      any Manager state.
+    ///      Re-enable only with one canonical cross-layer receipt/action anchor and atomic or
+    ///      fail-closed synchronization of both layers.
+    error MemberSetUpdateDisabled();
 
-        bytes32 oldCommitment = registeredMemberSetCommitment();
-        bytes32[MAX_MEMBER_COUNT] memory padded;
-        for (uint256 i = 0; i < newCount; i++) {
-            padded[i] = newPkGs[i];
-        }
-        bytes32 newCommitment = verifier.closeMemberSetCommitment(padded, newCount);
-
-        if (!verifier.verifyMemberSetUpdate(
-                uint32(channelId),
-                newVersion,
-                oldCommitment,
-                newCommitment,
-                activeMemberCount,
-                newCount,
-                newRecipient,
-                mleProof
-            )) revert MemberSetUpdateProofInvalid();
-
-        // ── Apply ──
-        // Rotation bookkeeping for the pkG-keyed registration maps: migrate any slot whose key
-        // changed (delete the old key's entries, bind the new key at the same index/recipient).
-        for (uint256 i = 0; i < MAX_MEMBER_COUNT; i++) {
-            bytes32 oldPk = memberPkGs[i];
-            bytes32 newPk = i < newCount ? padded[i] : bytes32(0);
-            if (oldPk == newPk) continue;
-            if (oldPk != bytes32(0)) {
-                address recip = registeredRecipientOf[oldPk];
-                delete registeredMemberIndexPlusOne[oldPk];
-                delete registeredRecipientOf[oldPk];
-                if (newPk != bytes32(0) && !isAdd) {
-                    // rotation: same slot, same recipient, new key
-                    registeredMemberIndexPlusOne[newPk] = i + 1;
-                    registeredRecipientOf[newPk] = recip;
-                }
-            }
-            if (newPk != bytes32(0) && isAdd && oldPk == bytes32(0)) {
-                // the joiner's slot
-                registeredMemberIndexPlusOne[newPk] = i + 1;
-                registeredRecipientOf[newPk] = newRecipient;
-            }
-            memberPkGs[i] = newPk;
-        }
-        if (isAdd) {
-            isMemberRecipient[newRecipient] = true;
-        }
-        activeMemberCount = newCount;
-        memberSetVersion = newVersion;
-        bpPkG = memberPkGs[bpMemberSlot];
-
-        emit MemberSetUpdated(newVersion, oldCommitment, newCommitment, newCount, newRecipient);
+    function applyMemberSetUpdate(bytes32[] calldata, uint8, address, uint64, MleVerifier.MleProof calldata)
+        external
+        pure
+    {
+        revert MemberSetUpdateDisabled();
     }
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {
+        if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod < CHALLENGE_PERIOD_SECS) return false;
         return channelStatus == ChannelLifecycleStatus.Active && suppliedCloseFreezeNonce == currentCloseFreezeNonce;
     }
 
@@ -1130,13 +1085,28 @@ contract ChannelSettlementManager {
     // `payable` with `msg.value == amount`, so the credited number is backed by real ETH — a
     // non-payable "fund" function can never be that.
 
-    /// @notice Step 1 of the two-step close (abstract2 §3.5): a registered member freezes the
-    /// channel. The first close intent can only be processed after
+    /// @notice Step 1 of the two-step close for a cosigner whose deployment binding is materialized
+    /// in the small on-chain mapping.  The first close intent can only be processed after
     /// `GRACE_BEFORE_PROCESS_SECS`.
-    function requestClose() external {
+    function requestClose() external releaseRuntime {
+        if (!isMemberRecipient[msg.sender]) revert NotChannelMember();
+        _requestClose();
+    }
+
+    /// @notice The same unilateral freeze right for any participant, including a delegate.  The
+    /// fixed-depth proof authenticates `(slot, pkG, msg.sender)` against the immutable live-snapshot
+    /// root without storing up to 1024 delegate bindings in contract storage.
+    function requestCloseAsParticipant(uint16 slot, bytes32 pkG_, bytes32[10] calldata siblings)
+        external
+        releaseRuntime
+    {
+        if (!_isParticipant(slot, pkG_, msg.sender, siblings)) revert InvalidParticipantProof();
+        _requestClose();
+    }
+
+    function _requestClose() private {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
-        if (!isMemberRecipient[msg.sender]) revert NotChannelMember();
 
         currentCloseFreezeNonce += 1;
         channelStatus = ChannelLifecycleStatus.ClosePending;
@@ -1147,7 +1117,10 @@ contract ChannelSettlementManager {
     /// @notice Step 2 of the two-step close: record (or challenge-replace) a close intent.
     /// Direct submission from `Active` is disallowed — `requestClose()` must run first
     /// (abstract2 §3.5).
-    function submitCloseIntent(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) external {
+    function submitCloseIntent(CloseIntent calldata intent, MleVerifier.MleProof calldata proof)
+        external
+        releaseRuntime
+    {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         // Multi-token: cheap structural bound BEFORE the proof check (defense-in-depth; the
         // strict TFD limb bind would reject an out-of-range count anyway, since the in-circuit
@@ -1200,8 +1173,7 @@ contract ChannelSettlementManager {
             //    2x horizon there and stretch the ladder well past it. On every other chain
             //    `challengePeriod >= 86,400`, so the effective floor is exactly
             //    `MIN_CLOSE_RESPONSE_SECS` and the overshoot is 1/48 of the horizon.
-            uint256 minResponse =
-                challengePeriod < MIN_CLOSE_RESPONSE_SECS ? challengePeriod : MIN_CLOSE_RESPONSE_SECS;
+            uint256 minResponse = challengePeriod < MIN_CLOSE_RESPONSE_SECS ? challengePeriod : MIN_CLOSE_RESPONSE_SECS;
             uint256 absoluteEnd = uint256(closeChallengeHorizon) + minResponse;
             if (block.timestamp > absoluteEnd) {
                 revert ChallengeWindowClosed();
@@ -1340,15 +1312,19 @@ contract ChannelSettlementManager {
         revert SpecialCloseDisabled();
     }
 
-    function cancelClose(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof) external {
+    function cancelClose(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof)
+        external
+        releaseRuntime
+    {
         if (!pendingClose.active) revert CloseNotActive();
         if (request.closeIntentDigest != pendingClose.closeIntentDigest) {
             revert CloseIntentDigestMismatch();
         }
         // SECURITY (audit 2026-08-28 §5, "Cancel monotonicity" — defence in depth): the cancel
         // circuit already asserts `close_final_state_version < revived_state_version` with a
-        // U64-correct comparator (`cancel_close_circuit.rs:461-467`) and connects the close operand
-        // into the IMCI recompute that L1 pins to `pendingClose.closeIntentDigest`. That made the
+        // U64-correct comparator (`cancel_close_circuit.rs`) and connects the explicit closing
+        // version PI to the proof while recomputing the IMCS ID that L1 pins to
+        // `pendingClose.closeIntentDigest`. That made the
         // property SINGLE-LAYER: a VK swap, a verifier regression, or a mis-keyed statement would
         // silently remove the only barrier against cancelling a close with an OLDER state — i.e.
         // reviving a channel into a stale head. Re-asserted here so the property survives any
@@ -1414,6 +1390,7 @@ contract ChannelSettlementManager {
                 channelId,
                 request.closeIntentDigest,
                 registeredMemberSetCommitment(),
+                pendingClose.finalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
                 proof
@@ -1516,7 +1493,7 @@ contract ChannelSettlementManager {
         revert LateOutgoingDebitDisabled();
     }
 
-    function finalizeClose() external {
+    function finalizeClose() external releaseRuntime {
         if (!pendingClose.active) revert CloseNotActive();
         // At equality a strictly-newer replacement is still admissible. Finalization must therefore
         // wait until the following timestamp; otherwise transaction order chooses which valid
@@ -1576,8 +1553,8 @@ contract ChannelSettlementManager {
         //    late-outgoing architecture gap.
         bool closeOlderThanAuthorizedBurn = authorizedBurnSnapshotActive
             && (authorizedBurnEpoch > pendingClose.finalEpoch
-            || (authorizedBurnEpoch == pendingClose.finalEpoch
-                && authorizedBurnStateVersion > pendingClose.finalStateVersion));
+                || (authorizedBurnEpoch == pendingClose.finalEpoch
+                    && authorizedBurnStateVersion > pendingClose.finalStateVersion));
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
@@ -1664,7 +1641,7 @@ contract ChannelSettlementManager {
         MleVerifier.MleProof calldata proof,
         bytes32 prevSettledTxChain,
         AuthorizedWithdrawal calldata withdrawal
-    ) external {
+    ) external releaseRuntime {
         if (channelStatus != ChannelLifecycleStatus.Active) {
             revert ChannelClosed();
         }
@@ -1731,16 +1708,13 @@ contract ChannelSettlementManager {
             if (!tokenFound) revert TokenRegistryMismatch();
         }
 
-        // (b) The payout address must be a registered participant of THIS channel.
-        //     `isMemberRecipient` is written ONLY in the constructor — at :715-720 for the N-of-N
-        //     members and :775-778 for delegates (whose recipients are registered precisely FOR the
-        //     withdrawal path, :757) — and has no setter, so it is exactly "an L1 address bound to a
-        //     registered participant of this channel at construction". An honest partial withdrawal
-        //     always pays the burning member's own registered L1 address, so this rejects nothing
-        //     legitimate. It does NOT establish entitlement BETWEEN participants.
-        if (!isMemberRecipient[withdrawal.recipient]) {
-            revert PartialWithdrawalRecipientNotParticipant();
-        }
+        // (b) Recipient authorization is the N-of-N-signed IMD2 descriptor below, not a second
+        // deployment-time mapping.  The close proof authenticates the signed balance state and
+        // `expectedDescriptor` binds its exact recipient/token/amount economics.  Requiring the
+        // recipient to appear in a constructor mapping was therefore redundant for soundness and,
+        // for a 1024-participant channel, would require an otherwise-unnecessary SSTORE per
+        // delegate.  Arbitrary recipient addresses remain impossible unless every cosigner signed
+        // that exact burn descriptor.
 
         // F-AUX-1 v2: auxData is the value pinned by the N-of-N-signed settled-tx chain. Requiring
         // it to be the IMD2 recompute makes that value determine the immutable source channel,
@@ -1879,7 +1853,7 @@ contract ChannelSettlementManager {
         );
     }
 
-    function finalizePartialWithdrawal() external {
+    function finalizePartialWithdrawal() external releaseRuntime {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (block.timestamp <= pendingPartialWithdrawalDeadline) revert ChallengeWindowOpen();
         // ── SECURITY (H-6, audit 2026-08-28): what this gate protects, and why it is no longer an
@@ -1954,8 +1928,7 @@ contract ChannelSettlementManager {
 
         // A newer proof-bound POST-burn fund vector supersedes the prior high-water snapshot.
         // Out-of-order finalization of an older historical burn must never move it backwards.
-        bool newerSnapshot = !authorizedBurnSnapshotActive
-            || pendingPartialWithdrawalEpoch > authorizedBurnEpoch
+        bool newerSnapshot = !authorizedBurnSnapshotActive || pendingPartialWithdrawalEpoch > authorizedBurnEpoch
             || (pendingPartialWithdrawalEpoch == authorizedBurnEpoch
                 && pendingPartialWithdrawalStateVersion > authorizedBurnStateVersion);
         if (newerSnapshot) {
@@ -2003,13 +1976,13 @@ contract ChannelSettlementManager {
         for (uint256 t = 0; t < newCount; t++) {
             uint32 baseToken = pendingPartialWithdrawalTokenRegistry[t];
             authorizedBurnTokenRegistry[t] = baseToken;
-            authorizedBurnPostFundAmount[baseToken] +=
-                pendingPartialWithdrawalPostBurnFundAmounts[t];
+            authorizedBurnPostFundAmount[baseToken] += pendingPartialWithdrawalPostBurnFundAmounts[t];
         }
     }
 
     function cancelPartialWithdrawal(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof)
         external
+        releaseRuntime
     {
         if (!partialWithdrawalPending) revert PartialWithdrawalNotPending();
         if (request.closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest) {
@@ -2087,6 +2060,7 @@ contract ChannelSettlementManager {
                 channelId,
                 pendingPartialWithdrawalCloseIntentDigest,
                 registeredMemberSetCommitment(),
+                pendingPartialWithdrawalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
                 proof
@@ -2123,7 +2097,10 @@ contract ChannelSettlementManager {
         emit PartialWithdrawalCancelled(authDigest, request.revivedChannelStateDigest, request.revivedStateVersion);
     }
 
-    function submitWithdrawalClaim(WithdrawalClaim calldata claim, MleVerifier.MleProof calldata proof) external {
+    function submitWithdrawalClaim(WithdrawalClaim calldata claim, MleVerifier.MleProof calldata proof)
+        external
+        releaseRuntime
+    {
         if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
         if (claim.closeIntentDigest != finalizedCloseIntentDigest) {
             revert CloseIntentDigestMismatch();
@@ -2246,7 +2223,7 @@ contract ChannelSettlementManager {
     ///         paid this manager via `IntmaxRollup.withdrawNative`). The balance delta is added to
     ///         `receivedChannelFunds[0]` (ETH = base token 0) — the authoritative payout ceiling.
     /// @dev nonReentrant; measures balance before/after the external `registry.withdraw()` call.
-    function pullChannelFunds() external nonReentrant returns (uint256 pulled) {
+    function pullChannelFunds() external releaseRuntime nonReentrant returns (uint256 pulled) {
         uint256 balBefore = address(this).balance;
         registry.withdraw(); // rollup pays pendingWithdrawals[manager] to this contract (receive())
         pulled = address(this).balance - balBefore;
@@ -2265,7 +2242,7 @@ contract ChannelSettlementManager {
     ///      contract, exactly like SELFDESTRUCT-forced ETH on the native path). The token address
     ///      resolves through the rollup's SET-ONCE registry (TM-10b) — the manager keeps no second
     ///      mutable copy.
-    function pullChannelTokenFunds(uint32 tokenIndex) external nonReentrant returns (uint256 pulled) {
+    function pullChannelTokenFunds(uint32 tokenIndex) external releaseRuntime nonReentrant returns (uint256 pulled) {
         IERC20 token = registry.tokenAddressOf(tokenIndex);
         if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
         uint256 balBefore = token.balanceOf(address(this));
@@ -2293,7 +2270,7 @@ contract ChannelSettlementManager {
     ///      the rollup's SET-ONCE registry (the SAME registry the escrow used — no second copy,
     ///      TM-10b). CEI: credit zeroed + paid-out accumulator bumped BEFORE the external
     ///      transfer; nonReentrant for defense in depth.
-    function claimWithdrawalCredit(uint32 tokenIndex) public nonReentrant returns (uint256 amount) {
+    function claimWithdrawalCredit(uint32 tokenIndex) public releaseRuntime nonReentrant returns (uint256 amount) {
         amount = withdrawalCredits[tokenIndex][msg.sender];
         if (amount == 0) revert NoWithdrawalCredit();
         if (totalCreditedOut[tokenIndex] + amount > receivedChannelFunds[tokenIndex]) {
@@ -2316,45 +2293,14 @@ contract ChannelSettlementManager {
         return pendingClose;
     }
 
-    /// @dev Byte-exact mirror of Rust `CloseIntent::signing_digest()` (src/common/channel.rs,
-    /// IMCI domain): keccak over big-endian u32 words. `abi.encodePacked` of
-    /// bytes4/uint64/bytes32/uint256 reproduces the BE word stream exactly. The second
-    /// `channelId` is the Rust `channel_fund_snapshot.channel_id` slot (this contract pins both
-    /// to its own channel). `finalStateVersion` and `finalSettledTxChain` are appended at the
-    /// END of the legacy preimage (detail2 §C-8). F7: unchanged (not member-bearing).
-    ///
-    /// Multi-token (§N-6, TM-11): the former single 8-word amount segment is widened IN PLACE to
-    /// the ALWAYS-full-width 80-word `channelFundAmounts[0..10]` vector, byte-identical to the
-    /// Rust preimage (`abi.encodePacked(uint256[10])` = 10 x 32 BE bytes; shared vector:
-    /// `close_intent_digest_matches_solidity_shared_vector`). `tokenRegistry`/`tokenCount` are NOT
-    /// part of the IMCI preimage (they bind through the tokenFundsDigest PI and the signed H1).
+    /// @dev Byte-exact mirror of Rust `close_state_id` and the close/cancel circuits:
+    /// `keccak(IMCS, channelId, finalChannelStateDigest, closeFreezeNonce)`. The ABI-retained name
+    /// `closeIntentDigest` now denotes this canonical state-derived identity. ABI-retained close
+    /// metadata is checked for its one canonical representation by `_checkCanonicalCloseMetadata`;
+    /// the verifier continues to bind the circuit-recomputed IMCL digest.
     function computeCloseIntentDigest(CloseIntent memory intent) public view returns (bytes32) {
-        // Built in two concatenated chunks so via-IR can free the intermediate field slots
-        // (stack-too-deep otherwise after the close path threads delegateCount elsewhere). The byte
-        // stream is identical to a single abi.encodePacked of all limbs in order.
         return keccak256(
-            bytes.concat(
-                abi.encodePacked(
-                    bytes4(0x494d4349),
-                    channelId,
-                    intent.closeNonce,
-                    intent.finalEpoch,
-                    intent.finalSmallBlockNumber,
-                    intent.closeFreezeNonce,
-                    intent.finalChannelStateDigest,
-                    intent.finalBalanceStateH1
-                ),
-                abi.encodePacked(
-                    channelId,
-                    intent.channelFundAmounts,
-                    intent.channelFundIntmaxStateRoot,
-                    intent.burnTxHash,
-                    intent.closeWithdrawalDigest,
-                    intent.snapshotMediumBlockNumber,
-                    intent.finalStateVersion,
-                    intent.finalSettledTxChain
-                )
-            )
+            abi.encodePacked(bytes4(0x494d4353), channelId, intent.finalChannelStateDigest, intent.closeFreezeNonce)
         );
     }
 
@@ -2374,6 +2320,7 @@ contract ChannelSettlementManager {
     }
 
     function _checkCloseProof(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) internal view {
+        _checkCanonicalCloseMetadata(intent);
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
         // channel's registered member-set commitment, AND the close proof's `memberCount` limb must
         // equal this channel's `activeMemberCount`, so a close can only finalize with the channel's
@@ -2381,29 +2328,33 @@ contract ChannelSettlementManager {
         // substitution, no signer-set shrinking). Both are part of the close-proof public inputs
         // (103 raw limbs incl. the delegateCount and the multi-token tokenFundsDigest).
         //
-        // B-2 SECURITY (doc/tasks/b2-delegate-close-threat-model.md §4d/§5) — the member/delegate
-        // boundary has TWO halves with DIFFERENT authority roots, and L1 asserts what it actually
-        // can about each:
+        // The member/delegate boundary is frozen at settlement activation and checked exactly:
         //   * MEMBER side (limb 93 + memberSetCommitment limbs 85..92): L1-rooted. The commitment
         //     hashes `activeMemberCount` and is cross-checked against the rollup registry in the
         //     constructor (Finding E), so raising/lowering `member_count` cannot shrink the signer
         //     set. STRICT equality, unchanged.
-        //   * DELEGATE side (limb 94): COSIGNER-rooted, by the Option B decision. Registration on L1
-        //     is cosigners-only, so this contract's `activeDelegateCount` is a deployer assertion
-        //     cross-checked against nothing (see the TRUST note at the constructor). The limb itself
-        //     decommits a field of the H1 that every cosigner's Falcon signature covers, so it
-        //     carries N-of-N authority — strictly MORE than the reference it used to be compared
-        //     against. L1 therefore enforces only what it can justify: MONOTONICITY (the active
-        //     region is at least as WIDE as the registered delegate population — a CARDINALITY
-        //     bound; L1 binds no delegate to a slot index, so it cannot name who is excluded, review
-        //     finding 6) and CAPACITY (the mirror of the in-circuit
-        //     `member_count + delegate_count <= 1024` bound). `delegate_count` never
+        //   * DELEGATE side (limb 94): the constructor records the authenticated live-snapshot
+        //     count after joins are frozen. The verifier requires strict equality with that
+        //     immutable count and separately mirrors the in-circuit
+        //     `member_count + delegate_count <= 1024` capacity bound. `delegate_count` never
         //     reaches a payout, a slot owner or a recipient — those are per-slot authenticated by
         //     the leaf-bound recipient / pk_digest / amount bindings in the claim circuits — and
         //     payouts stay hard-capped by `finalizedChannelFundAmount` / `receivedChannelFunds`.
-        // RESIDUAL (accepted, DLG-2): fully-colluding cosigners can sign any delegate balance or
-        // freeze out a post-deploy joiner. The former strict equality never prevented that.
+        // A later join/membership change must therefore create a new explicitly activated
+        // settlement snapshot; it cannot ride this manager's verifier binding.
         if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
+    }
+
+    /// @dev M-9 release invariant. Member signatures authenticate the final ChannelState, not
+    /// caller-selected close telemetry. The circuit constrains the same values, while this cheap
+    /// pre-check protects both full-close and partial-withdrawal entry points before verification.
+    function _checkCanonicalCloseMetadata(CloseIntent calldata intent) private pure {
+        if (
+            intent.closeNonce != intent.closeFreezeNonce || intent.snapshotMediumBlockNumber != 0
+                || intent.burnTxHash != bytes32(0)
+        ) {
+            revert NonCanonicalCloseMetadata();
+        }
     }
 
     /// @dev Isolated frame for the 17-arg `verifyCloseIntent` marshaling (keeps `_checkCloseProof`
@@ -2438,11 +2389,8 @@ contract ChannelSettlementManager {
             finalSettledTxAccumulatorRoot: intent.finalSettledTxAccumulatorRoot,
             memberSetCommitment: registeredMemberSetCommitment(),
             memberCount: activeMemberCount,
-            // B-2: the registered delegate count is a FLOOR, not an exact expected value. A channel
-            // that gained delegates after this manager was deployed (the normal case — L1 has no
-            // per-join registration under Option B) still closes; one whose active region is
-            // NARROWER than the registered delegate count does not. Cardinality only — see the
-            // `activeDelegateCount` doc comment (review finding 6).
+            // Legacy field name, exact semantics: settlement activation froze this count and the
+            // verifier requires PI limb 94 to equal it (not merely to meet a floor).
             minDelegateCount: uint32(activeDelegateCount)
         });
         return verifier.verifyCloseIntent(fields, proof);

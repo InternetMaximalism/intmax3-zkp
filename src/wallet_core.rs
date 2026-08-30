@@ -5134,10 +5134,11 @@ use crate::falcon_sig::agg::{AGG_LEVELS, falcon_agg_expected_public_inputs};
 /// verifier (there is no `verify` selector wire), so a leaf proof cannot exist for an invalid
 /// signature at all.
 ///
-/// SECURITY (T-5, disclosed not closed — design §8.3): the members signed the channel STATE, not
-/// this close. `close_nonce` / `burn_tx_hash` / `snapshot_medium_block_number` are NOT covered by
-/// any signature verified here; the coordinator chooses them unilaterally, bounded only by the L1
-/// era fence and the challenge ordering. "N-of-N signed the close" means "N-of-N signed the state".
+/// SECURITY (M-9): the members signed the channel STATE, not a separate close message. The close
+/// metadata is therefore canonicalized instead of caller-selected: `close_nonce` is the signed
+/// state's checked `close_freeze_nonce + 1`, while `burn_tx_hash` and
+/// `snapshot_medium_block_number` are zero sentinels. The zero burn hash explicitly does NOT prove
+/// a live withdrawal; that remains the responsibility of the withdrawal proof/nullifier lane.
 fn falcon_member_auth_from_signatures(
     record: &ChannelRecord,
     member_sigs: &[MemberSignature],
@@ -5478,9 +5479,6 @@ impl CloseProver {
         state: &ChannelState,
         member_sigs: &[MemberSignature],
         balance_proof: ProofWithPublicInputs<F, C, D>,
-        close_nonce: u64,
-        burn_tx_hash: Bytes32,
-        snapshot_medium_block_number: u64,
     ) -> WResult<ChannelCloseFullWitness<F, C, D>> {
         let artifact = self
             .falcon
@@ -5491,9 +5489,6 @@ impl CloseProver {
             state,
             &artifact,
             balance_proof,
-            close_nonce,
-            burn_tx_hash,
-            snapshot_medium_block_number,
         )
     }
 
@@ -5506,9 +5501,6 @@ impl CloseProver {
         state: &ChannelState,
         artifact: &FalconAggregateProofArtifact,
         balance_proof: ProofWithPublicInputs<F, C, D>,
-        close_nonce: u64,
-        burn_tx_hash: Bytes32,
-        snapshot_medium_block_number: u64,
     ) -> WResult<ChannelCloseFullWitness<F, C, D>> {
         let member_count = state.balance_state.member_count as usize;
         if !(2..=MAX_CHANNEL_MEMBERS).contains(&member_count) {
@@ -5535,13 +5527,14 @@ impl CloseProver {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash,
+            // M-9: explicit "no live burn proven" sentinel. Actual withdrawal authorization is a
+            // separate proof/nullifier path and must not be inferred from this close PI.
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: Vec::new(),
         };
-        let close_intent =
-            CloseIntent::new(close_nonce, state, &close_tx, snapshot_medium_block_number)
-                .map_err(|e| WalletError(format!("close intent binding failed: {e:?}")))?;
+        let close_intent = CloseIntent::new(state, &close_tx)
+            .map_err(|e| WalletError(format!("close intent binding failed: {e:?}")))?;
         let close = ChannelCloseWitness {
             final_channel_state: state.clone(),
             close_tx,
@@ -5600,7 +5593,6 @@ impl CloseProver {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Wrap an inner Plonky2 proof (close / withdrawal-claim / cancel / post-close) with
 /// `WrapperCircuit` and produce its MLE/WHIR proof JSON for the matching on-chain
 /// `ChannelSettlementVerifier` entry point (the SAME pipeline as the `bin/generate_*_fixture.rs`
@@ -5798,7 +5790,6 @@ impl WithdrawalClaimProver {
     }
 
     /// Wrap + MLE for the on-chain `ChannelSettlementVerifier.verifyWithdrawalClaim`.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.circuit.data.verifier_data(), proof)
     }
@@ -7978,9 +7969,6 @@ mod delegate_send_tests {
                 &state,
                 &short,
                 balance_proof.clone(),
-                1,
-                Bytes32::default(),
-                1,
             )
             .expect_err("close must reject a signature count != member_count");
         assert!(
@@ -7996,9 +7984,6 @@ mod delegate_send_tests {
                 &state,
                 &state.member_signatures,
                 balance_proof,
-                1,
-                Bytes32::default(),
-                1,
             )
             .expect("close full witness");
         let proof = prover.prove(&witness).expect("close proof");
@@ -8492,9 +8477,6 @@ mod delegate_send_tests {
                     &state,
                     sigs,
                     balance_proof.clone(),
-                    1,
-                    Bytes32::default(),
-                    1,
                 )
                 .expect("close full witness")
         };
@@ -8605,9 +8587,6 @@ mod delegate_send_tests {
                 &state,
                 &sigs[..2],
                 balance_proof.clone(),
-                1,
-                Bytes32::default(),
-                1,
             )
             .expect_err("a keyless prover must FAIL on a missing signature, not mint one");
         assert!(
@@ -8623,9 +8602,6 @@ mod delegate_send_tests {
                 &state,
                 &sigs,
                 balance_proof,
-                1,
-                Bytes32::default(),
-                1,
             )
             .expect("keyless close witness");
         let proof = prover.prove(&witness).expect("keyless close proof");
@@ -8707,11 +8683,11 @@ mod delegate_send_tests {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![],
         };
-        let close_intent = CloseIntent::new(5, &state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&state, &close_tx).unwrap();
 
         let pk_g = Bytes32::from_u32_slice(&[10, 11, 12, 13, 14, 15, 16, 17]).unwrap();
         let recipient = Address::from_u32_slice(&[1, 2, 3, 4, 5]).unwrap();
@@ -8870,11 +8846,11 @@ mod delegate_send_tests {
             final_channel_state_digest: closing_state.digest,
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![],
         };
-        let close_intent = CloseIntent::new(5, &closing_state, &close_tx, 123).unwrap();
+        let close_intent = CloseIntent::new(&closing_state, &close_tx).unwrap();
 
         let prover = CancelCloseProver::new();
 
@@ -10144,18 +10120,18 @@ mod delegate_send_tests {
             final_channel_state_digest: state.digest,
             final_balance_state_h1: state.balance_state.h1(),
             intmax_state_root: state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             // The burn denominates the GENESIS token fund ONLY (§N-6); the token-1 fund
             // settles via per-token claims, never the burn.
             burn_amount: state.channel_fund.amounts[0],
             zkp: vec![],
         };
         let close_intent =
-            CloseIntent::new(1, &state, &close_tx, 7).expect("two-token close intent must build");
+            CloseIntent::new(&state, &close_tx).expect("two-token close intent must build");
         assert_eq!(
             close_intent.channel_fund_snapshot.amounts[1],
             u64_to_u256(65),
-            "the intent must snapshot the full per-token fund vector (TFD/IMCI source)"
+            "the intent must snapshot the full per-token fund vector (TFD/IMCH source)"
         );
 
         let prover = WithdrawalClaimProver::new();

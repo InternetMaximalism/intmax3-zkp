@@ -17,9 +17,11 @@ use intmax3_zkp::{
         channel_id::ChannelId,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
+    l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
     regev::RegevCiphertext,
     validity_prover_service::{
-        L1ValidityAcknowledgement, ValidityProverService, ValidityProverServiceError,
+        L1FinalizationRpcConfig, L1ValidityAcknowledgement, ValidityProverService,
+        ValidityProverServiceError,
     },
     wallet_core::{
         assemble_genesis_state, build_record, default_settled_tx_accumulator,
@@ -249,8 +251,16 @@ fn acknowledgement(tag: u32, commitment: Bytes32) -> L1ValidityAcknowledgement {
     L1ValidityAcknowledgement {
         chain_id: 31_337,
         transaction_hash: Bytes32::from_u32_slice(&[tag; 8]).expect("tx hash"),
+        block_hash: Bytes32::from_u32_slice(&[tag + 1; 8]).expect("block hash"),
         block_number: tag as u64,
         final_extended_state_commitment: commitment,
+        finalized_checkpoint: L1FinalizedCheckpoint {
+            chain_id: 31_337,
+            block_number: tag as u64 + 2,
+            block_hash: Bytes32::from_u32_slice(&[tag + 2; 8]).expect("checkpoint hash"),
+            parent_hash: Bytes32::from_u32_slice(&[tag + 1; 8]).expect("checkpoint parent"),
+            source: L1FinalitySource::DevnetLatest,
+        },
     }
 }
 
@@ -409,6 +419,7 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
         1
     );
     let second_ack = acknowledgement(2, second.final_extended_state_commitment);
+    let second_tx_hash = second_ack.transaction_hash;
     validity
         .acknowledge_candidate_unchecked_for_test(
             "ack-span-2".into(),
@@ -431,6 +442,28 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
             .finalized_block_number,
         3
     );
+
+    // Production replay must traverse the L1 authority/receipt/head validation path before it may
+    // return an acknowledgement already present on disk.  An invalid config is a deterministic
+    // sentinel here: the old shortcut returned success without inspecting `l1` at all.
+    let invalid_l1 = L1FinalizationRpcConfig {
+        rpc_url: "http://127.0.0.1:1".into(),
+        expected_chain_id: 1,
+        rollup: Address::from_u32_slice(&[0x4242; 5]).expect("nonzero rollup"),
+        minimum_confirmations: 3,
+        allow_unfinalized_devnet: true,
+    };
+    assert!(matches!(
+        validity.acknowledge_candidate_from_l1(
+            "ack-span-2".into(),
+            second.candidate_id,
+            second_tx_hash,
+            &invalid_l1,
+            &producer,
+        ),
+        Err(ValidityProverServiceError::InvalidConfiguration(message))
+            if message.contains("31337")
+    ));
 
     let other_directory = TestDirectory::new("wrong-anchor");
     let other_producer = BlockProducerService::open(other_directory.producer_journal(), &[2])

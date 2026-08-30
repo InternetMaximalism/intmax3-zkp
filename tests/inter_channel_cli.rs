@@ -122,6 +122,7 @@ struct CliState {
     state_schema_version: u32,
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
+    settlement_binding: Option<serde_json::Value>,
     /// SECURITY (replay ledger, B side): identities already CREDITED into this channel. Mirrors
     /// `CliState::applied_tx_identities` — keyed on the token-FREE
     /// `InterChannelTx::replay_identity()`, NEVER on the token-bearing `tx_hash`.
@@ -291,13 +292,14 @@ fn write_json_file<T: Serialize>(path: &std::path::Path, v: &T) {
 }
 
 /// Must match `channel_member.rs`'s `STATE_SCHEMA_VERSION`. See the mirror field's comment.
-const STATE_SCHEMA_VERSION: u32 = 1;
+const STATE_SCHEMA_VERSION: u32 = 2;
 
 fn cli_state(fx: ChannelFixture) -> CliState {
     CliState {
         state_schema_version: STATE_SCHEMA_VERSION,
         controlled: fx.controlled,
         snapshot: fx.snapshot,
+        settlement_binding: None,
         applied_tx_identities: HashSet::new(),
         spent_tx_identities: HashSet::new(),
         imported_deposits: HashSet::new(),
@@ -756,6 +758,38 @@ fn inter_channel_cli_end_to_end() {
         "a PREPARED journal must survive the simulated crash"
     );
 
+    // A disabled MSU command must reject before the process-wide recovery prelude. Before this
+    // regression guard, startup rolled the PREPARED transfer forward (mutating B and deleting the
+    // journal) and only then reached `cmd_member_update`'s fail-closed stub.
+    let source_at_crash = read_state(&ch_a).snapshot.state.digest;
+    let (msu_ok, msu_log) = run(&ch_a, A_ID, &["member-update", "rotate", "0", "999999"]);
+    assert!(
+        !msu_ok,
+        "release MSU command must remain disabled:\n{msu_log}"
+    );
+    assert!(
+        msu_log.contains("member-update is disabled in this release"),
+        "MSU refusal must name the release gate:\n{msu_log}"
+    );
+    assert_eq!(
+        read_state(&ch_a).snapshot.state.digest,
+        source_at_crash,
+        "disabled MSU must not rewrite the already-committed source side"
+    );
+    assert_eq!(
+        read_state(&ch_b).snapshot.state.digest,
+        b_committed_digest,
+        "disabled MSU must reject before rolling the destination side forward"
+    );
+    assert_eq!(
+        root.join(".inter-transfer-journal")
+            .read_dir()
+            .expect("journal directory")
+            .count(),
+        1,
+        "disabled MSU must not retire an unrelated PREPARED recovery journal"
+    );
+
     let (ok, log) = run(&ch_a, A_ID, &["recover-inter-transfers"]);
     assert!(ok, "roll-forward recovery must succeed, log:\n{log}");
 
@@ -1160,6 +1194,19 @@ fn inter_channel_cli_idempotent_rejoin() {
         .snapshot
         .members
         .push(member_info(3, &delegate_keys));
+    // Simulate the exact crash boundary: PREPARED was fsynced before forge broadcast, then the
+    // process died before manager/verifier addresses were known. This must already freeze NEW
+    // joins, while the same-pk retry below remains available.
+    join_state.settlement_binding = Some(json!({
+        "status": "prepared",
+        "channel_id": B_ID,
+        "snapshot_state_digest": join_state.snapshot.state.digest,
+        "participant_root": Bytes32::from_u32_slice(&[0, 0, 0, 0, 0, 0, 0, 77]).unwrap(),
+        "participant_count": 4,
+        "rollup": "0x0000000000000000000000000000000000000042",
+        "verifier": null,
+        "manager": null
+    }));
     let v_before = join_state.snapshot.state.balance_state.state_version;
     write_state(&ch_join, &join_state);
 
@@ -1218,8 +1265,78 @@ fn inter_channel_cli_idempotent_rejoin() {
         "idempotent re-join must NOT duplicate the delegate slot"
     );
 
+    // A genuinely new pk_g is rejected even though settlement.json never existed (the crash was
+    // before publication). Removing that convenience file therefore cannot reopen membership.
+    let new_delegate_keys = MemberKeys::generate(&mut StdRng::seed_from_u64(0xDE_1E_6B));
+    let (new_ct, _) = encrypt_amount(
+        &mut StdRng::seed_from_u64(0xC0_FFEF),
+        &new_delegate_keys.regev_pk,
+        0,
+    )
+    .unwrap();
+    let new_contrib = json!({
+        "regevPk": new_delegate_keys.regev_pk,
+        "pkG": new_delegate_keys.pk_g().to_hex(),
+        "pkB": new_delegate_keys.pk_b().to_hex(),
+        "genesisCt": new_ct,
+        "recipient": "0x00000000000000000000000000000000feedbeef",
+    });
+    let new_contrib_path = ch_join.join("new_contribution.json");
+    std::fs::write(&new_contrib_path, serde_json::to_vec(&new_contrib).unwrap()).unwrap();
+    let (new_ok, new_log) = run(
+        &ch_join,
+        B_ID,
+        &["init", new_contrib_path.to_str().unwrap(), "new_snapshot.json"],
+    );
+    assert!(!new_ok, "a new pk_g after PREPARED must fail:\n{new_log}");
+    assert!(
+        new_log.contains("delegate join is frozen") && new_log.contains("Prepared"),
+        "the crash-boundary refusal must name the durable freeze:\n{new_log}"
+    );
+    assert!(!ch_join.join("settlement.json").exists());
+    let frozen_after = read_state(&ch_join);
+    assert_eq!(frozen_after.snapshot.members.len(), join_after.snapshot.members.len());
+
     let _ = std::fs::remove_dir_all(&root);
-    eprintln!("[inter_channel_cli] OK (dedup): idempotent re-join → same slot, no inflation.");
+    eprintln!("[inter_channel_cli] OK (dedup/freeze): same-pk retry works; PREPARED rejects new pk.");
+}
+
+/// Release gate: the wallet CLI must reject MSU before loading or mutating local state. Advancing
+/// only the wallet/validity set while the deployed settlement manager stays fixed strands the
+/// channel, so even a syntactically valid rotate command is fail-closed.
+#[test]
+fn member_update_cli_is_disabled_and_state_is_byte_identical() {
+    let root = std::env::temp_dir().join(format!(
+        "intmax_ic_cli_msu_disabled_{}",
+        std::process::id()
+    ));
+    let ch = root.join("ch");
+    std::fs::create_dir_all(&ch).unwrap();
+    write_state(&ch, &cli_state(build_cli_channel(A_ID, &[20, 40, 60])));
+    let before = std::fs::read(ch.join("cli_state.json")).expect("state before command");
+
+    let (ok, log) = run(&ch, A_ID, &["member-update", "rotate", "0", "999999"]);
+    assert!(!ok, "member-update must be disabled in the release CLI:\n{log}");
+    assert!(
+        log.contains("member-update is disabled in this release")
+            && log.contains("not atomically anchored"),
+        "refusal must explain the cross-layer safety reason:\n{log}"
+    );
+    assert_eq!(
+        std::fs::read(ch.join("cli_state.json")).expect("state after command"),
+        before,
+        "disabled CLI command must not alter even the serialized wallet state"
+    );
+    assert!(
+        !ch.join("channel_snapshot.json").exists(),
+        "disabled CLI command must not publish an updated snapshot"
+    );
+    assert!(
+        !ch.join(".cli_state.process.lock").exists(),
+        "disabled CLI command must reject before creating/acquiring the state-process lock"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A-1 (join-time conservation + claimability) — the REAL `join_delegate` path, driven through the

@@ -227,6 +227,7 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     {
         intent = _intent(1, 9, 22, freezeNonce);
         intent.finalStateVersion = stateVersion;
+        intent.finalChannelStateDigest = keccak256(abi.encodePacked("final_state", stateVersion, freezeNonce));
     }
 
     function _burnDescriptor() internal view returns (bytes32) {
@@ -248,6 +249,7 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     {
         intent = _intent(1, 9, 22, freezeNonce);
         intent.finalStateVersion = stateVersion;
+        intent.finalChannelStateDigest = keccak256(abi.encodePacked("burn_state", stateVersion, freezeNonce));
         intent.finalSettledTxChain =
             keccak256(abi.encodePacked(uint32(0x494d5443), PREV_CHAIN, _burnDescriptor()));
     }
@@ -286,11 +288,13 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     function _cancelProofFor(bytes32 closeIntentDigest, uint64 revivedStateVersion)
         internal view returns (MleVerifier.MleProof memory)
     {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         return CloseTestLib.proofWithLimbs(
             verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
                 closeIntentDigest,
                 manager.registeredMemberSetCommitment(),
+                pending.finalStateVersion,
                 revivedStateVersion,
                 keccak256(abi.encodePacked("revived", revivedStateVersion))
             )

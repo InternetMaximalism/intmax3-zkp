@@ -3,9 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {DeployConfig} from "./DeployConfig.sol";
 import {RegRecordLib} from "./RegRecordLib.sol";
@@ -16,7 +21,10 @@ contract WalletMockMleVerifier {
         MleVerifier.VerifyParams memory,
         SpongefishWhirVerify.WhirParams memory,
         bytes32
-    ) external pure returns (bool) {
+    ) external view returns (bool) {
+        // The script entrypoint is also local-only, but deployed code/state can
+        // be migrated without re-running it. Keep the mock itself fail-closed.
+        if (block.chainid != 31337) revert MleProofEngineUnavailable(block.chainid);
         return true;
     }
 }
@@ -71,8 +79,7 @@ contract DeployWalletSettlement is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeCloseVk(
-                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
         {
@@ -85,8 +92,7 @@ contract DeployWalletSettlement is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeCancelCloseVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
 
@@ -133,25 +139,20 @@ contract DeployWalletSettlement is Script {
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](r.memberCount);
         for (uint256 i = 0; i < r.memberCount; i++) {
-            mBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: r.pkGs[i],
-                recipient: r.recipients[i]
-            });
-        }
-        ChannelSettlementManager.MemberBinding[] memory dBind =
-            new ChannelSettlementManager.MemberBinding[](r.activeDelegateCount);
-        for (uint256 i = 0; i < r.activeDelegateCount; i++) {
-            dBind[i] = ChannelSettlementManager.MemberBinding({
-                pkG: r.pkGs[r.memberCount + i],
-                recipient: r.recipients[r.memberCount + i]
-            });
+            mBind[i] = ChannelSettlementManager.MemberBinding({pkG: r.pkGs[i], recipient: r.recipients[i]});
         }
         manager = new ChannelSettlementManager(
-            bytes4(r.channelId), r.bpSlot, r.pkGs[r.bpSlot], r.activeDelegateCount,
+            bytes4(r.channelId),
+            r.bpSlot,
+            r.pkGs[r.bpSlot],
+            r.activeDelegateCount,
+            r.participantRoot,
             DeployConfig.challengePeriodSecs(),
-            SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
-            mBind, dBind
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(sv)),
+            IChannelRegistry(address(rollup)),
+            mBind
         );
 
         // 5. Register settlement manager on rollup.
@@ -183,12 +184,10 @@ contract DeployWalletSettlement is Script {
             });
             SpongefishWhirVerify.WhirParams memory whir;
             sv.initializeWithdrawalClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
             sv.initializePostCloseClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"",
-                new uint256[](0), new uint256[](0)
+                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
             );
         }
 

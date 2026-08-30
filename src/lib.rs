@@ -13,7 +13,11 @@ pub mod falcon_sig;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod live_balance_service;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod l1_finality;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod partial_withdrawal_payout;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod proof_da;
 pub mod poseidon_sig;
 pub mod regev;
 pub mod utils;
@@ -34,6 +38,7 @@ mod wasm_demo;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_wallet;
 
+#[cfg(feature = "wasm-threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]

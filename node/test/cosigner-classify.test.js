@@ -35,6 +35,8 @@ test('cosigner: chain close events route to abnormal branches', () => {
   assert.equal(classify({ source: 'chain', kind: 'CloseRequested' }, {}), BRANCHES.CHAIN_CLOSE_REQUESTED);
   assert.equal(classify({ source: 'chain', kind: 'CloseSubmitted' }, {}), BRANCHES.CHAIN_CLOSE_SUBMITTED);
   assert.equal(classify({ source: 'chain', kind: 'SpecialCloseSubmitted' }, {}), BRANCHES.CHAIN_CLOSE_SUBMITTED);
+  assert.equal(classify({ source: 'chain', kind: 'CloseCancelled' }, {}), BRANCHES.CHAIN_CLOSE_CANCELLED);
+  assert.equal(classify({ source: 'chain', kind: 'CloseFinalized' }, {}), BRANCHES.CHAIN_CLOSE_FINALIZED);
   assert.equal(classify({ source: 'chain', kind: 'PartialWithdrawalSubmitted' }, {}), BRANCHES.CHAIN_PW_SUBMITTED);
   assert.equal(classify({ source: 'chain', kind: 'FraudConfirmed' }, {}), BRANCHES.ATTACK_SUSPECTED);
 });
@@ -43,7 +45,6 @@ test('cosigner: benign chain events → CHAIN_OBSERVE, deposit/finalized routed'
   assert.equal(classify({ source: 'chain', kind: 'Deposited' }, {}), BRANCHES.CHAIN_DEPOSITED);
   assert.equal(classify({ source: 'chain', kind: 'Finalized' }, {}), BRANCHES.CHAIN_BLOCK_FINALIZED);
   assert.equal(classify({ source: 'chain', kind: 'BlockPosted' }, {}), BRANCHES.CHAIN_OBSERVE);
-  assert.equal(classify({ source: 'chain', kind: 'CloseCancelled' }, {}), BRANCHES.CHAIN_OBSERVE);
 });
 
 test('cosigner: unknown chain kind → CHAIN_OBSERVE (review M2: watcher only emits our ABI events; an unmapped one is benign/new, not an attack — do not freeze the channel)', () => {

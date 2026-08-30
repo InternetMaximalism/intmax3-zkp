@@ -22,20 +22,22 @@ use crate::{
 //    as `close_circuit.rs` computes/exposes it). L1 (`ChannelSettlementManager`) matches it against
 //    `registeredMemberSetCommitment()` (the SAME mechanism the close path uses), so a third party
 //    cannot forge a cancel with their own keys (Finding D fix).
-//  - `revived_state_version` (2, hi/lo) — proven `> close_intent.final_state_version` in-circuit
-//    (Finding B fix). The version operand is anchored inside the revived IMCH (via H1), and the
-//    close-side operand is anchored inside the recomputed `close_intent_digest`, so neither side
-//    can be tampered independently of the digests the manager binds.
+//  - `close_final_state_version` (2, hi/lo) — injected by L1 from the pending close and strictly
+//    bound as a public input. IMCS intentionally does not expose the contents of the signed IMCH,
+//    so this explicit limb pair keeps the circuit's strict-greater predicate tied to the Manager's
+//    stored closing version.
+//  - `revived_state_version` (2, hi/lo) — proven `> close_final_state_version` in-circuit. The
+//    revived operand is anchored inside the member-signed revived IMCH (via H1).
 //  - `revived_channel_state_digest` (8) — the IMCH digest the members signed (the revived state).
-//  - `close_intent_digest` (8) — binds the pending close being cancelled (matched on L1 against
-//    `pendingClose.closeIntentDigest`). The circuit recomputes the FULL IMCI preimage in-circuit,
-//    so `close_intent.final_state_version` and `close_intent.close_freeze_nonce` used in the
-//    comparison / era fence are the SAME wires hashed into this digest.
+//  - `close_intent_digest` (8; legacy ABI name) — canonical IMCS closeStateId, matched on L1
+//    against `pendingClose.closeIntentDigest`. The circuit recomputes it from channel id, closing
+//    IMCH digest, and close freeze nonce; the latter is the same wire used in the era fence.
 //
 // Limb order (pinned by the Solidity `_expectedCancelCloseLimbs`, one BE u32 word per limb):
-//   channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) | revivedStateVersion(2 hi,lo) |
+//   channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) |
+//   closeFinalStateVersion(2 hi,lo) | revivedStateVersion(2 hi,lo) |
 //   revivedChannelStateDigest(8)
-pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 27;
+pub const CANCEL_CLOSE_PUBLIC_INPUTS_LEN: usize = 29;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +46,8 @@ pub struct CancelClosePublicInputs {
     /// identity), equal to `close_intent.channel_id` and to the revived state's `channel_id`
     /// (both anchored in-circuit via the recomputed digests).
     pub channel_id: ChannelId,
-    /// IMCI digest of the pending close being cancelled. Recomputed in-circuit from the full
-    /// `CloseIntent` preimage; matched on L1 against `pendingClose.closeIntentDigest`.
+    /// Canonical IMCS closeStateId of the pending close being cancelled. The legacy field name is
+    /// retained for ABI compatibility; L1 matches it against `pendingClose.closeIntentDigest`.
     pub close_intent_digest: Bytes32,
     /// `keccak([IMCM, member_count, pk_g_0..pk_g_{MAX-1}])` over the revived state's signing
     /// members (slot order, padding zeroed) — byte-identical to the close circuit's
@@ -53,7 +55,11 @@ pub struct CancelClosePublicInputs {
     /// (Finding D fix). Derived by the circuit from `member_auth`, not by the witness alone —
     /// `CancelCloseWitness::to_public_inputs` leaves it zero as a placeholder.
     pub member_set_commitment: Bytes32,
-    /// `state_version` of the revived channel state. Proven `> close_intent.final_state_version`
+    /// `final_state_version` of the pending close. L1 supplies the Manager's stored value and the
+    /// verifier strict-binds these limbs, preventing a prover from choosing a lower comparison
+    /// operand now that canonical IMCS intentionally treats the closing IMCH as opaque.
+    pub close_final_state_version: u64,
+    /// `state_version` of the revived channel state. Proven `> close_final_state_version`
     /// in-circuit (Finding B fix). Anchored inside the revived IMCH (via the recomputed H1).
     pub revived_state_version: u64,
     /// IMCH digest of the revived channel state the members N-of-N signed. Recomputed in-circuit
@@ -73,6 +79,8 @@ pub enum CancelCloseWitnessError {
         "era fence violated: revived close_freeze_nonce {revived} + 1 != close close_freeze_nonce {close}"
     )]
     EraFenceMismatch { revived: u64, close: u64 },
+    #[error("revived close_freeze_nonce {revived} cannot be advanced without overflowing u64")]
+    EraNonceOverflow { revived: u64 },
     #[error("revived channel state digest mismatch (stored digest != recomputed signing digest)")]
     RevivedDigestMismatch,
 }
@@ -112,7 +120,12 @@ impl CancelCloseWitness {
         // that was closed. `CloseIntent::new` advances `close_freeze_nonce` by +1 off the closing
         // state, so a continued-operation state from the pre-close era satisfies
         // `revived.close_freeze_nonce + 1 == close.close_freeze_nonce`. Do NOT relax to `>=`.
-        if self.revived_state.close_freeze_nonce + 1 != self.close_intent.close_freeze_nonce {
+        let revived_next_nonce = self.revived_state.close_freeze_nonce.checked_add(1).ok_or(
+            CancelCloseWitnessError::EraNonceOverflow {
+                revived: self.revived_state.close_freeze_nonce,
+            },
+        )?;
+        if revived_next_nonce != self.close_intent.close_freeze_nonce {
             return Err(CancelCloseWitnessError::EraFenceMismatch {
                 revived: self.revived_state.close_freeze_nonce,
                 close: self.close_intent.close_freeze_nonce,
@@ -123,6 +136,7 @@ impl CancelCloseWitness {
             close_intent_digest: self.close_intent.signing_digest(),
             // Filled by `CancelCloseCircuit::prove` from `member_auth`; placeholder here.
             member_set_commitment: Bytes32::default(),
+            close_final_state_version: self.close_intent.final_state_version,
             revived_state_version: revived_version,
             revived_channel_state_digest: self.revived_state.signing_digest(),
         })
@@ -143,6 +157,7 @@ impl CancelClosePublicInputs {
             self.channel_id.to_u64_vec(),
             self.close_intent_digest.to_u64_vec(),
             self.member_set_commitment.to_u64_vec(),
+            split_u64(self.close_final_state_version),
             split_u64(self.revived_state_version),
             self.revived_channel_state_digest.to_u64_vec(),
         ]
@@ -162,8 +177,9 @@ impl CancelClosePublicInputs {
                 .map_err(|e| e.to_string())?,
             member_set_commitment: Bytes32::from_u64_slice(&values[9..17])
                 .map_err(|e| e.to_string())?,
-            revived_state_version: join_u64(&values[17..19]),
-            revived_channel_state_digest: Bytes32::from_u64_slice(&values[19..27])
+            close_final_state_version: join_u64(&values[17..19]),
+            revived_state_version: join_u64(&values[19..21]),
+            revived_channel_state_digest: Bytes32::from_u64_slice(&values[21..29])
                 .map_err(|e| e.to_string())?,
         })
     }
@@ -267,11 +283,11 @@ mod tests {
             final_channel_state_digest: closing_state.digest,
             final_balance_state_h1: closing_state.balance_state.h1(),
             intmax_state_root: closing_state.channel_fund.intmax_state_root,
-            burn_tx_hash: Bytes32::from_u32_slice(&[7, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            burn_tx_hash: Bytes32::default(),
             burn_amount: closing_state.channel_fund.amounts[0],
             zkp: vec![7],
         };
-        CloseIntent::new(5, closing_state, &close_withdrawal, 123).unwrap()
+        CloseIntent::new(closing_state, &close_withdrawal).unwrap()
     }
 
     #[test]
@@ -295,8 +311,9 @@ mod tests {
         assert_eq!(
             limbs.len(),
             CANCEL_CLOSE_PUBLIC_INPUTS_LEN,
-            "cancel PI is exactly 27 BE u32 words (1 channelId + 8 closeIntentDigest + 8 \
-             memberSetCommitment + 2 revivedStateVersion + 8 revivedChannelStateDigest)"
+            "cancel PI is exactly 29 BE u32 words (1 channelId + 8 closeStateId + 8 \
+             memberSetCommitment + 2 closeFinalStateVersion + 2 revivedStateVersion + 8 \
+             revivedChannelStateDigest)"
         );
         // Pinned limb offsets (mirrored by Solidity `_expectedCancelCloseLimbs`).
         assert_eq!(&limbs[0..1], &public_inputs.channel_id.to_u64_vec()[..]);
@@ -309,10 +326,12 @@ mod tests {
             &public_inputs.member_set_commitment.to_u64_vec()[..],
             "member_set_commitment occupies limbs 9..17"
         );
-        assert_eq!(limbs[17], 0, "revived_state_version hi limb");
-        assert_eq!(limbs[18], 9, "revived_state_version lo limb");
+        assert_eq!(limbs[17], 0, "close_final_state_version hi limb");
+        assert_eq!(limbs[18], 7, "close_final_state_version lo limb");
+        assert_eq!(limbs[19], 0, "revived_state_version hi limb");
+        assert_eq!(limbs[20], 9, "revived_state_version lo limb");
         assert_eq!(
-            &limbs[19..27],
+            &limbs[21..29],
             &public_inputs.revived_channel_state_digest.to_u64_vec()[..]
         );
         let roundtrip = CancelClosePublicInputs::from_u64_slice(&limbs).unwrap();
@@ -370,8 +389,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cancel_close_rejects_era_nonce_overflow() {
+        // The circuit's U64 addition constrains the carry to zero. Mirror that checked behavior
+        // natively so malformed deserialized witnesses fail closed instead of panicking in debug
+        // builds or wrapping in release builds.
+        let closing_state = sample_state(0, 7);
+        let close_intent = close_intent_for(&closing_state);
+        let revived_state = sample_state(u64::MAX, 9);
+        let witness = CancelCloseWitness {
+            revived_state,
+            close_intent,
+        };
+        assert!(matches!(
+            witness.to_public_inputs(),
+            Err(CancelCloseWitnessError::EraNonceOverflow { revived: u64::MAX })
+        ));
+    }
+
     /// GOLDEN VECTOR: the Rust `CancelClosePublicInputs::to_u64_vec()` must produce the SAME
-    /// 27-limb vector as the Solidity `_expectedCancelCloseLimbs` (pinned by the Solidity
+    /// 29-limb vector as the Solidity `_expectedCancelCloseLimbs` (pinned by the Solidity
     /// `test_expectedCancelCloseLimbs_goldenVector`, same sentinels). One BE u32 word per limb.
     #[test]
     fn cancel_close_public_inputs_match_solidity_shared_vector() {
@@ -393,6 +430,7 @@ mod tests {
             channel_id: ChannelId::new(0x0a0b_0c0d).unwrap(),
             close_intent_digest: b32(0x1000),
             member_set_commitment: b32(0x2000),
+            close_final_state_version: 0x0000_0033_0000_0044,
             revived_state_version: 0x0000_0011_0000_0022,
             revived_channel_state_digest: b32(0x3000),
         };
@@ -403,13 +441,15 @@ mod tests {
             assert_eq!(v[1 + i], (0x1000 + i as u64), "close_intent_digest");
             assert_eq!(v[9 + i], (0x2000 + i as u64), "member_set_commitment");
             assert_eq!(
-                v[19 + i],
+                v[21 + i],
                 (0x3000 + i as u64),
                 "revived_channel_state_digest"
             );
         }
-        assert_eq!(v[17], 0x11, "revived_state_version hi");
-        assert_eq!(v[18], 0x22, "revived_state_version lo");
+        assert_eq!(v[17], 0x33, "close_final_state_version hi");
+        assert_eq!(v[18], 0x44, "close_final_state_version lo");
+        assert_eq!(v[19], 0x11, "revived_state_version hi");
+        assert_eq!(v[20], 0x22, "revived_state_version lo");
     }
 
     #[test]

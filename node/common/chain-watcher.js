@@ -3,9 +3,14 @@
 // fragments (verified against contracts/src/IntmaxRollup.sol + ChannelSettlementManager.sol), so
 // topic0 matching AND argument decoding are correct (a hand-written signature that disagrees with
 // the contract silently never matches — the original bug found in review C1/M3/H3). Polls with a
-// confirmation depth and advances the cursor PER BLOCK (a block is only marked done once all its
-// events handled — no silent event loss on a mid-batch failure). ethers is lazy-required so
-// pure-logic unit tests do not need it.
+// finalized head and advances the cursor PER BLOCK (a block is only marked done once all its
+// events handled — no silent event loss on a mid-batch failure). Public-chain durable actions are
+// NEVER driven from a merely-confirmed block: a fixed confirmation count is not finality, and an
+// orphaned deposit/close/credit cannot in general be undone after the CLI has acted. A shallow
+// confirmation mode exists only as an explicit chain-31337 devnet escape hatch. Every durable
+// cursor is paired with the canonical block hash and parent hash; a changed finalized checkpoint is
+// a fail-stop condition, not something this process silently rewinds past. ethers is lazy-required
+// so pure-logic unit tests do not need it.
 //
 // ChainEvent: { kind, contract, channelId, channelIds, args:{...decoded}, blockNumber, txHash,
 // logIndex }. `channelId` is populated only for a uniquely-routed event; `channelIds` is the
@@ -103,6 +108,64 @@ function sameAddress(a, b) {
   return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 }
 
+function parseBlockNumber(value, what = 'block number') {
+  if (typeof value === 'bigint') {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${what} is out of range`);
+    return Number(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${what} is invalid`);
+    return value;
+  }
+  if (typeof value === 'string' && value.length) {
+    const parsed = value.startsWith('0x') ? Number.parseInt(value.slice(2), 16) : Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${what} is invalid`);
+    return parsed;
+  }
+  throw new Error(`${what} is missing`);
+}
+
+function canonicalHash(value, what) {
+  const hash = String(value || '').toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/.test(hash)) throw new Error(`${what} is missing or malformed`);
+  return hash;
+}
+
+function checkpointFromBlock(block, expectedNumber = null) {
+  if (!block) throw new Error('canonical block is unavailable');
+  const number = parseBlockNumber(block.number, 'canonical block number');
+  if (expectedNumber !== null && number !== expectedNumber) {
+    throw new Error(`canonical block number ${number} differs from requested ${expectedNumber}`);
+  }
+  return {
+    number,
+    hash: canonicalHash(block.hash, 'canonical block hash'),
+    parentHash: canonicalHash(block.parentHash, 'canonical parent hash'),
+  };
+}
+
+class ChainSafetyError extends Error {
+  constructor(code, message, evidence = {}) {
+    super(message);
+    this.name = 'ChainSafetyError';
+    this.code = code;
+    this.evidence = evidence;
+  }
+}
+
+const TRANSIENT_CHAIN_AVAILABILITY_CODES = new Set([
+  'RPC_NETWORK_UNAVAILABLE',
+  'CANONICAL_BLOCK_UNAVAILABLE',
+  'FINALIZED_HEAD_UNAVAILABLE',
+  'DURABLE_HEAD_BEHIND_CURSOR',
+]);
+
+// Availability is not forensic evidence. These errors close the volatile action gate until a
+// complete poll succeeds, while chain-id/hash/malformed-data contradictions remain sticky.
+function isTransientChainSafetyError(error) {
+  return error instanceof ChainSafetyError && TRANSIENT_CHAIN_AVAILABILITY_CODES.has(error.code);
+}
+
 // Resolve an already-decoded event to the configured channel runtimes that own it. Manager events
 // are address-scoped. Shared-rollup events use their explicit channelId/manager/recipient whenever
 // the event exposes one; only events with no channel discriminator are broadcast to that rollup's
@@ -141,14 +204,30 @@ function routeEventChannelIds(channels, { contract, address, kind, args = {} }) 
 }
 
 class ChainWatcher {
-  constructor({ rpcUrl, channels, confirmations = 2, pollIntervalMs = 4000 }) {
+  constructor({
+    rpcUrl,
+    channels,
+    chainId = null,
+    confirmations = 2,
+    pollIntervalMs = 4000,
+    allowUnfinalizedDevnet = false,
+    provider = null,
+  }) {
     this.rpcUrl = rpcUrl;
     this.channels = channels;
-    this.confirmations = confirmations;
+    if (chainId == null) throw new Error('chainId is required to authenticate the RPC network');
+    this.chainId = parseBlockNumber(chainId, 'configured chain id');
+    if (this.chainId === 0) throw new Error('configured chain id must be positive');
+    this.confirmations = parseBlockNumber(confirmations, 'confirmation depth');
     this.pollIntervalMs = pollIntervalMs;
+    this.allowUnfinalizedDevnet = allowUnfinalizedDevnet === true;
+    if (this.allowUnfinalizedDevnet && this.chainId !== 31337) {
+      throw new Error('allowUnfinalizedDevnet is permitted only for explicit chainId 31337');
+    }
     this._ethers = null;
-    this._provider = null;
+    this._provider = provider;
     this._iface = null;
+    this._networkChecked = false;
   }
 
   _init() {
@@ -158,6 +237,163 @@ class ChainWatcher {
     this._ethers = ethers;
     this._provider = new ethers.JsonRpcProvider(this.rpcUrl);
     this._iface = new ethers.Interface([...ROLLUP_FRAGMENTS, ...MANAGER_FRAGMENTS]);
+  }
+
+  async _assertNetwork() {
+    this._init();
+    if (this._networkChecked || this.chainId == null) return;
+    let network;
+    try {
+      network = await this._provider.getNetwork();
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'RPC_NETWORK_UNAVAILABLE',
+        `cannot authenticate the RPC network: ${cause && cause.message || cause}`,
+      );
+    }
+    let actual;
+    try {
+      actual = parseBlockNumber(network && network.chainId, 'RPC chain id');
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'RPC_CHAIN_ID_INVALID',
+        `RPC returned an invalid chain id: ${cause.message}`,
+      );
+    }
+    if (actual !== this.chainId) {
+      throw new ChainSafetyError(
+        'CHAIN_ID_MISMATCH',
+        `RPC chain id ${actual} differs from configured ${this.chainId}`,
+        { expectedChainId: this.chainId, actualChainId: actual },
+      );
+    }
+    this._networkChecked = true;
+  }
+
+  async _blockCheckpoint(number) {
+    this._init();
+    let block;
+    try {
+      block = await this._provider.getBlock(number);
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'CANONICAL_BLOCK_UNAVAILABLE',
+        `cannot read canonical block ${number}: ${cause && cause.message || cause}`,
+        { number },
+      );
+    }
+    try {
+      return checkpointFromBlock(block, number);
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'CANONICAL_BLOCK_INVALID',
+        `canonical block ${number} is invalid: ${cause.message}`,
+        { number },
+      );
+    }
+  }
+
+  async _durableHead() {
+    await this._assertNetwork();
+    if (this.allowUnfinalizedDevnet) {
+      const latest = parseBlockNumber(await this._provider.getBlockNumber(), 'latest block number');
+      const number = latest - this.confirmations;
+      return number < 0 ? null : this._blockCheckpoint(number);
+    }
+
+    let finalized;
+    try {
+      finalized = await this._provider.getBlock('finalized');
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_UNAVAILABLE',
+        `RPC does not provide a finalized head: ${cause && cause.message || cause}`,
+      );
+    }
+    if (!finalized) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_UNAVAILABLE',
+        'RPC returned no finalized head; refusing durable chain actions',
+      );
+    }
+    try {
+      return checkpointFromBlock(finalized);
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_INVALID',
+        `RPC finalized head is invalid: ${cause.message}`,
+      );
+    }
+  }
+
+  // Validate the durable checkpoint before any new event is dispatched. A number-only legacy
+  // cursor cannot be authenticated after the fact: derived state may already contain effects from
+  // a different fork, while reading the current hash at cursor-1 would merely bless that state.
+  // Such stores require explicit operator reconciliation and never auto-bootstrap.
+  async validateCheckpoint(cursor, storedCheckpoint) {
+    let next;
+    try {
+      next = parseBlockNumber(cursor, 'stored chain cursor');
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'STORED_CURSOR_INVALID',
+        `stored chain cursor is invalid: ${cause.message}`,
+        { cursor },
+      );
+    }
+    if (next > 0 && storedCheckpoint == null) {
+      throw new ChainSafetyError(
+        'LEGACY_CURSOR_UNAUTHENTICATED',
+        `legacy cursor ${next} has no authenticated prior-block checkpoint; operator reconciliation is required`,
+        { cursor: next },
+      );
+    }
+    await this._assertNetwork();
+    if (next === 0) {
+      if (storedCheckpoint != null) {
+        throw new ChainSafetyError(
+          'STORED_CHECKPOINT_INVALID',
+          'genesis cursor cannot carry a prior-block checkpoint',
+          { cursor: next, storedCheckpoint },
+        );
+      }
+      return { cursor: next, checkpoint: null, bootstrapped: false, rewound: false };
+    }
+    const durableHead = await this._durableHead();
+    if (!durableHead) {
+      throw new ChainSafetyError(
+        'DURABLE_HEAD_BEHIND_CURSOR',
+        `no durable head exists for stored cursor ${next}`,
+        { cursor: next },
+      );
+    }
+    if (next - 1 > durableHead.number) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_REGRESSION',
+        `stored checkpoint ${next - 1} is ahead of finalized head ${durableHead.number}`,
+        { cursor: next, storedCheckpoint, durableHead },
+      );
+    }
+    const actual = await this._blockCheckpoint(next - 1);
+
+    let expected;
+    try {
+      expected = checkpointFromBlock(storedCheckpoint, next - 1);
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'STORED_CHECKPOINT_INVALID',
+        `stored chain checkpoint is invalid: ${cause.message}`,
+        { cursor: next, storedCheckpoint },
+      );
+    }
+    if (expected.hash !== actual.hash || expected.parentHash !== actual.parentHash) {
+      throw new ChainSafetyError(
+        'FINALIZED_CHECKPOINT_MISMATCH',
+        `finalized checkpoint ${expected.number} changed; refusing signing and durable actions`,
+        { cursor: next, expected, actual },
+      );
+    }
+    return { cursor: next, checkpoint: actual, bootstrapped: false, rewound: false };
   }
 
   _channelForAddress(addr) {
@@ -198,27 +434,42 @@ class ChainWatcher {
       address: logEntry.address,
       args,
       blockNumber: logEntry.blockNumber,
+      blockHash: logEntry.blockHash,
       txHash: logEntry.transactionHash,
       logIndex: logEntry.index != null ? logEntry.index : logEntry.logIndex,
     };
   }
 
-  // One poll pass: [fromBlock, head-confirmations]. Advances the cursor PER BLOCK: a block is only
+  // One poll pass: [fromBlock, finalizedHead] (or the explicit 31337 devnet confirmation head).
+  // Advances the cursor PER BLOCK: a block is only
   // marked done once ALL its events were handled without throwing, so a mid-batch handler failure
   // leaves the cursor at the last fully-done block (the failed block is retried next tick — no
   // silent loss). onEvent MUST throw to signal failure (the co-signer's dispatch rethrows for
   // chain-sourced events). Returns the new cursor.
+  // `onCursor(nextBlock, checkpoint)` MUST persist both values atomically. A callback accepting only
+  // the historical first argument remains source-compatible, but production callers use Store's
+  // paired progress API.
   async pollOnce(fromBlock, onEvent, onCursor) {
     this._init();
-    const head = await this._provider.getBlockNumber();
-    const safeHead = head - this.confirmations;
-    if (safeHead < fromBlock) return fromBlock;
+    let firstBlock;
+    try {
+      firstBlock = parseBlockNumber(fromBlock, 'poll cursor');
+    } catch (cause) {
+      throw new ChainSafetyError('POLL_CURSOR_INVALID', cause.message, { fromBlock });
+    }
+    const durableHead = await this._durableHead();
+    if (!durableHead) return firstBlock;
+    const safeHead = durableHead.number;
+    if (safeHead < firstBlock) return firstBlock;
     const addresses = [];
     for (const c of this.channels) { if (c.rollup) addresses.push(c.rollup); if (c.manager) addresses.push(c.manager); }
-    if (addresses.length === 0) return safeHead + 1;
+    if (addresses.length === 0) {
+      if (onCursor) await onCursor(safeHead + 1, durableHead);
+      return safeHead + 1;
+    }
 
     const logs = await this._provider.getLogs({
-      fromBlock,
+      fromBlock: firstBlock,
       toBlock: safeHead,
       address: [...new Set(addresses.map(a => a.toLowerCase()))],
     });
@@ -226,9 +477,66 @@ class ChainWatcher {
 
     // Group by block, process each block fully before advancing the cursor past it.
     const byBlock = new Map();
-    for (const l of logs) { if (!byBlock.has(l.blockNumber)) byBlock.set(l.blockNumber, []); byBlock.get(l.blockNumber).push(l); }
+    for (const logEntry of logs) {
+      if (logEntry.removed === true) {
+        throw new ChainSafetyError(
+          'REMOVED_LOG_IN_DURABLE_RANGE',
+          'RPC returned a removed log inside the durable range',
+          { blockNumber: logEntry.blockNumber, blockHash: logEntry.blockHash },
+        );
+      }
+      let blockNumber;
+      try {
+        blockNumber = parseBlockNumber(logEntry.blockNumber, 'log block number');
+      } catch (cause) {
+        throw new ChainSafetyError(
+          'LOG_BLOCK_NUMBER_INVALID',
+          cause.message,
+          { blockNumber: logEntry.blockNumber },
+        );
+      }
+      if (blockNumber < firstBlock || blockNumber > safeHead) {
+        throw new ChainSafetyError(
+          'LOG_OUTSIDE_DURABLE_RANGE',
+          `RPC returned log block ${blockNumber} outside [${firstBlock}, ${safeHead}]`,
+          { blockNumber, fromBlock: firstBlock, safeHead },
+        );
+      }
+      if (!byBlock.has(blockNumber)) byBlock.set(blockNumber, []);
+      // Provider Log objects are not guaranteed to be mutable. Normalize into our own object
+      // rather than assigning to a potentially read-only `blockNumber` property.
+      byBlock.get(blockNumber).push({ ...logEntry, blockNumber });
+    }
 
-    let doneThrough = fromBlock - 1;
+    // Validate the complete fetched batch before dispatching its first event. Otherwise a malformed
+    // or fork-mixed later log could be discovered only after an earlier block already caused an
+    // irreversible CLI action. `getLogs` blockHash and the canonical block query must agree.
+    const blockCheckpoints = new Map();
+    for (const b of [...byBlock.keys()].sort((x, y) => x - y)) {
+      const checkpoint = await this._blockCheckpoint(b);
+      for (const logEntry of byBlock.get(b)) {
+        let logHash;
+        try {
+          logHash = canonicalHash(logEntry.blockHash, 'log block hash');
+        } catch (cause) {
+          throw new ChainSafetyError(
+            'LOG_BLOCK_HASH_INVALID',
+            `log in block ${b} has no canonical block hash: ${cause.message}`,
+            { blockNumber: b },
+          );
+        }
+        if (logHash !== checkpoint.hash) {
+          throw new ChainSafetyError(
+            'LOG_BLOCK_HASH_MISMATCH',
+            `log block hash at ${b} differs from the canonical block`,
+            { blockNumber: b, logHash, canonicalHash: checkpoint.hash },
+          );
+        }
+      }
+      blockCheckpoints.set(b, checkpoint);
+    }
+
+    let doneThrough = firstBlock - 1;
     for (const b of [...byBlock.keys()].sort((x, y) => x - y)) {
       try {
         for (const l of byBlock.get(b)) {
@@ -237,19 +545,43 @@ class ChainWatcher {
         }
         doneThrough = b;
       } catch (e) {
-        if (onCursor) await onCursor(doneThrough + 1); // persist progress up to the last good block
+        if (onCursor && doneThrough >= firstBlock) {
+          const checkpoint = blockCheckpoints.get(doneThrough) || await this._blockCheckpoint(doneThrough);
+          await onCursor(doneThrough + 1, checkpoint); // persist progress through the last good block
+        }
         throw e; // surface so the caller logs + retries this block next tick
       }
     }
     const next = Math.max(doneThrough + 1, safeHead + 1);
-    if (onCursor) await onCursor(next);
+    // Re-read finality and the exact finalized height after handlers complete. A public-chain
+    // finalized block changing/regressing is a consensus/RPC safety violation and must be noticed
+    // before progress is persisted.
+    const durableHeadAfter = await this._durableHead();
+    if (!durableHeadAfter || durableHeadAfter.number < safeHead) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_REGRESSION',
+        `durable head regressed below processed block ${safeHead}`,
+        { before: durableHead, after: durableHeadAfter },
+      );
+    }
+    const finalCheckpoint = await this._blockCheckpoint(safeHead);
+    if (finalCheckpoint.hash !== durableHead.hash || finalCheckpoint.parentHash !== durableHead.parentHash) {
+      throw new ChainSafetyError(
+        'FINALIZED_HEAD_CHANGED_DURING_POLL',
+        `finalized block ${safeHead} changed while processing`,
+        { before: durableHead, after: finalCheckpoint },
+      );
+    }
+    if (onCursor) await onCursor(next, finalCheckpoint);
     return next;
   }
 
-  async getPendingClose(managerAddr) {
+  async getPendingClose(managerAddr, blockTag = 'finalized') {
     this._init();
     const c = new this._ethers.Contract(managerAddr, MANAGER_GETTER_ABI, this._provider);
-    const r = await c.getPendingClose();
+    // Reconciliation is part of a chain-triggered durable decision. Pin it to that finalized event
+    // block (or the finalized tag for standalone callers), never to the provider's moving `latest`.
+    const r = await c.getPendingClose({ blockTag });
     const epoch = Number(r.finalEpoch);
     const stateVersion = Number(r.finalStateVersion);
     // Guard against a decode mismatch yielding non-finite values (review MED-2): a caller comparing
@@ -281,9 +613,12 @@ class ChainWatcher {
 
 module.exports = {
   ChainWatcher,
+  ChainSafetyError,
   ROLLUP_FRAGMENTS,
   MANAGER_FRAGMENTS,
   ROLLUP_GETTER_ABI,
   MANAGER_GETTER_ABI,
   routeEventChannelIds,
+  checkpointFromBlock,
+  isTransientChainSafetyError,
 };

@@ -32,7 +32,8 @@ import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 /// claims, and the close PI appends a `memberSetCommitment` (keccak over the 3 members' pubkey
 /// hashes) so L1 binds the verified signing keys to the channel's registered member set.
 contract ChannelSettlementVerifier is IChannelSettlementVerifier {
-    uint32 internal constant CLOSE_INTENT_DOMAIN = 0x494d4349;
+    /// "IMCS" — canonical metadata-free close-state identity.
+    uint32 internal constant CLOSE_STATE_ID_DOMAIN = 0x494d4353;
     uint32 internal constant SPECIAL_CLOSE_DOMAIN = 0x494d5343;
     uint32 internal constant CANCEL_CLOSE_DOMAIN = 0x494d434e;
     uint32 internal constant LATE_OUTGOING_DEBIT_DOMAIN = 0x494d4c44;
@@ -85,9 +86,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// Phase C1: RAW Goldilocks PI limb count for the CORRECTED cancel-close circuit (mirror Rust
     /// `CANCEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/cancel_close_pis.rs). Its
     /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` is this raw
-    /// 27-limb vector. Layout: channelId(1) | closeIntentDigest(8) | memberSetCommitment(8) |
+    /// 29-limb vector. Layout: channelId(1) | closeIntentDigest/closeStateId(8) |
+    /// memberSetCommitment(8) | closeFinalStateVersion(2 hi,lo) |
     /// revivedStateVersion(2 hi,lo) | revivedChannelStateDigest(8).
-    uint256 internal constant CANCEL_CLOSE_PI_LEN = 27;
+    uint256 internal constant CANCEL_CLOSE_PI_LEN = 29;
     /// 2**32 — every close PI limb is a u32 word, so a canonical limb is strictly below this.
     uint256 internal constant LIMB_BOUND = 0x1_0000_0000;
 
@@ -157,7 +159,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @notice Close-circuit MLE verification key. `degreeBits == 0` ⇒ unset (reverts on verify).
     CloseVk public closeVk;
 
-    /// detail2 §Q-4: the member-set-update VK. ONLY the per-circuit anchor is stored — the
+    /// Parked future-protocol member-set-update VK. Production release deployment deliberately
+    /// leaves this unset because the current proof is not anchored to a finalized validity-tree
+    /// action and `ChannelSettlementManager.applyMemberSetUpdate` is fail-closed. If initialized
+    /// in a development deployment, ONLY the per-circuit anchor is stored — the
     /// WHIR/MLE rail (whirParams, kIs, subgroupGenPowers, protocol/session ids, the MleVerifier)
     /// is the WRAPPER's, which is circuit-independent (every inner circuit wraps to the same
     /// degree-13 shape; verified against the close fixture: whirParams/kIs/protocol byte-equal,
@@ -215,10 +220,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     event MemberSetUpdateVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
 
-    /// detail2 §Q-4: one-time member-set-update VK initialization. Deployer-only, set exactly
-    /// once, degreeBits > 0 — NO disable seam: applyMemberSetUpdate always runs real MLE
-    /// verification. Requires the close rail (whir params etc., reused — see the storage doc) to
-    /// be initialized first.
+    /// @notice Parked one-time member-set-update VK initialization for future protocol work and
+    /// fixture verification. Deployer-only, set exactly once, degreeBits > 0. The production
+    /// release script does not call it and the Manager entry point remains disabled even if a
+    /// deployer calls it manually. Requires the close rail to be initialized first.
     function initializeMemberSetUpdateVk(CloseVk memory _vk) external {
         require(msg.sender == deployer, "only deployer");
         require(!memberSetUpdateVkInitialized, "msu vk already set");
@@ -322,10 +327,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      BEFORE the strict loop, and the validated value is then written into the expected vector
     ///      so the loop still accounts for all 103 limbs (NONE are left free — that structural
     ///      invariant is load-bearing for auditability).
-    function verifyCloseIntent(
-        CloseProofFields calldata fields,
-        MleVerifier.MleProof calldata mleProof
-    ) external view returns (bool) {
+    function verifyCloseIntent(CloseProofFields calldata fields, MleVerifier.MleProof calldata mleProof)
+        external
+        view
+        returns (bool)
+    {
         if (!closeVkInitialized) revert CloseVkNotSet();
         uint256[] calldata pi = mleProof.publicInputs;
         // SECURITY (B-2 A-4): the length check is HOISTED out of `_bindCloseLimbsStrict` because the
@@ -349,7 +355,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // SCOPE (review finding 6): this is a CARDINALITY bound, not an identity one — L1 binds no
         // delegate to a slot INDEX, so it cannot single out a NAMED delegate as excluded. See the
         // `CloseDelegateCountOutOfRange` doc comment.
-        if (delegateCount < fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
+        // Settlement creation freezes the authenticated live participant root/count and the CLI
+        // durably refuses later joins.  The close must therefore open the SAME delegate boundary,
+        // not merely a superset: accepting a larger count would let a proof name active slots that
+        // are absent from the immutable identity snapshot.
+        if (delegateCount != fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
         // SECURITY (B-2 §4d, ceiling): mirror of the IN-CIRCUIT bound the claim circuits enforce on
         // `active = member_count + delegate_count` (`active <= MAX_CHANNEL_MEMBERS = 1024`,
         // withdrawal_claim_circuit.rs:353-371). `fields.memberCount` is itself strict-equality-bound
@@ -372,10 +382,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      `CLOSE_PI_LEN` (103) limbs; each limb MUST equal the expected limb (strict equality, no
     ///      masking) AND be a canonical u32 (`< 2**32`). Reverts on any violation — there is no
     ///      partial / masked match.
-    function _bindCloseLimbsStrict(
-        uint256[] calldata pi,
-        uint256[] memory expected
-    ) internal pure {
+    function _bindCloseLimbsStrict(uint256[] calldata pi, uint256[] memory expected) internal pure {
         require(pi.length == CLOSE_PI_LEN, "close pi len");
         require(expected.length == CLOSE_PI_LEN, "close expected len");
         for (uint256 i = 0; i < CLOSE_PI_LEN; i++) {
@@ -391,10 +398,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into storage. The
     ///      destination arrays are assumed empty (the close VK slot is written exactly once). Mirrors
     ///      `IntmaxRollup._copyWhirParams`.
-    function _copyWhirParams(
-        SpongefishWhirVerify.WhirParams storage dst,
-        SpongefishWhirVerify.WhirParams memory src
-    ) private {
+    function _copyWhirParams(SpongefishWhirVerify.WhirParams storage dst, SpongefishWhirVerify.WhirParams memory src)
+        private
+    {
         dst.numVariables = src.numVariables;
         dst.foldingFactor = src.foldingFactor;
         dst.numVectors = src.numVectors;
@@ -446,7 +452,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///      `IntmaxRollup._loadWhirParamsFrom`). Shared across the close / withdrawal-claim /
     ///      post-close-claim VKs (each has its OWN storage slot — see Phase B-D below).
     function _loadWhirParams(SpongefishWhirVerify.WhirParams storage s)
-        private view returns (SpongefishWhirVerify.WhirParams memory p)
+        private
+        view
+        returns (SpongefishWhirVerify.WhirParams memory p)
     {
         p.numVariables = s.numVariables;
         p.foldingFactor = s.foldingFactor;
@@ -509,11 +517,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///         `(registry, amounts)` pairs). `abi.encodePacked` emits each uint32 as 4 BE bytes and
     ///         each uint256 as 32 BE bytes, reproducing the Rust u32-word stream exactly (pinned by
     ///         the Rust↔Solidity shared vector `test_tokenFundsDigest_matchesRustSharedVector`).
-    function tokenFundsDigest(
-        uint32[10] memory tokenRegistry,
-        uint8 tokenCount,
-        uint256[10] memory amounts
-    ) public pure returns (bytes32) {
+    function tokenFundsDigest(uint32[10] memory tokenRegistry, uint8 tokenCount, uint256[10] memory amounts)
+        public
+        pure
+        returns (bytes32)
+    {
         // SECURITY (review MINOR 2, TM-8): the close circuit constrains token_count to 1..=10
         // in-circuit, so no legitimate TFD preimage exists outside that range — reject here so
         // this recompute (and every `_expectedCloseLimbs` caller) is self-contained defense-in-
@@ -614,11 +622,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // Multi-token (§N-6, TM-11): RECOMPUTED over the supplied settlement vectors, appended at
         // the very end. The strict bind then forces the proof's member-signed in-circuit TFD to
         // equal this recompute, proof-binding the (registry, count, amounts) the Manager stores.
-        c = _putBytes32(
-            limbs,
-            c,
-            tokenFundsDigest(fields.tokenRegistry, fields.tokenCount, fields.channelFundAmounts)
-        );
+        c = _putBytes32(limbs, c, tokenFundsDigest(fields.tokenRegistry, fields.tokenCount, fields.channelFundAmounts));
         require(c == CLOSE_PI_LEN, "close limb count");
     }
 
@@ -643,43 +647,17 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         return c;
     }
 
-    /// @dev Recompute the close-intent digest (IMCI) exactly as the Rust `CloseIntent::signing_digest`
-    ///      / the in-circuit IMCI keccak / the manager's `computeCloseIntentDigest` do: a single
-    ///      keccak over the IMCI domain word + the close-intent fields (incl. the second `channelId`
-    ///      from `channel_fund_snapshot` and the finalStateVersion / finalSettledTxChain tail).
-    ///
-    ///      Multi-token (§N-6, TM-11): the former single 8-word `channel_fund_amount` segment is
-    ///      widened IN PLACE to the ALWAYS-full-width 80-word `channelFundAmounts[0..10]` vector
-    ///      (each uint256 = 8 BE u32 words), byte-identical to the Rust preimage (shared vector:
-    ///      `close_intent_digest_matches_solidity_shared_vector`). Built in two concatenated chunks
-    ///      for the via-IR stack budget; the byte stream equals one flat encodePacked.
+    /// @dev Recompute canonical `closeStateId` exactly as Rust and both close circuits do:
+    ///      `keccak(IMCS, channelId, finalChannelStateDigest, closeFreezeNonce)`. The externally
+    ///      visible `closeIntentDigest` name is retained, but coordinator-chosen metadata is
+    ///      intentionally absent so it cannot mint a fresh replay/cancel/nullifier namespace.
     function _closeIntentDigest(CloseProofFields calldata fields) internal pure returns (bytes32) {
-        bytes memory head = abi.encodePacked(
-            bytes4(CLOSE_INTENT_DOMAIN),
-            fields.channelId,
-            fields.closeNonce,
-            fields.finalEpoch,
-            fields.finalSmallBlockNumber,
-            fields.closeFreezeNonce,
-            fields.finalChannelStateDigest,
-            fields.finalBalanceStateH1,
-            fields.channelId
-        );
-        // amounts[0..10]: abi.encodePacked emits each uint256 as its 32 big-endian bytes, exactly
-        // the Rust `U256::to_u32_vec` 8-word stream per amount (80 words total, zero-padded slots
-        // included — fixed-width injective, TM-11).
-        for (uint256 t = 0; t < MAX_CHANNEL_TOKENS; t++) {
-            head = abi.encodePacked(head, fields.channelFundAmounts[t]);
-        }
         return keccak256(
             abi.encodePacked(
-                head,
-                fields.channelFundIntmaxStateRoot,
-                fields.burnTxHash,
-                fields.closeWithdrawalDigest,
-                fields.snapshotMediumBlockNumber,
-                fields.finalStateVersion,
-                fields.finalSettledTxChain
+                bytes4(CLOSE_STATE_ID_DOMAIN),
+                fields.channelId,
+                fields.finalChannelStateDigest,
+                fields.closeFreezeNonce
             )
         );
     }
@@ -837,14 +815,15 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         emit CancelCloseVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
     }
 
-    /// @dev Build the EXPECTED 27-limb cancel-close PI vector, in the EXACT order of the Rust
+    /// @dev Build the EXPECTED 29-limb cancel-close PI vector, in the EXACT order of the Rust
     ///      `CancelClosePublicInputs::to_u64_vec()` (pinned by the Rust↔Solidity golden vector
     ///      `cancel_close_public_inputs_match_solidity_shared_vector`). Layout:
     ///        [0]      channelId                  (u32 value)
     ///        [1..9]   closeIntentDigest          (8 BE u32)
     ///        [9..17]  memberSetCommitment        (8 BE u32) — REGISTERED set (manager-injected)
-    ///        [17..19] revivedStateVersion        (hi, lo)
-    ///        [19..27] revivedChannelStateDigest  (8 BE u32)
+    ///        [17..19] closeFinalStateVersion     (hi, lo; Manager pending-close value)
+    ///        [19..21] revivedStateVersion        (hi, lo)
+    ///        [21..29] revivedChannelStateDigest  (8 BE u32)
     ///
     ///      SECURITY (Finding D fix): `memberSetCommitment` is NOT a caller-supplied request field —
     ///      `ChannelSettlementManager.cancelClose` passes `registeredMemberSetCommitment()` here, the
@@ -855,6 +834,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 memberSetCommitment,
+        uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest
     ) internal pure returns (uint256[] memory limbs) {
@@ -863,16 +843,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         limbs[c++] = uint256(uint32(channelId));
         c = _putBytes32(limbs, c, closeIntentDigest);
         c = _putBytes32(limbs, c, memberSetCommitment);
+        c = _putU64(limbs, c, closeFinalStateVersion);
         c = _putU64(limbs, c, revivedStateVersion);
         c = _putBytes32(limbs, c, revivedChannelStateDigest);
         require(c == CANCEL_CLOSE_PI_LEN, "cancel limb count");
     }
 
-    function _verifyCancelCloseMle(MleVerifier.MleProof calldata mleProof)
-        internal view returns (bool)
-    {
-        SpongefishWhirVerify.WhirParams memory whirParams =
-            _loadWhirParams(_cancelCloseWhirParams);
+    function _verifyCancelCloseMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_cancelCloseWhirParams);
         MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
             degreeBits: cancelCloseVk.degreeBits,
             preprocessedCommitmentRoot: cancelCloseVk.preprocessedRoot,
@@ -883,9 +861,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             kIs: _cancelCloseKIs,
             subgroupGenPowers: _cancelCloseSubgroupGenPowers
         });
-        return cancelCloseMleVerifier.verify(
-            mleProof, vp, whirParams, cancelCloseVk.gatesDigest
-        );
+        return cancelCloseMleVerifier.verify(mleProof, vp, whirParams, cancelCloseVk.gatesDigest);
     }
 
     /// @dev Build the EXPECTED 50-limb withdrawal-claim PI vector, in the EXACT order of the Rust
@@ -999,11 +975,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         }
     }
 
-    function _verifyWithdrawalClaimMle(MleVerifier.MleProof calldata mleProof)
-        internal view returns (bool)
-    {
-        SpongefishWhirVerify.WhirParams memory whirParams =
-            _loadWhirParams(_withdrawalClaimWhirParams);
+    function _verifyWithdrawalClaimMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_withdrawalClaimWhirParams);
         MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
             degreeBits: withdrawalClaimVk.degreeBits,
             preprocessedCommitmentRoot: withdrawalClaimVk.preprocessedRoot,
@@ -1014,16 +987,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             kIs: _withdrawalClaimKIs,
             subgroupGenPowers: _withdrawalClaimSubgroupGenPowers
         });
-        return withdrawalClaimMleVerifier.verify(
-            mleProof, vp, whirParams, withdrawalClaimVk.gatesDigest
-        );
+        return withdrawalClaimMleVerifier.verify(mleProof, vp, whirParams, withdrawalClaimVk.gatesDigest);
     }
 
-    function _verifyPostCloseClaimMle(MleVerifier.MleProof calldata mleProof)
-        internal view returns (bool)
-    {
-        SpongefishWhirVerify.WhirParams memory whirParams =
-            _loadWhirParams(_postCloseClaimWhirParams);
+    function _verifyPostCloseClaimMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
+        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_postCloseClaimWhirParams);
         MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
             degreeBits: postCloseClaimVk.degreeBits,
             preprocessedCommitmentRoot: postCloseClaimVk.preprocessedRoot,
@@ -1034,9 +1002,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             kIs: _postCloseClaimKIs,
             subgroupGenPowers: _postCloseClaimSubgroupGenPowers
         });
-        return postCloseClaimMleVerifier.verify(
-            mleProof, vp, whirParams, postCloseClaimVk.gatesDigest
-        );
+        return postCloseClaimMleVerifier.verify(mleProof, vp, whirParams, postCloseClaimVk.gatesDigest);
     }
 
     function verifySpecialClose(
@@ -1115,12 +1081,13 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @dev SECURITY: replaces the former forgeable `cancelPIHash`+`_matches` stub (the legacy
     ///      41-limb revived-tx design had no member binding — Finding D — and an unsound staleness
     ///      predicate — Finding B). Two mandatory checks:
-    ///        1. `_bindLimbsStrict` binds ALL 27 raw Goldilocks limbs limb-by-limb (strict eq,
+    ///        1. `_bindLimbsStrict` binds ALL 29 raw Goldilocks limbs limb-by-limb (strict eq,
     ///           <2**32, no mask) to the expected vector. This binds channelId(0),
-    ///           closeIntentDigest(1..8), memberSetCommitment(9..16), revivedStateVersion(17..18)
-    ///           and revivedChannelStateDigest(19..26) — NONE are left free. The in-circuit
-    ///           constraints already proved `revivedStateVersion > close.finalStateVersion` (the
-    ///           Finding-B staleness fix) and the era fence against the close intent whose digest is
+    ///           closeIntentDigest(1..8), memberSetCommitment(9..16),
+    ///           closeFinalStateVersion(17..18), revivedStateVersion(19..20), and
+    ///           revivedChannelStateDigest(21..28) — NONE are left free. The in-circuit
+    ///           constraints prove `revivedStateVersion > closeFinalStateVersion` and the era
+    ///           fence against the canonical close state whose legacy ABI key is
     ///           `closeIntentDigest`.
     ///        2. `MleVerifier.verify` re-checks the proof against the cancel-close VK (circuitDigest
     ///           absorb, preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
@@ -1134,6 +1101,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 memberSetCommitment,
+        uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest,
         MleVerifier.MleProof calldata mleProof
@@ -1145,6 +1113,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 channelId,
                 closeIntentDigest,
                 memberSetCommitment,
+                closeFinalStateVersion,
                 revivedStateVersion,
                 revivedChannelStateDigest
             )
@@ -1152,13 +1121,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         return _verifyCancelCloseMle(mleProof);
     }
 
-    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 27-limb cancel-close PI vector
+    /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 29-limb cancel-close PI vector
     ///         (lets tests build an `MleProof` whose `publicInputs` match the strict bind). No
     ///         security impact (reveals nothing a caller cannot recompute).
     function expectedCancelCloseLimbs(
         bytes4 channelId,
         bytes32 closeIntentDigest,
         bytes32 memberSetCommitment,
+        uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest
     ) external pure returns (uint256[] memory) {
@@ -1166,6 +1136,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
             channelId,
             closeIntentDigest,
             memberSetCommitment,
+            closeFinalStateVersion,
             revivedStateVersion,
             revivedChannelStateDigest
         );
@@ -1246,7 +1217,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     // no remaining caller (the live close path strict-binds the 103 raw limbs via
     // `_bindCloseLimbsStrict`, never a keccak of them), and keeping a second, parallel preimage
     // mirror in sync with every PI-layout change is exactly the stale-mirror hazard class TM-11
-    // warns about. The IMCI inner keccak lives on as `_closeIntentDigest`.
+    // warns about. The canonical IMCS state-identity keccak lives on as `_closeIntentDigest`.
 
     /// @dev F4/D6 member-set commitment (pad-to-MAX): FIXED-length keccak over
     /// `[IMCM, memberCount, h_0..h_{MAX-1}]` — the domain word, the `memberCount` u32 limb, and
@@ -1260,14 +1231,12 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// `memberCount` fixes the active/padding boundary, so the commitment is injective on the
     /// active member set (no non-member-key substitution). The caller MUST pass the channel's
     /// registered hashes already zero-padded to MAX_CHANNEL_MEMBERS.
-    function closeMemberSetCommitment(
-        bytes32[MAX_CHANNEL_MEMBERS] memory memberSphincsPubkeyHashes,
-        uint8 memberCount
-    ) public pure returns (bytes32) {
-        bytes memory packed = abi.encodePacked(
-            bytes4(CLOSE_MEMBER_SET_DOMAIN),
-            uint32(memberCount)
-        );
+    function closeMemberSetCommitment(bytes32[MAX_CHANNEL_MEMBERS] memory memberSphincsPubkeyHashes, uint8 memberCount)
+        public
+        pure
+        returns (bytes32)
+    {
+        bytes memory packed = abi.encodePacked(bytes4(CLOSE_MEMBER_SET_DOMAIN), uint32(memberCount));
         for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
             // SECURITY: zero padding slots (>= memberCount) INTERNALLY, exactly mirroring the Rust
             // `close_member_set_commitment` (which substitutes Bytes32::default() for slots

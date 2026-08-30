@@ -1,6 +1,6 @@
 'use strict';
 // Delegate proving backend (DESIGN.md §2.2/§4). Wraps the WASM wallet built with
-// `wasm-pack build --release --target nodejs` (output dir `pkg-node/` by convention). Secrets live
+// `hosting/build-wallet-node-wasm.sh` (output dir `pkg-node/`). Secrets live
 // only in the in-process WASM session and are never serialized (matches wasm_wallet.rs).
 //
 // The WASM module is LAZY-loaded so this file imports without the build present (pure-logic unit
@@ -12,6 +12,7 @@ class Wallet {
   constructor({ pkgDir } = {}) {
     this.pkgDir = pkgDir || path.join(__dirname, '..', '..', 'pkg-node');
     this.wasm = null;
+    this.initialized = false;
   }
 
   _load() {
@@ -19,15 +20,31 @@ class Wallet {
     let mod;
     try {
       // eslint-disable-next-line import/no-dynamic-require, global-require
-      mod = require(this.pkgDir);
+      mod = require(path.join(this.pkgDir, 'intmax3_zkp.js'));
     } catch (e) {
       throw new Error(
         `WASM wallet not found at ${this.pkgDir}. Build it with: ` +
-          `wasm-pack build --release --target nodejs --out-dir pkg-node  (cause: ${e.message})`
+          `hosting/build-wallet-node-wasm.sh  (cause: ${e.message})`
       );
     }
     this.wasm = mod;
     return mod;
+  }
+
+  // Browser builds expose a wasm-bindgen-rayon pool. The CommonJS Node build deliberately uses
+  // sequential fallbacks because wasm-bindgen-rayon's worker helper supports `web`, not `nodejs`.
+  // Keep this conditional so the wrapper remains compatible with either packaging target.
+  async initialize(numThreads) {
+    if (this.initialized) return;
+    const w = this._load();
+    if (typeof w.initThreadPool === 'function') {
+      const requested = numThreads == null ? 2 : Number(numThreads);
+      if (!Number.isSafeInteger(requested) || requested < 1 || requested > 64) {
+        throw new Error('wasmThreads must be an integer in 1..64');
+      }
+      await w.initThreadPool(requested);
+    }
+    this.initialized = true;
   }
 
   // Identity / session
@@ -49,6 +66,18 @@ class Wallet {
   balance(slot) {
     void slot; // session-internal
     return JSON.parse(this._load().wallet_balance());
+  }
+
+  // Build the exact public claim + MLE/WHIR proof inside WASM. The Regev secret key never appears
+  // in the returned artifact; finalizedContext is public manager state used to pin the proof to
+  // the exact closed snapshot.
+  withdrawalClaim(finalizedContext, tokenSlot = 0) {
+    if (!Number.isSafeInteger(tokenSlot) || tokenSlot < 0 || tokenSlot > 9) {
+      throw new Error('tokenSlot must be an integer in 0..9');
+    }
+    return JSON.parse(
+      this._load().wallet_withdrawal_claim(JSON.stringify(finalizedContext), tokenSlot)
+    );
   }
 
   // Own-tx proving (returns payloads to POST to the co-signer).

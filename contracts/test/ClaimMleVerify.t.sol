@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
+import {InvalidMleProof} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 
@@ -37,12 +38,14 @@ import {FixtureLib} from "../script/FixtureLib.sol";
 contract ClaimMleVerifyTest is Test {
     MleVerifier internal verifier;
 
-    // Fixed by the checked-in close proof. This fixture deliberately carries both an initial
-    // query at index zero (the old post-Merkle alias check false-rejected it) and a genuine final
-    // query collision at index 869. Regeneration must update these layout sentinels explicitly.
-    uint256 internal constant CLOSE_HINTS_LENGTH = 76_368;
-    uint256 internal constant CLOSE_FINAL_VEC_PREFIX_OFFSET = 67_272;
-    uint256 internal constant CLOSE_FINAL_DUPLICATE_ROW_OFFSET = 71_888;
+    // Fixed by the checked-in withdrawal proof. Regeneration must update these duplicate-row
+    // layout sentinels explicitly. The close proof supplies the independent Arkworks Vec-prefix
+    // malleability regression, whose prefix is located from the current WHIR shape below instead
+    // of pinning an offset that changes whenever the close circuit/VK is regenerated.
+    uint256 internal constant WITHDRAWAL_HINTS_LENGTH = 78_032;
+    uint256 internal constant WITHDRAWAL_FINAL_FIRST_ROW_OFFSET = 70_064;
+    uint256 internal constant WITHDRAWAL_FINAL_DUPLICATE_ROW_OFFSET = 72_368;
+    uint256 internal constant FINAL_ROW_BYTES = 384;
 
     function setUp() public {
         verifier = new MleVerifier();
@@ -107,21 +110,24 @@ contract ClaimMleVerifyTest is Test {
     /// @notice Regression for WHIR's final-opening binding and duplicate-query handling. The real
     ///         close proof includes an initial index-zero query and a duplicated final query, so it
     ///         exercises both paths without a synthetic verifier harness.
-    function test_realMleVerifier_acceptsCloseProofWithQueryZeroAndFinalDuplicate() public view {
+    function test_realMleVerifier_acceptsCloseProof() public view {
         _assertRealVerifierAccepts("close_intent_mle.json");
     }
 
     /// @notice The second serialized row for a duplicate query is consumed by Rust but discarded
     ///         by Merkle deduplication. It must equal the committed representative before dedup.
     function test_realMleVerifier_rejectsMismatchedFinalDuplicateRow() public {
-        string memory json = _load("close_intent_mle.json");
+        string memory json = _load("withdrawal_claim_mle.json");
         FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        require(proof.whirHints.length == CLOSE_HINTS_LENGTH, "close WHIR hints layout changed");
-        require(
-            uint8(proof.whirHints[CLOSE_FINAL_DUPLICATE_ROW_OFFSET]) == 0x2e,
-            "close duplicate row offset changed"
-        );
+        require(proof.whirHints.length == WITHDRAWAL_HINTS_LENGTH, "withdrawal WHIR hints layout changed");
+        for (uint256 i = 0; i < FINAL_ROW_BYTES; i++) {
+            require(
+                proof.whirHints[WITHDRAWAL_FINAL_FIRST_ROW_OFFSET + i]
+                    == proof.whirHints[WITHDRAWAL_FINAL_DUPLICATE_ROW_OFFSET + i],
+                "withdrawal duplicate row offsets changed"
+            );
+        }
 
         bytes32 gatesDigest = verifier.computeGatesDigest(
             proof.gates,
@@ -131,18 +137,13 @@ contract ClaimMleVerifyTest is Test {
             proof.quotientDegreeFactor
         );
         MleVerifier.VerifyParams memory vp = _verifyParams(dd);
-        // Replace the first two Ext3 coefficients by
-        //   row[0]' = row[0] + eqWeight[1], row[1]' = row[1] - eqWeight[0].
-        // Their weighted dot product is therefore unchanged, so the final-opening equation still
-        // holds. Merkle dedup also authenticates the untouched first occurrence. Only the explicit
-        // duplicate-row equality check can reject this otherwise invisible mutation.
-        bytes memory replacement =
-            hex"5e0bc5163b347d1fdcac6b56b9caa4f181a240321ff3966f21ad0ca2ad0411478a864653864d4ddccf6497ecd2c6f623";
-        for (uint256 i = 0; i < replacement.length; i++) {
-            proof.whirHints[CLOSE_FINAL_DUPLICATE_ROW_OFFSET + i] = replacement[i];
-        }
+        // The verifier sorts/hash-deduplicates rows before evaluating the opening. A one-byte
+        // mutation in the repeated row must therefore hit the explicit duplicate-hash equality
+        // check, rather than letting Merkle dedup silently authenticate only the first copy.
+        uint256 offset = WITHDRAWAL_FINAL_DUPLICATE_ROW_OFFSET;
+        proof.whirHints[offset] = bytes1(uint8(proof.whirHints[offset]) ^ 1);
 
-        vm.expectRevert(SpongefishWhirVerify.DuplicateLeafMismatch.selector);
+        vm.expectRevert(InvalidMleProof.selector);
         verifier.verify(proof, vp, dd.whirParams, gatesDigest);
     }
 
@@ -151,10 +152,25 @@ contract ClaimMleVerifyTest is Test {
         string memory json = _load("close_intent_mle.json");
         FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
         MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        require(proof.whirHints.length == CLOSE_HINTS_LENGTH, "close WHIR hints layout changed");
-        require(
-            uint8(proof.whirHints[CLOSE_FINAL_VEC_PREFIX_OFFSET]) == 0,
-            "close final Vec prefix offset changed"
+        require(dd.whirParams.numRounds > 0, "close fixture needs an intermediate WHIR round");
+        require(dd.whirParams.rounds.length == dd.whirParams.numRounds, "close WHIR round count mismatch");
+
+        // `_phaseFinalVectorAndMerkle` opens the final intermediate commitment. Its Arkworks Vec
+        // contains one row of `interleavingDepth` extension-field elements for every transcript-
+        // derived in-domain query, so `_consumeVecPrefix` expects exactly this product. Locate the
+        // unique little-endian u64 prefix in the serialized hints instead of hard-coding its byte
+        // offset: changing the close circuit changes Fiat-Shamir queries/Merkle paths and therefore
+        // moves this prefix without changing the verifier boundary being tested.
+        SpongefishWhirVerify.RoundParams memory finalRound = dd.whirParams.rounds[dd.whirParams.numRounds - 1];
+        uint256 rawQueryCount = finalRound.inDomainSamples;
+        uint256 expectedElements = rawQueryCount * finalRound.interleavingDepth;
+        require(expectedElements <= type(uint64).max, "final Vec length exceeds u64");
+        uint256 finalVecPrefixOffset = _findUniqueFinalVecPrefix(
+            proof.whirHints,
+            uint64(expectedElements),
+            rawQueryCount,
+            finalRound.interleavingDepth * 24,
+            finalRound.merkleDepth
         );
 
         bytes32 gatesDigest = verifier.computeGatesDigest(
@@ -164,10 +180,47 @@ contract ClaimMleVerifyTest is Test {
             proof.numGateConstraints,
             proof.quotientDegreeFactor
         );
-        proof.whirHints[CLOSE_FINAL_VEC_PREFIX_OFFSET] = 0x01;
+        proof.whirHints[finalVecPrefixOffset] = bytes1(uint8(proof.whirHints[finalVecPrefixOffset]) ^ 1);
 
-        vm.expectRevert(SpongefishWhirVerify.InvalidHints.selector);
+        vm.expectRevert(InvalidMleProof.selector);
         verifier.verify(proof, _verifyParams(dd), dd.whirParams, gatesDigest);
+    }
+
+    /// @dev Locate the final canonical Arkworks u64-LE prefix. Besides exact 64-bit matching, the
+    ///      candidate must leave exactly the final raw rows followed only by whole Merkle hashes,
+    ///      bounded by one sibling per query per tree layer. This ties the dynamic location to the
+    ///      final-opening shape instead of accepting an equal 8-byte sequence in arbitrary row data.
+    function _findUniqueFinalVecPrefix(
+        bytes memory data,
+        uint64 needle,
+        uint256 rawQueryCount,
+        uint256 rowBytes,
+        uint256 merkleDepth
+    ) internal pure returns (uint256 offset) {
+        require(data.length >= 8, "WHIR hints too short for Vec prefix");
+        uint256 rowsBytes = rawQueryCount * rowBytes;
+        uint256 maxMerkleBytes = rawQueryCount * merkleDepth * 32;
+        bool found;
+        for (uint256 i = 0; i <= data.length - 8; i++) {
+            if (_readU64LeAt(data, i) != needle) continue;
+            uint256 rowsEnd = i + 8 + rowsBytes;
+            if (rowsEnd > data.length) continue;
+            uint256 merkleBytes = data.length - rowsEnd;
+            if (merkleBytes % 32 != 0 || merkleBytes > maxMerkleBytes) continue;
+            require(!found, "ambiguous final Vec prefix");
+            found = true;
+            offset = i;
+        }
+        require(found, "final Vec prefix not found");
+    }
+
+    function _readU64LeAt(bytes memory data, uint256 offset) internal pure returns (uint64 value) {
+        assembly {
+            let word := shr(192, mload(add(add(data, 0x20), offset)))
+            word := or(and(shr(8, word), 0x00FF00FF00FF00FF), and(shl(8, word), 0xFF00FF00FF00FF00))
+            word := or(and(shr(16, word), 0x0000FFFF0000FFFF), and(shl(16, word), 0xFFFF0000FFFF0000))
+            value := and(or(shr(32, word), shl(32, word)), 0xFFFFFFFFFFFFFFFF)
+        }
     }
 
     /// @notice Reject proof-extension malleability: all hint bytes must be consumed.
@@ -184,15 +237,11 @@ contract ClaimMleVerifyTest is Test {
         );
         proof.whirHints = bytes.concat(proof.whirHints, hex"00");
 
-        vm.expectRevert(SpongefishWhirVerify.InvalidHints.selector);
+        vm.expectRevert(InvalidMleProof.selector);
         verifier.verify(proof, _verifyParams(dd), dd.whirParams, gatesDigest);
     }
 
-    function _verifyParams(FixtureLib.DeployData memory dd)
-        internal
-        pure
-        returns (MleVerifier.VerifyParams memory)
-    {
+    function _verifyParams(FixtureLib.DeployData memory dd) internal pure returns (MleVerifier.VerifyParams memory) {
         return MleVerifier.VerifyParams({
             degreeBits: dd.degreeBits,
             preprocessedCommitmentRoot: dd.preCommitRoot,

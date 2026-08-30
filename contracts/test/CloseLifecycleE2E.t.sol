@@ -3,10 +3,12 @@ pragma solidity ^0.8.24;
 
 import {CloseE2EBase} from "./CloseE2EBase.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title Full local CLOSE lifecycle e2e (Sepolia-rehearsal).
 /// @notice One EVM run: deploy (CREATE2) -> register -> deposit{value} -> postBlock x3 ->
@@ -69,6 +71,9 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // 1-2. Deploy all four contracts (+ registerChannel) via the shared CREATE2 path — IDENTICAL
         //      to ComputeCloseManager.s.sol so the manager lands at the baked address.
         (verifier, rollup, settlementVerifier, manager) = _deployAll(_validityJson(), _lifecycleJson());
+        TestProofDaVerifier testDa = new TestProofDaVerifier();
+        vm.prank(FACTORY);
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(testDa)));
 
         // 3. The deployed manager MUST equal the close proof's withdrawal recipient. Multitoken
         //    Phase 5b: the fixtures are regenerated against the multi-token manager initcode, so a
@@ -378,8 +383,14 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             keyIds: keyIds
         });
         subId = rollup.nextSubmissionId();
+        // Read the live pin before arming the one-shot prank. Otherwise Solidity evaluates this
+        // external view call as the pranked call and `postBlockAndSubmit` itself is sent by this
+        // test contract, tripping the production block-producer authorization gate.
+        bytes32 pendingChains = rollup.pendingChainsPin();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: STAKE}(subBlocks, proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: STAKE}(
+            subBlocks, proofHash, proofLength, stateRoot, pendingChains
+        );
     }
 
     function _parseVpis(string memory lcJson) internal pure returns (IntmaxRollup.ValidityPublicInputs memory v) {

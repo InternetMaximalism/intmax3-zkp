@@ -102,10 +102,9 @@ abstract contract CloseE2EBase is Test {
             // Delegate account: `delegateCount_ = 0` (no delegates in this lifecycle fixture), placed
             // 4th to match the constructor (channelId, bpSlot, bpPkG, delegateCount, ...).
             abi.encode(
-                channelId, bpSlot, hashes[bpSlot], uint8(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
+                channelId, bpSlot, hashes[bpSlot], uint16(0), bytes32(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
                 INITIAL_BP_BOND, IChannelSettlementVerifier(settlementVerifierAddr),
-                IChannelRegistry(rollupAddr), bindings,
-                new ChannelSettlementManager.MemberBinding[](0) // no delegates
+                IChannelRegistry(rollupAddr), bindings
             )
         );
     }

@@ -23,8 +23,8 @@ use crate::{
         channel_registration::{ChannelRegRecord, MemberRegEntry},
         deposit::Deposit,
         public_state::get_num_users,
-        tx::{ChannelAction, ChannelActionKind, TxClass, TxV2, member_set_update_payload},
-        trees::{key_tree::MemberTree, tx_v2_tree::{ChannelActionTree, TxV2Tree}},
+        trees::key_tree::MemberTree,
+        tx::{ChannelActionKind, TxV2},
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_SIG_CLUSTER},
     ethereum_types::{address::Address, bytes32::Bytes32, u256::U256},
@@ -44,6 +44,10 @@ pub enum ProductionBlockProducerError {
     InvalidRegistration(String),
     #[error("wallet authorization rejected: {0}")]
     WalletAuthorization(String),
+    #[error(
+        "member-set updates are disabled in this release because settlement and validity member roots are not atomically anchored"
+    )]
+    MemberSetUpdateDisabled,
     #[error(transparent)]
     Witness(#[from] BlockWitnessGeneratorError),
 }
@@ -380,6 +384,21 @@ impl ProductionBlockProducer {
         )
     }
 
+    /// Release safety gate: validity-side membership cannot advance until it is atomically anchored
+    /// to the immutable settlement authorization set.
+    pub fn produce_member_set_update_block(
+        &mut self,
+        _signed_state: &ChannelState,
+        _old_members: &[MemberInfo],
+        _new_record: &ChannelRecord,
+        _new_members: &[MemberInfo],
+        _timestamp: u64,
+    ) -> Result<Bytes32, ProductionBlockProducerError> {
+        Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+    }
+
+    /// Future implementation of the MEMBER-SET-UPDATE transition, retained for the point where a
+    /// cross-layer atomic settlement/validity anchor exists. It is unreachable from production.
     /// detail2 §Q-3: admit one MEMBER-SET-UPDATE block — the single transition that may advance a
     /// channel's registered co-signer root in the validity chain. Server-derived like the
     /// descriptor path: one active key slot, the action/TxV2/tree built HERE from the two member
@@ -396,7 +415,8 @@ impl ProductionBlockProducer {
     ///     authorizes exactly this transition.
     /// On success the producer's channel registry ADVANCES to `new_record` — every later block for
     /// this channel verifies against the new set.
-    pub fn produce_member_set_update_block(
+    #[allow(dead_code)]
+    fn produce_member_set_update_block_future(
         &mut self,
         signed_state: &ChannelState,
         old_members: &[MemberInfo],
@@ -727,6 +747,29 @@ impl ProductionBlockProducer {
         tx_tree_root: Bytes32,
         tx_v2_witness: BlockTxV2Witness,
     ) -> Result<(), ProductionBlockProducerError> {
+        // Release MSU gate at the LOWEST public production facade.  Rejecting only
+        // `produce_member_set_update_block` is insufficient: callers of this generic method can
+        // otherwise smuggle the same MemberSetUpdate action + new-member leaves directly inside a
+        // caller-built `BlockTxV2Witness`, bypassing the named API and advancing the validity-side
+        // member root while the settlement manager remains immutable.
+        //
+        // Check both representations. A canonical MSU carries both, but treating either marker as
+        // reserved also fails closed on a malformed/partial attempt before signatures, witness
+        // projections, queued deposits, or public heads are touched.
+        let carries_member_set_update = tx_v2_witness.new_member_leaves.is_some()
+            || tx_v2_witness
+                .channel_actions
+                .as_ref()
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.kind == ChannelActionKind::MemberSetUpdate)
+                })
+                .unwrap_or(false);
+        if carries_member_set_update {
+            return Err(ProductionBlockProducerError::MemberSetUpdateDisabled);
+        }
+
         let channel = signed_state.channel_id;
         let record = self.channel_records.get(&channel).ok_or_else(|| {
             ProductionBlockProducerError::WalletAuthorization(format!(

@@ -32,6 +32,8 @@ use crate::{
 
 pub const PRODUCTION_JOURNAL_MAGIC: &str = "INTMAX_KEYLESS_BLOCK_PRODUCER";
 pub const PRODUCTION_JOURNAL_VERSION: u32 = 1;
+pub const MEMBER_SET_UPDATE_DISABLED_REASON: &str =
+    "member-set updates are disabled in this release because settlement and validity member roots are not atomically anchored";
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -386,21 +388,11 @@ impl BlockProducerService {
             } => Ok(BlockProducerCommandResult::Receipt(
                 self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
             )),
-            BlockProducerCommand::PostMemberSetUpdate {
-                request_id,
-                signed_state,
-                old_members,
-                new_record,
-                new_members,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.post_member_set_update(
-                    request_id,
-                    signed_state,
-                    old_members,
-                    new_record,
-                    new_members,
-                )?,
-            )),
+            BlockProducerCommand::PostMemberSetUpdate { .. } => Err(
+                BlockProducerServiceError::InvalidRequest(
+                    MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
+                ),
+            ),
         }
     }
 
@@ -476,10 +468,24 @@ impl BlockProducerService {
         )
     }
 
-    /// detail2 §Q-3: journaled admission of one member-set-update block. Same durability shape
-    /// as `post_inter_channel`: idempotent by request id + fingerprint, refused when a state with
-    /// the same digest was already admitted, applied through the journal so a crash replays it.
+    /// Release safety gate: cross-layer member-set updates cannot be admitted until the validity
+    /// member root and settlement authorization set advance atomically.
     pub fn post_member_set_update(
+        &mut self,
+        _request_id: String,
+        _signed_state: ChannelState,
+        _old_members: Vec<MemberInfo>,
+        _new_record: ChannelRecord,
+        _new_members: Vec<MemberInfo>,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        Err(BlockProducerServiceError::InvalidRequest(
+            MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
+        ))
+    }
+
+    /// Retained only as a future implementation; no production command calls this method.
+    #[allow(dead_code)]
+    fn post_member_set_update_future(
         &mut self,
         request_id: String,
         signed_state: ChannelState,
@@ -834,20 +840,10 @@ fn apply_action(
                 *timestamp,
             )?;
         }
-        ProductionJournalAction::PostMemberSetUpdate {
-            signed_state,
-            old_members,
-            new_record,
-            new_members,
-            timestamp,
-        } => {
-            producer.produce_member_set_update_block(
-                signed_state,
-                old_members,
-                new_record,
-                new_members,
-                *timestamp,
-            )?;
+        ProductionJournalAction::PostMemberSetUpdate { .. } => {
+            return Err(BlockProducerServiceError::InvalidRequest(
+                MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
+            ));
         }
     }
     Ok(())
@@ -869,6 +865,22 @@ fn verify_and_replay(
         )));
     }
     validate_supported_user_counts(&disk.supported_user_counts)?;
+    if let Some((index, _)) = disk
+        .entries
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| {
+            matches!(
+                &entry.action,
+                ProductionJournalAction::PostMemberSetUpdate { .. }
+            )
+        })
+    {
+        return Err(BlockProducerServiceError::Journal(format!(
+            "entry {} contains a disabled legacy member-set update; operator migration is required",
+            index + 1
+        )));
+    }
     if disk.generation != disk.entries.len() as u64 {
         return Err(BlockProducerServiceError::Journal(format!(
             "generation {} disagrees with {} entries",

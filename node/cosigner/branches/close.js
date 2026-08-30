@@ -42,6 +42,42 @@ async function drivePwFinalize(event, ctx) {
   }
 }
 
+// Compatibility bridge for the delegate's typed ApiClient. Peer co-sign traffic terminates on the
+// hardened co-signer HTTP service (default :8200), while the legacy native withdrawal-claim
+// prover lives in the coordinator API (default :8100). Proxy only the configured manager and
+// bounded scalar fields; the downstream CLI/circuit/on-chain verifier remain authoritative.
+//
+// This is a COOPERATIVE compatibility service. A real delegate instead uses its local
+// `wallet_withdrawal_claim` export and submits directly; its Regev secret is not present here and
+// this route must never be treated as that delegate's censorship-resistant recovery path.
+async function proxyCloseClaim(event, ctx) {
+  const { api, ch, log } = ctx;
+  const body = (event && event.body) || {};
+  const manager = String(body.manager || '');
+  const configuredManager = String(ch.manager || '');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(manager)
+      || manager.toLowerCase() !== configuredManager.toLowerCase()) {
+    return { ok: false, status: 400, body: { error: 'manager must equal the configured channel manager' } };
+  }
+  const slot = Number(body.slot);
+  if (!Number.isSafeInteger(slot) || slot < 0 || slot >= 1024) {
+    return { ok: false, status: 400, body: { error: 'slot must be an integer in 0..1023' } };
+  }
+  const recipient = String(body.recipient || '');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+    return { ok: false, status: 400, body: { error: 'recipient must be a 20-byte address' } };
+  }
+  const tokenSlot = body.tokenSlot === undefined || body.tokenSlot === null
+    ? 0
+    : Number(body.tokenSlot);
+  if (!Number.isSafeInteger(tokenSlot) || tokenSlot < 0 || tokenSlot > 9) {
+    return { ok: false, status: 400, body: { error: 'tokenSlot must be an integer in 0..9' } };
+  }
+  const result = await api.closeClaim(ch.id, { manager, slot, recipient, tokenSlot });
+  log.info({ event: 'CLOSE_CLAIM_PROXIED', channel: ch.id, slot, recipient, tokenSlot });
+  return { ok: true, status: 200, body: result };
+}
+
 // --- ABNORMAL: a close was observed on-chain ---
 // CloseRequested can only be emitted by a registered member (the on-chain requestClose gates on
 // isMemberRecipient), so advancing to CLOSE_PENDING (which pauses new co-signing) is the safe
@@ -58,10 +94,43 @@ async function onCloseObserved(event, ctx) {
   }
 }
 
+// Finalized lifecycle observations must reconcile the local signing state machine too. Merely
+// logging them leaves a process permanently in CLOSE_SUBMITTED after another member cancels, or
+// incorrectly able to resume from ACTIVE after a close has finalized. These events are dispatched
+// only from the finalized/hash-authenticated watcher range.
+async function onCloseCancelled(event, ctx) {
+  const { ch, log, store } = ctx;
+  if (store && typeof store.set === 'function') store.set('closeFinalizedObserved', false);
+  ctx.sm.signal(SIGNALS.CANCELLED);
+  log.info({
+    event: 'CLOSE_CANCELLED_RECONCILED',
+    channel: ch.id,
+    closeIntentDigest: event.args && event.args.closeIntentDigest,
+    txHash: event.txHash,
+  });
+}
+
+async function onCloseFinalized(event, ctx) {
+  const { ch, log, store } = ctx;
+  // Keep this fact orthogonal to the defensive-mode state-machine sink. A process that entered
+  // DEFENSIVE before finalization still needs to expose the fail-closed claim prover afterwards.
+  if (store && typeof store.set === 'function') store.set('closeFinalizedObserved', true);
+  ctx.sm.signal(SIGNALS.FINALIZED);
+  log.info({
+    event: 'CLOSE_FINALIZED_RECONCILED',
+    channel: ch.id,
+    closeIntentDigest: event.args && event.args.closeIntentDigest,
+    txHash: event.txHash,
+  });
+}
+
 // CloseSubmitted / SpecialCloseSubmitted: decide cooperate vs challenge/cancel. The pending close's
 // (epoch, version) is read from the AUTHORITATIVE on-chain getPendingClose() getter (NOT our own
-// persisted intent), with the decoded event args as a fallback — so a STALE close submitted by
-// anyone is detected. Whether it is "ours" is decided by digest match, not by version comparison.
+// persisted intent and not the event payload). This distinction is load-bearing when two close
+// transitions land in one finalized block: the first log is canonical, but it is no longer the
+// pending state at that block's end. A digest match only tells us who originally authored the
+// intent; it must never override version ordering. In particular, a previously-authored intent can
+// be replayed after cancellation, after this signer has advanced to a newer N-of-N head.
 async function onCloseIntentObserved(event, ctx) {
   const { ch, store, log, alert, cli, rpc } = ctx;
   ctx.sm.signal(SIGNALS.CLOSE_SUBMITTED);
@@ -77,15 +146,20 @@ async function onCloseIntentObserved(event, ctx) {
   const isOurs = ourDigest && pending.closeIntentDigest && ourDigest.toLowerCase() === String(pending.closeIntentDigest).toLowerCase();
   const cmp = policy.compareVersion(ourHead, pending); // 1 => our head strictly newer than the close
 
-  if (isOurs || cmp <= 0) {
-    // Either we authored this close, or it froze a state at/after our head ⇒ legitimate exit.
+  if (cmp <= 0) {
+    // It froze a state at/after our head ⇒ legitimate exit. `isOurs` is diagnostic only: an old
+    // locally-authored intent is still stale once our signed head has advanced past it.
     log.info({ event: 'CLOSE_LEGITIMATE', channel: ch.id, ourHead, pending, isOurs });
     return;
   }
 
-  // STALE close authored by someone else freezing an OLDER state ⇒ defend with a newer head.
+  // STALE close freezing an OLDER state ⇒ defend with a newer head, including when the digest
+  // matches an intent we authored before advancing our local signed head.
   const response = policy.staleCloseResponse(ctx.policy);
-  const actionId = `stale-close:${response}:${pending.closeIntentDigest || event.txHash || ''}`;
+  // Cancellation restores the freeze nonce, so an identical close-intent digest can lawfully
+  // appear again in a distinct transaction. Bind deduplication to the observation as well as the
+  // digest: retries of this event remain idempotent, while a later replay is defended again.
+  const actionId = `stale-close:${response}:${pending.closeIntentDigest || ''}:${event.txHash || ''}`;
   if (!store.claimAction(actionId, { retryPending: true })) return;
   await alert.raise('attack', ch.id, 'STALE_CLOSE_DETECTED',
     `pending close froze v${pending.stateVersion}@e${pending.epoch} but our head is v${ourHead.stateVersion}@e${ourHead.epoch}`,
@@ -127,23 +201,18 @@ function readHeadVersion(cli, ch) {
   } catch (e) { return null; }
 }
 
-// The AUTHORITATIVE pending close as it actually is on-chain (NOT our own persisted intent). Prefer
-// the getPendingClose() getter; fall back to the decoded event args if the getter is unavailable.
+// The AUTHORITATIVE pending close as it actually is on-chain (NOT our own persisted intent).
+// Production supplies getPendingClose and pins it to the finalized event block. A getter failure
+// MUST escape so the chain watcher retries this block instead of advancing its durable cursor: an
+// event payload describes the state immediately after that transaction, not necessarily the final
+// state after a later replacement/cancel in the same block. Falling back to it can challenge the
+// wrong close or permanently miss the actually pending one.
 async function readOnChainPending(ctx, event) {
   if (typeof ctx.getPendingClose === 'function' && ctx.ch.manager) {
-    try {
-      const p = await ctx.getPendingClose(ctx.ch.manager);
-      if (p && p.active) return p;
-    } catch (e) { /* fall through to event args */ }
+    const p = await ctx.getPendingClose(ctx.ch.manager, event && event.blockNumber);
+    return p && p.active ? p : null;
   }
-  const a = event && event.args;
-  if (a && (a.finalEpoch != null || a.finalStateVersion != null)) {
-    const epoch = Number(a.finalEpoch || 0);
-    const stateVersion = Number(a.finalStateVersion || 0);
-    if (!Number.isFinite(epoch) || !Number.isFinite(stateVersion)) return null; // review MED-2
-    return { epoch, stateVersion, closeIntentDigest: a.closeIntentDigest };
-  }
-  return null;
+  throw new Error('authoritative getPendingClose reader is unavailable');
 }
 
 // The close_intent_digest of the close WE last authored (to tell "ours" from a foreign close).
@@ -159,5 +228,8 @@ function ourCloseIntentDigest(cli, ch) {
 }
 
 module.exports = {
-  driveCloseStep, drivePwFinalize, onCloseObserved, onCloseIntentObserved, onPartialWithdrawalObserved,
+  driveCloseStep, drivePwFinalize, onCloseObserved, onCloseIntentObserved, onCloseCancelled,
+  onCloseFinalized, onPartialWithdrawalObserved,
+  proxyCloseClaim,
+  readOnChainPending,
 };

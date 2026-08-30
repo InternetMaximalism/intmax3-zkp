@@ -3,8 +3,10 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title Full real on-chain channel-to-channel lifecycle (manager-free, direct-to-EOA exit).
 /// @notice Exercises, in one EVM run, the complete cross-channel flow the Sepolia run will perform:
@@ -52,6 +54,7 @@ contract C2CFullE2ETest is Test {
             vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
             true // A-2: test opt-in for the degreeBits==0 bypass
         );
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
         FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);
         IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(withdrawalMleJson, verifier);
@@ -217,8 +220,9 @@ contract C2CFullE2ETest is Test {
             keyIds: keyIds
         });
         subId = rollup.nextSubmissionId();
+        bytes32 pin = rollup.pendingChainsPin();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: STAKE}(sb, proofHash, proofLength, stateRoot);
+        rollup.postBlockAndSubmit{value: STAKE}(sb, proofHash, proofLength, stateRoot, pin);
     }
 
     function _parseVpis() internal view returns (IntmaxRollup.ValidityPublicInputs memory vpis) {

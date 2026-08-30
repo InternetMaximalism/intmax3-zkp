@@ -18,7 +18,10 @@ const BRANCHES = {
   COSIGNER_WITHHOLDING: 'COSIGNER_WITHHOLDING',
   CHAIN_CLOSE_SEEN: 'CHAIN_CLOSE_SEEN',
   CHAIN_FINALIZED: 'CHAIN_FINALIZED',
+  CHAIN_CLAIM_ACCEPTED: 'CHAIN_CLAIM_ACCEPTED',
+  CHAIN_FUNDS_PULLED: 'CHAIN_FUNDS_PULLED',
   CHAIN_CREDIT: 'CHAIN_CREDIT',
+  RECOVERY_TICK: 'RECOVERY_TICK',
   EQUIVOCATION: 'EQUIVOCATION',
   IGNORE: 'IGNORE',
 };
@@ -36,12 +39,9 @@ const CHAIN_TO_BRANCH = {
   CloseSubmitted: BRANCHES.CHAIN_CLOSE_SEEN,
   SpecialCloseSubmitted: BRANCHES.CHAIN_CLOSE_SEEN,
   CloseFinalized: BRANCHES.CHAIN_FINALIZED,
+  WithdrawalClaimAccepted: BRANCHES.CHAIN_CLAIM_ACCEPTED,
+  ChannelFundsPulled: BRANCHES.CHAIN_FUNDS_PULLED,
   WithdrawalClaimed: BRANCHES.CHAIN_CREDIT,
-  NativeWithdrawn: BRANCHES.CHAIN_CREDIT,
-  WithdrawalCredited: BRANCHES.CHAIN_CREDIT,
-  // Multi-token (§N-7): ERC-20 credit/pull events confirm an exit exactly like their ETH twins.
-  Erc20Withdrawn: BRANCHES.CHAIN_CREDIT,
-  TokenWithdrawalClaimed: BRANCHES.CHAIN_CREDIT,
   FraudConfirmed: BRANCHES.EQUIVOCATION,
 };
 
@@ -74,6 +74,7 @@ function classify(event, ctx = {}) {
   }
 
   if (event.source === 'api' || event.source === 'timer') {
+    if (event.source === 'timer' && event.kind === 'recovery') return BRANCHES.RECOVERY_TICK;
     if (event.kind === 'snapshot') return BRANCHES.SNAPSHOT_UPDATED;
     if (event.kind === 'balance') return BRANCHES.BALANCE_POLL;
     const b = INTENT_TO_BRANCH[event.kind];

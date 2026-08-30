@@ -16,8 +16,10 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 contract RollupChainPinDoSTest is Test {
     IntmaxRollup internal rollup;
@@ -35,6 +37,7 @@ contract RollupChainPinDoSTest is Test {
             bytes32(0),                    // genesisStateRoot
             true                           // allowMleDisabled (this test never verifies a proof)
         );
+        rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);
         vm.deal(address(this), 100 ether);
         vm.deal(GRIEFER, 10 ether);
@@ -138,11 +141,18 @@ contract RollupChainPinDoSTest is Test {
         assertTrue(rollup.channelMemberSetCommitment(4242) != bytes32(0));
     }
 
-    /// The unpinned overload is devnet-only, so a real deployment cannot skip the pin.
-    function test_M5_unpinnedOverloadIsRefusedOffDevnet() public {
+    /// The unpinned overload is absent, so no deployment can skip the pin.
+    function test_M5_unpinnedOverloadIsRemoved() public {
         _mockBlob();
-        vm.chainId(11155111);
-        vm.expectRevert(IntmaxRollup.ChainPinRequired.selector);
-        rollup.postBlockAndSubmit{value: 1 ether}(_batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)));
+        bytes memory legacyCall = abi.encodeWithSignature(
+            "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32)",
+            _batch(),
+            bytes32(uint256(1)),
+            uint32(1),
+            bytes32(uint256(9))
+        );
+        (bool ok,) = address(rollup).call{value: 1 ether}(legacyCall);
+        assertFalse(ok, "retired unpinned selector must not be callable");
+        assertEq(rollup.nextSubmissionId(), 0, "retired selector must not mutate state");
     }
 }

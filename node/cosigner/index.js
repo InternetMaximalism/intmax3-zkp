@@ -10,7 +10,11 @@ const fs = require('fs');
 
 const { makeCli } = require('../common/cli');
 const { ApiClient } = require('../common/api-client');
-const { ChainWatcher } = require('../common/chain-watcher');
+const {
+  ChainWatcher,
+  ChainSafetyError,
+  isTransientChainSafetyError,
+} = require('../common/chain-watcher');
 const { Store } = require('../common/store');
 const { bootstrapTokenRegistry } = require('../common/token-registry');
 const log = require('../common/log');
@@ -18,6 +22,11 @@ const alert = require('../common/alert');
 const { makeRuntime, makeLock } = require('./loop');
 
 const DEFAULT_COSIGNER_BODY_LIMIT = 1024 * 1024;
+const COSIGNER_ROUTE_RE = /^\/api\/v1\/channel\/(\d+)\/(cosign|cosign-refresh|inter-channel\/send|burn\/cosign|close\/claim|snapshot)$/;
+
+function matchCosignerRoute(url) {
+  return String(url || '').replace(/\?.*$/, '').match(COSIGNER_ROUTE_RE);
+}
 
 function isLoopbackHost(host) {
   const normalized = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
@@ -57,6 +66,89 @@ function targetRuntimeIds(event, runtimes) {
   return [...new Set(requested)].filter(id => runtimes.has(id));
 }
 
+function propagateExistingChainSafetyHalt(entries) {
+  const existing = entries.find(({ store }) => store.get('chainSafetyHalt'));
+  if (!existing) return null;
+  const halt = existing.store.get('chainSafetyHalt');
+  for (const { store } of entries) store.haltChainSafety(halt);
+  return halt;
+}
+
+// Volatile readiness is deliberately separate from the durable chain-safety halt. A finalized
+// checkpoint mismatch needs operator reconciliation and survives restart; an ordinary getLogs/RPC
+// outage merely inhibits signing and timers until a complete finalized poll succeeds again. Start
+// in the unavailable state so no caller can observe a signing surface before the first scan.
+function createChainReadiness() {
+  let phase = 'startup';
+  return {
+    beginPoll() { phase = 'polling'; },
+    markReady() { phase = 'ready'; },
+    markUnavailable() { phase = 'unavailable'; },
+    isReady() { return phase === 'ready'; },
+    phase() { return phase; },
+  };
+}
+
+async function startAfterInitialChainPoll(pollChain, startHttpServer) {
+  const ready = await pollChain();
+  if (!ready) {
+    const error = new Error('initial finalized chain scan did not complete; refusing to expose signing HTTP');
+    error.code = 'CHAIN_STARTUP_UNAVAILABLE';
+    throw error;
+  }
+  startHttpServer();
+}
+
+function markCosignerPollSuccess(entries, pollFailures, chainReadiness) {
+  for (const { ch } of entries) pollFailures.set(ch.id, 0);
+  chainReadiness.markReady();
+}
+
+async function handleCosignerPollFailure(
+  error,
+  { entries, pollFailures, chainReadiness, logger = log, alerter = alert },
+) {
+  chainReadiness.markUnavailable();
+  if (error instanceof ChainSafetyError && !isTransientChainSafetyError(error)) {
+    for (const { ch, store } of entries) {
+      const halt = store.haltChainSafety(error);
+      logger.error({ event: 'CHAIN_SAFETY_HALT', channel: ch.id, code: halt.code, error: halt.message });
+      await alerter.raise(
+        'attack',
+        ch.id,
+        'CHAIN_SAFETY_HALT',
+        `durable chain processing halted: ${halt.code}: ${halt.message}`,
+        halt.evidence,
+      );
+    }
+    return false;
+  }
+  const affected = error && error.chainChannelId !== undefined
+    ? entries.filter(({ ch }) => String(ch.id) === String(error.chainChannelId))
+    : entries;
+  for (const { ch, store } of affected) {
+    const n = (pollFailures.get(ch.id) || 0) + 1;
+    pollFailures.set(ch.id, n);
+    logger.warn({
+      event: 'CHAIN_POLL_ERROR',
+      channel: ch.id,
+      consecutive: n,
+      code: error && error.code,
+      error: String(error && error.message || error),
+    });
+    if (n === 3 || n % 20 === 0) {
+      await alerter.raise(
+        'fault',
+        ch.id,
+        'CHAIN_WATCHER_WEDGED',
+        `chain poll failed ${n}x consecutively at cursor ${store.get('cursor')}; later blocks are not being processed`,
+        { cursor: store.get('cursor'), error: String(error && error.message || error) },
+      );
+    }
+  }
+  return false;
+}
+
 function loadConfig() {
   const p = process.env.INTMAX_NODE_CONFIG || path.join(__dirname, '..', 'config.json');
   if (!fs.existsSync(p)) {
@@ -71,12 +163,24 @@ async function main() {
   const httpSecurity = resolveHttpSecurity(cfg);
   const repoRoot = path.join(__dirname, '..', '..');
   const cli = makeCli({ binPath: process.env.CHANNEL_MEMBER_BIN, repoRoot });
-  const api = new ApiClient({ baseUrl: cfg.apiBaseUrl || 'http://127.0.0.1:8100' });
+  const api = new ApiClient({
+    baseUrl: cfg.coordinatorApiBaseUrl || cfg.apiBaseUrl || 'http://127.0.0.1:8100',
+    // The co-signer bearer authenticates delegate -> co-signer. The coordinator has a distinct
+    // trust boundary and token; never reuse the peer-signing secret for the proxy hop.
+    bearerToken: process.env.INTMAX_API_TOKEN || '',
+  });
   alert.configure({ webhook: cfg.alertWebhook });
 
   // Authoritative on-chain pending-close reader for the defensive close game (review C1).
-  const watcher = new ChainWatcher({ rpcUrl: cfg.rpcUrl, channels: cfg.channels, confirmations: cfg.confirmations, pollIntervalMs: cfg.pollIntervalMs });
-  const getPendingClose = (managerAddr) => watcher.getPendingClose(managerAddr);
+  const watcher = new ChainWatcher({
+    rpcUrl: cfg.rpcUrl,
+    channels: cfg.channels,
+    chainId: cfg.chainId,
+    confirmations: cfg.confirmations,
+    pollIntervalMs: cfg.pollIntervalMs,
+    allowUnfinalizedDevnet: cfg.allowUnfinalizedDevnet === true,
+  });
+  const getPendingClose = (managerAddr, blockNumber) => watcher.getPendingClose(managerAddr, blockNumber);
 
   // Token DISPLAY metadata (multi-token §N-1/§N-7). The mapping is HELD by the running node and
   // verified against the rollup's set-once `tokenAddressOf` registry before anything is served.
@@ -99,17 +203,28 @@ async function main() {
   }
 
   const runtimes = new Map(); // channelId -> { runtime, lock }
+  const chainReadiness = createChainReadiness();
   for (const ch of cfg.channels) {
     fs.mkdirSync(ch.workDir, { recursive: true });
     const store = new Store(path.join(ch.workDir, 'node-cosigner-state.json'));
-    const runtime = makeRuntime(ch, { cli, api, store, log, alert, rpc: cfg.rpcUrl, policyCfg: cfg.policy || {}, getPendingClose, tokenRegistry });
+    const runtime = makeRuntime(ch, {
+      cli,
+      api,
+      store,
+      log,
+      alert,
+      rpc: cfg.rpcUrl,
+      policyCfg: cfg.policy || {},
+      getPendingClose,
+      tokenRegistry,
+      isChainReady: () => chainReadiness.isReady(),
+    });
     runtimes.set(ch.id, { runtime, lock: makeLock(), ch, store });
   }
 
   // --- HTTP server for peer requests (delegate → co-signer) ---
   const server = http.createServer((req, res) => {
-    const route = String(req.url || '').replace(/\?.*$/, '');
-    const m = route.match(/^\/api\/v1\/channel\/(\d+)\/(cosign|cosign-refresh|inter-channel\/send|burn\/cosign|snapshot)$/);
+    const m = matchCosignerRoute(req.url);
     if (!m) { res.writeHead(404).end(JSON.stringify({ error: 'not found' })); req.resume(); return; }
     const expectedMethod = m[2] === 'snapshot' ? 'GET' : 'POST';
     if (req.method !== expectedMethod) {
@@ -148,7 +263,14 @@ async function main() {
       let body = {};
       try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; }
       catch (e) { res.writeHead(400).end(JSON.stringify({ error: 'invalid JSON' })); return; }
-      const kindMap = { cosign: 'cosign', 'cosign-refresh': 'cosign-refresh', 'inter-channel/send': 'inter', 'burn/cosign': 'burn', snapshot: 'snapshot' };
+      const kindMap = {
+        cosign: 'cosign',
+        'cosign-refresh': 'cosign-refresh',
+        'inter-channel/send': 'inter',
+        'burn/cosign': 'burn',
+        'close/claim': 'close-claim',
+        snapshot: 'snapshot',
+      };
       const event = { source: 'api', kind: kindMap[m[2]], body, sender: body && body.sender };
       try {
         const result = await rt.lock(() => rt.runtime.dispatch(event));
@@ -165,7 +287,7 @@ async function main() {
   const port = cfg.cosignerPort || 8200;
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  server.listen(port, httpSecurity.host, () => log.info({
+  const startHttpServer = () => server.listen(port, httpSecurity.host, () => log.info({
     event: 'COSIGNER_HTTP_UP',
     host: httpSecurity.host,
     port,
@@ -176,16 +298,40 @@ async function main() {
   // --- chain watcher poll loop (watcher constructed above for getPendingClose) ---
   const pollFailures = new Map(); // channelId -> consecutive failure count
   async function pollChain() {
+    // Block new API/timer actions while the finalized view is being authenticated. Chain events
+    // emitted by this scan remain allowed; readiness is published only after all of them and the
+    // paired cursor/checkpoint writes complete successfully.
+    chainReadiness.beginPoll();
     const entries = [...runtimes.values()];
-    if (entries.length === 0) return;
+    if (entries.length === 0) {
+      chainReadiness.markUnavailable();
+      return false;
+    }
+    if (entries.some(({ store }) => store.get('chainSafetyHalt'))) {
+      // A watcher/RPC safety failure is deployment-wide. If a process died while persisting the
+      // halt to multiple channel stores, propagate the surviving forensic record before exposing
+      // any still-unhalted channel runtime after restart.
+      propagateExistingChainSafetyHalt(entries);
+      chainReadiness.markUnavailable();
+      return false;
+    }
     // One RPC scan covers all configured addresses. The previous per-runtime loop scanned the same
     // logs N times and dispatched every decoded event into whichever runtime happened to own that
     // iteration, so one manager's close could freeze every channel. Start at the least-advanced
     // per-channel cursor and skip already-consumed events for runtimes that are further ahead.
-    const from = Math.min(...entries.map(({ store }) => Number(store.get('cursor') || 0)));
     try {
+      // Authenticate every per-channel restart cursor before one shared scan dispatches anything.
+      // A nonzero number-only legacy cursor cannot be authenticated retrospectively and fails stop.
+      for (const { store, ch } of entries) {
+        const checked = await watcher.validateCheckpoint(
+          Number(store.get('cursor') || 0),
+          store.get('chainCheckpoint'),
+        );
+        void ch;
+      }
+      const scanFrom = Math.min(...entries.map(({ store }) => Number(store.get('cursor') || 0)));
       await watcher.pollOnce(
-        from,
+        scanFrom,
         async (ev) => {
           for (const id of targetRuntimeIds(ev, runtimes)) {
             const target = runtimes.get(id);
@@ -199,33 +345,28 @@ async function main() {
             }
           }
         },
-        (cursor) => {
-          for (const { store } of entries) store.setCursor(cursor);
+        (cursor, checkpoint) => {
+          for (const { store } of entries) {
+            if (cursor >= Number(store.get('cursor') || 0)) store.setChainProgress(cursor, checkpoint);
+          }
         },
       );
-      for (const { ch } of entries) pollFailures.set(ch.id, 0);
+      markCosignerPollSuccess(entries, pollFailures, chainReadiness);
+      return true;
     } catch (e) {
-      const affected = e && e.chainChannelId !== undefined
-        ? entries.filter(({ ch }) => String(ch.id) === String(e.chainChannelId))
-        : entries;
-      for (const { ch, store } of affected) {
-        const n = (pollFailures.get(ch.id) || 0) + 1;
-        pollFailures.set(ch.id, n);
-        log.warn({ event: 'CHAIN_POLL_ERROR', channel: ch.id, consecutive: n, error: String(e && e.message || e) });
-        // A wedged cursor (same block failing every tick) is a silent liveness halt — escalate to
-        // an ALERT after a few consecutive failures (review MED-3), not just a warn.
-        if (n === 3 || n % 20 === 0) {
-          await alert.raise('fault', ch.id, 'CHAIN_WATCHER_WEDGED',
-            `chain poll failed ${n}x consecutively at cursor ${store.get('cursor')}; later blocks are not being processed`,
-            { cursor: store.get('cursor'), error: String(e && e.message || e) });
-        }
-      }
+      return handleCosignerPollFailure(e, {
+        entries,
+        pollFailures,
+        chainReadiness,
+      });
     }
   }
 
   // --- timer tick: derive settle_due / pw_finalize_due from tickets + on-chain deadlines ---
   async function tick() {
+    if (!chainReadiness.isReady()) return;
     for (const { runtime, lock, store } of runtimes.values()) {
+      if (store.get('chainSafetyHalt')) continue;
       const fw = store.findTicket((t) => t.type === 'full_withdrawal' && t.status === 'close_submitted_finalizable');
       if (fw) await lock(() => runtime.dispatch({ source: 'timer', kind: 'settle_due', closeIntentDigest: fw.params && fw.params.closeIntentDigest }));
       const pw = store.findTicket((t) => t.type === 'partial_withdrawal' && t.status === 'settle_finalizable');
@@ -234,9 +375,25 @@ async function main() {
   }
 
   const interval = cfg.pollIntervalMs || 4000;
-  const loop = async () => { await pollChain(); await tick(); };
-  await loop();
-  setInterval(() => { loop().catch((e) => log.error({ event: 'LOOP_ERROR', error: String(e && e.message || e) })); }, interval);
+  const loop = async () => {
+    const ready = await pollChain();
+    if (!ready) return false;
+    await tick();
+    return true;
+  };
+  // Establish/validate the durable finalized checkpoint before exposing a signing HTTP surface.
+  await startAfterInitialChainPoll(loop, startHttpServer);
+  let loopInFlight = false;
+  setInterval(() => {
+    // Avoid overlapping scans of the same durable cursor when an RPC request outlives the poll
+    // interval. Besides duplicate work, overlapping scans could otherwise interleave readiness
+    // transitions and expose a stale success from one pass while another has failed.
+    if (loopInFlight) return;
+    loopInFlight = true;
+    loop()
+      .catch((e) => log.error({ event: 'LOOP_ERROR', error: String(e && e.message || e) }))
+      .finally(() => { loopInFlight = false; });
+  }, interval);
   log.info({ event: 'COSIGNER_READY', interval });
 }
 
@@ -250,5 +407,11 @@ module.exports = {
   isLoopbackHost,
   resolveHttpSecurity,
   bearerAuthorized,
+  propagateExistingChainSafetyHalt,
+  createChainReadiness,
+  startAfterInitialChainPoll,
+  markCosignerPollSuccess,
+  handleCosignerPollFailure,
+  matchCosignerRoute,
   DEFAULT_COSIGNER_BODY_LIMIT,
 };

@@ -611,6 +611,18 @@ impl UpdateUserTree {
                                          the channel's committed member root"
                                     )));
                                 }
+                                // SECURITY: the validity transition and the settlement-manager
+                                // membership transition do not yet share an atomic on-chain
+                                // receipt.  Accepting this action in the circuit would therefore
+                                // let a whitelisted custom prover advance only the validity-side
+                                // root, even though every bundled producer currently refuses the
+                                // operation.  Keep the structural checks above as the future
+                                // implementation contract, but fail closed until that receipt is
+                                // designed and verified by both consumers.
+                                return Err(UpdateUserTreeError::InvalidLength(format!(
+                                    "member-set update at i {i} is disabled until the settlement \
+                                     and validity transitions have an atomic receipt"
+                                )));
                             }
                         }
                     }
@@ -1458,6 +1470,13 @@ impl UpdateUserTreeTarget {
 
         // ── Block-level well-formedness of the signer set (design §5.4 items 2-3) ──
         //
+        // SECURITY: MemberSetUpdate is deliberately unreachable in the deployed validity
+        // circuit.  The producer/CLI refusal is not a security boundary: a whitelisted custom
+        // prover could otherwise submit a validity-side-only membership transition while the
+        // settlement manager retained the old member set.  Remove this assertion only together
+        // with an atomic, on-chain receipt consumed by BOTH transitions.
+        builder.assert_zero(any_member_update.target);
+
         // ── detail2 §Q-3: the structural delta of a MemberSetUpdate block ──
         //
         // Gated on `any_member_update`; on every other block the new-leaf targets are free
@@ -2656,11 +2675,11 @@ mod tests {
 
     // ── detail2 §Q-3: MemberSetUpdate blocks ────────────────────────────────────────────────
 
-    /// Positive: a rotate block proves, and the account tree advances to a channel leaf carrying
-    /// the NEW registered member root (the frozen-copy rule's one sanctioned exception).
+    /// Release gate: even a structurally valid rotation is refused until the validity and
+    /// settlement membership transitions consume one atomic receipt.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
-    fn member_update_rotate_block_proves_and_advances_the_root() {
+    fn member_update_rotate_is_disabled_until_atomic_receipt() {
         let _heavy = heavy();
         let channel = RegisteredChannel::new(2, 0x51);
         let mut rng = StdRng::seed_from_u64(0x515);
@@ -2670,51 +2689,13 @@ mod tests {
         new_leaves[1].pk_b = PoseidonHashOut::rand(&mut rng);
         let (tree, _digest) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves.clone());
 
-        let pis = tree.to_public_inputs().expect("a valid rotate block is accepted natively");
-        // The advanced account root commits the NEW member root.
-        let new_member_root = {
-            let mut t = MemberTree::init();
-            for l in new_leaves.iter() {
-                t.push(l.clone());
-            }
-            t.get_root()
-        };
-        assert_ne!(new_member_root, channel.root, "the rotation must actually move the root");
-        let expected_account_root = {
-            let send_tree = SendTree::init();
-            let new_send_leaf = SendLeaf {
-                prev: BlockNumber::new(4).unwrap(),
-                cur: BlockNumber::new(30).unwrap(),
-                tx_tree_root: tree.block.tx_tree_root,
-            };
-            let send_proof = send_tree.prove(0);
-            let new_send_root = send_proof.get_root(&new_send_leaf, 0);
-            let leaf = ChannelLeaf {
-                index: 1,
-                prev: BlockNumber::new(30).unwrap(),
-                send_tree_root: new_send_root,
-                member_pubkeys_root: new_member_root,
-            };
-            let mut t = ChannelTree::new(CHANNEL_TREE_HEIGHT);
-            t.update(ChannelId::new(TEST_CHANNEL_ID as u64).unwrap().as_u64(), leaf);
-            t.get_root()
-        };
-        assert_eq!(
-            pis.new_account_tree_root, expected_account_root,
-            "the channel leaf must carry the NEW registered member root"
-        );
-
-        // And the circuit agrees byte-for-byte with the native mirror.
-        let proof = CIRCUIT.prove(&tree).expect("the rotate block proves");
-        CIRCUIT.data.verify(proof.clone()).unwrap();
-        let expected: Vec<F> = pis.to_u64_vec().into_iter().map(F::from_canonical_u64).collect();
-        assert_eq!(proof.public_inputs, expected);
+        assert_refused(&tree, "disabled until the settlement");
     }
 
-    /// Positive: an ADD at the left-packed boundary proves.
+    /// Release gate: even a structurally valid boundary ADD is refused for the same reason.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
-    fn member_update_add_at_boundary_proves() {
+    fn member_update_add_is_disabled_until_atomic_receipt() {
         let _heavy = heavy();
         let channel = RegisteredChannel::new(2, 0x52);
         let mut rng = StdRng::seed_from_u64(0x525);
@@ -2725,11 +2706,7 @@ mod tests {
             regev_pk_digest: PoseidonHashOut::rand(&mut rng),
         };
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        let pis = tree.to_public_inputs().expect("a boundary add is accepted natively");
-        let proof = CIRCUIT.prove(&tree).expect("the add block proves");
-        CIRCUIT.data.verify(proof.clone()).unwrap();
-        let expected: Vec<F> = pis.to_u64_vec().into_iter().map(F::from_canonical_u64).collect();
-        assert_eq!(proof.public_inputs, expected);
+        assert_refused(&tree, "disabled until the settlement");
     }
 
     /// Refusal: a rotation that swaps the Regev digest (decryption-key substitution, §Q-6).

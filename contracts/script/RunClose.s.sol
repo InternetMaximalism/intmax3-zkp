@@ -24,7 +24,84 @@ contract RunClose is Script {
     function _closeMle() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_close_intent_mle.json")); }
     function _closeIntent() internal view returns (string memory) { return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_close_intent.json")); }
 
-    /// finalize the 3-block chain (submission id via SUB_ID env, default 2 = the 3rd posting round).
+    /// Write deterministic transaction input without simulating the state-changing call.  The
+    /// production driver uses this before it observes/reconciles a permissionless completion, so a
+    /// copied transaction cannot make calldata recovery fail merely by changing contract state.
+    function _writeCalldata(bytes memory input) internal {
+        vm.writeFile(vm.envString("CALLDATA_OUT"), vm.toString(input));
+    }
+
+    function materializeAttestProofDataCalldataStep() external {
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
+        bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
+        uint256 subId = vm.envOr("SUB_ID", uint256(2));
+        _writeCalldata(abi.encodeCall(IntmaxRollup.attestProofData, (subId, abi.encode(proof), blobSidecars)));
+    }
+
+    function materializeFinalizeCalldataStep() external {
+        string memory lc = _lc();
+        IntmaxRollup.ValidityPublicInputs memory vpis;
+        vpis.initialBlockNumber = uint64(vm.parseJsonUint(lc, ".vpis.initial_block_number"));
+        vpis.initialBlockChain = vm.parseJsonBytes32(lc, ".vpis.initial_block_chain");
+        vpis.initialExtCommitment = vm.parseJsonBytes32(lc, ".vpis.initial_ext_commitment");
+        vpis.finalBlockNumber = uint64(vm.parseJsonUint(lc, ".vpis.final_block_number"));
+        vpis.finalBlockChain = vm.parseJsonBytes32(lc, ".vpis.final_block_chain");
+        vpis.finalExtCommitment = vm.parseJsonBytes32(lc, ".vpis.final_ext_commitment");
+        vpis.prover = vm.parseJsonAddress(lc, ".vpis.prover");
+        bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
+        uint256 subId = vm.envOr("SUB_ID", uint256(2));
+        _writeCalldata(abi.encodeCall(IntmaxRollup.finalize, (subId, finalRoot, vpis, proof)));
+    }
+
+    function materializeWithdrawNativeCalldataStep() external {
+        string memory j = _payout();
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = IntmaxRollup.Withdrawal({
+            recipient: vm.parseJsonAddress(j, ".withdrawals[0].recipient"),
+            tokenIndex: uint32(vm.parseJsonUint(j, ".withdrawals[0].token_index")),
+            amount: vm.parseUint(vm.parseJsonString(j, ".withdrawals[0].amount")),
+            nullifier: vm.parseJsonBytes32(j, ".withdrawals[0].nullifier"),
+            auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
+        });
+        address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wmle());
+        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawNative, (ws, prover, proof)));
+    }
+
+    function materializeWithdrawErc20CalldataStep() external {
+        string memory j = vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_payout.json")
+        );
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = IntmaxRollup.Withdrawal({
+            recipient: vm.parseJsonAddress(j, ".withdrawals[0].recipient"),
+            tokenIndex: uint32(vm.parseJsonUint(j, ".withdrawals[0].token_index")),
+            amount: vm.parseUint(vm.parseJsonString(j, ".withdrawals[0].amount")),
+            nullifier: vm.parseJsonBytes32(j, ".withdrawals[0].nullifier"),
+            auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
+        });
+        address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(
+            vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_mle.json"))
+        );
+        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawERC20, (ws, prover, proof)));
+    }
+
+    /// Authenticate the exact blob-backed proof in its own transaction before MLE verification.
+    function attestProofDataStep() external {
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
+        bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
+        uint256 subId = vm.envOr("SUB_ID", uint256(2));
+
+        vm.startBroadcast();
+        bytes32 digest = _rollup().attestProofData(subId, abi.encode(proof), blobSidecars);
+        vm.stopBroadcast();
+        console2.log("proof DA attested:");
+        console2.logBytes32(digest);
+    }
+
+    /// Finalize the 3-block chain after `attestProofDataStep` (SUB_ID defaults to 2).
     function finalizeStep() external {
         string memory lc = _lc();
         IntmaxRollup.ValidityPublicInputs memory vpis;

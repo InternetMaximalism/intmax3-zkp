@@ -9,7 +9,15 @@ const path = require('path');
 
 function emptyState() {
   return {
-    cursor: 0, // last fully-processed (confirmed) block number
+    // Next durable L1 block to scan. Every nonzero cursor must carry the authenticated cursor-1
+    // checkpoint. A legacy number-only cursor fails stop; the current fork cannot retroactively
+    // authenticate state that may have been derived on another fork.
+    cursor: 0,
+    chainCheckpoint: null, // { number: cursor-1, hash, parentHash }
+    // Sticky fail-stop for structural/cryptographic contradictions (chain id, hashes, malformed
+    // finalized data). Ordinary RPC transport unavailability uses a volatile readiness gate and
+    // auto-recovers after a complete successful poll.
+    chainSafetyHalt: null, // { at, code, message, evidence }
     smNode: null, // current state-machine node string
     tickets: {}, // id -> ticket object
     actions: {}, // actionId -> { at, result } (idempotency ledger)
@@ -21,6 +29,18 @@ function emptyState() {
     outgoingBaseNonceReservation: null, // { nonce, actionId, at }
     mode: 'normal', // 'normal' | 'defensive' | 'exiting'
   };
+}
+
+function fsyncDirectorySync(directory) {
+  // `rename` is atomic but not necessarily durable across sudden power loss until the containing
+  // directory entry is fsynced. Cursor/checkpoint loss can replay an external action, so treat a
+  // directory fsync failure exactly like a state persistence failure.
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY);
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 class Store {
@@ -49,9 +69,11 @@ class Store {
     }
   }
 
-  // Atomic persist: tmp file + rename (rename is atomic on the same filesystem).
+  // Crash-durable persist: temp fd write+fsync, atomic same-directory rename, parent-directory
+  // fsync. The last step is what makes the renamed cursor/checkpoint survive a power loss.
   flush() {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    const directory = path.dirname(this.filePath);
+    fs.mkdirSync(directory, { recursive: true });
     const tmp = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Store.flushSequence++}`;
     let fd;
     try {
@@ -61,6 +83,7 @@ class Store {
       fs.closeSync(fd);
       fd = undefined;
       fs.renameSync(tmp, this.filePath);
+      fsyncDirectorySync(directory);
     } catch (e) {
       if (fd !== undefined) fs.closeSync(fd);
       try { fs.rmSync(tmp, { force: true }); } catch (_) { /* keep original error */ }
@@ -121,9 +144,23 @@ class Store {
   }
 
   _writeOutgoingReservation(reservation) {
-    const tmp = `${this.reservationPath}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(reservation), { mode: 0o600 });
-    fs.renameSync(tmp, this.reservationPath);
+    const directory = path.dirname(this.reservationPath);
+    fs.mkdirSync(directory, { recursive: true });
+    const tmp = `${this.reservationPath}.tmp-${process.pid}-${Date.now()}-${Store.flushSequence++}`;
+    let fd;
+    try {
+      fd = fs.openSync(tmp, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify(reservation));
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.renameSync(tmp, this.reservationPath);
+      fsyncDirectorySync(directory);
+    } catch (error) {
+      if (fd !== undefined) fs.closeSync(fd);
+      try { fs.rmSync(tmp, { force: true }); } catch (_) { /* preserve original error */ }
+      throw error;
+    }
   }
 
   set(key, value) {
@@ -135,9 +172,71 @@ class Store {
   setCursor(block) {
     if (block > this.state.cursor) {
       this.state.cursor = block;
+      // Compatibility API for old callers/tests only. This deliberately leaves a nonzero cursor
+      // unauthenticated: the watcher will fail stop and require operator reconciliation. Production
+      // chain consumers must call setChainProgress(cursor, checkpoint) instead.
+      this.state.chainCheckpoint = null;
       this.flush();
     }
     return this.state.cursor;
+  }
+
+  setChainProgress(nextBlock, checkpoint) {
+    if (!Number.isSafeInteger(nextBlock) || nextBlock < 0) {
+      throw new Error(`invalid next chain block ${nextBlock}`);
+    }
+    if (nextBlock < this.state.cursor) {
+      throw new Error(`refusing implicit chain cursor rollback ${this.state.cursor} -> ${nextBlock}`);
+    }
+    if (nextBlock === 0) {
+      if (checkpoint != null) throw new Error('genesis cursor must not carry a prior-block checkpoint');
+    } else {
+      if (!checkpoint || checkpoint.number !== nextBlock - 1
+          || !/^0x[0-9a-f]{64}$/.test(String(checkpoint.hash || '').toLowerCase())
+          || !/^0x[0-9a-f]{64}$/.test(String(checkpoint.parentHash || '').toLowerCase())) {
+        throw new Error('chain checkpoint must authenticate exactly nextBlock - 1');
+      }
+    }
+    const normalized = checkpoint == null ? null : {
+      number: checkpoint.number,
+      hash: checkpoint.hash.toLowerCase(),
+      parentHash: checkpoint.parentHash.toLowerCase(),
+    };
+    const unchanged = nextBlock === this.state.cursor
+      && JSON.stringify(normalized) === JSON.stringify(this.state.chainCheckpoint);
+    if (!unchanged) {
+      this.state.cursor = nextBlock;
+      this.state.chainCheckpoint = normalized;
+      this.flush();
+    }
+    return { cursor: this.state.cursor, checkpoint: this.state.chainCheckpoint };
+  }
+
+  bootstrapChainProgress(nextBlock, checkpoint) {
+    void nextBlock;
+    void checkpoint;
+    // Do not turn a current-fork observation into retroactive authentication for derived state
+    // produced by a legacy cursor. Keeping this formerly public helper fail-stop also prevents a
+    // future caller from accidentally reintroducing the unsafe migration path.
+    throw new Error('legacy number-only chain cursors require operator reconciliation');
+  }
+
+  haltChainSafety(error) {
+    const rec = {
+      at: Date.now(),
+      code: String(error && error.code || 'CHAIN_SAFETY_FAILURE'),
+      message: String(error && error.message || error || 'chain safety failure'),
+      evidence: error && error.evidence && typeof error.evidence === 'object'
+        ? error.evidence
+        : {},
+    };
+    // Preserve the first failure as the forensic root cause. Repeated poll attempts must not erase
+    // it or make a catastrophic finalized-checkpoint mismatch look transient.
+    if (!this.state.chainSafetyHalt) {
+      this.state.chainSafetyHalt = rec;
+      this.flush();
+    }
+    return this.state.chainSafetyHalt;
   }
 
   // Idempotency: returns true the FIRST time an actionId is seen (and records it), false after.
@@ -245,4 +344,4 @@ class Store {
 
 Store.flushSequence = 0;
 
-module.exports = { Store, emptyState };
+module.exports = { Store, emptyState, fsyncDirectorySync };

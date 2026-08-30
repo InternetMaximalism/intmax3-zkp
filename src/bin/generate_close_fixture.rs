@@ -77,7 +77,7 @@ struct CloseIntentDescriptor {
     /// Stage 3: `settled_tx_accumulator_root` of the final balance state (PI limbs 77..85). The
     /// Solidity `CloseLifecycleE2E` parses this into `CloseIntent.finalSettledTxAccumulatorRoot`.
     final_settled_tx_accumulator_root: String,
-    /// Close-intent digest (IMCI), pulled from PI limbs 57..65. The Solidity
+    /// Canonical close-state ID (IMCS), pulled from PI limbs 57..65. The Solidity
     /// `computeCloseIntentDigest` must reproduce this; emitted so the test can assert it.
     close_intent_digest: String,
     /// The proof's in-circuit `member_set_commitment` (PI limbs 85..93, shifted +8 by Stage 3).
