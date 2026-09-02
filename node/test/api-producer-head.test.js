@@ -9,8 +9,13 @@ process.env.INTMAX_WORK_DIR = work;
 
 const producer = require('../../api/lib/block-producer');
 const cliModule = require('../../api/lib/cli');
-cliModule.cli = () => {};
-const { flushPublishedHead } = require('../../api/lib/producer-head');
+const authoritativeSnapshots = new Map();
+cliModule.cli = (ch, args) => {
+  if (args[0] === 'publish-snapshot' && authoritativeSnapshots.has(ch)) {
+    write(ch, args[1] || 'channel_snapshot.json', authoritativeSnapshots.get(ch));
+  }
+};
+const { flushPublishedHead, publishOffchainSnapshot } = require('../../api/lib/producer-head');
 
 const heads = new Map();
 const calls = [];
@@ -31,6 +36,10 @@ producer.postInterChannel = async (state, debitPayload, descriptor) => {
 producer.liveSettleInterChannel = async (channelId, receipt, state, debitPayload, descriptor) => {
   calls.push({ kind: 'settle', channelId, receipt, state, debitPayload, descriptor });
   return { baseNonce: calls.length };
+};
+producer.liveBindSnapshot = async (channelId, snapshot) => {
+  calls.push({ kind: 'bind', channelId, snapshot });
+  return { channelId, signedHeadDigest: snapshot.state.digest };
 };
 
 function write(ch, name, value) {
@@ -95,4 +104,69 @@ test('deposit recovery never skips its intermediate fund-import state', async ()
   await flushPublishedHead(10);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], { kind: 'sync', states: [fund, bundle] });
+});
+
+test('ordinary signed head is bound to backing before its public producer head advances', async () => {
+  calls.length = 0;
+  heads.set(11, 'before');
+  const state = {
+    channelId: 11,
+    digest: 'after',
+    h2Tag: `0x${'00'.repeat(32)}`,
+  };
+  const snapshot = { record: { channelId: 11 }, members: [], state };
+  write(11, 'channel_snapshot.json', snapshot);
+
+  const result = await publishOffchainSnapshot(11, state);
+  assert.deepEqual(calls.map(call => call.kind), ['bind', 'sync']);
+  assert.deepEqual(calls[0], { kind: 'bind', channelId: 11, snapshot });
+  assert.equal(result.headSyncReceipt.generation, 2);
+  assert.equal(heads.get(11), 'after');
+});
+
+test('failed backing bind leaves the public producer head unchanged', async () => {
+  calls.length = 0;
+  heads.set(12, 'before');
+  const state = {
+    channelId: 12,
+    digest: 'after',
+    h2Tag: `0x${'00'.repeat(32)}`,
+  };
+  write(12, 'channel_snapshot.json', { record: {}, members: [], state });
+  const original = producer.liveBindSnapshot;
+  producer.liveBindSnapshot = async () => {
+    calls.push({ kind: 'bind-failed' });
+    throw new Error('backing rejected');
+  };
+  try {
+    await assert.rejects(publishOffchainSnapshot(12, state), /backing rejected/);
+  } finally {
+    producer.liveBindSnapshot = original;
+  }
+  assert.deepEqual(calls.map(call => call.kind), ['bind-failed']);
+  assert.equal(heads.get(12), 'before');
+});
+
+test('flush republishes the authoritative private head before binding or exposing it', async () => {
+  calls.length = 0;
+  heads.set(13, 'parent');
+  const parent = {
+    record: { channelId: 13 }, members: [],
+    state: { channelId: 13, digest: 'parent', h2Tag: `0x${'00'.repeat(32)}` },
+  };
+  const child = {
+    record: { channelId: 13 }, members: [],
+    state: { channelId: 13, digest: 'child', h2Tag: `0x${'00'.repeat(32)}` },
+  };
+  write(13, 'channel_snapshot.json', parent);
+  authoritativeSnapshots.set(13, child);
+  try {
+    await flushPublishedHead(13);
+  } finally {
+    authoritativeSnapshots.delete(13);
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(work, 'ch13', 'channel_snapshot.json'))), child);
+  assert.deepEqual(calls.map(call => call.kind), ['bind', 'sync']);
+  assert.equal(calls[0].snapshot.state.digest, 'child');
+  assert.equal(heads.get(13), 'child');
 });

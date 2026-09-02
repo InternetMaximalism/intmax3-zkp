@@ -226,6 +226,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
+            address(this),
             mb
         );
 
@@ -266,8 +267,10 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     // ── Revert: channel not Active ──
 
     function test_submitPartialWithdrawal_reverts_channelNotActive() public {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
 
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
@@ -609,8 +612,10 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         // requestClose during challenge period → status becomes ClosePending
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
 
         // H-6 (audit 2026-08-28): a frozen-but-unsettled close still blocks the payout, because the

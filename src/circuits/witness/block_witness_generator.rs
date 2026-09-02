@@ -7,8 +7,7 @@ use crate::{
         validity::block_hash_chain::{
             block_hash_chain_processor::BlockHashChainProcessorWitness,
             channel_state_message::ChannelStateMessageFields,
-            ext_public_state::ExtendedPublicState,
-            update_channel_tree::channel_leaf_member_root,
+            ext_public_state::ExtendedPublicState, update_channel_tree::channel_leaf_member_root,
         },
     },
     common::{
@@ -1246,7 +1245,10 @@ impl BlockWitnessGenerator {
             let action_lens = (
                 witness.channel_action_indices.as_ref().map(|v| v.len()),
                 witness.channel_actions.as_ref().map(|v| v.len()),
-                witness.channel_action_merkle_proofs.as_ref().map(|v| v.len()),
+                witness
+                    .channel_action_merkle_proofs
+                    .as_ref()
+                    .map(|v| v.len()),
             );
             let n = Some(num_users as usize);
             if has_channel_action_slot && action_lens != (n, n, n) {
@@ -1258,7 +1260,8 @@ impl BlockWitnessGenerator {
                     action_lens.0, action_lens.1, action_lens.2,
                 )));
             }
-            if !has_channel_action_slot && action_lens != (None, None, None)
+            if !has_channel_action_slot
+                && action_lens != (None, None, None)
                 && action_lens != (n, n, n)
             {
                 return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
@@ -2016,13 +2019,15 @@ mod production_boundary_tests {
 /// `None` on every production path, `block_hash_chain_processor` substituted
 /// `ChannelAction::default()` (kind `InterChannelSend`), and `is_member_update` was identically
 /// false — §Q was reachable only from `update_channel_tree`'s own unit tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "deprecated-msu"))]
 mod member_set_update_production_path_tests {
     use super::*;
-    use crate::circuits::validity::block_hash_chain::update_channel_tree::validate_member_set_delta;
-    use crate::common::tx::ChannelActionKind;
-    use crate::wallet_core::{
-        canonical_member_set_update_action_index, canonical_member_set_update_block,
+    use crate::{
+        circuits::validity::block_hash_chain::update_channel_tree::validate_member_set_delta,
+        common::tx::ChannelActionKind,
+        wallet_core::{
+            canonical_member_set_update_action_index, canonical_member_set_update_block,
+        },
     };
 
     const CHANNEL: u32 = 63;

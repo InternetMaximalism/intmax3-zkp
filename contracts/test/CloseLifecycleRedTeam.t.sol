@@ -180,8 +180,10 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         uint256 roundsEveSurvived = 0;
 
         for (uint256 i = 0; i < ROUNDS; i++) {
+            uint64 freezeNonce = manager.currentCloseFreezeNonce();
+            uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
             vm.prank(alice);
-            manager.requestClose();
+            manager.requestClose(freezeNonce, cancellationFloor);
             vm.warp(block.timestamp + GRACE);
             manager.submitCloseIntent(honestIntent, _closeProof(honestIntent));
 
@@ -224,7 +226,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // property the round-1 "minimum close state version" latch could NOT have provided.
         assertTrue(manager.getPendingClose().active, "alice's close survived the failed cancel");
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(
             uint8(manager.channelStatus()),
             uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
@@ -320,8 +322,10 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             "BLOCKED: the rung at the horizon is NOT zero-length; it carries a full response window"
         );
         // Same-block finalization — the whole point of the attack — is refused.
+        bytes32 guardedDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 guardedGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(guardedDigest, guardedGeneration);
 
         // And the reply is genuinely available for that whole interval: `cancelClose` needs the
         // identical material a replacement would and has no window bound.
@@ -372,8 +376,10 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             "the rung still carries a full MIN_CLOSE_RESPONSE_SECS"
         );
         // Same-block finalization — the whole point of the attack — is refused.
+        bytes32 guardedDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 guardedGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(guardedDigest, guardedGeneration);
 
         // R3-2: one second later a replacement IS admitted — round 2 refused it, and that refusal
         // was the blackout. It too carries a full response window.
@@ -401,14 +407,16 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // Strict deadline ownership adds exactly one timestamp so replacement and finalization
         // cannot both win at equality. After it, admission is permanently closed.
         vm.warp(uint256(manager.getPendingClose().challengeDeadline));
+        guardedDigest = manager.getPendingClose().closeIntentDigest;
+        guardedGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(guardedDigest, guardedGeneration);
         vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
         ChannelSettlementManager.CloseIntent memory afterEnd = _intentAt(9, 15);
         MleVerifier.MleProof memory afterEndProof = _closeProof(afterEnd);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(afterEnd, afterEndProof);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertLe(
             vm.getBlockTimestamp(),
             uint256(horizon) + minResponse + 1,
@@ -463,7 +471,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 12);
         manager.submitCloseIntent(stale, _closeProof(stale));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
         assertEq(
             uint8(manager.channelStatus()),
@@ -545,7 +553,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         manager.submitCloseIntent(intent, _closeProof(intent));
         bytes32 digest = manager.computeCloseIntentDigest(intent);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.currentCloseFreezeNonce(), 1, "settled era is NOT unwound");
 
         ChannelSettlementManager.CancelCloseRequest memory late = _cancelRequest(digest, 12);
@@ -651,7 +659,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 29);
         manager.submitCloseIntent(stale, _closeProof(stale));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalSupersededByClose.selector);
         manager.finalizePartialWithdrawal();
@@ -669,8 +677,10 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         _submitPwAndElapse(9, 12);
 
         for (uint64 i = 0; i < 3; i++) {
+            uint64 freezeNonce = manager.currentCloseFreezeNonce();
+            uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
             vm.prank(bob);
-            manager.requestClose();
+            manager.requestClose(freezeNonce, cancellationFloor);
             vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCloseInProgress.selector);
             manager.finalizePartialWithdrawal();
             assertTrue(manager.partialWithdrawalPending(), "the burn is deferred, not destroyed");
@@ -825,13 +835,15 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         assertEq(manager.highestCancelledRevivedStateVersion(), 9_999, "floor is maximal");
 
         // Alice, holding only v20 — far BELOW the floor — still closes and exits.
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory honest = _intentAt(9, 20);
         manager.submitCloseIntent(honest, _closeProof(honest));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
         assertEq(
             uint8(manager.channelStatus()),

@@ -1142,8 +1142,8 @@ mod tests {
         }
     }
 
-    /// Measurement (the deliverable): build + prove times for N = 2 and N = MAX_SIG_CLUSTER in the ONE flat
-    /// circuit, to compare against the tree's leaf/level chain. Run with --nocapture.
+    /// Measurement (the deliverable): build + prove times for N = 2 and N = MAX_SIG_CLUSTER in the
+    /// ONE flat circuit, to compare against the tree's leaf/level chain. Run with --nocapture.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn batch_measure() {

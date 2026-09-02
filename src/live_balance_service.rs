@@ -22,19 +22,16 @@ use plonky2::plonk::proof::ProofWithPublicInputs;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    block_producer::ProductionDepositRequest,
+    block_producer::{ProductionBlockProducer, ProductionDepositRequest},
     block_producer_service::{
-        BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
+        BlockProducerAnchor, BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
     },
     circuits::{
         balance::{
-            balance_pis::BalanceFullPublicInputs, balance_processor::BalanceProcessor,
+            balance_pis::BalanceFullPublicInputs,
+            balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id,
             spend_circuit::{SpendCircuit, SpendPublicInputs},
-        },
-        witness::balance_witness_generator::{
-            BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
-            SingleWithdrawalData,
         },
         withdraw::{
             single_withdrawal_circuit::{
@@ -44,6 +41,14 @@ use crate::{
             withdrawal_processor::WithdrawalProcessor,
             withdrawal_step::WithdrawalStepWitness,
         },
+        witness::balance_witness_generator::{
+            BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
+            SingleWithdrawalData,
+        },
+    },
+    close_funding::{
+        CloseFundingPlan, CloseFundingProposal, build_close_funding_proposal,
+        verify_close_funding_proposal,
     },
     common::{
         balance_state::settled_tx_chain_push,
@@ -56,8 +61,12 @@ use crate::{
         withdrawal::Withdrawal,
     },
     constants::BURN_CHANNEL_ID,
-    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
-    partial_withdrawal_payout::{PartialWithdrawalProofArtifacts, PartialWithdrawalProofMetrics},
+    ethereum_types::{
+        address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
+    },
+    partial_withdrawal_payout::{
+        PartialWithdrawalLane, PartialWithdrawalProofArtifacts, PartialWithdrawalProofMetrics,
+    },
     utils::{
         conversion::ToU64 as _,
         mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
@@ -78,7 +87,9 @@ const SNAPSHOT_MAGIC: &[u8; 16] = b"IMLIVEBALANCE001";
 // from the POST-send head proof to the PRE-send proof a ReceiveTransfer can actually connect
 // (receive_transfer_circuit.rs:263). v1 journals stored a proof that could never serve a
 // receive, so they are rejected fail-closed by version rather than by a confusing serde error.
-pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 2;
+// v3: terminal close-funding material is persisted in the same atomic snapshot as its spent base
+// nonce. Version 2 is read and migrated in-memory with `terminal_close_funding = None`.
+pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 3;
 const SNAPSHOT_HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_APPLIED_TRANSITIONS: usize = 1_000_000;
@@ -151,6 +162,8 @@ pub struct LiveBalanceStatus {
     pub signed_head_digest: Option<Bytes32>,
     pub applied_transition_count: usize,
     pub awaiting_channel_binding: bool,
+    pub terminal_close_funding: bool,
+    pub close_funding_plan_digest: Option<Bytes32>,
 }
 
 /// Public response from the production initializer. The two salts and every private tree remain
@@ -188,6 +201,10 @@ pub struct LiveBaseHeadArtifact {
 pub struct BurnWithdrawalProof {
     pub withdrawal: Withdrawal,
     pub withdrawal_prover: Address,
+    /// Exact authenticated producer state used by the final withdrawal proof. A burn may be
+    /// proved after unrelated channels have advanced, so this can be a strict descendant of the
+    /// burn's own admission receipt.
+    pub proof_anchor: BlockProducerAnchor,
     pub proof: plonky2::plonk::proof::ProofWithPublicInputs<F, C, D>,
     pub withdrawal_vd: plonky2::plonk::circuit_data::VerifierCircuitData<F, C, D>,
     /// Serialized byte length of the intermediate single-withdrawal proof, captured before it is
@@ -223,6 +240,30 @@ pub struct LiveInterChannelSendArtifact {
     pub spend_proof: Vec<u8>,
 }
 
+/// One on-chain payout lane for terminal close funding. Native ETH and all ERC-20 leaves use
+/// separate withdrawal chains because the rollup entry points reject mixed asset classes. Thus a
+/// channel emits at most two final proofs regardless of its token count; existing circuit/VK and
+/// proof shapes remain unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseFundingLaneArtifacts {
+    pub lane: PartialWithdrawalLane,
+    pub withdrawals: Vec<Withdrawal>,
+    pub withdrawal_prover: Address,
+    pub payout_json: String,
+    pub withdrawal_mle_json: String,
+    pub producer_anchor: BlockProducerAnchor,
+    pub metrics: PartialWithdrawalProofMetrics,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseFundingPayoutArtifacts {
+    pub plan_digest: Bytes32,
+    pub funding_aux_data: Bytes32,
+    pub lanes: Vec<CloseFundingLaneArtifacts>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppliedTransition {
@@ -253,6 +294,14 @@ struct StoredInterChannelSendMaterial {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StoredCloseFundingMaterial {
+    request_id: String,
+    previous_head: ChannelState,
+    plan: CloseFundingPlan,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LiveBalanceSnapshot {
     channel_id: ChannelId,
     balance_generation: u64,
@@ -271,6 +320,45 @@ struct LiveBalanceSnapshot {
     /// until `bind_signed_snapshot` succeeds so a crash between prove and bind is recoverable.
     pending_deposit_salt: Option<Salt>,
     applied: Vec<AppliedTransition>,
+    /// Once present, the base collateral has been spent to the immutable Manager. Every later
+    /// balance/channel mutation is refused; only proof export and the ordinary close flow remain.
+    terminal_close_funding: Option<StoredCloseFundingMaterial>,
+}
+
+/// Exact v2 payload layout, retained only for a one-way, proof-verified migration to v3.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveBalanceSnapshotV2 {
+    channel_id: ChannelId,
+    balance_generation: u64,
+    balance_proof: Vec<u8>,
+    full_private_state: FullPrivateState,
+    base_nonce: u32,
+    channel_record: Option<ChannelRecord>,
+    channel_members: Option<Vec<MemberInfo>>,
+    signed_head: Option<ChannelState>,
+    awaiting_channel_binding: bool,
+    pending_deposit_salt: Option<Salt>,
+    applied: Vec<AppliedTransition>,
+}
+
+impl From<LiveBalanceSnapshotV2> for LiveBalanceSnapshot {
+    fn from(old: LiveBalanceSnapshotV2) -> Self {
+        Self {
+            channel_id: old.channel_id,
+            balance_generation: old.balance_generation,
+            balance_proof: old.balance_proof,
+            full_private_state: old.full_private_state,
+            base_nonce: old.base_nonce,
+            channel_record: old.channel_record,
+            channel_members: old.channel_members,
+            signed_head: old.signed_head,
+            awaiting_channel_binding: old.awaiting_channel_binding,
+            pending_deposit_salt: old.pending_deposit_salt,
+            applied: old.applied,
+            terminal_close_funding: None,
+        }
+    }
 }
 
 /// A live service owns one snapshot lock and one in-memory circuit set for its whole lifetime.
@@ -351,6 +439,7 @@ impl LiveBalanceService {
             awaiting_channel_binding: false,
             pending_deposit_salt,
             applied: Vec::new(),
+            terminal_close_funding: None,
         };
         verify_snapshot_semantics(&disk, &spend, &balance, None)?;
         persist_snapshot(&snapshot_path, &disk)?;
@@ -411,6 +500,12 @@ impl LiveBalanceService {
             signed_head_digest: self.disk.signed_head.as_ref().map(|state| state.digest),
             applied_transition_count: self.disk.applied.len(),
             awaiting_channel_binding: self.disk.awaiting_channel_binding,
+            terminal_close_funding: self.disk.terminal_close_funding.is_some(),
+            close_funding_plan_digest: self
+                .disk
+                .terminal_close_funding
+                .as_ref()
+                .map(|material| material.plan.plan_digest),
         })
     }
 
@@ -438,6 +533,7 @@ impl LiveBalanceService {
     /// the derived public recipient is returned; its salt stays inside this service.
     pub fn prepare_deposit_recipient(&mut self) -> Result<Bytes32, LiveBalanceServiceError> {
         self.ensure_healthy()?;
+        self.ensure_not_terminal()?;
         if self.disk.awaiting_channel_binding {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "finish binding the current deposit before allocating another recipient".into(),
@@ -481,6 +577,12 @@ impl LiveBalanceService {
         &self,
     ) -> Result<LiveChannelBackingArtifact, LiveBalanceServiceError> {
         self.ensure_healthy()?;
+        if self.disk.awaiting_channel_binding {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "the newest live balance transition is not yet bound to an N-of-N channel head"
+                    .into(),
+            ));
+        }
         let record = self.disk.channel_record.clone().ok_or_else(|| {
             LiveBalanceServiceError::InvalidRequest(
                 "live balance proof is not yet bound to an N-of-N channel snapshot".into(),
@@ -506,6 +608,42 @@ impl LiveBalanceService {
         })
     }
 
+    /// Construct the one canonical terminal child that pays the complete live asset vector to
+    /// `manager`. This is read-only; members sign `proposed_state` through the existing detached
+    /// N-of-N flow before the producer accepts it.
+    pub fn prepare_close_funding(
+        &self,
+        chain_id: u64,
+        rollup: Address,
+        manager: Address,
+    ) -> Result<CloseFundingProposal, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        self.ensure_not_terminal()?;
+        if self.disk.awaiting_channel_binding {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "bind the pending deposit before preparing terminal close funding".into(),
+            ));
+        }
+        let record = self.disk.channel_record.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(
+                "live balance has no pinned channel record".into(),
+            )
+        })?;
+        let head = self.disk.signed_head.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(
+                "live balance has no pinned N-of-N channel head".into(),
+            )
+        })?;
+        verify_all_signatures(record, &[], head).map_err(|e| {
+            LiveBalanceServiceError::InvalidRequest(format!(
+                "current close-funding source head is not N-of-N signed: {e}"
+            ))
+        })?;
+        verify_close_asset_vector(&self.disk, head)?;
+        build_close_funding_proposal(head, chain_id, rollup, manager, self.disk.base_nonce)
+            .map_err(|e| LiveBalanceServiceError::InvalidRequest(e.to_string()))
+    }
+
     /// Recover the crash-durable public proof bundle for any accepted source send. Destination
     /// settlement may lag later source sends, so this looks up the exact request rather than
     /// exporting only the current head.
@@ -514,6 +652,16 @@ impl LiveBalanceService {
         producer_request_id: &str,
     ) -> Result<LiveInterChannelSendArtifact, LiveBalanceServiceError> {
         self.ensure_healthy()?;
+        if self
+            .disk
+            .terminal_close_funding
+            .as_ref()
+            .is_some_and(|material| material.request_id == producer_request_id)
+        {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "terminal close funding is not an inter-channel receive artifact".into(),
+            ));
+        }
         let entry = self
             .disk
             .applied
@@ -555,9 +703,8 @@ impl LiveBalanceService {
         )
         .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend proof: {e}")))?;
         let stored_spend_pis =
-            SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
-                |e| LiveBalanceServiceError::Snapshot(format!("stored spend pis: {e}")),
-            )?;
+            SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
+                .map_err(|e| LiveBalanceServiceError::Snapshot(format!("stored spend pis: {e}")))?;
         self.spend
             .data
             .verify(spend_proof)
@@ -648,6 +795,7 @@ impl LiveBalanceService {
             verify_deposit_receipt(producer, producer_receipt, request)?;
             return Ok(receipt);
         }
+        self.ensure_not_terminal()?;
         if self.disk.awaiting_channel_binding {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "bind the pending deposit proof to an N-of-N channel snapshot before another transition"
@@ -726,6 +874,24 @@ impl LiveBalanceService {
         producer_receipt: &BlockProducerReceipt,
         request: &ProductionDepositRequest,
     ) -> Result<LiveBalanceReceipt, LiveBalanceServiceError> {
+        // Crash recovery may replay this command after phase 2 already cleared the one-time salt.
+        // The producer journal authenticates the exact request; an already-applied entry with the
+        // same exact receipt is therefore safe to return without reconstructing the retired salt.
+        if let Some(applied) = self
+            .disk
+            .applied
+            .iter()
+            .find(|entry| entry.request_id == producer_receipt.request_id)
+        {
+            verify_deposit_receipt(producer, producer_receipt, request)?;
+            if applied.producer_receipt != *producer_receipt {
+                return Err(LiveBalanceServiceError::ProducerReconciliation(
+                    "replayed configured deposit receipt differs from the durable live entry"
+                        .into(),
+                ));
+            }
+            return Ok(applied.result.clone());
+        }
         let salt = self.disk.pending_deposit_salt.ok_or_else(|| {
             LiveBalanceServiceError::InvalidRequest(
                 "no configured deposit recipient is pending for this live balance".into(),
@@ -734,14 +900,20 @@ impl LiveBalanceService {
         self.receive_deposit_unbound(producer, producer_receipt, request, salt)
     }
 
-    /// Phase 2 of deposit adoption: bind the already durable balance proof to the exact N-of-N
-    /// channel snapshot members subsequently created. This phase makes no balance proof and is
-    /// safe to retry after a crash.
+    /// Bind the durable balance proof to an exact N-of-N channel snapshot.
+    ///
+    /// The first call completes deposit adoption. Later calls may advance only one ordinary
+    /// `h2_tag == 0` off-chain child whose settled base chain is unchanged. This keeps the public
+    /// backing projection current after intra-channel sends/refreshes without reproving the base
+    /// account, while exact predecessor/counter checks prevent a higher-version sibling from
+    /// replacing an already archived head. Base-moving H2 transitions use their dedicated
+    /// `settle_*` methods and remain forbidden here.
     pub fn bind_signed_snapshot(
         &mut self,
         signed_snapshot: &ChannelSnapshot,
     ) -> Result<(), LiveBalanceServiceError> {
         self.ensure_healthy()?;
+        self.ensure_not_terminal()?;
         verify_snapshot(signed_snapshot, None).map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!(
                 "deposit-backed channel snapshot is not fully valid/N-of-N signed: {e}"
@@ -756,7 +928,7 @@ impl LiveBalanceService {
         }
         if signed_snapshot.state.h2_tag != Bytes32::default() {
             return Err(LiveBalanceServiceError::InvalidRequest(
-                "an L1 deposit receive head must have h2_tag == 0".to_string(),
+                "a generic signed-snapshot bind requires h2_tag == 0".to_string(),
             ));
         }
         let proof = decode_balance_proof(&self.disk, &self.balance)?;
@@ -778,9 +950,79 @@ impl LiveBalanceService {
             {
                 return Ok(());
             }
-            return Err(LiveBalanceServiceError::InvalidRequest(
-                "there is no unbound deposit transition to attach to this snapshot".into(),
-            ));
+            if self.disk.channel_record.is_none()
+                && self.disk.channel_members.is_none()
+                && self.disk.signed_head.is_none()
+            {
+                // A zero-funded channel has no deposit transition to put the service into
+                // `awaiting_channel_binding`, but its genesis N-of-N head is still safe to attach:
+                // the exact asset-vector check below rejects any locally claimed unbacked value.
+                verify_close_asset_vector(&self.disk, &signed_snapshot.state)?;
+                let mut candidate = self.disk.clone();
+                candidate.channel_record = Some(signed_snapshot.record.clone());
+                candidate.channel_members = Some(signed_snapshot.members.clone());
+                candidate.signed_head = Some(signed_snapshot.state.clone());
+                verify_snapshot_semantics(&candidate, &self.spend, &self.balance, None)?;
+                return self.commit(candidate);
+            }
+            let previous = self.disk.signed_head.as_ref().ok_or_else(|| {
+                LiveBalanceServiceError::Snapshot(
+                    "bound live balance has no previous signed head".into(),
+                )
+            })?;
+            if self
+                .disk
+                .channel_record
+                .as_ref()
+                .map(ChannelRecord::signing_digest)
+                != Some(signed_snapshot.record.signing_digest())
+            {
+                return Err(LiveBalanceServiceError::InvalidRequest(
+                    "channel record changed during ordinary signed-head advancement".into(),
+                ));
+            }
+            if signed_snapshot.state.prev_digest != previous.digest
+                || signed_snapshot.state.close_freeze_nonce != previous.close_freeze_nonce
+                || signed_snapshot.state.epoch != previous.epoch.checked_add(1).ok_or_else(|| {
+                    LiveBalanceServiceError::InvalidRequest("channel epoch overflow".into())
+                })?
+                || signed_snapshot.state.balance_state.state_version
+                    != previous
+                        .balance_state
+                        .state_version
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            LiveBalanceServiceError::InvalidRequest(
+                                "balance-state version overflow".into(),
+                            )
+                        })?
+                // Header-only and intra-channel transitions do not post a base small block.
+                // Allowing `+1` here would let an N-of-N H2=0 sibling impersonate an omitted
+                // base-moving transition and make the public backing cursor ambiguous.
+                || signed_snapshot.state.small_block_number != previous.small_block_number
+                // H2=0 transitions are off-chain redistribution/refresh/registry operations.
+                // They may never rewrite the base-backed fund/root/nullifier/import cursors.
+                || signed_snapshot.state.channel_fund != previous.channel_fund
+                || signed_snapshot.state.shared_native_nullifier_root
+                    != previous.shared_native_nullifier_root
+                || signed_snapshot.state.unallocated_confirmed_incoming
+                    != previous.unallocated_confirmed_incoming
+                || signed_snapshot.state.balance_state.settled_tx_chain
+                    != previous.balance_state.settled_tx_chain
+                || signed_snapshot.state.balance_state.settled_tx_accumulator_root
+                    != previous.balance_state.settled_tx_accumulator_root
+            {
+                return Err(LiveBalanceServiceError::InvalidRequest(
+                    "ordinary signed head skips, forks, rolls back, or changes close era".into(),
+                ));
+            }
+            verify_close_asset_vector(&self.disk, &signed_snapshot.state)?;
+            let mut candidate = self.disk.clone();
+            candidate.channel_record = Some(signed_snapshot.record.clone());
+            candidate.channel_members = Some(signed_snapshot.members.clone());
+            candidate.signed_head = Some(signed_snapshot.state.clone());
+            verify_snapshot_semantics(&candidate, &self.spend, &self.balance, None)?;
+            return self.commit(candidate);
         }
         verify_record_and_head_continuity(
             self.disk.channel_record.as_ref(),
@@ -828,6 +1070,7 @@ impl LiveBalanceService {
             )?;
             return Ok(receipt);
         }
+        self.ensure_not_terminal()?;
         if self.disk.awaiting_channel_binding {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "bind the pending deposit proof before settling a send".into(),
@@ -993,6 +1236,155 @@ impl LiveBalanceService {
         Ok(result)
     }
 
+    /// Settle the producer-admitted terminal close-funding transaction into the resident balance
+    /// IVC. The existing fixed-width Spend/SendTx circuits are reused: all nonzero token funds are
+    /// debited by one Spend proof, while transfer index 0 folds the shared IMCF aux value exactly
+    /// once into the signed settle chain.
+    pub fn settle_close_funding(
+        &mut self,
+        producer: &BlockProducerService,
+        producer_receipt: &BlockProducerReceipt,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+    ) -> Result<LiveBalanceReceipt, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = hash_serializable(&CloseFundingFingerprint {
+            domain: "INTMAX_LIVE_CLOSE_FUNDING_V1",
+            producer_receipt,
+            signed_state,
+            plan,
+        })?;
+        if let Some(receipt) = self.idempotent_result(&producer_receipt.request_id, fingerprint)? {
+            verify_close_funding_receipt(producer, producer_receipt, signed_state, plan)?;
+            return Ok(receipt);
+        }
+        self.ensure_not_terminal()?;
+        if self.disk.awaiting_channel_binding {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "bind the pending deposit before settling terminal close funding".into(),
+            ));
+        }
+        verify_close_funding_receipt(producer, producer_receipt, signed_state, plan)?;
+        self.require_new_producer_generation(producer_receipt)?;
+        verify_private_cursor(&self.disk)?;
+        if plan.source_channel_id != self.disk.channel_id || plan.base_nonce != self.disk.base_nonce
+        {
+            return Err(LiveBalanceServiceError::InvalidRequest(format!(
+                "close-funding channel/nonce ({}/{}) differs from live cursor ({}/{})",
+                plan.source_channel_id.as_u64(),
+                plan.base_nonce,
+                self.disk.channel_id.as_u64(),
+                self.disk.base_nonce
+            )));
+        }
+        let record = self.disk.channel_record.clone().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(
+                "live balance has no pinned channel record".into(),
+            )
+        })?;
+        let previous_head = self.disk.signed_head.clone().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(
+                "live balance has no pinned N-of-N channel head".into(),
+            )
+        })?;
+        verify_close_funding_proposal(&previous_head, signed_state, plan)
+            .map_err(|e| LiveBalanceServiceError::InvalidRequest(e.to_string()))?;
+        verify_all_signatures(&record, &[], signed_state).map_err(|e| {
+            LiveBalanceServiceError::InvalidRequest(format!(
+                "terminal close-funding head is not N-of-N signed: {e}"
+            ))
+        })?;
+        verify_record_and_head_continuity(
+            Some(&record),
+            Some(&previous_head),
+            &record,
+            signed_state,
+            false,
+        )?;
+        verify_close_asset_vector(&self.disk, &previous_head)?;
+
+        let mut transfer_tree = TransferTree::init();
+        for transfer in &plan.transfers {
+            transfer_tree.push(transfer.clone());
+        }
+        if transfer_tree.get_root() != plan.tx_v2.transfer_tree_root {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "close-funding transfer vector does not open the TxV2 transfer root".into(),
+            ));
+        }
+
+        let mut generator = self.generator(producer)?;
+        let spend_witness = generator.spend_witness(&plan.transfers).map_err(|e| {
+            LiveBalanceServiceError::Transition(format!("close spend witness: {e}"))
+        })?;
+        if spend_witness.tx_nonce != self.disk.base_nonce {
+            return Err(LiveBalanceServiceError::Transition(
+                "close spend witness nonce diverged from durable base cursor".into(),
+            ));
+        }
+        let spend_proof = self
+            .spend
+            .prove(&spend_witness)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("close spend proof: {e}")))?;
+        let tx = Tx {
+            transfer_tree_root: transfer_tree.get_root(),
+            nonce: self.disk.base_nonce,
+        };
+        let mut legacy_tx_tree = TxTree::init();
+        legacy_tx_tree.update(self.disk.channel_id.as_u64(), tx);
+        let send_data = SendTxData {
+            spend_proof: spend_proof.clone(),
+            tx_tree_root: plan.tx_tree_root,
+            tx,
+            tx_merkle_proof: legacy_tx_tree.prove(self.disk.channel_id.as_u64()),
+            tx_v2: Some(plan.tx_v2),
+            tx_v2_merkle_proof: Some(plan.tx_v2_merkle_proof.clone()),
+            transfer: plan.transfers[0].clone(),
+            transfer_merkle_proof: transfer_tree.prove(0),
+        };
+        let send_witness = generator
+            .send_tx_witness(&send_data)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("close send witness: {e}")))?;
+        let new_proof = self.balance.prove_send_tx(&send_witness).map_err(|e| {
+            LiveBalanceServiceError::Transition(format!("close send balance proof: {e}"))
+        })?;
+        generator
+            .commit_send_tx(&new_proof, &send_witness, &spend_witness)
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("commit close send: {e}")))?;
+
+        let mut candidate = self.disk.clone();
+        candidate.balance_generation =
+            candidate.balance_generation.checked_add(1).ok_or_else(|| {
+                LiveBalanceServiceError::Transition("balance generation overflow".into())
+            })?;
+        candidate.balance_proof = new_proof.to_bytes();
+        candidate.full_private_state = generator.full_private_state;
+        candidate.base_nonce = candidate.full_private_state.nonce;
+        candidate.signed_head = Some(signed_state.clone());
+        candidate.terminal_close_funding = Some(StoredCloseFundingMaterial {
+            request_id: producer_receipt.request_id.clone(),
+            previous_head,
+            plan: plan.clone(),
+        });
+        let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
+        candidate.applied.push(AppliedTransition {
+            request_id: producer_receipt.request_id.clone(),
+            request_fingerprint: fingerprint,
+            producer_receipt: producer_receipt.clone(),
+            result: result.clone(),
+            send_material: Some(StoredInterChannelSendMaterial {
+                balance_proof: self.disk.balance_proof.clone(),
+                spend_proof: spend_proof.to_bytes(),
+                settled_leaf: plan.funding_aux_data,
+                channel_record: record,
+                signed_head: signed_state.clone(),
+            }),
+        });
+        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
+        self.commit(candidate)?;
+        Ok(result)
+    }
+
     /// Settle the destination side of one producer-admitted channel-to-channel transfer. The
     /// source's durable balance+spend proofs and both N-of-N destination credit states are
     /// verified before the destination private asset/nullifier trees advance.
@@ -1028,6 +1420,7 @@ impl LiveBalanceService {
             )?;
             return Ok(receipt);
         }
+        self.ensure_not_terminal()?;
         if self.disk.awaiting_channel_binding {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "bind the pending deposit proof before receiving an inter-channel transfer".into(),
@@ -1299,7 +1692,12 @@ impl LiveBalanceService {
                 "producer request {producer_request_id:?} is not an inter-channel send"
             ))
         })?;
-        if descriptor.inter_channel_tx.destination_channel_id.channel_id() != BURN_CHANNEL_ID {
+        if descriptor
+            .inter_channel_tx
+            .destination_channel_id
+            .channel_id()
+            != BURN_CHANNEL_ID
+        {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "request is not a burn: the destination is not BURN_CHANNEL_ID".into(),
             ));
@@ -1329,10 +1727,10 @@ impl LiveBalanceService {
         self.spend.data.verify(spend_proof.clone()).map_err(|e| {
             LiveBalanceServiceError::Snapshot(format!("verify journaled burn spend proof: {e}"))
         })?;
-        let spend_pis =
-            SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
-                |e| LiveBalanceServiceError::Snapshot(format!("journaled burn spend pis: {e}")),
-            )?;
+        let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
+            .map_err(|e| {
+                LiveBalanceServiceError::Snapshot(format!("journaled burn spend pis: {e}"))
+            })?;
         let burn_nonce = spend_pis.tx.nonce;
 
         let mut transfer_tree = TransferTree::init();
@@ -1365,6 +1763,7 @@ impl LiveBalanceService {
         let tx_merkle_proof = tx_tree.prove(self.disk.channel_id.as_u64());
         let tx_v2_merkle_proof = canonical_tx_v2_tree.prove(self.disk.channel_id.as_u64());
 
+        let proof_anchor = producer.current_anchor()?;
         let generator = self.generator(producer)?;
         let single_withdrawal_data = SingleWithdrawalData {
             tx_tree_root,
@@ -1382,7 +1781,8 @@ impl LiveBalanceService {
                 LiveBalanceServiceError::Transition(format!("burn withdrawal witness: {e}"))
             })?;
 
-        let single_withdrawal_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
+        let single_withdrawal_circuit =
+            SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
         let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
         let single_proof = single_withdrawal_circuit.prove(&witness).map_err(|e| {
             LiveBalanceServiceError::Transition(format!("single withdrawal proof: {e}"))
@@ -1435,6 +1835,13 @@ impl LiveBalanceService {
             .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
             .borrow()
             .current_extended_public_state();
+        if ext_public_state.inner.block_number.as_u64() != proof_anchor.block_number
+            || ext_public_state.commitment() != proof_anchor.extended_state_commitment
+        {
+            return Err(LiveBalanceServiceError::ProducerReconciliation(
+                "current producer witness differs from its authenticated proof anchor".into(),
+            ));
+        }
         let final_proof = withdrawal_processor
             .prove_final(&chain_proof, withdrawal_prover, &ext_public_state)
             .map_err(|e| {
@@ -1450,6 +1857,7 @@ impl LiveBalanceService {
         Ok(BurnWithdrawalProof {
             withdrawal,
             withdrawal_prover,
+            proof_anchor,
             proof: final_proof,
             withdrawal_vd: withdrawal_processor.withdrawal_vd(),
             single_proof_bytes,
@@ -1506,13 +1914,6 @@ impl LiveBalanceService {
 
         // The payout descriptor, field for field what the forge step parses; every leaf value is
         // the PI-decoded one.
-        let ext_public_state = producer
-            .producer()
-            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
-            .witness_handle()
-            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
-            .borrow()
-            .current_extended_public_state();
         let payout_json = serde_json::to_string_pretty(&serde_json::json!({
             "withdrawals": [{
                 "recipient": proved.withdrawal.recipient.to_string(),
@@ -1522,32 +1923,18 @@ impl LiveBalanceService {
                 "aux_data": proved.withdrawal.aux_data.to_string(),
             }],
             "withdrawal_prover": proved.withdrawal_prover.to_string(),
-            "block_number": ext_public_state.inner.block_number.as_u64(),
-            "ext_commitment": ext_public_state.commitment().to_string(),
+            "block_number": proved.proof_anchor.block_number,
+            "ext_commitment": proved.proof_anchor.extended_state_commitment.to_string(),
         }))
         .map_err(|e| LiveBalanceServiceError::Transition(format!("payout json: {e}")))?;
 
         let mle_json_bytes = withdrawal_mle_json.len();
-        let receipt = &self
-            .disk
-            .applied
-            .iter()
-            .find(|entry| entry.request_id == producer_request_id)
-            .expect("entry existed above")
-            .producer_receipt;
         Ok(PartialWithdrawalProofArtifacts {
             withdrawal: proved.withdrawal,
             withdrawal_prover: proved.withdrawal_prover,
             payout_json,
             withdrawal_mle_json,
-            producer_anchor: crate::block_producer_service::BlockProducerAnchor {
-                generation: receipt.generation,
-                entry_hash: receipt.entry_hash,
-                block_number: receipt.block_number,
-                timestamp: receipt.timestamp,
-                extended_state_commitment: receipt.extended_state_commitment,
-                bp_sig_chain: receipt.bp_sig_chain,
-            },
+            producer_anchor: proved.proof_anchor,
             metrics: PartialWithdrawalProofMetrics {
                 single_withdrawal_millis: prove_millis,
                 withdrawal_chain_millis: 0,
@@ -1562,13 +1949,350 @@ impl LiveBalanceService {
         })
     }
 
+    /// Produce the complete proof-backed funding set for a terminal channel close. The transfer
+    /// vector was already spent by [`Self::settle_close_funding`]; this method only extracts those
+    /// exact settled leaves from the live history. It emits one native chain and one ERC-20 chain
+    /// at most, keeping final proof count and on-chain proof size independent of token count.
+    pub fn close_funding_payout_artifacts(
+        &self,
+        producer: &BlockProducerService,
+        producer_request_id: &str,
+        withdrawal_prover: Address,
+    ) -> Result<CloseFundingPayoutArtifacts, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        let terminal = self.disk.terminal_close_funding.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::InvalidRequest(
+                "live balance has not settled terminal close funding".into(),
+            )
+        })?;
+        if terminal.request_id != producer_request_id {
+            return Err(LiveBalanceServiceError::InvalidRequest(format!(
+                "terminal close funding is request {:?}, not {producer_request_id:?}",
+                terminal.request_id
+            )));
+        }
+        let entry = self
+            .disk
+            .applied
+            .iter()
+            .find(|entry| entry.request_id == producer_request_id)
+            .ok_or_else(|| {
+                LiveBalanceServiceError::Snapshot(
+                    "terminal close-funding request is absent from the applied journal".into(),
+                )
+            })?;
+        let send_material = entry.send_material.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "terminal close-funding request has no settled spend material".into(),
+            )
+        })?;
+        let signed_head = self.disk.signed_head.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot("terminal close-funding head is missing".into())
+        })?;
+        verify_close_funding_receipt(
+            producer,
+            &entry.producer_receipt,
+            signed_head,
+            &terminal.plan,
+        )?;
+        verify_close_funding_proposal(&terminal.previous_head, signed_head, &terminal.plan)
+            .map_err(|e| LiveBalanceServiceError::Snapshot(e.to_string()))?;
+
+        let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
+            send_material.spend_proof.clone(),
+            &self.spend.data.common,
+        )
+        .map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("decode terminal close spend proof: {e}"))
+        })?;
+        self.spend.data.verify(spend_proof.clone()).map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("verify terminal close spend proof: {e}"))
+        })?;
+        let spend_pis = SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec())
+            .map_err(|e| {
+                LiveBalanceServiceError::Snapshot(format!("terminal close spend PIs: {e}"))
+            })?;
+        if !spend_pis.is_valid || spend_pis.tx.nonce != terminal.plan.base_nonce {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close spend is invalid or has the wrong base nonce".into(),
+            ));
+        }
+
+        let mut transfer_tree = TransferTree::init();
+        for transfer in &terminal.plan.transfers {
+            transfer_tree.push(transfer.clone());
+        }
+        let transfer_tree_root = transfer_tree.get_root();
+        if transfer_tree_root != spend_pis.tx.transfer_tree_root
+            || transfer_tree_root != terminal.plan.tx_v2.transfer_tree_root
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close transfer vector diverges from its proved Spend/TxV2 roots".into(),
+            ));
+        }
+        let tx = Tx {
+            transfer_tree_root,
+            nonce: terminal.plan.base_nonce,
+        };
+        let mut legacy_tx_tree = TxTree::init();
+        legacy_tx_tree.update(self.disk.channel_id.as_u64(), tx);
+
+        let producer_anchor = BlockProducerAnchor {
+            generation: entry.producer_receipt.generation,
+            entry_hash: entry.producer_receipt.entry_hash,
+            block_number: entry.producer_receipt.block_number,
+            timestamp: entry.producer_receipt.timestamp,
+            extended_state_commitment: entry.producer_receipt.extended_state_commitment,
+            bp_sig_chain: entry.producer_receipt.bp_sig_chain,
+        };
+        let proof_producer = producer.producer_at_anchor(&producer_anchor)?;
+        let generator = self.generator_from_producer(&proof_producer)?;
+        let single_circuit = SingleWithdawalCircuit::<F, C, D>::new(&self.balance.balance_vd());
+        let single_vd = single_circuit.data.verifier_data();
+        let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_vd);
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
+        let mle_vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let ext_public_state = proof_producer
+            .witness_handle()
+            .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
+            .borrow()
+            .current_extended_public_state();
+
+        let native_indices: Vec<usize> = terminal
+            .plan
+            .transfers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transfer)| (transfer.token_index == 0).then_some(index))
+            .collect();
+        let erc20_indices: Vec<usize> = terminal
+            .plan
+            .transfers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transfer)| (transfer.token_index != 0).then_some(index))
+            .collect();
+        let mut lanes = Vec::with_capacity(2);
+
+        for (lane, indices) in [
+            (PartialWithdrawalLane::Native, native_indices),
+            (PartialWithdrawalLane::Erc20, erc20_indices),
+        ] {
+            if indices.is_empty() {
+                continue;
+            }
+            let mut withdrawals = Vec::with_capacity(indices.len());
+            let mut chain_proof = None;
+            let mut withdrawal_hash = Bytes32::default();
+            let mut single_millis = 0u64;
+            let mut chain_millis = 0u64;
+            let mut single_proof_bytes = 0usize;
+
+            for index in indices {
+                let transfer = terminal.plan.transfers[index].clone();
+                let data = SingleWithdrawalData {
+                    tx_tree_root: terminal.plan.tx_tree_root,
+                    tx,
+                    tx_merkle_proof: legacy_tx_tree.prove(self.disk.channel_id.as_u64()),
+                    tx_v2: Some(terminal.plan.tx_v2),
+                    tx_v2_merkle_proof: Some(terminal.plan.tx_v2_merkle_proof.clone()),
+                    transfer: transfer.clone(),
+                    transfer_index: index as u32,
+                    transfer_merkle_proof: transfer_tree.prove(index as u64),
+                };
+                let witness = generator.single_withdrawal_witness(&data).map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "close single-withdrawal witness[{index}]: {e}"
+                    ))
+                })?;
+                let started = std::time::Instant::now();
+                let single_proof = single_circuit.prove(&witness).map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "close single-withdrawal proof[{index}]: {e}"
+                    ))
+                })?;
+                single_millis = single_millis.saturating_add(started.elapsed().as_millis() as u64);
+                single_circuit
+                    .data
+                    .verify(single_proof.clone())
+                    .map_err(|e| {
+                        LiveBalanceServiceError::Transition(format!(
+                            "verify close single-withdrawal[{index}]: {e}"
+                        ))
+                    })?;
+                single_proof_bytes =
+                    single_proof_bytes.saturating_add(single_proof.to_bytes().len());
+                let single_pis = SingleWithdawalPublicInputs::from_u64_slice(
+                    &single_proof.public_inputs[..SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN].to_u64_vec(),
+                )
+                .map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "close single-withdrawal PIs[{index}]: {e}"
+                    ))
+                })?;
+                let withdrawal = single_pis.withdrawal;
+                if withdrawal.recipient != terminal.plan.manager
+                    || withdrawal.token_index != transfer.token_index
+                    || withdrawal.amount != transfer.amount
+                    || withdrawal.aux_data != terminal.plan.funding_aux_data
+                {
+                    return Err(LiveBalanceServiceError::Transition(format!(
+                        "PI-decoded close withdrawal[{index}] differs from the signed funding plan"
+                    )));
+                }
+                withdrawal_hash = withdrawal.hash_with_prev_hash(withdrawal_hash);
+                withdrawals.push(withdrawal);
+
+                let started = std::time::Instant::now();
+                let next_chain = withdrawal_processor
+                    .prove_step(&WithdrawalStepWitness::<F, C, D> {
+                        prev_withdrawal_chain_proof: chain_proof,
+                        single_withdrawal_proof: single_proof,
+                        update_public_state: witness.update_public_state,
+                    })
+                    .map_err(|e| {
+                        LiveBalanceServiceError::Transition(format!(
+                            "close withdrawal-chain step[{index}]: {e}"
+                        ))
+                    })?;
+                chain_millis = chain_millis.saturating_add(started.elapsed().as_millis() as u64);
+                withdrawal_processor
+                    .withdrawal_chain_vd()
+                    .verify(next_chain.clone())
+                    .map_err(|e| {
+                        LiveBalanceServiceError::Transition(format!(
+                            "verify close withdrawal-chain step[{index}]: {e}"
+                        ))
+                    })?;
+                chain_proof = Some(next_chain);
+            }
+
+            let chain_proof = chain_proof.expect("nonempty lane creates a chain proof");
+            let proof_hash = Bytes32::from_u64_slice(&chain_proof.public_inputs.to_u64_vec()[0..8])
+                .map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "close withdrawal-chain hash limbs: {e}"
+                    ))
+                })?;
+            if proof_hash != withdrawal_hash {
+                return Err(LiveBalanceServiceError::Transition(
+                    "close withdrawal chain does not re-fold to its PI-decoded leaves".into(),
+                ));
+            }
+            let chain_proof_bytes = chain_proof.to_bytes().len();
+            let started = std::time::Instant::now();
+            let final_proof = withdrawal_processor
+                .prove_final(&chain_proof, withdrawal_prover, &ext_public_state)
+                .map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "close final withdrawal proof: {e}"
+                    ))
+                })?;
+            let final_millis = started.elapsed().as_millis() as u64;
+            withdrawal_processor
+                .withdrawal_vd()
+                .verify(final_proof.clone())
+                .map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!(
+                        "verify close final withdrawal proof: {e}"
+                    ))
+                })?;
+            let final_proof_bytes = final_proof.to_bytes().len();
+
+            let started = std::time::Instant::now();
+            let wrapped = wrapper.prove(&final_proof).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("wrap close withdrawal proof: {e}"))
+            })?;
+            wrapper.data.verify(wrapped).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!(
+                    "verify wrapped close withdrawal proof: {e}"
+                ))
+            })?;
+            let mut pw = plonky2::iop::witness::PartialWitness::new();
+            plonky2::iop::witness::WitnessWrite::set_proof_with_pis_target(
+                &mut pw,
+                &wrapper.wrap_proof,
+                &final_proof,
+            )
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("close MLE witness: {e}")))?;
+            let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("close MLE prove: {e}"))
+            })?;
+            verify_mle_proof(&wrapper.data, &mle_vk, &mle.proof).map_err(|e| {
+                LiveBalanceServiceError::Transition(format!("close MLE verify: {e}"))
+            })?;
+            let withdrawal_mle_json =
+                export_mle_json(&mle.proof, &wrapper.data.common).map_err(|e| {
+                    LiveBalanceServiceError::Transition(format!("close MLE export: {e}"))
+                })?;
+            let wrap_mle_millis = started.elapsed().as_millis() as u64;
+
+            let json_withdrawals: Vec<_> = withdrawals
+                .iter()
+                .map(|withdrawal| {
+                    serde_json::json!({
+                        "recipient": withdrawal.recipient.to_string(),
+                        "token_index": withdrawal.token_index,
+                        "amount": withdrawal.amount.to_string(),
+                        "nullifier": withdrawal.nullifier.to_string(),
+                        "aux_data": withdrawal.aux_data.to_string(),
+                    })
+                })
+                .collect();
+            let payout_json = serde_json::to_string_pretty(&serde_json::json!({
+                "withdrawals": json_withdrawals,
+                "withdrawal_prover": withdrawal_prover.to_string(),
+                "block_number": ext_public_state.inner.block_number.as_u64(),
+                "ext_commitment": ext_public_state.commitment().to_string(),
+            }))
+            .map_err(|e| LiveBalanceServiceError::Transition(format!("close payout json: {e}")))?;
+            let mle_json_bytes = withdrawal_mle_json.len();
+            lanes.push(CloseFundingLaneArtifacts {
+                lane,
+                withdrawals,
+                withdrawal_prover,
+                payout_json,
+                withdrawal_mle_json,
+                producer_anchor: producer_anchor.clone(),
+                metrics: PartialWithdrawalProofMetrics {
+                    single_withdrawal_millis: single_millis,
+                    withdrawal_chain_millis: chain_millis,
+                    withdrawal_final_millis: final_millis,
+                    wrap_mle_millis,
+                    single_withdrawal_proof_bytes: single_proof_bytes,
+                    withdrawal_chain_proof_bytes: chain_proof_bytes,
+                    withdrawal_final_proof_bytes: final_proof_bytes,
+                    mle_json_bytes,
+                    peak_rss_bytes: None,
+                },
+            });
+        }
+
+        if lanes.is_empty() || lanes.len() > 2 {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close-funding plan produced no payout lane or more than two lanes".into(),
+            ));
+        }
+        Ok(CloseFundingPayoutArtifacts {
+            plan_digest: terminal.plan.plan_digest,
+            funding_aux_data: terminal.plan.funding_aux_data,
+            lanes,
+        })
+    }
+
     fn generator(
         &self,
         producer: &BlockProducerService,
     ) -> Result<BalanceWitnessGenerator<F, C, D>, LiveBalanceServiceError> {
+        self.generator_from_producer(producer.producer()?)
+    }
+
+    fn generator_from_producer(
+        &self,
+        producer: &ProductionBlockProducer,
+    ) -> Result<BalanceWitnessGenerator<F, C, D>, LiveBalanceServiceError> {
         let proof = decode_balance_proof(&self.disk, &self.balance)?;
         let handle = producer
-            .producer()?
             .witness_handle()
             .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?;
         Ok(BalanceWitnessGenerator {
@@ -1639,6 +2363,17 @@ impl LiveBalanceService {
             Ok(())
         }
     }
+
+    fn ensure_not_terminal(&self) -> Result<(), LiveBalanceServiceError> {
+        if let Some(material) = &self.disk.terminal_close_funding {
+            Err(LiveBalanceServiceError::InvalidRequest(format!(
+                "channel is terminal after close-funding request {:?}; only proof export and close are permitted",
+                material.request_id
+            )))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1656,6 +2391,14 @@ struct SendFingerprint<'a> {
     signed_state: &'a ChannelState,
     debit_payload: &'a InterChannelDebitPayload,
     descriptor: &'a InterChannelTransferDescriptor,
+}
+
+#[derive(Serialize)]
+struct CloseFundingFingerprint<'a> {
+    domain: &'static str,
+    producer_receipt: &'a BlockProducerReceipt,
+    signed_state: &'a ChannelState,
+    plan: &'a CloseFundingPlan,
 }
 
 #[derive(Serialize)]
@@ -1707,6 +2450,51 @@ fn verify_inter_channel_receipt(
             ))
         })?;
     verify_exact_receipt(producer, receipt, &canonical)
+}
+
+fn verify_close_funding_receipt(
+    producer: &BlockProducerService,
+    receipt: &BlockProducerReceipt,
+    signed_state: &ChannelState,
+    plan: &CloseFundingPlan,
+) -> Result<(), LiveBalanceServiceError> {
+    let canonical = producer
+        .receipt_for_close_funding(&receipt.request_id, signed_state, plan)?
+        .ok_or_else(|| {
+            LiveBalanceServiceError::ProducerReconciliation(format!(
+                "producer journal contains no matching close-funding request {:?}",
+                receipt.request_id
+            ))
+        })?;
+    verify_exact_receipt(producer, receipt, &canonical)
+}
+
+fn verify_close_asset_vector(
+    disk: &LiveBalanceSnapshot,
+    head: &ChannelState,
+) -> Result<(), LiveBalanceServiceError> {
+    let token_count = head.balance_state.token_count as usize;
+    let expected: std::collections::HashMap<u64, U256> = (0..token_count)
+        .filter_map(|slot| {
+            let amount = head.channel_fund.amounts[slot];
+            (amount != U256::zero())
+                .then_some((head.balance_state.token_registry[slot] as u64, amount))
+        })
+        .collect();
+    let actual: std::collections::HashMap<u64, U256> = disk
+        .full_private_state
+        .asset_tree
+        .leaves()
+        .into_iter()
+        .filter(|(_, amount)| *amount != U256::zero())
+        .collect();
+    if actual != expected {
+        return Err(LiveBalanceServiceError::InvalidRequest(
+            "live private asset vector does not exactly equal the N-of-N channel fund vector"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_exact_receipt(
@@ -1923,16 +2711,13 @@ fn verify_snapshot_semantics(
                     "journaled source-send proof/head/result binding is inconsistent".into(),
                 ));
             }
-            verify_all_signatures(
-                &material.channel_record,
-                &[],
-                &material.signed_head,
-            )
-            .map_err(|e| {
-                LiveBalanceServiceError::Snapshot(format!(
-                    "journaled source-send signed head: {e}"
-                ))
-            })?;
+            verify_all_signatures(&material.channel_record, &[], &material.signed_head).map_err(
+                |e| {
+                    LiveBalanceServiceError::Snapshot(format!(
+                        "journaled source-send signed head: {e}"
+                    ))
+                },
+            )?;
             let spend_proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
                 material.spend_proof.clone(),
                 &spend.data.common,
@@ -1942,14 +2727,12 @@ fn verify_snapshot_semantics(
                     "decode journaled source-send spend proof: {e}"
                 ))
             })?;
-            let journaled_spend_pis =
-                SpendPublicInputs::from_pis_u64(&spend_proof.public_inputs.to_u64_vec()).map_err(
-                    |e| {
-                        LiveBalanceServiceError::Snapshot(format!(
-                            "journaled source-send spend pis: {e}"
-                        ))
-                    },
-                )?;
+            let journaled_spend_pis = SpendPublicInputs::from_pis_u64(
+                &spend_proof.public_inputs.to_u64_vec(),
+            )
+            .map_err(|e| {
+                LiveBalanceServiceError::Snapshot(format!("journaled source-send spend pis: {e}"))
+            })?;
             spend.data.verify(spend_proof).map_err(|e| {
                 LiveBalanceServiceError::Snapshot(format!(
                     "verify journaled source-send spend proof: {e}"
@@ -1966,6 +2749,72 @@ fn verify_snapshot_semantics(
         }
         previous_producer_generation = entry.producer_receipt.generation;
         previous_balance_generation = entry.result.balance_generation;
+    }
+    if let Some(terminal) = &disk.terminal_close_funding {
+        if disk.awaiting_channel_binding {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close funding cannot coexist with an unbound deposit".into(),
+            ));
+        }
+        let record = disk.channel_record.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "terminal close funding has no pinned channel record".into(),
+            )
+        })?;
+        let head = disk.signed_head.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "terminal close funding has no pinned signed head".into(),
+            )
+        })?;
+        verify_all_signatures(record, &[], &terminal.previous_head).map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!(
+                "terminal close-funding predecessor N-of-N signature: {e}"
+            ))
+        })?;
+        verify_close_funding_proposal(&terminal.previous_head, head, &terminal.plan)
+            .map_err(|e| LiveBalanceServiceError::Snapshot(e.to_string()))?;
+        if terminal.plan.source_channel_id != disk.channel_id
+            || terminal
+                .plan
+                .base_nonce
+                .checked_add(1)
+                .filter(|next| *next == disk.base_nonce)
+                .is_none()
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close-funding channel/base nonce does not match the spent live cursor"
+                    .into(),
+            ));
+        }
+        let last = disk.applied.last().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "terminal close funding has no applied producer transition".into(),
+            )
+        })?;
+        let send = last.send_material.as_ref().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "terminal close funding has no journaled Spend/Send material".into(),
+            )
+        })?;
+        if last.request_id != terminal.request_id
+            || send.settled_leaf != terminal.plan.funding_aux_data
+            || send.signed_head.digest != head.digest
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal marker, final applied request, and signed funding head diverge".into(),
+            ));
+        }
+        if disk
+            .full_private_state
+            .asset_tree
+            .leaves()
+            .into_values()
+            .any(|amount| amount != U256::zero())
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "terminal close funding left a nonzero asset in the live private tree".into(),
+            ));
+        }
     }
     if let Some(last) = disk.applied.last() {
         if last.result.balance_generation != disk.balance_generation
@@ -2027,11 +2876,9 @@ fn verify_balance_proof_bytes(
     ),
     LiveBalanceServiceError,
 > {
-    let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
-        bytes.to_vec(),
-        &balance.balance_vd().common,
-    )
-    .map_err(|e| LiveBalanceServiceError::Snapshot(format!("decode {label} proof: {e}")))?;
+    let proof =
+        ProofWithPublicInputs::<F, C, D>::from_bytes(bytes.to_vec(), &balance.balance_vd().common)
+            .map_err(|e| LiveBalanceServiceError::Snapshot(format!("decode {label} proof: {e}")))?;
     balance
         .balance_vd()
         .verify(proof.clone())
@@ -2102,7 +2949,7 @@ fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceE
         ));
     }
     let version = u32::from_le_bytes(bytes[16..20].try_into().expect("fixed header"));
-    if version != LIVE_BALANCE_SNAPSHOT_VERSION {
+    if version != 2 && version != LIVE_BALANCE_SNAPSHOT_VERSION {
         return Err(LiveBalanceServiceError::Snapshot(format!(
             "unsupported snapshot version {version}"
         )));
@@ -2125,11 +2972,22 @@ fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceE
             "snapshot checksum mismatch".into(),
         ));
     }
-    let (disk, consumed) = bincode::serde::decode_from_slice::<LiveBalanceSnapshot, _>(
-        payload,
-        bincode::config::standard(),
-    )
-    .map_err(|e| LiveBalanceServiceError::Snapshot(format!("decode snapshot payload: {e}")))?;
+    let (disk, consumed) = if version == 2 {
+        let (old, consumed) = bincode::serde::decode_from_slice::<LiveBalanceSnapshotV2, _>(
+            payload,
+            bincode::config::standard(),
+        )
+        .map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("decode v2 snapshot payload: {e}"))
+        })?;
+        (LiveBalanceSnapshot::from(old), consumed)
+    } else {
+        bincode::serde::decode_from_slice::<LiveBalanceSnapshot, _>(
+            payload,
+            bincode::config::standard(),
+        )
+        .map_err(|e| LiveBalanceServiceError::Snapshot(format!("decode snapshot payload: {e}")))?
+    };
     if consumed != payload.len() {
         return Err(LiveBalanceServiceError::Snapshot(
             "snapshot bincode payload has trailing data".into(),

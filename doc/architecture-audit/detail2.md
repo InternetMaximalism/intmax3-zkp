@@ -708,11 +708,11 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 
 | abstract2.md | Implementation (updated version) | Change |
 |---|---|---|
-| §3.5.1 `requestClose` | **[New] `requestClose()`**: immediately makes `channelStatus` `ClosePending` and records `closeRequestedAt = block.timestamp` (the signal to stop signing. `isNativeSendAllowed` becomes false) | Since the current contract does not separate request/startProcess, **a function is added** |
+| §3.5.1 `requestClose` | **[New] `requestClose(uint64,uint64)`**: binds the signed transaction to the durable freeze/cancel era, immediately makes `channelStatus` `ClosePending`, increments the monotone request generation, and records `closeRequestedAt = block.timestamp` (the signal to stop signing. `isNativeSendAllowed` becomes false) | Since the current contract does not separate request/startProcess, **a function is added** |
 | §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:submitCloseIntent` :558; GRACE check :587). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
 | §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `submitCloseIntent`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
-| §3.5.4 `closeAndWithdraw` | `finalizeClose()` (`:752`) → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit()` (`:905`). **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
-| §3.5.5 `claimLateTx` | `submitPostCloseClaim` (`:835`). `lateBalanceProof` is verified inside claim_proof, with `usedSharedNativeNullifiers` preventing double receipt | [Keep] |
+| §3.5.4 `closeAndWithdraw` | `finalizeCloseGuarded(bytes32,uint64)` → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` (`:905`). The historical no-arg finalize and aggregate payout selectors are removed from the production ABI. **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
+| §3.5.5 `claimLateTx` | **Disabled:** `submitPostCloseClaim` reverts unconditionally because the old statement can double-credit a delta already absorbed by the closing balance. Re-enable only with an explicit unapplied-incoming commitment. | [Do not expose] |
 
 ### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md)
 
@@ -776,11 +776,12 @@ These disables are **safety-neutral**: cross-channel isolation (the `Σ paid ≤
 no-double-withdraw guarantee (nullifier used-sets) do NOT depend on C2/C3. Disabling only removes the
 forgeable-while-stubbed BP-censorship slash (C2) and the redundant late-debit cancel (C3).
 
-FOLLOW-UP (non-security, deferred): with C2/C3 disabled, the symbols only their removed bodies touched are now
-dead — `latestSpecialCloseDigest`, `usedLateOutgoingDebitNullifiers`, the `SpecialCloseSubmitted` /
-`LateOutgoingDebitAccepted` events, and `computeSpecialCloseDigest`. The adversarial review confirmed these are
-harmless (no invariant reads them). They are intentionally LEFT for a future cleanup PR, since removing them
-changes the Manager bytecode again (CREATE2 manager drift → another close-fixture regeneration).
+FOLLOW-UP (non-security): with C2/C3 disabled, several symbols touched only by their removed bodies remain
+dead — `latestSpecialCloseDigest`, `usedLateOutgoingDebitNullifiers`, and the `SpecialCloseSubmitted` /
+`LateOutgoingDebitAccepted` events. The adversarial review confirmed these are harmless (no invariant reads
+them). The unused external `computeSpecialCloseDigest` helper was removed before release because its ABI decoder
+materially contributed to an EIP-170 overflow in the clean recorded-submodule build. The remaining storage/event
+symbols do not add callable runtime behavior and are deferred to the final fixture-regeneration boundary.
 
 ### H-4. Invariant of the challenge order
 
@@ -815,7 +816,7 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
 | `src/circuits/validity/…` (confirmation family) | The H2 constraints of §F-2 |
 | `src/circuits/channel/close_pis.rs` / `close_circuit.rs` | §F-3 |
 | `src/circuits/channel/withdrawal_claim_pis.rs` | Change the meaning of `user_amount_digest` to `RegevCiphertext::digest()` |
-| `contracts/src/ChannelSettlementManager.sol` | Add `requestClose()` / enforce GRACE / chain reconciliation / `final_state_version` comparison (§H-2) |
+| `contracts/src/ChannelSettlementManager.sol` | Add guarded `requestClose(uint64,uint64)` / enforce GRACE / chain reconciliation / `final_state_version` comparison (§H-2) |
 | `contracts/src/ChannelSettlementVerifier.sol` | Add `final_state_version` / `final_settled_tx_chain` to the close PI hash |
 | `src/constants.rs` | Add the §G constants; `MAX_CHANNEL_MEMBERS = 1024` (balance-slot capacity) split from `MAX_COSIGNERS = 16` (variable `member_count`, D6 → D12) |
 | `src/circuits/channel/e2e_flow.rs` | Make E2E Regev-based (remove opening hand-off, make ZKP mandatory) |
@@ -1542,14 +1543,20 @@ debit payload + `verify_aggregate_manifest` wired into the co-sign gate behind
    sound — an inert leaf has no signed state and no E-2-committed debit — but wastes the slot for
    that window. Decide at stage-3 implementation time.
 
-## Q. Dynamic co-signer membership: add a member, rotate your own key (2026-08-23; ALL THREE STAGES LANDED 2026-08-25)
+## Q. Historical direct member-set mutation design (2026-08-23; retired 2026-09-02)
 
-> STATUS: **complete.** Q1 (channel layer: `verify_member_set_update` + the `member-update` CLI),
-> Q2 (validity circuit: the `MemberSetUpdate` block transition + producer/service emission), and
-> Q3 (L1: `MemberSetUpdateCircuit` → MLE wrap → `ChannelSettlementManager.applyMemberSetUpdate`,
-> real-proof-verified, no disable seam) are all merged with adversarial tests at every layer;
-> `ChannelSafetyQ.lean` carries the machine-checked invariants (T1-T10). Fixtures:
-> `member_set_update{,_mle}.json`; forge 332/332.
+> STATUS: **SUPERSEDED / NOT A PRODUCTION CAPABILITY.** This section records the direct
+> `MemberSetUpdate` prototype that was once implemented and tested. It must not be read as the
+> current protocol or as release evidence. The constructive circuit is isolated behind the
+> `deprecated-msu` feature, active fixture generation/deployment is removed, the production CLI,
+> producer and service retain rejection tombstones only, and the Manager has no direct-MSU ABI
+> selector. Historical raw calldata reaches no fallback and reverts before decoding. Current
+> membership changes are intentionally unsupported.
+> The replacement design is the TODO in `doc/tasks/channel-change-msu.md`: unanimous ordinary
+> close, registration of a distinct channel id, then exact once-only asset/commitment migration.
+>
+> The remainder of §Q is preserved solely as a historical audit/design record. Statements such as
+> “landed”, “complete”, or “henceforth” below describe that retired snapshot, not the current tree.
 
 Today the co-signer set is write-once, pinned independently at three layers (the audit below cites
 the exact 28 rejection points): (a) off-chain gates compare every payload against a locally-held
@@ -1559,7 +1566,8 @@ the exact 28 rejection points): (a) off-chain gates compare every payload agains
 → the close proof's strict limbs 85..93. Delegates already grow the set dynamically — but only
 because they live OUTSIDE all three pins (wallet-tree only, close via slot-leaf inclusion).
 
-§Q makes the CO-SIGNER set updatable through one canonical object verified at all three layers.
+The retired §Q prototype made the CO-SIGNER set updatable through one canonical object verified at
+all three layers; production no longer exposes that transition.
 
 ### Q-1. The update object and its digests
 

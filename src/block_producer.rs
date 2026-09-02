@@ -11,19 +11,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     circuits::{
+        validity::block_hash_chain::block_hash_chain_processor::BlockHashChainProcessorWitness,
         witness::block_witness_generator::{
             BlockTxV2Witness, BlockWitnessGenerator, BlockWitnessGeneratorError, BpSigEvent,
             ChannelCosignBundle,
         },
-        validity::block_hash_chain::block_hash_chain_processor::BlockHashChainProcessorWitness,
     },
+    close_funding::{CloseFundingPlan, verify_close_funding_proposal},
     common::{
         channel::{ChannelRecord, ChannelState, InterChannelTx},
         channel_id::ChannelId,
         channel_registration::{ChannelRegRecord, MemberRegEntry},
         deposit::Deposit,
         public_state::get_num_users,
-        trees::key_tree::MemberTree,
         tx::{ChannelActionKind, TxV2},
     },
     constants::{MAX_CHANNEL_MEMBERS, MAX_SIG_CLUSTER},
@@ -32,10 +32,12 @@ use crate::{
     regev::RegevPk,
     wallet_core::{
         C, ChannelSnapshot, D, F, InterChannelDebitPayload, InterChannelTransferDescriptor,
-        MemberInfo, attach_small_block_signatures, registered_cosigner_leaves,
-        verify_all_signatures, verify_inter_channel_descriptor_matches_debit, verify_snapshot,
+        MemberInfo, attach_small_block_signatures, verify_all_signatures,
+        verify_inter_channel_descriptor_matches_debit, verify_snapshot,
     },
 };
+#[cfg(feature = "deprecated-msu")]
+use crate::{common::trees::key_tree::MemberTree, wallet_core::registered_cosigner_leaves};
 use plonky2::plonk::proof::ProofWithPublicInputs;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,9 +47,9 @@ pub enum ProductionBlockProducerError {
     #[error("wallet authorization rejected: {0}")]
     WalletAuthorization(String),
     #[error(
-        "member-set updates are disabled in this release because settlement and validity member roots are not atomically anchored"
+        "direct member-set updates are retired; close the old channel by unanimous consent and migrate into a newly registered channel"
     )]
-    MemberSetUpdateDisabled,
+    MemberSetUpdateRetired,
     #[error(transparent)]
     Witness(#[from] BlockWitnessGeneratorError),
 }
@@ -178,6 +180,9 @@ pub struct ProductionBlockProducer {
     /// Last admitted base-account send nonce per source channel. Channel transition counters are
     /// independent, so descriptor admission tracks this explicit IMI3 field separately.
     accepted_base_nonces: HashMap<ChannelId, u32>,
+    /// Channels whose complete base collateral has been spent to their N-of-N-authorized
+    /// settlement manager. These are terminal: no later head or outgoing transaction is legal.
+    terminal_close_funding: HashSet<ChannelId>,
 }
 
 /// Secret-free channel head exposed by the service status command.
@@ -218,6 +223,7 @@ impl ProductionBlockProducer {
             channel_heads: HashMap::new(),
             accepted_inter_channel_txs: HashSet::new(),
             accepted_base_nonces: HashMap::new(),
+            terminal_close_funding: HashSet::new(),
         }
     }
 
@@ -384,8 +390,7 @@ impl ProductionBlockProducer {
         )
     }
 
-    /// Release safety gate: validity-side membership cannot advance until it is atomically anchored
-    /// to the immutable settlement authorization set.
+    /// Permanent compatibility tombstone for the retired direct member-set-update API.
     pub fn produce_member_set_update_block(
         &mut self,
         _signed_state: &ChannelState,
@@ -394,10 +399,12 @@ impl ProductionBlockProducer {
         _new_members: &[MemberInfo],
         _timestamp: u64,
     ) -> Result<Bytes32, ProductionBlockProducerError> {
-        Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+        Err(ProductionBlockProducerError::MemberSetUpdateRetired)
     }
 
-    /// Future implementation of the MEMBER-SET-UPDATE transition, retained for the point where a
+    /// Deprecated historical implementation of the MEMBER-SET-UPDATE transition, retained only
+    /// behind `deprecated-msu` for audit archaeology. It must never be linked into a release.
+    /// It was originally retained for the point where a
     /// cross-layer atomic settlement/validity anchor exists. It is unreachable from production.
     /// detail2 §Q-3: admit one MEMBER-SET-UPDATE block — the single transition that may advance a
     /// channel's registered co-signer root in the validity chain. Server-derived like the
@@ -410,12 +417,13 @@ impl ProductionBlockProducer {
     ///   * the (old → new) delta must satisfy `validate_member_set_delta` (one slot; rotate
     ///     preserves regev; add at the boundary) — the same rule the circuit enforces;
     ///   * `new_record` must carry version + 1 and member_count consistent with the delta;
-    ///   * the signed state's `h2_tag` must equal the derived tx-tree root, so the OLD set's
-    ///     N-of-N (verified by `produce_cosigned_block` against the still-registered old record)
+    ///   * the signed state's `h2_tag` must equal the derived tx-tree root, so the OLD set's N-of-N
+    ///     (verified by `produce_cosigned_block` against the still-registered old record)
     ///     authorizes exactly this transition.
     /// On success the producer's channel registry ADVANCES to `new_record` — every later block for
     /// this channel verifies against the new set.
-    #[allow(dead_code)]
+    #[cfg(feature = "deprecated-msu")]
+    #[allow(dead_code, deprecated)]
     fn produce_member_set_update_block_future(
         &mut self,
         signed_state: &ChannelState,
@@ -429,10 +437,12 @@ impl ProductionBlockProducer {
         let old_record = self
             .channel_records
             .get(&channel)
-            .ok_or_else(|| auth(format!(
-                "channel {} is not registered in this producer",
-                channel.as_u64()
-            )))?
+            .ok_or_else(|| {
+                auth(format!(
+                    "channel {} is not registered in this producer",
+                    channel.as_u64()
+                ))
+            })?
             .clone();
         if new_record.channel_id != channel {
             return Err(auth("new record is for a different channel".to_string()));
@@ -443,10 +453,16 @@ impl ProductionBlockProducer {
                 old_record.set_version, new_record.set_version
             )));
         }
-        let old_leaves = registered_cosigner_leaves(&old_record, old_members)
-            .map_err(|e| auth(format!("old member list does not match the registered record: {e}")))?;
-        let new_leaves = registered_cosigner_leaves(new_record, new_members)
-            .map_err(|e| auth(format!("new member list does not match the new record: {e}")))?;
+        let old_leaves = registered_cosigner_leaves(&old_record, old_members).map_err(|e| {
+            auth(format!(
+                "old member list does not match the registered record: {e}"
+            ))
+        })?;
+        let new_leaves = registered_cosigner_leaves(new_record, new_members).map_err(|e| {
+            auth(format!(
+                "new member list does not match the new record: {e}"
+            ))
+        })?;
         crate::circuits::validity::block_hash_chain::update_channel_tree::validate_member_set_delta(
             &old_leaves,
             &new_leaves,
@@ -534,6 +550,14 @@ impl ProductionBlockProducer {
         descriptor: &InterChannelTransferDescriptor,
         timestamp: u64,
     ) -> Result<InterChannelTx, ProductionBlockProducerError> {
+        if self
+            .terminal_close_funding
+            .contains(&descriptor.source_channel_id)
+        {
+            return Err(ProductionBlockProducerError::WalletAuthorization(
+                "source channel is terminal after close funding".into(),
+            ));
+        }
         verify_inter_channel_descriptor_matches_debit(debit_payload, descriptor).map_err(|e| {
             ProductionBlockProducerError::WalletAuthorization(format!(
                 "descriptor/debit canonical binding failed: {e}"
@@ -636,6 +660,82 @@ impl ProductionBlockProducer {
         Ok(attached_tx)
     }
 
+    /// Admit the canonical N-of-N terminal child whose existing UserTransfer transaction pays
+    /// the complete fund vector to the Manager. No circuit or proof shape is added: this builds
+    /// the same one-active-channel TxV2 witness as an ordinary send.
+    pub fn produce_close_funding_block(
+        &mut self,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+        timestamp: u64,
+    ) -> Result<(), ProductionBlockProducerError> {
+        let channel = plan.source_channel_id;
+        if self.terminal_close_funding.contains(&channel) {
+            return Err(ProductionBlockProducerError::WalletAuthorization(
+                "channel already committed terminal close funding".into(),
+            ));
+        }
+        let previous = self.channel_heads.get(&channel).ok_or_else(|| {
+            ProductionBlockProducerError::WalletAuthorization(format!(
+                "channel {} has no registered replay-fence head",
+                channel.as_u64()
+            ))
+        })?;
+        verify_close_funding_proposal(previous, signed_state, plan).map_err(|e| {
+            ProductionBlockProducerError::WalletAuthorization(format!(
+                "close-funding proposal is not canonical: {e}"
+            ))
+        })?;
+        let expected_nonce = match self.accepted_base_nonces.get(&channel) {
+            Some(previous_nonce) => previous_nonce.checked_add(1).ok_or_else(|| {
+                ProductionBlockProducerError::WalletAuthorization(
+                    "base-account send nonce overflow".into(),
+                )
+            })?,
+            None => 0,
+        };
+        if plan.base_nonce != expected_nonce {
+            return Err(ProductionBlockProducerError::WalletAuthorization(format!(
+                "close-funding base nonce is stale or skipped: got {}, expected {expected_nonce}",
+                plan.base_nonce
+            )));
+        }
+        let num_users = get_num_users(1, &self.witness.supported_user_counts).ok_or_else(|| {
+            ProductionBlockProducerError::WalletAuthorization(
+                "producer supports no circuit arity capable of one active channel".into(),
+            )
+        })? as usize;
+        let mut tx_v2_indices = vec![0u64; num_users];
+        let mut tx_v2s = vec![TxV2::default(); num_users];
+        let mut tx_v2_merkle_proofs = vec![plan.tx_v2_merkle_proof.clone(); num_users];
+        tx_v2_indices[0] = channel.as_u64();
+        tx_v2s[0] = plan.tx_v2;
+        tx_v2_merkle_proofs[0] = plan.tx_v2_merkle_proof.clone();
+
+        let mut candidate = self.clone();
+        candidate.produce_cosigned_block(
+            signed_state,
+            &[1],
+            timestamp,
+            plan.tx_tree_root,
+            BlockTxV2Witness {
+                tx_v2_indices,
+                tx_v2s,
+                tx_v2_merkle_proofs,
+                new_member_leaves: None,
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
+            },
+        )?;
+        candidate
+            .accepted_base_nonces
+            .insert(channel, plan.base_nonce);
+        candidate.terminal_close_funding.insert(channel);
+        *self = candidate;
+        Ok(())
+    }
+
     /// Advance the producer's replay fence across N-of-N authorized channel transitions that do
     /// not create a base-layer block (in-channel sends, refreshes, token registration, and the
     /// two receive/import accounting steps). Without this explicit journaled bridge, the next
@@ -655,6 +755,11 @@ impl ProductionBlockProducer {
             )
         })?;
         let channel = first.channel_id;
+        if self.terminal_close_funding.contains(&channel) {
+            return Err(ProductionBlockProducerError::WalletAuthorization(
+                "channel is terminal after close funding".into(),
+            ));
+        }
         let record = self.channel_records.get(&channel).ok_or_else(|| {
             ProductionBlockProducerError::WalletAuthorization(format!(
                 "channel {} is not registered in this producer",
@@ -747,7 +852,7 @@ impl ProductionBlockProducer {
         tx_tree_root: Bytes32,
         tx_v2_witness: BlockTxV2Witness,
     ) -> Result<(), ProductionBlockProducerError> {
-        // Release MSU gate at the LOWEST public production facade.  Rejecting only
+        // Retired-MSU gate at the LOWEST public production facade. Rejecting only
         // `produce_member_set_update_block` is insufficient: callers of this generic method can
         // otherwise smuggle the same MemberSetUpdate action + new-member leaves directly inside a
         // caller-built `BlockTxV2Witness`, bypassing the named API and advancing the validity-side
@@ -767,10 +872,15 @@ impl ProductionBlockProducer {
                 })
                 .unwrap_or(false);
         if carries_member_set_update {
-            return Err(ProductionBlockProducerError::MemberSetUpdateDisabled);
+            return Err(ProductionBlockProducerError::MemberSetUpdateRetired);
         }
 
         let channel = signed_state.channel_id;
+        if self.terminal_close_funding.contains(&channel) {
+            return Err(ProductionBlockProducerError::WalletAuthorization(
+                "channel is terminal after close funding".into(),
+            ));
+        }
         let record = self.channel_records.get(&channel).ok_or_else(|| {
             ProductionBlockProducerError::WalletAuthorization(format!(
                 "channel {} is not registered in this producer",
@@ -919,6 +1029,22 @@ impl ProductionBlockProducer {
         block_number: crate::common::u63::BlockNumber,
     ) -> Option<BlockHashChainProcessorWitness> {
         self.witness.block_chain_witness.get(&block_number).cloned()
+    }
+
+    /// Return the exact public small block whose hash the validity witness consumes.
+    ///
+    /// This is intentionally narrower than exporting the whole witness generator: an L1 posting
+    /// driver needs `(channelId,timestamp,txTreeRoot,keyIds)`, but must never receive channel
+    /// signing keys or an independently mutable witness. Index zero is the synthetic genesis
+    /// placeholder and is therefore never exportable as a posted block.
+    pub fn public_block(
+        &self,
+        block_number: crate::common::u63::BlockNumber,
+    ) -> Option<crate::common::block::Block> {
+        let index = block_number.as_u64() as usize;
+        (index != 0)
+            .then(|| self.witness.blocks.get(index).cloned())
+            .flatten()
     }
 
     /// Clone the fully replayed public witness history for a wallet-owned balance prover. This is

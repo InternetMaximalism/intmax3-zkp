@@ -12,8 +12,9 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
 /// @title Full local CLOSE lifecycle e2e (Sepolia-rehearsal).
 /// @notice One EVM run: deploy (CREATE2) -> register -> deposit{value} -> postBlock x3 ->
-///         finalize(real validity MLE) -> withdrawNative(recipient = ChannelSettlementManager, real
-///         withdrawal MLE) -> manager.pullChannelFunds() -> close intent/finalize ->
+///         finalize(real validity MLE) -> close intent/finalize ->
+///         withdrawNative(recipient = ChannelSettlementManager, real withdrawal MLE) ->
+///         manager.pullChannelFunds() ->
 ///         submitWithdrawalClaim -> claimWithdrawalCredit -> a channel member receives REAL ETH.
 ///         Proves the channel's aggregate native settlement (P2 withdrawNative) feeds the manager's
 ///         capped per-member split (P3), end-to-end with real proofs.
@@ -165,20 +166,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // ── A. Advance + finalize the registration→deposit→withdrawal chain (real validity MLE). ──
         _runChainThroughFinalize();
 
-        // ── B. Channel aggregate settlement: withdrawNative pays the channel's ETH to the manager. ──
-        (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        assertEq(ws[0].recipient, address(manager), "withdrawal recipient is the manager");
-        uint256 channelAmount = ws[0].amount; // = 3
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(_withdrawalJson());
-        rollup.withdrawNative(ws, prover, wproof);
-        assertEq(rollup.pendingWithdrawals(address(manager)), channelAmount, "manager credited at rollup");
-
-        // ── C. Manager pulls the real ETH in. ──
-        uint256 pulled = manager.pullChannelFunds();
-        assertEq(pulled, channelAmount, "manager pulled channel ETH");
-        assertEq(manager.receivedChannelFunds(0), channelAmount, "receivedChannelFunds[ETH] == channel amount");
-
-        // ── D-E. Drive the channel close to Closed with the REAL wrapped-close MLE/WHIR proof.
+        // ── B-C. Drive the channel close to Closed with the REAL wrapped-close MLE/WHIR proof.
         //
         // Multitoken Phase 5b: the close fixture is CO-GENERATED with the lifecycle fixture over
         // the same deterministic member keys (see setUp step 6), so this section always runs — a
@@ -202,8 +190,10 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         address member0 = vm.parseJsonAddress(lcJson, ".registration.recipients[0]");
         bytes32 member0Hash = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs")[0];
 
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(member0);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + 600); // grace
 
         // REAL close intent (every field is the proved close public input) + REAL wrapped-close proof
@@ -220,7 +210,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         );
         manager.submitCloseIntent(intent, closeProof);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         bytes32 digest = manager.finalizedCloseIntentDigest();
 
         // Multitoken (§N-6): `finalizeClose` accrues the member-signed per-token fund vector into
@@ -245,6 +235,26 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
                 "token-t1 lane accrual != signed amounts[1]"
             );
         }
+
+        // ── D. Only after challenge finality, pay the exact proof-bound channel amount to the
+        // manager. Moving funds before this point can strand them if the pending close is replaced
+        // or cancelled (the same stale-state ordering class as Lightning close races).
+        (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
+        assertEq(ws[0].recipient, address(manager), "withdrawal recipient is the manager");
+        uint256 channelAmount = ws[0].amount;
+        assertEq(
+            channelAmount,
+            manager.finalizedChannelFundAmount(0),
+            "live withdrawal must drain the exact finalized ETH cap"
+        );
+        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(_withdrawalJson());
+        rollup.withdrawNative(ws, prover, wproof);
+        assertEq(rollup.pendingWithdrawals(address(manager)), channelAmount, "manager credited at rollup");
+
+        // ── E. The Manager accepts only the exact atomic delta for this closed channel.
+        uint256 pulled = manager.pullChannelFunds();
+        assertEq(pulled, channelAmount, "manager pulled channel ETH");
+        assertEq(manager.receivedChannelFunds(0), channelAmount, "receivedChannelFunds[ETH] == channel amount");
 
         // Phase B-D: `submitWithdrawalClaim` now runs a REAL `verifyWithdrawalClaim` MLE/WHIR
         // verification (no more stub proof). Driving it here would require a withdrawal-claim MLE

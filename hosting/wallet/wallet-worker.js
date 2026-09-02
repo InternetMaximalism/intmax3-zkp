@@ -36,6 +36,11 @@ function tokenSlotArg(v) {
   return v;
 }
 
+function claimTokenSlot(v) {
+  if (!Number.isInteger(v) || v < 0 || v > 9) throw new Error('claim token slot must be an integer in 0..9');
+  return v;
+}
+
 // Map worker actions to wasm entry points. Each returns a JSON string (or void).
 const CALLS = {
   keygen: () => wasm.wallet_keygen(),
@@ -57,6 +62,11 @@ const CALLS = {
   refresh: (a) => wasm.wallet_refresh(tokenSlotArg(a.tokenSlot)),
   cosign: (a) => wasm.wallet_cosign(a.payloadJson),
   finalize: (a) => wasm.wallet_finalize(a.stateJson),
+  // The Regev secret never crosses this worker boundary. Only the public claim tuple and its
+  // self-verified MLE/WHIR proof are returned to the page for the keyless calldata handoff.
+  withdrawalClaim: (a) => wasm.wallet_withdrawal_claim(
+    a.finalizedContextJson, claimTokenSlot(a.tokenSlot)
+  ),
 };
 
 self.onmessage = async (e) => {

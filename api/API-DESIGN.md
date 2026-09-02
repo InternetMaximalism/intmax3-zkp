@@ -571,7 +571,7 @@ fact paying out. Verified against the code before rewriting.*
   `settle_done`, and returns `{ok: true, authDigest, paidOut: true}`
   (`api/routes/partial-withdrawal.js`). The combined `.../settle` route does the
   same and also returns `paidOut: true`. No 501 on either.
-- Contract: `finalizePartialWithdrawal()`, `claimWithdrawalCredit()` — implemented.
+- Contract: `finalizePartialWithdrawal()` plus the proof/nullifier-scoped payout path — implemented.
 - **Payout: IMPLEMENTED, and deliberately NOT a revival of the deleted door.**
   `IntmaxRollup.claimAuthorizedWithdrawal` was DELETED in `42640f1` because it
   paid the GLOBAL escrow against the authorization alone, with no withdrawal
@@ -611,8 +611,11 @@ Response: { ok: true, authDigest: string, paidOut: true }
 **Outputs:** L1 tx confirmation
 
 **Current status:**
-- CLI: inside `cmd_close` (calls `requestClose()` then waits then `submitCloseIntent(...)`)
-- Contract: `requestClose()` — implemented
+- CLI: inside `cmd_close` (reads a hash-authenticated durable checkpoint, then calls
+  `requestClose(uint64,uint64)` with the exact freeze nonce and cancellation floor before
+  `submitCloseIntent(...)`)
+- Contract: guarded `requestClose(uint64,uint64)` — implemented; the historical no-argument
+  selector is absent
 - NOT a separate CLI command or relay endpoint.
 
 **API implementation:**
@@ -722,9 +725,12 @@ Requires new CLI command `cancel-close` that builds the `CancelCloseProver` proo
 **Outputs:** L1 tx confirmation
 
 **Current status:**
-- CLI: `settle` — implemented (calls `finalizeClose()`)
+- CLI: `settle` — implemented (reads the pending digest and monotone request generation from one
+  durable checkpoint, revalidates it, then calls `finalizeCloseGuarded(bytes32,uint64)`)
 - Relay: `POST /api/settle` — implemented
-- Contract: `finalizeClose()` — implemented
+- Contract: `finalizeCloseGuarded(bytes32,uint64)` — implemented. The historical
+  `finalizeClose()` selector is absent from the production ABI, so delayed unguarded raw
+  transactions always fail instead of being redirected after cancel/re-request.
 
 **API implementation:**
 ```
@@ -748,7 +754,7 @@ Response: { ok: true }
 - wallet_core: `WithdrawalClaimProver` — implemented
 - CLI: `claim` — implemented (builds proof + submits + pulls credit)
 - Relay: `POST /api/claim` — implemented
-- Contract: `submitWithdrawalClaim(...)`, `claimWithdrawalCredit()` — implemented
+- Contract: `submitWithdrawalClaim(...)`, `claimWithdrawalCredit(bytes32)` — implemented
 
 **API implementation:**
 ```
@@ -763,18 +769,19 @@ Response: { ok: true }
 
 **Overview:** Pull the ETH credit from a successful withdrawal claim. Transfers ETH to the member's registered `l1_recipient`. (detail2 H-2 §3.5.4)
 
-**Inputs:** `{ manager: address }`
+**Inputs:** `{ manager: address, withdrawalNullifier: bytes32 }`
 **Outputs:** ETH transferred
 
 **Current status:**
-- Contract: `claimWithdrawalCredit()` — implemented
+- Contract: `claimWithdrawalCredit(bytes32 withdrawalNullifier)` — implemented. The historical
+  no-argument and aggregate token/amount overloads are absent from the production ABI.
 - CLI: called inside `cmd_claim` after `submitWithdrawalClaim`
 
 **API implementation:**
 Bundled with A32 in the current implementation. Could be separated:
 ```
 POST /api/v1/channel/{ch}/close/pull-credit
-Request:  { manager: string }
+Request:  { manager: string, withdrawalNullifier: string }
 Response: { ok: true, amount: string }
 ```
 
@@ -789,12 +796,10 @@ Response: { ok: true, amount: string }
 
 **Preconditions:** `usedSharedNativeNullifiers` prevents double receipt.
 
-**Current status:**
-- wallet_core: `PostCloseClaimProver` — implemented
-- Contract: `submitPostCloseClaim(...)` — implemented
-- CLI: NOT implemented (no CLI subcommand)
-- Relay: NOT implemented
-- Fixture generator: `generate_withdrawal_fixture.rs` has post-close fixture generation
+**Current status: DISABLED.** The active Manager entry point reverts
+`PostCloseClaimDisabled()` unconditionally because the old statement can double-credit an incoming
+delta already absorbed by the closing balance. Historical prover/fixture/CLI scaffolding is not a
+production capability and must not be exposed by the relay or browser.
 
 **API implementation:**
 ```
@@ -1257,8 +1262,8 @@ A27 deploySettlement
          ↙ (no challenge)        ↘ (challenge/cancel: see W11/W12)
        → A31 finalizeClose (L1)
          → A32 submitWithdrawalClaim (× member_count, each with Regev decryption ZKP)
-           → A33 claimWithdrawalCredit (× member_count, ETH payout)
-             → [optional] A34 submitPostCloseClaim (late transfers: see W13)
+           → A33 claimWithdrawalCredit(bytes32) (× member_count, exact proof-scoped payout)
+             → A34 is disabled; no late-transfer credit path is release-active
 ```
 
 **Branching:**
@@ -1348,14 +1353,13 @@ Response: { ok: true }
  → build late balance proof (lateBalanceProof)
    → build post-close claim proof (PostCloseClaimProver)
      → A34 submitPostCloseClaim (L1)
-       → A33 claimWithdrawalCredit (L1, additional ETH)
+       → A33 claimWithdrawalCredit(bytes32) (L1, additional ETH)
 ```
 
-**Current status:**
-- Rust: `PostCloseClaimProver` — implemented
-- Contract: `submitPostCloseClaim(...)` — implemented
-- CLI: NOT implemented
-- Relay: NOT implemented
+**Current status: DISABLED / not a supported workflow.** Historical Rust and CLI scaffolding may
+construct artifacts, but the active Manager always reverts `submitPostCloseClaim`. Do not expose
+this route until a new statement proves that the incoming delta was not already applied to the
+closing balance.
 
 **API:**
 ```

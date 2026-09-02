@@ -178,7 +178,7 @@ before anything is on chain) and `require(rollup.withdrawalVkInitialized())` aft
 `ChannelSettlementManager` hardcoded `CHALLENGE_PERIOD = 1` second while
 `ChannelSettlementManager.CHALLENGE_PERIOD_SECS = 86_400` (documented, spec-referenced) was read by
 nothing, and every test used 1 day — so the value that actually shipped was exercised by no test.
-`finalizeClose()` is permissionless at the deadline and both remedies (`cancelClose`, a newer
+`finalizeCloseGuarded(bytes32,uint64)` is permissionless at the deadline and both remedies (`cancelClose`, a newer
 `submitCloseIntent`) require minutes of MLE proving, so the deployed window made a stale close
 unchallengeable: fund MIS-ALLOCATION among members, not a liveness inconvenience. Now:
 - `script/DeployConfig.sol` resolves the value — the protocol constant off-devnet, 1 second on

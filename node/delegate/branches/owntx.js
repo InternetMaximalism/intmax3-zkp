@@ -5,7 +5,7 @@
 // canSend == false.
 
 const { verifyCosignedStructural } = require('../verify');
-const { headOf } = require('./sync');
+const { importPublishedState } = require('./sync');
 const dsm = require('../state-machine');
 const crypto = require('crypto');
 
@@ -66,15 +66,14 @@ async function doRefresh(event, ctx) {
     log.error({ event: 'COSIGN_INVALID', channel: ch.id, op: 'refresh', reason: v.reason });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  // `wallet_finalize` is the delegate's cryptographic gate: it verifies the full real N-of-N
-  // member signature set and own-slot decryption before committing.  `wallet_cosign` cannot be
-  // used here: it accepts SendPayload, and delegates are deliberately forbidden to co-sign.
-  wallet.finalize(resp.state || resp);
+  // Recover the complete published snapshot, verify it in WASM, and durably archive its exact
+  // `/backing` v2 before acceptedHead advances. A bare co-sign response alone is not sufficient
+  // recovery material if the coordinator later withholds the public close proof.
+  await importPublishedState(resp.state || resp, ctx);
   sm.signal(dsm.SIGNALS.COSIGN_OK);
   store.set('canSend', true);
   // The refreshed witness backs exactly the position we refreshed (§N/TM-13).
   store.set('witnessTokenSlot', normTokenSlot(event && event.tokenSlot));
-  store.set('acceptedHead', headOf({ state: resp.state || resp }));
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'REFRESH_FINALIZED', channel: ch.id });
 }
@@ -100,9 +99,8 @@ async function doSend(event, ctx) {
     log.error({ event: 'COSIGN_INVALID', channel: ch.id, op: 'send', reason: v.reason });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  wallet.finalize(resp.state || resp);
+  await importPublishedState(resp.state || resp, ctx);
   sm.signal(dsm.SIGNALS.COSIGN_OK);
-  store.set('acceptedHead', headOf({ state: resp.state || resp }));
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'SEND_FINALIZED', channel: ch.id, toSlot, amount: String(amount), tokenSlot: tokenSlot === undefined ? 0 : tokenSlot });
 }
@@ -133,11 +131,9 @@ async function doInterChannelSend(event, ctx) {
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
   if (resp.sourceHead) {
-    // Verify the source head's real N-of-N signatures before committing (review H5).
-    wallet.finalize(resp.sourceHead);
+    await importPublishedState(resp.sourceHead, ctx);
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
-  store.set('acceptedHead', headOf({ state: resp.sourceHead }));
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'INTER_SEND_FINALIZED', channel: ch.id, toChannel, toSlot, amount: String(amount) });
 }
@@ -163,11 +159,9 @@ async function doBurn(event, ctx) {
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
   if (resp.state) {
-    // Verify the burn debit's real N-of-N signatures before committing (review H5).
-    wallet.finalize(resp.state);
+    await importPublishedState(resp.state, ctx);
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
-  store.set('acceptedHead', headOf({ state: resp.state }));
   store.upsertTicket({ id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done', params: { amount: String(amount), recipient: l1Address, tokenIndex: tokenIndex === undefined ? '0' : String(tokenIndex) } });
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'BURN_FINALIZED', channel: ch.id, amount: String(amount) });

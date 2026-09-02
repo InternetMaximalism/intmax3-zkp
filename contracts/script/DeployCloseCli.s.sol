@@ -10,6 +10,7 @@ import {
     IChannelRegistry
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
@@ -28,7 +29,7 @@ import {RegRecordLib} from "./RegRecordLib.sol";
 ///      cli_reg_record.json}. Prints the deployed addresses for the driver.
 contract DeployCloseCli is Script {
     // SECURITY (challenge-period floor): the challenge window is the ONLY interval in which an
-    // honest member can replace or cancel a stale close intent, and `finalizeClose()` is
+    // honest member can replace or cancel a stale close intent, and guarded finalization is
     // permissionless the moment it lapses. This script previously hardcoded 1 second — enough for
     // the anvil E2Es (`evm_increaseTime` then settle), and a permanent fund-mis-allocation hole on
     // any real chain. `DeployConfig.challengePeriodSecs()` keeps the 1-second value on chain id
@@ -50,8 +51,8 @@ contract DeployCloseCli is Script {
 
     /// @return rollup  the deployed IntmaxRollup
     /// @return sv      the deployed ChannelSettlementVerifier (the four live settlement VKs keyed:
-    ///                 close, withdrawalClaim, postCloseClaim and cancelClose; member-set-update
-    ///                 is intentionally left unkeyed for the release)
+    ///                 close, withdrawalClaim, postCloseClaim and cancelClose; the retired direct
+    ///                 member-set-update verifier surface no longer exists)
     /// @return manager the deployed ChannelSettlementManager, registered on `rollup`
     /// @dev The return values exist so `test/DeployGuards.t.sol` can assert on what this script
     ///      actually deployed. `forge script --sig run` is unaffected (return types are not part of
@@ -131,6 +132,7 @@ contract DeployCloseCli is Script {
             require(rollup.withdrawalVkInitialized(), "existing rollup withdrawal VK is not initialized");
             require(address(rollup.kzgVerifier()) != address(0), "existing rollup KZG verifier is not set");
         }
+        CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
 
         // 3. Settlement verifier + the REAL close VK (the close circuit's MLE/WHIR verifier data).
         sv = new ChannelSettlementVerifier();
@@ -299,6 +301,7 @@ contract DeployCloseCli is Script {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)),
             IChannelRegistry(address(rollup)),
+            address(materializer),
             mBind
         );
 
@@ -339,15 +342,10 @@ contract DeployCloseCli is Script {
         // address as the payout recipient inside the proof.
         rollup.registerSettlementManager(address(manager));
 
-        // 7. Member-set-update is deliberately NOT keyed in the production release.
-        //
-        // The current IMMS proof authenticates a transition approved by the old signers, but does
-        // not anchor that transition to the canonical finalized validity-tree action. Enabling the
-        // verifier would therefore permit `ChannelSettlementManager` and the Rollup/validity layer
-        // to advance independently. The Manager entry point is also an unconditional
-        // `MemberSetUpdateDisabled` revert, so manually keying this parked verifier cannot revive a
-        // one-layer mutation path. The checked-in circuit/VK fixture remains available for future
-        // cross-layer protocol work; production deploy does not read or initialize it.
+        // 7. Direct member-set updates are retired. The active verifier exposes no MSU key or
+        // verification entry point, and the Manager keeps only an explicit compatibility
+        // tombstone. The replacement is a unanimous close followed by a separately registered
+        // channel and proof-bound asset/commitment migration.
 
         vm.stopBroadcast();
 
@@ -360,14 +358,10 @@ contract DeployCloseCli is Script {
             "settlement manager not registered: partial withdrawal cannot finalize"
         );
 
-        // Release invariant: this script must not silently turn the parked MSU verifier back into a
-        // production feature. Keeping the negative read-back here makes an accidental initializer
-        // fail during script simulation, before any broadcast is accepted by the operator.
-        require(!sv.memberSetUpdateVkInitialized(), "member-set-update VK must remain unset in release");
-
         console2.log("=== close-lifecycle CLI deploy ===");
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("SettlementVerifier:", address(sv));
+        console2.log("CloseFundingMaterializer:", address(materializer));
         console2.log("CLOSE_MANAGER_ADDRESS:", address(manager));
     }
 }

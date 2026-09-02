@@ -27,12 +27,21 @@ contract SettlementHandler {
     bytes32[3] internal members;
     address[3] internal recipients;
 
+    struct ScopedPayout {
+        address recipient;
+        bytes32 withdrawalNullifier;
+        bool paid;
+    }
+
+    ScopedPayout[] internal scopedPayouts;
+
     // ghost counters to force distinct nullifiers across calls
     uint256 internal wdSalt;
     uint256 internal pcNonce;
 
     // ghost totals for cross-checking (independent of the contract's own accounting)
-    uint256 public ghostPulled; // Σ ETH actually pulled into the manager
+    uint256 public ghostPulled; // Σ pull deltas accepted as this channel's backing cap
+    uint256 public ghostSurplus; // Σ physical pull delta deliberately excluded from channel backing
     uint256 public ghostPaid; // Σ ETH actually paid out to members
 
     // ── LIVENESS instrumentation (audit28-08-2026 M-7) ──────────────────────────────────────────
@@ -106,9 +115,14 @@ contract SettlementHandler {
         if (address(this).balance < amt) return;
         registry.creditWithdrawal{value: amt}(address(manager));
         attemptedPull += 1;
+        uint256 receivedBefore = manager.receivedChannelFunds(0);
         try manager.pullChannelFunds() returns (uint256 pulled) {
             succeededPull += 1;
-            ghostPulled += pulled;
+            // The physical delta may include unrelated proof-backed surplus in the Rollup's
+            // recipient-scoped ledger. Only the capped accounting delta belongs to this channel.
+            uint256 accepted = manager.receivedChannelFunds(0) - receivedBefore;
+            ghostPulled += accepted;
+            ghostSurplus += pulled - accepted;
         } catch {}
     }
 
@@ -127,8 +141,15 @@ contract SettlementHandler {
         });
         wdSalt += 1;
         uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
-            channelId, c.closeIntentDigest, manager.finalizedBalanceStateH1(),
-            c.memberPkG, c.recipient, c.userAmountDigest, c.amount, c.tokenSlot, c.tokenIndex,
+            channelId,
+            c.closeIntentDigest,
+            manager.finalizedBalanceStateH1(),
+            c.memberPkG,
+            c.recipient,
+            c.userAmountDigest,
+            c.amount,
+            c.tokenSlot,
+            c.tokenIndex,
             c.withdrawalNullifier
         );
         attemptedWithdrawal += 1;
@@ -137,6 +158,13 @@ contract SettlementHandler {
         }
         try manager.submitWithdrawalClaim(c, CloseTestLib.proofWithLimbs(limbs)) {
             succeededWithdrawal += 1;
+            if (amt > 0) {
+                scopedPayouts.push(ScopedPayout({
+                    recipient: c.recipient,
+                    withdrawalNullifier: c.withdrawalNullifier,
+                    paid: false
+                }));
+            }
         } catch {}
     }
 
@@ -147,8 +175,16 @@ contract SettlementHandler {
         pcNonce += 1;
         bytes32 snn = keccak256(abi.encodePacked(bytes4(uint32(0x494d434b)), digest, incomingTx, members[i]));
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
-            channelId, digest, incomingTx, members[i], recipients[i], snn, amt,
-            manager.finalizedBalanceStateH1(), manager.finalizedSettledTxAccumulatorRoot(), 0
+            channelId,
+            digest,
+            incomingTx,
+            members[i],
+            recipients[i],
+            snn,
+            amt,
+            manager.finalizedBalanceStateH1(),
+            manager.finalizedSettledTxAccumulatorRoot(),
+            0
         );
         ChannelSettlementManager.PostCloseClaim memory c = ChannelSettlementManager.PostCloseClaim({
             closeIntentDigest: digest,
@@ -167,12 +203,16 @@ contract SettlementHandler {
         } catch {}
     }
 
-    function claim(uint256 recipientSeed) external {
-        address r = recipients[recipientSeed % 3];
-        uint256 balBefore = r.balance;
+    function claim(uint256 payoutSeed) external {
         attemptedClaim += 1;
+        if (scopedPayouts.length == 0) return;
+        ScopedPayout storage payout = scopedPayouts[payoutSeed % scopedPayouts.length];
+        if (payout.paid) return;
+        address r = payout.recipient;
+        uint256 balBefore = r.balance;
         vm.prank(r);
-        try manager.claimWithdrawalCredit() returns (uint256) {
+        try manager.claimWithdrawalCredit(payout.withdrawalNullifier) returns (uint256) {
+            payout.paid = true;
             succeededClaim += 1;
             ghostPaid += (r.balance - balBefore);
         } catch {}
@@ -200,12 +240,11 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
     function setUp() public override {
         super.setUp(); // deploys verifier/manager (3 members), wires mock MLE verdict=true
         bytes32 digest = _finalizeDefault(); // drive to Closed, fund = 75
+        _materializeCloseFundingAuthorization(registry, manager, 0);
 
         bytes32[3] memory members = [USER_A, USER_B, USER_C];
         address[3] memory recipients = [alice, bob, carol];
-        handler = new SettlementHandler(
-            manager, verifier, registry, CHANNEL_ID, digest, members, recipients
-        );
+        handler = new SettlementHandler(manager, verifier, registry, CHANNEL_ID, digest, members, recipients);
         vm.deal(address(handler), 1_000_000 ether);
 
         // Restrict fuzzing to the handler's four lifecycle actions.
@@ -225,8 +264,8 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
 
     /// I2 (CONSERVATION): every accrued unit is either still owed (a credit) or already paid out.
     function invariant_I2_conservation() external view {
-        uint256 sumCredits = manager.withdrawalCredits(0, alice)
-            + manager.withdrawalCredits(0, bob) + manager.withdrawalCredits(0, carol);
+        uint256 sumCredits = manager.withdrawalCredits(0, alice) + manager.withdrawalCredits(0, bob)
+            + manager.withdrawalCredits(0, carol);
         assertEq(
             manager.totalWithdrawn(0),
             manager.totalCreditedOut(0) + sumCredits,
@@ -239,13 +278,14 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
         assertLe(manager.totalWithdrawn(0), manager.finalizedChannelFundAmount(0), "I3: accrual > fund");
     }
 
-    /// I4 (ETH BACKING): the manager's native balance always equals received-minus-paid, so unpaid
-    /// credits are always backed by held ETH up to the received ceiling.
+    /// I4 (ETH BACKING): channel backing plus separately tracked mixed-ledger surplus, less actual
+    /// member payouts, exactly equals the Manager's native balance. Surplus must never appear in
+    /// `receivedChannelFunds`, but it still physically remains in the Manager after the atomic pull.
     function invariant_I4_ethBacking() external view {
         assertEq(
             address(manager).balance,
-            manager.receivedChannelFunds(0) - manager.totalCreditedOut(0),
-            "I4: balance != received - creditedOut"
+            manager.receivedChannelFunds(0) + handler.ghostSurplus() - manager.totalCreditedOut(0),
+            "I4: balance != received + surplus - creditedOut"
         );
     }
 
@@ -253,8 +293,7 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
     /// second close re-finalize and reset accrual under live credits).
     function invariant_I5_terminalClosed() external view {
         assertTrue(
-            manager.channelStatus() == ChannelSettlementManager.ChannelLifecycleStatus.Closed,
-            "I5: channel left Closed"
+            manager.channelStatus() == ChannelSettlementManager.ChannelLifecycleStatus.Closed, "I5: channel left Closed"
         );
     }
 
@@ -328,16 +367,19 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
 
         // 2. Each action class succeeded at least once over the run.
         assertGt(
-            handler.succeededPull(), 0,
+            handler.succeededPull(),
+            0,
             "I6 LIVENESS: pullChannelFunds() never once succeeded -- the manager can never be funded"
         );
         assertGt(
-            handler.succeededWithdrawal() + handler.succeededPostClose(), 0,
+            handler.succeededWithdrawal() + handler.succeededPostClose(),
+            0,
             "I6 LIVENESS: NEITHER submitWithdrawalClaim() NOR submitPostCloseClaim() ever succeeded "
             "-- a closed channel's members can never accrue their exit by any route"
         );
         assertGt(
-            handler.succeededClaim(), 0,
+            handler.succeededClaim(),
+            0,
             "I6 LIVENESS: claimWithdrawalCredit() never once succeeded -- accrued credit can never be "
             "turned into value"
         );
@@ -347,7 +389,8 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
         //    it is draw-order independent, so it is a claim about the contract and not the fuzzer.
         if (handler.feasibleWithdrawal() > 0) {
             assertGt(
-                handler.succeededWithdrawal(), 0,
+                handler.succeededWithdrawal(),
+                0,
                 "I6 LIVENESS: submitWithdrawalClaim() was called with an amount that fit under the "
                 "remaining accrual ceiling and STILL never once succeeded -- the members' primary "
                 "exit from a closed channel is bricked"
@@ -365,14 +408,16 @@ contract ChannelSettlementInvariantTest is CloseSettlementBase {
         // commitment in H1 (or an applied/unapplied accumulator split) trips the invariant suite
         // rather than silently restoring the double-claim.
         assertEq(
-            handler.succeededPostClose(), 0,
+            handler.succeededPostClose(),
+            0,
             "C-2: submitPostCloseClaim() SUCCEEDED -- the double-credit path is supposed to be "
             "permanently disabled; re-enabling it requires an unapplied-incoming commitment in H1"
         );
 
         // 4. The property the whole suite is FOR: real ETH reached a real member.
         assertGt(
-            handler.ghostPaid(), 0,
+            handler.ghostPaid(),
+            0,
             "I6 LIVENESS: not one wei ever reached a member over the whole run -- the honest exit is "
             "impossible and every safety invariant above is satisfied by zero"
         );

@@ -10,6 +10,7 @@ import {
     IChannelRegistry
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
@@ -97,6 +98,7 @@ contract DeployPartialWithdrawalE2E is Script {
 
         // 3. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
         sv = new ChannelSettlementVerifier();
+        CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
         {
             ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
                 degreeBits: 1,
@@ -165,6 +167,7 @@ contract DeployPartialWithdrawalE2E is Script {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)),
             IChannelRegistry(address(rollup)),
+            address(materializer),
             mBind
         );
 
@@ -198,6 +201,7 @@ contract DeployPartialWithdrawalE2E is Script {
 
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("SettlementVerifier:", address(sv));
+        console2.log("CloseFundingMaterializer:", address(materializer));
         console2.log("MANAGER:", address(manager));
     }
 }

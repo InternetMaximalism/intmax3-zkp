@@ -26,6 +26,10 @@ function makeRuntime(account, deps) {
     participantCloser = null,
     claimSettlement = null,
     snapshotVault = null,
+    backingVault = null,
+    backingVerifier = null,
+    publicClosePublisher = null,
+    readDurableCloseState = null,
     isChainReady = () => true,
   } = deps;
   const smW = makeSm(store);
@@ -39,6 +43,10 @@ function makeRuntime(account, deps) {
     participantCloser,
     claimSettlement,
     snapshotVault,
+    backingVault,
+    backingVerifier,
+    publicClosePublisher,
+    readDurableCloseState,
     // Lets own-tx branches inject a hard signal that re-enters dispatch.
     raiseSignal: (sig) => {
       if (!activeGroup) throw new Error('delegate signal raised outside serialized dispatch');
@@ -86,6 +94,7 @@ function makeRuntime(account, deps) {
         case BRANCHES.COSIGN_INVALID: return await exitB.onCosignInvalid(event, ctx);
         case BRANCHES.COSIGNER_WITHHOLDING: return await exitB.onWithholding(event, ctx);
         case BRANCHES.CHAIN_CLOSE_SEEN: return await exitB.onCloseSeen(event, ctx);
+        case BRANCHES.CHAIN_CLOSE_CANCELLED: return await exitB.onCloseCancelled(event, ctx);
         case BRANCHES.CHAIN_FINALIZED: return await exitB.onChannelFinalized(event, ctx);
         case BRANCHES.CHAIN_CLAIM_ACCEPTED: return await exitB.onClaimAccepted(event, ctx);
         case BRANCHES.CHAIN_FUNDS_PULLED: return await exitB.onFundsPulled(event, ctx);

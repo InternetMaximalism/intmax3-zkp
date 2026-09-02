@@ -94,8 +94,10 @@ contract CloseExitHandler {
     }
 
     function requestClose() external {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(oracle.oMember());
-        try manager.requestClose() {
+        try manager.requestClose(freezeNonce, cancellationFloor) {
             succeededRequest += 1;
         } catch {}
         this.noteState();
@@ -128,7 +130,8 @@ contract CloseExitHandler {
     }
 
     function finalizeTheClose() external {
-        try manager.finalizeClose() {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
+        try manager.finalizeCloseGuarded(pending.closeIntentDigest, manager.closeRequestGeneration()) {
             succeededFinalize += 1;
         } catch {}
         this.noteState();
@@ -315,11 +318,12 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     {
         uint256 clock = block.timestamp;
 
-        // (a) `finalizeClose` — permissionless, needs NO material at all, only the passage of time.
+        // (a) guarded finalize — permissionless, but names the exact request generation and digest.
         uint256 snap = vm.snapshotState();
         uint64 deadline = manager.getPendingClose().challengeDeadline;
         if (block.timestamp <= deadline) vm.warp(uint256(deadline) + 1);
-        try manager.finalizeClose() {
+        ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
+        try manager.finalizeCloseGuarded(pending.closeIntentDigest, manager.closeRequestGeneration()) {
             viaFinalize = true;
         } catch {}
         vm.revertToState(snap);

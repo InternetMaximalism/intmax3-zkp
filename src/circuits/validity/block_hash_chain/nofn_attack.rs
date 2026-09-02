@@ -467,10 +467,10 @@ fn the_2_1_attack_is_dead() {
     // ---- A1: `signer_count = 1` over the channel's real member set. ---------------------------
     //
     // The literal §2.1 block, restated in the post-change witness shape: ONE signature, the
-    // channel's own registered members. NAMED CONSTRAINT: the `2 <= signer_count <= MAX_SIG_CLUSTER`
-    // floor (`update_channel_tree.rs`, design §5.4 item 2) — asserted IN-CIRCUIT rather than
-    // natively precisely so that the 1-of-N aggregate, which `FalconAggCircuit` itself permits, is
-    // inapplicable to a block.
+    // channel's own registered members. NAMED CONSTRAINT: the `2 <= signer_count <=
+    // MAX_SIG_CLUSTER` floor (`update_channel_tree.rs`, design §5.4 item 2) — asserted
+    // IN-CIRCUIT rather than natively precisely so that the 1-of-N aggregate, which
+    // `FalconAggCircuit` itself permits, is inapplicable to a block.
     //
     // ISOLATION, stated honestly: this witness ALSO violates the padding rule (slots 1 and 2 hold
     // real members at or above `signer_count = 1`), so the floor is not the only rule it breaks.

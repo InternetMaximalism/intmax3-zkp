@@ -6,6 +6,7 @@ const { checkHeadMonotonic } = require('../verify');
 const dsm = require('../state-machine');
 const wire = require('../../common/wire');
 const { buildParticipantCloseProof } = require('../participant-close');
+const { isDeepStrictEqual } = require('util');
 
 function headOf(snapshot) {
   const st = (snapshot && snapshot.state) || {};
@@ -34,7 +35,9 @@ function recordBalance(store, bal) {
 }
 
 async function importAndVerify(event, ctx) {
-  const { api, wallet, ch, store, log, raiseSignal, snapshotVault } = ctx;
+  const {
+    api, wallet, ch, store, log, raiseSignal, snapshotVault, backingVault, backingVerifier,
+  } = ctx;
   let snapshot = event.snapshot;
   if (!snapshot) snapshot = await api.getSnapshot(ch.id);
   const incoming = headOf(snapshot);
@@ -48,8 +51,30 @@ async function importAndVerify(event, ctx) {
     return raiseSignal({ source: 'signal', kind: 'equivocation', reason: mono.reason });
   }
 
-  // Import into the WASM session (fails closed on a bad N-of-N signature).
-  if (wallet.available()) {
+  // A snapshot is not accepted unless its exact public close backing is already retrievable and
+  // can be durably archived. Fetch and fully context-check it BEFORE the WASM session adopts the
+  // head. The artifact is only published into the immutable vault AFTER WASM has authenticated
+  // every signature/root in the same snapshot.
+  if (!wallet.available()) {
+    throw new Error('WASM wallet unavailable: refusing to accept an unverifiable signed head');
+  }
+  if (!snapshotVault || !backingVault || !backingVerifier) {
+    throw new Error('durable snapshot/backing archives and native backing verification are required before accepting a signed head');
+  }
+  const backing = await api.getBacking(ch.id);
+  const stagedBacking = backingVault.prepare(backing, snapshot);
+  try {
+    // Verify the exact fsynced JSON file that will become the archive.  The compact native
+    // --verify-only path checks the N-of-N signatures, pinned VD and BalanceProcessor proof but
+    // deliberately avoids close-proof construction.  A durable receipt can be reused for an
+    // idempotent replay of the same content-addressed archive.
+    if (backingVault.requiresVerification(stagedBacking)) {
+      const receipt = await backingVerifier.verify(
+        backingVault.verificationInput(stagedBacking),
+        backingVault.authority,
+      );
+      backingVault.acceptVerification(stagedBacking, receipt);
+    }
     wallet.importChannel(snapshot, ctx.slot);
     const bal = wallet.balance(ctx.slot);
     if (!bal || Number(bal.slot) !== Number(ctx.slot)) {
@@ -60,16 +85,30 @@ async function importAndVerify(event, ctx) {
     // and located our own key. The proof contains no secret; it is the immutable L1 authentication
     // path the recipient will use for requestCloseAsParticipant.
     const participantCloseProof = buildParticipantCloseProof(snapshot, ctx.slot, ctx.recipient);
+    // Publish the already-fsynced backing stage first, then the snapshot. acceptedHead is written
+    // last, so a crash can leave extra immutable recovery material but can never leave an accepted
+    // head whose backing was not durable.
+    backingVault.commit(stagedBacking);
+    snapshotVault.save(snapshot);
     store.set('participantCloseProof', participantCloseProof);
-    // Archive only AFTER WASM accepted every signature/root and confirmed ownership of our slot.
-    // This keeps a stale-but-valid finalized close independently claimable after restart.
-    if (snapshotVault) snapshotVault.save(snapshot);
     recordBalance(store, bal);
     log.info({ event: 'SNAPSHOT_IMPORTED', channel: ch.id, head: incoming, balance: bal && bal.balance });
-  } else {
-    log.warn({ event: 'WASM_UNAVAILABLE', channel: ch.id, note: 'snapshot accepted structurally; build pkg-node to decrypt' });
+  } catch (error) {
+    backingVault.abort(stagedBacking);
+    throw error;
   }
   store.set('acceptedHead', incoming);
+}
+
+// Own-transaction endpoints return a bare ChannelState. Before accepting it, recover the complete
+// public snapshot and demand byte-for-byte JSON value equality with that response. This funnels
+// local send/refresh/inter/burn heads through the same WASM + backing archive gate as poll sync.
+async function importPublishedState(expectedState, ctx) {
+  const snapshot = await ctx.api.getSnapshot(ctx.ch.id);
+  if (!snapshot || !isDeepStrictEqual(snapshot.state, expectedState)) {
+    throw new Error('published snapshot differs from the exact co-signed response state');
+  }
+  return importAndVerify({ source: 'api', kind: 'snapshot', snapshot }, ctx);
 }
 
 async function decryptAndReport(event, ctx) {
@@ -87,4 +126,11 @@ async function awaitImportThenSync(event, ctx) {
   return importAndVerify({ source: 'api', kind: 'snapshot' }, ctx);
 }
 
-module.exports = { importAndVerify, decryptAndReport, awaitImportThenSync, headOf, recordBalance };
+module.exports = {
+  importAndVerify,
+  importPublishedState,
+  decryptAndReport,
+  awaitImportThenSync,
+  headOf,
+  recordBalance,
+};

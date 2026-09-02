@@ -9,6 +9,7 @@ import {
     IChannelRegistry
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
@@ -69,6 +70,7 @@ contract DeployWalletSettlement is Script {
 
         // 2. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
         sv = new ChannelSettlementVerifier();
+        CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
         {
             ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
                 degreeBits: 1,
@@ -152,6 +154,7 @@ contract DeployWalletSettlement is Script {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(sv)),
             IChannelRegistry(address(rollup)),
+            address(materializer),
             mBind
         );
 
@@ -194,6 +197,7 @@ contract DeployWalletSettlement is Script {
         vm.stopBroadcast();
 
         console2.log("VERIFIER:", address(sv));
+        console2.log("CLOSE_FUNDING_MATERIALIZER:", address(materializer));
         console2.log("MANAGER:", address(manager));
     }
 }

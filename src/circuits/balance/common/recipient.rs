@@ -66,10 +66,7 @@ pub fn calculate_recipient_from_address(address: Address) -> Bytes32 {
 /// Circuit equivalent of [`calculate_recipient_from_address`]. Keeping construction and
 /// extraction inverse to this one canonical form prevents tagged values with non-zero 11-byte
 /// padding from being accepted in a proof even though the L1 contract reconstructs zero padding.
-pub fn calculate_recipient_from_address_circuit<
-    F: RichField + Extendable<D>,
-    const D: usize,
->(
+pub fn calculate_recipient_from_address_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     address: &AddressTarget,
 ) -> Bytes32Target {

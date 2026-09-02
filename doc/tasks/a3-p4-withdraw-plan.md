@@ -23,7 +23,7 @@ live(anvil)で通す。manager の L1 残高が増えることを assert。
   5. postBlock(block2=withdrawal)  ← blob, この submissionId を finalize
   6. `finalize(subId, finalRoot, vpis, validityMle)`
   7. `withdrawNative(ws, prover, withdrawalMle)`
-  8. `pullChannelFunds()`(manager が rollup.withdraw() を引く)
+  8. `pullChannelFunds()`(manager が rollup.withdraw(expectedAmount) で当該 channel 分だけ引く)
 - 生成物 4 点(`generate_withdrawal_fixture.rs` が出力、`build_channel_withdrawal` が同一生成):
   `lifecycle.json` / `lifecycle_validity_mle.json` / `withdrawal_mle.json` / `withdrawal_payout.json`。
 

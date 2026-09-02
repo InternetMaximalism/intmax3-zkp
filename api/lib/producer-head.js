@@ -6,6 +6,10 @@ function sameJsonValue(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function isZeroH2Tag(value) {
+  return typeof value === 'string' && /^0x0{64}$/i.test(value);
+}
+
 // Reconcile one CLI-committed H2=0 state with the durable producer. Stable request ids inside the
 // producer client make retries idempotent. H2-bearing source debits deliberately fail here: those
 // must be replayed with their debit payload + descriptor through postInterChannel.
@@ -21,11 +25,35 @@ async function syncStateIfNeeded(state) {
   return producer.syncOffchainHeads([state]);
 }
 
+// Publish one ordinary N-of-N H2=0 state in the only safe order:
+//   durable resident backing -> durable public producer head.
+// A crash after phase one is harmless (the live bind is exact-idempotent); a live-bind failure
+// cannot leave `/snapshot` ahead of `/backing`.  The full ChannelSnapshot is always re-read from
+// the CLI's canonical file instead of manufacturing a record/member wrapper around response data.
+async function publishOffchainSnapshot(ch, expectedState) {
+  const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+  if (!snapshot || !snapshot.state || !expectedState
+      || !sameJsonValue(snapshot.state.channelId, expectedState.channelId)
+      || !sameJsonValue(snapshot.state.digest, expectedState.digest)) {
+    throw new Error('canonical channel snapshot differs from the just-cosigned state');
+  }
+  if (!isZeroH2Tag(snapshot.state.h2Tag)) {
+    throw new Error('ordinary off-chain publication requires an exact H2=0 signed head');
+  }
+  const liveStatus = await producer.liveBindSnapshot(ch, snapshot);
+  const headSyncReceipt = await syncStateIfNeeded(snapshot.state);
+  return { snapshot, liveStatus, headSyncReceipt };
+}
+
 async function flushPublishedHead(ch) {
   // Repair a crash between the two local channel-state replacements before looking at either
   // published snapshot or producer artifact. The CLI command is an idempotent 2PC roll-forward.
   cli(ch, ['recover-inter-transfers']);
+  // The private CLI snapshot is authoritative. If the prior process died after committing it but
+  // before atomically replacing the convenience public file, roll that publication forward now.
+  cli(ch, ['publish-snapshot', 'channel_snapshot.json']);
   const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+  const deferredHeadStates = [];
 
   // Source-side H2 transition. The CLI may have committed its channel state immediately before
   // the API crashed; the retained public payload/descriptor/result reproduce the exact producer
@@ -84,10 +112,10 @@ async function flushPublishedHead(ch) {
       && incoming.bBundleApplyState
       && sameJsonValue(incoming.bBundleApplyState.digest, snapshot.state.digest)
     ) {
-      await producer.syncOffchainHeads([
+      deferredHeadStates.push(
         incoming.bFundImportState,
         incoming.bBundleApplyState,
-      ]);
+      );
     }
   }
 
@@ -100,14 +128,30 @@ async function flushPublishedHead(ch) {
       && deposit.bundleApplyState
       && sameJsonValue(deposit.bundleApplyState.digest, snapshot.state.digest)
     ) {
-      await producer.syncOffchainHeads([
+      deferredHeadStates.push(
         deposit.fundImportState,
         deposit.bundleApplyState,
-      ]);
+      );
     }
+  }
+
+  // H2=0 heads are not public until the exact full signed snapshot is durably archived with the
+  // resident balance proof.  Deposit/destination recovery states are deliberately deferred until
+  // after this bind, closing the crash window where the public producer could outrun backing.
+  if (isZeroH2Tag(snapshot.state && snapshot.state.h2Tag)) {
+    await producer.liveBindSnapshot(ch, snapshot);
+  }
+  if (deferredHeadStates.length > 0) {
+    await producer.syncOffchainHeads(deferredHeadStates);
   }
 
   return syncStateIfNeeded(snapshot.state);
 }
 
-module.exports = { flushPublishedHead, sameJsonValue, syncStateIfNeeded };
+module.exports = {
+  flushPublishedHead,
+  isZeroH2Tag,
+  publishOffchainSnapshot,
+  sameJsonValue,
+  syncStateIfNeeded,
+};

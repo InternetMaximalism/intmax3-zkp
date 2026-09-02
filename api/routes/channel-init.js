@@ -5,7 +5,7 @@ const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 const producer = require('../lib/block-producer');
 const { importL1Deposit } = require('../lib/deposit-pipeline');
-const { flushPublishedHead, syncStateIfNeeded } = require('../lib/producer-head');
+const { flushPublishedHead, publishOffchainSnapshot } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
 
@@ -17,11 +17,12 @@ router.post('/init', (req, res) => {
     writeJson(wc(ch, 'contribution.json'), req.body);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-    await producer.register(snapshot);
     // The durable live-balance spine starts HERE (sole base-state authority): the daemon derives
     // and owns the account/deposit salts; the API only ever learns the deposit recipient.
     // Idempotent across restarts — an existing snapshot returns its configured recipient.
     const live = await producer.liveInit(ch);
+    await producer.liveBindSnapshot(ch, snapshot);
+    await producer.register(snapshot);
     res.json({ ...snapshot, liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -39,8 +40,9 @@ router.post('/join', (req, res) => {
     writeJson(wc(ch, 'contribution.json'), contribution);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-    await producer.register(snapshot);
     const live = await producer.liveInit(ch);
+    await producer.liveBindSnapshot(ch, snapshot);
+    await producer.register(snapshot);
     const slot = snapshot.members ? snapshot.members.length - 1 : 0;
     res.json({ snapshot, slot, balance: '0', liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
@@ -75,6 +77,8 @@ router.post('/join-and-deposit', (req, res) => {
     writeJson(wc(ch, 'contribution.json'), contribution);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     let snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    const live = await producer.liveInit(ch);
+    await producer.liveBindSnapshot(ch, snapshot);
     await producer.register(snapshot);
     const slot = snapshot.members ? snapshot.members.length - 1 : 0;
     let depositTxHash;
@@ -83,12 +87,13 @@ router.post('/join-and-deposit', (req, res) => {
     if (depositAmount && depositAmount !== '0') {
       try {
         const backing = readJson(wc(ch, 'channel_backing.json'));
+        if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
         // tokenIndex 0 = ETH (msg.value == amount); nonzero = registered ERC-20 (msg.value 0;
         // requires a prior approve(rollup, amount) by the depositor — §N-7).
         const castArgs = [
           'send', backing.rollup,
           'deposit(bytes32,uint32,uint256,bytes32)',
-          backing.deposit_recipient, tokenIndex, String(depositAmount),
+          live.depositRecipient, tokenIndex, String(depositAmount),
           '0x0000000000000000000000000000000000000000000000000000000000000000',
         ];
         if (tokenIndex === '0') castArgs.push('--value', String(depositAmount));
@@ -117,6 +122,7 @@ router.post('/join-and-deposit', (req, res) => {
       balance: depositSucceeded ? String(depositAmount) : '0',
       depositSucceeded,
       depositTxHash,
+      liveDepositRecipient: live.depositRecipient,
     });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -139,7 +145,7 @@ router.post('/register-token', (req, res) => {
     }
     cli(ch, ['register-token', tokenIndex, 'token_register_cosigned.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-    await syncStateIfNeeded(snapshot.state);
+    await publishOffchainSnapshot(ch, snapshot.state);
     res.json(snapshot);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));

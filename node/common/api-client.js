@@ -3,6 +3,53 @@
 // co-signer, and by the co-signer's own self-checks. Adds retries with backoff and timeouts.
 // Uses Node's built-in fetch (Node 18+); no extra dependency.
 
+const MAX_BACKING_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+async function responseText(res, maximumBytes = null) {
+  if (maximumBytes == null) return res.text();
+  const declaredRaw = res.headers && typeof res.headers.get === 'function'
+    ? res.headers.get('content-length') : null;
+  if (declaredRaw != null && /^\d+$/.test(declaredRaw)
+      && Number(declaredRaw) > maximumBytes) {
+    const error = new Error(`HTTP response exceeds the ${maximumBytes}-byte safety limit`);
+    error.code = 'RESPONSE_TOO_LARGE';
+    throw error;
+  }
+  // Test doubles and older fetch shims may expose only text(). Production Node fetch exposes a
+  // Web ReadableStream, which is consumed incrementally so a hostile coordinator cannot force an
+  // unbounded allocation before BackingVault sees the envelope.
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    if (Buffer.byteLength(text, 'utf8') > maximumBytes) {
+      const error = new Error(`HTTP response exceeds the ${maximumBytes}-byte safety limit`);
+      error.code = 'RESPONSE_TOO_LARGE';
+      throw error;
+    }
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      total += chunk.length;
+      if (total > maximumBytes) {
+        const error = new Error(`HTTP response exceeds the ${maximumBytes}-byte safety limit`);
+        error.code = 'RESPONSE_TOO_LARGE';
+        throw error;
+      }
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    try { await reader.cancel(error); } catch (_) { /* keep the bounded-read failure */ }
+    throw error;
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
+}
+
 class ApiClient {
   constructor({ baseUrl, timeoutMs = 600_000, maxRetries = 3, bearerToken = '' }) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -11,7 +58,7 @@ class ApiClient {
     this.bearerToken = bearerToken;
   }
 
-  async _req(method, pathname, body) {
+  async _req(method, pathname, body, { maxResponseBytes = null } = {}) {
     let lastErr;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       const ctrl = new AbortController();
@@ -25,8 +72,8 @@ class ApiClient {
           body: body ? JSON.stringify(body) : undefined,
           signal: ctrl.signal,
         });
+        const text = await responseText(res, maxResponseBytes);
         clearTimeout(t);
-        const text = await res.text();
         let json;
         try { json = text ? JSON.parse(text) : {}; } catch (e) { json = { raw: text }; }
         if (!res.ok) {
@@ -41,6 +88,7 @@ class ApiClient {
         }
       } catch (e) {
         clearTimeout(t);
+        if (e && e.code === 'RESPONSE_TOO_LARGE') throw e;
         if (e.status && e.status >= 400 && e.status < 500) throw e;
         lastErr = e;
       }
@@ -57,7 +105,11 @@ class ApiClient {
   // --- read ---
   getSnapshot(id) { return this._req('GET', this.ch(id, '/snapshot')); }
   getStatus(id) { return this._req('GET', this.ch(id, '/status')); }
-  getBacking(id) { return this._req('GET', this.ch(id, '/backing')); }
+  getBacking(id) {
+    return this._req('GET', this.ch(id, '/backing'), undefined, {
+      maxResponseBytes: MAX_BACKING_RESPONSE_BYTES,
+    });
+  }
   getBaseHead(id) { return this._req('GET', this.ch(id, '/base-head')); }
   getTickets(id) { return this._req('GET', this.ch(id, '/tickets')); }
 
@@ -82,4 +134,4 @@ class ApiClient {
   postCloseClaim(id, body) { return this._req('POST', this.ch(id, '/close/post-close-claim'), body); }
 }
 
-module.exports = { ApiClient };
+module.exports = { ApiClient, MAX_BACKING_RESPONSE_BYTES, responseText };

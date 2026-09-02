@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 const { createBatchWindow, projectToSlim, partitionByAnchor } = require('./batch-window');
 const { publicBacking } = require('./public-backing');
+const { installBrowserClaimRoutes } = require('./browser-claim-routes');
 
 const ROOT = __dirname; // hosting/wallet/ — serves wallet-live.html + wallet-worker.js
 const REPO = path.join(ROOT, '..', '..'); // repo root — target/, self_certs/, contracts/, pkg/, wallet-live-work/ live here (two levels up from hosting/wallet/)
@@ -735,20 +736,12 @@ app.post('/api/withdraw', (req, res) => {
   } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
 });
 
-// POST /api/claim?channel=N  body: { manager, slot, recipient }  (per-member payout)
+// Retired: this let the caller choose manager/slot/recipient and moved the Regev witness into the
+// relay-owned CLI. Browser claims now use /api/browser-claim/*: the browser WASM owns the witness,
+// while the relay derives every public authority from its durable settlement binding.
 app.post('/api/claim', (req, res) => {
-  try {
-    const ch = reqChannel(req);
-    const manager = req.body && req.body.manager;
-    const slot = req.body && req.body.slot;
-    const recipient = req.body && req.body.recipient;
-    if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
-    const ticket = findActiveTicket(ch, 'full_withdrawal');
-    if (ticket) { ticket.status = 'claim_pending'; upsertTicket(ch, ticket); }
-    const out = cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
-    if (ticket) { ticket.status = 'claim_done'; ticket.steps.claim = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
-    res.json({ ok: true, log: out });
-  } catch (e) { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); }
+  void req;
+  res.status(410).json({ error: 'legacy relay-owned claim is retired; use /api/browser-claim/*' });
 });
 
 // ─── L1 deposit + mid-channel import + partial withdrawal ─────────────────────────────────────
@@ -1079,6 +1072,7 @@ for (const ch of CHANNELS) {
 // its deposit is the first on that contract (prev hash 0). Done ONCE per channel (~40s each); the
 // cached backing persists across relay restarts, so this only runs on the very first launch.
 const RPC = 'http://127.0.0.1:8545';
+installBrowserClaimRoutes(app, { reqChannel, wc, rollupOf, cli, rpc: RPC });
 const ANVIL0 = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const sh = (bin, args, o) => execFileSync(bin, args, { encoding: 'utf8', ...o });
 const rpcUp = () => { try { sh('cast', ['block-number', '--rpc-url', RPC], { stdio: 'pipe' }); return true; } catch (e) { return false; } };

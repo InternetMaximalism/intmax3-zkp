@@ -304,7 +304,9 @@ the two `#[ignore]`d-not-repinned Rust↔Solidity shared vectors (IMCI + close P
       ceiling (TM-1 layer b); `withdrawERC20` sharing the FULL `withdrawNative` verification core
       (factored `_verifyWithdrawalSet` — real MLE + finalized-root anchor + chain refold; per-leaf
       `tokenIndex != 0` + registered + IMPW auth gate); pull-payment
-      `pendingTokenWithdrawals[t][r]` + `withdrawToken(t)` (the ERC-20 mirror of `withdraw()`).
+      `pendingTokenWithdrawals[t][r]` + `withdrawToken(t, amount)` (the ERC-20 mirror of
+      `withdraw(amount)`). Both pull APIs debit exactly the caller-supplied amount; unrelated
+      recipient-wide credits remain in the Rollup.
       ETH stays on `totalEscrowed` (documented; `escrowedByToken[0]` never used — minimal diff).
       Runtime size 23,855 B (721 B EIP-170 margin; the factoring PAID for the additions).
       Minimal in-tree `SafeERC20.sol` (IERC20 + SafeERC20Lib) — no new external dependency
@@ -616,8 +618,9 @@ analysis became **TM-16** (threat model) and the approved fix is the IMTC ids-li
       verified by the SAME withdrawal VK; `None` keeps byte-parity. CLI `withdraw` gains
       `WD_ERC20_TOKEN/WD_ERC20_AMOUNT/WD_ERC20_TOKEN_ADDR` (approve + ERC-20 `deposit()`
       balanceOf-delta branch on-chain, `RunClose.withdrawErc20Step` → `withdrawERC20`,
-      `pullChannelTokenFunds`); CLI `claim` pulls via `claimWithdrawalCredit(uint32)` for
-      non-genesis tokens. `close_lifecycle_cli_e2e` accessors fixed to the per-token getters
+      `pullChannelTokenFunds`); CLI `claim` pulls every native/ERC-20 payout through its exact
+      proof-scoped `claimWithdrawalCredit(bytes32 withdrawalNullifier)`. The aggregate token-index
+      overload is removed. `close_lifecycle_cli_e2e` accessors fixed to the per-token getters
       (they still read the retired scalar getters — latent breakage since Phase 3).
 - [x] **Two-token anvil E2E** — `tests/two_token_cli_e2e.rs` (ignored/heavy, CLI-driven; GREEN,
       946s): DeployCloseCli + SimpleERC20 + set-once `registerToken` → init (ETH genesis) → CLI
@@ -628,9 +631,9 @@ analysis became **TM-16** (threat model) and the approved fix is the IMTC ids-li
       balanceOf-delta ERC-20 deposit in ONE deposit block, finalize, real withdrawNative +
       the NEW real-proof withdrawERC20 chain — the FIRST real-MLE ERC-20 withdrawal —
       pullChannelFunds + pullChannelTokenFunds: 0.09 ETH + 40 real tokens land in the manager)
-      → per-token conservation with no finalized close (both `claimWithdrawalCredit` entry
-      points refuse, `totalCreditedOut[t] == 0`, both asset pools intact, no cross-token
-      movement).
+      → per-token conservation with no finalized close (both proof-scoped
+      `claimWithdrawalCredit(bytes32)` calls refuse, `totalCreditedOut[t] == 0`, both asset
+      pools intact, no cross-token movement).
       **E2E FINDINGS (stop-and-report, both PRE-EXISTING fences working fail-closed as designed;
       neither weakened nor bypassed):**
       1. *P1 re-attestation fence:* a close AFTER `cosign-l1-deposit-import` is refused by the

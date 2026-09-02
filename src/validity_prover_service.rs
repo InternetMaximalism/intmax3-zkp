@@ -24,12 +24,13 @@ use plonky2::{
     field::types::PrimeField64 as _,
     plonk::{circuit_data::VerifierCircuitData, proof::ProofWithPublicInputs},
 };
+use plonky2_keccak::utils::solidity_keccak256;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     block_producer::ProductionBlockProducer,
     block_producer_service::{
-        BlockProducerAnchor, BlockProducerService, BlockProducerServiceError,
+        BlockProducerAnchor, BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
     },
     circuits::validity::block_hash_chain::{
         block_chain_pis::BlockChainPublicInputs,
@@ -38,26 +39,26 @@ use crate::{
         validity_circuit::{ValidityCircuit, ValidityPublicInputs},
     },
     common::u63::BlockNumber,
-    utils::{
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
-        wrapper::WrapperCircuit,
-    },
     ethereum_types::{
         address::Address,
-        bytes32::{Bytes32, BYTES32_LEN},
+        bytes32::{BYTES32_LEN, Bytes32},
         u32limb_trait::U32LimbTrait as _,
     },
     falcon_sig::{
         agg::{FalconAggCircuit, FalconAggWitness},
-        agg_list::{agg_list_commitment, AggListCircuit},
+        agg_list::{AggListCircuit, agg_list_commitment},
     },
     l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource, L1FinalizedCheckpoint},
-    utils::poseidon_hash_out::PoseidonHashOut,
+    utils::{
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        poseidon_hash_out::PoseidonHashOut,
+        wrapper::WrapperCircuit,
+    },
     wallet_core::{C, D, F},
 };
 
-const SNAPSHOT_MAGIC: &[u8; 16] = b"IMVALIDITYPROV02";
-pub const VALIDITY_PROVER_SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_MAGIC: &[u8; 16] = b"IMVALIDITYPROV03";
+pub const VALIDITY_PROVER_SNAPSHOT_VERSION: u32 = 3;
 const SNAPSHOT_HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -117,6 +118,35 @@ pub struct L1ValidityAcknowledgement {
     pub finalized_checkpoint: L1FinalizedCheckpoint,
 }
 
+/// Immutable identity of the L1 contract whose finalized state is accepted by this prover.
+///
+/// Address and chain binding alone are insufficient for a release deployment: a mistaken or
+/// substituted contract can expose the expected getters and events while implementing different
+/// authorization semantics. The runtime-code hash is therefore process configuration and is
+/// durably copied into snapshot v3 before any command is accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct L1ValidityDeploymentBinding {
+    pub chain_id: u64,
+    pub rollup: Address,
+    pub rollup_runtime_code_hash: Bytes32,
+}
+
+impl L1ValidityDeploymentBinding {
+    fn validate(&self) -> Result<(), ValidityProverServiceError> {
+        if self.chain_id == 0
+            || self.rollup == Address::default()
+            || self.rollup_runtime_code_hash == Bytes32::default()
+        {
+            return Err(ValidityProverServiceError::InvalidConfiguration(
+                "L1 deployment binding requires a nonzero chain, rollup and runtime-code hash"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Operator-owned L1 read configuration. It is process configuration, never accepted from a
 /// per-request JSON command, so a remote caller cannot substitute an RPC endpoint or rollup.
 #[derive(Clone, Debug)]
@@ -124,6 +154,9 @@ pub struct L1FinalizationRpcConfig {
     pub rpc_url: String,
     pub expected_chain_id: u64,
     pub rollup: Address,
+    /// Keccak-256 of the exact deployed rollup runtime bytecode. This is intentionally supplied
+    /// out of band rather than learned from the same RPC whose state it authenticates.
+    pub expected_rollup_runtime_code_hash: Bytes32,
     pub minimum_confirmations: u64,
     /// Explicit local-test escape. Production always requires the RPC `finalized` tag; this may
     /// select `latest` only when `expected_chain_id == 31337`.
@@ -142,6 +175,11 @@ impl L1FinalizationRpcConfig {
                 "L1 rollup address must be nonzero".into(),
             ));
         }
+        if self.expected_rollup_runtime_code_hash == Bytes32::default() {
+            return Err(ValidityProverServiceError::InvalidConfiguration(
+                "expected L1 rollup runtime-code hash must be nonzero".into(),
+            ));
+        }
         if self.expected_chain_id == 0 {
             return Err(ValidityProverServiceError::InvalidConfiguration(
                 "expected L1 chain id must be nonzero".into(),
@@ -158,6 +196,14 @@ impl L1FinalizationRpcConfig {
             )));
         }
         Ok(())
+    }
+
+    fn deployment_binding(&self) -> L1ValidityDeploymentBinding {
+        L1ValidityDeploymentBinding {
+            chain_id: self.expected_chain_id,
+            rollup: self.rollup,
+            rollup_runtime_code_hash: self.expected_rollup_runtime_code_hash,
+        }
     }
 }
 
@@ -201,6 +247,10 @@ pub struct ValidityFinalizationReceipt {
     pub producer_anchor: BlockProducerAnchor,
     pub finalized_block_number: u64,
     pub final_extended_state_commitment: Bytes32,
+    /// Exact authoritative producer receipt promoted only after the L1 finalization was proven
+    /// canonical and finalized. Downstream live settlement must consume this field verbatim; it
+    /// must never fall back to the earlier non-authoritative prepared receipt.
+    pub committed_producer_receipt: BlockProducerReceipt,
     pub l1_acknowledgement: L1ValidityAcknowledgement,
 }
 
@@ -212,6 +262,38 @@ pub struct ValidityCandidateArtifact {
     pub initial_extended_state: Vec<u64>,
     pub final_extended_state: Vec<u64>,
     pub validity_proof: Vec<u8>,
+}
+
+/// Exact public fields for one Rust small block. Solidity derives the two accumulator values from
+/// the immutable pending-chain checkpoint selected beside `SubBlock`, so they MUST still travel
+/// with the calldata fields. A posting driver must submit the proof-authenticated checkpoint and
+/// must never replace it with a newer live pin; later deposits/registrations remain queued for the
+/// next proof.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidityPostingSubBlock {
+    pub channel_id: u32,
+    pub timestamp: u64,
+    pub tx_tree_root: Bytes32,
+    pub num_users: u32,
+    pub key_ids: Vec<u32>,
+    pub deposit_hash_chain: Bytes32,
+    pub channel_reg_hash_chain: Bytes32,
+}
+
+/// Candidate-bound material needed to construct the L1 `SubBlock[]` argument. The proof payload
+/// remains in [`ValidityFinalizeArtifact`]; keeping the two views tied to the same candidate id
+/// lets an operator encode the large MLE object once without accepting caller-supplied blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidityPostingArtifact {
+    pub receipt: ValidityCandidateReceipt,
+    pub sub_blocks: Vec<ValidityPostingSubBlock>,
+    /// `keccak256(abi.encodePacked(finalDepositHashChain, finalChannelRegHashChain))`, naming the
+    /// exact immutable `IntmaxRollup` checkpoint authenticated by this candidate. It may differ
+    /// from the newer live `pendingChainsPin()`; that is a safe historical prefix, never a reason
+    /// to substitute the live value or rebuild this proof.
+    pub expected_pending_chains: Bytes32,
 }
 
 /// Everything `IntmaxRollup.finalize(id, stateRoot, vpis, mleProof)` needs for the current
@@ -288,6 +370,10 @@ struct ValidityProverSnapshot {
     /// snapshot is bound before the daemon accepts commands; every acknowledged snapshot must
     /// carry this field.
     l1_authority: Option<L1FinalizedCheckpoint>,
+    /// Exact deployment identity paired with `l1_authority`. These fields are introduced together
+    /// in snapshot v3, so an acknowledged snapshot can never silently inherit process-local
+    /// authority after restart.
+    l1_binding: Option<L1ValidityDeploymentBinding>,
     finalized: FinalizedCheckpoint,
     candidate: Option<CandidateCheckpoint>,
     acknowledgements: Vec<AcknowledgementRecord>,
@@ -352,6 +438,7 @@ impl ValidityProverService {
             prover,
             circuit_fingerprint: circuits.fingerprint,
             l1_authority: None,
+            l1_binding: None,
             finalized: FinalizedCheckpoint {
                 anchor: genesis_anchor,
                 extended_state: genesis.to_u64_vec(),
@@ -463,8 +550,24 @@ impl ValidityProverService {
     ) -> Result<(), ValidityProverServiceError> {
         self.ensure_healthy()?;
         l1.validate()?;
-        let current = read_l1_authority_checkpoint(l1)?;
+        let expected_binding = l1.deployment_binding();
+        expected_binding.validate()?;
+        if let Some(stored) = self.disk.l1_binding {
+            if stored != expected_binding {
+                return Err(ValidityProverServiceError::InvalidConfiguration(format!(
+                    "snapshot L1 deployment binding {stored:?} differs from configured {expected_binding:?}"
+                )));
+            }
+        } else if self.disk.l1_authority.is_some()
+            || !self.disk.acknowledgements.is_empty()
+            || self.disk.finalized.acknowledgement.is_some()
+        {
+            return Err(ValidityProverServiceError::Snapshot(
+                "L1-bound validity snapshot has no durable deployment identity".into(),
+            ));
+        }
 
+        let current = read_l1_authority_checkpoint(l1)?;
         if let Some(stored) = self.disk.l1_authority {
             validate_stored_l1_checkpoint(l1, &stored, &current)?;
         } else if !self.disk.acknowledgements.is_empty()
@@ -478,47 +581,62 @@ impl ValidityProverService {
         // This check is deliberately unconditional. A fresh snapshot has no receipt yet, but it
         // is still untrusted local disk state: another prover may already have advanced the
         // rollup. Bind the local finalized cursor/root to the rollup at a stable finalized block
-        // before this daemon accepts even its first command.
+        // before this daemon accepts even its first command. There is one deliberately narrow
+        // crash-recovery state: L1 may already expose the exact durable pending candidate as its
+        // latest root. This only permits startup; it does not promote local state. The normal ACK
+        // command must still prove the exact transaction receipt, event, canonicality and
+        // finality before either the producer or validity snapshot advances.
         let finalized = decode_extended_state(&self.disk.finalized.extended_state)?;
+        let pending_l1_candidate =
+            self.disk
+                .candidate
+                .as_ref()
+                .map(|candidate| PendingL1Candidate {
+                    root: candidate.receipt.final_extended_state_commitment,
+                    intmax_block: candidate.receipt.final_block_number,
+                });
         let locally_bound = verify_local_finalized_state_at_l1(
             l1,
             &current,
             finalized.commitment(),
             finalized.inner.block_number.as_u64(),
+            pending_l1_candidate,
         )?;
 
-        let next_authority = if let Some(acknowledgement) =
-            self.disk.finalized.acknowledgement.as_ref()
-        {
-            let reread = revalidate_historical_l1_finalization(
-                l1,
-                acknowledgement.transaction_hash,
-                acknowledgement.final_extended_state_commitment,
-                finalized.inner.block_number.as_u64(),
-            )?;
-            if reread.chain_id != acknowledgement.chain_id
-                || reread.transaction_hash != acknowledgement.transaction_hash
-                || reread.block_number != acknowledgement.block_number
-                || reread.block_hash != acknowledgement.block_hash
-                || reread.final_extended_state_commitment
-                    != acknowledgement.final_extended_state_commitment
-            {
-                return Err(l1_rejected(
-                    "persisted finalization receipt changed or was orphaned after restart",
-                ));
-            }
-            validate_stored_l1_checkpoint(l1, &locally_bound, &reread.finalized_checkpoint)?;
-            validate_checkpoint_progression(&locally_bound, &reread.finalized_checkpoint)?;
-            reread.finalized_checkpoint
-        } else {
-            locally_bound
-        };
+        let next_authority =
+            if let Some(acknowledgement) = self.disk.finalized.acknowledgement.as_ref() {
+                let reread = revalidate_historical_l1_finalization(
+                    l1,
+                    acknowledgement.transaction_hash,
+                    acknowledgement.final_extended_state_commitment,
+                    finalized.inner.block_number.as_u64(),
+                )?;
+                if reread.chain_id != acknowledgement.chain_id
+                    || reread.transaction_hash != acknowledgement.transaction_hash
+                    || reread.block_number != acknowledgement.block_number
+                    || reread.block_hash != acknowledgement.block_hash
+                    || reread.final_extended_state_commitment
+                        != acknowledgement.final_extended_state_commitment
+                {
+                    return Err(l1_rejected(
+                        "persisted finalization receipt changed or was orphaned after restart",
+                    ));
+                }
+                validate_stored_l1_checkpoint(l1, &locally_bound, &reread.finalized_checkpoint)?;
+                validate_checkpoint_progression(&locally_bound, &reread.finalized_checkpoint)?;
+                reread.finalized_checkpoint
+            } else {
+                locally_bound
+            };
 
-        if self.disk.l1_authority == Some(next_authority) {
+        if self.disk.l1_authority == Some(next_authority)
+            && self.disk.l1_binding == Some(expected_binding)
+        {
             return Ok(());
         }
         let mut next_disk = self.disk.clone();
         next_disk.l1_authority = Some(next_authority);
+        next_disk.l1_binding = Some(expected_binding);
         if let Err(error) = persist_snapshot(&self.snapshot_path, &next_disk) {
             self.poisoned = true;
             return Err(error);
@@ -539,7 +657,7 @@ impl ValidityProverService {
         validate_request_id(&request_id)?;
         if let Some(existing) = &self.disk.candidate {
             if existing.receipt.request_id == request_id {
-                verify_anchor(producer, &existing.receipt.producer_anchor)?;
+                candidate_producer_for_anchor(producer, &existing.receipt.producer_anchor)?;
                 return Ok(existing.receipt.clone());
             }
             return Err(ValidityProverServiceError::Conflict(format!(
@@ -549,9 +667,12 @@ impl ValidityProverService {
         }
 
         verify_anchor(producer, &self.disk.finalized.anchor)?;
-        let target_anchor = producer.current_anchor()?;
+        // A terminal close is first persisted as a non-authoritative producer candidate. Prove
+        // that exact frozen candidate; never silently fall back to the older authoritative head.
+        // Ordinary non-terminal validity batches continue to target the committed head.
+        let (target_anchor, target_producer) = producer_proof_target(producer)?;
         let initial_state = decode_extended_state(&self.disk.finalized.extended_state)?;
-        let final_state = producer.producer()?.current_extended_public_state();
+        let final_state = target_producer.current_extended_public_state();
         if final_state.commitment() != target_anchor.extended_state_commitment
             || final_state.inner.block_number.as_u64() != target_anchor.block_number
             || final_state.bp_sig_chain != target_anchor.bp_sig_chain
@@ -573,8 +694,8 @@ impl ValidityProverService {
             ));
         }
 
-        verify_event_prefix(
-            producer,
+        verify_event_prefix_core(
+            target_producer,
             self.disk.finalized.signature_event_count,
             initial_state.bp_sig_chain,
         )?;
@@ -588,14 +709,11 @@ impl ValidityProverService {
                     "invalid producer block number {raw_block}: {e}"
                 ))
             })?;
-            let witness = producer
-                .producer()?
-                .block_witness(block_number)
-                .ok_or_else(|| {
-                    ValidityProverServiceError::ProducerReconciliation(format!(
-                        "producer journal has no witness for block {raw_block}"
-                    ))
-                })?;
+            let witness = target_producer.block_witness(block_number).ok_or_else(|| {
+                ValidityProverServiceError::ProducerReconciliation(format!(
+                    "producer journal has no witness for block {raw_block}"
+                ))
+            })?;
             let span_initial = block_chain_proof.is_none().then(|| initial_state.clone());
             block_chain_proof = Some(
                 self.circuits
@@ -625,7 +743,7 @@ impl ValidityProverService {
         }
 
         let list_started = Instant::now();
-        let events = producer.producer()?.signature_events();
+        let events = target_producer.signature_events();
         if self.disk.finalized.signature_event_count > events.len() {
             return Err(ValidityProverServiceError::ProducerReconciliation(
                 "finalized signature cursor is ahead of producer history".into(),
@@ -777,6 +895,101 @@ impl ValidityProverService {
             }))
     }
 
+    /// Export only the public block span authenticated by the current durable candidate.
+    ///
+    /// Reconcile the candidate anchor against the replayed producer on every call. This prevents
+    /// an API from pairing a persisted proof with blocks from another journal generation after a
+    /// restart or concurrent producer advance. The returned span may contain more than one block
+    /// for general tooling; terminal close funding applies a stricter one-block release gate at
+    /// the JSONL/API boundary so pending deposit/registration accumulators cannot be misplaced.
+    pub fn posting_artifact(
+        &self,
+        producer: &BlockProducerService,
+    ) -> Result<Option<ValidityPostingArtifact>, ValidityProverServiceError> {
+        self.ensure_healthy()?;
+        let Some(candidate) = self.disk.candidate.as_ref() else {
+            return Ok(None);
+        };
+        let candidate_producer =
+            candidate_producer_for_anchor(producer, &candidate.receipt.producer_anchor)?;
+
+        let expected_count = candidate
+            .receipt
+            .final_block_number
+            .checked_sub(candidate.receipt.initial_block_number)
+            .ok_or_else(|| {
+                ValidityProverServiceError::Snapshot(
+                    "candidate final block precedes its initial block".into(),
+                )
+            })?;
+        if expected_count == 0 || expected_count != candidate.receipt.metrics.block_count {
+            return Err(ValidityProverServiceError::Snapshot(format!(
+                "candidate block span {expected_count} disagrees with proof metric {}",
+                candidate.receipt.metrics.block_count
+            )));
+        }
+        let capacity = usize::try_from(expected_count).map_err(|_| {
+            ValidityProverServiceError::Snapshot(
+                "candidate block span does not fit this platform".into(),
+            )
+        })?;
+        let mut sub_blocks = Vec::with_capacity(capacity);
+        for raw in candidate.receipt.initial_block_number + 1..=candidate.receipt.final_block_number
+        {
+            let block_number = BlockNumber::new(raw).map_err(|e| {
+                ValidityProverServiceError::Snapshot(format!(
+                    "candidate contains invalid block number {raw}: {e}"
+                ))
+            })?;
+            let block = candidate_producer
+                .public_block(block_number)
+                .ok_or_else(|| {
+                    ValidityProverServiceError::ProducerReconciliation(format!(
+                        "producer journal has no public block {raw} for the candidate"
+                    ))
+                })?;
+            if block.key_ids.len() != block.num_users as usize || block.key_ids.is_empty() {
+                return Err(ValidityProverServiceError::ProducerReconciliation(format!(
+                    "producer block {raw} has {} key ids for arity {}",
+                    block.key_ids.len(),
+                    block.num_users
+                )));
+            }
+            sub_blocks.push(ValidityPostingSubBlock {
+                channel_id: block.channel_id,
+                timestamp: block.timestamp,
+                tx_tree_root: block.tx_tree_root,
+                num_users: block.num_users,
+                key_ids: block.key_ids,
+                deposit_hash_chain: block.deposit_hash_chain,
+                channel_reg_hash_chain: block.channel_reg_hash_chain,
+            });
+        }
+        if sub_blocks.len() != capacity {
+            return Err(ValidityProverServiceError::Snapshot(
+                "candidate public block export is incomplete".into(),
+            ));
+        }
+        let final_block = sub_blocks.last().ok_or_else(|| {
+            ValidityProverServiceError::Snapshot(
+                "candidate public block export unexpectedly has no final block".into(),
+            )
+        })?;
+        let mut pending_chain_words = final_block.deposit_hash_chain.to_u32_vec();
+        pending_chain_words.extend(final_block.channel_reg_hash_chain.to_u32_vec());
+        let expected_pending_chains =
+            Bytes32::from_u32_slice(&solidity_keccak256(&pending_chain_words)).map_err(|e| {
+                ValidityProverServiceError::Snapshot(format!(
+                    "failed to encode candidate pending-chain pin: {e}"
+                ))
+            })?;
+        Ok(Some(ValidityPostingArtifact {
+            receipt: candidate.receipt.clone(),
+            sub_blocks,
+            expected_pending_chains,
+        }))
+    }
+
     /// Wrap the current candidate's validity proof for on-chain finalization. Reconstructs the
     /// `ValidityPublicInputs` from the candidate's own committed initial/final extended states
     /// (never re-proving), wraps + MLE/WHIRs the validity proof through the SAME rail the fixture
@@ -799,7 +1012,8 @@ impl ValidityProverService {
             &self.circuits.validity.data.verifier_data(),
             "validity finalize artifact",
         )?;
-        let wrapper = WrapperCircuit::<F, C, C, D>::new(&self.circuits.validity.data.verifier_data());
+        let wrapper =
+            WrapperCircuit::<F, C, C, D>::new(&self.circuits.validity.data.verifier_data());
         let wrapped = wrapper.prove(&validity_proof).map_err(|e| {
             ValidityProverServiceError::Proving(format!("wrap validity proof: {e}"))
         })?;
@@ -847,9 +1061,10 @@ impl ValidityProverService {
         candidate_id: Bytes32,
         transaction_hash: Bytes32,
         l1: &L1FinalizationRpcConfig,
-        producer: &BlockProducerService,
+        producer: &mut BlockProducerService,
     ) -> Result<ValidityFinalizationReceipt, ValidityProverServiceError> {
         self.ensure_healthy()?;
+        validate_request_id(&request_id)?;
         // An idempotent acknowledgement is still a production command, not a trusted read from
         // local disk.  Revalidate the persisted finalized receipt, its canonical block, the
         // durable L1 head and the rollup's latest root before returning it.  Without this branch a
@@ -887,9 +1102,16 @@ impl ValidityProverService {
                 &reread.finalized_checkpoint,
             )?;
             verify_anchor(producer, &existing.finalized_anchor)?;
-            return Ok(finalization_receipt(&existing));
+            let committed_producer_receipt = producer
+                .committed_receipt_at_anchor(&existing.finalized_anchor)?
+                .ok_or_else(|| {
+                    ValidityProverServiceError::ProducerReconciliation(
+                        "acknowledged producer anchor has no committed journal receipt".into(),
+                    )
+                })?;
+            return Ok(finalization_receipt(&existing, committed_producer_receipt));
         }
-        let candidate = self.disk.candidate.as_ref().ok_or_else(|| {
+        let candidate = self.disk.candidate.clone().ok_or_else(|| {
             ValidityProverServiceError::InvalidRequest(
                 "there is no pending candidate to acknowledge".into(),
             )
@@ -910,16 +1132,24 @@ impl ValidityProverService {
                 "production acknowledgement requires a startup-bound L1 authority".into(),
             )
         })?;
-        validate_stored_l1_checkpoint(
-            l1,
-            stored_authority,
-            &acknowledgement.finalized_checkpoint,
-        )?;
+        validate_stored_l1_checkpoint(l1, stored_authority, &acknowledgement.finalized_checkpoint)?;
         validate_checkpoint_progression(stored_authority, &acknowledgement.finalized_checkpoint)?;
+
+        // The close entry remains non-authoritative until this exact L1 result is canonical and
+        // finalized. Commit by the proof-bound journal anchor only after every L1 check above.
+        // If a crash happened after producer persistence but before the validity snapshot rename,
+        // the committed-anchor lookup makes this retry converge without reapplying the close.
+        if producer
+            .committed_receipt_at_anchor(&candidate.receipt.producer_anchor)?
+            .is_none()
+        {
+            producer.commit_prepared_close_funding_at_anchor(&candidate.receipt.producer_anchor)?;
+        }
         self.acknowledge_candidate_unchecked_for_test(
             request_id,
             candidate_id,
             acknowledgement,
+            l1.deployment_binding(),
             producer,
         )
     }
@@ -934,10 +1164,24 @@ impl ValidityProverService {
         request_id: String,
         candidate_id: Bytes32,
         acknowledgement: L1ValidityAcknowledgement,
+        deployment_binding: L1ValidityDeploymentBinding,
         producer: &BlockProducerService,
     ) -> Result<ValidityFinalizationReceipt, ValidityProverServiceError> {
         self.ensure_healthy()?;
         validate_request_id(&request_id)?;
+        deployment_binding.validate()?;
+        if deployment_binding.chain_id != acknowledgement.chain_id {
+            return Err(ValidityProverServiceError::InvalidRequest(
+                "L1 acknowledgement chain differs from the deployment binding".into(),
+            ));
+        }
+        if let Some(stored) = self.disk.l1_binding {
+            if stored != deployment_binding {
+                return Err(ValidityProverServiceError::Conflict(
+                    "L1 deployment binding changed across validity acknowledgements".into(),
+                ));
+            }
+        }
         let fingerprint = acknowledgement_fingerprint(candidate_id, &acknowledgement)?;
         if let Some(existing) = self
             .disk
@@ -951,7 +1195,14 @@ impl ValidityProverService {
                 )));
             }
             verify_anchor(producer, &existing.finalized_anchor)?;
-            return Ok(finalization_receipt(existing));
+            let committed_producer_receipt = producer
+                .committed_receipt_at_anchor(&existing.finalized_anchor)?
+                .ok_or_else(|| {
+                    ValidityProverServiceError::ProducerReconciliation(
+                        "acknowledged producer anchor has no committed journal receipt".into(),
+                    )
+                })?;
+            return Ok(finalization_receipt(existing, committed_producer_receipt));
         }
         if acknowledgement.chain_id == 0 || acknowledgement.transaction_hash == Bytes32::default() {
             return Err(ValidityProverServiceError::InvalidRequest(
@@ -989,6 +1240,13 @@ impl ValidityProverService {
             ));
         }
         verify_anchor(producer, &candidate.receipt.producer_anchor)?;
+        let committed_producer_receipt = producer
+            .committed_receipt_at_anchor(&candidate.receipt.producer_anchor)?
+            .ok_or_else(|| {
+                ValidityProverServiceError::ProducerReconciliation(
+                    "candidate producer anchor is not authoritatively committed".into(),
+                )
+            })?;
 
         let record = AcknowledgementRecord {
             request_id,
@@ -1010,6 +1268,7 @@ impl ValidityProverService {
         };
         let mut next_disk = self.disk.clone();
         next_disk.l1_authority = Some(next_authority);
+        next_disk.l1_binding = Some(deployment_binding);
         next_disk.finalized = next_finalized;
         next_disk.candidate = None;
         next_disk.acknowledgements.push(record.clone());
@@ -1024,7 +1283,7 @@ impl ValidityProverService {
             return Err(error);
         }
         self.disk = next_disk;
-        Ok(finalization_receipt(&record))
+        Ok(finalization_receipt(&record, committed_producer_receipt))
     }
 
     fn ensure_healthy(&self) -> Result<(), ValidityProverServiceError> {
@@ -1066,7 +1325,7 @@ struct L1FinalizationEvidence {
     head_after: ParsedBlock,
     canonical_head_before: ParsedBlock,
     canonical_receipt_block: ParsedBlock,
-    rollup_has_code: bool,
+    rollup_runtime_code_hash: Bytes32,
     root_membership: bool,
     latest_finalized_root: Bytes32,
     latest_finalized_block_number: u64,
@@ -1081,10 +1340,20 @@ struct L1StateAuthorityEvidence {
     head_before: ParsedBlock,
     canonical_head_before: ParsedBlock,
     head_after: ParsedBlock,
-    rollup_has_code: bool,
+    rollup_runtime_code_hash: Bytes32,
     root_membership: bool,
     latest_finalized_root: Bytes32,
     latest_finalized_block_number: u64,
+}
+
+/// Exact durable candidate which may already be L1-latest across the
+/// `finalize succeeded -> local acknowledgement persisted` crash boundary. Merely matching this
+/// tuple never authorizes local promotion; [`ValidityProverService::acknowledge_candidate_from_l1`]
+/// still verifies the finalization transaction independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingL1Candidate {
+    root: Bytes32,
+    intmax_block: u64,
 }
 
 fn verify_local_finalized_state_at_l1(
@@ -1092,6 +1361,7 @@ fn verify_local_finalized_state_at_l1(
     checkpoint: &L1FinalizedCheckpoint,
     expected_root: Bytes32,
     expected_intmax_block: u64,
+    pending_candidate: Option<PendingL1Candidate>,
 ) -> Result<L1FinalizedCheckpoint, ValidityProverServiceError> {
     checkpoint
         .validate()
@@ -1099,17 +1369,9 @@ fn verify_local_finalized_state_at_l1(
     let block_tag = format!("0x{:x}", checkpoint.block_number);
     let code = run_cast(
         config,
-        &[
-            "code",
-            &config.rollup.to_string(),
-            "--block",
-            &block_tag,
-        ],
+        &["code", &config.rollup.to_string(), "--block", &block_tag],
     )?;
-    let rollup_has_code = code
-        .trim()
-        .strip_prefix("0x")
-        .is_some_and(|hex| !hex.is_empty() && hex.as_bytes().iter().any(|byte| *byte != b'0'));
+    let rollup_runtime_code_hash = runtime_code_hash(&code, "configured rollup")?;
     let root_membership = parse_bool_text(&run_cast(
         config,
         &[
@@ -1174,7 +1436,7 @@ fn verify_local_finalized_state_at_l1(
             hash: after.block_hash,
             parent_hash: after.parent_hash,
         },
-        rollup_has_code,
+        rollup_runtime_code_hash,
         root_membership,
         latest_finalized_root,
         latest_finalized_block_number,
@@ -1184,6 +1446,7 @@ fn verify_local_finalized_state_at_l1(
         config,
         expected_root,
         expected_intmax_block,
+        pending_candidate,
     )?;
     Ok(after)
 }
@@ -1193,6 +1456,7 @@ fn validate_l1_state_authority_evidence(
     config: &L1FinalizationRpcConfig,
     expected_root: Bytes32,
     expected_intmax_block: u64,
+    pending_candidate: Option<PendingL1Candidate>,
 ) -> Result<(), ValidityProverServiceError> {
     if evidence.chain_id != config.expected_chain_id
         || evidence.source != configured_finality_source(config)
@@ -1201,8 +1465,11 @@ fn validate_l1_state_authority_evidence(
             "L1 state authority belongs to a different chain/finality mode",
         ));
     }
-    if !evidence.rollup_has_code {
-        return Err(l1_rejected("configured rollup address has no bytecode"));
+    if evidence.rollup_runtime_code_hash != config.expected_rollup_runtime_code_hash {
+        return Err(l1_rejected(&format!(
+            "configured rollup runtime-code hash mismatch: expected {}, observed {}",
+            config.expected_rollup_runtime_code_hash, evidence.rollup_runtime_code_hash
+        )));
     }
     if evidence.canonical_head_before != evidence.head_before {
         return Err(l1_rejected(
@@ -1221,14 +1488,17 @@ fn validate_l1_state_authority_evidence(
             "local finalized root is not a member of the rollup finalized-root set",
         ));
     }
-    if evidence.latest_finalized_block_number != expected_intmax_block {
+    let latest_is_local = evidence.latest_finalized_block_number == expected_intmax_block
+        && evidence.latest_finalized_root == expected_root;
+    let latest_is_pending = pending_candidate.is_some_and(|pending| {
+        pending.root != Bytes32::default()
+            && pending.intmax_block > expected_intmax_block
+            && evidence.latest_finalized_block_number == pending.intmax_block
+            && evidence.latest_finalized_root == pending.root
+    });
+    if !latest_is_local && !latest_is_pending {
         return Err(l1_rejected(
-            "rollup latest finalized block differs from the local finalized snapshot",
-        ));
-    }
-    if evidence.latest_finalized_root != expected_root {
-        return Err(l1_rejected(
-            "rollup latest finalized root differs from the local finalized snapshot",
+            "rollup latest finalized state matches neither the local snapshot nor its exact durable pending candidate",
         ));
     }
     if expected_root == Bytes32::default() {
@@ -1308,7 +1578,10 @@ fn verify_l1_finalization_with_position(
         config.rollup,
     )?;
     let head_before = parse_block(
-        &run_cast(config, &["rpc", "eth_getBlockByNumber", finality_tag, "false"])?,
+        &run_cast(
+            config,
+            &["rpc", "eth_getBlockByNumber", finality_tag, "false"],
+        )?,
         "durable head before finalization read-back",
     )?;
     let head_block_tag = format!("0x{:x}", head_before.number);
@@ -1321,10 +1594,7 @@ fn verify_l1_finalization_with_position(
             &head_block_tag,
         ],
     )?;
-    let rollup_has_code = code
-        .trim()
-        .strip_prefix("0x")
-        .is_some_and(|hex| !hex.is_empty() && hex.as_bytes().iter().any(|byte| *byte != b'0'));
+    let rollup_runtime_code_hash = runtime_code_hash(&code, "configured rollup")?;
     let root_membership = parse_bool_text(&run_cast(
         config,
         &[
@@ -1395,7 +1665,10 @@ fn verify_l1_finalization_with_position(
         config.rollup,
     )?;
     let head_after = parse_block(
-        &run_cast(config, &["rpc", "eth_getBlockByNumber", finality_tag, "false"])?,
+        &run_cast(
+            config,
+            &["rpc", "eth_getBlockByNumber", finality_tag, "false"],
+        )?,
         "durable head after finalization read-back",
     )?;
     let evidence = L1FinalizationEvidence {
@@ -1406,7 +1679,7 @@ fn verify_l1_finalization_with_position(
         head_after,
         canonical_head_before,
         canonical_receipt_block,
-        rollup_has_code,
+        rollup_runtime_code_hash,
         root_membership,
         latest_finalized_root,
         latest_finalized_block_number,
@@ -1466,8 +1739,11 @@ fn validate_l1_finalization_evidence_at_position(
             evidence.chain_id, config.expected_chain_id
         )));
     }
-    if !evidence.rollup_has_code {
-        return Err(l1_rejected("configured rollup address has no bytecode"));
+    if evidence.rollup_runtime_code_hash != config.expected_rollup_runtime_code_hash {
+        return Err(l1_rejected(&format!(
+            "configured rollup runtime-code hash mismatch: expected {}, observed {}",
+            config.expected_rollup_runtime_code_hash, evidence.rollup_runtime_code_hash
+        )));
     }
     let receipt = &evidence.first_receipt;
     if receipt != &evidence.second_receipt {
@@ -1528,9 +1804,11 @@ fn validate_l1_finalization_evidence_at_position(
             source,
         }
         .covers_receipt(receipt.block_number, receipt.block_hash)
-        .map_err(|error| l1_rejected(&format!(
-            "receipt is not covered by the {label} durable head: {error}"
-        )))?;
+        .map_err(|error| {
+            l1_rejected(&format!(
+                "receipt is not covered by the {label} durable head: {error}"
+            ))
+        })?;
     }
     let confirmations = evidence
         .head_after
@@ -1693,8 +1971,7 @@ fn validate_checkpoint_progression(
     }
     if later.block_number < earlier.block_number
         || (later.block_number == earlier.block_number
-            && (later.block_hash != earlier.block_hash
-                || later.parent_hash != earlier.parent_hash))
+            && (later.block_hash != earlier.block_hash || later.parent_hash != earlier.parent_hash))
     {
         return Err(l1_rejected(
             "durable L1 checkpoint regressed or changed at the same height",
@@ -1884,6 +2161,26 @@ fn parse_bool_text(text: &str) -> Result<bool, ValidityProverServiceError> {
     }
 }
 
+fn runtime_code_hash(encoded: &str, label: &str) -> Result<Bytes32, ValidityProverServiceError> {
+    let encoded = encoded.trim();
+    let body = encoded
+        .strip_prefix("0x")
+        .or_else(|| encoded.strip_prefix("0X"))
+        .ok_or_else(|| l1_rejected(&format!("{label} runtime code is not 0x-prefixed hex")))?;
+    if body.is_empty() || body.len() % 2 != 0 {
+        return Err(l1_rejected(&format!(
+            "{label} runtime code is empty or malformed"
+        )));
+    }
+    let bytes = hex::decode(body)
+        .map_err(|error| l1_rejected(&format!("decode {label} runtime code: {error}")))?;
+    if bytes.is_empty() {
+        return Err(l1_rejected(&format!("{label} runtime code is empty")));
+    }
+    Bytes32::from_bytes_be(&keccak_hash::keccak(bytes).0)
+        .map_err(|error| l1_rejected(&format!("construct {label} runtime-code hash: {error}")))
+}
+
 fn build_resident_circuits(
     supported_user_counts: &[u32],
 ) -> Result<(ResidentCircuits, u64, u64), ValidityProverServiceError> {
@@ -1994,15 +2291,33 @@ fn validate_snapshot(
             "acknowledgement history exceeds {MAX_ACK_HISTORY} entries"
         )));
     }
-    if let Some(authority) = disk.l1_authority {
-        authority.validate().map_err(|error| {
+    if let Some(binding) = disk.l1_binding {
+        binding.validate().map_err(|error| {
             ValidityProverServiceError::Snapshot(format!(
-                "invalid durable L1 authority: {error}"
+                "invalid durable L1 deployment binding: {error}"
             ))
         })?;
-    } else if !disk.acknowledgements.is_empty() {
+    }
+    if disk.l1_authority.is_some() != disk.l1_binding.is_some() {
         return Err(ValidityProverServiceError::Snapshot(
-            "acknowledged snapshot has no durable L1 authority".into(),
+            "durable L1 authority and deployment binding must be present together".into(),
+        ));
+    }
+    if let Some(authority) = disk.l1_authority {
+        authority.validate().map_err(|error| {
+            ValidityProverServiceError::Snapshot(format!("invalid durable L1 authority: {error}"))
+        })?;
+        if !matches!(
+            disk.l1_binding,
+            Some(binding) if binding.chain_id == authority.chain_id
+        ) {
+            return Err(ValidityProverServiceError::Snapshot(
+                "durable L1 authority and deployment binding belong to different chains".into(),
+            ));
+        }
+    } else if !disk.acknowledgements.is_empty() || disk.finalized.acknowledgement.is_some() {
+        return Err(ValidityProverServiceError::Snapshot(
+            "acknowledged snapshot has no durable L1 authority/deployment binding".into(),
         ));
     }
     verify_anchor(producer, &disk.finalized.anchor)?;
@@ -2127,6 +2442,14 @@ fn validate_snapshot(
                 "snapshot L1 authority does not cover its acknowledgement history".into(),
             ));
         }
+        if !matches!(
+            disk.l1_binding,
+            Some(binding) if binding.chain_id == tail.chain_id
+        ) {
+            return Err(ValidityProverServiceError::Snapshot(
+                "snapshot deployment binding does not cover its acknowledgement history".into(),
+            ));
+        }
     }
 
     if let Some(candidate) = &disk.candidate {
@@ -2144,7 +2467,8 @@ fn validate_snapshot(
                 "candidate does not advance exactly from the finalized checkpoint".into(),
             ));
         }
-        verify_anchor(producer, &candidate.receipt.producer_anchor)?;
+        let candidate_producer =
+            candidate_producer_for_anchor(producer, &candidate.receipt.producer_anchor)?;
         let final_state = decode_extended_state(&candidate.final_extended_state)?;
         verify_state_anchor(
             &final_state,
@@ -2161,8 +2485,8 @@ fn validate_snapshot(
                 "candidate receipt metadata disagrees with its state span".into(),
             ));
         }
-        verify_event_prefix(
-            producer,
+        verify_event_prefix_core(
+            candidate_producer,
             candidate.receipt.signature_event_count,
             final_state.bp_sig_chain,
         )?;
@@ -2235,6 +2559,53 @@ fn verify_state_anchor(
     Ok(())
 }
 
+/// Select the exact producer state a new proof must target. A durable terminal close candidate
+/// takes precedence over the authoritative head because the latter intentionally has not moved
+/// yet. Returning a borrowed producer avoids cloning the large witness trees and therefore adds
+/// no proof-size, proving-time, or peak-memory tax to the happy path.
+fn producer_proof_target(
+    producer: &BlockProducerService,
+) -> Result<(BlockProducerAnchor, &ProductionBlockProducer), ValidityProverServiceError> {
+    if let Some(anchor) = producer.prepared_anchor()? {
+        let prepared = producer.prepared_producer()?.ok_or_else(|| {
+            ValidityProverServiceError::ProducerReconciliation(
+                "prepared journal entry has no semantically replayed producer".into(),
+            )
+        })?;
+        return Ok((anchor, prepared));
+    }
+    Ok((producer.current_anchor()?, producer.producer()?))
+}
+
+/// Resolve a candidate anchor against either the authoritative journal prefix or the single
+/// durable prepared close entry. Once L1 finalization commits that entry, the same anchor resolves
+/// through the first branch, which is what makes crash recovery deterministic.
+fn candidate_producer_for_anchor<'a>(
+    producer: &'a BlockProducerService,
+    supplied: &BlockProducerAnchor,
+) -> Result<&'a ProductionBlockProducer, ValidityProverServiceError> {
+    if let Some(canonical) = producer.anchor_at_generation(supplied.generation)? {
+        if canonical != *supplied {
+            return Err(ValidityProverServiceError::ProducerReconciliation(format!(
+                "producer generation {} anchor mismatch (rollback, replacement, or corrupt checkpoint)",
+                supplied.generation
+            )));
+        }
+        return Ok(producer.producer()?);
+    }
+    if producer.prepared_anchor()?.as_ref() == Some(supplied) {
+        return producer.prepared_producer()?.ok_or_else(|| {
+            ValidityProverServiceError::ProducerReconciliation(
+                "prepared candidate anchor has no semantically replayed producer".into(),
+            )
+        });
+    }
+    Err(ValidityProverServiceError::ProducerReconciliation(format!(
+        "producer journal has neither committed nor prepared generation {}",
+        supplied.generation
+    )))
+}
+
 fn verify_anchor(
     producer: &BlockProducerService,
     supplied: &BlockProducerAnchor,
@@ -2261,7 +2632,15 @@ fn verify_event_prefix(
     event_count: usize,
     expected_chain: Bytes32,
 ) -> Result<(), ValidityProverServiceError> {
-    let events = producer.producer()?.signature_events();
+    verify_event_prefix_core(producer.producer()?, event_count, expected_chain)
+}
+
+fn verify_event_prefix_core(
+    producer: &ProductionBlockProducer,
+    event_count: usize,
+    expected_chain: Bytes32,
+) -> Result<(), ValidityProverServiceError> {
+    let events = producer.signature_events();
     if event_count > events.len() {
         return Err(ValidityProverServiceError::ProducerReconciliation(format!(
             "signature cursor {event_count} is ahead of producer event count {}",
@@ -2435,13 +2814,17 @@ fn acknowledgement_fingerprint(
     })
 }
 
-fn finalization_receipt(record: &AcknowledgementRecord) -> ValidityFinalizationReceipt {
+fn finalization_receipt(
+    record: &AcknowledgementRecord,
+    committed_producer_receipt: BlockProducerReceipt,
+) -> ValidityFinalizationReceipt {
     ValidityFinalizationReceipt {
         request_id: record.request_id.clone(),
         candidate_id: record.candidate_id,
         producer_anchor: record.finalized_anchor.clone(),
         finalized_block_number: record.finalized_anchor.block_number,
         final_extended_state_commitment: record.acknowledgement.final_extended_state_commitment,
+        committed_producer_receipt,
         l1_acknowledgement: record.acknowledgement.clone(),
     }
 }
@@ -2744,6 +3127,7 @@ mod l1_evidence_tests {
             rpc_url: "http://127.0.0.1:8545".into(),
             expected_chain_id: 11_155_111,
             rollup: rollup(),
+            expected_rollup_runtime_code_hash: word(0x44),
             minimum_confirmations: 3,
             allow_unfinalized_devnet: false,
         }
@@ -2782,7 +3166,7 @@ mod l1_evidence_tests {
                 hash: word(100),
                 parent_hash: word(99),
             },
-            rollup_has_code: true,
+            rollup_runtime_code_hash: word(0x44),
             root_membership: true,
             latest_finalized_root: root,
             latest_finalized_block_number: 7,
@@ -2801,7 +3185,7 @@ mod l1_evidence_tests {
             head_before: head.clone(),
             canonical_head_before: head.clone(),
             head_after: head,
-            rollup_has_code: true,
+            rollup_runtime_code_hash: word(0x44),
             root_membership: true,
             latest_finalized_root: root,
             latest_finalized_block_number: intmax_block,
@@ -2817,20 +3201,108 @@ mod l1_evidence_tests {
     }
 
     #[test]
+    fn substituted_rollup_runtime_code_is_rejected() {
+        let root = word(7);
+        let tx = word(9);
+        let mut substituted = evidence(root, tx);
+        substituted.rollup_runtime_code_hash = word(0x45);
+        assert!(validate_l1_finalization_evidence(&substituted, &config(), tx, root, 7).is_err());
+
+        let mut substituted_authority = authority_evidence(root, 7);
+        substituted_authority.rollup_runtime_code_hash = word(0x45);
+        assert!(
+            validate_l1_state_authority_evidence(&substituted_authority, &config(), root, 7, None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_code_hash_rejects_empty_or_malformed_code() {
+        assert_eq!(
+            runtime_code_hash("0x6000", "rollup").expect("valid runtime code"),
+            Bytes32::from_bytes_be(&keccak_hash::keccak([0x60, 0x00]).0).expect("bytes32")
+        );
+        assert!(runtime_code_hash("0x", "rollup").is_err());
+        assert!(runtime_code_hash("6000", "rollup").is_err());
+        assert!(runtime_code_hash("0x0", "rollup").is_err());
+        assert!(runtime_code_hash("0xgg", "rollup").is_err());
+    }
+
+    #[test]
     fn fresh_snapshot_is_bound_to_current_rollup_state_without_an_acknowledgement() {
         let root = word(7);
-        validate_l1_state_authority_evidence(&authority_evidence(root, 7), &config(), root, 7)
-            .expect("fresh snapshot matches current finalized rollup state");
+        validate_l1_state_authority_evidence(
+            &authority_evidence(root, 7),
+            &config(),
+            root,
+            7,
+            None,
+        )
+        .expect("fresh snapshot matches current finalized rollup state");
 
         // This is the attack path that receipt-only restart validation missed: local disk still
         // contains genesis/old state while another prover has advanced the rollup.
         let mut stale = authority_evidence(word(8), 8);
-        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7).is_err());
+        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7, None).is_err());
 
         stale.latest_finalized_root = root;
         stale.latest_finalized_block_number = 7;
         stale.root_membership = false;
-        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7).is_err());
+        assert!(validate_l1_state_authority_evidence(&stale, &config(), root, 7, None).is_err());
+    }
+
+    #[test]
+    fn startup_allows_only_the_exact_pending_candidate_without_promoting_it() {
+        let local_root = word(7);
+        let candidate_root = word(8);
+        let pending = PendingL1Candidate {
+            root: candidate_root,
+            intmax_block: 8,
+        };
+        validate_l1_state_authority_evidence(
+            &authority_evidence(candidate_root, 8),
+            &config(),
+            local_root,
+            7,
+            Some(pending),
+        )
+        .expect("exact durable pending candidate is a recoverable pre-ACK state");
+
+        assert!(
+            validate_l1_state_authority_evidence(
+                &authority_evidence(word(9), 8),
+                &config(),
+                local_root,
+                7,
+                Some(pending),
+            )
+            .is_err(),
+            "a sibling root at the candidate height must fail closed"
+        );
+        assert!(
+            validate_l1_state_authority_evidence(
+                &authority_evidence(candidate_root, 9),
+                &config(),
+                local_root,
+                7,
+                Some(pending),
+            )
+            .is_err(),
+            "a later untracked state must fail closed"
+        );
+        let mut missing_local_history = authority_evidence(candidate_root, 8);
+        missing_local_history.root_membership = false;
+        assert!(
+            validate_l1_state_authority_evidence(
+                &missing_local_history,
+                &config(),
+                local_root,
+                7,
+                Some(pending),
+            )
+            .is_err(),
+            "the predecessor must remain in the finalized-root set"
+        );
     }
 
     #[test]
@@ -2842,7 +3314,7 @@ mod l1_evidence_tests {
             hash: word(103),
             parent_hash: word(102),
         };
-        assert!(validate_l1_state_authority_evidence(&moved, &config(), root, 7).is_err());
+        assert!(validate_l1_state_authority_evidence(&moved, &config(), root, 7, None).is_err());
     }
 
     #[test]
@@ -2992,9 +3464,7 @@ mod l1_evidence_tests {
         let tx = word(9);
         let mut replacement = evidence(root, tx);
         replacement.canonical_head_before.hash = word(999);
-        assert!(
-            validate_l1_finalization_evidence(&replacement, &config(), tx, root, 7).is_err()
-        );
+        assert!(validate_l1_finalization_evidence(&replacement, &config(), tx, root, 7).is_err());
 
         let mut stale = evidence(root, tx);
         stale.latest_finalized_block_number = 8;

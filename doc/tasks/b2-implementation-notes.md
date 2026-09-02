@@ -593,8 +593,9 @@ vestigial FOR CLAIMS ONLY, and dropping it would have broken the lifecycle):**
 the constructor also writes `isMemberRecipient[binding.recipient] = true`
 (`ChannelSettlementManager.sol:751`, `:809`), and that map IS read at runtime in two places:
 
-- `requestClose()` — `if (!isMemberRecipient[msg.sender]) revert NotChannelMember();` (`:852`).
-  The CLI sends `requestClose()` from `deposit_key_env()`, which defaults to the anvil dev key
+- `requestClose(uint64,uint64)` — validates the exact durable freeze nonce / monotone cancellation
+  floor and then enforces `isMemberRecipient[msg.sender]`.
+  The CLI sends this guarded request from `deposit_key_env()`, which defaults to the anvil dev key
   (`channel_member.rs:487`) — i.e. exactly the EOA `DeployCloseCli` routes slot 0 to. Without the
   override the E2E could not even OPEN the close.
 - `submitPartialWithdrawal` — "the payout address must be a registered participant" (`:1151`).

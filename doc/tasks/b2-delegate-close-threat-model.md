@@ -309,7 +309,8 @@ predecessor. Two consequential leftovers should ride along with (d):
 
 1. Correct the stale "DEFERRED to B-2" paragraph in `h1-poseidon-root-threat-model.md`.
 2. Note the remaining *liveness* asymmetry: a delegate that is not in the constructor's
-   `delegateBindings` has no `isMemberRecipient` entry, so it cannot call `requestClose()`
+   `delegateBindings` has no `isMemberRecipient` entry, so it cannot call the member-only
+   `requestClose(uint64,uint64)`
    (`:831`) and cannot be the payee of `submitPartialWithdrawalIntent` (`:1130`). Under Option B a
    post-deploy joiner is never registered, so **every post-deploy delegate depends on a cosigner to
    initiate the close it then claims against**. That is consistent with DLG-3 ("censorship/liveness:

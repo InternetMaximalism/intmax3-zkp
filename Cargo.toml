@@ -215,6 +215,10 @@ post-close-claim-fixture-bin = []
 # for its fixture-generator binary WITHOUT pulling them into normal `cargo build`. Same pattern as
 # the other fixture features.
 cancel-close-fixture-bin = []
+# Retired direct member-set-update prototype. This feature exists only so old audit fixtures can
+# still be reproduced from an explicitly non-production build. No release binary enables it, and
+# the production producer/service/CLI contain no constructive MSU path.
+deprecated-msu = []
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -244,6 +248,11 @@ required-features = ["post-close-claim-fixture-bin"]
 name = "generate_cancel_close_fixture"
 path = "src/bin/generate_cancel_close_fixture.rs"
 required-features = ["cancel-close-fixture-bin"]
+
+[[bin]]
+name = "generate_member_set_update_fixture"
+path = "src/deprecated/member_set_update/generate_fixture.rs"
+required-features = ["deprecated-msu"]
 
 [[bench]]
 name = "proof_bench"

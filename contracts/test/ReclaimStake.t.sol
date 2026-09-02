@@ -81,7 +81,7 @@ contract ReclaimStakeTest is Test {
         // Pull-payment: the poster collects the recovered bonds as real ETH.
         uint256 balBefore = poster.balance;
         vm.prank(poster);
-        rollup.withdraw();
+        rollup.withdraw(5 * STAKE);
         assertEq(poster.balance, balBefore + 5 * STAKE, "poster received all recovered bonds");
     }
 

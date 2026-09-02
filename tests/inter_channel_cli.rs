@@ -34,23 +34,26 @@
 //! growth.
 #![cfg(not(debug_assertions))]
 
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+    process::Command,
+};
 
 use intmax3_zkp::{
     common::{
         channel::ChannelRecord, channel_id::ChannelId, private_state::FullPrivateState, salt::Salt,
     },
-    ethereum_types::{bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
-    regev::{encrypt_amount, RegevCiphertext, RegevSecurityLevel},
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
+    regev::{RegevCiphertext, RegevSecurityLevel, encrypt_amount},
     wallet_core::{
-        add_signature, assemble_genesis_state, build_burn_send,
-        build_inter_channel_send_token_at_base_nonce, build_record, decrypt_balance,
-        default_settled_tx_accumulator, sign_state, verify_snapshot, BuiltInterChannelSend,
-        ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
-        MemberKeys,
+        BuiltInterChannelSend, ChannelSnapshot, InterChannelDebitPayload,
+        InterChannelTransferDescriptor, MemberInfo, MemberKeys, add_signature,
+        assemble_genesis_state, build_burn_send, build_inter_channel_send_token_at_base_nonce,
+        build_record, decrypt_balance, default_settled_tx_accumulator, sign_state, verify_snapshot,
     },
 };
-use rand010::{rngs::StdRng, SeedableRng};
+use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -133,6 +136,9 @@ struct CliState {
     /// SECURITY (L1 deposit import replay ledger). Mirrored only so the key-set check above is
     /// exact; not asserted on by these tests.
     imported_deposits: HashSet<String>,
+    /// Private binary type; values are retained losslessly so read/modify/write tests cannot erase
+    /// the crash-safe anti-equivocation history.
+    state_signing_ledger: BTreeMap<String, serde_json::Value>,
 }
 
 fn member_info(slot: u16, keys: &MemberKeys) -> MemberInfo {
@@ -292,7 +298,7 @@ fn write_json_file<T: Serialize>(path: &std::path::Path, v: &T) {
 }
 
 /// Must match `channel_member.rs`'s `STATE_SCHEMA_VERSION`. See the mirror field's comment.
-const STATE_SCHEMA_VERSION: u32 = 2;
+const STATE_SCHEMA_VERSION: u32 = 3;
 
 fn cli_state(fx: ChannelFixture) -> CliState {
     CliState {
@@ -303,6 +309,7 @@ fn cli_state(fx: ChannelFixture) -> CliState {
         applied_tx_identities: HashSet::new(),
         spent_tx_identities: HashSet::new(),
         imported_deposits: HashSet::new(),
+        state_signing_ledger: BTreeMap::new(),
     }
 }
 
@@ -1286,7 +1293,11 @@ fn inter_channel_cli_idempotent_rejoin() {
     let (new_ok, new_log) = run(
         &ch_join,
         B_ID,
-        &["init", new_contrib_path.to_str().unwrap(), "new_snapshot.json"],
+        &[
+            "init",
+            new_contrib_path.to_str().unwrap(),
+            "new_snapshot.json",
+        ],
     );
     assert!(!new_ok, "a new pk_g after PREPARED must fail:\n{new_log}");
     assert!(
@@ -1295,10 +1306,15 @@ fn inter_channel_cli_idempotent_rejoin() {
     );
     assert!(!ch_join.join("settlement.json").exists());
     let frozen_after = read_state(&ch_join);
-    assert_eq!(frozen_after.snapshot.members.len(), join_after.snapshot.members.len());
+    assert_eq!(
+        frozen_after.snapshot.members.len(),
+        join_after.snapshot.members.len()
+    );
 
     let _ = std::fs::remove_dir_all(&root);
-    eprintln!("[inter_channel_cli] OK (dedup/freeze): same-pk retry works; PREPARED rejects new pk.");
+    eprintln!(
+        "[inter_channel_cli] OK (dedup/freeze): same-pk retry works; PREPARED rejects new pk."
+    );
 }
 
 /// Release gate: the wallet CLI must reject MSU before loading or mutating local state. Advancing
@@ -1306,17 +1322,18 @@ fn inter_channel_cli_idempotent_rejoin() {
 /// channel, so even a syntactically valid rotate command is fail-closed.
 #[test]
 fn member_update_cli_is_disabled_and_state_is_byte_identical() {
-    let root = std::env::temp_dir().join(format!(
-        "intmax_ic_cli_msu_disabled_{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("intmax_ic_cli_msu_disabled_{}", std::process::id()));
     let ch = root.join("ch");
     std::fs::create_dir_all(&ch).unwrap();
     write_state(&ch, &cli_state(build_cli_channel(A_ID, &[20, 40, 60])));
     let before = std::fs::read(ch.join("cli_state.json")).expect("state before command");
 
     let (ok, log) = run(&ch, A_ID, &["member-update", "rotate", "0", "999999"]);
-    assert!(!ok, "member-update must be disabled in the release CLI:\n{log}");
+    assert!(
+        !ok,
+        "member-update must be disabled in the release CLI:\n{log}"
+    );
     assert!(
         log.contains("member-update is disabled in this release")
             && log.contains("not atomically anchored"),
@@ -1335,6 +1352,50 @@ fn member_update_cli_is_disabled_and_state_is_byte_identical() {
         !ch.join(".cli_state.process.lock").exists(),
         "disabled CLI command must reject before creating/acquiring the state-process lock"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn publish_snapshot_repairs_a_torn_or_stale_public_copy_without_advancing_state() {
+    let root = std::env::temp_dir().join(format!(
+        "intmax_ic_cli_publish_snapshot_{}",
+        std::process::id()
+    ));
+    let ch = root.join("ch");
+    std::fs::create_dir_all(&ch).unwrap();
+    let state = cli_state(build_cli_channel(A_ID, &[20, 40, 60]));
+    write_state(&ch, &state);
+    let state_before = std::fs::read(ch.join("cli_state.json")).unwrap();
+    std::fs::write(ch.join("channel_snapshot.json"), b"{\"torn\":").unwrap();
+
+    let (ok, log) = run(&ch, A_ID, &["publish-snapshot", "channel_snapshot.json"]);
+    assert!(ok, "authoritative snapshot republish failed:\n{log}");
+    let published: ChannelSnapshot =
+        serde_json::from_slice(&std::fs::read(ch.join("channel_snapshot.json")).unwrap())
+            .expect("atomically published snapshot");
+    assert_eq!(published.state.digest, state.snapshot.state.digest);
+    assert_eq!(
+        published.record.channel_id,
+        state.snapshot.record.channel_id
+    );
+    assert_eq!(
+        std::fs::read(ch.join("cli_state.json")).unwrap(),
+        state_before,
+        "read-only republish must not mutate the authoritative private state"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(ch.join("channel_snapshot.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1630,10 +1691,61 @@ fn cli_state_missing_replay_ledger_fails_loudly() {
     let (ok, log) = run(&ch, B_ID, &["balance"]);
     assert!(ok, "the migrated file must load cleanly, log:\n{log}");
 
+    // (7) The anti-equivocation ledger is a DIFFERENT risk and therefore requires its own
+    // explicit acknowledgement. A replay-ledger acknowledgement must not authorize erasing past
+    // state-signing decisions.
+    let mut obj = obj_of(&pristine);
+    assert!(
+        obj.remove("state_signing_ledger").is_some(),
+        "fixture must carry the anti-equivocation ledger"
+    );
+    put(&obj);
+    let before = std::fs::read_to_string(&state_path).unwrap();
+    let (ok, log) = run(&ch, B_ID, &["balance"]);
+    assert!(
+        !ok && log.contains("state_signing_ledger")
+            && log.contains("--i-understand-this-resets-anti-equivocation-ledger"),
+        "a missing signing ledger must fail loudly with its distinct recovery path:\n{log}"
+    );
+    let (ok, log) = run(
+        &ch,
+        B_ID,
+        &["migrate-state", "--i-understand-this-resets-replay-ledgers"],
+    );
+    assert!(
+        !ok && log.contains("conflicting successor signature"),
+        "the replay-ledger acknowledgement must not reset signing history:\n{log}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&state_path).unwrap(),
+        before,
+        "a migration lacking the signing acknowledgement must not touch the file"
+    );
+    let (ok, log) = run(
+        &ch,
+        B_ID,
+        &[
+            "migrate-state",
+            "--i-understand-this-resets-anti-equivocation-ledger",
+        ],
+    );
+    assert!(
+        ok,
+        "signing-ledger migration must succeed only with its ack:\n{log}"
+    );
+    let migrated = obj_of(&std::fs::read_to_string(&state_path).unwrap());
+    assert_eq!(
+        migrated.get("state_signing_ledger"),
+        Some(&serde_json::Value::Object(serde_json::Map::new())),
+        "migration must create an explicitly empty anti-equivocation ledger"
+    );
+    let (ok, log) = run(&ch, B_ID, &["balance"]);
+    assert!(ok, "the signing-ledger-migrated file must load:\n{log}");
+
     let _ = std::fs::remove_dir_all(&root);
     eprintln!(
-        "[inter_channel_cli] OK: an absent/renamed replay ledger is a LOUD refusal; the only way \
-         past it is the acknowledged `migrate-state`."
+        "[inter_channel_cli] OK: an absent/renamed security ledger is a LOUD refusal; replay and \
+         anti-equivocation resets require distinct acknowledged `migrate-state` flags."
     );
 }
 

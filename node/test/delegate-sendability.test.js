@@ -21,8 +21,41 @@ function fakeStore(init = {}) {
 // optional checks when there is no prior head and the payload carries no channel_tx).
 function fakeCtx({ store, available = true, refreshOk = true } = {}) {
   const calls = { refresh: [], finalize: [] };
+  const recipient = '0x4444444444444444444444444444444444444444';
+  const state = {
+    channelId: 7,
+    epoch: 1,
+    digest: '0x' + 'aa'.repeat(32),
+    memberSignatures: ['s0'],
+    channelFund: { channelId: 7 },
+    balanceState: {
+      channelId: 7,
+      memberCount: 3,
+      delegateCount: 1,
+      recipients: [
+        '0x1111111111111111111111111111111111111111',
+        '0x2222222222222222222222222222222222222222',
+        '0x3333333333333333333333333333333333333333',
+        recipient,
+      ],
+      stateVersion: 1,
+      settledTxChain: '0x' + 'bb'.repeat(32),
+    },
+  };
+  const snapshot = {
+    record: {
+      channelId: 7,
+      memberCount: 3,
+      delegateCount: 1,
+      memberPkGs: ['11', '22', '33', '44'].map(x => '0x' + x.repeat(32)),
+    },
+    state,
+    members: [],
+  };
+  let refreshedTokenSlot = 0;
   const ctx = {
     slot: 3,
+    recipient,
     ch: { id: 7 },
     store,
     policy: {},
@@ -31,15 +64,30 @@ function fakeCtx({ store, available = true, refreshOk = true } = {}) {
     raiseSignal: () => { calls.raised = true; },
     wallet: {
       available: () => available,
-      refresh: (slot, tokenSlot) => { calls.refresh.push({ slot, tokenSlot }); return { kind: 'refresh-payload' }; },
-      finalize: (state) => { calls.finalize.push(state); return {}; },
+      refresh: (slot, tokenSlot) => {
+        refreshedTokenSlot = tokenSlot == null ? 0 : Number(tokenSlot);
+        calls.refresh.push({ slot, tokenSlot });
+        return { kind: 'refresh-payload' };
+      },
+      importChannel: (value) => { calls.finalize.push(value.state); },
+      balance: () => report(true, refreshedTokenSlot),
     },
     api: {
       cosignRefresh: async () => {
         if (!refreshOk) throw new Error('withheld');
-        return { state: { memberSignatures: ['s0'], digest: '0xnew', balanceState: { stateVersion: 1 } } };
+        return { state };
       },
+      getSnapshot: async () => snapshot,
+      getBacking: async () => ({}),
     },
+    backingVault: {
+      prepare: () => ({ verificationMetadata: {} }),
+      requiresVerification: () => false,
+      commit() {},
+      abort() {},
+    },
+    backingVerifier: { async verify() { throw new Error('unexpected native verify'); } },
+    snapshotVault: { save() {} },
   };
   return { ctx, calls };
 }
@@ -127,7 +175,7 @@ test('ensureSendable: canSend:false triggers a refresh and then permits the send
   assert.equal(await ensureSendable(ctx, undefined), true);
   assert.equal(calls.refresh.length, 1);
   assert.equal(calls.finalize.length, 1);
-  assert.equal(calls.finalize[0].digest, '0xnew', 'pass the raw ChannelState, not the API envelope');
+  assert.equal(calls.finalize[0].digest, '0x' + 'aa'.repeat(32), 'verify the exact published ChannelState');
   assert.equal(calls.refresh[0].tokenSlot, undefined, 'genesis refresh');
   assert.equal(store.get('witnessTokenSlot'), 0, 'refresh records the position it backs');
 });

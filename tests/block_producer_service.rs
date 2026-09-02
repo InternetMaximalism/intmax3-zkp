@@ -4,14 +4,24 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "deprecated-msu")]
+use intmax3_zkp::common::tx::TxV2;
+#[cfg(feature = "deprecated-msu")]
+#[allow(deprecated)]
+use intmax3_zkp::wallet_core::{
+    canonical_member_set_update_action_index, canonical_member_set_update_block,
+    cosign_member_set_update, member_set_update_block_root, propose_rotate_key,
+    registered_cosigner_leaves, registered_cosigner_root_hash, verify_member_set_update,
+};
 use intmax3_zkp::{
     block_producer::{
         ProductionBlockProducer, ProductionBlockProducerError, ProductionDepositRequest,
     },
-    circuits::witness::block_witness_generator::BlockTxV2Witness,
     block_producer_service::{
         BlockProducerCommand, BlockProducerService, BlockProducerServiceError,
     },
+    circuits::witness::block_witness_generator::BlockTxV2Witness,
+    close_funding::build_close_funding_proposal,
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash},
         channel::{
@@ -22,7 +32,6 @@ use intmax3_zkp::{
         channel_id::ChannelId,
         deposit::Deposit,
         u63::{BlockNumber, U63},
-        tx::TxV2,
     },
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
@@ -30,12 +39,8 @@ use intmax3_zkp::{
     regev::RegevCiphertext,
     wallet_core::{
         ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
-        MemberKeys, assemble_genesis_state, build_record,
-        canonical_member_set_update_action_index, canonical_member_set_update_block,
-        cosign_member_set_update, default_settled_tx_accumulator, inter_channel_base_transfer,
-        inter_channel_tx_v2, member_set_update_block_root, propose_rotate_key,
-        registered_cosigner_leaves, registered_cosigner_root_hash, sign_state,
-        verify_member_set_update,
+        MemberKeys, assemble_genesis_state, build_record, default_settled_tx_accumulator,
+        inter_channel_base_transfer, inter_channel_tx_v2, sign_state,
     },
 };
 use rand010::SeedableRng as _;
@@ -276,6 +281,23 @@ fn next_offchain_state(
     state
 }
 
+fn signed_close_funding(
+    keys: &[MemberKeys],
+    previous: &ChannelState,
+) -> (ChannelState, intmax3_zkp::close_funding::CloseFundingPlan) {
+    let rollup = Address::from_u32_slice(&[0x524f_4c4c; 5]).expect("rollup");
+    let manager = Address::from_u32_slice(&[0x4d41_4e47; 5]).expect("manager");
+    let proposal = build_close_funding_proposal(previous, 1, rollup, manager, 0)
+        .expect("canonical close funding");
+    let mut state = proposal.proposed_state;
+    state.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, keys)| sign_state(keys, slot as u8, &state).expect("sign close funding"))
+        .collect();
+    (state, proposal.plan)
+}
+
 #[test]
 fn journal_restart_recovers_head_and_accepts_the_next_block() {
     let directory = TestDirectory::new("restart");
@@ -373,6 +395,448 @@ fn journal_restart_recovers_head_and_accepts_the_next_block() {
     assert!(!journal_text.contains("local_test_signers"));
     assert!(!journal_text.contains("fixture_channel_keys"));
     assert!(!journal_text.contains("falcon_key"));
+}
+
+#[test]
+fn close_funding_prepare_is_durable_frozen_and_exactly_committed() {
+    let directory = TestDirectory::new("close-funding-two-phase");
+    let journal = directory.journal();
+    let (keys, snapshot) = signed_snapshot(29);
+    let (signed_state, plan) = signed_close_funding(&keys, &snapshot.state);
+    let (inter_state, inter_debit, inter_descriptor) =
+        next_descriptor(&keys, &snapshot, &snapshot.state, 0, 3);
+    let later = next_offchain_state(&keys, &snapshot.state, 0);
+    let (_, other_snapshot) = signed_snapshot(30);
+    let frozen_deposit = ProductionDepositRequest {
+        deposit_index: 0,
+        depositor: Address::from_u32_slice(&[0x4445_504f; 5]).expect("depositor"),
+        recipient: Bytes32::from_u32_slice(&[0x5245_4350; 8]).expect("recipient"),
+        token_index: 0,
+        amount: U256::from(1u64),
+        aux_data: Bytes32::default(),
+        expected_deposit_hash_chain: Bytes32::default(),
+    };
+
+    let authoritative_before;
+    let prepared_receipt;
+    let prepared_anchor;
+    {
+        let mut service = BlockProducerService::open(&journal, &[2]).expect("service");
+        let register_receipt = service
+            .register("register-29".to_string(), snapshot.clone())
+            .expect("register");
+        authoritative_before = service.status().expect("authoritative before prepare");
+        let authoritative_anchor = service.current_anchor().expect("authoritative anchor");
+        assert_eq!(
+            service
+                .committed_receipt_at_anchor(&authoritative_anchor)
+                .expect("ordinary canonical receipt lookup"),
+            Some(register_receipt)
+        );
+        assert!(matches!(
+            service.commit_prepared_close_funding_at_anchor(&authoritative_anchor),
+            Err(BlockProducerServiceError::Conflict(reason))
+                if reason.contains("not a terminal close-funding")
+        ));
+
+        assert!(matches!(
+            service.post_close_funding(
+                "legacy-immediate".to_string(),
+                signed_state.clone(),
+                plan.clone(),
+            ),
+            Err(BlockProducerServiceError::InvalidRequest(reason))
+                if reason.contains("prepare_close_funding")
+        ));
+        assert!(matches!(
+            service.execute(BlockProducerCommand::PostCloseFunding {
+                request_id: "legacy-command".to_string(),
+                signed_state: signed_state.clone(),
+                plan: plan.clone(),
+            }),
+            Err(BlockProducerServiceError::InvalidRequest(reason))
+                if reason.contains("prepare_close_funding")
+        ));
+
+        prepared_receipt = service
+            .prepare_close_funding(
+                "close-funding-29".to_string(),
+                signed_state.clone(),
+                plan.clone(),
+            )
+            .expect("durable prepare");
+        prepared_anchor = service
+            .prepared_anchor()
+            .expect("prepared anchor read")
+            .expect("prepared anchor");
+        assert_eq!(
+            prepared_receipt.generation,
+            authoritative_before.generation + 1
+        );
+        assert_eq!(
+            prepared_receipt.block_number,
+            authoritative_before.block_number + 1
+        );
+        assert_eq!(prepared_anchor.generation, prepared_receipt.generation);
+        assert_eq!(prepared_anchor.entry_hash, prepared_receipt.entry_hash);
+        assert_eq!(
+            prepared_anchor.extended_state_commitment,
+            prepared_receipt.extended_state_commitment
+        );
+        assert_eq!(service.status().unwrap(), authoritative_before);
+        assert_eq!(service.current_anchor().unwrap(), authoritative_anchor);
+        assert_eq!(service.producer().unwrap().block_number(), 1);
+        assert_eq!(
+            service
+                .prepared_producer()
+                .unwrap()
+                .expect("borrowed candidate")
+                .block_number(),
+            2
+        );
+        assert_eq!(
+            service
+                .prepared_producer_clone()
+                .unwrap()
+                .expect("candidate")
+                .block_number(),
+            2
+        );
+        assert_eq!(
+            service.prepared_receipt().unwrap(),
+            Some(prepared_receipt.clone())
+        );
+        assert_eq!(
+            service
+                .prepared_receipt_for_close_funding("close-funding-29", &signed_state, &plan)
+                .unwrap(),
+            Some(prepared_receipt.clone())
+        );
+        assert_eq!(
+            service
+                .prepare_close_funding(
+                    "close-funding-29".to_string(),
+                    signed_state.clone(),
+                    plan.clone(),
+                )
+                .expect("exact prepare is idempotent"),
+            prepared_receipt
+        );
+
+        let mut changed = plan.clone();
+        changed.transfers[0].amount += U256::from(1u64);
+        assert!(matches!(
+            service.prepare_close_funding(
+                "close-funding-29".to_string(),
+                signed_state.clone(),
+                changed,
+            ),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.prepare_close_funding(
+                "sibling-close".to_string(),
+                signed_state.clone(),
+                plan.clone(),
+            ),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+
+        // A prepared terminal mutation freezes every other producer mutation, including one that
+        // reuses the prepared request id under a different action kind.
+        assert!(matches!(
+            service.register(
+                "register-while-prepared".to_string(),
+                other_snapshot.clone()
+            ),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.post_deposit("close-funding-29".to_string(), frozen_deposit),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.sync_offchain_heads("sync-while-prepared".to_string(), vec![later.clone()]),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.post_inter_channel(
+                "inter-while-prepared".to_string(),
+                inter_state,
+                inter_debit,
+                inter_descriptor,
+            ),
+            Err(BlockProducerServiceError::Conflict(_))
+        ));
+        assert_eq!(service.status().unwrap(), authoritative_before);
+
+        let disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal).unwrap()).expect("prepared journal JSON");
+        assert_eq!(
+            disk["generation"],
+            serde_json::json!(authoritative_before.generation)
+        );
+        assert_eq!(disk["entries"].as_array().unwrap().len(), 1);
+        assert!(!disk["prepared"].is_null());
+    }
+
+    // Simulated crash/restart: startup semantically replays both the authoritative prefix and the
+    // separate candidate, without advancing the authoritative producer.
+    let mut service = BlockProducerService::open(&journal, &[2]).expect("restart with prepare");
+    assert_eq!(service.status().unwrap(), authoritative_before);
+    assert_eq!(
+        service.prepared_receipt().unwrap(),
+        Some(prepared_receipt.clone())
+    );
+    assert_eq!(
+        service.prepared_anchor().unwrap(),
+        Some(prepared_anchor.clone())
+    );
+    assert_eq!(service.producer().unwrap().block_number(), 1);
+    assert_eq!(
+        service
+            .prepared_producer_clone()
+            .unwrap()
+            .expect("replayed candidate")
+            .block_number(),
+        2
+    );
+
+    let mut wrong_plan = plan.clone();
+    wrong_plan.transfers[0].amount += U256::from(1u64);
+    assert!(matches!(
+        service.commit_prepared_close_funding(
+            "close-funding-29".to_string(),
+            &signed_state,
+            &wrong_plan,
+            &prepared_anchor,
+        ),
+        Err(BlockProducerServiceError::Conflict(_))
+    ));
+    let mut wrong_anchor = prepared_anchor.clone();
+    wrong_anchor.entry_hash = Bytes32::default();
+    assert!(matches!(
+        service.commit_prepared_close_funding_at_anchor(&wrong_anchor),
+        Err(BlockProducerServiceError::Conflict(_))
+    ));
+
+    let committed = service
+        .commit_prepared_close_funding_at_anchor(&prepared_anchor)
+        .expect("exact prepared commit");
+    assert_eq!(committed, prepared_receipt);
+    assert_eq!(service.status().unwrap().generation, committed.generation);
+    assert_eq!(service.status().unwrap().block_number, 2);
+    assert_eq!(service.producer().unwrap().block_number(), 2);
+    assert_eq!(service.prepared_receipt().unwrap(), None);
+    assert_eq!(service.prepared_anchor().unwrap(), None);
+    assert!(service.prepared_producer_clone().unwrap().is_none());
+    assert_eq!(
+        service
+            .committed_receipt_for_close_funding_at_anchor(
+                "close-funding-29",
+                &signed_state,
+                &plan,
+                &prepared_anchor,
+            )
+            .unwrap(),
+        Some(committed.clone())
+    );
+    assert_eq!(
+        service
+            .commit_prepared_close_funding_at_anchor(&prepared_anchor)
+            .expect("commit replay is idempotent"),
+        committed
+    );
+    assert_eq!(
+        service
+            .committed_receipt_at_anchor(&prepared_anchor)
+            .expect("anchor-only committed replay"),
+        Some(committed.clone())
+    );
+    assert_eq!(
+        service
+            .prepare_close_funding(
+                "close-funding-29".to_string(),
+                signed_state.clone(),
+                plan.clone(),
+            )
+            .expect("prepare replay discovers committed receipt"),
+        committed
+    );
+
+    assert!(matches!(
+        service.sync_offchain_heads("after-terminal".to_string(), vec![later]),
+        Err(BlockProducerServiceError::Producer(
+            ProductionBlockProducerError::WalletAuthorization(message)
+        )) if message.contains("terminal")
+    ));
+
+    // The terminal channel stays frozen, but unrelated channels are allowed to advance the
+    // global producer after commit. The exact historical witness remains reconstructible for
+    // terminal withdrawal proofs and cannot be substituted with a sibling/future anchor.
+    service
+        .register("register-other-after-terminal".to_string(), other_snapshot)
+        .expect("an unrelated channel may advance after terminal commit");
+    assert_eq!(
+        service.status().unwrap().generation,
+        committed.generation + 1
+    );
+    assert_eq!(
+        service.status().unwrap().block_number,
+        committed.block_number + 1
+    );
+    let historical = service
+        .producer_at_anchor(&prepared_anchor)
+        .expect("replay exact terminal anchor");
+    assert_eq!(historical.block_number(), committed.block_number);
+    assert_eq!(
+        historical
+            .witness_handle()
+            .expect("historical public witness")
+            .borrow()
+            .current_extended_public_state()
+            .commitment(),
+        committed.extended_state_commitment
+    );
+    let mut sibling_anchor = prepared_anchor.clone();
+    sibling_anchor.entry_hash = Bytes32::default();
+    assert!(matches!(
+        service.producer_at_anchor(&sibling_anchor),
+        Err(BlockProducerServiceError::Conflict(_))
+    ));
+    drop(service);
+
+    let recovered = BlockProducerService::open(&journal, &[2]).expect("terminal replay");
+    assert_eq!(
+        recovered
+            .committed_receipt_for_close_funding_at_anchor(
+                "close-funding-29",
+                &signed_state,
+                &plan,
+                &prepared_anchor,
+            )
+            .expect("replayed exact committed receipt"),
+        Some(committed)
+    );
+}
+
+fn prepared_journal(label: &str) -> (TestDirectory, PathBuf) {
+    let directory = TestDirectory::new(label);
+    let journal = directory.journal();
+    let (keys, snapshot) = signed_snapshot(31);
+    let (signed_state, plan) = signed_close_funding(&keys, &snapshot.state);
+    let mut service = BlockProducerService::open(&journal, &[2]).expect("service");
+    service
+        .register("register-31".to_string(), snapshot)
+        .expect("registration");
+    service
+        .prepare_close_funding("prepare-31".to_string(), signed_state, plan)
+        .expect("prepare");
+    drop(service);
+    (directory, journal)
+}
+
+#[test]
+fn prepared_journal_metadata_and_semantic_result_tampering_fail_closed() {
+    let (_directory, journal) = prepared_journal("prepared-tampering");
+    let canonical: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journal).expect("read prepared journal"))
+            .expect("parse prepared journal");
+    for (label, expected, mutate) in [
+        ("prepared-generation", "generation", 0u8),
+        ("prepared-prev", "previous-hash", 1u8),
+        ("prepared-fingerprint", "fingerprint", 2u8),
+        ("prepared-timestamp", "timestamp", 3u8),
+        ("prepared-result", "hash", 4u8),
+        ("prepared-entry-hash", "hash", 5u8),
+    ] {
+        let mut disk = canonical.clone();
+        match mutate {
+            0 => disk["prepared"]["generation"] = disk["generation"].clone(),
+            1 => {
+                disk["prepared"]["prevEntryHash"] =
+                    serde_json::to_value(Bytes32::default()).unwrap()
+            }
+            2 => {
+                disk["prepared"]["requestFingerprint"] =
+                    serde_json::to_value(Bytes32::default()).unwrap()
+            }
+            3 => disk["prepared"]["action"]["timestamp"] = serde_json::json!(0),
+            4 => {
+                let block = disk["prepared"]["result"]["blockNumber"]
+                    .as_u64()
+                    .expect("candidate block number");
+                disk["prepared"]["result"]["blockNumber"] = serde_json::json!(block + 1);
+            }
+            5 => disk["prepared"]["entryHash"] = serde_json::to_value(Bytes32::default()).unwrap(),
+            _ => unreachable!(),
+        }
+        fs::write(&journal, serde_json::to_vec(&disk).unwrap()).expect("write tampered journal");
+        match BlockProducerService::open(&journal, &[2]) {
+            Err(BlockProducerServiceError::Journal(reason)) => {
+                assert!(reason.contains(expected), "{label}: {reason}");
+            }
+            Err(other) => panic!("{label}: unexpected error {other}"),
+            Ok(_) => panic!("{label}: tampered prepared entry was accepted"),
+        }
+    }
+}
+
+#[test]
+fn journal_v1_without_prepared_field_remains_compatible() {
+    let directory = TestDirectory::new("journal-v1-no-prepared");
+    let journal = directory.journal();
+    let (_, snapshot) = signed_snapshot(32);
+    let expected;
+    {
+        let mut service = BlockProducerService::open(&journal, &[2]).expect("service");
+        service
+            .register("register-32".to_string(), snapshot)
+            .expect("registration");
+        expected = service.status().expect("status");
+    }
+    let mut disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journal).unwrap()).expect("journal JSON");
+    assert!(disk.get("prepared").is_some());
+    disk.as_object_mut()
+        .expect("journal object")
+        .remove("prepared");
+    fs::write(&journal, serde_json::to_vec(&disk).unwrap()).expect("legacy v1 journal");
+    let recovered = BlockProducerService::open(&journal, &[2]).expect("legacy v1 replay");
+    assert_eq!(recovered.status().unwrap(), expected);
+    assert_eq!(recovered.prepared_receipt().unwrap(), None);
+}
+
+#[test]
+fn uncertain_commit_persistence_poisons_the_live_service() {
+    let directory = TestDirectory::new("prepared-commit-poison");
+    let journal = directory.journal();
+    let (keys, snapshot) = signed_snapshot(33);
+    let (signed_state, plan) = signed_close_funding(&keys, &snapshot.state);
+    let mut service = BlockProducerService::open(&journal, &[2]).expect("service");
+    service
+        .register("register-33".to_string(), snapshot)
+        .expect("registration");
+    service
+        .prepare_close_funding("prepare-33".to_string(), signed_state.clone(), plan.clone())
+        .expect("prepare");
+    let anchor = service.prepared_anchor().unwrap().expect("prepared anchor");
+
+    // Removing the parent makes the commit's create/rename/fsync sequence fail. The service must
+    // not guess whether its durable name advanced; every subsequent read/mutation is poisoned.
+    fs::remove_dir_all(&directory.0).expect("remove journal parent");
+    assert!(matches!(
+        service.commit_prepared_close_funding_at_anchor(&anchor),
+        Err(BlockProducerServiceError::Journal(_))
+    ));
+    assert!(matches!(
+        service.status(),
+        Err(BlockProducerServiceError::Poisoned)
+    ));
+    assert!(matches!(
+        service.prepared_producer_clone(),
+        Err(BlockProducerServiceError::Poisoned)
+    ));
 }
 
 #[test]
@@ -540,10 +1004,83 @@ fn a_second_daemon_cannot_share_the_journal() {
     BlockProducerService::open(&journal, &[2]).expect("lock released on drop");
 }
 
-
 /// Release gate: even a structurally valid, fully N-of-N-authorized update must not advance the
 /// validity-side registry while the settlement manager's member set is immutable. The direct
 /// producer API, typed service API, command dispatcher and legacy journal replay all fail closed.
+#[test]
+fn retired_member_set_update_has_only_fail_closed_tombstones() {
+    let directory = TestDirectory::new("retired-member-set-update");
+    let journal = directory.journal();
+    let (_keys, snapshot) = signed_snapshot(21);
+    let mut service = BlockProducerService::open(&journal, &[2]).expect("new service");
+    service
+        .register("register-21".to_string(), snapshot.clone())
+        .expect("register");
+    let before = service.status().expect("status before retired request");
+
+    let refused = service.post_member_set_update(
+        "retired-msu".to_string(),
+        snapshot.state.clone(),
+        snapshot.members.clone(),
+        snapshot.record.clone(),
+        snapshot.members.clone(),
+    );
+    assert!(matches!(
+        refused,
+        Err(BlockProducerServiceError::InvalidRequest(ref reason))
+            if reason.contains("retired")
+    ));
+    assert_eq!(service.status().unwrap(), before);
+
+    let command_refused = service.execute(BlockProducerCommand::PostMemberSetUpdate {
+        request_id: "retired-msu-command".to_string(),
+        signed_state: snapshot.state.clone(),
+        old_members: snapshot.members.clone(),
+        new_record: snapshot.record.clone(),
+        new_members: snapshot.members.clone(),
+    });
+    assert!(matches!(
+        command_refused,
+        Err(BlockProducerServiceError::InvalidRequest(ref reason))
+            if reason.contains("retired")
+    ));
+    assert_eq!(service.status().unwrap(), before);
+
+    let mut producer = ProductionBlockProducer::new(&[2]);
+    producer
+        .register_snapshot(&snapshot, 1)
+        .expect("register producer");
+    let block_before = producer.block_number();
+    assert!(matches!(
+        producer.produce_member_set_update_block(
+            &snapshot.state,
+            &snapshot.members,
+            &snapshot.record,
+            &snapshot.members,
+            2,
+        ),
+        Err(ProductionBlockProducerError::MemberSetUpdateRetired)
+    ));
+
+    // The low-level witness marker remains reserved so a legacy/raw caller cannot bypass the
+    // named tombstone. Rejection happens before signatures, proving, or head mutation.
+    let raw_reserved = BlockTxV2Witness {
+        tx_v2_indices: Vec::new(),
+        tx_v2s: Vec::new(),
+        tx_v2_merkle_proofs: Vec::new(),
+        new_member_leaves: Some(Vec::new()),
+        channel_action_indices: None,
+        channel_actions: None,
+        channel_action_merkle_proofs: None,
+    };
+    assert!(matches!(
+        producer.produce_cosigned_block(&snapshot.state, &[], 2, Bytes32::default(), raw_reserved,),
+        Err(ProductionBlockProducerError::MemberSetUpdateRetired)
+    ));
+    assert_eq!(producer.block_number(), block_before);
+}
+
+#[cfg(feature = "deprecated-msu")]
 #[test]
 fn member_set_update_is_disabled_across_all_production_paths() {
     let directory = TestDirectory::new("member-set-update");
@@ -558,14 +1095,9 @@ fn member_set_update_is_disabled_across_all_production_paths() {
     // N-of-N over IMMS, exactly the ChannelSafetyQ-verified gate.
     let mut rng = rand010::rngs::StdRng::seed_from_u64(0xEE21);
     let new_keys = MemberKeys::generate(&mut rng);
-    let mut update = propose_rotate_key(
-        &keys[1],
-        &new_keys,
-        &snapshot.record,
-        &snapshot.members,
-        1,
-    )
-    .expect("propose");
+    let mut update =
+        propose_rotate_key(&keys[1], &new_keys, &snapshot.record, &snapshot.members, 1)
+            .expect("propose");
     update.member_signatures = keys
         .iter()
         .enumerate()
@@ -598,14 +1130,13 @@ fn member_set_update_is_disabled_across_all_production_paths() {
         .collect();
 
     let before_service = service.status().expect("status before refused update");
-    let refused = service
-        .post_member_set_update(
-            "msu-21-0".to_string(),
-            state.clone(),
-            snapshot.members.clone(),
-            new_record.clone(),
-            new_members.clone(),
-        );
+    let refused = service.post_member_set_update(
+        "msu-21-0".to_string(),
+        state.clone(),
+        snapshot.members.clone(),
+        new_record.clone(),
+        new_members.clone(),
+    );
     assert!(matches!(
         refused,
         Err(BlockProducerServiceError::InvalidRequest(ref reason))
@@ -650,7 +1181,7 @@ fn member_set_update_is_disabled_across_all_production_paths() {
     );
     assert!(matches!(
         direct_refused,
-        Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+        Err(ProductionBlockProducerError::MemberSetUpdateRetired)
     ));
     assert_eq!(
         (
@@ -669,8 +1200,8 @@ fn member_set_update_is_disabled_across_all_production_paths() {
     // root despite every named MSU entry point returning Disabled.
     let prev_root = registered_cosigner_root_hash(&snapshot.record, &snapshot.members)
         .expect("old registered root");
-    let next_root = registered_cosigner_root_hash(&new_record, &new_members)
-        .expect("new registered root");
+    let next_root =
+        registered_cosigner_root_hash(&new_record, &new_members).expect("new registered root");
     let (action, action_tree, tx_v2, tx_v2_tree, smuggled_root) =
         canonical_member_set_update_block(snapshot.record.channel_id, prev_root, next_root);
     assert_eq!(
@@ -696,16 +1227,11 @@ fn member_set_update_is_disabled_across_all_production_paths() {
     let mut leaves_only = smuggled_witness.clone();
     leaves_only.channel_actions = None;
     for attack_witness in [smuggled_witness, action_only, leaves_only] {
-        let smuggled_refused = producer.produce_cosigned_block(
-            &state,
-            &[1],
-            2,
-            smuggled_root,
-            attack_witness,
-        );
+        let smuggled_refused =
+            producer.produce_cosigned_block(&state, &[1], 2, smuggled_root, attack_witness);
         assert!(matches!(
             smuggled_refused,
-            Err(ProductionBlockProducerError::MemberSetUpdateDisabled)
+            Err(ProductionBlockProducerError::MemberSetUpdateRetired)
         ));
     }
     assert_eq!(
@@ -750,7 +1276,10 @@ fn member_set_update_is_disabled_across_all_production_paths() {
 
     match BlockProducerService::open(&journal, &[2]) {
         Err(BlockProducerServiceError::Journal(reason)) => {
-            assert!(reason.contains("disabled legacy member-set update"), "{reason}");
+            assert!(
+                reason.contains("disabled legacy member-set update"),
+                "{reason}"
+            );
         }
         Err(other) => panic!("unexpected legacy replay error: {other}"),
         Ok(_) => panic!("legacy member-set update journal must fail closed at startup"),

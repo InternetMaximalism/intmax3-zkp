@@ -9,9 +9,12 @@ settlement contracts (Solidity/Foundry), a machine‑checked safety proof (Lean)
 
 ## Why INTMAX3
 
-- **L1 security + 1‑of‑N trust.** Every channel ultimately settles on Ethereum L1. Safety needs only
-  **one honest party — you**: with the last all‑member‑signed state you can always `close` on‑chain,
-  and `withdrawClaimZKP` lets you exit and withdraw **without any other member's cooperation**.
+- **L1 safety; conditional exit liveness.** Every channel ultimately settles on Ethereum L1. One
+  honest participant can retain and publish the last all-member-signed state, initiate its on-chain
+  close, and prove its own `withdrawClaimZKP`. In the current implementation, however, funding the
+  Manager for final L1 payout uses a fresh terminal child with fresh N-of-N signatures. A fully
+  signer-independent exit therefore additionally requires the planned pre-authorized exit kit;
+  the present path is cooperative terminal funding followed by permissionless publication.
   
 - **Strong statelessness & minimal block‑space use.** The rollup keeps **almost no per‑user state
   on‑chain** — users custody their own `balanceProof`s, and each block posts only a `tx_tree_root`
@@ -87,8 +90,9 @@ sequenceDiagram
 2. **No double‑spend / no illicit mint** — `commonState` + per‑block `validityProof`; close‑time
    `withdrawCap` caps total withdrawals; `settledTxChain` binds the state to its `balanceProof`.
 3. **Solvency** — encrypted balances stay non‑negative inductively via the mandatory range ZKPs.
-4. **Exit / liveness** — `requestClose → grace → challenge(latest‑version wins) → withdraw`; you exit
-   alone with `withdrawClaimZKP`; late funds recovered via `lateBalanceProof`.
+4. **Exit safety / conditional liveness** — `requestClose → grace → challenge(latest-version wins)
+   → withdraw`; close initiation and `withdrawClaimZKP` generation are participant-local, while
+   signer-independent final funding remains gated on the planned latest-head exit kit.
 5. **Balance confidentiality** — Regev encryption hides per‑member balances from everyone.
 
 ---
@@ -127,12 +131,14 @@ RPC `finalized` block tag at startup and binds the local finalized block number 
 commitment to `IntmaxRollup.latestFinalizedBlockNumber`, `latestFinalizedStateRoot`, and
 `isFinalizedStateRoot` at that exact canonical block. Stored receipt block hashes and checkpoints
 are re-read after restart; missing, orphaned, replaced, or merely mined-but-unfinalized receipts are
-rejected.
+rejected. The daemon also requires an operator-supplied `--l1-rollup-runtime-code-hash`, verifies
+the exact runtime bytecode at every durable read, and persists the chain/address/hash deployment
+identity in the snapshot instead of learning expected code identity from the RPC.
 
 For local Anvil only (chain id `31337`), `block-producer-service` may explicitly use
 `--l1-allow-unfinalized-devnet`; the partial-withdrawal CLI uses the equivalent
 `INTMAX_ALLOW_UNFINALIZED_DEVNET=1` escape. Both escapes are rejected on public chain ids. Validity
-Validity snapshots use the finality-bound v2 format. Partial-withdrawal snapshots use v3, which
+snapshots use the finality-and-deployment-bound v3 format. Partial-withdrawal snapshots use v3, which
 also journals the exact `finalizePartialWithdrawal` intent, transaction hashes and canonical
 finalized receipt before payout; older payout snapshots must be regenerated rather than silently
 trusted or migrated.
@@ -144,7 +150,7 @@ trusted or migrated.
 | Area | Path | What |
 |---|---|---|
 | **Specification** | [`doc/architecture-audit/detail2.md`](doc/architecture-audit/detail2.md) | the **authoritative implementation spec**; [`abstract2.md`](doc/architecture-audit/abstract2.md) is the minimal spec + the 5 security properties |
-| **Audit** | [`doc/audit/zkp/`](doc/audit/zkp/) ([SUMMARY](doc/audit/zkp/SUMMARY.md)) | an **implementation‑level** Lean formalization of the actual Plonky2 circuits **and** L1 contracts (each gate/`require` transcribed line‑by‑line to a machine‑checked soundness theorem) — 225 theorems, zero `sorry`/`axiom`, `lake build` green — plus an **additional adversarial audit by Opus 4.8** built on top of it (meta‑audit + remediation; [report](doc/audit/audit02-07-2026.md)) |
+| **Audit** | [`doc/audit/zkp/`](doc/audit/zkp/) ([SUMMARY](doc/audit/zkp/SUMMARY.md)) | a historical, partial implementation-level Lean model with 257 theorem declarations and zero `sorry`/`axiom`. Its own staleness banner identifies the target commit, unmodeled cryptographic internals and gate evaluators, and sections not re-synchronized to the current tree. A green `lake build` proves consistency of that model, not line-by-line equivalence with current circuits/contracts. It is accompanied by an adversarial audit and remediation report ([report](doc/audit/audit02-07-2026.md)). |
 | **Machine‑checked safety** | [`doc/architecture-audit/ChannelSafety.lean`](doc/architecture-audit/ChannelSafety.lean), [`ChannelSafety2.lean`](doc/architecture-audit/ChannelSafety2.lean) | Lean proofs of authorization / no‑double‑spend / solvency / exit safety for abstract(2).md, with crypto primitives modeled by their soundness contracts |
 | **Proof circuits** | `src/circuits/` | `balance/` (account state via IVC), `validity/` (block consensus + Poseidon signature), `withdraw/`, `channel/` (channel state‑update verifiers) |
 | **Lattice layer** | `src/regev/` | Regev/LWE keygen, encryption, and the channel‑tx / channel‑update STARKs (`channelTxZKP` / `channelUpdateZKP`) |

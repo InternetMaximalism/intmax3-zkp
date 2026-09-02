@@ -56,17 +56,6 @@ interface IChannelSettlementVerifier {
     /// Phase A: the close intent is verified by a REAL MLE/WHIR proof of the plonky2 close circuit
     /// (not a stub). The proof is the wrapped close `MleVerifier.MleProof` whose `publicInputs` are
     /// the 103 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
-    function verifyMemberSetUpdate(
-        uint32 channelId_,
-        uint64 newVersion,
-        bytes32 oldCommitment,
-        bytes32 newCommitment,
-        uint8 oldCount,
-        uint8 newCount,
-        address recipient,
-        MleVerifier.MleProof calldata mleProof
-    ) external view returns (bool);
-
     function verifyCloseIntent(CloseProofFields calldata fields, MleVerifier.MleProof calldata proof)
         external
         view
@@ -137,6 +126,15 @@ interface IChannelSettlementVerifier {
     ) external pure returns (bool);
 
     function closeMemberSetCommitment(bytes32[8] memory memberPkGs, uint8 memberCount) external pure returns (bytes32);
+
+    /// @notice Canonical Rust-compatible IMTF digest over the complete fixed-width close fund
+    ///         vectors. The Manager snapshots this exact proof-bound digest at finalization so its
+    ///         later IMCF close-funding authorization cannot be built from adjusted accounting
+    ///         caps or a truncated registry.
+    function tokenFundsDigest(uint32[10] memory tokenRegistry, uint8 tokenCount, uint256[10] memory amounts)
+        external
+        pure
+        returns (bytes32);
 }
 
 /// @notice Read-only view of the rollup's per-channel registration (the SINGLE SOURCE OF TRUTH for
@@ -149,15 +147,20 @@ interface IChannelRegistry {
     function channelMemberSetCommitment(uint32 channelId) external view returns (bytes32);
     function channelBpMemberSlot(uint32 channelId) external view returns (uint8);
     function channelBpPkG(uint32 channelId) external view returns (bytes32);
+    /// @notice True only for an extended state root finalized by this exact rollup instance.
+    ///         Close proofs bind their channel-fund snapshot to one such root; checking through
+    ///         the immutable registry prevents a valid proof over another rollup's history from
+    ///         becoming backing authority for this manager.
+    function isFinalizedStateRoot(bytes32 stateRoot) external view returns (bool);
     /// @notice Pull-payment claim on the rollup. The channel close pays the channel's native ETH
     ///         to THIS manager (recipient == manager) via `IntmaxRollup.withdrawNative`, crediting
     ///         the rollup's `pendingWithdrawals[manager]`; `pullChannelFunds` then calls this to
     ///         move that ETH into the manager so it can be split among members.
-    function withdraw() external;
-    /// @notice Pull-payment ERC-20 claim (multitoken §N-7): the ERC-20 mirror of `withdraw()`.
+    function withdraw(uint256 amount) external;
+    /// @notice Pull-payment ERC-20 claim (multitoken §N-7): the ERC-20 mirror of `withdraw(amount)`.
     ///         `IntmaxRollup.withdrawERC20` credits `pendingTokenWithdrawals[t][manager]`;
     ///         `pullChannelTokenFunds(t)` calls this to move the tokens into the manager.
-    function withdrawToken(uint32 tokenIndex) external;
+    function withdrawToken(uint32 tokenIndex, uint256 amount) external;
     /// @notice The rollup's SET-ONCE `tokenIndex → ERC-20` registry (multitoken §N-7, TM-10b).
     ///         SECURITY: the manager resolves payout token addresses through THIS single registry —
     ///         it deliberately keeps NO second (potentially divergent/mutable) copy of the mapping.
@@ -165,6 +168,9 @@ interface IChannelRegistry {
     /// @notice Authorize a partial-withdrawal auth digest on the rollup. Called by the settlement
     ///         manager after a finalized partial-withdrawal close proof (N-of-N channel consent).
     function authorizePartialWithdrawal(bytes32 authDigest) external;
+    /// @notice One-shot IPW2 authorization latch. A terminal close payout consumes this inside
+    ///         the proof-verified Rollup withdrawal before the Manager may pull its backing.
+    function partialWithdrawalAuthorized(bytes32 authDigest) external view returns (bool);
 }
 
 // The protocol challenge period, at FILE level so deploy tooling can reference it before any
@@ -179,6 +185,10 @@ uint64 constant CHALLENGE_PERIOD_SECS_FLOOR = 86_400;
 uint256 constant SETTLEMENT_LOCAL_DEVNET_CHAIN_ID = 31337;
 
 contract ChannelSettlementManager {
+    error ReleaseRuntimeUnavailable();
+    error InvalidCloseFundingMaterializer();
+    error OnlyCloseFundingMaterializer();
+
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
     /// order 0..memberCount. Slots `memberCount..MAX_MEMBER_COUNT` are zero padding. Mirrors the
@@ -197,6 +207,9 @@ contract ChannelSettlementManager {
     /// array here. MUST equal Rust `MAX_CHANNEL_TOKENS` (src/constants.rs) and
     /// `ChannelSettlementVerifier.MAX_CHANNEL_TOKENS`, or the TFD recompute would disagree.
     uint256 internal constant MAX_CHANNEL_TOKENS = 10;
+    /// "IMCF" — terminal close-funding aux-data domain. MUST equal Rust
+    /// `src/close_funding.rs::CLOSE_FUNDING_DOMAIN`.
+    uint32 internal constant CLOSE_FUNDING_DOMAIN = 0x494d4346;
 
     error InvalidChannelId();
     error InvalidBpMemberSlot();
@@ -242,6 +255,8 @@ contract ChannelSettlementManager {
     error NullifierAlreadyUsed();
     error WithdrawalCapExceeded();
     error NoWithdrawalCredit();
+    error InsufficientWithdrawalCredit();
+    error WithdrawalPayoutRecipientMismatch();
     /// Only the bound rollup (`registry`) may send native ETH to this manager (via its `withdraw`).
     error OnlyRollup();
     /// A native ETH transfer out of the manager failed.
@@ -304,6 +319,13 @@ contract ChannelSettlementManager {
     error TokenCountOutOfRange();
     /// ERC-20 fund pulling / payout needs an L1-registered token address for the index.
     error TokenIndexNotRegisteredOnRollup();
+    error ChannelFundStateRootNotFinalized(bytes32 stateRoot);
+    error ChannelFundingMismatch(uint32 tokenIndex, uint256 expected, uint256 observed);
+    error ChannelFundsAlreadyReceived(uint32 tokenIndex);
+    error CloseFundingAlreadyAuthorized(uint32 tokenIndex);
+    error CloseFundingProofNotMaterialized(uint32 tokenIndex);
+    error CloseFundingAuxMismatch();
+    error TokenPayoutAmountMismatch();
 
     enum ChannelLifecycleStatus {
         Active,
@@ -370,7 +392,9 @@ contract ChannelSettlementManager {
         uint32 tokenIndex
     );
 
-    event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
+    event WithdrawalClaimed(
+        bytes32 indexed withdrawalNullifier, address indexed recipient, uint32 indexed tokenIndex, uint256 amount
+    );
 
     event PartialWithdrawalSubmitted(
         bytes32 indexed authDigest, bytes32 indexed chainKey, uint64 challengeDeadline, uint64 finalStateVersion
@@ -467,6 +491,15 @@ contract ChannelSettlementManager {
         /// additionally re-checks it against the TFD-bound finalized registry.
         uint32 tokenIndex;
         bytes32 withdrawalNullifier;
+    }
+
+    /// @notice Immutable payout coordinates created by one accepted withdrawal proof. The record
+    ///         is deleted before value transfer, so the public getter returns amount == 0 after a
+    ///         successful payout (and for a nullifier that never existed).
+    struct WithdrawalPayout {
+        address recipient;
+        uint32 tokenIndex;
+        uint256 amount;
     }
 
     /// Phase C1 (CORRECTED): a cancel proves the members N-of-N signed a HIGHER-version channel
@@ -666,12 +699,8 @@ contract ChannelSettlementManager {
 
     /// @notice The number of ACTIVE members (2..=MAX_MEMBER_COUNT). Mirrors the Rust
     /// `ChannelRecord.member_count` (src/common/channel.rs). Seeded by the constructor and frozen
-    /// for this release; see `applyMemberSetUpdate`.
+    /// for this deployment. Membership changes require closing and replacing the channel.
     uint8 public activeMemberCount;
-
-    /// @notice The channel's member-set version. It remains at genesis version 0 while member-set
-    /// updates are release-disabled. Retained in storage/ABI for a future cross-layer protocol.
-    uint64 public memberSetVersion;
 
     /// @notice The number of delegates frozen into the authenticated live snapshot at deployment.
     /// `ChannelRecord.delegate_count` / `BalanceState.delegate_count` AT THAT MOMENT. Delegates do
@@ -702,6 +731,10 @@ contract ChannelSettlementManager {
 
     ChannelLifecycleStatus public channelStatus;
     uint64 public currentCloseFreezeNonce;
+    /// @notice Monotone manager-lifetime request generation. Unlike the proof-bound freeze nonce,
+    /// this is never restored by cancelClose, so delayed request/finalize raw transactions cannot
+    /// become valid again when a later close era reuses the same signed state and digest.
+    uint64 public closeRequestGeneration;
     uint64 public closeRequestedAt;
     /// @notice H-3: the ABSOLUTE end of the current frozen era's challenge game, anchored at the
     /// era's FIRST close intent and NOT moved by any replacement. Zero while no intent is pending.
@@ -710,8 +743,9 @@ contract ChannelSettlementManager {
     /// @notice A1 (round 2): the highest `revivedStateVersion` that any successful `cancelClose` has
     /// ever consumed. MONOTONE for the manager's lifetime — never reset by a cancel, a finalize, or
     /// an era change (that is the whole point: `cancelClose` restores the era counter, so anything
-    /// per-era is replayable). Read ONLY by `cancelClose`; no close, finalize, or payout path reads
-    /// it. See the A1 block in `cancelClose` for the non-lockout argument.
+    /// per-era is replayable). It is also an expected-value guard for close requests, but never a
+    /// minimum-state-version gate on close proofs. See the A1 block in `cancelClose` for the
+    /// non-lockout argument.
     uint64 public highestCancelledRevivedStateVersion;
     /// @notice A3 (round 2): the (epoch, stateVersion) high-water mark of every burn this manager has
     /// already authorized on the rollup. Zero until the first `finalizePartialWithdrawal`.
@@ -784,8 +818,10 @@ contract ChannelSettlementManager {
     /// @notice Σ accepted withdrawal/post-close claim amounts per base token (accrual bound).
     mapping(uint32 => uint256) public totalWithdrawn;
 
-    /// @notice Real value this manager has pulled from the rollup per base token (cumulative
-    ///         `pullChannelFunds` / `pullChannelTokenFunds` balance deltas; index 0 = native ETH).
+    /// @notice Real value this manager has accepted as CHANNEL backing per base token (the capped
+    ///         portion of `pullChannelFunds` / `pullChannelTokenFunds` balance deltas; index 0 =
+    ///         native ETH). A mixed Rollup recipient ledger may pay surplus in the same atomic pull;
+    ///         that surplus is deliberately not recorded here and cannot increase member capacity.
     ///         SECURITY: this — NOT the intent-declared `finalizedChannelFundAmount[t]` — is the
     ///         authoritative cross-channel/cross-token solvency ceiling: `claimWithdrawalCredit`
     ///         enforces Σ token-t payouts ≤ receivedChannelFunds[t], so the manager can never pay
@@ -795,14 +831,32 @@ contract ChannelSettlementManager {
     /// @notice Σ value actually paid out per base token via `claimWithdrawalCredit`.
     mapping(uint32 => uint256) public totalCreditedOut;
 
-    /// @notice Accrued member credits per (base token, recipient).
+    /// @notice Aggregate accrued credits per (base token, recipient), retained only for accounting
+    ///         and views. Payout authority is the nullifier-scoped `withdrawalPayouts` record.
     mapping(uint32 => mapping(address => uint256)) public withdrawalCredits;
+
+    /// @notice Exact proof-accepted payout keyed by withdrawal nullifier. A successful claim
+    ///         deletes this record atomically before transferring value.
+    mapping(bytes32 => WithdrawalPayout) public withdrawalPayouts;
 
     /// @notice The finalized close's token registry (channel-local slot → base token index) and
     ///         active count, stored TFD-bound at `finalizeClose`. `finalizedTokenRegistry` is
     ///         exposed via the auto-getter (per-index).
     uint32[10] public finalizedTokenRegistry;
     uint8 public finalizedTokenCount;
+    /// @notice Exact IMTF digest of the proof-bound full-width vectors that settled. This remains
+    ///         the original signed digest even if `finalizeClose` subsequently lowers one payout
+    ///         cap against a newer authorized-burn snapshot.
+    bytes32 private _finalizedTokenFundsDigest;
+    /// @notice Lifetime one-shot latch per funded base token. Rollup IPW2 flags are consumed by
+    ///         payout; this independent latch prevents a consumed close authorization being
+    ///         re-enabled. A token with no finalized nonzero cap is never authorizable.
+    mapping(uint32 => bool) private _closeFundingAuthorizationIssued;
+
+    /// @notice The only contract allowed to create terminal IPW2 authorizations. It atomically
+    ///         consumes a COMPLETE native/ERC-20 lane in the same transaction, so an unbound
+    ///         proof nullifier can never pre-consume a single authorization and wedge the lane.
+    address public immutable closeFundingMaterializer;
 
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
     mapping(bytes32 => bool) public usedSharedNativeNullifiers;
@@ -849,9 +903,17 @@ contract ChannelSettlementManager {
     uint256 private _status = _NOT_ENTERED;
 
     modifier nonReentrant() {
+        _nonReentrantBefore();
+        _;
+        _nonReentrantAfter();
+    }
+
+    function _nonReentrantBefore() private {
         if (_status == _ENTERED) revert Reentrant();
         _status = _ENTERED;
-        _;
+    }
+
+    function _nonReentrantAfter() private {
         _status = _NOT_ENTERED;
     }
 
@@ -860,13 +922,17 @@ contract ChannelSettlementManager {
     ///      transition, so every live state transition and value sink repeats
     ///      the release boundary at runtime.
     modifier releaseRuntime() {
-        if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod < CHALLENGE_PERIOD_SECS) {
-            revert ChallengePeriodTooShort(challengePeriod, CHALLENGE_PERIOD_SECS);
-        }
+        _requireReleaseRuntime();
         _;
     }
 
-    /// @notice Accept native ETH ONLY from the bound rollup (its `withdraw()` pays this manager via
+    function _requireReleaseRuntime() private view {
+        if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod < CHALLENGE_PERIOD_SECS) {
+            revert ChallengePeriodTooShort(challengePeriod, CHALLENGE_PERIOD_SECS);
+        }
+    }
+
+    /// @notice Accept native ETH ONLY from the bound rollup (its `withdraw(amount)` pays this manager via
     ///         a low-level call). SECURITY: restricting the sender keeps `receivedChannelFunds`
     ///         (measured as the `pullChannelFunds` balance delta) the sole source of payout capacity
     ///         and prevents stray/forced ETH from being mistaken for real channel funds. (SELFDESTRUCT
@@ -887,6 +953,7 @@ contract ChannelSettlementManager {
         uint256 initialBpBondCredits_,
         IChannelSettlementVerifier verifier_,
         IChannelRegistry registry_,
+        address closeFundingMaterializer_,
         MemberBinding[] memory memberBindings
     ) {
         if (channelId_ == bytes4(0)) revert InvalidChannelId();
@@ -923,6 +990,10 @@ contract ChannelSettlementManager {
         bpBondCredits = initialBpBondCredits_;
         verifier = verifier_;
         registry = registry_;
+        if (closeFundingMaterializer_ == address(0) || closeFundingMaterializer_.code.length == 0) {
+            revert InvalidCloseFundingMaterializer();
+        }
+        closeFundingMaterializer = closeFundingMaterializer_;
         channelStatus = ChannelLifecycleStatus.Active;
         activeMemberCount = uint8(memberBindings.length);
         uint256 participantCount = uint256(memberBindings.length) + uint256(delegateCount_);
@@ -1037,34 +1108,9 @@ contract ChannelSettlementManager {
         return verifier.closeMemberSetCommitment(memberPkGs, activeMemberCount);
     }
 
-    /// @dev Parked ABI declarations retained for forward compatibility. None are reachable while
-    /// `applyMemberSetUpdate` is release-disabled.
-    event MemberSetUpdated(
-        uint64 indexed newVersion, bytes32 oldCommitment, bytes32 newCommitment, uint8 newCount, address newRecipient
-    );
-    error MemberSetUpdateWhileNotActive();
-    error MemberSetVersionNotMonotone();
-    error MemberSetUpdateCountInvalid();
-    error MemberSetUpdateProofInvalid();
-    error MemberSetUpdateRecipientInvalid();
-
-    /// @notice Member-set updates are intentionally unavailable in this release.
-    /// @dev The current IMMS proof authenticates the old signers' proposed transition, but it does
-    ///      not prove that the same transition was included in and finalized by the validity layer.
-    ///      Applying it here alone can therefore split the Manager's signer set/version/BP from the
-    ///      Rollup registry and the validity-tree leaf. Keep the function selector for forward
-    ///      compatibility, but fail before validating calldata, calling the verifier, or writing
-    ///      any Manager state.
-    ///      Re-enable only with one canonical cross-layer receipt/action anchor and atomic or
-    ///      fail-closed synchronization of both layers.
-    error MemberSetUpdateDisabled();
-
-    function applyMemberSetUpdate(bytes32[] calldata, uint8, address, uint64, MleVerifier.MleProof calldata)
-        external
-        pure
-    {
-        revert MemberSetUpdateDisabled();
-    }
+    // RETIRED: `applyMemberSetUpdate(...)` is intentionally absent from the production ABI.
+    // Historical construction code is isolated under `src/deprecated/member_set_update`; changing
+    // participants requires closing this channel and migrating into a newly registered channel.
 
     function isNativeSendAllowed(uint64 suppliedCloseFreezeNonce) external view returns (bool) {
         if (block.chainid != LOCAL_DEVNET_CHAIN_ID && challengePeriod < CHALLENGE_PERIOD_SECS) return false;
@@ -1088,18 +1134,36 @@ contract ChannelSettlementManager {
     /// @notice Step 1 of the two-step close for a cosigner whose deployment binding is materialized
     /// in the small on-chain mapping.  The first close intent can only be processed after
     /// `GRACE_BEFORE_PROCESS_SECS`.
-    function requestClose() external releaseRuntime {
+    function requestClose(
+        uint64 expectedCurrentCloseFreezeNonce,
+        uint64 expectedHighestCancelledRevivedStateVersion
+    ) external releaseRuntime {
+        if (
+            currentCloseFreezeNonce != expectedCurrentCloseFreezeNonce
+                || highestCancelledRevivedStateVersion != expectedHighestCancelledRevivedStateVersion
+        ) revert InvalidFreezeNonce();
         if (!isMemberRecipient[msg.sender]) revert NotChannelMember();
         _requestClose();
     }
 
     /// @notice The same unilateral freeze right for any participant, including a delegate.  The
     /// fixed-depth proof authenticates `(slot, pkG, msg.sender)` against the immutable live-snapshot
-    /// root without storing up to 1024 delegate bindings in contract storage.
-    function requestCloseAsParticipant(uint16 slot, bytes32 pkG_, bytes32[10] calldata siblings)
-        external
-        releaseRuntime
-    {
+    /// root without storing up to 1024 delegate bindings in contract storage. The two expected
+    /// era values make a journaled raw request one-shot across both a foreign freeze and a later
+    /// cancel: `currentCloseFreezeNonce` is restored by cancel for protocol liveness, whereas
+    /// `highestCancelledRevivedStateVersion` is monotone and prevents the old calldata becoming
+    /// valid again after that restoration.
+    function requestCloseAsParticipant(
+        uint16 slot,
+        bytes32 pkG_,
+        bytes32[10] calldata siblings,
+        uint64 expectedCurrentCloseFreezeNonce,
+        uint64 expectedHighestCancelledRevivedStateVersion
+    ) external releaseRuntime {
+        if (
+            currentCloseFreezeNonce != expectedCurrentCloseFreezeNonce
+                || highestCancelledRevivedStateVersion != expectedHighestCancelledRevivedStateVersion
+        ) revert InvalidFreezeNonce();
         if (!_isParticipant(slot, pkG_, msg.sender, siblings)) revert InvalidParticipantProof();
         _requestClose();
     }
@@ -1108,6 +1172,7 @@ contract ChannelSettlementManager {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         if (channelStatus != ChannelLifecycleStatus.Active) revert ChannelAlreadyFrozen();
 
+        closeRequestGeneration += 1;
         currentCloseFreezeNonce += 1;
         channelStatus = ChannelLifecycleStatus.ClosePending;
         closeRequestedAt = uint64(block.timestamp);
@@ -1359,9 +1424,9 @@ contract ChannelSettlementManager {
         //    required the COMPLETED N-of-N set over the revived state, which by construction only
         //    the canceller holds; in the C-3 scenario the canceller IS the withholding coordinator,
         //    so it converted "bricked for everyone" into "closable only by the attacker". This
-        //    floor is read in `cancelClose` and NOWHERE ELSE: `submitCloseIntent`, `finalizeClose`,
-        //    `submitPartialWithdrawalIntent`, `finalizePartialWithdrawal` and every payout path are
-        //    untouched by it. So:
+        //    floor gates `cancelClose` and is equality-read by request entry points only;
+        //    `submitCloseIntent`, finalization, partial-withdrawal proof validation and every payout
+        //    path remain untouched by it. So:
         //      - an HONEST CLOSE is never blocked. A member holding only v20 still runs
         //        `requestClose -> submitCloseIntent(v20) -> finalizeClose` with the floor at any
         //        value. Exit liveness — the property the C-3 brick destroyed — is preserved
@@ -1493,7 +1558,25 @@ contract ChannelSettlementManager {
         revert LateOutgoingDebitDisabled();
     }
 
-    function finalizeClose() external releaseRuntime {
+    /// @notice Finalize only the exact pending close named by the publisher's durable journal.
+    /// @dev A newer valid close may replace an older pending close until its challenge deadline.
+    ///      The digest check happens before any finalized state or accounting mutation, so a
+    ///      preflight-to-mining replacement cannot redirect a signed finalization transaction.
+    function finalizeCloseGuarded(
+        bytes32 expectedCloseIntentDigest,
+        uint64 expectedCloseRequestGeneration
+    ) external releaseRuntime {
+        if (!pendingClose.active) revert CloseNotActive();
+        if (
+            pendingClose.closeIntentDigest != expectedCloseIntentDigest
+                || closeRequestGeneration != expectedCloseRequestGeneration
+        ) {
+            revert CloseIntentDigestMismatch();
+        }
+        _finalizeClose();
+    }
+
+    function _finalizeClose() private {
         if (!pendingClose.active) revert CloseNotActive();
         // At equality a strictly-newer replacement is still admissible. Finalization must therefore
         // wait until the following timestamp; otherwise transaction order chooses which valid
@@ -1577,6 +1660,13 @@ contract ChannelSettlementManager {
         // — TM-1 layer a — makes duplicates unreachable; the rollup's `escrowedByToken` ceiling —
         // layer b — bounds any residue independently).
         uint8 tc = pendingClose.tokenCount;
+        // Keep a fixed-width memory image for the terminal funding identity. In the ordinary case
+        // this is byte-for-byte the close proof's vector. If the stale-burn rule below lowers a cap,
+        // the terminal withdrawal must instead prove that exact adjusted vector from a signed,
+        // validity-finalized head; no such head means funding safely remains unavailable rather
+        // than authenticating the stale larger amount.
+        uint32[10] memory terminalTokenRegistry = pendingClose.tokenRegistry;
+        uint256[10] memory terminalFundAmounts = pendingClose.channelFundAmounts;
         finalizedTokenCount = tc;
         for (uint256 t = 0; t < tc; t++) {
             uint32 baseToken = pendingClose.tokenRegistry[t];
@@ -1604,9 +1694,17 @@ contract ChannelSettlementManager {
                 uint256 observedPostBurnFund = authorizedBurnPostFundAmount[baseToken];
                 if (observedPostBurnFund >= cap) continue;
                 finalizedChannelFundAmount[baseToken] = observedPostBurnFund;
+                terminalFundAmounts[t] = observedPostBurnFund;
                 emit AuthorizedBurnDeducted(baseToken, cap - observedPostBurnFund, observedPostBurnFund);
             }
         }
+
+        // IMCF must authenticate the exact per-token amounts this Manager will accept and pull.
+        // Retaining the pre-adjustment digest here would make every honest terminal proof for the
+        // later post-burn head fail `CloseFundingAuxMismatch`, permanently locking a safely
+        // finalized stale close. The Rollup withdrawal proof remains the independent evidence that
+        // this adjusted vector actually occurs in a signed, finalized channel head.
+        _finalizedTokenFundsDigest = verifier.tokenFundsDigest(terminalTokenRegistry, tc, terminalFundAmounts);
 
         // NOTE (Phase 2b review MINOR 3, examined for Phase 3): the Rust-side
         // `unallocated_confirmed_incoming` scalar is NOT consumed anywhere in this Manager (it is
@@ -2151,6 +2249,8 @@ contract ChannelSettlementManager {
         totalWithdrawn[claim.tokenIndex] = newTotalWithdrawn;
         usedWithdrawalNullifiers[claim.withdrawalNullifier] = true;
         withdrawalCredits[claim.tokenIndex][claim.recipient] += claim.amount;
+        withdrawalPayouts[claim.withdrawalNullifier] =
+            WithdrawalPayout({recipient: claim.recipient, tokenIndex: claim.tokenIndex, amount: claim.amount});
 
         emit WithdrawalClaimAccepted(
             claim.closeIntentDigest,
@@ -2218,76 +2318,186 @@ contract ChannelSettlementManager {
         revert PostCloseClaimDisabled();
     }
 
-    /// @notice Pull this channel's native ETH from the rollup into the manager. Permissionless: it
-    ///         only moves the manager's own `pendingWithdrawals[manager]` (credited when the close
-    ///         paid this manager via `IntmaxRollup.withdrawNative`). The balance delta is added to
-    ///         `receivedChannelFunds[0]` (ETH = base token 0) — the authoritative payout ceiling.
-    /// @dev nonReentrant; measures balance before/after the external `registry.withdraw()` call.
+    /// @notice Pre-authorize one proof-backed terminal close payout on the bound Rollup.
+    /// @dev Callable only by the immutable permissionless `CloseFundingMaterializer`, which invokes
+    ///      this for every nonzero token in a complete asset lane and consumes the flags with the
+    ///      verified Rollup withdrawal before the transaction can return. The supplied aux is
+    ///      independently recomputed from immutable/finalized state. Amount and recipient are
+    ///      never caller fields; the accepted tuple is the Rollup's one-shot IPW2 second factor.
+    function authorizeCloseFunding(uint32 tokenIndex, bytes32 auxData)
+        external
+        releaseRuntime
+        returns (bytes32 authDigest)
+    {
+        if (msg.sender != closeFundingMaterializer) revert OnlyCloseFundingMaterializer();
+        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
+        uint256 amount = finalizedChannelFundAmount[tokenIndex];
+        // Rust omits zero-fund entries. Since only finalized registry entries populate this map, a
+        // zero cap also fail-closes every arbitrary/non-finalized token without another scan.
+        if (amount == 0 || receivedChannelFunds[tokenIndex] != 0) {
+            revert ChannelFundsAlreadyReceived(tokenIndex);
+        }
+        if (_closeFundingAuthorizationIssued[tokenIndex]) {
+            revert CloseFundingAlreadyAuthorized(tokenIndex);
+        }
+
+        // Rust `close_funding_aux_data`: exactly 30 u32 words / 120 packed bytes — bytes4 domain,
+        // uint256 chain id, addresses, bytes4 channel id, uint64 freeze nonce, bytes32 IMTF.
+        bytes32 expectedAux = _closeFundingAuxData();
+        if (auxData != expectedAux) revert CloseFundingAuxMismatch();
+        authDigest = _closeFundingAuthDigest(tokenIndex, amount, auxData);
+        // CEI: a Rollup revert rolls the latch back; a successful payout can never be re-authorized
+        // after the Rollup consumes its one-shot flag.
+        _closeFundingAuthorizationIssued[tokenIndex] = true;
+        registry.authorizePartialWithdrawal(authDigest);
+    }
+
+    /// @notice Pull this CLOSED channel's remaining native backing from the bound rollup.
+    /// @dev The rollup's recipient ledger is not channel-scoped, so this Manager asks it to transfer
+    ///      exactly the remaining proof-bound cap. Any unrelated recipient-wide credit remains in
+    ///      the Rollup ledger and cannot enter this channel's payout capacity.
     function pullChannelFunds() external releaseRuntime nonReentrant returns (uint256 pulled) {
-        uint256 balBefore = address(this).balance;
-        registry.withdraw(); // rollup pays pendingWithdrawals[manager] to this contract (receive())
-        pulled = address(this).balance - balBefore;
-        receivedChannelFunds[0] += pulled;
-        emit ChannelFundsPulled(0, pulled, receivedChannelFunds[0]);
+        return _pullChannelFunds(0);
     }
 
     /// @notice Pull this channel's ERC-20 funds for one base token from the rollup (multitoken
     ///         §N-7): the ERC-20 mirror of `pullChannelFunds`. The channel's ERC-20 settlement
     ///         arrives as `IntmaxRollup.withdrawERC20` credits (recipient == this manager); this
-    ///         moves them in via the rollup's `withdrawToken` pull and records the MEASURED
-    ///         balance delta as token-t payout capacity.
-    /// @dev SECURITY: `nonReentrant` (the token is untrusted code); the delta measurement counts
-    ///      ONLY value received during this pull — a fee-skimming token under-credits (self-harm,
-    ///      fail-safe direction) and unsolicited donations are not counted (they merely sit in the
-    ///      contract, exactly like SELFDESTRUCT-forced ETH on the native path). The token address
-    ///      resolves through the rollup's SET-ONCE registry (TM-10b) — the manager keeps no second
-    ///      mutable copy.
+    ///         moves exactly the remaining cap via the rollup's amount-scoped `withdrawToken`.
+    /// @dev SECURITY: `nonReentrant` (the token is untrusted code). A fee-skimming/under-delivering
+    ///      token reverts the entire Rollup pull atomically. Pre-existing credits are excluded by
+    ///      exact amount selection and remain withdrawable in the Rollup ledger.
+    ///      The token address resolves through the rollup's SET-ONCE registry (TM-10b) — the manager
+    ///      keeps no second mutable copy.
     function pullChannelTokenFunds(uint32 tokenIndex) external releaseRuntime nonReentrant returns (uint256 pulled) {
-        IERC20 token = registry.tokenAddressOf(tokenIndex);
-        if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
-        uint256 balBefore = token.balanceOf(address(this));
-        registry.withdrawToken(tokenIndex); // rollup pays pendingTokenWithdrawals[t][manager]
-        pulled = token.balanceOf(address(this)) - balBefore;
-        receivedChannelFunds[tokenIndex] += pulled;
-        emit ChannelFundsPulled(tokenIndex, pulled, receivedChannelFunds[tokenIndex]);
+        if (tokenIndex == 0) revert TokenIndexNotRegisteredOnRollup();
+        return _pullChannelFunds(tokenIndex);
     }
 
-    /// @notice Claim a member's accrued native-ETH credit (pull-payment). Convenience alias for
-    ///         `claimWithdrawalCredit(0)` — keeps the pre-multitoken ETH call sites unchanged.
-    function claimWithdrawalCredit() external returns (uint256 amount) {
-        return claimWithdrawalCredit(0);
+    /// @dev Shared native/ERC-20 pull core. The asset-specific balance measurement surrounds the
+    ///      Rollup pull; the exact-cap reconciliation below is identical for both lanes.
+    function _pullChannelFunds(uint32 tokenIndex) private returns (uint256 pulled) {
+        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
+        IERC20 token;
+        if (tokenIndex != 0) {
+            token = registry.tokenAddressOf(tokenIndex);
+            if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
+        }
+        uint256 received = receivedChannelFunds[tokenIndex];
+        uint256 cap = finalizedChannelFundAmount[tokenIndex];
+        if (received >= cap) revert ChannelFundsAlreadyReceived(tokenIndex);
+        // A recipient-wide Rollup credit is not evidence that THIS channel's terminal payout ran:
+        // an unrelated withdrawal (or a deliberate donation) may already be pending for the same
+        // Manager address.  The terminal flow first installs this exact IMCF/IPW2 authorization;
+        // only the proof-verified Rollup withdrawal can consume it.  Requiring issued+consumed
+        // closes the authorize→proof TOCTOU without changing any proof, PI, or withdrawal ABI.
+        if (!_closeFundingAuthorizationIssued[tokenIndex]) {
+            revert CloseFundingProofNotMaterialized(tokenIndex);
+        }
+        bytes32 authDigest = _closeFundingAuthDigest(tokenIndex, cap, _closeFundingAuxData());
+        if (registry.partialWithdrawalAuthorized(authDigest)) {
+            revert CloseFundingProofNotMaterialized(tokenIndex);
+        }
+        uint256 expected = cap - received;
+        if (tokenIndex == 0) {
+            uint256 balBefore = address(this).balance;
+            registry.withdraw(expected);
+            pulled = address(this).balance - balBefore;
+        } else {
+            uint256 balBefore = _tokenBalanceOf(token, address(this));
+            registry.withdrawToken(tokenIndex, expected);
+            pulled = _tokenBalanceOf(token, address(this)) - balBefore;
+        }
+        if (pulled != expected) revert ChannelFundingMismatch(tokenIndex, expected, pulled);
+        receivedChannelFunds[tokenIndex] = cap;
+        emit ChannelFundsPulled(tokenIndex, expected, cap);
     }
 
-    /// @notice Claim a member's accrued credit in ONE base token as real value (pull-payment).
-    ///         `tokenIndex == 0` pays native ETH; any other index pays the L1-registered ERC-20.
-    /// @dev SECURITY (TM-3, per-token CapInv — the Lean `execMT_payout_ceiling` site): the
-    ///      cross-channel/cross-token solvency invariant is enforced HERE, PER BASE TOKEN —
-    ///      `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` — so the manager can never
-    ///      pay out more of ANY asset than it actually received from the rollup in THAT asset,
-    ///      regardless of inflated intents or intra-channel mis-accounting (accepted intra-channel
-    ///      risks). Token-t credits can NEVER draw on token-t' (or ETH) capacity. Payout dispatch:
-    ///      t == 0 → ETH transfer (existing pattern); else safeTransfer of the token resolved via
-    ///      the rollup's SET-ONCE registry (the SAME registry the escrow used — no second copy,
-    ///      TM-10b). CEI: credit zeroed + paid-out accumulator bumped BEFORE the external
-    ///      transfer; nonReentrant for defense in depth.
-    function claimWithdrawalCredit(uint32 tokenIndex) public releaseRuntime nonReentrant returns (uint256 amount) {
-        amount = withdrawalCredits[tokenIndex][msg.sender];
+    /// @dev Rust `close_funding_aux_data`, factored so authorization and pull re-derive the same
+    ///      terminal identity. Keeping this as a pure recomputation avoids another mutable latch.
+    function _closeFundingAuxData() private view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                bytes4(CLOSE_FUNDING_DOMAIN),
+                uint256(block.chainid),
+                address(registry),
+                address(this),
+                channelId,
+                currentCloseFreezeNonce,
+                _finalizedTokenFundsDigest
+            )
+        );
+    }
+
+    function _closeFundingAuthDigest(uint32 tokenIndex, uint256 amount, bytes32 auxData)
+        private
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encodePacked(bytes4(0x49505732), address(this), tokenIndex, amount, auxData) // "IPW2"
+        );
+    }
+
+    /// @notice Claim exactly the payout committed by one accepted withdrawal proof.
+    /// @dev The nullifier fixes recipient, base token and amount. The aggregate credit remains an
+    ///      accounting view only and cannot select or merge payouts. CEI deletes the scoped record,
+    ///      subtracts the aggregate and increments the paid accumulator before value transfer.
+    function claimWithdrawalCredit(bytes32 withdrawalNullifier)
+        external
+        releaseRuntime
+        nonReentrant
+        returns (uint256 amount)
+    {
+        WithdrawalPayout memory payout = withdrawalPayouts[withdrawalNullifier];
+        amount = payout.amount;
         if (amount == 0) revert NoWithdrawalCredit();
+        if (msg.sender != payout.recipient) revert WithdrawalPayoutRecipientMismatch();
+
+        uint32 tokenIndex = payout.tokenIndex;
+        uint256 available = withdrawalCredits[tokenIndex][payout.recipient];
+        if (amount > available) revert InsufficientWithdrawalCredit();
         if (totalCreditedOut[tokenIndex] + amount > receivedChannelFunds[tokenIndex]) {
             revert WithdrawalCapExceeded();
         }
-        withdrawalCredits[tokenIndex][msg.sender] = 0;
+
+        IERC20 token;
+        if (tokenIndex != 0) {
+            token = registry.tokenAddressOf(tokenIndex);
+            if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
+        }
+
+        delete withdrawalPayouts[withdrawalNullifier];
+        withdrawalCredits[tokenIndex][payout.recipient] = available - amount;
         totalCreditedOut[tokenIndex] += amount;
-        emit WithdrawalClaimed(msg.sender, tokenIndex, amount);
+        emit WithdrawalClaimed(withdrawalNullifier, payout.recipient, tokenIndex, amount);
         if (tokenIndex == 0) {
-            (bool ok,) = msg.sender.call{value: amount}("");
+            (bool ok,) = payout.recipient.call{value: amount}("");
             if (!ok) revert TransferFailed();
         } else {
-            IERC20 token = registry.tokenAddressOf(tokenIndex);
-            if (address(token) == address(0)) revert TokenIndexNotRegisteredOnRollup();
-            SafeERC20Lib.safeTransfer(token, msg.sender, amount);
+            uint256 balanceBefore = _tokenBalanceOf(token, payout.recipient);
+            SafeERC20Lib.safeTransfer(token, payout.recipient, amount);
+            if (_tokenBalanceOf(token, payout.recipient) - balanceBefore != amount) {
+                revert TokenPayoutAmountMismatch();
+            }
         }
     }
+
+    /// @dev Compact strict `balanceOf` used by both ERC-20 value boundaries. A failed or malformed
+    ///      token view is not a usable accounting oracle and therefore fails closed.
+    function _tokenBalanceOf(IERC20 token, address account) private view returns (uint256 tokenBalance) {
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x70a08231))
+            mstore(add(ptr, 4), account)
+            if iszero(staticcall(gas(), token, ptr, 36, ptr, 32)) { revert(0, 0) }
+            if lt(returndatasize(), 32) { revert(0, 0) }
+            tokenBalance := mload(ptr)
+        }
+    }
+
+    // RETIRED: the three aggregate `claimWithdrawalCredit` overloads are intentionally absent.
+    // Only the proof/nullifier-scoped `claimWithdrawalCredit(bytes32)` payout surface exists.
 
     function getPendingClose() external view returns (PendingClose memory) {
         return pendingClose;
@@ -2304,23 +2514,11 @@ contract ChannelSettlementManager {
         );
     }
 
-    function computeSpecialCloseDigest(SpecialClose memory specialClose) public view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(0x494d5343),
-                channelId,
-                uint32(specialClose.offendingBpMemberSlot),
-                specialClose.offendingBpPkG,
-                specialClose.fullySignedSmallBlockRoot,
-                specialClose.smallBlockNumber,
-                specialClose.signedMediumBlockNumber,
-                specialClose.latestFinalizedMediumBlockNumber
-            )
-        );
-    }
-
     function _checkCloseProof(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) internal view {
         _checkCanonicalCloseMetadata(intent);
+        if (!registry.isFinalizedStateRoot(intent.channelFundIntmaxStateRoot)) {
+            revert ChannelFundStateRootNotFinalized(intent.channelFundIntmaxStateRoot);
+        }
         // F4/F7 SECURITY: the close proof's in-circuit `memberSetCommitment` must equal this
         // channel's registered member-set commitment, AND the close proof's `memberCount` limb must
         // equal this channel's `activeMemberCount`, so a close can only finalize with the channel's

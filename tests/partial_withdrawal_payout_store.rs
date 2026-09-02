@@ -171,10 +171,7 @@ fn finalize_receipt(auth_digest: Bytes32, token: u32) -> L1TransactionReceipt {
     receipt
 }
 
-fn finalize_candidate(
-    store: &mut PartialWithdrawalPayoutStore,
-    candidate_id: Bytes32,
-) {
+fn finalize_candidate(store: &mut PartialWithdrawalPayoutStore, candidate_id: Bytes32) {
     let auth_digest = store.active().unwrap().unwrap().auth_digest;
     store
         .mark_finalize_broadcast(candidate_id, intent())

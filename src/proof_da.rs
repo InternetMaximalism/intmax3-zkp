@@ -162,13 +162,15 @@ pub fn validate_decoded_blob_transaction(
     let mut compact = Vec::with_capacity(count * 96);
     let mut normalized_hashes = Vec::with_capacity(count);
     for i in 0..count {
-        let actual_blob = decode_hex_exact(&decoded.blobs[i], BYTES_PER_BLOB, &format!("blob[{i}]"))?;
+        let actual_blob =
+            decode_hex_exact(&decoded.blobs[i], BYTES_PER_BLOB, &format!("blob[{i}]"))?;
         if actual_blob != expected_blobs[i] {
             return Err(format!(
                 "blob[{i}] is not the exact lossless Alloy SimpleCoder encoding"
             ));
         }
-        let commitment = decode_hex_exact(&decoded.commitments[i], 48, &format!("commitment[{i}]"))?;
+        let commitment =
+            decode_hex_exact(&decoded.commitments[i], 48, &format!("commitment[{i}]"))?;
         let proof = decode_hex_exact(&decoded.proofs[i], 48, &format!("proof[{i}]"))?;
         let supplied_hash = decode_hex_exact(
             &decoded.blob_versioned_hashes[i],
@@ -217,10 +219,7 @@ pub fn submitted_id_from_receipt(
     let topic0 = format!(
         "0x{}",
         hex::encode(
-            keccak_hash::keccak(
-                b"Submitted(uint256,address,bytes32,bytes32,uint32,bytes32)"
-            )
-            .0
+            keccak_hash::keccak(b"Submitted(uint256,address,bytes32,bytes32,uint32,bytes32)").0
         )
     );
     let logs = receipt["logs"]
@@ -309,9 +308,8 @@ mod tests {
 
     fn decoded_for(payload: &[u8]) -> DecodedBlobTransaction {
         let blobs = encode_simple_coder_blobs(payload).unwrap();
-        let commitments: Vec<Vec<u8>> = (0..blobs.len())
-            .map(|i| vec![0x31 + i as u8; 48])
-            .collect();
+        let commitments: Vec<Vec<u8>> =
+            (0..blobs.len()).map(|i| vec![0x31 + i as u8; 48]).collect();
         let hashes = commitments
             .iter()
             .map(|commitment| {
@@ -368,31 +366,35 @@ mod tests {
         let mut blob = decode_hex_exact(&decoded.blobs[0], BYTES_PER_BLOB, "blob").unwrap();
         blob[33] ^= 1;
         decoded.blobs[0] = hex_of(&blob);
-        assert!(validate_decoded_blob_transaction(
-            &decoded,
-            payload,
-            1,
-            "0x1111111111111111111111111111111111111111",
-            "0x2222222222222222222222222222222222222222",
-            1_000_000_000_000_000_000,
-            "0xabcdef",
-        )
-        .unwrap_err()
-        .contains("exact lossless"));
+        assert!(
+            validate_decoded_blob_transaction(
+                &decoded,
+                payload,
+                1,
+                "0x1111111111111111111111111111111111111111",
+                "0x2222222222222222222222222222222222222222",
+                1_000_000_000_000_000_000,
+                "0xabcdef",
+            )
+            .unwrap_err()
+            .contains("exact lossless")
+        );
 
         let mut decoded = decoded_for(payload);
         decoded.blob_versioned_hashes[0] = hex_of(&[0x01; 32]);
-        assert!(validate_decoded_blob_transaction(
-            &decoded,
-            payload,
-            1,
-            "0x1111111111111111111111111111111111111111",
-            "0x2222222222222222222222222222222222222222",
-            1_000_000_000_000_000_000,
-            "0xabcdef",
-        )
-        .unwrap_err()
-        .contains("sha256"));
+        assert!(
+            validate_decoded_blob_transaction(
+                &decoded,
+                payload,
+                1,
+                "0x1111111111111111111111111111111111111111",
+                "0x2222222222222222222222222222222222222222",
+                1_000_000_000_000_000_000,
+                "0xabcdef",
+            )
+            .unwrap_err()
+            .contains("sha256")
+        );
     }
 
     #[test]
@@ -400,10 +402,7 @@ mod tests {
         let topic0 = format!(
             "0x{}",
             hex::encode(
-                keccak_hash::keccak(
-                    b"Submitted(uint256,address,bytes32,bytes32,uint32,bytes32)"
-                )
-                .0
+                keccak_hash::keccak(b"Submitted(uint256,address,bytes32,bytes32,uint32,bytes32)").0
             )
         );
         let mut data = vec![0u8; 128];

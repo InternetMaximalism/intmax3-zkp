@@ -87,7 +87,7 @@ fn tx_v2_witness(nonce: u32) -> (Bytes32, BlockTxV2Witness) {
             channel_action_indices: None,
             channel_actions: None,
             channel_action_merkle_proofs: None,
-            },
+        },
     )
 }
 

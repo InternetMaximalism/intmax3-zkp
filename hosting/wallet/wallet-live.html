@@ -176,11 +176,10 @@
     <button id="btnFwClose" disabled>2 -- Close Channel</button>
     <button id="btnFwSettle" disabled>3 -- Settle</button>
     <button id="btnFwWithdraw" disabled>4 -- Withdraw</button>
-    <div class="row" style="margin-top:8px">
-      <input id="fwClaimSlot" type="number" value="0" min="0" title="slot to claim" />
-      <input id="fwClaimRecipient" type="text" placeholder="0x..." style="flex:3" />
-    </div>
-    <button id="btnFwClaim" disabled>5 -- Claim</button>
+    <p class="hint" id="fwClaimScope" style="margin-top:8px">
+      Your signed slot and its L1 recipient are derived inside wallet WASM; they cannot be edited here.
+    </p>
+    <button id="btnFwClaim" disabled>5 -- Claim All Balances</button>
   </section>
 
   <div class="log" id="wdLog" style="margin-top:16px"></div>
@@ -904,6 +903,204 @@ function senderAfterCt(p) {
   return ct;
 }
 
+// Browser-claim response gates. The relay is not trusted to select a different recipient/token or
+// L1 contract after proving: these pure checks join its response back to (a) the finalized context
+// just fetched for this channel, (b) the artifact returned by wallet WASM, and (c) the connected
+// EIP-1193 account that must sign the exact transaction.
+function normalizeBrowserClaimContext(value, expectedChannel) {
+  if (!isPlainObject(value) || value.schemaVersion !== 1
+      || !isPlainObject(value.authority) || !isPlainObject(value.finalized)
+      || !isPlainObject(value.durable)) throw new Error('malformed browser claim context');
+  const authority = value.authority;
+  const finalized = value.finalized;
+  for (const field of ['manager', 'rollup', 'verifier']) {
+    if (!HEX20_RE.test(String(authority[field])) || String(authority[field]).toLowerCase() === ZERO_ADDRESS_20) {
+      throw new Error('malformed browser claim ' + field);
+    }
+  }
+  if (!Number.isSafeInteger(authority.chainId) || authority.chainId <= 0
+      || !Number.isSafeInteger(authority.channelId) || authority.channelId !== Number(expectedChannel)
+      || finalized.channelId !== authority.channelId) throw new Error('browser claim channel/chain binding mismatch');
+  if (!HEX32_RE.test(String(finalized.closeIntentDigest))
+      || !HEX32_RE.test(String(finalized.finalChannelStateDigest))
+      || !HEX32_RE.test(String(finalized.finalBalanceStateH1))) throw new Error('malformed finalized claim digest');
+  if (!Array.isArray(finalized.tokenRegistry)
+      || finalized.tokenRegistry.length !== finalized.tokenCount
+      || finalized.tokenCount < 1 || finalized.tokenCount > 10
+      || new Set(finalized.tokenRegistry).size !== finalized.tokenRegistry.length
+      || finalized.tokenRegistry.some((v) => !Number.isSafeInteger(v) || v < 0 || v > 0xffffffff)) {
+    throw new Error('malformed finalized token registry');
+  }
+  if (!Number.isSafeInteger(value.durable.number) || value.durable.number < 0
+      || !HEX32_RE.test(String(value.durable.hash))
+      || !Number.isSafeInteger(authority.startBlock) || authority.startBlock < 0
+      || authority.startBlock > value.durable.number
+      || (authority.chainId !== 31337 && value.durable.source !== 'finalized')) {
+    throw new Error('browser claim context is not anchored to a durable head');
+  }
+  return value;
+}
+
+function claimCalldataWord(data, index) {
+  const raw = String(data || '');
+  const start = 10 + index * 64;
+  const word = raw.slice(start, start + 64);
+  if (!/^[0-9a-fA-F]{64}$/.test(word)) throw new Error('browser claim calldata is truncated');
+  return word.toLowerCase();
+}
+
+const SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR = '0x70f89118';
+const SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR = '0x6d3e503a';
+
+function validateBrowserSubmitCalldata(data, claim, expectedSelector) {
+  const raw = String(data || '').toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0
+      || ![SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR, SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR].includes(expectedSelector)
+      || !raw.startsWith(expectedSelector)) {
+    throw new Error('browser claim calldata is not submitWithdrawalClaim');
+  }
+  const addressWord = claimCalldataWord(raw, 2);
+  const expected = [
+    [0, String(claim.closeIntentDigest).slice(2).toLowerCase(), 'close digest'],
+    [1, String(claim.memberPkG).slice(2).toLowerCase(), 'member key'],
+    [2, '0'.repeat(24) + String(claim.recipient).slice(2).toLowerCase(), 'recipient'],
+    [3, String(claim.userAmountDigest).slice(2).toLowerCase(), 'amount digest'],
+    [4, BigInt(claim.amount).toString(16).padStart(64, '0'), 'amount'],
+    [5, BigInt(claim.tokenSlot).toString(16).padStart(64, '0'), 'token slot'],
+    [6, BigInt(claim.tokenIndex).toString(16).padStart(64, '0'), 'token index'],
+    [7, String(claim.withdrawalNullifier).slice(2).toLowerCase(), 'nullifier'],
+    [8, (0x120n).toString(16).padStart(64, '0'), 'proof offset'],
+  ];
+  void addressWord; // forces the minimum static tuple length before the comparison loop.
+  for (const [index, wanted, label] of expected) {
+    if (claimCalldataWord(raw, index) !== wanted) throw new Error('browser claim calldata changed ' + label);
+  }
+  return true;
+}
+
+const BROWSER_CLAIM_AUTHORITY_FIELDS = ['chainId', 'channelId', 'manager', 'rollup', 'verifier', 'startBlock'];
+const BROWSER_CLAIM_FIELDS = [
+  'closeIntentDigest', 'memberPkG', 'recipient', 'userAmountDigest', 'amount',
+  'tokenSlot', 'tokenIndex', 'withdrawalNullifier',
+];
+
+function validateBrowserClaimPinnedRecord(value, context, pin) {
+  if (!isPlainObject(value) || value.schemaVersion !== 1 || !isPlainObject(value.authority)
+      || !isPlainObject(value.claim) || !isPlainObject(context) || !isPlainObject(context.authority)
+      || !isPlainObject(pin) || !isPlainObject(pin.authority) || !isPlainObject(pin.claim)
+      || !HEX32_RE.test(String(pin.operationId))
+      || String(value.operationId).toLowerCase() !== String(pin.operationId).toLowerCase()
+      || Number(value.mleAbiVersion) !== Number(pin.mleAbiVersion)
+      || String(value.submitWithdrawalClaimSelector).toLowerCase()
+        !== String(pin.submitWithdrawalClaimSelector).toLowerCase()) {
+    throw new Error('browser claim response differs from the locally pinned operation');
+  }
+  for (const field of BROWSER_CLAIM_AUTHORITY_FIELDS) {
+    if (String(value.authority[field]).toLowerCase() !== String(context.authority[field]).toLowerCase()
+        || String(value.authority[field]).toLowerCase() !== String(pin.authority[field]).toLowerCase()) {
+      throw new Error('browser claim response changed pinned authority ' + field);
+    }
+  }
+  for (const field of BROWSER_CLAIM_FIELDS) {
+    if (String(value.claim[field]).toLowerCase() !== String(pin.claim[field]).toLowerCase()) {
+      throw new Error('browser claim response changed pinned claim ' + field);
+    }
+  }
+  return value;
+}
+
+function validateBrowserClaimAction(value, context, pin) {
+  if (context || pin) validateBrowserClaimPinnedRecord(value, context, pin);
+  if (!isPlainObject(value) || !isPlainObject(value.action) || !isPlainObject(value.claim)
+      || !isPlainObject(value.authority) || !isPlainObject(value.transaction)
+      || !['funding', 'payout'].includes(value.action.kind)
+      || String(value.transaction.to).toLowerCase() !== String(value.authority.manager).toLowerCase()
+      || value.transaction.value !== '0x0') throw new Error('malformed browser claim action');
+  const tokenWord = BigInt(value.claim.tokenIndex).toString(16).padStart(64, '0');
+  let expectedData;
+  if (value.action.kind === 'funding') {
+    expectedData = Number(value.claim.tokenIndex) === 0
+      ? '0x0829ffe3'
+      : '0xcf450977' + tokenWord;
+    if (value.action.amount !== null) throw new Error('funding action must not claim a payout amount');
+  } else {
+    if (String(value.action.amount) !== String(value.claim.amount)) {
+      throw new Error('payout action differs from the accepted claim amount');
+    }
+    if (!HEX32_RE.test(String(value.claim.withdrawalNullifier))) {
+      throw new Error('payout action has no canonical withdrawal nullifier');
+    }
+    expectedData = '0xc7cf9d48' + String(value.claim.withdrawalNullifier).slice(2).toLowerCase();
+  }
+  if (String(value.transaction.data).toLowerCase() !== expectedData) {
+    throw new Error('browser claim action calldata differs from the exact local encoding');
+  }
+  return value;
+}
+
+function validateBrowserClaimPrepared(value, context, artifact, tokenSlot, account) {
+  if (!isPlainObject(value) || value.schemaVersion !== 1 || !isPlainObject(value.claim)
+      || !isPlainObject(value.authority) || !HEX32_RE.test(String(value.operationId))) {
+    throw new Error('malformed prepared browser claim');
+  }
+  for (const field of BROWSER_CLAIM_AUTHORITY_FIELDS) {
+    if (String(value.authority[field]).toLowerCase() !== String(context.authority[field]).toLowerCase()) {
+      throw new Error('prepared browser claim changed ' + field);
+    }
+  }
+  const claim = value.claim;
+  const wasmClaim = artifact && artifact.claim;
+  const wasmProof = artifact && artifact.mleProof;
+  if (!isPlainObject(wasmClaim)) throw new Error('wallet WASM returned no claim tuple');
+  if (!isPlainObject(wasmProof)) throw new Error('wallet WASM returned no MLE proof');
+  const hasProtocolVersion = Object.prototype.hasOwnProperty.call(wasmProof, 'protocolVersion');
+  const hasConstituentWidth = Object.prototype.hasOwnProperty.call(wasmProof, 'constituentWidth');
+  if (hasProtocolVersion !== hasConstituentWidth) {
+    throw new Error('wallet WASM returned a partially versioned MLE proof');
+  }
+  const expectedMleAbiVersion = hasProtocolVersion ? 2 : 1;
+  const expectedSelector = expectedMleAbiVersion === 2
+    ? SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR : SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR;
+  if (expectedMleAbiVersion === 1 && context.authority.chainId !== 31337) {
+    throw new Error('legacy MLE proof ABI is disabled on public chains');
+  }
+  if (Number(value.mleAbiVersion) !== expectedMleAbiVersion
+      || String(value.submitWithdrawalClaimSelector).toLowerCase() !== expectedSelector) {
+    throw new Error('prepared browser claim changed the explicit MLE proof ABI version');
+  }
+  for (const field of BROWSER_CLAIM_FIELDS) {
+    if (String(claim[field]).toLowerCase() !== String(wasmClaim[field]).toLowerCase()) {
+      throw new Error('prepared claim differs from wallet WASM field ' + field);
+    }
+  }
+  const slot = Number(tokenSlot);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= context.finalized.tokenCount
+      || Number(claim.tokenSlot) !== slot
+      || Number(claim.tokenIndex) !== context.finalized.tokenRegistry[slot]) {
+    throw new Error('prepared browser claim changed the finalized token binding');
+  }
+  if (String(claim.closeIntentDigest).toLowerCase() !== String(context.finalized.closeIntentDigest).toLowerCase()) {
+    throw new Error('prepared browser claim changed the finalized close');
+  }
+  if (!HEX20_RE.test(String(account))
+      || String(claim.recipient).toLowerCase() !== String(account).toLowerCase()) {
+    throw new Error('connected wallet is not the proof-bound claim recipient');
+  }
+  if (!/^(0|[1-9][0-9]*)$/.test(String(claim.amount)) || BigInt(claim.amount) <= 0n) {
+    throw new Error('browser claim amount must be a positive canonical integer');
+  }
+  if (['prepared', 'submit-pending', 'submit-failed'].includes(value.status)) {
+    if (!isPlainObject(value.transaction)
+        || String(value.transaction.to).toLowerCase() !== String(context.authority.manager).toLowerCase()
+        || !/^0x[0-9a-fA-F]+$/.test(String(value.transaction.data))
+        || value.transaction.value !== '0x0') throw new Error('malformed prepared claim transaction');
+    validateBrowserSubmitCalldata(value.transaction.data, claim, expectedSelector);
+  } else if (!['accepted', 'paid'].includes(value.status)) {
+    throw new Error('unexpected prepared browser claim status');
+  }
+  return value;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 // TESTABLE-END: deposit-ui
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1100,7 +1297,8 @@ async function selectWallet(w) {
 function fillRecipientFields() {
   if (walletAccount) {
     if (!$('pwAddress').value) $('pwAddress').value = walletAccount;
-    if (!$('fwClaimRecipient').value) $('fwClaimRecipient').value = walletAccount;
+    const scope = $('fwClaimScope');
+    if (scope) scope.textContent = 'Signed slot ' + mySlot + ' → ' + walletAccount + ' (recipient is proof-bound)';
   }
 }
 
@@ -1332,6 +1530,79 @@ let _polling = false;
 let fwSettlement = null;
 let _lastReport = null; // last BalanceReport rendered, so late-arriving token metadata can re-render
 
+// Every snapshot stored here has first passed wallet_import_channel's signature/root validation.
+// IndexedDB is only an availability cache (never an authority): loading one hands it back to WASM,
+// and wallet_withdrawal_claim additionally requires the exact Manager-finalized digest and H1.
+// `add`, not `put`, means a later relay response can never overwrite an older value under the same
+// digest. This is what keeps a stale-but-valid finalized close claimable after a browser restart.
+const CLAIM_SNAPSHOT_DB = 'intmax3-claim-snapshots-v1';
+const CLAIM_SNAPSHOT_STORE = 'snapshots';
+const MAX_CLAIM_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+
+function openClaimSnapshotDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(CLAIM_SNAPSHOT_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(CLAIM_SNAPSHOT_STORE, { keyPath: 'key' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('cannot open claim snapshot archive'));
+  });
+}
+
+async function archiveVerifiedClaimSnapshot(snapshotJson) {
+  if (typeof snapshotJson !== 'string'
+      || new TextEncoder().encode(snapshotJson).byteLength > MAX_CLAIM_SNAPSHOT_BYTES) {
+    throw new Error('verified claim snapshot exceeds the browser archive limit');
+  }
+  const parsed = JSON.parse(snapshotJson);
+  const digest = String(parsed && parsed.state && parsed.state.digest || '').toLowerCase();
+  if (!HEX32_RE.test(digest)) throw new Error('verified claim snapshot has no canonical digest');
+  const channel = parsed && parsed.record && parsed.record.channelId;
+  const channelId = Number(channel && typeof channel === 'object' ? (channel.value ?? channel.channelId) : channel);
+  if (!Number.isSafeInteger(channelId) || channelId < 0) throw new Error('verified claim snapshot has no channel id');
+  const db = await openClaimSnapshotDb();
+  const key = channelId + ':' + digest;
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CLAIM_SNAPSHOT_STORE, 'readwrite');
+      const store = tx.objectStore(CLAIM_SNAPSHOT_STORE);
+      const existing = store.get(key);
+      let conflict = null;
+      existing.onsuccess = () => {
+        if (!existing.result) {
+          store.add({ key, channelId, digest, snapshotJson });
+          return;
+        }
+        let same = false;
+        try {
+          same = claimCanonicalJson(JSON.parse(existing.result.snapshotJson))
+            === claimCanonicalJson(parsed);
+        } catch (_) { /* malformed prior archive is a hard conflict */ }
+        if (!same) {
+          conflict = new Error('refusing to replace a different verified snapshot under the same digest');
+          tx.abort();
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('cannot archive verified claim snapshot'));
+      tx.onabort = () => reject(conflict || tx.error || new Error('claim snapshot archive aborted'));
+    });
+  } finally { db.close(); }
+}
+
+async function loadVerifiedClaimSnapshot(channelId, digest) {
+  const key = Number(channelId) + ':' + String(digest).toLowerCase();
+  const db = await openClaimSnapshotDb();
+  try {
+    const entry = await new Promise((resolve, reject) => {
+      const request = db.transaction(CLAIM_SNAPSHOT_STORE, 'readonly')
+        .objectStore(CLAIM_SNAPSHOT_STORE).get(key);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error('cannot read claim snapshot archive'));
+    });
+    return entry && entry.snapshotJson || null;
+  } finally { db.close(); }
+}
+
 function setChannelFrom(snapJson) {
   try {
     const c = JSON.parse(snapJson).record.channelId;
@@ -1356,7 +1627,7 @@ let _callId = 0;
 // state that does not extend its own head — it would only waste a round trip.
 let verifiedHeadState = null;
 // Actions that provably leave the wasm session's head where it is, so the base survives them.
-const HEAD_PRESERVING_ACTIONS = ['send', 'refresh', 'sendInterChannel', 'cosign', 'burnSend'];
+const HEAD_PRESERVING_ACTIONS = ['send', 'refresh', 'sendInterChannel', 'cosign', 'burnSend', 'withdrawalClaim'];
 
 // Both head-adopting actions return a BalanceReport read from the state the wasm ACTUALLY adopted,
 // so its stateVersion is an independent witness of the head. Cross-check it against the base we are
@@ -1373,22 +1644,49 @@ function adoptHead(state, report) {
   return base;
 }
 
-function noteVerifiedHead(action, payload, ok, result) {
+function claimCanonicalJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(claimCanonicalJson).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + claimCanonicalJson(value[key])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+async function noteVerifiedHead(action, payload, ok, result) {
   try {
-    if (action === 'finalize') { verifiedHeadState = ok ? adoptHead(JSON.parse(payload.stateJson), result) : null; return; }
-    if (action === 'importChannel') {
-      verifiedHeadState = ok ? adoptHead(JSON.parse(payload.snapshotJson).state, result) : null;
+    if (action === 'finalize') {
+      if (!ok) { verifiedHeadState = null; return; }
+      const expectedState = JSON.parse(payload.stateJson);
+      verifiedHeadState = adoptHead(expectedState, result);
+      // A bare finalized ChannelState is enough for the current WASM session but not for restart
+      // recovery (record, member keys and settled accumulator live in the complete snapshot).
+      // Require the relay to publish that exact value now, verify the full snapshot again in WASM,
+      // and wait for the IndexedDB transaction before reporting finalization to the UI.
+      const snapshotJson = await api('/api/snapshot', null, 'GET');
+      const snapshot = JSON.parse(snapshotJson);
+      if (!snapshot || claimCanonicalJson(snapshot.state) !== claimCanonicalJson(expectedState)) {
+        throw new Error('relay did not publish the exact WASM-finalized state for durable claim recovery');
+      }
+      await call('importChannel', { snapshotJson });
       return;
     }
-  } catch (e) { verifiedHeadState = null; return; }
+    if (action === 'importChannel') {
+      if (!ok) { verifiedHeadState = null; return; }
+      const snapshot = JSON.parse(payload.snapshotJson);
+      const adopted = adoptHead(snapshot.state, result);
+      await archiveVerifiedClaimSnapshot(payload.snapshotJson);
+      verifiedHeadState = adopted;
+      return;
+    }
+  } catch (e) { verifiedHeadState = null; throw e; }
   if (HEAD_PRESERVING_ACTIONS.indexOf(action) < 0) verifiedHeadState = null;
 }
 
 function call(action, payload={}) {
   const id = ++_callId;
   return new Promise((resolve, reject) => { handlers[id] = { resolve, reject }; worker.postMessage({ action, _callId: id, ...payload }); })
-    .then((result) => { noteVerifiedHead(action, payload, true, result); return result; },
-          (err) => { noteVerifiedHead(action, payload, false, null); throw err; });
+    .then(async (result) => { await noteVerifiedHead(action, payload, true, result); return result; },
+          async (err) => { await noteVerifiedHead(action, payload, false, null); throw err; });
 }
 worker.onmessage = (e) => {
   const d = e.data;
@@ -2516,20 +2814,250 @@ $('btnFwWithdraw').onclick = guard('fwWithdraw', async () => {
   $('btnFwWithdraw').disabled = false;
 });
 
+const BROWSER_CLAIM_LOCAL_PREFIX = 'intmax3-browser-claim-v1:';
+
+function claimLocalKey(closeDigest, tokenSlot) {
+  return BROWSER_CLAIM_LOCAL_PREFIX + activeCh + ':' + String(closeDigest).toLowerCase() + ':' + tokenSlot;
+}
+function readLocalClaim(closeDigest, tokenSlot) {
+  try { return JSON.parse(localStorage.getItem(claimLocalKey(closeDigest, tokenSlot))) || null; }
+  catch (_) { return null; }
+}
+function saveLocalClaim(closeDigest, tokenSlot, patch) {
+  const key = claimLocalKey(closeDigest, tokenSlot);
+  const prior = readLocalClaim(closeDigest, tokenSlot) || {};
+  localStorage.setItem(key, JSON.stringify({ ...prior, ...patch, updatedAt: Date.now() }));
+}
+
+async function claimApi(pathname, body) {
+  return JSON.parse(await api(pathname, JSON.stringify(body), 'POST'));
+}
+
+async function fetchBrowserClaimContext() {
+  const raw = JSON.parse(await api('/api/browser-claim/context', null, 'GET'));
+  const context = normalizeBrowserClaimContext(raw, activeCh);
+  // Independent browser-visible join to the channel's backing route. The Manager/rollup equality
+  // is already enforced server-side and on-chain; this catches a compromised relay response before
+  // asking MetaMask to switch/sign.
+  const backing = await fetchDepositInfo();
+  if (backing.chainId !== context.authority.chainId
+      || String(backing.rollup).toLowerCase() !== String(context.authority.rollup).toLowerCase()) {
+    throw new Error('claim authority differs from the browser-visible channel backing');
+  }
+  return { context, walletNetwork: backing };
+}
+
+async function ensureFinalizedClaimSnapshot(context) {
+  const wanted = String(context.finalized.finalChannelStateDigest).toLowerCase();
+  if (verifiedHeadState && String(verifiedHeadState.digest).toLowerCase() === wanted) return;
+  let snapshotJson = await loadVerifiedClaimSnapshot(context.authority.channelId, wanted);
+  if (!snapshotJson) {
+    const current = await api('/api/snapshot', null, 'GET');
+    let digest = '';
+    try { digest = String(JSON.parse(current).state.digest).toLowerCase(); } catch (_) { /* fail below */ }
+    if (digest !== wanted) {
+      throw new Error(
+        'the Manager finalized an older signed head that this browser did not archive; ' +
+        'restore this account\'s authenticated snapshot archive or run its delegate recovery'
+      );
+    }
+    snapshotJson = current;
+  }
+  const report = JSON.parse(await call('importChannel', { snapshotJson }));
+  if (!verifiedHeadState || String(verifiedHeadState.digest).toLowerCase() !== wanted) {
+    throw new Error('wallet WASM did not adopt the exact finalized claim snapshot');
+  }
+  mySlot = report.slot;
+  showBalance(report);
+}
+
+async function positiveFinalizedClaimSlots(context) {
+  const report = _lastReport || JSON.parse(await call('balance'));
+  if (!report || !Array.isArray(report.balances)
+      || report.balances.length !== context.finalized.tokenCount) {
+    throw new Error('wallet balance report does not cover every finalized token slot');
+  }
+  const seen = new Set();
+  return report.balances.map((entry) => {
+    const tokenSlot = Number(entry.tokenSlot);
+    const tokenIndex = Number(entry.tokenIndex);
+    const amount = String(entry.balance);
+    if (!Number.isInteger(tokenSlot) || tokenSlot < 0 || tokenSlot >= context.finalized.tokenCount
+        || seen.has(tokenSlot)) throw new Error('wallet returned a duplicate/out-of-range token slot');
+    seen.add(tokenSlot);
+    if (tokenIndex !== context.finalized.tokenRegistry[tokenSlot]) {
+      throw new Error('wallet token registry differs from the finalized Manager registry');
+    }
+    if (!/^(0|[1-9][0-9]*)$/.test(amount) || BigInt(amount) > MAX_U64) {
+      throw new Error('wallet returned a non-canonical claim balance');
+    }
+    return { tokenSlot, tokenIndex, amount };
+  }).filter((entry) => BigInt(entry.amount) > 0n);
+}
+
+async function refreshClaimWalletAccount(expectedRecipient, network) {
+  await ensureWallet();
+  const accounts = await walletProvider.request({ method: 'eth_accounts' });
+  walletAccount = accounts && accounts[0] || null;
+  updateWalletButton();
+  if (!walletAccount || String(walletAccount).toLowerCase() !== String(expectedRecipient).toLowerCase()) {
+    throw new Error('select the L1 wallet bound into this signed channel slot');
+  }
+  await ensureChain(network);
+  const actualChain = await walletProvider.request({ method: 'eth_chainId' });
+  if (BigInt(actualChain) !== BigInt(network.chainId)) throw new Error('wallet remained on a different L1 chain');
+}
+
+async function sendExactBrowserClaimTransaction(transaction, recipient, network, label) {
+  if (!transaction || String(transaction.to).toLowerCase() === ZERO_ADDRESS_20
+      || !HEX20_RE.test(String(transaction.to)) || !/^0x[0-9a-fA-F]+$/.test(String(transaction.data))
+      || transaction.value !== '0x0') throw new Error('relay returned a malformed claim transaction');
+  await refreshClaimWalletAccount(recipient, network);
+  log('  ' + label + ': manager ' + transaction.to + ', value 0 (verify in wallet)', 'zk');
+  const txHash = await walletProvider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: walletAccount, to: transaction.to, value: '0x0', data: transaction.data }],
+  });
+  if (!HEX32_RE.test(String(txHash))) throw new Error(label + ' wallet returned a malformed transaction hash');
+  return String(txHash).toLowerCase();
+}
+
+async function reconcileBrowserClaim(pathname, body, doneStatuses, label, validateResponse) {
+  for (let i = 0; i < 600; i++) { // up to one hour: public-chain `finalized`, not merely mined.
+    const state = await claimApi(pathname, body);
+    if (validateResponse) validateResponse(state);
+    if (doneStatuses.includes(state.status)) return state;
+    if (String(state.status).endsWith('failed')) throw new Error(label + ' transaction reverted');
+    if (i % 10 === 0) log('  ' + label + ' tx is ' + state.status + '; waiting for finalized head...');
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+  }
+  throw new Error(label + ' is still not finalized; the durable operation can be resumed safely');
+}
+
+async function claimOneBrowserBalance(context, network, balance) {
+  const closeDigest = context.finalized.closeIntentDigest;
+  let local = readLocalClaim(closeDigest, balance.tokenSlot);
+  let state = null;
+  if (local && HEX32_RE.test(String(local.operationId))
+      && isPlainObject(local.authority) && isPlainObject(local.claim)) {
+    state = await claimApi('/api/browser-claim/status', { operationId: local.operationId });
+    validateBrowserClaimPinnedRecord(state, context, local);
+    if (state.status === 'paid') return state;
+    const submitHash = local.submitTxHash || state.submitTxHash;
+    if (submitHash && !['accepted', 'paid'].includes(state.status)) {
+      state = await reconcileBrowserClaim(
+        '/api/browser-claim/reconcile-submit',
+        { operationId: local.operationId, txHash: submitHash },
+        ['accepted', 'paid'],
+        'claim acceptance',
+        (value) => validateBrowserClaimPinnedRecord(value, context, local),
+      );
+    }
+    const actionHash = local.actionTxHash || state.action && state.action.txHash;
+    if (actionHash && state.status !== 'paid') {
+      state = await reconcileBrowserClaim(
+        '/api/browser-claim/reconcile-action',
+        { operationId: local.operationId, txHash: actionHash },
+        ['accepted', 'paid'],
+        state.action && state.action.kind || 'claim action',
+        (value) => validateBrowserClaimPinnedRecord(value, context, local),
+      );
+      if (state.status === 'paid') return state;
+    }
+  }
+
+  if (!state || !['accepted', 'paid'].includes(state.status)) {
+    const finalizedContext = {
+      closeIntentDigest: context.finalized.closeIntentDigest,
+      finalChannelStateDigest: context.finalized.finalChannelStateDigest,
+      finalBalanceStateH1: context.finalized.finalBalanceStateH1,
+    };
+    log('  proving token slot ' + balance.tokenSlot + ' inside browser WASM...', 'zk');
+    const artifact = JSON.parse(await call('withdrawalClaim', {
+      finalizedContextJson: JSON.stringify(finalizedContext),
+      tokenSlot: balance.tokenSlot,
+    }));
+    state = await claimApi('/api/browser-claim/prepare', { artifact, tokenSlot: balance.tokenSlot });
+    validateBrowserClaimPrepared(state, context, artifact, balance.tokenSlot, walletAccount);
+    local = {
+      operationId: state.operationId,
+      authority: structuredClone(state.authority),
+      claim: structuredClone(state.claim),
+      mleAbiVersion: state.mleAbiVersion,
+      submitWithdrawalClaimSelector: state.submitWithdrawalClaimSelector,
+    };
+    saveLocalClaim(closeDigest, balance.tokenSlot, local);
+    if (state.status !== 'accepted') {
+      const txHash = state.submitTxHash || await sendExactBrowserClaimTransaction(
+        state.transaction, state.claim.recipient, network, 'submit withdrawal claim'
+      );
+      saveLocalClaim(closeDigest, balance.tokenSlot, { submitTxHash: txHash });
+      state = await reconcileBrowserClaim(
+        '/api/browser-claim/reconcile-submit',
+        { operationId: state.operationId, txHash },
+        ['accepted'],
+        'claim acceptance',
+        (value) => validateBrowserClaimPinnedRecord(value, context, local),
+      );
+    }
+  }
+
+  while (state.status !== 'paid') {
+    const next = await claimApi('/api/browser-claim/next', { operationId: state.operationId });
+    validateBrowserClaimPinnedRecord(next, context, local);
+    if (next.status === 'paid') return next;
+    if (!next.action || !['funding', 'payout'].includes(next.action.kind)) {
+      throw new Error('relay returned no canonical next claim action');
+    }
+    validateBrowserClaimAction(next, context, local);
+    const txHash = next.action.txHash || await sendExactBrowserClaimTransaction(
+      next.transaction, next.claim.recipient, network,
+      next.action.kind === 'funding' ? 'pull exact channel backing' : 'pay nullifier-scoped withdrawal credit'
+    );
+    saveLocalClaim(closeDigest, balance.tokenSlot, { actionTxHash: txHash, actionKind: next.action.kind });
+    state = await reconcileBrowserClaim(
+      '/api/browser-claim/reconcile-action',
+      { operationId: next.operationId, txHash },
+      ['accepted', 'paid'],
+      next.action.kind,
+      (value) => validateBrowserClaimPinnedRecord(value, context, local),
+    );
+    if (state.status === 'accepted') {
+      saveLocalClaim(closeDigest, balance.tokenSlot, { actionTxHash: null, actionKind: null });
+    }
+  }
+  return state;
+}
+
 $('btnFwClaim').onclick = guard('fwClaim', async () => {
   const t0 = Date.now();
   const tick = setInterval(() => { $('btnFwClaim').textContent = 'Claiming... ' + Math.round((Date.now()-t0)/1000) + 's'; }, 250);
   try {
     $('btnFwClaim').disabled = true;
-    const slot = $('fwClaimSlot').value;
-    const recipient = $('fwClaimRecipient').value;
-    log('claiming slot ' + slot + ' to ' + recipient + '...');
-    await api('/api/claim', JSON.stringify({ manager: fwSettlement.manager, slot: Number(slot), recipient }));
-    log('claimed slot ' + slot + ' funds to ' + recipient + '.', 'ok');
+    await ensureWallet();
+    const { context, walletNetwork } = await fetchBrowserClaimContext();
+    await ensureFinalizedClaimSnapshot(context);
+    const balances = await positiveFinalizedClaimSlots(context);
+    if (!balances.length) {
+      log('finalized signed slot has no positive balance to claim.', 'ok');
+    }
+    for (const balance of balances) {
+      // eslint-disable-next-line no-await-in-loop
+      const paid = await claimOneBrowserBalance(context, walletNetwork, balance);
+      if (paid.status !== 'paid' || !paid.payout
+          || String(paid.payout.amount) !== balance.amount
+          || Number(paid.payout.tokenIndex) !== balance.tokenIndex
+          || String(paid.payout.withdrawalNullifier).toLowerCase() !== String(paid.claim.withdrawalNullifier).toLowerCase()
+          || String(paid.payout.recipient).toLowerCase() !== String(walletAccount).toLowerCase()) {
+        throw new Error('finalized payout differs from the authenticated browser balance');
+      }
+      log('  paid token ' + balance.tokenIndex + ': exact amount ' + paid.payout.amount, 'ok');
+    }
+    log('all browser-owned claims are finalized and exactly reconciled.', 'ok');
     await fetchTickets(); applyTicketState();
   } catch (e) { log('claim failed: '+e.message, 'err'); }
   clearInterval(tick);
-  $('btnFwClaim').textContent = '5 -- Claim';
+  $('btnFwClaim').textContent = '5 -- Claim All Balances';
   $('btnFwClaim').disabled = false;
 });
 

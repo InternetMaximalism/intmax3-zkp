@@ -15,6 +15,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { extractSlimAnchor } = require('./slim-wire');
 const { publicBacking } = require('./public-backing');
+const { installBrowserClaimRoutes } = require('./browser-claim-routes');
 const pExecFile = promisify(execFile);
 
 const ROOT = __dirname;
@@ -507,6 +508,10 @@ app.use((req, res, next) => {
   else res.setHeader('Cache-Control', 'no-store');
   next();
 });
+
+// Keyless production claim handoff. It revalidates the ACTIVE settlement binding for every
+// request; no browser body may name a manager, rollup, recipient, token index, or close context.
+installBrowserClaimRoutes(app, { reqChannel, wc, rollupOf, cli, rpc: RPC });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, channels: CHANNELS }));
 app.get('/api/channels', (req, res) => res.json({ channels: CHANNELS }));
@@ -1037,17 +1042,8 @@ app.post('/api/withdraw', (req, res) => {
   }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
 });
 app.post('/api/claim', (req, res) => {
-  const ch = reqChannel(req);
-  // Locked + async (was an unlocked sync handler; execFileSync used to serialize implicitly).
-  withLock(ch, async () => {
- const manager = req.body && req.body.manager; const slot = req.body && req.body.slot; const recipient = req.body && req.body.recipient;
-    if (!manager || slot === undefined || !recipient) throw new Error('claim needs { manager, slot, recipient }');
-    const ticket = findActiveTicket(ch, 'full_withdrawal');
-    if (ticket) { ticket.status = 'claim_pending'; upsertTicket(ch, ticket); }
-    const out = await cli(ch, ['claim', manager, String(slot), RPC], { CLAIM_RECIPIENT: recipient });
-    if (ticket) { ticket.status = 'claim_done'; ticket.steps.claim = { completedAt: Date.now() }; upsertTicket(ch, ticket); }
-    res.json({ ok: true, log: out });
-  }).catch((e) => { console.error(e.stderr ? String(e.stderr) : (e.message||e)); res.status(500).json({ error: String(e.stderr || e.message || e) }); });
+  void req;
+  res.status(410).json({ error: 'legacy relay-owned claim is retired; use /api/browser-claim/*' });
 });
 
 // ─── Ticket endpoints ────────────────────────────────────────────────────────────────────────

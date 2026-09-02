@@ -16,7 +16,8 @@ import {
     FeeOnTransferERC20,
     FalseReturnERC20,
     ShortReturnERC20,
-    ReentrantHookERC20
+    ReentrantHookERC20,
+    SenderFeeERC20
 } from "./tokens/TestTokens.sol";
 
 /// @title Multi-token L1 escrow adversarial suite (multitoken Phase 3, detail2 §N-7).
@@ -224,6 +225,10 @@ contract MultiTokenEscrowTest is Test {
         });
     }
 
+    function _authDigest(IntmaxRollup.Withdrawal memory w) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes4(0x49505732), w.recipient, w.tokenIndex, w.amount, w.auxData));
+    }
+
     function _depositToken(SimpleERC20 token, uint32 tokenIndex, address from, uint256 amount)
         internal
     {
@@ -380,14 +385,42 @@ contract MultiTokenEscrowTest is Test {
 
         // Pull the tokens.
         vm.prank(recipient1);
-        rollup.withdrawToken(TOKEN_A);
-        assertEq(tokenA.balanceOf(recipient1), 400, "recipient received real tokens");
+        rollup.withdrawToken(TOKEN_A, 150);
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 250, "unselected token credit remains");
+        vm.prank(recipient1);
+        rollup.withdrawToken(TOKEN_A, 250);
+        assertEq(tokenA.balanceOf(recipient1), 400, "recipient received exact token slices");
         assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 0, "credit cleared");
 
         // Double-pay via the same nullifier is rejected.
         MleVerifier.MleProof memory proof = _withdrawalProof(ws);
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
         rollup.withdrawERC20(ws, wdProver, proof);
+    }
+
+    function test_withdrawERC20_authorizationIsOneShotThroughPull() public {
+        _depositToken(tokenA, TOKEN_A, makeAddr("authorizedTokenDepositor"), 100);
+        rollup.registerSettlementManager(address(this));
+
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = _leaf(recipient1, TOKEN_A, 40, keccak256("authorized-token-nullifier"));
+        ws[0].auxData = keccak256("token-close-funding-aux");
+        bytes32 authDigest = _authDigest(ws[0]);
+        rollup.authorizePartialWithdrawal(authDigest);
+
+        MleVerifier.MleProof memory proof = _withdrawalProof(ws);
+        rollup.withdrawERC20(ws, wdProver, proof);
+        assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 token authorization consumed");
+        assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "token nullifier consumed");
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 40, "token pull credit installed");
+
+        vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
+        rollup.withdrawERC20(ws, wdProver, proof);
+
+        vm.prank(recipient1);
+        rollup.withdrawToken(TOKEN_A, 40);
+        assertEq(tokenA.balanceOf(recipient1), 40, "authorized token payout pulled once");
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 0, "token pull credit consumed");
     }
 
     /// Asset frame: `withdrawNative` refuses ERC-20 leaves; `withdrawERC20` refuses ETH leaves and
@@ -476,14 +509,42 @@ contract MultiTokenEscrowTest is Test {
 
         // The hook (fires on `transfer`, i.e. the payout path) attempts a nested withdrawToken.
         hookToken.setHook(
-            address(rollup), abi.encodeCall(IntmaxRollup.withdrawToken, (uint32(23))), false
+            address(rollup), abi.encodeCall(IntmaxRollup.withdrawToken, (uint32(23), uint256(200))), false
         );
         vm.prank(recipient1);
-        rollup.withdrawToken(23);
+        rollup.withdrawToken(23, 200);
 
         assertTrue(hookToken.hookReverted(), "reentrant withdrawToken must have reverted");
         assertEq(hookToken.balanceOf(recipient1), 200, "paid exactly once");
         assertEq(rollup.pendingTokenWithdrawals(23, recipient1), 0, "credit cleared once");
+    }
+
+    /// A sender-selective/upgradeable token can behave exactly at deposit, then under-deliver only
+    /// when the Rollup is the sender. The exact pull API must compare recipient balance deltas and
+    /// roll its pending-credit debit back instead of permanently consuming a short payment.
+    function test_withdrawToken_senderSelectiveFee_revertsWithoutConsumingCredit() public {
+        SenderFeeERC20 feeToken = new SenderFeeERC20(1_000); // 10%
+        uint32 feeIndex = 25;
+        rollup.registerToken(feeIndex, address(feeToken));
+        address depositor = makeAddr("senderFeeDepositor");
+        feeToken.mint(depositor, 200);
+        vm.startPrank(depositor);
+        feeToken.approve(address(rollup), 200);
+        rollup.deposit(bytes32(uint256(1)), feeIndex, 200, bytes32(0));
+        vm.stopPrank();
+
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = _leaf(recipient1, feeIndex, 200, keccak256("sender-fee-withdrawal"));
+        rollup.withdrawERC20(ws, wdProver, _withdrawalProof(ws));
+
+        feeToken.setTaxedSender(address(rollup));
+        vm.prank(recipient1);
+        vm.expectRevert(IntmaxRollup.TokenWithdrawalAmountMismatch.selector);
+        rollup.withdrawToken(feeIndex, 200);
+
+        assertEq(feeToken.balanceOf(recipient1), 0, "under-delivery rolled back");
+        assertEq(rollup.pendingTokenWithdrawals(feeIndex, recipient1), 200, "credit remains retryable");
+        assertEq(feeToken.balanceOf(address(rollup)), 200, "escrow custody restored");
     }
 
     /// ETH regression frame: the ETH path's global `totalEscrowed` semantics are untouched by the
@@ -499,6 +560,33 @@ contract MultiTokenEscrowTest is Test {
         rollup.withdrawNative(ws, wdProver, _withdrawalProof(ws));
         assertEq(rollup.totalEscrowed(), 2 ether, "ETH ceiling decremented");
         assertEq(rollup.pendingWithdrawals(recipient1), 1 ether, "ETH pull credit");
+    }
+
+    function test_withdrawNative_authorizationIsOneShotThroughPull() public {
+        vm.deal(address(this), 1 ether);
+        rollup.deposit{value: 1 ether}(bytes32(uint256(0xE1)), 0, 1 ether, bytes32(0));
+        rollup.registerSettlementManager(address(this));
+
+        IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
+        ws[0] = _leaf(recipient1, 0, 0.4 ether, keccak256("authorized-native-nullifier"));
+        ws[0].auxData = keccak256("native-close-funding-aux");
+        bytes32 authDigest = _authDigest(ws[0]);
+        rollup.authorizePartialWithdrawal(authDigest);
+
+        MleVerifier.MleProof memory proof = _withdrawalProof(ws);
+        rollup.withdrawNative(ws, wdProver, proof);
+        assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 native authorization consumed");
+        assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "native nullifier consumed");
+        assertEq(rollup.pendingWithdrawals(recipient1), 0.4 ether, "native pull credit installed");
+
+        vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
+        rollup.withdrawNative(ws, wdProver, proof);
+
+        uint256 before = recipient1.balance;
+        vm.prank(recipient1);
+        rollup.withdraw(0.4 ether);
+        assertEq(recipient1.balance - before, 0.4 ether, "authorized native payout pulled once");
+        assertEq(rollup.pendingWithdrawals(recipient1), 0, "native pull credit consumed");
     }
 
     receive() external payable {}

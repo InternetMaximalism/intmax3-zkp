@@ -447,7 +447,7 @@ fn main() -> anyhow::Result<()> {
         channel_action_indices: None,
         channel_actions: None,
         channel_action_merkle_proofs: None,
-            };
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
@@ -579,7 +579,7 @@ fn main() -> anyhow::Result<()> {
         channel_action_indices: None,
         channel_actions: None,
         channel_action_merkle_proofs: None,
-            };
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();

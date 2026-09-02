@@ -1,4 +1,10 @@
-//! MemberSetUpdateCircuit — detail2 §Q-4 (stage Q3, slice B): the L1-facing proof that a
+//! DEPRECATED MemberSetUpdateCircuit — retained only to reproduce historical audit fixtures.
+//!
+//! This module is excluded from every default/release build. Direct in-place member-set updates
+//! are retired; the replacement design closes the old channel by unanimous consent and migrates
+//! into a newly registered channel (see `doc/tasks/channel-change-msu.md`).
+//!
+//! Historical statement — detail2 §Q-4 (stage Q3, slice B): the L1-facing proof that a
 //! channel's registered sig-cluster advanced from one set to the next under the PREVIOUS set's
 //! full N-of-N.
 //!
@@ -6,20 +12,19 @@
 //!
 //!   1. an aggregated Falcon proof verifies, carrying `old_count` real signatures — one per listed
 //!      pk — over ONE 32-byte message;
-//!   2. that message IS the wallet-layer IMMS digest
-//!      `keccak([IMMS, channel_id, set_version(2), prev_root(8), new_root(8), op_digest(8)])`
-//!      (`wallet_core::MemberSetUpdate::signing_digest`, byte-identical preimage), where
-//!      `prev_root` / `new_root` are the Poseidon folds of the OLD / NEW witnessed member leaves
-//!      and `op_digest` is recomputed in-circuit from the leaf delta — so the OLD set's unanimous
-//!      signatures authorize EXACTLY this transition;
-//!   3. the OLD leaves' signing keys are slot-for-slot the aggregated proof's verified pk list
-//!      (the poseidon world and the signature world name the same set);
+//!   2. that message IS the wallet-layer IMMS digest `keccak([IMMS, channel_id, set_version(2),
+//!      prev_root(8), new_root(8), op_digest(8)])` (`wallet_core::MemberSetUpdate::signing_digest`,
+//!      byte-identical preimage), where `prev_root` / `new_root` are the Poseidon folds of the OLD
+//!      / NEW witnessed member leaves and `op_digest` is recomputed in-circuit from the leaf delta
+//!      — so the OLD set's unanimous signatures authorize EXACTLY this transition;
+//!   3. the OLD leaves' signing keys are slot-for-slot the aggregated proof's verified pk list (the
+//!      poseidon world and the signature world name the same set);
 //!   4. the delta obeys detail2 §Q-3: exactly one slot changes; a changed empty slot is an ADD at
 //!      the left-packed boundary (`slot == old_count`); a changed occupied slot is a ROTATE that
 //!      preserves `regev_pk_digest` (§Q-6 — balances stay decryptable); never a removal;
 //!   5. the exposed `old_commitment` / `new_commitment` are the close-path IMCM keccaks
-//!      (`keccak([IMCM, count, pk_g_0..pk_g_{MAX-1}])`, padding zeroed) over the old / new key
-//!      sets — the exact form `ChannelSettlementManager` stores and compares, so the L1 apply is
+//!      (`keccak([IMCM, count, pk_g_0..pk_g_{MAX-1}])`, padding zeroed) over the old / new key sets
+//!      — the exact form `ChannelSettlementManager` stores and compares, so the L1 apply is
 //!      `require(old_commitment == stored); store(new set verified against new_commitment)`.
 //!
 //! The joiner/rotation CONSENT signatures (IMKR/IMJC) are deliberately NOT re-verified here: they
@@ -196,11 +201,7 @@ where
         };
         let empty = MemberLeaf::empty_leaf();
         let is_add = self.old_leaves[j] == empty;
-        let old_count = self
-            .old_leaves
-            .iter()
-            .take_while(|l| **l != empty)
-            .count() as u32;
+        let old_count = self.old_leaves.iter().take_while(|l| **l != empty).count() as u32;
         let new_count = old_count + u32::from(is_add);
         if !is_add && self.recipient != Address::default() {
             return Err("a rotation must carry the zero recipient".to_string());
@@ -310,9 +311,8 @@ where
             // zero on both sides (the batch circuit left-packs; from_hash_out(0) == 0), so the
             // unconditional connect is exact.
             let start = FALCON_AGG_PK_LIST_OFFSET + i * BYTES32_LEN;
-            let agg_pk = Bytes32Target::from_slice(
-                &agg_proof.public_inputs[start..start + BYTES32_LEN],
-            );
+            let agg_pk =
+                Bytes32Target::from_slice(&agg_proof.public_inputs[start..start + BYTES32_LEN]);
             old_pk.connect(&mut builder, agg_pk);
             old_leaf_hashes.push(old_l.hash::<F, C, D>(&mut builder));
             new_leaf_hashes.push(new_l.hash::<F, C, D>(&mut builder));
@@ -332,9 +332,11 @@ where
             old_leaf_targets[i]
                 .pk_b
                 .conditional_assert_eq(&mut builder, zero_hash, not_active);
-            old_leaf_targets[i]
-                .regev_pk_digest
-                .conditional_assert_eq(&mut builder, zero_hash, not_active);
+            old_leaf_targets[i].regev_pk_digest.conditional_assert_eq(
+                &mut builder,
+                zero_hash,
+                not_active,
+            );
         }
         let prev_root = compute_member_tree_root::<F, C, D>(&mut builder, &old_leaf_hashes);
         let new_root = compute_member_tree_root::<F, C, D>(&mut builder, &new_leaf_hashes);
@@ -343,10 +345,12 @@ where
         let mut changed_bits: Vec<BoolTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
         let mut sum_changed = builder.zero();
         for i in 0..MAX_SIG_CLUSTER {
-            let eq_pkg =
-                old_leaf_targets[i].pk_g.is_equal(&mut builder, &new_leaf_targets[i].pk_g);
-            let eq_pkb =
-                old_leaf_targets[i].pk_b.is_equal(&mut builder, &new_leaf_targets[i].pk_b);
+            let eq_pkg = old_leaf_targets[i]
+                .pk_g
+                .is_equal(&mut builder, &new_leaf_targets[i].pk_g);
+            let eq_pkb = old_leaf_targets[i]
+                .pk_b
+                .is_equal(&mut builder, &new_leaf_targets[i].pk_b);
             let eq_rgv = old_leaf_targets[i]
                 .regev_pk_digest
                 .is_equal(&mut builder, &new_leaf_targets[i].regev_pk_digest);
@@ -400,8 +404,9 @@ where
         for i in 0..MAX_SIG_CLUSTER {
             for k in (i + 1)..MAX_SIG_CLUSTER {
                 let touches_changed = builder.or(changed_bits[i], changed_bits[k]);
-                let dup =
-                    new_leaf_targets[i].pk_g.is_equal(&mut builder, &new_leaf_targets[k].pk_g);
+                let dup = new_leaf_targets[i]
+                    .pk_g
+                    .is_equal(&mut builder, &new_leaf_targets[k].pk_g);
                 let bad = builder.and(touches_changed, dup);
                 builder.assert_zero(bad.target);
             }
@@ -423,9 +428,11 @@ where
             new_leaf_targets[i]
                 .pk_b
                 .conditional_assert_eq(&mut builder, zero_hash, not_new_active);
-            new_leaf_targets[i]
-                .regev_pk_digest
-                .conditional_assert_eq(&mut builder, zero_hash, not_new_active);
+            new_leaf_targets[i].regev_pk_digest.conditional_assert_eq(
+                &mut builder,
+                zero_hash,
+                not_new_active,
+            );
         }
 
         // ── (5) IMCM commitments, byte-identical to `close_member_set_commitment` ──
@@ -548,7 +555,11 @@ where
         let set_u32 = |pw: &mut PartialWitness<F>, t: Target, v: u32| {
             let _ = pw.set_target(t, F::from_canonical_u32(v));
         };
-        set_u32(&mut pw, self.public_inputs.channel_id, witness.channel_id.as_u64() as u32);
+        set_u32(
+            &mut pw,
+            self.public_inputs.channel_id,
+            witness.channel_id.as_u64() as u32,
+        );
         set_u32(
             &mut pw,
             self.public_inputs.set_version_hi,

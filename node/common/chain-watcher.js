@@ -36,7 +36,7 @@ const ROLLUP_FRAGMENTS = [
 ];
 
 // Multi-token (§N-6, Phase 3): WithdrawalClaimAccepted gained a trailing `uint32 tokenIndex`,
-// WithdrawalClaimed gained `uint32 indexed tokenIndex` (2nd, indexed), and ChannelFundsPulled
+// WithdrawalClaimed binds its leading indexed withdrawal nullifier plus recipient/token, and ChannelFundsPulled
 // gained a LEADING `uint32 indexed tokenIndex` — a stale fragment changes topic0 and silently
 // never matches (the exact failure class this file's header warns about), so each fragment
 // below was re-verified field-for-field (indexed-ness included) against the committed
@@ -52,7 +52,7 @@ const MANAGER_FRAGMENTS = [
   // TM-16 (multitoken Phase 5a): trailing `uint32 tokenIndex` — MUST stay field-for-field
   // identical to ChannelSettlementManager.sol (a stale fragment silently never matches).
   'event PostCloseClaimAccepted(bytes32 indexed closeIntentDigest, bytes32 indexed sharedNativeNullifier, bytes32 indexed receiverPkG, address recipient, uint256 amount, uint32 tokenIndex)',
-  'event WithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount)',
+  'event WithdrawalClaimed(bytes32 indexed withdrawalNullifier, address indexed recipient, uint32 indexed tokenIndex, uint256 amount)',
   'event PartialWithdrawalSubmitted(bytes32 indexed authDigest, bytes32 indexed chainKey, uint64 challengeDeadline, uint64 finalStateVersion)',
   'event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey)',
   'event PartialWithdrawalCancelled(bytes32 indexed authDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion)',
@@ -93,6 +93,15 @@ const MANAGER_GETTER_ABI = [
     'bytes32 finalSettledTxChain,' +
     'bytes32 finalSettledTxAccumulatorRoot' +
   '))',
+];
+
+// The enum getter is kept separate from MANAGER_GETTER_ABI because the latter is also used by
+// tests that deliberately instantiate only the PendingClose reader.  `channelStatus` is the
+// authoritative discriminator between Active, ClosePending and Closed when a delegate upgrades
+// from a journal written before explicit close phases existed.
+const MANAGER_STATUS_ABI = [
+  'function channelStatus() view returns (uint8)',
+  'function closeRequestGeneration() view returns (uint64)',
 ];
 
 function decodedArgs(parsed) {
@@ -595,6 +604,103 @@ class ChainWatcher {
       stateVersion,
       challengeDeadline: Number(r.challengeDeadline) || 0,
       closeFreezeNonce: Number(r.closeFreezeNonce) || 0,
+      // Delegate close scheduling must not round uint64 values through a JS Number.  Keep the
+      // historical numeric fields above for the co-signer policy API, and expose exact canonical
+      // forms for the exit state machine.
+      epochExact: String(r.finalEpoch),
+      stateVersionExact: String(r.finalStateVersion),
+      challengeDeadlineExact: String(r.challengeDeadline),
+      closeFreezeNonceExact: String(r.closeFreezeNonce),
+    };
+  }
+
+  // Return one hash-authenticated durable block timestamp.  Public deployments use the RPC's
+  // finalized head; the explicit 31337 escape hatch uses the same confirmation-delayed head as
+  // pollOnce().  A local wall clock or `latest` block must never decide whether a close deadline
+  // has elapsed.
+  async durableChainTime(expectedCheckpoint = null) {
+    let durableHead;
+    if (expectedCheckpoint == null) {
+      durableHead = await this._durableHead();
+    } else {
+      await this._assertNetwork();
+      try {
+        durableHead = checkpointFromBlock(expectedCheckpoint);
+      } catch (cause) {
+        throw new ChainSafetyError(
+          'STORED_CHECKPOINT_INVALID',
+          `processed chain checkpoint is invalid: ${cause.message}`,
+          { expectedCheckpoint },
+        );
+      }
+    }
+    if (!durableHead) return null;
+    let block;
+    try {
+      block = await this._provider.getBlock(durableHead.number);
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'CANONICAL_BLOCK_UNAVAILABLE',
+        `cannot read durable block ${durableHead.number}: ${cause && cause.message || cause}`,
+        { number: durableHead.number },
+      );
+    }
+    let checkpoint;
+    let timestamp;
+    try {
+      checkpoint = checkpointFromBlock(block, durableHead.number);
+      timestamp = parseBlockNumber(block.timestamp, 'durable block timestamp');
+    } catch (cause) {
+      throw new ChainSafetyError(
+        'CANONICAL_BLOCK_INVALID',
+        `durable block ${durableHead.number} is invalid: ${cause.message}`,
+        { number: durableHead.number },
+      );
+    }
+    if (checkpoint.hash !== durableHead.hash || checkpoint.parentHash !== durableHead.parentHash) {
+      throw new ChainSafetyError(
+        'PROCESSED_CHECKPOINT_CHANGED_DURING_READ',
+        `processed durable block ${durableHead.number} changed while reading its timestamp`,
+        { before: durableHead, after: checkpoint },
+      );
+    }
+    return { ...checkpoint, timestamp };
+  }
+
+  // Reconcile the delegate's durable close phase against one exact finalized/devnet-safe block.
+  // This is primarily an upgrade path for old journals where `awaitingClaim=true` ambiguously
+  // meant either CloseRequested or CloseSubmitted.
+  async getDurableCloseState(managerAddr, expectedCheckpoint = null) {
+    this._init();
+    const durable = await this.durableChainTime(expectedCheckpoint);
+    if (!durable) return null;
+    const c = new this._ethers.Contract(managerAddr, MANAGER_STATUS_ABI, this._provider);
+    const [statusRaw, closeRequestGenerationRaw, pending] = await Promise.all([
+      c.channelStatus({ blockTag: durable.number }),
+      c.closeRequestGeneration({ blockTag: durable.number }),
+      this.getPendingClose(managerAddr, durable.number),
+    ]);
+    const after = await this._blockCheckpoint(durable.number);
+    if (after.hash !== durable.hash || after.parentHash !== durable.parentHash) {
+      throw new ChainSafetyError(
+        'PROCESSED_CHECKPOINT_CHANGED_DURING_MANAGER_READ',
+        `processed durable block ${durable.number} changed while reading Manager close state`,
+        { before: durable, after },
+      );
+    }
+    const status = Number(statusRaw);
+    if (!Number.isSafeInteger(status) || status < 0 || status > 2) {
+      throw new ChainSafetyError(
+        'MANAGER_CLOSE_STATUS_INVALID',
+        `manager returned invalid channelStatus ${statusRaw}`,
+        { managerAddr, blockNumber: durable.number },
+      );
+    }
+    return {
+      status,
+      closeRequestGenerationExact: String(closeRequestGenerationRaw),
+      pending,
+      durable,
     };
   }
 
@@ -618,6 +724,7 @@ module.exports = {
   MANAGER_FRAGMENTS,
   ROLLUP_GETTER_ABI,
   MANAGER_GETTER_ABI,
+  MANAGER_STATUS_ABI,
   routeEventChannelIds,
   checkpointFromBlock,
   isTransientChainSafetyError,

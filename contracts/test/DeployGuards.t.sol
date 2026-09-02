@@ -97,6 +97,9 @@ contract DeployWalletSettlementHarness is DeployWalletSettlement {
 ///      performs under `forge script`, so deleting either fix makes these tests fail rather than
 ///      merely go stale.
 contract DeployGuardsTest is Test {
+    /// Historical pre-retirement selector, fixed independently of future PCS proof-tuple changes.
+    bytes4 internal constant LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR = 0x66e3ff78;
+
     /// A public chain id, so `block.chainid != SETTLEMENT_LOCAL_DEVNET_CHAIN_ID` on every path
     /// under test. Sepolia is the network the live runbook targets.
     uint256 internal constant REAL_CHAIN_ID = 11155111;
@@ -160,6 +163,7 @@ contract DeployGuardsTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
+            address(this),
             b
         );
     }
@@ -229,10 +233,14 @@ contract DeployGuardsTest is Test {
         );
         assertFalse(m.isNativeSendAllowed(0), "migrated dev manager must not authorize sends");
 
+        uint64 freezeNonce = m.currentCloseFreezeNonce();
+        uint64 cancellationFloor = m.highestCancelledRevivedStateVersion();
+        bytes32 closeIntentDigest = m.getPendingClose().closeIntentDigest;
+        uint64 generation = m.closeRequestGeneration();
         vm.expectRevert(expected);
-        m.requestClose();
+        m.requestClose(freezeNonce, cancellationFloor);
         vm.expectRevert(expected);
-        m.finalizeClose();
+        m.finalizeCloseGuarded(closeIntentDigest, generation);
         vm.expectRevert(expected);
         m.finalizePartialWithdrawal();
         vm.expectRevert(expected);
@@ -240,7 +248,7 @@ contract DeployGuardsTest is Test {
         vm.expectRevert(expected);
         m.pullChannelTokenFunds(7);
         vm.expectRevert(expected);
-        m.claimWithdrawalCredit(uint32(0));
+        m.claimWithdrawalCredit(bytes32(uint256(1)));
     }
 
     /// Zero stays rejected on every chain, including the devnet — a same-block finalize voids the
@@ -450,11 +458,9 @@ contract DeployGuardsTest is Test {
         rollup.registerSettlementManager(alice);
     }
 
-    /// A real settlement deployment keys every LIVE statement VK and deliberately leaves the
-    /// parked member-set-update VK unset. The current MSU proof authenticates signer intent but not
-    /// inclusion/finality of the matching validity-tree action, so keying it in production would
-    /// misrepresent a one-layer transition as a complete protocol feature.
-    function test_deployCloseCliScript_localDevnet_keysLiveVksAndLeavesMsuUnkeyed() public {
+    /// A real settlement deployment keys every live statement VK. Direct member-set updates are
+    /// retired, so the active verifier has no MSU key or initialization surface at all.
+    function test_deployCloseCliScript_localDevnet_keysOnlyLiveVks() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup, ChannelSettlementVerifier sv,) = new DeployCloseCliHarness().run();
@@ -465,28 +471,17 @@ contract DeployGuardsTest is Test {
         assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK: no remedy against a stale close");
         assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK: members could not collect");
         assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK: `post-close-claim` bricked");
-        assertFalse(sv.memberSetUpdateVkInitialized(), "release deploy must not initialize the msu VK");
-        (uint256 msuDegreeBits, bytes32 msuRoot, uint256 msuConstants, uint256 msuWires, bytes32 msuGates) =
-            sv.memberSetUpdateVk();
-        assertEq(msuDegreeBits, 0, "release deploy installed an msu degree");
-        assertEq(msuRoot, bytes32(0), "release deploy installed an msu root");
-        assertEq(msuConstants, 0, "release deploy installed msu constants");
-        assertEq(msuWires, 0, "release deploy installed msu wires");
-        assertEq(msuGates, bytes32(0), "release deploy installed an msu gates digest");
         assertTrue(address(rollup.kzgVerifier()).code.length > 0, "KZG satellite must be pinned");
     }
 
-    /// The production-deployed Manager rejects MSU with its own named release error and leaves the
-    /// signer set/version/BP unchanged. An empty proof is intentional: the Manager must fail before
-    /// consulting either proof calldata or the uninitialized parked verifier.
-    function test_deployCloseCliScript_localDevnet_msuEntryIsDisabledAndCannotMutate() public {
+    /// The production-deployed Manager has no direct-MSU selector; legacy raw calldata must fail
+    /// before it can change the signer set or block-proposer identity.
+    function test_deployCloseCliScript_localDevnet_removedMsuSelectorCannotMutate() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (, ChannelSettlementVerifier sv, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
-        assertFalse(sv.memberSetUpdateVkInitialized(), "production verifier unexpectedly keyed msu");
+        (, , ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
 
         uint8 beforeCount = manager.activeMemberCount();
-        uint64 beforeVersion = manager.memberSetVersion();
         bytes32 beforeBp = manager.bpPkG();
         bytes32 beforeCommitment = manager.registeredMemberSetCommitment();
         bytes32[] memory proposed = new bytes32[](beforeCount);
@@ -496,11 +491,20 @@ contract DeployGuardsTest is Test {
         proposed[beforeCount - 1] = keccak256("must-not-be-installed");
         MleVerifier.MleProof memory noProof;
 
-        vm.expectRevert(ChannelSettlementManager.MemberSetUpdateDisabled.selector);
-        manager.applyMemberSetUpdate(proposed, beforeCount, address(0), beforeVersion + 1, noProof);
+        (bool ok, bytes memory revertData) = address(manager).call(
+            abi.encodeWithSelector(
+                LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR,
+                proposed,
+                beforeCount,
+                address(0),
+                uint64(1),
+                noProof
+            )
+        );
+        assertFalse(ok, "removed MSU selector unexpectedly succeeded");
+        assertEq(revertData.length, 0, "removed MSU selector unexpectedly has an active decoder");
 
         assertEq(manager.activeMemberCount(), beforeCount, "member count mutated");
-        assertEq(manager.memberSetVersion(), beforeVersion, "member-set version mutated");
         assertEq(manager.bpPkG(), beforeBp, "BP key mutated");
         assertEq(manager.registeredMemberSetCommitment(), beforeCommitment, "member commitment mutated");
         for (uint256 i = 0; i < beforeCount; i++) {

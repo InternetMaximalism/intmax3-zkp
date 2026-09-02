@@ -7,6 +7,7 @@ use std::{
 
 use intmax3_zkp::{
     block_producer_service::BlockProducerService,
+    close_funding::{CloseFundingPlan, build_close_funding_proposal},
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash},
         channel::{
@@ -20,13 +21,13 @@ use intmax3_zkp::{
     l1_finality::{L1FinalitySource, L1FinalizedCheckpoint},
     regev::RegevCiphertext,
     validity_prover_service::{
-        L1FinalizationRpcConfig, L1ValidityAcknowledgement, ValidityProverService,
-        ValidityProverServiceError,
+        L1FinalizationRpcConfig, L1ValidityAcknowledgement, L1ValidityDeploymentBinding,
+        ValidityProverService, ValidityProverServiceError,
     },
     wallet_core::{
-        assemble_genesis_state, build_record, default_settled_tx_accumulator,
-        inter_channel_base_transfer, inter_channel_tx_v2, sign_state, ChannelSnapshot,
-        InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo, MemberKeys,
+        ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+        MemberKeys, assemble_genesis_state, build_record, default_settled_tx_accumulator,
+        inter_channel_base_transfer, inter_channel_tx_v2, sign_state,
     },
 };
 use rand010::SeedableRng as _;
@@ -247,6 +248,23 @@ fn next_descriptor(
     (signed_state, debit, descriptor)
 }
 
+fn signed_close_funding(
+    keys: &[MemberKeys],
+    previous: &ChannelState,
+) -> (ChannelState, CloseFundingPlan) {
+    let rollup = Address::from_u32_slice(&[0x524f_4c4c; 5]).expect("rollup");
+    let manager = Address::from_u32_slice(&[0x4d41_4e47; 5]).expect("manager");
+    let proposal = build_close_funding_proposal(previous, 31_337, rollup, manager, 0)
+        .expect("canonical close funding");
+    let mut state = proposal.proposed_state;
+    state.member_signatures = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, keys)| sign_state(keys, slot as u8, &state).expect("sign close funding"))
+        .collect();
+    (state, proposal.plan)
+}
+
 fn acknowledgement(tag: u32, commitment: Bytes32) -> L1ValidityAcknowledgement {
     L1ValidityAcknowledgement {
         chain_id: 31_337,
@@ -261,6 +279,15 @@ fn acknowledgement(tag: u32, commitment: Bytes32) -> L1ValidityAcknowledgement {
             parent_hash: Bytes32::from_u32_slice(&[tag + 1; 8]).expect("checkpoint parent"),
             source: L1FinalitySource::DevnetLatest,
         },
+    }
+}
+
+fn deployment_binding() -> L1ValidityDeploymentBinding {
+    L1ValidityDeploymentBinding {
+        chain_id: 31_337,
+        rollup: Address::from_u32_slice(&[0x524f_4c4c; 5]).expect("rollup"),
+        rollup_runtime_code_hash: Bytes32::from_u32_slice(&[0x434f_4445; 8])
+            .expect("runtime code hash"),
     }
 }
 
@@ -315,6 +342,27 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
     );
     assert_eq!(validity.status().expect("status").finalized_block_number, 0);
 
+    let posting = validity
+        .posting_artifact(&producer)
+        .expect("posting artifact")
+        .expect("candidate has public blocks");
+    assert_eq!(posting.receipt, first);
+    assert_eq!(posting.sub_blocks.len(), 2);
+    // A registration-only block has no active posting slot, so its public `channelId` sentinel is
+    // zero.  The following signing block is the one that must name the registered channel.
+    assert_eq!(posting.sub_blocks[0].channel_id, 0);
+    assert_eq!(
+        posting.sub_blocks[1].channel_id,
+        channel_snapshot.record.channel_id.as_u64() as u32
+    );
+    assert_eq!(posting.sub_blocks[1].tx_tree_root, first_state.h2_tag);
+    assert!(
+        posting
+            .sub_blocks
+            .iter()
+            .all(|block| !block.key_ids.is_empty())
+    );
+
     // The on-chain finalize payload: wrapped validity MLE + vpis in the schema `finalize()`
     // parses. The final state root is the candidate's committed final ext-commitment — the value
     // a later withdrawNative binds against.
@@ -323,17 +371,13 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
         .expect("finalize artifact")
         .expect("a candidate exists");
     assert_eq!(fin.final_state_root, first.final_extended_state_commitment);
-    let vpis: serde_json::Value =
-        serde_json::from_str(&fin.vpis_json).expect("vpis json parses");
+    let vpis: serde_json::Value = serde_json::from_str(&fin.vpis_json).expect("vpis json parses");
     assert_eq!(vpis["final_block_number"].as_u64().unwrap(), 2);
     assert_eq!(
         vpis["final_ext_commitment"].as_str().unwrap(),
         first.final_extended_state_commitment.to_string()
     );
-    assert_eq!(
-        vpis["prover"].as_str().unwrap(),
-        prover_address.to_string()
-    );
+    assert_eq!(vpis["prover"].as_str().unwrap(), prover_address.to_string());
     assert!(
         fin.validity_mle_json.len() > 100_000,
         "a real validity MLE/WHIR proof was exported"
@@ -388,6 +432,7 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
             "ack-span-1".into(),
             first.candidate_id,
             acknowledgement(1, first.final_extended_state_commitment),
+            deployment_binding(),
             &producer,
         )
         .expect("L1 ack advances finalized cursor");
@@ -398,7 +443,7 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
     producer
         .post_inter_channel(
             "post-41-1".into(),
-            second_state,
+            second_state.clone(),
             second_debit,
             second_descriptor,
         )
@@ -425,6 +470,7 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
             "ack-span-2".into(),
             second.candidate_id,
             second_ack.clone(),
+            deployment_binding(),
             &producer,
         )
         .expect("second L1 ack");
@@ -436,12 +482,82 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
                 "ack-span-2".into(),
                 second.candidate_id,
                 second_ack,
+                deployment_binding(),
                 &producer,
             )
             .expect("ack request id is idempotent")
             .finalized_block_number,
         3
     );
+
+    // Terminal close is a durable producer PREPARE, not an authoritative block. The validity
+    // service must nevertheless prove/export that exact frozen candidate. Only after simulated
+    // L1 finality may the proof-bound anchor be committed and promoted; the final receipt exposes
+    // the exact committed producer receipt for downstream live settlement.
+    let (close_state, close_plan) = signed_close_funding(&keys, &second_state);
+    let authoritative_before_close = producer.current_anchor().expect("authoritative anchor");
+    let prepared_receipt = producer
+        .prepare_close_funding("close-41".into(), close_state, close_plan)
+        .expect("durable close prepare");
+    let prepared_anchor = producer
+        .prepared_anchor()
+        .expect("prepared anchor read")
+        .expect("prepared close anchor");
+    assert_eq!(
+        producer.current_anchor().unwrap(),
+        authoritative_before_close
+    );
+    assert_eq!(prepared_anchor.entry_hash, prepared_receipt.entry_hash);
+
+    let terminal = validity
+        .prove_candidate("validity-span-3-close".into(), &producer)
+        .expect("prove exact prepared close candidate");
+    assert_eq!(terminal.producer_anchor, prepared_anchor);
+    assert_eq!(terminal.initial_block_number, 3);
+    assert_eq!(terminal.final_block_number, 4);
+    assert_eq!(terminal.metrics.block_count, 1);
+    assert_eq!(
+        terminal.metrics.block_chain_proof_bytes, second.metrics.block_chain_proof_bytes,
+        "the two-phase boundary must not alter the recursive block proof size"
+    );
+    assert_eq!(
+        terminal.metrics.validity_proof_bytes, second.metrics.validity_proof_bytes,
+        "the two-phase boundary must not alter the validity proof size"
+    );
+    let terminal_posting = validity
+        .posting_artifact(&producer)
+        .expect("prepared posting artifact")
+        .expect("prepared candidate posting material");
+    assert_eq!(terminal_posting.receipt, terminal);
+    assert_eq!(terminal_posting.sub_blocks.len(), 1);
+
+    let terminal_ack = acknowledgement(3, terminal.final_extended_state_commitment);
+    assert!(matches!(
+        validity.acknowledge_candidate_unchecked_for_test(
+            "ack-span-3-close".into(),
+            terminal.candidate_id,
+            terminal_ack.clone(),
+            deployment_binding(),
+            &producer,
+        ),
+        Err(ValidityProverServiceError::ProducerReconciliation(_))
+    ));
+    let committed_close = producer
+        .commit_prepared_close_funding_at_anchor(&prepared_anchor)
+        .expect("simulated post-L1 proof-bound commit");
+    assert_eq!(committed_close, prepared_receipt);
+    let terminal_final = validity
+        .acknowledge_candidate_unchecked_for_test(
+            "ack-span-3-close".into(),
+            terminal.candidate_id,
+            terminal_ack,
+            deployment_binding(),
+            &producer,
+        )
+        .expect("promote after exact producer commit");
+    assert_eq!(terminal_final.finalized_block_number, 4);
+    assert_eq!(terminal_final.committed_producer_receipt, committed_close);
+    assert_eq!(validity.status().unwrap().finalized_block_number, 4);
 
     // Production replay must traverse the L1 authority/receipt/head validation path before it may
     // return an acknowledgement already present on disk.  An invalid config is a deterministic
@@ -450,6 +566,8 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
         rpc_url: "http://127.0.0.1:1".into(),
         expected_chain_id: 1,
         rollup: Address::from_u32_slice(&[0x4242; 5]).expect("nonzero rollup"),
+        expected_rollup_runtime_code_hash: Bytes32::from_u32_slice(&[0x434f_4445; 8])
+            .expect("runtime code hash"),
         minimum_confirmations: 3,
         allow_unfinalized_devnet: true,
     };
@@ -459,7 +577,7 @@ fn resident_prover_recovers_candidate_and_proves_two_independent_spans() {
             second.candidate_id,
             second_tx_hash,
             &invalid_l1,
-            &producer,
+            &mut producer,
         ),
         Err(ValidityProverServiceError::InvalidConfiguration(message))
             if message.contains("31337")

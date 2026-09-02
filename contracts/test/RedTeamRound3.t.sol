@@ -203,13 +203,15 @@ contract RedTeamRound3Test is CloseSettlementBase {
         manager.submitCloseIntent(head, headProof);
 
         // (d) no new era can be opened.
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.ChannelAlreadyFrozen.selector);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
 
         // ── (a) THE EXIT. Round 2 reverted `CloseOlderThanAuthorizedBurn` here, and that is what
         //    made the state terminal. Round 3 settles.
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(
             uint8(manager.channelStatus()),
             uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
@@ -237,7 +239,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 28);
         manager.submitCloseIntent(stale, _closeProof(stale));
         vm.warp(uint256(manager.closeChallengeHorizon()) + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(
             manager.finalizedChannelFundAmount(TOKEN_INDEX),
             DEFAULT_FUND_AMOUNT,
@@ -285,7 +287,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory stale2 = _intentAt(9, 28);
         manager.submitCloseIntent(stale2, _closeProof(stale2));
         vm.warp(uint256(manager.closeChallengeHorizon()) + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 28, "settles; the A1 floor alone is inert");
     }
 
@@ -352,7 +354,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
 
         // Eve's stale v11 does NOT settle; the honest v12 does.
         vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 12, "the honest state settled, not the griefer's");
     }
 
@@ -441,7 +443,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
 
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), nextVersion, "tail replacement is what settles");
     }
 
@@ -482,7 +484,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 30, "newest available state settles");
     }
 
@@ -498,8 +500,10 @@ contract RedTeamRound3Test is CloseSettlementBase {
         _walkLadderToHorizon(11);
         assertEq(vm.getBlockTimestamp(), uint256(horizon), "the last rung landed AT the horizon");
 
+        bytes32 guardedDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 guardedGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(guardedDigest, guardedGeneration);
         assertEq(
             uint256(manager.getPendingClose().challengeDeadline),
             vm.getBlockTimestamp() + manager.MIN_CLOSE_RESPONSE_SECS(),
@@ -699,7 +703,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory b = _intentAt(9, 20);
         manager.submitCloseIntent(b, _closeProof(b));
         vm.warp(vm.getBlockTimestamp() + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 20, "exit liveness is unconditional in A1 alone");
     }
 
@@ -727,7 +731,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 30);
         manager.submitCloseIntent(head, _closeProof(head));
         vm.warp(vm.getBlockTimestamp() + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 30, "A3 is strict, not >=");
     }
 }

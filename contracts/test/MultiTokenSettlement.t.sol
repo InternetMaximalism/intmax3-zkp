@@ -7,7 +7,7 @@ import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {IERC20} from "../src/SafeERC20.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
-import {SimpleERC20, ReentrantHookERC20} from "./tokens/TestTokens.sol";
+import {SimpleERC20, ReentrantHookERC20, SenderFeeERC20} from "./tokens/TestTokens.sol";
 
 /// @title Multi-token settlement adversarial suite (multitoken Phase 3, detail2 §N-6, TM-3/TM-11).
 /// @notice Per-base-token Manager accounting: the TFD binding chain (close PI → finalization →
@@ -48,12 +48,13 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _twoTokenIntent(ethFund, tokenFund);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         return manager.finalizedCloseIntentDigest();
     }
 
     /// Fund the manager's TOKEN_A capacity: mint to the mock registry, credit, pull.
     function _fundAndPullToken(uint256 amount) internal {
+        _materializeCloseFundingAuthorization(registry, manager, TOKEN_A);
         tokenA.mint(address(registry), amount);
         registry.creditTokenWithdrawal(TOKEN_A, address(manager), amount);
         manager.pullChannelTokenFunds(TOKEN_A);
@@ -66,10 +67,11 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         uint64 amount,
         uint8 tokenSlot,
         uint32 tokenIndex
-    ) internal {
+    ) internal returns (bytes32) {
         ChannelSettlementManager.WithdrawalClaim memory c =
             _withdrawalClaimToken(digest, memberPkG, recipient, amount, tokenSlot, tokenIndex);
         manager.submitWithdrawalClaim(c, _withdrawalClaimProof(c));
+        return c.withdrawalNullifier;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -353,7 +355,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         manager.submitWithdrawalClaim(wc, _withdrawalClaimProof(wc));
         _fundAndPullToken(40);
         vm.prank(bob);
-        assertEq(manager.claimWithdrawalCredit(TOKEN_A), 40);
+        assertEq(manager.claimWithdrawalCredit(wc.withdrawalNullifier), 40);
         assertEq(tokenA.balanceOf(bob), 40, "bob received real tokens");
         assertEq(manager.totalCreditedOut(0), 0, "no ETH left the manager");
     }
@@ -366,7 +368,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
     /// capacity can never satisfy a token claim (and vice versa).
     function test_payout_perTokenCeiling_noCrossTokenDraw() external {
         bytes32 d = _finalizeTwoToken(75, 40);
-        _submitTokenClaim(d, USER_A, alice, 40, 1, TOKEN_A);
+        bytes32 nullifier = _submitTokenClaim(d, USER_A, alice, 40, 1, TOKEN_A);
 
         // Fund ONLY the ETH side generously; token-A received = 0.
         _fundAndPull(registry, manager, 75);
@@ -376,13 +378,13 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         // Token-A payout must revert: totalCreditedOut[A] + 40 > receivedChannelFunds[A] = 0.
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
-        manager.claimWithdrawalCredit(TOKEN_A);
+        manager.claimWithdrawalCredit(nullifier);
 
         // Now fund token-A for real: the payout succeeds and pays REAL tokens.
         _fundAndPullToken(40);
         assertEq(manager.receivedChannelFunds(TOKEN_A), 40, "measured token delta recorded");
         vm.prank(alice);
-        uint256 got = manager.claimWithdrawalCredit(TOKEN_A);
+        uint256 got = manager.claimWithdrawalCredit(nullifier);
         assertEq(got, 40);
         assertEq(tokenA.balanceOf(alice), 40, "alice received real tokens");
         assertEq(manager.totalCreditedOut(TOKEN_A), 40);
@@ -411,10 +413,11 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
             _intentWithTokens(1, 9, 22, 1, amounts, reg, 2);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         bytes32 d = manager.finalizedCloseIntentDigest();
 
-        _submitTokenClaim(d, USER_A, alice, 200, 1, hookIndex);
+        bytes32 nullifier = _submitTokenClaim(d, USER_A, alice, 200, 1, hookIndex);
+        _materializeCloseFundingAuthorization(registry, manager, hookIndex);
         hookToken.mint(address(registry), 200);
         registry.creditTokenWithdrawal(hookIndex, address(manager), 200);
         manager.pullChannelTokenFunds(hookIndex);
@@ -422,20 +425,62 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         // Hook fires on `transfer` (the manager's payout) and re-enters the payout entry point.
         hookToken.setHook(
             address(manager),
-            abi.encodeWithSignature("claimWithdrawalCredit(uint32)", hookIndex),
+            abi.encodeWithSignature("claimWithdrawalCredit(bytes32)", nullifier),
             false
         );
         vm.prank(alice);
-        manager.claimWithdrawalCredit(hookIndex);
+        manager.claimWithdrawalCredit(nullifier);
 
         assertTrue(hookToken.hookReverted(), "reentrant payout must have reverted");
         assertEq(hookToken.balanceOf(alice), 200, "paid exactly once");
         assertEq(manager.totalCreditedOut(hookIndex), 200, "single payout recorded");
     }
 
+    /// A token may behave exactly on deposit and Rollup-to-Manager transfer, then tax only the
+    /// Manager-to-member leg (for example after an implementation/role change). A `true` ERC-20
+    /// return is not proof of exact receipt: the final recipient delta must match or every payout
+    /// effect, including nullifier consumption, rolls back.
+    function test_payout_senderSelectiveFee_revertsWithoutConsumingCredit() external {
+        SenderFeeERC20 feeToken = new SenderFeeERC20(1_000); // 10%
+        uint32 feeIndex = 78;
+        registry.setToken(feeIndex, IERC20(address(feeToken)));
+
+        _requestCloseAndElapseGrace();
+        uint256[10] memory amounts;
+        amounts[0] = 10;
+        amounts[1] = 200;
+        uint32[10] memory reg;
+        reg[1] = feeIndex;
+        ChannelSettlementManager.CloseIntent memory intent =
+            _intentWithTokens(1, 9, 22, 1, amounts, reg, 2);
+        manager.submitCloseIntent(intent, _closeProof(intent));
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
+
+        bytes32 nullifier = _submitTokenClaim(
+            manager.finalizedCloseIntentDigest(), USER_A, alice, 200, 1, feeIndex
+        );
+        _materializeCloseFundingAuthorization(registry, manager, feeIndex);
+        feeToken.mint(address(registry), 200);
+        registry.creditTokenWithdrawal(feeIndex, address(manager), 200);
+        manager.pullChannelTokenFunds(feeIndex);
+
+        feeToken.setTaxedSender(address(manager));
+        vm.prank(alice);
+        vm.expectRevert(ChannelSettlementManager.TokenPayoutAmountMismatch.selector);
+        manager.claimWithdrawalCredit(nullifier);
+
+        assertEq(feeToken.balanceOf(alice), 0, "under-delivery rolled back");
+        assertEq(manager.withdrawalCredits(feeIndex, alice), 200, "credit remains retryable");
+        (,, uint256 payoutAmount) = manager.withdrawalPayouts(nullifier);
+        assertEq(payoutAmount, 200, "nullifier-scoped payout remains live");
+        assertEq(manager.totalCreditedOut(feeIndex), 0, "no failed payout accounted");
+    }
+
     /// Unsolicited token donations to the manager do NOT create payout capacity (only measured
     /// pull deltas count — the ERC-20 analogue of the SELFDESTRUCT-forced-ETH note).
     function test_pullTokenFunds_ignoresDonations() external {
+        _finalizeTwoToken(10, 5);
         tokenA.mint(address(manager), 1_000_000); // stray donation
         assertEq(manager.receivedChannelFunds(TOKEN_A), 0, "donations never counted");
         _fundAndPullToken(5);
@@ -444,6 +489,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
 
     /// pullChannelTokenFunds refuses an index with no L1-registered token address.
     function test_pullTokenFunds_unregisteredIndex_reverts() external {
+        _finalizeTwoToken(10, 5);
         vm.expectRevert(ChannelSettlementManager.TokenIndexNotRegisteredOnRollup.selector);
         manager.pullChannelTokenFunds(999);
     }
@@ -453,10 +499,10 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
     function test_singleTokenClose_ethRegression() external {
         bytes32 d = _finalizeDefault(); // 75 at slot 0, registry [ETH], count 1
         assertEq(manager.finalizedChannelFundAmount(0), 75);
-        _submitTokenClaim(d, USER_A, alice, 30, 0, 0);
+        bytes32 nullifier = _submitTokenClaim(d, USER_A, alice, 30, 0, 0);
         _fundAndPull(registry, manager, 75);
         vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 30, "zero-arg ETH alias still works");
+        assertEq(manager.claimWithdrawalCredit(nullifier), 30, "nullifier-scoped ETH payout works");
         assertEq(alice.balance, 30, "real ETH paid");
         assertEq(manager.totalCreditedOut(0), 30);
     }

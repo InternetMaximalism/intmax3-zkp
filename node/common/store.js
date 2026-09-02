@@ -5,6 +5,8 @@
 // state lives in the CLI's cli_state.json (co-signer) or the WASM session (delegate) — never here.
 
 const fs = require('fs');
+const crypto = require('crypto');
+const os = require('os');
 const path = require('path');
 
 function emptyState() {
@@ -43,9 +45,99 @@ function fsyncDirectorySync(directory) {
   }
 }
 
+function contentFingerprint(raw) {
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !error || error.code !== 'ESRCH';
+  }
+}
+
+function readLockOwner(lockPath, label) {
+  const metadata = fs.lstatSync(lockPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`${label} lock is not a trusted regular file`);
+  }
+  let owner;
+  try {
+    owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`${label} lock owner is malformed; refusing unsafe stale-lock recovery`, { cause: error });
+  }
+  if (!owner || owner.schemaVersion !== 1 || owner.hostname !== os.hostname()
+      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || !/^0x[0-9a-f]{64}$/.test(String(owner.token || ''))) {
+    throw new Error(`${label} lock has no recoverable same-host owner`);
+  }
+  return owner;
+}
+
+// Synchronous cross-process mutex for the very short read/check/rename sections below. A lock is
+// reclaimed only when the kernel proves its same-host owner PID is gone; elapsed wall time never
+// licenses deleting a live process's lock. Ambiguous lock metadata fails closed.
+function withExclusiveFileLock(lockPath, label, fn) {
+  const directory = path.dirname(lockPath);
+  fs.mkdirSync(directory, { recursive: true });
+  const token = `0x${crypto.randomBytes(32).toString('hex')}`;
+  const owner = JSON.stringify({ schemaVersion: 1, hostname: os.hostname(), pid: process.pid, token });
+  let fd = null;
+  let created = false;
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+      created = true;
+      fs.writeFileSync(fd, owner);
+      fs.fsyncSync(fd);
+      break;
+    } catch (error) {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (_) { /* preserve original */ }
+        fd = null;
+      }
+      if (created) {
+        try { fs.rmSync(lockPath, { force: true }); } catch (_) { /* preserve original */ }
+        throw error;
+      }
+      if (!error || error.code !== 'EEXIST') throw error;
+      const incumbent = readLockOwner(lockPath, label);
+      if (!processIsAlive(incumbent.pid)) {
+        const abandoned = `${lockPath}.abandoned-${process.pid}-${token.slice(2, 18)}`;
+        try {
+          fs.renameSync(lockPath, abandoned);
+          fs.rmSync(abandoned, { force: true });
+          continue;
+        } catch (reclaimError) {
+          if (reclaimError && ['ENOENT', 'EEXIST'].includes(reclaimError.code)) continue;
+          throw reclaimError;
+        }
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  if (fd === null) throw new Error(`timed out acquiring ${label} lock`);
+
+  fs.closeSync(fd);
+  try {
+    return fn();
+  } finally {
+    const current = readLockOwner(lockPath, label);
+    if (current.pid !== process.pid || current.token !== token) {
+      throw new Error(`${label} lock ownership changed while held`);
+    }
+    fs.rmSync(lockPath);
+  }
+}
+
 class Store {
   constructor(filePath) {
     this.filePath = filePath;
+    this.stateLockPath = `${filePath}.state.lock`;
     this.reservationPath = `${filePath}.outgoing-base-nonce`;
     this.reservationLockPath = `${this.reservationPath}.lock`;
     this.state = emptyState();
@@ -58,9 +150,11 @@ class Store {
     try {
       const raw = fs.readFileSync(this.filePath, 'utf8');
       this.state = { ...emptyState(), ...JSON.parse(raw) };
+      this.diskFingerprint = contentFingerprint(raw);
     } catch (e) {
       if (e && e.code === 'ENOENT') {
         this.state = emptyState();
+        this.diskFingerprint = null;
         return;
       }
       // Cursor/action loss can suppress chain events or authorize a duplicate signature. A corrupt
@@ -72,23 +166,43 @@ class Store {
   // Crash-durable persist: temp fd write+fsync, atomic same-directory rename, parent-directory
   // fsync. The last step is what makes the renamed cursor/checkpoint survive a power loss.
   flush() {
-    const directory = path.dirname(this.filePath);
-    fs.mkdirSync(directory, { recursive: true });
-    const tmp = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Store.flushSequence++}`;
-    let fd;
-    try {
-      fd = fs.openSync(tmp, 'wx', 0o600);
-      fs.writeFileSync(fd, JSON.stringify(this.state, null, 2));
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fd = undefined;
-      fs.renameSync(tmp, this.filePath);
-      fsyncDirectorySync(directory);
-    } catch (e) {
-      if (fd !== undefined) fs.closeSync(fd);
-      try { fs.rmSync(tmp, { force: true }); } catch (_) { /* keep original error */ }
-      throw e;
-    }
+    return withExclusiveFileLock(this.stateLockPath, 'durable node store', () => {
+      let currentFingerprint = null;
+      try {
+        currentFingerprint = contentFingerprint(fs.readFileSync(this.filePath));
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') throw error;
+      }
+      if (currentFingerprint !== this.diskFingerprint) {
+        // Reload before failing so a caller which catches the exception cannot later overwrite the
+        // winner with this process's stale in-memory snapshot. The attempted mutation is discarded.
+        this._load();
+        const conflict = new Error(
+          `durable node store changed in another process; discarded stale mutation for ${this.filePath}`,
+        );
+        conflict.code = 'STORE_CONCURRENT_MODIFICATION';
+        throw conflict;
+      }
+
+      const directory = path.dirname(this.filePath);
+      const tmp = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Store.flushSequence++}`;
+      const serialized = JSON.stringify(this.state, null, 2);
+      let fd;
+      try {
+        fd = fs.openSync(tmp, 'wx', 0o600);
+        fs.writeFileSync(fd, serialized);
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fd = undefined;
+        fs.renameSync(tmp, this.filePath);
+        fsyncDirectorySync(directory);
+        this.diskFingerprint = contentFingerprint(serialized);
+      } catch (e) {
+        if (fd !== undefined) fs.closeSync(fd);
+        try { fs.rmSync(tmp, { force: true }); } catch (_) { /* keep original error */ }
+        throw e;
+      }
+    });
   }
 
   get(key) {
@@ -109,38 +223,11 @@ class Store {
   }
 
   _withReservationLock(fn) {
-    fs.mkdirSync(path.dirname(this.reservationLockPath), { recursive: true });
-    let fd = null;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        fd = fs.openSync(this.reservationLockPath, 'wx', 0o600);
-        break;
-      } catch (e) {
-        if (!e || e.code !== 'EEXIST') throw e;
-        // A process can die after acquiring the tiny critical section. Reap only a clearly stale
-        // lock; a healthy holder normally releases it within a few synchronous filesystem calls.
-        try {
-          const ageMs = Date.now() - fs.statSync(this.reservationLockPath).mtimeMs;
-          if (ageMs > 30_000) {
-            fs.rmSync(this.reservationLockPath, { force: true });
-            continue;
-          }
-        } catch (statError) {
-          if (statError && statError.code === 'ENOENT') continue;
-          throw statError;
-        }
-        // Synchronous store APIs cannot yield a Promise; Atomics.wait provides a bounded 5ms
-        // backoff without burning CPU while another local process owns the lock.
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-      }
-    }
-    if (fd === null) throw new Error('timed out acquiring outgoing base nonce reservation lock');
-    try {
-      return fn();
-    } finally {
-      fs.closeSync(fd);
-      fs.rmSync(this.reservationLockPath, { force: true });
-    }
+    return withExclusiveFileLock(
+      this.reservationLockPath,
+      'outgoing base nonce reservation',
+      fn,
+    );
   }
 
   _writeOutgoingReservation(reservation) {

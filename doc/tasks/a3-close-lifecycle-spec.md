@@ -68,11 +68,11 @@ CLI(`channel_member`)から、実 L1 を相手に **deposit → 運用 → close
 
 | サブコマンド | 役割 | 主な処理 | on-chain |
 |---|---|---|---|
-| `close <manager_addr>` | close 意図の生成 | 最終 state を読み、N-of-N IMCH 共署名を集め、`prove_close` で close MLE 生成 → `close_intent.json` + `close_intent_mle.json`。`requestClose` 未了なら先に投げる | `cast send Manager.requestClose()` → `submitCloseIntent(intent, mleProof)` |
+| `close <manager_addr>` | close 意図の生成 | 最終 state を読み、N-of-N IMCH 共署名を集め、`prove_close` で close MLE 生成 → `close_intent.json` + `close_intent_mle.json`。durable checkpoint で freeze nonce / cancel floor を固定して `requestClose` | `cast send Manager.requestClose(uint64,uint64)` → `submitCloseIntent(intent, mleProof)` |
 | `cancel-close <manager_addr> <revived_state.json>` | challenge: 新しい署名済み state で close を撤回 | `build_cancel_close` → MLE | `cast send Manager.cancelClose(req, mleProof)` |
-| `settle <manager_addr>` | challenge 期間後に finalize | challengeDeadline 経過を確認 | `cast send Manager.finalizeClose()` |
+| `settle <manager_addr>` | challenge 期間後に finalize | durable checkpoint で pending digest / request generation を固定・再検証 | `cast send Manager.finalizeCloseGuarded(bytes32,uint64)` |
 | `withdraw <rollup_addr> <manager_addr>` | rollup から manager へ資金移動 | `build_channel_withdrawal`(recipient=manager、finalized root)→ withdrawal proof | `cast send IntmaxRollup.withdrawNative(...)` → `Manager.pullChannelFunds()` |
-| `claim <manager_addr> <member_slot>` | member ごとの取り分主張+引き出し | `build_withdrawal_claim`(member の regev_sk)→ MLE | `cast send Manager.submitWithdrawalClaim(claim, mleProof)` → `claimWithdrawalCredit()` |
+| `claim <manager_addr> <member_slot>` | member ごとの取り分主張+引き出し | `build_withdrawal_claim`(member の regev_sk)→ MLE | `cast send Manager.submitWithdrawalClaim(claim, mleProof)` → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` |
 
 - 状態ファイル:`close_intent.json` / `close_intent_mle.json` / `withdrawal_claim_*.json` を channel dir に出力(既存 fixture と同スキーマ)。
 - 秘密鍵の扱いは CLAUDE.md 準拠(`.claude/priv` を shell 展開、assistant に載せない)。

@@ -698,7 +698,7 @@ in the repo. Same security as B for strictly more blast radius. Reject.
     │    • auxData != 0 ⇒ partialWithdrawalAuthorized[authDigest(w)]  ← the second factor
     │    • nullifier single-use; totalEscrowed -= amount
     │    • pendingWithdrawals[recipient] += amount
- 7  └─ withdraw() ─ member pulls their own ETH (msg.sender only, IntmaxRollup.sol:1385-1391)
+ 7  └─ withdraw(amount) ─ member pulls that exact ETH amount (msg.sender only)
 ```
 
 Steps 1, 2, 5, 6, 7 exist. Step 3 is the new command. Step 4 exists but must be de-mocked (§0.5) and
@@ -730,7 +730,8 @@ public inputs**, exactly as `:5013-5025` does) and `pw_withdrawal_mle.json`.
 
 On-chain leg: reuse the `withdrawNativeStep()` / `withdrawErc20Step()` shape at
 `src/bin/channel_member.rs:2975-3027`, then **stop** — no `pullChannelFunds`, no manager
-involvement. The member pulls with `withdraw()` (`IntmaxRollup.sol:1385-1391`).
+involvement. The member pulls the proven amount with `withdraw(amount)`; any unrelated credit for
+the same recipient remains pending.
 
 ### 3.3 Circuit reuse — **no new circuit, no new PI layout, no VK rotation**
 

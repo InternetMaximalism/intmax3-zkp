@@ -4,6 +4,10 @@ Scope: native INTMAX transactions and channel settlement. Per owner direction, K
 explicitly deferred and is not a gate in this list. “Done” means the stated acceptance test passes;
 an existing library primitive or fixture-only path does not count as production wiring.
 
+Direct in-place member-set update is retired. Its replacement is the unanimous close → new channel
+→ exact asset/commitment migration protocol tracked in `doc/tasks/channel-change-msu.md`; do not
+re-enable the historical IMMS verifier, producer, or CLI path.
+
 ## P0 — cannot advertise as a functioning testnet
 
 - [ ] **Production block-producer service wiring.** `ProductionBlockProducer` is now a keyless core,

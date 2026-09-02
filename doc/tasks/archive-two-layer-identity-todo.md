@@ -97,7 +97,7 @@ transition = the registration sequence → the root is bound on-chain. ← the p
 
 1. The channel was not an actual base-intmax account (`intmax_state_root` unconstrained) → **resolved in §1 by making it a channel_id
    account**.
-2. There is no on-chain user withdrawal payout in the base rollup (`withdraw()` is stake/fraud-only,
+2. There is no on-chain user withdrawal payout in the base rollup (`withdraw(amount)` is stake/fraud-only,
    no nullifier mapping, aux_data not exposed) → **newly added in §2**.
 
 ## 4. replace window design (new mechanism)

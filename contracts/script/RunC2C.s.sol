@@ -133,8 +133,9 @@ contract RunC2C is Script {
 
     /// EOA pulls its pendingWithdrawals balance as real ETH (the receiver's channel-to-channel exit).
     function withdrawStep() external {
+        uint256 amount = _rollup().pendingWithdrawals(msg.sender);
         vm.startBroadcast();
-        _rollup().withdraw();
+        _rollup().withdraw(amount);
         vm.stopBroadcast();
         console2.log("withdraw OK; pendingWithdrawals[msg.sender]:", _rollup().pendingWithdrawals(msg.sender));
     }

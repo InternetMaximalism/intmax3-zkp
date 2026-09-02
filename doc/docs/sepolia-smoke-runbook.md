@@ -7,6 +7,12 @@
 > `channel_member withdraw` now refuses every chain id except local devnet `31337`. This runbook is
 > retained as a local rehearsal reference until the proof-DA commitment is redesigned (for example,
 > a lossless multi-blob format) and covered by a real fraud-proof E2E.
+>
+> **SUPERSEDED ABI NOTICE (2026-09-02).** The manual `cast send` examples below intentionally
+> preserve an old rehearsal transcript and use retired posting selectors. They are not release
+> instructions. Current publication must go through `public_validity_publisher` and its reviewed
+> deployment manifest, using `postBlockAndSubmitGuarded` with the exact pending-chain checkpoint
+> and predecessor block number/hash chain; see `doc/docs/public-validity-publisher.md`.
 
 End-to-end smoke of the **real** on-chain validity path on Sepolia:
 

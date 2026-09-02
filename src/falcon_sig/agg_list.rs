@@ -501,8 +501,8 @@ mod tests {
         proof
     }
 
-    /// Proving a full-cluster aggregation is the heaviest thing in this module; each cached proof is
-    /// built at most once and reused by every case that needs it.
+    /// Proving a full-cluster aggregation is the heaviest thing in this module; each cached proof
+    /// is built at most once and reused by every case that needs it.
     static AGG_2: Lazy<ProofWithPublicInputs<F, C, D>> =
         Lazy::new(|| real_agg_proof(2, digest(0x02), 10));
     static AGG_16: Lazy<ProofWithPublicInputs<F, C, D>> =
@@ -583,9 +583,9 @@ mod tests {
         );
     }
 
-    /// Acceptance 2: a step over a REAL full-cluster aggregation proof verifies (a FULL tree, no absent
-    /// subtree anywhere) and again matches the native fold — so the padding-slot agreement between
-    /// the aggregation circuit and this fold is exercised at both extremes.
+    /// Acceptance 2: a step over a REAL full-cluster aggregation proof verifies (a FULL tree, no
+    /// absent subtree anywhere) and again matches the native fold — so the padding-slot
+    /// agreement between the aggregation circuit and this fold is exercised at both extremes.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn step_folds_a_real_16_of_16_aggregation() {
@@ -830,8 +830,8 @@ mod tests {
         );
         // The empty chain is zero — the value the validity circuit gates on.
         assert_eq!(agg_list_commitment(&[]), Bytes32::zero());
-        // Padding is a zero SUFFIX: the MAX_SIG_CLUSTER-slot digest of n signers is the digest of the same n
-        // signers followed by explicit zero slots.
+        // Padding is a zero SUFFIX: the MAX_SIG_CLUSTER-slot digest of n signers is the digest of
+        // the same n signers followed by explicit zero slots.
         assert_eq!(
             agg_pk_list_digest(&[pk(0xa1), pk(0xa2)]),
             agg_pk_list_digest(&[

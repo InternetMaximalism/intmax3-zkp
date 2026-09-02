@@ -45,6 +45,27 @@ test('two Store instances loaded before either write cannot reserve the same non
   }
 });
 
+test('two stale Store instances cannot overwrite each other\'s general journal mutations', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-store-multiprocess-'));
+  const file = path.join(dir, 'state.json');
+  try {
+    const first = new Store(file);
+    const stale = new Store(file);
+    assert.equal(first.claimAction('chain-event-a'), true);
+    assert.throws(
+      () => stale.claimAction('chain-event-b'),
+      error => error && error.code === 'STORE_CONCURRENT_MODIFICATION',
+    );
+
+    const durable = new Store(file);
+    assert.equal(durable.hasAction('chain-event-a'), true, 'winning action survives');
+    assert.equal(durable.hasAction('chain-event-b'), false, 'stale full-snapshot rename never lands');
+    assert.equal(stale.hasAction('chain-event-a'), true, 'loser reloads the durable winner before failing');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a pre-sign failure releases only its exact reservation', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-nonce-release-'));
   const file = path.join(dir, 'state.json');

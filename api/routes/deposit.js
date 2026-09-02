@@ -4,6 +4,7 @@ const { cli, wc, RPC, l1SignerArgs, l1SignerAddress, sh, readJson, writeJson } =
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 const { importL1Deposit } = require('../lib/deposit-pipeline');
+const producer = require('../lib/block-producer');
 
 const router = Router({ mergeParams: true });
 
@@ -21,11 +22,11 @@ function parseTokenIndex(v) {
 // tokenIndex 0 = native ETH (msg.value == amount); a nonzero index is a REGISTERED ERC-20
 // (msg.value MUST be 0 — IntmaxRollup pulls the tokens via safeTransferFrom, which requires a
 // prior approve(rollup, amount) by the depositor; §N-7).
-function depositCastArgs(backing, tokenIndex, amount) {
+function depositCastArgs(rollup, depositRecipient, tokenIndex, amount) {
   const args = [
-    'send', backing.rollup,
+    'send', rollup,
     'deposit(bytes32,uint32,uint256,bytes32)',
-    backing.deposit_recipient, tokenIndex, String(amount),
+    depositRecipient, tokenIndex, String(amount),
     '0x0000000000000000000000000000000000000000000000000000000000000000',
   ];
   if (tokenIndex === '0') args.push('--value', String(amount));
@@ -36,8 +37,8 @@ function depositCastArgs(backing, tokenIndex, amount) {
 // POST /api/v1/channel/:ch/deposit/l1-send (A18)
 // body: { amount, tokenIndex? } — tokenIndex optional, default '0' (ETH).
 router.post('/l1-send', (req, res) => {
-  try {
-    const ch = Number(req.params.ch);
+  const ch = Number(req.params.ch);
+  withLock(ch, async () => {
     const amount = req.body && req.body.amount;
     if (!amount) {
       return res.status(400).json({ error: 'needs { amount, tokenIndex? }' });
@@ -46,19 +47,40 @@ router.post('/l1-send', (req, res) => {
     if (tokenIndex === null) {
       return res.status(400).json({ error: 'tokenIndex must be a decimal u32' });
     }
-    const backing = readJson(wc(ch, 'channel_backing.json'));
-    if (!backing.rollup || !backing.deposit_recipient) {
-      throw new Error('no rollup/deposit_recipient in channel_backing.json');
+    const pendingPath = wc(ch, 'pending_deposit.json');
+    if (fs.existsSync(pendingPath)) {
+      const pending = readJson(pendingPath);
+      if (pending.status !== 'imported') {
+        return res.status(409).json({
+          error: 'a durable L1 deposit is already awaiting import; retry /deposit/import first',
+          txHash: pending.txHash,
+        });
+      }
     }
-    const out = sh('cast', depositCastArgs(backing, tokenIndex, amount), { stdio: 'pipe' });
+    const backing = readJson(wc(ch, 'channel_backing.json'));
+    if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+    const depositRecipient = await producer.livePrepareDepositRecipient(ch);
+    const out = sh(
+      'cast',
+      depositCastArgs(backing.rollup, depositRecipient, tokenIndex, amount),
+      { stdio: 'pipe' },
+    );
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]+)"/) || [])[1] || '';
     const depositor = l1SignerAddress();
-    writeJson(wc(ch, 'pending_deposit.json'), { depositor, amount: String(amount), tokenIndex, txHash });
-    res.json({ txHash, depositor, tokenIndex });
-  } catch (e) {
+    writeJson(pendingPath, {
+      schemaVersion: 1,
+      status: 'broadcast',
+      depositor,
+      amount: String(amount),
+      tokenIndex,
+      txHash,
+      depositRecipient,
+    });
+    res.json({ txHash, depositor, tokenIndex, depositRecipient });
+  }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
     res.status(500).json({ error: String(e.stderr || e.message || e) });
-  }
+  });
 });
 
 // POST /api/v1/channel/:ch/deposit/import (A20)
@@ -97,6 +119,13 @@ router.post('/import', (req, res) => {
     // cannot hold. The flag relaxes ONLY that leg: if the depositor were some member's bound exit
     // address, the CLI's misdirection refusal still fires unconditionally, flag or not.
     await importL1Deposit(ch, slot, txHash, { allowUnboundDepositor: true });
+    const pendingPath = wc(ch, 'pending_deposit.json');
+    if (fs.existsSync(pendingPath)) {
+      const pending = readJson(pendingPath);
+      if (String(pending.txHash).toLowerCase() === String(txHash).toLowerCase()) {
+        writeJson(pendingPath, { ...pending, status: 'imported' });
+      }
+    }
     const depTicket = findActiveTicket(ch, 'deposit');
     if (depTicket) {
       depTicket.status = 'import_done';
@@ -142,7 +171,13 @@ router.post('/', (req, res) => {
     const amt = amount;
 
     const backing = readJson(wc(ch, 'channel_backing.json'));
-    const out = sh('cast', depositCastArgs(backing, tokenIndex, amt), { stdio: 'pipe' });
+    if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
+    const depositRecipient = await producer.livePrepareDepositRecipient(ch);
+    const out = sh(
+      'cast',
+      depositCastArgs(backing.rollup, depositRecipient, tokenIndex, amt),
+      { stdio: 'pipe' },
+    );
     const txHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]{64})"/) || [])[1];
     if (!txHash) {
       res.status(500).json({ error: 'could not read the deposit transactionHash from cast output' });
@@ -158,7 +193,10 @@ router.post('/', (req, res) => {
       balance: String(amt),
       tokenIndex,
       txHash,
+      depositRecipient,
       producerReceipt: pipeline.producerReceipt,
+      liveReceipt: pipeline.liveReceipt,
+      liveStatus: pipeline.liveStatus,
       headSyncReceipt: pipeline.headSyncReceipt,
     });
   }).catch(e => {

@@ -96,7 +96,8 @@ pub struct BlockHashChainProcessorWitness {
     /// set with `signer_count = 0` is used, valid only when every slot is non-updating (the whole
     /// N-of-N binding is gated on a block actually applying a signature).
     pub member_leaves: Option<Vec<MemberLeaf>>,
-    /// detail2 §Q-3: the NEW registered member leaves for a MemberSetUpdate block (None otherwise).
+    /// detail2 §Q-3: the NEW registered member leaves for a MemberSetUpdate block (None
+    /// otherwise).
     pub new_member_leaves: Option<Vec<MemberLeaf>>,
     pub signer_count: Option<u32>,
     /// Optional per-block-slot Regev public keys. If None, default (empty/dummy) keys are used
@@ -179,12 +180,9 @@ impl BlockHashChainProcessorWitness {
                 .channel_actions
                 .clone()
                 .unwrap_or_else(|| vec![ChannelAction::default(); num_users]),
-            channel_action_merkle_proofs: self
-                .channel_action_merkle_proofs
-                .clone()
-                .unwrap_or_else(|| {
-                    vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users]
-                }),
+            channel_action_merkle_proofs: self.channel_action_merkle_proofs.clone().unwrap_or_else(
+                || vec![ChannelActionMerkleProof::dummy(TX_TREE_HEIGHT); num_users],
+            ),
         }
     }
 }

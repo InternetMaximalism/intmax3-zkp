@@ -19,8 +19,7 @@ use crate::{
                 TxV2MerkleProofTarget,
             },
         },
-        tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target,
-            member_set_update_payload},
+        tx::{ChannelAction, ChannelActionKind, ChannelActionTarget, TxClass, TxV2, TxV2Target},
         u63::{BlockNumber, BlockNumberTarget, U63Target},
     },
     constants::{CHANNEL_TREE_HEIGHT, MAX_SIG_CLUSTER, SEND_TREE_HEIGHT, TX_TREE_HEIGHT},
@@ -124,11 +123,9 @@ pub struct UpdateUserTree {
     ///   * an empty slot below `signer_count`, or a non-empty slot at or above it, is refused — so
     ///     `occupancy == signer_count` is a theorem, not a premise about left-packing.
     pub member_leaves: Vec<MemberLeaf>,
-    /// detail2 §Q-3: the NEW registered member leaves when this block carries a
-    /// `MemberSetUpdate` channel action — empty otherwise. When present the strict mirror (and
-    /// the circuit) validates the single-slot delta against `member_leaves` (the OLD set, which
-    /// this block's N-of-N is verified against), re-derives the action `payload_hash` from the
-    /// two folded roots, and writes the NEW root into the channel leaf instead of copying.
+    /// Retired direct-MSU wire tombstone. Production witnesses must leave this empty; retaining
+    /// the field lets old serialized requests fail closed without keeping the former transition
+    /// constraints in the release circuit.
     pub new_member_leaves: Vec<MemberLeaf>,
     /// N — how many members signed. Constrained `2 <= signer_count <= MAX_SIG_CLUSTER` in-circuit
     /// (design §5.4 item 2: the registration floor is repeated here IN-CIRCUIT rather than
@@ -159,42 +156,17 @@ pub struct UpdateUserTree {
     pub channel_action_merkle_proofs: Vec<ChannelActionMerkleProof>,
 }
 
-/// detail2 §Q-3: THE predicate + fold that decides what `member_pubkeys_root` one block slot
-/// writes into its `ChannelLeaf` — `is_member_update ? fold(new_member_leaves) : copy`.
-///
-/// SECURITY (M-2): this is the SINGLE derivation. Both the proven side
-/// (`UpdateUserTree::compute_public_inputs`, whose in-circuit twin gates the same write on
-/// `should_check_channel_action ∧ is_msu_kind`) and the daemon's authoritative base-state mirror
-/// (`BlockWitnessGenerator::add_block_with_tx_v2_inner`, which writes the leaf into
-/// `channel_tree`) CALL it. They must not restate it: M-2 was reported precisely because the
-/// generator copied `prev_user_leaf.member_pubkeys_root` unconditionally, so the daemon's base
-/// state would have diverged from the proven root on the first member-set-update block and every
-/// later Merkle opening against that channel would have broken.
-///
-/// `new_member_leaves` is empty on every block that carries no member-set transition; a caller
-/// that has no `TxV2` for the slot at all passes the default (`TxClass::UserTransfer`), which
-/// short-circuits to the copy arm exactly as the dummy substitution in
-/// `block_hash_chain_processor` does.
+/// Direct in-place member-set updates are retired. Every release transition preserves the
+/// registered member root; the action-kind circuit gate below separately rejects the reserved
+/// `MemberSetUpdate` tag. The unused arguments are retained only as a source-compatible
+/// tombstone for historical, feature-gated callers.
 pub fn channel_leaf_member_root(
-    tx_v2: &TxV2,
-    channel_action: Option<&ChannelAction>,
-    new_member_leaves: &[MemberLeaf],
+    _tx_v2: &TxV2,
+    _channel_action: Option<&ChannelAction>,
+    _new_member_leaves: &[MemberLeaf],
     prev_member_pubkeys_root: PoseidonHashOut,
 ) -> PoseidonHashOut {
-    let is_member_update = tx_v2.tx_class == TxClass::ChannelAction
-        && channel_action
-            .map(|a| a.kind == ChannelActionKind::MemberSetUpdate)
-            .unwrap_or(false)
-        && !new_member_leaves.is_empty();
-    if is_member_update {
-        let mut t = MemberTree::init();
-        for l in new_member_leaves.iter() {
-            t.push(l.clone());
-        }
-        t.get_root()
-    } else {
-        prev_member_pubkeys_root
-    }
+    prev_member_pubkeys_root
 }
 
 /// detail2 §Q-3: the structural delta a `MemberSetUpdate` block may apply to the registered
@@ -205,10 +177,11 @@ pub fn channel_leaf_member_root(
 /// Anything else — two slots changed, a removal, a regev swap, an add off the boundary — is
 /// refused. Mirrors `wallet_core::verify_member_set_update`'s structural half (the consent /
 /// N-of-N halves live at the co-sign gate and in the block's signature chain respectively).
-pub fn validate_member_set_delta(
-    old: &[MemberLeaf],
-    new: &[MemberLeaf],
-) -> Result<(), String> {
+#[cfg(feature = "deprecated-msu")]
+#[deprecated(
+    note = "direct in-place member-set updates are retired; see doc/tasks/channel-change-msu.md"
+)]
+pub fn validate_member_set_delta(old: &[MemberLeaf], new: &[MemberLeaf]) -> Result<(), String> {
     if old.len() != MAX_SIG_CLUSTER || new.len() != MAX_SIG_CLUSTER {
         return Err(format!(
             "member leaf arrays must be exactly MAX_SIG_CLUSTER ({MAX_SIG_CLUSTER}) long, got old {} new {}",
@@ -258,7 +231,9 @@ pub fn validate_member_set_delta(
     } else {
         // ROTATE: stays occupied, regev preserved, signing identity actually changes.
         if new[j] == empty {
-            return Err(format!("slot {j}: removal is not a supported member-set op (§Q-6)"));
+            return Err(format!(
+                "slot {j}: removal is not a supported member-set op (§Q-6)"
+            ));
         }
         if new[j].regev_pk_digest != old[j].regev_pk_digest {
             return Err(format!(
@@ -416,6 +391,13 @@ impl UpdateUserTree {
                 self.member_leaves.len()
             )));
         }
+        if strict && !self.new_member_leaves.is_empty() {
+            return Err(UpdateUserTreeError::InvalidLength(
+                "new_member_leaves is a retired direct-MSU wire and must be empty; close the old \
+                 channel and migrate into a newly registered channel"
+                    .to_owned(),
+            ));
+        }
 
         // update user tree
         let mut account_tree_root = self.prev_account_tree_root;
@@ -566,62 +548,9 @@ impl UpdateUserTree {
                             ChannelActionKind::InterChannelSend
                             | ChannelActionKind::ChannelClose => {}
                             ChannelActionKind::MemberSetUpdate => {
-                                // detail2 §Q-3, strict half: the delta and the payload binding.
-                                // (The root override itself is computed OUTSIDE `strict` below so
-                                // the account root advances identically in both modes.)
-                                validate_member_set_delta(
-                                    &self.member_leaves,
-                                    &self.new_member_leaves,
-                                )
-                                .map_err(|e| {
-                                    UpdateUserTreeError::InvalidLength(format!(
-                                        "member-set update delta at i {i}: {e}"
-                                    ))
-                                })?;
-                                let prev_root = {
-                                    let mut t = MemberTree::init();
-                                    for l in self.member_leaves.iter() {
-                                        t.push(l.clone());
-                                    }
-                                    t.get_root()
-                                };
-                                let new_root = {
-                                    let mut t = MemberTree::init();
-                                    for l in self.new_member_leaves.iter() {
-                                        t.push(l.clone());
-                                    }
-                                    t.get_root()
-                                };
-                                // The signed block commits EXACTLY this transition: the action's
-                                // payload_hash must be the canonical Poseidon commitment of the
-                                // two folded roots (reached from the signed digest via
-                                // tx_tree_root → channel_action_root → payload).
-                                if channel_action.payload_hash
-                                    != member_set_update_payload(prev_root, new_root)
-                                {
-                                    return Err(UpdateUserTreeError::InvalidLength(format!(
-                                        "member-set update payload_hash at i {i} does not commit \
-                                         the (prev_root, new_root) transition"
-                                    )));
-                                }
-                                // And it must be THIS channel's own set the block advances.
-                                if prev_root != prev_user_leaf.member_pubkeys_root {
-                                    return Err(UpdateUserTreeError::InvalidLength(format!(
-                                        "member-set update at i {i}: old leaves do not fold to \
-                                         the channel's committed member root"
-                                    )));
-                                }
-                                // SECURITY: the validity transition and the settlement-manager
-                                // membership transition do not yet share an atomic on-chain
-                                // receipt.  Accepting this action in the circuit would therefore
-                                // let a whitelisted custom prover advance only the validity-side
-                                // root, even though every bundled producer currently refuses the
-                                // operation.  Keep the structural checks above as the future
-                                // implementation contract, but fail closed until that receipt is
-                                // designed and verified by both consumers.
                                 return Err(UpdateUserTreeError::InvalidLength(format!(
-                                    "member-set update at i {i} is disabled until the settlement \
-                                     and validity transitions have an atomic receipt"
+                                    "member-set update at i {i} is permanently retired; close the \
+                                     old channel and migrate into a newly registered channel"
                                 )));
                             }
                         }
@@ -629,15 +558,9 @@ impl UpdateUserTree {
                 }
             }
 
-            // detail2 §Q-3: the ONLY transition that may advance the channel leaf's registered
-            // member root. Computed unconditionally (both strict and non-strict modes) so the
-            // account tree root is mode-independent; the strict arm above is what VALIDATES the
-            // transition, exactly as every other strict/circuit split in this file.
-            //
-            // SECURITY (M-2): CALLED, never restated. `BlockWitnessGenerator` writes the very same
-            // leaf into the daemon's authoritative channel tree and must reach the same root by
-            // the same predicate — a second derivation that agrees only by luck is exactly the
-            // divergence M-2 reported.
+            // Direct MSU is retired: all reachable transitions preserve the registered root.
+            // The circuit independently rejects the reserved action kind, so unchecked public
+            // input construction cannot revive the removed transition.
             let member_root_for_leaf = channel_leaf_member_root(
                 tx_v2,
                 self.channel_actions.get(i),
@@ -671,9 +594,8 @@ impl UpdateUserTree {
                 send_merkle_proof.get_root(&new_send_leaf, prev_user_leaf.index.into());
 
             // create new account leaf and compute new user tree root
-            // member_pubkeys_root preserved from previous leaf across state transitions —
-            // UNLESS this block is an authorized MemberSetUpdate (detail2 §Q-3), the one
-            // transition that may advance it (ChannelSafetyQ.member_set_changes_iff_update).
+            // Every release transition preserves member_pubkeys_root. Membership changes require
+            // unanimous close plus migration into a newly registered channel.
             let new_user_leaf = ChannelLeaf {
                 index: prev_user_leaf.index + 1,
                 prev: self.block_number,
@@ -1034,10 +956,6 @@ pub struct UpdateUserTreeTarget {
     /// `UpdateUserTree::member_leaves`. Block-level, NOT per block slot: every slot of a block
     /// references the same channel leaf and therefore the same member set.
     pub member_leaf_targets: Vec<MemberLeafTarget>,
-    /// detail2 §Q-3: the NEW member leaves for a MemberSetUpdate block (all-empty padding on any
-    /// other block — the delta/payload gates below are conditioned off and the leaf-root select
-    /// falls back to the copy). Block-level like `member_leaf_targets`.
-    pub new_member_leaf_targets: Vec<MemberLeafTarget>,
     /// Witnessed `signer_count` (N).
     pub signer_count: Target,
     /// Per-block-slot witnessed Regev public-key coefficient targets (`a` then `b`, each
@@ -1142,7 +1060,8 @@ impl UpdateUserTreeTarget {
             .collect();
 
         let mut member_leaf_targets: Vec<MemberLeafTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
-        let mut member_leaf_hashes: Vec<PoseidonHashOutTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
+        let mut member_leaf_hashes: Vec<PoseidonHashOutTarget> =
+            Vec::with_capacity(MAX_SIG_CLUSTER);
         let mut member_pk_limbs: Vec<Target> = Vec::with_capacity(MAX_SIG_CLUSTER * BYTES32_LEN);
         let mut member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
         for _ in 0..MAX_SIG_CLUSTER {
@@ -1160,27 +1079,6 @@ impl UpdateUserTreeTarget {
         // registration step used to write it (shared `compute_member_tree_root`).
         let recomputed_member_root =
             compute_member_tree_root::<F, C, D>(builder, &member_leaf_hashes);
-
-        // ── detail2 §Q-3: the NEW member set of a MemberSetUpdate block ──
-        //
-        // Witnessed unconditionally (all-empty padding when unused); its fold becomes the channel
-        // leaf's member root ONLY under the per-slot `is_member_update` select below, and the
-        // structural delta + payload gates are all conditioned on the same flag, so on every other
-        // block these targets are free padding with no constraint force.
-        let mut new_member_leaf_targets: Vec<MemberLeafTarget> =
-            Vec::with_capacity(MAX_SIG_CLUSTER);
-        let mut new_member_leaf_hashes: Vec<PoseidonHashOutTarget> =
-            Vec::with_capacity(MAX_SIG_CLUSTER);
-        let mut new_member_pk_is_zero: Vec<BoolTarget> = Vec::with_capacity(MAX_SIG_CLUSTER);
-        for _ in 0..MAX_SIG_CLUSTER {
-            let leaf = MemberLeafTarget::new(builder);
-            let pk_bytes = Bytes32Target::from_hash_out(builder, leaf.pk_g);
-            new_member_pk_is_zero.push(pk_bytes.is_zero::<F, D, Bytes32>(builder));
-            new_member_leaf_hashes.push(leaf.hash::<F, C, D>(builder));
-            new_member_leaf_targets.push(leaf);
-        }
-        let new_member_root =
-            compute_member_tree_root::<F, C, D>(builder, &new_member_leaf_hashes);
 
         // ── The folded block statement (design §5.3) ──
         //
@@ -1206,9 +1104,6 @@ impl UpdateUserTreeTarget {
         // a block that signs nothing must not be forced to carry a member set it has no business
         // knowing, and a block that signs must satisfy every one of those constraints.
         let mut any_sign = builder._false();
-        // detail2 §Q-3: true iff some slot's action is a MemberSetUpdate — gates the block-level
-        // structural-delta constraints emitted after the loop.
-        let mut any_member_update = builder._false();
         // Poseidon-digest domain for the Regev pubkey leaf component (mirrors
         // `RegevPk::poseidon_digest`).
         let regev_poseidon_domain =
@@ -1250,11 +1145,7 @@ impl UpdateUserTreeTarget {
             // makes an already-applied signed H2 unusable after the leaf advances.  Do NOT bind the
             // independent `small_block_number` here: incoming and other channel transitions may
             // advance that counter without consuming a base nonce.
-            builder.conditional_assert_eq(
-                should_update.target,
-                tx_v2.nonce,
-                prev_user_leaf.index,
-            );
+            builder.conditional_assert_eq(should_update.target, tx_v2.nonce, prev_user_leaf.index);
 
             let user_transfer_class =
                 builder.constant(F::from_canonical_u32(TxClass::UserTransfer.as_u32()));
@@ -1298,31 +1189,17 @@ impl UpdateUserTreeTarget {
                 channel_id,
             );
 
-            // ── detail2 §Q-3: is THIS slot's action a MemberSetUpdate? ──
+            // Direct in-place MemberSetUpdate is permanently retired. Reject the reserved action
+            // tag at the exact slot where the action is authenticated. There is intentionally no
+            // new-member witness, payload fold, root select, or structural-delta gadget in the
+            // release circuit: keeping unreachable legacy constraints would still enlarge the
+            // proving key and proving time.
             let member_update_kind = builder.constant(F::from_canonical_u32(
                 ChannelActionKind::MemberSetUpdate.as_u32(),
             ));
             let is_msu_kind = builder.is_equal(channel_action.kind, member_update_kind);
             let is_member_update = builder.and(should_check_channel_action, is_msu_kind);
-            any_member_update = builder.or(any_member_update, is_member_update);
-            // The signed block commits EXACTLY the (prev_root, new_root) transition: the action's
-            // payload_hash must be the canonical Poseidon commitment of the two folds. The prev
-            // fold is bound to the channel leaf's committed root by the N-of-N section below
-            // (design §5.4 item 2), closing the chain signed-digest → tx_tree_root →
-            // channel_action_root → payload → root transition.
-            let msu_domain = builder.constant(F::from_canonical_u32(
-                crate::constants::MEMBER_SET_UPDATE_DOMAIN,
-            ));
-            let mut payload_preimage: Vec<Target> = vec![msu_domain];
-            payload_preimage.extend(recomputed_member_root.to_vec());
-            payload_preimage.extend(new_member_root.to_vec());
-            let expected_msu_payload =
-                PoseidonHashOutTarget::hash_inputs::<F, D>(builder, &payload_preimage);
-            channel_action.payload_hash.conditional_assert_eq(
-                builder,
-                expected_msu_payload,
-                is_member_update,
-            );
+            builder.assert_zero(is_member_update.target);
 
             send_merkle_proof.conditional_verify::<F, C, D>(
                 builder,
@@ -1344,15 +1221,10 @@ impl UpdateUserTreeTarget {
             );
 
             let next_index = builder.add_const(prev_user_leaf.index, F::ONE);
-            // member_pubkeys_root preserved unchanged across state transitions — UNLESS this
-            // slot's action is an authorized MemberSetUpdate (detail2 §Q-3), the ONE transition
-            // that may advance it (ChannelSafetyQ.member_set_changes_iff_update).
-            let leaf_member_root = PoseidonHashOutTarget::select(
-                builder,
-                is_member_update,
-                new_member_root,
-                prev_user_leaf.member_pubkeys_root.clone(),
-            );
+            // Every release transition preserves membership. A future channel-change protocol
+            // must close this channel and register a different channel; it must never revive an
+            // in-place root select here.
+            let leaf_member_root = prev_user_leaf.member_pubkeys_root.clone();
             let new_user_leaf = ChannelLeafTarget {
                 index: next_index,
                 prev: block_number.clone(),
@@ -1372,9 +1244,9 @@ impl UpdateUserTreeTarget {
             // registered member set signed this block's IMCH digest. For the updating slot we:
             //   1. keep the `tx_tree_root != 0` gate;
             //   2. connect the recomputed member root to the channel leaf's committed
-            //      `member_pubkeys_root` — the binding that makes the MAX_SIG_CLUSTER witnessed leaves
-            //      (and hence the folded pk list, the occupancy and `signer_count`) the channel's
-            //      REGISTERED set rather than a prover-chosen one;
+            //      `member_pubkeys_root` — the binding that makes the MAX_SIG_CLUSTER witnessed
+            //      leaves (and hence the folded pk list, the occupancy and `signer_count`) the
+            //      channel's REGISTERED set rather than a prover-chosen one;
             //   3. compute regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over the witnessed Regev
             //      pubkey coefficients (mirrors `RegevPk::poseidon_digest`) and bind it to THIS
             //      slot's member leaf — the bp's Regev binding, unchanged in strength;
@@ -1428,8 +1300,9 @@ impl UpdateUserTreeTarget {
 
             // -- (3) regev_pk_digest = Poseidon([IMRP, n, a…, b…]) over witnessed Regev coeffs --
             // KEPT VERBATIM for the bp slot only (design §4 "cost trap"): doing this for every
-            // slot would be MAX_SIG_CLUSTER x 2 x REGEV_N range checks. The others' `regev_pk_digest` are
-            // free witnesses authenticated by the root connect in (2).
+            // slot would be MAX_SIG_CLUSTER x 2 x REGEV_N range checks. The others'
+            // `regev_pk_digest` are free witnesses authenticated by the root connect in
+            // (2).
             let regev_pk_coeffs: Vec<Target> = builder.add_virtual_targets(2 * REGEV_N);
             // SECURITY: range-check each coefficient to 32 bits so a malicious witness cannot pack
             // a >2^32 value that aliases a canonical coefficient (digest malleability F1-A).
@@ -1469,101 +1342,6 @@ impl UpdateUserTreeTarget {
         }
 
         // ── Block-level well-formedness of the signer set (design §5.4 items 2-3) ──
-        //
-        // SECURITY: MemberSetUpdate is deliberately unreachable in the deployed validity
-        // circuit.  The producer/CLI refusal is not a security boundary: a whitelisted custom
-        // prover could otherwise submit a validity-side-only membership transition while the
-        // settlement manager retained the old member set.  Remove this assertion only together
-        // with an atomic, on-chain receipt consumed by BOTH transitions.
-        builder.assert_zero(any_member_update.target);
-
-        // ── detail2 §Q-3: the structural delta of a MemberSetUpdate block ──
-        //
-        // Gated on `any_member_update`; on every other block the new-leaf targets are free
-        // padding. Rules (mirror of `validate_member_set_delta`, native):
-        //   * exactly ONE slot changes;
-        //   * a changed slot that was EMPTY (¬is_signer[i], the occupancy theorem) is an ADD and
-        //     must sit exactly at the boundary `i == signer_count`;
-        //   * a changed slot that was OCCUPIED is a ROTATE and must preserve `regev_pk_digest`
-        //     (§Q-6 — balances stay decryptable);
-        //   * a changed slot's NEW leaf is never empty (removal is not a supported op);
-        //   * (M-1) the changed slot's NEW `pk_g` is DISTINCT from every other slot's.
-        {
-            let one = builder.one();
-            let mut sum_changed = builder.zero();
-            let mut changed_flags: Vec<plonky2::iop::target::BoolTarget> =
-                Vec::with_capacity(MAX_SIG_CLUSTER);
-            for i in 0..MAX_SIG_CLUSTER {
-                let old_l = &member_leaf_targets[i];
-                let new_l = &new_member_leaf_targets[i];
-                let eq_pkg = old_l.pk_g.is_equal(builder, &new_l.pk_g);
-                let eq_pkb = old_l.pk_b.is_equal(builder, &new_l.pk_b);
-                let eq_rgv = old_l.regev_pk_digest.is_equal(builder, &new_l.regev_pk_digest);
-                let eq_all = {
-                    let a = builder.and(eq_pkg, eq_pkb);
-                    builder.and(a, eq_rgv)
-                };
-                let changed = builder.not(eq_all);
-                let changed_g = builder.and(changed, any_member_update);
-                sum_changed = builder.add(sum_changed, changed_g.target);
-
-                // ADD: changed ∧ was-empty ⇒ i == signer_count (the left-packed boundary).
-                let not_signer = builder.not(is_signer[i]);
-                let add_here = builder.and(changed_g, not_signer);
-                let i_const = builder.constant(F::from_canonical_usize(i));
-                builder.conditional_assert_eq(add_here.target, i_const, signer_count);
-
-                // ROTATE: changed ∧ was-occupied ⇒ regev preserved.
-                let rot_here = builder.and(changed_g, is_signer[i]);
-                old_l.regev_pk_digest.conditional_assert_eq(
-                    builder,
-                    new_l.regev_pk_digest,
-                    rot_here,
-                );
-
-                // Never a removal: a changed slot's NEW pk is non-zero.
-                let removed = builder.and(changed_g, new_member_pk_is_zero[i]);
-                builder.assert_zero(removed.target);
-
-                changed_flags.push(changed_g);
-            }
-            // Exactly one changed slot on an update block; zero otherwise (sum is already gated).
-            builder.conditional_assert_eq(any_member_update.target, sum_changed, one);
-
-            // SECURITY (M-1, §Q-3): NO DUPLICATE SIGNING IDENTITIES. The changed slot's NEW `pk_g`
-            // must differ from every other slot's NEW `pk_g`. Mirror of the identical rule now in
-            // `validate_member_set_delta` (native) — the two layers must stay byte-identical.
-            //
-            // What it stops: a rotate-to-duplicate. Nothing above forbids re-pointing slot j at
-            // slot k's key, and that is an EFFECTIVE REMOVAL that walks straight past the
-            // "removal is not a supported op" rule three lines up — slot j's holder can no longer
-            // sign anything, so the cluster shrinks without any of the §Q-1 removal ceremony. It
-            // also falsifies the `member_leaves` doc obligation ("one member's `pk_g` in two slots
-            // changes the root — duplicates are unrepresentable"): the tree represents duplicates
-            // perfectly well, and THIS is the gate that makes them unreachable, discharging the
-            // consumer obligation `FalconAggCircuit` leaves open (`falcon_sig::agg` deliberately
-            // permits a repeated key, so `signer_count` counts SIGNATURES, not DISTINCT signers —
-            // only distinct leaves make the two equal).
-            //
-            // Formulated over unordered pairs (28 comparisons for MAX_SIG_CLUSTER = 8 rather than
-            // 56): exactly one flag is set on an update block, so gating a pair on
-            // `changed[i] ∨ changed[k]` selects precisely the pairs containing the changed slot,
-            // and leaves every all-unchanged pair free (the OLD set's distinctness is already a
-            // theorem via the root connect). Padding slots are included: an occupied changed slot's
-            // `pk_g` is nonzero (the `removed` assert above) while padding `pk_g` is zero, so the
-            // comparison is exact rather than over-strict.
-            for i in 0..MAX_SIG_CLUSTER {
-                for k in (i + 1)..MAX_SIG_CLUSTER {
-                    let touches_changed = builder.or(changed_flags[i], changed_flags[k]);
-                    let dup = new_member_leaf_targets[i]
-                        .pk_g
-                        .is_equal(builder, &new_member_leaf_targets[k].pk_g);
-                    let bad = builder.and(touches_changed, dup);
-                    builder.assert_zero(bad.target);
-                }
-            }
-        }
-
         // Gated on the COMPUTED `any_sign`: on a block that applies no member signature nothing
         // here is bound to anything, and requiring a well-formed member set there would force the
         // witness to invent one (padding blocks do not know the channel's members). On a signing
@@ -1640,7 +1418,6 @@ impl UpdateUserTreeTarget {
             public_inputs,
             prev_bp_sig_chain,
             member_leaf_targets,
-            new_member_leaf_targets,
             signer_count,
             member_regev_pk_targets,
             channel_state_fields,
@@ -1732,14 +1509,6 @@ impl UpdateUserTreeTarget {
             .zip(value.member_leaves.iter())
         {
             target.set_witness(witness, leaf);
-        }
-        // §Q-3: NEW member leaves — all-empty padding when the block is not a MemberSetUpdate.
-        {
-            let empty = MemberLeaf::empty_leaf();
-            for (i, target) in self.new_member_leaf_targets.iter().enumerate() {
-                let leaf = value.new_member_leaves.get(i).unwrap_or(&empty);
-                target.set_witness(witness, leaf);
-            }
         }
         witness.set_target(self.signer_count, F::from_canonical_u32(value.signer_count));
 
@@ -2089,10 +1858,8 @@ mod tests {
         (tree, signed_digest)
     }
 
-    /// detail2 §Q-3 harness: a MEMBER-SET-UPDATE signing block over `channel`, transitioning the
-    /// registered leaves to `new_leaves`. Identical to `signing_block` except the channel action:
-    /// kind = MemberSetUpdate, payload = the canonical (prev_root, new_root) commitment, and the
-    /// witness carries `new_member_leaves`.
+    /// Historical direct-MSU harness retained only to prove that both release tombstones refuse
+    /// the old wire shape and reserved action tag.
     fn member_update_block(
         channel: &RegisteredChannel,
         channel_id: u32,
@@ -2130,7 +1897,7 @@ mod tests {
             destination_channel_id: channel_target,
             tx_hash: Bytes32::rand(&mut rng),
             seal: Bytes32::default(),
-            payload_hash: member_set_update_payload(channel.root, new_root),
+            payload_hash: crate::common::tx::member_set_update_payload(channel.root, new_root),
         };
         let mut channel_action_tree = ChannelActionTree::init();
         channel_action_tree.update(0, channel_action);
@@ -2260,9 +2027,9 @@ mod tests {
         assert_eq!(proof.public_inputs, expected_public_inputs);
     }
 
-    /// Positive 2: a FULL full-cluster block — every member slot active, no padding anywhere — proves
-    /// and verifies. The extreme the thermometer and the pk-list padding agreement are most likely
-    /// to get wrong.
+    /// Positive 2: a FULL full-cluster block — every member slot active, no padding anywhere —
+    /// proves and verifies. The extreme the thermometer and the pk-list padding agreement are
+    /// most likely to get wrong.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn a_real_16_of_16_signing_block_proves() {
@@ -2506,8 +2273,8 @@ mod tests {
     /// registered set really is one member, so the root recompute, the padding rule and the
     /// active-slot rule are ALL satisfied and only the `>= 2` floor can refuse it. (Registration
     /// itself will not mint such a channel — `channel_reg_step` range-checks `member_count` to
-    /// `[2, MAX_SIG_CLUSTER]` — which is exactly why the floor has to be restated where the signature is
-    /// applied rather than assumed upstream.)
+    /// `[2, MAX_SIG_CLUSTER]` — which is exactly why the floor has to be restated where the
+    /// signature is applied rather than assumed upstream.)
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn a_single_signer_is_unprovable() {
@@ -2673,7 +2440,7 @@ mod tests {
         }
     }
 
-    // ── detail2 §Q-3: MemberSetUpdate blocks ────────────────────────────────────────────────
+    // ── Retired direct-MSU wire/action tombstones ───────────────────────────────────────────
 
     /// Release gate: even a structurally valid rotation is refused until the validity and
     /// settlement membership transitions consume one atomic receipt.
@@ -2689,7 +2456,7 @@ mod tests {
         new_leaves[1].pk_b = PoseidonHashOut::rand(&mut rng);
         let (tree, _digest) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves.clone());
 
-        assert_refused(&tree, "disabled until the settlement");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
     /// Release gate: even a structurally valid boundary ADD is refused for the same reason.
@@ -2706,10 +2473,11 @@ mod tests {
             regev_pk_digest: PoseidonHashOut::rand(&mut rng),
         };
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        assert_refused(&tree, "disabled until the settlement");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
-    /// Refusal: a rotation that swaps the Regev digest (decryption-key substitution, §Q-6).
+    /// A historically malformed Regev-swap update is stopped by the same retired wire/action
+    /// tombstones; release code does not pay gates to distinguish legacy MSU sub-cases.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn member_update_regev_swap_is_refused() {
@@ -2720,24 +2488,20 @@ mod tests {
         new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
         new_leaves[1].regev_pk_digest = PoseidonHashOut::rand(&mut rng);
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        assert_refused(&tree, "must preserve regev_pk_digest");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
-    /// Refusal (audit M-1): a ROTATE-TO-DUPLICATE — slot 1's signing identity re-pointed at slot
-    /// 0's `pk_g`. This witness satisfies every §Q-3 rule that existed before M-1: exactly one
-    /// slot changes, the slot stays occupied, `regev_pk_digest` is preserved, and the new `pk_g`
-    /// is nonzero so the explicit no-removal assert is untouched. It is nonetheless an EFFECTIVE
-    /// REMOVAL — slot 1's holder can never sign again — and it makes `signer_count` stop counting
-    /// DISTINCT signers, falsifying the "duplicates are unrepresentable" obligation documented on
-    /// `member_leaves` that `FalconAggCircuit` (which deliberately permits a repeated key) leaves
-    /// for THIS layer to discharge.
+    /// Retired legacy shape (audit M-1): a ROTATE-TO-DUPLICATE — slot 1's signing identity
+    /// re-pointed at slot 0's `pk_g`. This witness satisfies every §Q-3 rule that existed
+    /// before M-1: exactly one slot changes, the slot stays occupied, `regev_pk_digest` is
+    /// preserved, and the new `pk_g` is nonzero so the explicit no-removal assert is untouched.
+    /// It is nonetheless an EFFECTIVE REMOVAL — slot 1's holder can never sign again — and it
+    /// makes `signer_count` stop counting DISTINCT signers, falsifying the "duplicates are
+    /// unrepresentable" obligation documented on `member_leaves` that `FalconAggCircuit` (which
+    /// deliberately permits a repeated key) leaves for THIS layer to discharge.
     ///
-    /// `assert_refused` pins BOTH layers: the native `validate_member_set_delta` mirror refuses it
-    /// for the stated reason, AND the circuit refuses it when driven with unchecked public inputs
-    /// (the malicious-prover path, where the native mirror is not a defence).
-    ///
-    /// Confirmed RED without the fix: reverting either the native guard or the in-circuit pairwise
-    /// gate makes the corresponding half of this assertion fail.
+    /// `assert_refused` pins BOTH active tombstones: the native release wire must be empty, and the
+    /// circuit rejects the reserved action tag even when driven through unchecked public inputs.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn member_update_rotate_to_duplicate_is_refused() {
@@ -2754,10 +2518,10 @@ mod tests {
             "regev is preserved — the §Q-6 rule is NOT what rejects this"
         );
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        assert_refused(&tree, "already occupies slot");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
-    /// Refusal: two slots changed in one update.
+    /// Retired legacy shape: two slots changed in one update.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn member_update_two_slot_change_is_refused() {
@@ -2768,10 +2532,10 @@ mod tests {
         new_leaves[0].pk_g = PoseidonHashOut::rand(&mut rng);
         new_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        assert_refused(&tree, "exactly one slot may change");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
-    /// Refusal: an add OFF the left-packed boundary (slot 4 with only 2 occupied).
+    /// Retired legacy shape: an add OFF the left-packed boundary (slot 4 with only 2 occupied).
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn member_update_add_off_boundary_is_refused() {
@@ -2785,11 +2549,10 @@ mod tests {
             regev_pk_digest: PoseidonHashOut::rand(&mut rng),
         };
         let (tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
-        assert_refused(&tree, "left-packed boundary");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 
-    /// Refusal: a payload_hash that does not commit the transition — the signed block must bind
-    /// EXACTLY the (prev_root, new_root) pair.
+    /// Retired legacy shape: a payload hash that does not commit the requested transition.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     fn member_update_payload_mismatch_is_refused() {
@@ -2801,6 +2564,6 @@ mod tests {
         let (mut tree, _d) = member_update_block(&channel, TEST_CHANNEL_ID, new_leaves);
         // Tamper: swap in DIFFERENT new leaves than the payload committed.
         tree.new_member_leaves[1].pk_g = PoseidonHashOut::rand(&mut rng);
-        assert_refused(&tree, "payload_hash");
+        assert_refused(&tree, "new_member_leaves is a retired direct-MSU wire");
     }
 }

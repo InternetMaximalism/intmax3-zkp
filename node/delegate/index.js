@@ -7,6 +7,7 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const { JsonRpcProvider, Wallet: EthersWallet, getAddress } = require('ethers');
 
 const { ApiClient } = require('../common/api-client');
 const {
@@ -19,7 +20,11 @@ const { Store } = require('../common/store');
 const { bootstrapTokenRegistry } = require('../common/token-registry');
 const { makeParticipantCloser } = require('./participant-close');
 const { makeClaimSettlement } = require('./claim-settlement');
+const { SignedTransactionOutbox } = require('./signed-transaction-outbox');
 const { SnapshotVault } = require('./snapshot-vault');
+const { BackingVault } = require('./backing-vault');
+const { makePublicBackingVerifier } = require('./public-backing-verifier');
+const { makePublicClosePublisher } = require('./public-close-publisher');
 const log = require('../common/log');
 const alert = require('../common/alert');
 const { makeRuntime } = require('./loop');
@@ -86,6 +91,53 @@ function resolveDelegateSeed(env = process.env) {
   }
   if (/^0{64}$/.test(raw)) throw new Error('DELEGATE_SEED_HEX must not be the all-zero placeholder');
   return raw.toLowerCase();
+}
+
+function resolveDelegateOutboxPaths(cfg, signerAddress) {
+  const configured = String(cfg && cfg.l1SignerLockRoot || '').trim();
+  if (!configured) {
+    throw new Error('l1SignerLockRoot is required when INTMAX_DELEGATE_L1_PRIVATE_KEY is configured');
+  }
+  const repository = path.resolve(__dirname, '..', '..');
+  const lockRoot = path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : path.resolve(repository, configured);
+  const chainId = BigInt(cfg.chainId);
+  if (chainId <= 0n) throw new Error('delegate L1 chainId must be positive');
+  const signer = getAddress(signerAddress).slice(2).toLowerCase();
+  return {
+    lockRoot,
+    // Every channel process using this signer derives the same outbox directory. The persistent
+    // signer lease is therefore paired with one canonical journal namespace across processes.
+    outboxDirectory: path.join(lockRoot, 'delegate-signed-transaction-outbox', `${chainId}-${signer}`),
+  };
+}
+
+function assertDelegateSignerIsolation(cfg, delegateSignerAddress) {
+  const configured = cfg && cfg.rustPublisherSignerAddresses;
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) {
+    throw new Error(
+      'rustPublisherSignerAddresses.publicValidity/publicClose/closeFunding are required for delegate signer isolation',
+    );
+  }
+  const delegate = getAddress(delegateSignerAddress);
+  const roles = ['publicValidity', 'publicClose', 'closeFunding'];
+  const resolved = {};
+  for (const role of roles) {
+    let address;
+    try { address = getAddress(configured[role]); }
+    catch (_) { throw new Error(`rustPublisherSignerAddresses.${role} must be a valid nonzero address`); }
+    if (address === getAddress('0x0000000000000000000000000000000000000000')) {
+      throw new Error(`rustPublisherSignerAddresses.${role} must be a valid nonzero address`);
+    }
+    if (address === delegate) {
+      throw new Error(
+        `delegate signer ${delegate} must be distinct from Rust ${role} publisher signer ${address}`,
+      );
+    }
+    resolved[role] = address;
+  }
+  return Object.freeze(resolved);
 }
 
 async function startAfterInitialSync(pollChain, sync, startHttpServer, readiness) {
@@ -234,6 +286,33 @@ async function main() {
   fs.mkdirSync(account.workDir || '.', { recursive: true });
   const store = new Store(path.join(account.workDir || '.', `node-delegate-${account.id}.json`));
   const snapshotVault = new SnapshotVault(account.workDir || '.', account.id);
+  const backingVault = new BackingVault(account.workDir || '.', account.id, {
+    chainId: cfg.chainId,
+    rollup: account.rollup,
+    balanceVerifierDataSha256: cfg.balanceVerifierDataSha256,
+  });
+  const backingVerifier = makePublicBackingVerifier({
+    binPath: cfg.publicCloseProverBin,
+    timeoutMs: cfg.publicBackingVerifyTimeoutMs,
+  });
+  const publicClosePublisher = makePublicClosePublisher({
+    proverBinPath: cfg.publicCloseProverBin,
+    publisherBinPath: cfg.publicClosePublisherBin,
+    deploymentManifestPath: cfg.publicCloseDeploymentManifest,
+    deploymentManifestSha256: cfg.publicCloseDeploymentManifestSha256,
+    signerLockRoot: cfg.l1SignerLockRoot,
+    account: cfg.publicClosePublisherAccount,
+    rpc: cfg.rpcUrl,
+    chainId: cfg.chainId,
+    rollup: account.rollup,
+    manager: account.manager,
+    channelId: account.id,
+    balanceVerifierDataSha256: cfg.balanceVerifierDataSha256,
+    workDir: account.workDir,
+    allowUnfinalizedDevnet: cfg.allowUnfinalizedDevnet === true,
+    proveTimeoutMs: cfg.publicCloseProveTimeoutMs,
+    publishTimeoutMs: cfg.publicClosePublishTimeoutMs,
+  });
 
   // Derive identity from the seed (env, never config). The WASM session holds the secret.
   // A daemon must reproduce the same Regev/Falcon identity after every restart; generating a
@@ -254,21 +333,49 @@ async function main() {
   // node operational for sends, but exit mode will raise a sticky liveness fault instead of
   // pretending it can initiate a close.
   const delegateL1Key = process.env.INTMAX_DELEGATE_L1_PRIVATE_KEY || '';
+  let delegateL1Outbox = null;
+  let delegateL1Provider = null;
+  let delegateL1Signer = null;
+  if (delegateL1Key) {
+    // Construct one offline signer/provider/outbox context and inject it into every delegate L1
+    // writer. Separate Wallet-connected Contract instances would reintroduce nonce races.
+    delegateL1Signer = new EthersWallet(delegateL1Key);
+    assertDelegateSignerIsolation(cfg, delegateL1Signer.address);
+    delegateL1Provider = new JsonRpcProvider(cfg.rpcUrl);
+    const outboxPaths = resolveDelegateOutboxPaths(cfg, delegateL1Signer.address);
+    delegateL1Outbox = new SignedTransactionOutbox({
+      ...outboxPaths,
+      chainId: cfg.chainId,
+      signer: delegateL1Signer,
+      provider: delegateL1Provider,
+      confirmations: cfg.l1TxConfirmations == null ? 1 : cfg.l1TxConfirmations,
+      allowUnfinalizedDevnet: cfg.allowUnfinalizedDevnet === true,
+    });
+  }
   const participantCloser = delegateL1Key
     ? makeParticipantCloser({
-      rpcUrl: cfg.rpcUrl,
       chainId: cfg.chainId,
       recipient: account.recipient,
-      privateKey: delegateL1Key,
+      provider: delegateL1Provider,
+      signer: delegateL1Signer,
+      outbox: delegateL1Outbox,
+      confirmations: cfg.l1TxConfirmations == null ? 1 : cfg.l1TxConfirmations,
+      allowUnfinalizedDevnet: cfg.allowUnfinalizedDevnet === true,
+      channelId: account.id,
+      participantSlot: account.slot,
     })
     : null;
   const claimSettlement = delegateL1Key
     ? makeClaimSettlement({
-      rpcUrl: cfg.rpcUrl,
       chainId: cfg.chainId,
       recipient: account.recipient,
-      privateKey: delegateL1Key,
+      provider: delegateL1Provider,
+      signer: delegateL1Signer,
+      outbox: delegateL1Outbox,
       confirmations: cfg.l1TxConfirmations == null ? 1 : cfg.l1TxConfirmations,
+      allowUnfinalizedDevnet: cfg.allowUnfinalizedDevnet === true,
+      channelId: account.id,
+      participantSlot: account.slot,
     })
     : null;
   if (!participantCloser) {
@@ -319,6 +426,16 @@ async function main() {
     participantCloser,
     claimSettlement,
     snapshotVault,
+    backingVault,
+    backingVerifier,
+    publicClosePublisher,
+    // Pin close reconciliation to the exact cursor-1 checkpoint whose complete log batch was
+    // already dispatched.  A newer finalized head may appear between poll completion and this
+    // recovery tick; acting on that unprocessed block would skip its close/challenge events.
+    readDurableCloseState: (manager) => watcher.getDurableCloseState(
+      manager,
+      store.get('chainCheckpoint'),
+    ),
     isChainReady: () => chainReadiness.isReady(),
   });
   const recoverExit = makeSingleFlight(
@@ -428,5 +545,7 @@ module.exports = {
   createDelegateHttpHandler,
   createDelegateHttpServer,
   resolveDelegateSeed,
+  resolveDelegateOutboxPaths,
+  assertDelegateSignerIsolation,
   DEFAULT_DELEGATE_BODY_LIMIT,
 };

@@ -347,6 +347,86 @@ test('pending-close reconciliation getter is pinned to the finalized event block
   assert.equal(pending.stateVersion, 9);
 });
 
+test('delegate close reconciliation reads status, pending intent, and time from one durable block', async () => {
+  const blocks = linearBlocks(12);
+  for (const [number, block] of blocks) block.timestamp = 1_000 + number;
+  // The RPC finalized head has already advanced to 12, while the delegate's fully-dispatched
+  // durable cursor is still pinned to block 10.  Reconciliation must not skip ahead.
+  const provider = new FakeProvider({ blocks, finalized: 12, latest: 12 });
+  const chain = watcher(provider);
+  const observedBlockTags = [];
+  chain._ethers = {
+    Contract: class {
+      async channelStatus(overrides) {
+        observedBlockTags.push(overrides.blockTag);
+        return 1n;
+      }
+
+      async closeRequestGeneration(overrides) {
+        observedBlockTags.push(overrides.blockTag);
+        return 7n;
+      }
+
+      async getPendingClose(overrides) {
+        observedBlockTags.push(overrides.blockTag);
+        return {
+          active: true,
+          closeIntentDigest: hash(123),
+          finalEpoch: 4n,
+          finalStateVersion: 9n,
+          challengeDeadline: 1_100n,
+          closeFreezeNonce: 3n,
+        };
+      }
+    },
+  };
+
+  const close = await chain.getDurableCloseState(ROLLUP, blocks.get(10));
+  assert.equal(close.status, 1);
+  assert.equal(close.durable.number, 10);
+  assert.equal(close.durable.timestamp, 1_010);
+  assert.equal(close.closeRequestGenerationExact, '7');
+  assert.equal(close.pending.challengeDeadlineExact, '1100');
+  assert.deepEqual(observedBlockTags, [10, 10, 10]);
+});
+
+test('delegate close reconciliation rejects a fork switch during Manager reads', async () => {
+  const blocks = linearBlocks(10);
+  for (const [number, block] of blocks) block.timestamp = 1_000 + number;
+  const original = { ...blocks.get(10) };
+  const provider = new FakeProvider({ blocks, finalized: 10, latest: 10 });
+  const chain = watcher(provider);
+  chain._ethers = {
+    Contract: class {
+      async channelStatus() { return 1n; }
+      async closeRequestGeneration() { return 7n; }
+
+      async getPendingClose() {
+        provider.blocks.set(10, {
+          number: 10,
+          hash: hash(8_888),
+          parentHash: hash(8_887),
+          timestamp: 1_010,
+        });
+        return {
+          active: true,
+          closeIntentDigest: hash(123),
+          finalEpoch: 4n,
+          finalStateVersion: 9n,
+          challengeDeadline: 1_100n,
+          closeFreezeNonce: 3n,
+        };
+      }
+    },
+  };
+
+  await assert.rejects(
+    () => chain.getDurableCloseState(ROLLUP, original),
+    error => error instanceof ChainSafetyError
+      && error.code === 'PROCESSED_CHECKPOINT_CHANGED_DURING_MANAGER_READ',
+  );
+});
+
 test('sticky chain-safety halt refuses co-signer and delegate actions', async () => {
   const temp = tempStore('signing-halt');
   try {

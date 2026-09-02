@@ -104,7 +104,7 @@ contract IntmaxRollup {
     // `EthTransferFailed` removed with `claimAuthorizedWithdrawal` (2026-07-28) — it was that
     // function's transfer-failure case and had no other use. It was the only native payout that
     // PUSHED to a caller-named third-party address; every remaining native payout is pull-payment
-    // (`withdrawNative` credits `pendingWithdrawals`, the recipient then pulls via `withdraw()`,
+    // (`withdrawNative` credits `pendingWithdrawals`, the recipient then pulls via `withdraw(amount)`,
     // which sends to `msg.sender` and reverts with `WithdrawTransferFailed`).
     error EthDepositValueMismatch();
     error NonEthDepositMustNotCarryEth();
@@ -114,10 +114,14 @@ contract IntmaxRollup {
     error EmptyBatch();
     error InvalidStakeAmount();
     error NotAuthorizedBlockProducer();
-    /// M-5 (audit28-08-2026): the producer's declared pending-chain pin did not match the live
-    /// chains, i.e. a deposit or a channel registration landed between witness generation and this
-    /// call. Fail CLEANLY here so the producer re-reads and retries, instead of posting a batch
-    /// whose proof can never finalize.
+    /// @dev The guarded production posting endpoint binds the transaction to the exact L1 rollup
+    ///      predecessor used as the validity proof's initial block-chain state. A competing
+    ///      authorized producer moving either field makes the transaction revert before stake or
+    ///      batch state is written.
+    error BlockHeadMoved();
+    /// The producer's declared pending-chain pin is unknown or predates an already processed
+    /// checkpoint. Every real pending-chain pair is retained so a proof may consume its exact
+    /// historical prefix even when a later deposit/registration races publication.
     error PendingChainsMoved();
     error NotBlockProducerManager();
     error NothingToWithdraw();
@@ -163,10 +167,12 @@ contract IntmaxRollup {
     ///      Repeating this at the value boundary covers code/state migration
     ///      that does not execute either constructor.
     modifier releaseRuntime() {
-        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) {
-            revert ReleaseRuntimeUnavailable();
-        }
+        _requireReleaseRuntime();
         _;
+    }
+
+    function _requireReleaseRuntime() private view {
+        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ReleaseRuntimeUnavailable();
     }
 
     // -----------------------------------------------------------------------
@@ -272,6 +278,7 @@ contract IntmaxRollup {
     /// `withdrawERC20` pays ERC-20 leaves only; ETH leaves go through `withdrawNative`.
     error WithdrawalNotErc20Token();
     error NothingToWithdrawForToken();
+    error TokenWithdrawalAmountMismatch();
 
     // -----------------------------------------------------------------------
     // Types
@@ -339,6 +346,19 @@ contract IntmaxRollup {
         // unsound (a batch never advances those live cumulative accumulators — see the comment in
         // `_rollbackBatch`). They had no other reader anywhere in the repo, so removing them also
         // frees a storage slot per submission.
+    }
+
+    /// @dev An immutable observation of one real pair of cumulative pending chains. A posting
+    ///      proof is built against one such pair. Keeping historical prefixes makes publication
+    ///      race-free: later permissionless deposits cannot force an already-proved block to use a
+    ///      different chain, while the packed deposit/registration counts prevent either
+    ///      accumulator from rolling back.
+    struct PendingChainsCheckpoint {
+        bytes32 depositHashChain;
+        bytes32 channelRegHashChain;
+        /// Zero is the unknown-pin sentinel. A real checkpoint stores a presence bit followed by
+        /// the exact uint64 deposit count and uint64 registration count in one storage word.
+        uint256 packedCounts;
     }
 
     /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
@@ -524,6 +544,8 @@ contract IntmaxRollup {
     /// @notice Pending deposits for the next block (rolled into block's deposit_hash_chain).
     bytes32 internal _pendingDepositHashChain;
 
+    mapping(bytes32 => PendingChainsCheckpoint) private _pendingChainsCheckpoints;
+
     // -----------------------------------------------------------------------
     // Identity registration (channel-as-base-user model).
     //
@@ -620,7 +642,7 @@ contract IntmaxRollup {
     ///         `pendingWithdrawals` pattern. `withdrawERC20` credits here (CEI, no token call in
     ///         the verification loop); recipients (incl. the ChannelSettlementManager) pull via
     ///         `withdrawToken`, so a reverting/hooking token transfer cannot block the payout of
-    ///         other leaves and the manager's receiving path mirrors the ETH `withdraw()` pull.
+    ///         other leaves and the manager's receiving path mirrors the ETH exact-amount pull.
     mapping(uint32 => mapping(address => uint256)) public pendingTokenWithdrawals;
 
     event TokenRegistered(uint32 indexed tokenIndex, address indexed token);
@@ -633,13 +655,17 @@ contract IntmaxRollup {
     );
     event TokenWithdrawalClaimed(address indexed recipient, uint32 indexed tokenIndex, uint256 amount);
 
+    function _requireDeployer() private view {
+        if (msg.sender != deployer) revert OnlyDeployer();
+    }
+
     /// @notice Register an ERC-20 for a base token index. Deployer-only (the contract's existing
     ///         admin pattern), APPEND-ONLY and SET-ONCE per index (TM-10b).
     /// @dev SECURITY: index 0 is reserved for native ETH; address(0) is rejected; the address must
     ///      be a deployed contract (a no-code address turns every token call into a vacuous
     ///      success, silently voiding the escrow). Once set, an index can NEVER be remapped.
     function registerToken(uint32 tokenIndex, address token) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         if (tokenIndex == ETH_TOKEN_INDEX) revert TokenIndexZeroReservedForEth();
         if (token == address(0)) revert TokenAddressZeroReserved();
         if (address(tokenAddressOf[tokenIndex]) != address(0)) revert TokenIndexAlreadyRegistered();
@@ -663,7 +689,7 @@ contract IntmaxRollup {
     ///           and `fraudProof` cannot touch blocks at/before the latest finalized block — so a
     ///           root in this set can never be rolled back. Accepting any member is therefore sound
     ///           (the per-withdrawal nullifier still prevents double-spend across roots).
-    mapping(bytes32 => bool) internal finalizedStateRoots;
+    mapping(bytes32 => bool) public isFinalizedStateRoot;
 
     /// @notice The latest finalized intmax block number.
     ///         Fraud proofs cannot target submissions at or before this block.
@@ -749,9 +775,10 @@ contract IntmaxRollup {
         // in the same permanent membership relation as later finalized roots. Keep zero out of the
         // set: test deployments may use it as an unset sentinel, but it is never a withdrawable
         // snapshot under the strict finalized-root API.
-        if (_genesisStateRoot != bytes32(0)) finalizedStateRoots[_genesisStateRoot] = true;
+        if (_genesisStateRoot != bytes32(0)) isFinalizedStateRoot[_genesisStateRoot] = true;
         // Genesis: block 0 has default (zero) hash chains
         blockHashChainAt[0] = bytes32(0);
+        _recordPendingChainsCheckpoint();
     }
 
     /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into a storage
@@ -803,7 +830,7 @@ contract IntmaxRollup {
         uint256[] memory _kIs,
         uint256[] memory _subgroupGenPowers
     ) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         if (withdrawalVkInitialized) revert WithdrawalVkAlreadySet();
         if (_vk.degreeBits == 0) revert WithdrawalVkDegreeBitsZero();
         withdrawalVkInitialized = true;
@@ -824,7 +851,7 @@ contract IntmaxRollup {
     ///         Deployer-only, additive (no removal). A manager earns `authorizePartialWithdrawal`
     ///         call rights after verifying a finalized close proof (N-of-N channel consent).
     function registerSettlementManager(address manager) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         isRegisteredSettlementManager[manager] = true;
         emit SettlementManagerRegistered(manager);
     }
@@ -851,7 +878,7 @@ contract IntmaxRollup {
     ///      the explicit whitelist, deployer-managed). This is the address block posting is
     ///      restricted to (together with its designees).
     function setBlockProducerAdmin(address admin) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         blockProducerAdmin = admin;
         emit BlockProducerAdminSet(admin);
     }
@@ -868,7 +895,7 @@ contract IntmaxRollup {
     ///      `fraudProof` FAILS CLOSED (no fraud confirmation; the no-ZKP timeout-removal branch is
     ///      unaffected) — same deploy-then-initialize trust as `initializeWithdrawalVk`.
     function setKzgVerifier(BlobKZGVerifierExt v) external {
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         if (address(kzgVerifier) != address(0)) revert KzgVerifierAlreadySet();
         if (address(v).code.length == 0) revert KzgVerifierNotAContract();
         kzgVerifier = v;
@@ -925,57 +952,153 @@ contract IntmaxRollup {
     /// @dev SECURITY: permissioned — posting is restricted to the `blockProducerAdmin` or the
     ///      producers it designates (`setBlockProducer`). Fail-closed: with no admin set and an
     ///      empty whitelist, nobody can post.
-    /// @notice The live pending-chain pin a producer must declare when posting (M-5).
-    /// @dev Both pending chains are LIVE CUMULATIVE and are folded into the last sub-block by
-    ///      `_postBlock`, so their value at POSTING time — not at witness-generation time — is what
-    ///      ends up under the proof. Any `deposit()` or `registerChannel()` landing in between moves
-    ///      them. Producers read this immediately before building the witness and pass it back.
+    /// @notice The live pending-chain pin a producer records when building a witness.
+    /// @dev Every value returned here is retained as an immutable checkpoint. Publication consumes
+    ///      the exact checkpoint named by the proof, not whatever newer pair happens to be live at
+    ///      mining time. Later deposits/registrations therefore remain pending for the next block
+    ///      instead of invalidating the already-built proof.
     function pendingChainsPin() public view returns (bytes32) {
-        return keccak256(abi.encodePacked(_pendingDepositHashChain, _pendingChannelRegHashChain));
+        bytes32 depositChain = _pendingDepositHashChain;
+        bytes32 registrationChain = _pendingChannelRegHashChain;
+        bytes32 pin;
+        assembly ("memory-safe") {
+            mstore(0, depositChain)
+            mstore(32, registrationChain)
+            pin := keccak256(0, 64)
+        }
+        return pin;
     }
 
-    /// @notice Post a batch and submit its proof commitment, pinned to the pending chains the
-    ///         witness was generated against.
-    /// @dev SECURITY (M-5, audit28-08-2026): WITHOUT this pin, ANY address could fold a record into
-    ///      `_pendingDepositHashChain` (a 1 wei `deposit()`) or `_pendingChannelRegHashChain`
-    ///      (`registerChannel`) between the producer's witness generation and this call. `_postBlock`
-    ///      then folds a DIFFERENT chain value into the block hash than the proof was built over, so
-    ///      `finalize` fails — and it fails SILENTLY (it returns false rather than reverting), so
-    ///      `finalizedStateRoots` never advances and EVERY withdrawal is blocked until the ~12 h
-    ///      `FINALIZE_DEADLINE_BLOCKS` timeout lets someone truncate the stuck submission. One cheap
-    ///      transaction per window bought a 12-hour chain halt, repeatable indefinitely.
-    ///      With the pin the race is a CLEAN REVERT: the producer re-reads `pendingChainsPin()` and
-    ///      retries in the next block, so a griefer buys one wasted transaction, not a halt.
-    ///      NOTE this is a liveness guard, not a soundness one — a wrong pin can only refuse a post.
+    function _recordPendingChainsCheckpoint() private {
+        bytes32 depositChain = _pendingDepositHashChain;
+        bytes32 registrationChain = _pendingChannelRegHashChain;
+        uint256 packedCounts = 1 | (uint256(depositCount) << 1) | (uint256(channelRegCount) << 65);
+        assembly ("memory-safe") {
+            mstore(0, depositChain)
+            mstore(32, registrationChain)
+            let pin := keccak256(0, 64)
+            mstore(0, pin)
+            mstore(32, _pendingChainsCheckpoints.slot)
+            let checkpointSlot := keccak256(0, 64)
+            sstore(checkpointSlot, depositChain)
+            sstore(add(checkpointSlot, 1), registrationChain)
+            sstore(add(checkpointSlot, 2), packedCounts)
+        }
+    }
+
+    /// @notice Local-devnet compatibility endpoint. Production publishers MUST use
+    ///         `postBlockAndSubmitGuarded`, which additionally binds the proof predecessor.
+    /// @dev SECURITY: accepting only the live pair created a terminal liveness trap: after local
+    ///      terminal admission, one later permissionless deposit made the old proof unpostable and
+    ///      using the new pin made it unverifiable. Historical checkpoints turn that race into a
+    ///      prefix: this batch consumes its authenticated pair and newer records remain queued.
+    ///      Unknown pins and checkpoints older than the already processed pair fail closed.
     function postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
         bytes32 stateRoot,
         bytes32 expectedPendingChains
+    ) external payable nonReentrant {
+        // Keep the legacy five-argument selector permanently local-only. In particular, a future
+        // PCS repair that enables `releaseRuntime` on an explicitly configured public chain must
+        // not accidentally expose an endpoint whose preflight can be raced by another producer.
+        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ReleaseRuntimeUnavailable();
+        _postBlockAndSubmitPinned(subBlocks, proofHash, proofLength, stateRoot, expectedPendingChains);
+    }
+
+    /// @notice Post a batch using both its authenticated pending-chain checkpoint and the exact
+    ///         rollup predecessor against which the validity witness was generated.
+    /// @dev This is the only production publication endpoint. The predecessor guard is evaluated
+    ///      before the stake is recorded or any block/submission state is mutated, closing the
+    ///      preflight-to-mining race between independently authorized producers.
+    function postBlockAndSubmitGuarded(
+        SubBlock[] calldata subBlocks,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot,
+        bytes32 expectedPendingChains,
+        uint64 expectedBlockNumber,
+        bytes32 expectedBlockHashChain
     ) external payable releaseRuntime nonReentrant {
-        if (pendingChainsPin() != expectedPendingChains) revert PendingChainsMoved();
-        _postBlockAndSubmit(subBlocks, proofHash, proofLength, stateRoot);
+        if (blockNumber != expectedBlockNumber || blockHashChain != expectedBlockHashChain) {
+            revert BlockHeadMoved();
+        }
+        _postBlockAndSubmitPinned(subBlocks, proofHash, proofLength, stateRoot, expectedPendingChains);
+    }
+
+    function _postBlockAndSubmitPinned(
+        SubBlock[] calldata subBlocks,
+        bytes32 proofHash,
+        uint32 proofLength,
+        bytes32 stateRoot,
+        bytes32 expectedPendingChains
+    ) private {
+        bytes32 checkpointDepositChain;
+        bytes32 checkpointRegistrationChain;
+        uint256 checkpointCounts;
+        bytes32 processedDepositChain = depositHashChain;
+        bytes32 processedRegistrationChain = channelRegHashChain;
+        uint256 processedCounts;
+        assembly ("memory-safe") {
+            mstore(0, expectedPendingChains)
+            mstore(32, _pendingChainsCheckpoints.slot)
+            let checkpointSlot := keccak256(0, 64)
+            checkpointDepositChain := sload(checkpointSlot)
+            checkpointRegistrationChain := sload(add(checkpointSlot, 1))
+            checkpointCounts := sload(add(checkpointSlot, 2))
+
+            mstore(0, processedDepositChain)
+            mstore(32, processedRegistrationChain)
+            let processedPin := keccak256(0, 64)
+            mstore(0, processedPin)
+            mstore(32, _pendingChainsCheckpoints.slot)
+            processedCounts := sload(add(keccak256(0, 64), 2))
+        }
+        if (
+            checkpointCounts == 0 || uint64(checkpointCounts >> 1) < uint64(processedCounts >> 1)
+                || uint64(checkpointCounts >> 65) < uint64(processedCounts >> 65)
+        ) {
+            revert PendingChainsMoved();
+        }
+        _postBlockAndSubmit(
+            subBlocks,
+            proofHash,
+            proofLength,
+            stateRoot,
+            checkpointDepositChain,
+            checkpointRegistrationChain,
+            uint64(checkpointCounts >> 1)
+        );
     }
 
     function _postBlockAndSubmit(
         SubBlock[] calldata subBlocks,
         bytes32 proofHash,
         uint32 proofLength,
-        bytes32 stateRoot
+        bytes32 stateRoot,
+        bytes32 checkpointDepositChain,
+        bytes32 checkpointRegistrationChain,
+        uint64 checkpointDepositCount
     ) private {
         if (!isBlockProducer[msg.sender] && msg.sender != blockProducerAdmin) {
             revert NotAuthorizedBlockProducer();
         }
         if (msg.value != POST_BLOCK_STAKE) revert InvalidStakeAmount();
-        BatchMetadata memory meta = _postBlock(subBlocks);
+        BatchMetadata memory meta =
+            _postBlock(subBlocks, checkpointDepositChain, checkpointRegistrationChain, checkpointDepositCount);
         uint256 submissionId = _submit(proofHash, proofLength, stateRoot);
 
         stakeInfo[submissionId] = StakeInfo({submitter: msg.sender, spent: false});
         _batchMetadata[submissionId] = meta;
     }
 
-    function _postBlock(SubBlock[] calldata subBlocks) internal returns (BatchMetadata memory meta) {
+    function _postBlock(
+        SubBlock[] calldata subBlocks,
+        bytes32 checkpointDepositChain,
+        bytes32 checkpointRegistrationChain,
+        uint64 checkpointDepositCount
+    ) internal returns (BatchMetadata memory meta) {
         if (subBlocks.length == 0) revert EmptyBatch();
 
         bytes32 previousBlockHash = blockHashChain;
@@ -993,8 +1116,7 @@ contract IntmaxRollup {
         // (block_witness_generator.rs:617,631). The previous per-round reset-to-0 diverged from Rust
         // for any block following a deposit and silently dropped deposit history across rounds —
         // this mirrors the channel-reg chain's existing carry-forward semantics below.
-        bytes32 pendingHashBefore = _pendingDepositHashChain;
-        bytes32 batchDepositHashChain = pendingHashBefore;
+        bytes32 batchDepositHashChain = checkpointDepositChain;
 
         // --- Channel registrations: CUMULATIVE running chain (matches the Rust channel_reg chain) ---
         // SECURITY: `_pendingChannelRegHashChain` is the LIVE CUMULATIVE registration chain — folded
@@ -1006,12 +1128,7 @@ contract IntmaxRollup {
         // path), but diverging from Rust for ANY channel registered in a later round than another
         // (the channel-to-channel path). Mirrors the cumulative deposit chain above.
         bytes32 previousChannelRegHashChain = channelRegHashChain;
-        bytes32 pendingChannelRegBefore = _pendingChannelRegHashChain;
-        // CUMULATIVE: `_pendingChannelRegHashChain` is NOT reset (see comment above), so when a
-        // registration has occurred it already equals the running cumulative; the ternary still
-        // selects `previous` only in the never-registered case (pending == 0).
-        bytes32 batchChannelRegHashChain =
-            pendingChannelRegBefore == bytes32(0) ? previousChannelRegHashChain : pendingChannelRegBefore;
+        bytes32 batchChannelRegHashChain = checkpointRegistrationChain;
 
         uint64 previousPostingRound = postingRound;
         postingRound++;
@@ -1064,7 +1181,7 @@ contract IntmaxRollup {
         blockHashChainAt[currentBlockNumber] = currentHash;
         depositHashChain = batchDepositHashChain;
         channelRegHashChain = batchChannelRegHashChain;
-        processedDepositCount = depositCount;
+        processedDepositCount = checkpointDepositCount;
 
         meta = BatchMetadata({
             startBlockNumber: startBlockNumber,
@@ -1118,9 +1235,9 @@ contract IntmaxRollup {
             // tokens are UNSUPPORTED and fail closed here rather than under-collateralizing the
             // escrow. (A hook that re-enters to inflate our balance mid-transfer can only make
             // delta LARGER, which also fails the strict equality.)
-            uint256 balBefore = token.balanceOf(address(this));
+            uint256 balBefore = _tokenBalanceOf(token, address(this));
             SafeERC20Lib.safeTransferFrom(token, msg.sender, address(this), amount);
-            if (token.balanceOf(address(this)) - balBefore != amount) {
+            if (_tokenBalanceOf(token, address(this)) - balBefore != amount) {
                 revert TokenDepositAmountMismatch();
             }
             // Per-token escrow ceiling grows only by the VERIFIED-received amount (TM-1 layer b).
@@ -1138,6 +1255,7 @@ contract IntmaxRollup {
         _depositRecords[idx] = DepositRecord({
             depositor: msg.sender, recipient: recipient, tokenIndex: tokenIndex, amount: amount, auxData: auxData
         });
+        _recordPendingChainsCheckpoint();
 
         emit Deposited(idx, msg.sender, recipient, tokenIndex, amount, auxData, newHash);
     }
@@ -1182,7 +1300,7 @@ contract IntmaxRollup {
         // Channel ids are one-shot protocol state. Pricing a targeted front-run does not authorize
         // it: a stranger can still pay a small fee and permanently occupy a predictable id. Keep
         // registration under the immutable deployment authority instead.
-        if (msg.sender != deployer) revert OnlyDeployer();
+        _requireDeployer();
         if (channelId == 0) revert ChannelIdZeroReserved();
         if (channelId == BURN_CHANNEL_ID) revert ChannelIdBurnReserved();
         // The validity registration circuit constrains this retained wire field to zero. Reject
@@ -1249,6 +1367,7 @@ contract IntmaxRollup {
             keccak256(abi.encodePacked(regevPkDigests)),
             newHash
         );
+        _recordPendingChainsCheckpoint();
     }
 
     /// @dev Require all three bytes32 values to encode four big-endian canonical
@@ -1443,7 +1562,7 @@ contract IntmaxRollup {
 
         sub.finalized = true;
         latestFinalizedStateRoot = stateRoot;
-        finalizedStateRoots[stateRoot] = true; // permanent; enables withdrawals against any finalized root
+        isFinalizedStateRoot[stateRoot] = true; // permanent; enables withdrawals against any finalized root
         latestFinalizedBlockNumber = validityPIs.finalBlockNumber;
 
         emit Finalized(submissionId, stateRoot);
@@ -1541,19 +1660,14 @@ contract IntmaxRollup {
         return _submissions[id].finalized;
     }
 
-    /// @notice Canonical read-back for proof services before they advance a durable finalized
-    ///         cursor. Historical roots remain true after `latestFinalizedStateRoot` advances.
-    function isFinalizedStateRoot(bytes32 stateRoot) external view returns (bool) {
-        return finalizedStateRoots[stateRoot];
-    }
-
-    /// @notice Pull-payment: claim pending withdrawals (stake refunds / fraud rewards).
-    ///         Finalize and fraudProof credit amounts to pendingWithdrawals instead of
-    ///         pushing ETH, so reverting recipients cannot block protocol operations.
-    function withdraw() external releaseRuntime nonReentrant {
-        uint256 amount = pendingWithdrawals[msg.sender];
-        if (amount == 0) revert NothingToWithdraw();
-        pendingWithdrawals[msg.sender] = 0;
+    /// @notice Pull an exact amount from the caller's native withdrawal ledger.
+    /// @dev Exact-amount withdrawal keeps unrelated recipient-wide credits out of a channel
+    ///      Manager's channel-scoped backing. Credits arriving before mining remain in the Rollup
+    ///      ledger instead of being swept into, and stranded inside, the Manager.
+    function withdraw(uint256 amount) external releaseRuntime nonReentrant {
+        uint256 pending = pendingWithdrawals[msg.sender];
+        if (amount == 0 || amount > pending) revert NothingToWithdraw();
+        pendingWithdrawals[msg.sender] = pending - amount;
         (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert WithdrawTransferFailed();
     }
@@ -1644,7 +1758,7 @@ contract IntmaxRollup {
     ///   • Per leaf: single-use nullifier (CEI check-then-set) + `totalEscrowed -= amount` (the
     ///     GLOBAL solvency ceiling: Σ payouts ≤ Σ real ETH escrowed; underflow reverts the whole
     ///     call → cross-channel theft impossible) + pull-payment credit. v1 pays ETH token only.
-    ///   • No external call here (pull-payment via `withdraw()`); `nonReentrant` is belt-and-braces.
+    ///   • No external call here (pull-payment via `withdraw(amount)`); `nonReentrant` is belt-and-braces.
     function withdrawNative(Withdrawal[] calldata ws, address withdrawalProver, MleVerifier.MleProof calldata mleProof)
         external
         nonReentrant
@@ -1658,33 +1772,7 @@ contract IntmaxRollup {
             // mixing ETH and ERC-20 leaves is not payable by either entry point (the chain binds as
             // a whole) — the withdrawal prover emits single-asset-class chains.
             if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken();
-            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
-
-            // GAP2: burn withdrawals (auxData != 0) require a finalized partial-withdrawal
-            // authorization from a registered settlement manager — a SECOND FACTOR (channel
-            // consent) on top of the proof. Normal withdrawals (auxData == 0) are unaffected.
-            //
-            // SECURITY — IPW2 commits (recipient, tokenIndex, amount, auxData), while IMD2 makes
-            // that auxData commit the immutable source channel, base nonce, tx leaf, and the same
-            // economics in the N-of-N-signed history. The proof-side nullifier is deliberately
-            // absent from IPW2 because the Manager cannot verify it. `_verifyWithdrawalSet` above
-            // supplies that missing proof binding and this loop enforces nullifier single use. The
-            // authorization must therefore stay a second factor on this proof-backed path, never a
-            // standalone payout authority.
-            if (w.auxData != bytes32(0)) {
-                bytes32 authDigest = _withdrawalAuthDigest(w);
-                if (!partialWithdrawalAuthorized[authDigest]) {
-                    revert PartialWithdrawalNotAuthorized();
-                }
-                // IPW2 deliberately omits the proof-side nullifier, so a permanent flag would
-                // authorize every later proof-valid leaf carrying the same payout tuple/auxData
-                // under a fresh nonce. Consume the N-of-N authorization with the first successful
-                // proof-backed payout. Any later revert (including escrow underflow) restores this
-                // delete atomically with the rest of the transaction.
-                delete partialWithdrawalAuthorized[authDigest];
-            }
-
-            withdrawalNullifierUsed[w.nullifier] = true;
+            _consumeWithdrawalGuard(w);
             // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
             totalEscrowed -= w.amount;
             pendingWithdrawals[w.recipient] += w.amount;
@@ -1719,23 +1807,7 @@ contract IntmaxRollup {
             Withdrawal calldata w = ws[i];
             if (w.tokenIndex == ETH_TOKEN_INDEX) revert WithdrawalNotErc20Token();
             if (address(tokenAddressOf[w.tokenIndex]) == address(0)) revert TokenIndexNotRegistered();
-            if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
-
-            // GAP2 mirror: burn withdrawals need a finalized IPW2 authorization (the digest commits
-            // tokenIndex, so an ETH authorization can never authorize an ERC-20 payout). SAME
-            // second-factor semantics as `withdrawNative` — see the SECURITY note there: this is a
-            // veto on a proof-verified leaf, NOT a derivation of the leaf's fields.
-            if (w.auxData != bytes32(0)) {
-                bytes32 authDigest = _withdrawalAuthDigest(w);
-                if (!partialWithdrawalAuthorized[authDigest]) {
-                    revert PartialWithdrawalNotAuthorized();
-                }
-                // Same one-shot authorization semantics as the native lane. The token index is in
-                // IPW2, so the two asset paths cannot consume one another's authorization.
-                delete partialWithdrawalAuthorized[authDigest];
-            }
-
-            withdrawalNullifierUsed[w.nullifier] = true;
+            _consumeWithdrawalGuard(w);
             // PER-TOKEN solvency ceiling (TM-1 layer b): underflow-revert on over-release.
             escrowedByToken[w.tokenIndex] -= w.amount;
             pendingTokenWithdrawals[w.tokenIndex][w.recipient] += w.amount;
@@ -1744,20 +1816,37 @@ contract IntmaxRollup {
     }
 
     /// @notice Pull-payment: claim accrued ERC-20 credits for one token (the ERC-20 mirror of
-    ///         `withdraw()`). The ChannelSettlementManager receives its channel's ERC-20 funds
+    ///         `withdraw(amount)`). The ChannelSettlementManager receives its channel's ERC-20 funds
     ///         through this call (measuring its own balance delta), exactly as it pulls ETH via
-    ///         `withdraw()`.
-    /// @dev SECURITY: CEI (credit zeroed before the token call) + `nonReentrant` — the token is
-    ///      untrusted code (ERC-777-style hooks) but re-entering any guarded entry point reverts,
-    ///      and the credit is already zero on reentry regardless.
-    function withdrawToken(uint32 tokenIndex) external releaseRuntime nonReentrant {
+    ///         `withdraw(amount)`.
+    /// @dev SECURITY: CEI (credit decremented before the token call) + `nonReentrant` — the token is
+    ///      untrusted code (ERC-777-style hooks) but re-entering any guarded entry point reverts;
+    ///      the selected amount has already been removed even when unrelated credit remains.
+    function withdrawToken(uint32 tokenIndex, uint256 amount) external releaseRuntime nonReentrant {
         IERC20 token = tokenAddressOf[tokenIndex];
         if (address(token) == address(0)) revert TokenIndexNotRegistered();
-        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
-        if (amount == 0) revert NothingToWithdrawForToken();
-        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
+        uint256 pending = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        if (amount == 0 || amount > pending) revert NothingToWithdrawForToken();
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = pending - amount;
         emit TokenWithdrawalClaimed(msg.sender, tokenIndex, amount);
+        uint256 balanceBefore = _tokenBalanceOf(token, msg.sender);
         SafeERC20Lib.safeTransfer(token, msg.sender, amount);
+        if (_tokenBalanceOf(token, msg.sender) - balanceBefore != amount) {
+            revert TokenWithdrawalAmountMismatch();
+        }
+    }
+
+    /// @dev Compact strict `balanceOf` shared by ERC-20 deposit and withdrawal boundaries. A
+    ///      failed or malformed view cannot establish exact custody/receipt and fails closed.
+    function _tokenBalanceOf(IERC20 token, address account) private view returns (uint256 tokenBalance) {
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x70a08231))
+            mstore(add(ptr, 4), account)
+            if iszero(staticcall(gas(), token, ptr, 36, ptr, 32)) { revert(0, 0) }
+            if lt(returndatasize(), 32) { revert(0, 0) }
+            tokenBalance := mload(ptr)
+        }
     }
 
     /// @dev IPW2 partial-withdrawal auth digest over the proof-verified withdrawal economics and
@@ -1766,16 +1855,36 @@ contract IntmaxRollup {
     ///      the ETH and ERC-20 payout paths. The proof-free consumer of this digest
     ///      (`claimAuthorizedWithdrawal`) was removed 2026-07-28.
     function _withdrawalAuthDigest(Withdrawal calldata w) private pure returns (bytes32) {
-        return
-            keccak256(
-                abi.encodePacked(
-                    bytes4(0x49505732), // "IPW2" domain
-                    w.recipient,
-                    w.tokenIndex,
-                    w.amount,
-                    w.auxData
-                )
-            );
+        address recipient = w.recipient;
+        uint32 tokenIndex = w.tokenIndex;
+        uint256 amount = w.amount;
+        bytes32 auxData = w.auxData;
+        bytes32 result;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x49505732)) // "IPW2"
+            mstore(add(ptr, 4), shl(96, recipient))
+            mstore(add(ptr, 24), shl(224, tokenIndex))
+            mstore(add(ptr, 28), amount)
+            mstore(add(ptr, 60), auxData)
+            result := keccak256(ptr, 92)
+            mstore(0x40, add(ptr, 96))
+        }
+        return result;
+    }
+
+    /// @dev Shared native/ERC-20 single-use guard. IPW2 commits recipient, token, amount and aux;
+    ///      the already-verified withdrawal proof supplies those economics and the independent
+    ///      nullifier. The authorization is consumed before accounting, with transaction rollback
+    ///      restoring both writes if a later escrow ceiling fails.
+    function _consumeWithdrawalGuard(Withdrawal calldata w) private {
+        if (withdrawalNullifierUsed[w.nullifier]) revert WithdrawalNullifierUsed();
+        if (w.auxData != bytes32(0)) {
+            bytes32 authDigest = _withdrawalAuthDigest(w);
+            if (!partialWithdrawalAuthorized[authDigest]) revert PartialWithdrawalNotAuthorized();
+            delete partialWithdrawalAuthorized[authDigest];
+        }
+        withdrawalNullifierUsed[w.nullifier] = true;
     }
 
     /// @dev Shared verification core of `withdrawNative` / `withdrawERC20` (steps 1–3): real
@@ -1807,7 +1916,7 @@ contract IntmaxRollup {
         //     the latest — finalized roots are permanent, so this is sound and avoids locking honest
         //     withdrawers out when the next block finalizes (the nullifier still blocks double-spend).
         bytes32 extCommitment = _limbsToBytes32(pi, 8);
-        if (!finalizedStateRoots[extCommitment]) revert WithdrawalExtCommitmentMismatch();
+        if (!isFinalizedStateRoot[extCommitment]) revert WithdrawalExtCommitmentMismatch();
 
         // 2b. block_number PI (single limb 16 = the u63 value). Used in the pis_hash recomputation
         //     below (re-split into 2 big-endian u32 words there); no separate equality check is
@@ -1831,7 +1940,24 @@ contract IntmaxRollup {
     ///      = 152-byte preimage. abi.encodePacked emits address as 20 bytes, uint32 as 4, uint256 as
     ///      32 (big-endian) — matching the Rust 5/1/8 u32-limb layout exactly.
     function _foldWithdrawalLeaf(bytes32 prev, Withdrawal calldata w) private pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, w.recipient, w.tokenIndex, w.amount, w.nullifier, w.auxData));
+        address recipient = w.recipient;
+        uint32 tokenIndex = w.tokenIndex;
+        uint256 amount = w.amount;
+        bytes32 nullifier = w.nullifier;
+        bytes32 auxData = w.auxData;
+        bytes32 result;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, prev)
+            mstore(add(ptr, 32), shl(96, recipient))
+            mstore(add(ptr, 52), shl(224, tokenIndex))
+            mstore(add(ptr, 56), amount)
+            mstore(add(ptr, 88), nullifier)
+            mstore(add(ptr, 120), auxData)
+            result := keccak256(ptr, 152)
+            mstore(0x40, add(ptr, 160))
+        }
+        return result;
     }
 
     /// @dev pis_hash = remove_3bits( keccak256(
@@ -1845,8 +1971,17 @@ contract IntmaxRollup {
         pure
         returns (bytes32)
     {
-        bytes32 h = keccak256(abi.encodePacked(withdrawalHash, prover, extCommitment, blockNumber));
-        return bytes32(uint256(h) & ((uint256(1) << 253) - 1));
+        bytes32 result;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, withdrawalHash)
+            mstore(add(ptr, 32), shl(96, prover))
+            mstore(add(ptr, 52), extCommitment)
+            mstore(add(ptr, 84), shl(192, blockNumber))
+            result := and(keccak256(ptr, 92), sub(shl(253, 1), 1))
+            mstore(0x40, add(ptr, 96))
+        }
+        return result;
     }
 
     /// @dev Reconstruct a bytes32 from 8 big-endian u32 limbs starting at `off` (Bytes32::to_u32_vec
@@ -2203,7 +2338,7 @@ contract IntmaxRollup {
     }
 
     /// @dev Credit fraud reward/treasury share to pendingWithdrawals (pull-payment).
-    ///      Recipients call withdraw() to claim. A reverting recipient cannot block fraudProof().
+    ///      Recipients call withdraw(amount) to claim. A reverting recipient cannot block fraudProof().
     function _slashStake(uint256 submissionId, address reporter) internal {
         StakeInfo storage info = stakeInfo[submissionId];
         if (info.submitter == address(0) || info.spent) {
@@ -2225,7 +2360,7 @@ contract IntmaxRollup {
     }
 
     /// @dev Credit stake refund to pendingWithdrawals (pull-payment).
-    ///      Submitter calls withdraw() to claim. A reverting submitter cannot block finalize().
+    ///      Submitter calls withdraw(amount) to claim. A reverting submitter cannot block finalize().
     function _refundStake(uint256 submissionId) internal {
         StakeInfo storage info = stakeInfo[submissionId];
         if (info.submitter == address(0) || info.spent) {
@@ -2281,45 +2416,45 @@ contract IntmaxRollup {
     /// validityPIs (and therefore to the accepted state root) with no separately-trusted argument.
     function _mlePublicInputsMatch(uint256[] memory publicInputs, bytes32 piHash) internal pure returns (bool) {
         if (publicInputs.length != 8) return false;
-        uint256 h = uint256(piHash);
-        for (uint256 i = 0; i < 8; i++) {
-            // Extract the i-th big-endian u32 limb: bits [255-i*32 .. 224-i*32]
-            uint256 limb = (h >> (224 - i * 32)) & 0xFFFFFFFF;
-            if (publicInputs[i] != limb) return false;
-        }
-        return true;
+        return _limbsMatchBytes32(publicInputs, 0, piHash);
     }
 
     /// @dev Compute block hash matching Rust's Block::hash_with_prev_hash:
     ///      keccak256(prev_hash || channel_id || timestamp || key_ids
-    ///               || tx_tree_root || deposit_hash_chain)
-    ///      All values packed as u32 words.
+    ///               || tx_tree_root || deposit_hash_chain || channel_reg_hash_chain).
+    ///      Integer fields and every key id are packed big-endian with their exact Rust width.
     function _computeBlockHash(
         bytes32 prevHash,
         uint32 channelId,
-        uint64 timestamp,
+        uint64 blockTimestamp,
         uint32[] calldata keyIds,
         bytes32 txTreeRoot,
         bytes32 blockDepositHashChain,
         bytes32 blockChannelRegHashChain
     ) internal pure returns (bytes32) {
-        // Build the u32 array matching Rust's solidity_keccak256 layout.
-        // NOTE: abi.encodePacked(uint32[]) pads each element to 32 bytes, which
-        // does NOT match Rust's 4-byte-per-u32 packing. We must manually pack
-        // the keyIds as raw 4-byte big-endian values.
-        bytes memory packed = abi.encodePacked(prevHash, channelId, timestamp);
-        // Pack keyIds as 4-byte big-endian values (matching Rust u32 layout)
-        for (uint256 i = 0; i < keyIds.length; i++) {
-            packed = bytes.concat(packed, bytes4(keyIds[i]));
+        bytes32 result;
+        // `abi.encodePacked(uint32[])` pads each element to 32 bytes. Write the exact 4-byte words
+        // directly instead; this is both cheaper and byte-identical to Rust's solidity_keccak256.
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, prevHash)
+            mstore(add(ptr, 32), shl(224, channelId))
+            mstore(add(ptr, 36), shl(192, blockTimestamp))
+            let cursor := add(ptr, 44)
+            let source := keyIds.offset
+            let sourceEnd := add(source, mul(keyIds.length, 32))
+            for {} lt(source, sourceEnd) { source := add(source, 32) } {
+                mstore(cursor, shl(224, calldataload(source)))
+                cursor := add(cursor, 4)
+            }
+            mstore(cursor, txTreeRoot)
+            mstore(add(cursor, 32), blockDepositHashChain)
+            mstore(add(cursor, 64), blockChannelRegHashChain)
+            cursor := add(cursor, 96)
+            result := keccak256(ptr, sub(cursor, ptr))
+            mstore(0x40, and(add(cursor, 31), not(31)))
         }
-        // G6: the block-hash preimage is
-        //   prev || channelId || timestamp || keyIds || txTreeRoot ||
-        //   deposit_hash_chain || channel_reg_hash_chain
-        // byte-identical to Rust `Block::hash_with_prev_hash` (deposit chain then reg chain, each
-        // 32 bytes). This folds the registration chain into the on-chain block hash chain, so the
-        // `blockHashChainAt` snapshot the validity proof must match commits the registration set.
-        packed = bytes.concat(packed, txTreeRoot, blockDepositHashChain, blockChannelRegHashChain);
-        return keccak256(packed);
+        return result;
     }
 
     /// @dev Compute deposit hash matching Rust's Deposit::hash_with_prev_hash:
@@ -2333,6 +2468,18 @@ contract IntmaxRollup {
         uint256 amount,
         bytes32 auxData
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prevHash, depositor, recipient, tokenIndex, amount, auxData));
+        bytes32 result;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, prevHash)
+            mstore(add(ptr, 32), shl(96, depositor))
+            mstore(add(ptr, 52), recipient)
+            mstore(add(ptr, 84), shl(224, tokenIndex))
+            mstore(add(ptr, 88), amount)
+            mstore(add(ptr, 120), auxData)
+            result := keccak256(ptr, 152)
+            mstore(0x40, add(ptr, 160))
+        }
+        return result;
     }
 }

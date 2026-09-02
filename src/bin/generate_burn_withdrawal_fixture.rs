@@ -1,8 +1,8 @@
 //! Generate on-chain test fixtures for a REAL partial-withdrawal (BURN) payout — the repo's first
 //! payout artifact whose withdrawal leaf carries `aux_data != 0`.
 //!
-//! WHY THIS EXISTS (doc/tasks/partial-withdrawal-payout-design.md P3 HEAVY note / P4-3): every other
-//! committed payout fixture (`withdrawal_payout.json`, `close_withdrawal_payout.json`,
+//! WHY THIS EXISTS (doc/tasks/partial-withdrawal-payout-design.md P3 HEAVY note / P4-3): every
+//! other committed payout fixture (`withdrawal_payout.json`, `close_withdrawal_payout.json`,
 //! `c2c_withdrawal_payout.json`, `sepolia_withdrawal_payout.json`) is a NORMAL withdrawal
 //! (`aux_data == 0`). So `contracts/test/PartialWithdrawalPayout.t.sol` could only ever assert that
 //! the burn branch fails on the proof binding (`test_burnLeafWithoutAuthorization_failsClosed`) —
@@ -21,7 +21,7 @@ use std::{fs, path::Path};
 
 use intmax3_zkp::{
     common::{channel::burn_descriptor, channel_id::ChannelId},
-    ethereum_types::{address::Address, bytes32::Bytes32, u256::U256, u32limb_trait::U32LimbTrait},
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
 };
 
@@ -53,14 +53,16 @@ fn main() -> anyhow::Result<()> {
         .ok()
         .map(|h| parse_address_hex(&h))
         // A fixed, non-anvil L1 recipient so the fixture is self-describing and stable across runs.
-        .unwrap_or_else(|| Address::from_u32_slice(&[0x00, 0x00, 0x00, 0x00, 0x0B0E_0000]).unwrap());
+        .unwrap_or_else(|| {
+            Address::from_u32_slice(&[0x00, 0x00, 0x00, 0x00, 0x0B0E_0000]).unwrap()
+        });
 
     // A real IMD2-shaped burn descriptor. On the payout side `withdrawNative` never re-derives it
-    // (that binding is the Manager's job at submit time — Phase 0/2), so its exact preimage does not
-    // affect what this fixture proves; we still compute a genuine `burn_descriptor(...)` value
-    // rather than an arbitrary constant so the leaf reads as a faithful burn. The tx_leaf and
-    // recipient limbs here are documentation stand-ins for the inter-channel burn structure a live
-    // burn would carry.
+    // (that binding is the Manager's job at submit time — Phase 0/2), so its exact preimage does
+    // not affect what this fixture proves; we still compute a genuine `burn_descriptor(...)`
+    // value rather than an arbitrary constant so the leaf reads as a faithful burn. The tx_leaf
+    // and recipient limbs here are documentation stand-ins for the inter-channel burn structure
+    // a live burn would carry.
     let burn_aux = burn_descriptor(
         ChannelId::new(channel_id as u64).expect("fixture channel id"),
         0, // the fixture models the channel's first base-account send
@@ -69,7 +71,11 @@ fn main() -> anyhow::Result<()> {
         0,
         U256::from(withdrawal_amount as u32),
     );
-    assert_ne!(burn_aux, Bytes32::default(), "burn descriptor must be nonzero");
+    assert_ne!(
+        burn_aux,
+        Bytes32::default(),
+        "burn descriptor must be nonzero"
+    );
 
     let params = ChannelWithdrawalParams {
         channel_id,
@@ -91,8 +97,9 @@ fn main() -> anyhow::Result<()> {
 
     let artifacts = build_channel_withdrawal(&params, None)?;
 
-    // Falsifiable self-check: the emitted payout leaf really is a burn (aux != 0). A regression that
-    // dropped the aux stamp would produce a normal leaf and silently defeat the whole fixture.
+    // Falsifiable self-check: the emitted payout leaf really is a burn (aux != 0). A regression
+    // that dropped the aux stamp would produce a normal leaf and silently defeat the whole
+    // fixture.
     {
         let payout: serde_json::Value = serde_json::from_str(&artifacts.payout_json)?;
         let aux = payout["withdrawals"][0]["aux_data"]
@@ -122,8 +129,14 @@ fn main() -> anyhow::Result<()> {
         out_dir.join(name("lifecycle_validity_mle.json")),
         &artifacts.validity_mle_json,
     )?;
-    fs::write(out_dir.join(name("lifecycle.json")), &artifacts.lifecycle_json)?;
-    fs::write(out_dir.join(name("withdrawal_payout.json")), &artifacts.payout_json)?;
+    fs::write(
+        out_dir.join(name("lifecycle.json")),
+        &artifacts.lifecycle_json,
+    )?;
+    fs::write(
+        out_dir.join(name("withdrawal_payout.json")),
+        &artifacts.payout_json,
+    )?;
 
     for f in [
         "withdrawal_mle.json",

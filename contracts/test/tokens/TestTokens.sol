@@ -63,6 +63,29 @@ contract FeeOnTransferERC20 is SimpleERC20 {
     }
 }
 
+/// @notice Sender-selective fee token. It behaves exactly on deposit and Rollup-to-Manager pulls,
+/// then under-delivers only when the configured Manager pays its final recipient. This models
+/// upgradeable/role-based tokens whose transfer semantics can change after registration.
+contract SenderFeeERC20 is SimpleERC20 {
+    address public taxedSender;
+    uint256 public immutable feeBps;
+
+    constructor(uint256 feeBps_) SimpleERC20("SenderFee") {
+        feeBps = feeBps_;
+    }
+
+    function setTaxedSender(address sender) external {
+        taxedSender = sender;
+    }
+
+    function _move(address from, address to, uint256 amount) internal override {
+        require(balanceOf[from] >= amount, "balance");
+        uint256 fee = from == taxedSender ? (amount * feeBps) / 10_000 : 0;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - fee;
+    }
+}
+
 /// @notice ERC-20 that returns `false` instead of reverting (SafeERC20Lib must treat it as
 /// failure).
 contract FalseReturnERC20 is SimpleERC20 {

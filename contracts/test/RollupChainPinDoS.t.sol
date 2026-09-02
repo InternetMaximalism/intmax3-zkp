@@ -11,8 +11,9 @@ pragma solidity ^0.8.24;
 // withdrawal is blocked until the ~12 h `FINALIZE_DEADLINE_BLOCKS` timeout lets someone truncate the
 // stuck submission. One cheap transaction per window bought a 12-hour chain halt, repeatable.
 //
-// The fix makes the producer declare the pin it proved against, so the race is a CLEAN REVERT and
-// the producer simply re-reads and retries.
+// The release fix retains every real pending-chain pair as a monotone checkpoint. An already-built
+// proof consumes its exact historical prefix even if a later record lands; that later record stays
+// pending for the next proof. Unknown or regressive pins still fail closed.
 
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
@@ -60,44 +61,140 @@ contract RollupChainPinDoSTest is Test {
         vm.blobhashes(h);
     }
 
-    /// THE ATTACK, blocked: the griefer's 1 wei deposit lands between the producer reading the pin
-    /// and posting. The post now REVERTS cleanly instead of committing an unfinalizable batch.
-    function test_M5_griefersDepositMakesThePostRevertCleanly() public {
+    function _register(uint32 channelId, uint256 seed) internal {
+        bytes32[] memory pk = new bytes32[](2);
+        pk[0] = bytes32(seed + 11); pk[1] = bytes32(seed + 12);
+        bytes32[] memory pkb = new bytes32[](2);
+        pkb[0] = bytes32(seed + 21); pkb[1] = bytes32(seed + 22);
+        bytes32[] memory rg = new bytes32[](2);
+        rg[0] = bytes32(seed + 31); rg[1] = bytes32(seed + 32);
+        address[] memory rc = new address[](2);
+        rc[0] = address(uint160(seed + 0x1001)); rc[1] = address(uint160(seed + 0x1002));
+        rollup.registerChannel(channelId, 0, 0, pk, pkb, rg, rc);
+    }
+
+    /// The griefer's 1 wei deposit cannot invalidate the already-built prefix. Block 1 consumes
+    /// the zero-chain checkpoint and block 2 later consumes the deposit, with no proof substitution.
+    function test_M5_griefersDepositRemainsPendingAfterHistoricalPrefixPosts() public {
         bytes32 pin = rollup.pendingChainsPin();
 
         vm.prank(GRIEFER);
         rollup.deposit{value: 1}(bytes32(uint256(0xAA)), 0, 1, bytes32(0));
+        bytes32 depositPin = rollup.pendingChainsPin();
 
         _mockBlob();
-        vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
         rollup.postBlockAndSubmit{value: 1 ether}(_batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), pin);
+        assertEq(rollup.blockDepositHash(1), bytes32(0), "proved historical prefix is preserved");
+        assertEq(rollup.processedDepositCount(), 0, "racing deposit remains pending");
 
-        // And the producer simply retries with a fresh pin — no halt, no stuck submission.
+        // The next witness can consume the still-pending deposit checkpoint.
         _mockBlob();
         rollup.postBlockAndSubmit{value: 1 ether}(
-            _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), rollup.pendingChainsPin()
+            _batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), depositPin
         );
-        assertEq(rollup.nextSubmissionId(), 1, "the retry posted");
+        assertEq(rollup.blockDepositHash(2), rollup.depositHashChain(), "next block consumes deposit");
+        assertEq(rollup.processedDepositCount(), 1, "deposit consumed exactly once");
+        assertEq(rollup.nextSubmissionId(), 2, "both sound prefixes posted");
     }
 
-    /// The same clean retry behavior for an authorized registration racing the producer's pin.
-    function test_M5_authorizedRegistrationMakesThePostRevertCleanly() public {
+    /// The same prefix behavior applies to an authorized registration racing publication.
+    function test_M5_authorizedRegistrationRemainsPendingAfterHistoricalPrefixPosts() public {
         bytes32 pin = rollup.pendingChainsPin();
 
-        bytes32[] memory pk = new bytes32[](2);
-        pk[0] = bytes32(uint256(11)); pk[1] = bytes32(uint256(12));
-        bytes32[] memory pkb = new bytes32[](2);
-        pkb[0] = bytes32(uint256(21)); pkb[1] = bytes32(uint256(22));
-        bytes32[] memory rg = new bytes32[](2);
-        rg[0] = bytes32(uint256(31)); rg[1] = bytes32(uint256(32));
-        address[] memory rc = new address[](2);
-        rc[0] = address(0x1001); rc[1] = address(0x1002);
+        _register(4242, 0);
+        bytes32 registrationPin = rollup.pendingChainsPin();
 
-        rollup.registerChannel(4242, 0, 0, pk, pkb, rg, rc);
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(_batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), pin);
+        assertEq(rollup.blockChannelRegHash(1), bytes32(0), "proved registration prefix is preserved");
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), registrationPin
+        );
+        assertEq(rollup.blockChannelRegHash(2), rollup.channelRegHashChain(), "next block consumes registration");
+    }
+
+    /// Deposit count alone is not an ordering relation: two registration-only checkpoints have
+    /// the same deposit count. Once the newer registration prefix is consumed, an older pin must
+    /// not be able to rewind the channel-registration accumulator.
+    function test_M5_registrationOnlyCheckpointCannotRegress() public {
+        _register(4242, 0);
+        bytes32 firstRegistrationPin = rollup.pendingChainsPin();
+        _register(4243, 100);
+        bytes32 secondRegistrationPin = rollup.pendingChainsPin();
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), secondRegistrationPin
+        );
 
         _mockBlob();
         vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), firstRegistrationPin
+        );
+    }
+
+    /// With no new pending record, the exact current pair is still a valid carry-forward prefix.
+    function test_M5_currentCheckpointMayCarryForwardAcrossEmptyRounds() public {
+        bytes32 pin = rollup.pendingChainsPin();
+        _mockBlob();
         rollup.postBlockAndSubmit{value: 1 ether}(_batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), pin);
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(_batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), pin);
+        assertEq(rollup.nextSubmissionId(), 2);
+    }
+
+    function test_M5_unknownAndRegressivePinsFailClosed() public {
+        bytes32 genesisPin = rollup.pendingChainsPin();
+        vm.prank(GRIEFER);
+        rollup.deposit{value: 1}(bytes32(uint256(0xAA)), 0, 1, bytes32(0));
+        bytes32 latestPin = rollup.pendingChainsPin();
+
+        _mockBlob();
+        vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), bytes32(uint256(123456))
+        );
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), latestPin
+        );
+        _mockBlob();
+        vm.expectRevert(IntmaxRollup.PendingChainsMoved.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(3)), 1, bytes32(uint256(11)), genesisPin
+        );
+    }
+
+    /// A fraud/timeout rollback rewinds only the processed prefix. The immutable pending
+    /// checkpoint remains available, so the exact sound prefix can be reposted without erasing the
+    /// deposit record or silently switching to a newer accumulator.
+    function test_M5_checkpointSurvivesRollbackAndCanBeReposted() public {
+        vm.prank(GRIEFER);
+        rollup.deposit{value: 1}(bytes32(uint256(0xAA)), 0, 1, bytes32(0));
+        bytes32 depositPin = rollup.pendingChainsPin();
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), depositPin
+        );
+        assertEq(rollup.processedDepositCount(), 1);
+
+        vm.roll(block.number + 3601);
+        IntmaxRollup.ValidityPublicInputs memory emptyPis;
+        assertTrue(rollup.fraudProof(0, bytes32(0), emptyPis, bytes("")), "timeout removes batch");
+        assertEq(rollup.processedDepositCount(), 0, "rollback restores processed prefix count");
+        assertEq(rollup.blockNumber(), 0, "rollback restores block height");
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(2)), 1, bytes32(uint256(10)), depositPin
+        );
+        assertEq(rollup.processedDepositCount(), 1, "same real checkpoint remains postable");
+        assertEq(rollup.blockDepositHash(1), rollup.depositHashChain());
     }
 
     /// An unraced post succeeds — the pin is not a new honest-path revert (gate-8 class check).
@@ -107,6 +204,69 @@ contract RollupChainPinDoSTest is Test {
             _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), rollup.pendingChainsPin()
         );
         assertEq(rollup.nextSubmissionId(), 1, "honest post landed");
+    }
+
+    /// A candidate is built over predecessor (0, 0). If another authorized producer advances the
+    /// rollup before the candidate is mined, the guarded transaction must lose no stake and leave
+    /// no orphan submission. A publisher-side preflight alone cannot provide this property.
+    function test_guardedPost_competingProducerMoveRevertsBeforeMutation() public {
+        bytes32 candidatePin = rollup.pendingChainsPin();
+        uint64 candidateBlockNumber = rollup.blockNumber();
+        bytes32 candidateBlockHashChain = rollup.blockHashChain();
+
+        _mockBlob();
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(100)), 1, bytes32(uint256(200)), candidatePin
+        );
+
+        uint256 submissionsAfterCompetitor = rollup.nextSubmissionId();
+        uint64 blockNumberAfterCompetitor = rollup.blockNumber();
+        bytes32 blockHashAfterCompetitor = rollup.blockHashChain();
+        uint256 balanceAfterCompetitor = address(rollup).balance;
+
+        _mockBlob();
+        vm.expectRevert(IntmaxRollup.BlockHeadMoved.selector);
+        rollup.postBlockAndSubmitGuarded{value: 1 ether}(
+            _batch(),
+            bytes32(uint256(101)),
+            1,
+            bytes32(uint256(201)),
+            candidatePin,
+            candidateBlockNumber,
+            candidateBlockHashChain
+        );
+
+        assertEq(rollup.nextSubmissionId(), submissionsAfterCompetitor, "no orphan submission");
+        assertEq(rollup.blockNumber(), blockNumberAfterCompetitor, "no orphan block");
+        assertEq(rollup.blockHashChain(), blockHashAfterCompetitor, "head remains competitor head");
+        assertEq(address(rollup).balance, balanceAfterCompetitor, "guarded candidate stake refunded");
+    }
+
+    function test_guardedPost_exactPredecessorSucceeds() public {
+        _mockBlob();
+        rollup.postBlockAndSubmitGuarded{value: 1 ether}(
+            _batch(),
+            bytes32(uint256(1)),
+            1,
+            bytes32(uint256(9)),
+            rollup.pendingChainsPin(),
+            rollup.blockNumber(),
+            rollup.blockHashChain()
+        );
+        assertEq(rollup.nextSubmissionId(), 1, "exact predecessor candidate landed");
+    }
+
+    /// The compatibility selector cannot become a production bypass when the PCS release gate is
+    /// later opened for an explicitly configured chain.
+    function test_legacyPostSelector_isPermanentlyLocalDevnetOnly() public {
+        bytes32 pin = rollup.pendingChainsPin();
+        vm.chainId(1);
+        _mockBlob();
+        vm.expectRevert(IntmaxRollup.ReleaseRuntimeUnavailable.selector);
+        rollup.postBlockAndSubmit{value: 1 ether}(
+            _batch(), bytes32(uint256(1)), 1, bytes32(uint256(9)), pin
+        );
+        assertEq(rollup.nextSubmissionId(), 0);
     }
 
     /// M-5 (squatting half): a targeted front-run is an authorization problem, not a pricing

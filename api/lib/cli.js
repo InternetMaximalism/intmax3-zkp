@@ -169,6 +169,39 @@ function ensureSettlement(ch) {
   });
 }
 
+// Reconcile a convenience settlement record with the crash-safe ACTIVE binding owned by the
+// channel CLI. The command is keyless, but it also revalidates the production activation
+// checkpoint and the current participant root/count before returning.
+function verifyActiveSettlementBinding(ch, settlement) {
+  const materializer = settlement
+    && (settlement.close_funding_materializer || settlement.closeFundingMaterializer);
+  if (!settlement || !settlement.manager || !settlement.rollup || !settlement.verifier
+      || !materializer) {
+    throw new Error('settlement.json is missing manager, rollup, verifier, or close-funding materializer');
+  }
+  const raw = cli(ch, [
+    'verify-settlement-binding',
+    String(settlement.manager),
+    RPC,
+    String(settlement.rollup),
+    String(settlement.verifier),
+  ]);
+  let binding;
+  try {
+    binding = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`verify-settlement-binding returned invalid JSON: ${error.message}`);
+  }
+  if (!binding || binding.schemaVersion !== 1 || binding.status !== 'active') {
+    throw new Error('verify-settlement-binding did not return an ACTIVE v1 authority');
+  }
+  if (String(binding.closeFundingMaterializer || '').toLowerCase()
+      !== String(materializer).toLowerCase()) {
+    throw new Error('settlement.json close-funding materializer differs from durable ACTIVE binding');
+  }
+  return binding;
+}
+
 /// Route error handler: reports a `SettlementUnavailable` (or any error carrying a payload) as the
 /// structured refusal it is, and everything else as it did before. INTENTIONALLY SIMPLE — one
 /// helper so no route can forget to distinguish "not provisioned" from "broke".
@@ -216,4 +249,5 @@ module.exports = {
   REPO, WORK, CLI, RPC, CHANNELS, DEVNET_CHAIN_ID, l1SignerArgsForChain, l1SignerArgs,
   l1SignerAddress, chDir, wc, validChannel, cli, sh,
   rollupOf, readJson, writeJson, chainId, ensureSettlement, failRoute, SettlementUnavailable,
+  verifyActiveSettlementBinding,
 };

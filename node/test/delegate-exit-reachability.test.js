@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ZeroHash } = require('ethers');
+const { Interface, ZeroHash } = require('ethers');
 
 const {
   buildParticipantCloseProof,
@@ -96,6 +96,70 @@ test('delegate L1 signer must control the exact signed recipient', () => {
     }),
     /not configured recipient/,
   );
+});
+
+test('own CloseRequested terminalizes from its exact receipt even when submit and cancel restore Active in the same block', async () => {
+  const manager = '0x4444444444444444444444444444444444444444';
+  const signerAddress = RECIPIENTS[2];
+  const transactionHash = `0x${'77'.repeat(32)}`;
+  const managerInterface = new Interface([
+    'event CloseRequested(address indexed requester, uint64 closeRequestedAt, uint64 closeFreezeNonce)',
+    'function highestCancelledRevivedStateVersion() view returns (uint64)',
+  ]);
+  const encodedEvent = managerInterface.encodeEventLog(
+    managerInterface.getEvent('CloseRequested'),
+    [signerAddress, 100n, 1n],
+  );
+  const provider = {
+    async getNetwork() { return { chainId: 31337n }; },
+    async call(transaction) {
+      assert.equal(
+        transaction.data.slice(0, 10),
+        managerInterface.getFunction('highestCancelledRevivedStateVersion').selector,
+      );
+      assert.equal(transaction.blockTag, 50);
+      // End-of-block state is already Active after a later submit+cancel. The monotone cancel
+      // floor, not channelStatus/currentCloseFreezeNonce, remains available to authenticate era.
+      return managerInterface.encodeFunctionResult('highestCancelledRevivedStateVersion', [13n]);
+    },
+  };
+  const outbox = {
+    signerAddress,
+    provider,
+    async markFinalized(actionId, observation, predicate) {
+      assert.equal(actionId, 'participant-close:test-action');
+      assert.equal(observation.transactionHash, transactionHash);
+      return predicate({
+        blockTag: 50,
+        transactionHash,
+        receipt: {
+          logs: [{
+            address: manager,
+            transactionHash,
+            index: 0,
+            topics: encodedEvent.topics,
+            data: encodedEvent.data,
+          }],
+        },
+      });
+    },
+  };
+  const closer = makeParticipantCloser({
+    chainId: 31337,
+    recipient: signerAddress,
+    provider,
+    outbox,
+  });
+  const accepted = await closer.markRequestFinalized(
+    manager,
+    'participant-close:test-action',
+    { transactionHash },
+    {
+      expectedCurrentCloseFreezeNonce: '0',
+      expectedHighestCancelledRevivedStateVersion: '0',
+    },
+  );
+  assert.equal(accepted, true);
 });
 
 test('exit mode initiates participant close itself and never submits a claim before finalization', async () => {

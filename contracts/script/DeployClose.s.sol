@@ -11,6 +11,7 @@ import {
     SETTLEMENT_LOCAL_DEVNET_CHAIN_ID
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
@@ -36,7 +37,7 @@ import {DeployConfig} from "./DeployConfig.sol";
 /// deployment that must actually settle.
 contract DeployClose is Script {
     // SECURITY (challenge-period floor): was a hardcoded 1 second labelled "demo", on a script
-    // whose own header aims it at Sepolia. `finalizeClose()` is permissionless at the deadline, so
+    // whose own header aims it at Sepolia. Guarded finalization is permissionless at the deadline, so
     // a 1-second window means a stale close intent can be finalized before any honest member can
     // prove and land a replacement — permanent fund mis-allocation. The value is now devnet-only;
     // the manager's constructor enforces the same floor independently.
@@ -61,7 +62,7 @@ contract DeployClose is Script {
     function run() external returns (IntmaxRollup rollup, ChannelSettlementManager manager) {
         // SECURITY (fund freeze): this script constructs a REAL `ChannelSettlementVerifier` and a
         // REAL `ChannelSettlementManager` and keys NONE of the four settlement VKs, so a channel it
-        // deploys can be FROZEN by the permissionless `requestClose()` (which flips
+        // deploys can be FROZEN by a member's guarded close request (which flips
         // `isNativeSendAllowed = false`) and then never closed — `submitCloseIntent` reverts
         // `CloseVkNotSet()` — and never un-frozen — `cancelClose` reverts `CancelCloseVkNotSet()`.
         // `initializeCloseVk` is deployer-only-and-set-once on a verifier this script does not
@@ -126,6 +127,7 @@ contract DeployClose is Script {
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
         ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
+        CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
 
         // registerChannel BEFORE the manager deploy (Finding E).
         uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
@@ -150,7 +152,8 @@ contract DeployClose is Script {
         }
         manager = new ChannelSettlementManager(
             bytes4(channelId), bpSlot, sphincs[bpSlot], 0, bytes32(0), DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)), bindings
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
+            address(materializer), bindings
         );
 
         // Withdrawal VK (deployer == EOA == msg.sender here, so the deployer-only guard passes).
@@ -167,6 +170,7 @@ contract DeployClose is Script {
         console2.log("MleVerifier :", address(verifier));
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("SettlementVerifier:", address(sv));
+        console2.log("CloseFundingMaterializer:", address(materializer));
         console2.log("CLOSE_MANAGER_ADDRESS:", address(manager));
         console2.log("baked recipient (sepolia_withdrawal_payout.json):");
         console2.logAddress(vm.parseJsonAddress(

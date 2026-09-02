@@ -340,7 +340,7 @@ Recorded because a negative result from an adversarial pass is a deliverable, no
   requestClose→cancelClose→finalize, and the close-lane race are all blocked, with no off-by-one.
   The attacker cannot block the veto.
 - **Reentrancy / CEI** on `finalizePartialWithdrawal`, `withdrawNative`/`withdrawERC20` (pull-payment
-  only), `withdraw()`, `pullChannelFunds`.
+  only), exact `withdraw(amount)`, `pullChannelFunds`.
 - **Double-pay** via shared nullifier, ETH/ERC-20 lane confusion, or chain-key reuse.
 
 **Scope caveat.** The claimed binding of the base transfer to the channel's N-of-N `h2_tag` is a

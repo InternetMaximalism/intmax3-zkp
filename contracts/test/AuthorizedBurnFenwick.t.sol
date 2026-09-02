@@ -88,14 +88,16 @@ contract AuthorizedBurnSnapshotTest is CloseSettlementBase {
         uint256 nativeFund,
         uint256 token7Fund
     ) internal {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory intent =
             _intentAt(epoch, stateVersion, settledTxChain, nativeFund, token7Fund);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
     }
 
     /// Stale V fund=10; then credit=10 and burn=10; newest post-burn fund is again 10. Gross-burn
@@ -136,6 +138,56 @@ contract AuthorizedBurnSnapshotTest is CloseSettlementBase {
         _settleClose(9, 10, PREV_CHAIN, 100, 100);
         assertEq(manager.finalizedChannelFundAmount(0), 90, "native snapshot cap");
         assertEq(manager.finalizedChannelFundAmount(7), 40, "token-7 snapshot cap");
+    }
+
+    /// The terminal IMCF authorization must name the same post-burn cap the Manager will pull.
+    /// Keeping the stale close's larger IMTF here is safe against theft but permanently wedges the
+    /// honest terminal withdrawal for the newer signed head.
+    function test_staleCloseFundingAuxUsesAdjustedCapVector() public {
+        ChannelSettlementManager.AuthorizedWithdrawal memory burn =
+            _withdrawal(keccak256("close_funding_adjusted_cap"), 9, 0, 10);
+        ChannelSettlementManager.CloseIntent memory burnState =
+            _burnIntent(burn, 9, 20, PREV_CHAIN, 40, 0);
+        _finalizeBurn(burnState, PREV_CHAIN, burn);
+
+        _settleClose(9, 10, PREV_CHAIN, 100, 0);
+        assertEq(manager.finalizedChannelFundAmount(0), 40, "settled cap follows newer burn head");
+
+        uint32[10] memory tokenRegistry;
+        tokenRegistry[0] = 0;
+        tokenRegistry[1] = 7;
+        uint256[10] memory staleAmounts;
+        staleAmounts[0] = 100;
+        uint256[10] memory adjustedAmounts;
+        adjustedAmounts[0] = 40;
+
+        bytes32 staleAux = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4346),
+                uint256(block.chainid),
+                address(registry),
+                address(manager),
+                manager.channelId(),
+                manager.currentCloseFreezeNonce(),
+                verifier.tokenFundsDigest(tokenRegistry, 2, staleAmounts)
+            )
+        );
+        vm.expectRevert(ChannelSettlementManager.CloseFundingAuxMismatch.selector);
+        manager.authorizeCloseFunding(0, staleAux);
+
+        bytes32 adjustedAux = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4346),
+                uint256(block.chainid),
+                address(registry),
+                address(manager),
+                manager.channelId(),
+                manager.currentCloseFreezeNonce(),
+                verifier.tokenFundsDigest(tokenRegistry, 2, adjustedAmounts)
+            )
+        );
+        bytes32 authDigest = manager.authorizeCloseFunding(0, adjustedAux);
+        assertTrue(registry.partialWithdrawalAuthorized(authDigest), "adjusted terminal authorization armed");
     }
 
     /// Finalization order is permissionless. An older burn finalized later must not replace the

@@ -138,8 +138,10 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         uint64 staleDeadline = manager.getPendingClose().challengeDeadline;
         vm.warp(staleDeadline);
 
+        bytes32 finalizeDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 finalizeGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(finalizeDigest, finalizeGeneration);
 
         ChannelSettlementManager.CloseIntent memory newer = _intentAt(9, 11);
         manager.submitCloseIntent(newer, _closeProof(newer));
@@ -147,11 +149,13 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
 
         uint64 newerDeadline = manager.getPendingClose().challengeDeadline;
         vm.warp(newerDeadline);
+        finalizeDigest = manager.getPendingClose().closeIntentDigest;
+        finalizeGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(finalizeDigest, finalizeGeneration);
 
         vm.warp(uint256(newerDeadline) + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedStateVersion(), 11, "newer state settles after strict deadline");
     }
 
@@ -161,8 +165,36 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _intentAt(epoch, stateVersion);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
     }
+
+    /// A public finalizer must never sign an argument-free capability that can be redirected to a
+    /// replacement close between preflight and mining. The guarded digest loses no lifecycle state
+    /// when the pending close moves, while the exact replacement remains permissionlessly
+    /// finalizable after its deadline.
+    function test_finalizeCloseGuarded_replacementCannotRedirectTransaction() public {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 10);
+        manager.submitCloseIntent(stale, _closeProof(stale));
+        bytes32 staleDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 generation = manager.closeRequestGeneration();
+
+        ChannelSettlementManager.CloseIntent memory newer = _intentAt(9, 11);
+        manager.submitCloseIntent(newer, _closeProof(newer));
+        ChannelSettlementManager.PendingClose memory replacement = manager.getPendingClose();
+        assertTrue(replacement.closeIntentDigest != staleDigest, "test requires a distinct replacement");
+        vm.warp(replacement.challengeDeadline + 1);
+
+        vm.expectRevert(ChannelSettlementManager.CloseIntentDigestMismatch.selector);
+        manager.finalizeCloseGuarded(staleDigest, generation);
+        assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
+        assertEq(manager.getPendingClose().closeIntentDigest, replacement.closeIntentDigest, "mismatch is non-mutating");
+
+        manager.finalizeCloseGuarded(replacement.closeIntentDigest, generation);
+        assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed));
+        assertEq(manager.finalizedCloseIntentDigest(), replacement.closeIntentDigest);
+    }
+
 
     // ─────────────────────────────────────────────────────────────────────────
     // C-3 — one `cancelClose` must not brick the channel forever
@@ -205,13 +237,55 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         assertEq(manager.currentCloseFreezeNonce(), 1, "the era is 1 again, not 2");
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(
             uint256(manager.channelStatus()),
             uint256(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
             "the channel settles; C-3's permanent lock is gone"
         );
         assertEq(manager.finalizedStateVersion(), 30);
+    }
+
+    /// A signed request/finalize raw transaction must name a manager-lifetime era that cancellation
+    /// can never restore. This deliberately re-submits the identical close intent, so the digest
+    /// and proof-bound freeze nonce are the same in both eras; only the guarded request floor and
+    /// monotone request generation distinguish them.
+    function test_staleMemberRequestAndFinalizeRawCannotReplayAfterCancel() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory intent = _intentAt(9, 12);
+        manager.submitCloseIntent(intent, _closeProof(intent));
+        bytes32 digest = manager.getPendingClose().closeIntentDigest;
+        uint64 staleGeneration = manager.closeRequestGeneration();
+        assertEq(staleGeneration, 1, "first request generation");
+
+        ChannelSettlementManager.CancelCloseRequest memory cancellation = _cancelRequest(digest, 13);
+        manager.cancelClose(cancellation, _cancelProof(cancellation));
+        assertEq(manager.currentCloseFreezeNonce(), 0, "proof era is restored for liveness");
+        assertEq(manager.closeRequestGeneration(), staleGeneration, "generation is never restored");
+
+        // Exact old member-request calldata is permanently invalid even though the freeze nonce
+        // returned to zero. A fresh request pins the monotone cancellation floor.
+        vm.prank(alice);
+        vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
+        manager.requestClose(0, 0);
+        vm.prank(alice);
+        manager.requestClose(0, 13);
+        assertEq(manager.closeRequestGeneration(), staleGeneration + 1, "fresh request advances generation");
+
+        vm.warp(block.timestamp + GRACE);
+        manager.submitCloseIntent(intent, _closeProof(intent));
+        assertEq(manager.getPendingClose().closeIntentDigest, digest, "test requires digest reuse");
+        vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
+
+        // The legacy unguarded selector is absent from the production ABI. Its exact old calldata
+        // reaches no function and therefore fails without touching the new close era.
+        (bool legacyFinalizeAccepted,) = address(manager).call(abi.encodeWithSignature("finalizeClose()"));
+        assertFalse(legacyFinalizeAccepted, "legacy unguarded finalize selector must stay removed");
+        vm.expectRevert(ChannelSettlementManager.CloseIntentDigestMismatch.selector);
+        manager.finalizeCloseGuarded(digest, staleGeneration);
+
+        manager.finalizeCloseGuarded(digest, staleGeneration + 1);
+        assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed));
     }
 
     /// The griefer's exact play: withhold the completed signature set, let an honest member close,
@@ -444,7 +518,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(afterEnd, afterEndProof);
 
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(
             uint256(manager.channelStatus()),
             uint256(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
@@ -479,8 +553,10 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         manager.submitCloseIntent(second, _closeProof(second));
         assertEq(manager.getPendingClose().challengeDeadline, t1 + CHALLENGE_PERIOD);
         assertEq(manager.closeChallengeHorizon(), t1 + 2 * CHALLENGE_PERIOD);
+        bytes32 finalizeDigest = manager.getPendingClose().closeIntentDigest;
+        uint64 finalizeGeneration = manager.closeRequestGeneration();
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(finalizeDigest, finalizeGeneration);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -498,8 +574,10 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         _submitPwAndElapse(9, 12);
 
         // A single griefing (or merely honest) `requestClose` from any participant.
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(bob);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
 
         // Deferred, NOT destroyed: the settlement version is simply not decided yet.
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCloseInProgress.selector);
@@ -664,7 +742,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         // real ETH still reaches the member
         _fundAndPull(registry, manager, 75);
         vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 75);
+        assertEq(manager.claimWithdrawalCredit(wc.withdrawalNullifier), 75);
         assertEq(alice.balance, 75, "the surviving exit path pays");
     }
 }

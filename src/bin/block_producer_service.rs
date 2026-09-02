@@ -6,13 +6,14 @@ use clap::Parser;
 use intmax3_zkp::{
     block_producer::ProductionDepositRequest,
     block_producer_service::{
-        BlockProducerCommand, BlockProducerReceipt, BlockProducerService,
-        BlockProducerServiceError,
+        BlockProducerCommand, BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
     },
-    common::channel::ChannelState,
-    common::channel_id::ChannelId,
+    close_funding::CloseFundingPlan,
+    common::{channel::ChannelState, channel_id::ChannelId},
     ethereum_types::{address::Address, bytes32::Bytes32},
-    live_balance_service::{LiveBalanceService, LiveBalanceServiceError, LiveInterChannelSendArtifact},
+    live_balance_service::{
+        LiveBalanceService, LiveBalanceServiceError, LiveInterChannelSendArtifact,
+    },
     regev::RegevSecurityLevel,
     validity_prover_service::{
         L1FinalizationRpcConfig, ValidityProverService, ValidityProverServiceError,
@@ -56,11 +57,17 @@ struct Args {
     #[arg(long, requires = "validity_snapshot")]
     l1_rollup: Option<String>,
 
+    /// Keccak-256 of the exact IntmaxRollup runtime bytecode. Required out-of-band deployment
+    /// identity; the daemon never learns its expected value from the RPC it is authenticating.
+    #[arg(long, requires = "validity_snapshot")]
+    l1_rollup_runtime_code_hash: Option<String>,
+
     /// Required depth only for the explicit chain-31337 unfinalized development escape.
     #[arg(long, default_value_t = 3, requires = "validity_snapshot")]
     l1_confirmations: u64,
 
-    /// Permit `latest` when the local RPC cannot serve `finalized`. Valid only with chain id 31337.
+    /// Permit `latest` when the local RPC cannot serve `finalized`. Valid only with chain id
+    /// 31337.
     #[arg(long, default_value_t = false, requires = "validity_snapshot")]
     l1_allow_unfinalized_devnet: bool,
 
@@ -97,6 +104,7 @@ enum ValidityCommand {
         request_id: String,
     },
     ValidityArtifact,
+    ValidityPostingArtifact,
     ValidityFinalizeArtifact,
     AcknowledgeValidity {
         request_id: String,
@@ -151,6 +159,23 @@ enum LiveCommand {
     },
     LiveBaseHead {
         channel_id: ChannelId,
+    },
+    LivePrepareCloseFunding {
+        channel_id: ChannelId,
+        chain_id: u64,
+        rollup: String,
+        manager: String,
+    },
+    LiveSettleCloseFunding {
+        channel_id: ChannelId,
+        producer_receipt: BlockProducerReceipt,
+        signed_state: ChannelState,
+        plan: CloseFundingPlan,
+    },
+    LiveCloseFundingPayoutArtifacts {
+        channel_id: ChannelId,
+        producer_request_id: String,
+        withdrawal_prover: String,
     },
     /// Prove + wrap the L1 payout artifacts for a SETTLED burn. Read-only on live state; the
     /// heavy MLE wrap runs in this resident process so the circuits stay warm.
@@ -311,6 +336,20 @@ fn configure_validity(
         .map_err(|e| {
             ValidityProverServiceError::InvalidConfiguration(format!("parse --l1-rollup: {e}"))
         })?;
+    let expected_rollup_runtime_code_hash = args
+        .l1_rollup_runtime_code_hash
+        .as_deref()
+        .ok_or_else(|| {
+            ValidityProverServiceError::InvalidConfiguration(
+                "--l1-rollup-runtime-code-hash is required with --validity-snapshot".into(),
+            )
+        })?
+        .parse::<Bytes32>()
+        .map_err(|e| {
+            ValidityProverServiceError::InvalidConfiguration(format!(
+                "parse --l1-rollup-runtime-code-hash: {e}"
+            ))
+        })?;
     let l1 = L1FinalizationRpcConfig {
         rpc_url: args.l1_rpc_url.clone().ok_or_else(|| {
             ValidityProverServiceError::InvalidConfiguration(
@@ -323,6 +362,7 @@ fn configure_validity(
             )
         })?,
         rollup,
+        expected_rollup_runtime_code_hash,
         minimum_confirmations: args.l1_confirmations,
         allow_unfinalized_devnet: args.l1_allow_unfinalized_devnet,
     };
@@ -378,9 +418,7 @@ fn execute_live_command(
     producer: &mut BlockProducerService,
 ) -> Result<serde_json::Value, LiveBalanceServiceError> {
     let to_value = |v: Result<serde_json::Value, serde_json::Error>| {
-        v.map_err(|e| {
-            LiveBalanceServiceError::Snapshot(format!("serialize live response: {e}"))
-        })
+        v.map_err(|e| LiveBalanceServiceError::Snapshot(format!("serialize live response: {e}")))
     };
     match command {
         LiveCommand::LiveStatus { channel_id } => {
@@ -468,6 +506,50 @@ fn execute_live_command(
             let head = live.service(channel_id, producer)?.base_head_artifact()?;
             to_value(serde_json::to_value(head))
         }
+        LiveCommand::LivePrepareCloseFunding {
+            channel_id,
+            chain_id,
+            rollup,
+            manager,
+        } => {
+            let rollup = rollup.parse::<Address>().map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!("parse rollup: {e}"))
+            })?;
+            let manager = manager.parse::<Address>().map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!("parse manager: {e}"))
+            })?;
+            let proposal = live
+                .service(channel_id, producer)?
+                .prepare_close_funding(chain_id, rollup, manager)?;
+            to_value(serde_json::to_value(proposal))
+        }
+        LiveCommand::LiveSettleCloseFunding {
+            channel_id,
+            producer_receipt,
+            signed_state,
+            plan,
+        } => {
+            let receipt = live.service(channel_id, producer)?.settle_close_funding(
+                producer,
+                &producer_receipt,
+                &signed_state,
+                &plan,
+            )?;
+            to_value(serde_json::to_value(receipt))
+        }
+        LiveCommand::LiveCloseFundingPayoutArtifacts {
+            channel_id,
+            producer_request_id,
+            withdrawal_prover,
+        } => {
+            let prover = withdrawal_prover.parse::<Address>().map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!("parse withdrawal_prover: {e}"))
+            })?;
+            let artifacts = live
+                .service(channel_id, producer)?
+                .close_funding_payout_artifacts(producer, &producer_request_id, prover)?;
+            to_value(serde_json::to_value(artifacts))
+        }
         LiveCommand::LiveBurnPayoutArtifacts {
             channel_id,
             producer_request_id,
@@ -513,7 +595,7 @@ fn execute_live_command(
 fn execute_command(
     command: ServiceCommand,
     producer: &mut BlockProducerService,
-    validity: Option<&mut ValidityProverService>,
+    mut validity: Option<&mut ValidityProverService>,
     l1: Option<&L1FinalizationRpcConfig>,
     live: Option<&mut LiveState>,
 ) -> Result<serde_json::Value, (&'static str, String)> {
@@ -528,16 +610,56 @@ fn execute_command(
             execute_live_command(command, live, producer)
                 .map_err(|error| (error.code(), error.to_string()))
         }
-        ServiceCommand::Producer(command) => producer
-            .execute(command)
-            .and_then(|result| {
-                serde_json::to_value(result).map_err(|error| {
-                    BlockProducerServiceError::Journal(format!(
-                        "serialize producer response: {error}"
-                    ))
+        ServiceCommand::Producer(command) => {
+            // A terminal close-funding block irreversibly zeroes the live private-asset vector.
+            // A NEW request may only become a durable, frozen prepare when the validity cursor is
+            // L1-bound and exactly caught up. Exact prepared/committed replay is allowed first so
+            // crash recovery can continue while its one-block proof is pending. No remote command
+            // can commit the prepare; only a canonical finalized L1 validity acknowledgement can.
+            if let BlockProducerCommand::PrepareCloseFunding {
+                request_id,
+                signed_state,
+                plan,
+            } = &command
+            {
+                let committed = producer
+                    .receipt_for_close_funding(request_id, signed_state, plan)
+                    .map_err(|error| (error.code(), error.to_string()))?;
+                let prepared = producer
+                    .prepared_receipt_for_close_funding(request_id, signed_state, plan)
+                    .map_err(|error| (error.code(), error.to_string()))?;
+                if committed.is_none() && prepared.is_none() {
+                    let validity = validity.as_deref_mut().ok_or_else(|| {
+                        (
+                            "validity_not_configured",
+                            "terminal close funding requires the resident validity prover and L1 read-back"
+                                .to_string(),
+                        )
+                    })?;
+                    let l1 = l1.ok_or_else(|| {
+                        (
+                            "validity_invalid_configuration",
+                            "terminal close funding requires operator-owned L1 finality configuration"
+                                .to_string(),
+                        )
+                    })?;
+                    validity
+                        .bind_or_revalidate_l1_authority(l1)
+                        .and_then(|_| require_terminal_close_funding_readiness(validity, producer))
+                        .map_err(|error| (error.code(), error.to_string()))?;
+                }
+            }
+            producer
+                .execute(command)
+                .and_then(|result| {
+                    serde_json::to_value(result).map_err(|error| {
+                        BlockProducerServiceError::Journal(format!(
+                            "serialize producer response: {error}"
+                        ))
+                    })
                 })
-            })
-            .map_err(|error| (error.code(), error.to_string())),
+                .map_err(|error| (error.code(), error.to_string()))
+        }
         ServiceCommand::Validity(command) => execute_validity_command(
             command,
             producer,
@@ -553,9 +675,39 @@ fn execute_command(
     }
 }
 
+/// Terminal funding is safe to admit only from a producer head already finalized on L1. The
+/// following terminal block then forms a single-block candidate, so the posting driver never has
+/// to guess historical boundaries for live deposit/registration accumulators.
+fn require_terminal_close_funding_readiness(
+    validity: &ValidityProverService,
+    producer: &BlockProducerService,
+) -> Result<(), ValidityProverServiceError> {
+    validity.reconcile(producer)?;
+    let status = validity.status()?;
+    if status.candidate.is_some() {
+        return Err(ValidityProverServiceError::Conflict(
+            "a validity candidate is already pending L1 acknowledgement".into(),
+        ));
+    }
+    let producer_anchor = producer.current_anchor()?;
+    if status.finalized_anchor != producer_anchor
+        || status.finalized_block_number != producer_anchor.block_number
+        || status.finalized_extended_state_commitment != producer_anchor.extended_state_commitment
+    {
+        return Err(ValidityProverServiceError::ProducerReconciliation(format!(
+            "terminal close funding requires a fully finalized producer head; L1-bound anchor is generation {} block {}, producer is generation {} block {}",
+            status.finalized_anchor.generation,
+            status.finalized_anchor.block_number,
+            producer_anchor.generation,
+            producer_anchor.block_number
+        )));
+    }
+    Ok(())
+}
+
 fn execute_validity_command(
     command: ValidityCommand,
-    producer: &BlockProducerService,
+    producer: &mut BlockProducerService,
     validity: &mut ValidityProverService,
     l1: Option<&L1FinalizationRpcConfig>,
 ) -> Result<serde_json::Value, ValidityProverServiceError> {
@@ -591,6 +743,17 @@ fn execute_validity_command(
                     // protocol remains JSONL. The proof itself is canonical plonky2 binary.
                     "validityProof": format!("0x{}", hex::encode(artifact.validity_proof)),
                 }),
+            });
+        }
+        ValidityCommand::ValidityPostingArtifact => {
+            let artifact = validity.posting_artifact(producer)?;
+            return Ok(match artifact {
+                None => serde_json::Value::Null,
+                Some(a) => serde_json::to_value(a).map_err(|e| {
+                    ValidityProverServiceError::Snapshot(format!(
+                        "serialize validity posting artifact: {e}"
+                    ))
+                })?,
             });
         }
         ValidityCommand::ValidityFinalizeArtifact => {
@@ -724,6 +887,7 @@ mod tests {
                 request_id: "prove".into(),
             },
             ValidityCommand::ValidityArtifact,
+            ValidityCommand::ValidityPostingArtifact,
             ValidityCommand::ValidityFinalizeArtifact,
         ] {
             assert!(validity_command_requires_preflight(&command));

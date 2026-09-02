@@ -24,16 +24,16 @@ use crate::{
             },
             spend_circuit::SpendCircuit,
         },
+        withdraw::{
+            single_withdrawal_circuit::SingleWithdawalCircuit,
+            withdrawal_processor::WithdrawalProcessor, withdrawal_step::WithdrawalStepWitness,
+        },
         witness::{
             balance_witness_generator::{
                 BalanceWitnessGenerator, ReceiveDepositData, ReceiveTransferData, SendTxData,
                 SingleWithdrawalData,
             },
             block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
-        },
-        withdraw::{
-            single_withdrawal_circuit::SingleWithdawalCircuit,
-            withdrawal_processor::WithdrawalProcessor, withdrawal_step::WithdrawalStepWitness,
         },
     },
     common::{

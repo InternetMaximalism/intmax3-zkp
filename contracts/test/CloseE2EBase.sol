@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
@@ -12,15 +13,17 @@ import {FixtureLib} from "../script/FixtureLib.sol";
 /// @title Shared CREATE2 deploy + address-prediction logic for the close-lifecycle e2e.
 /// @notice The channel close pays its native ETH to the `ChannelSettlementManager`, so the manager's
 ///         address must be baked (as the L1 withdrawal recipient) into the close withdrawal PROOF
-///         before that proof is generated. To make the address knowable ahead of time, ALL four
+///         before that proof is generated. To make the address knowable ahead of time, all five
 ///         contracts are deployed through the canonical CREATE2 factory with fixed salts; the
 ///         factory is the CREATE2 deployer, so `computeCreate2Address` is identical whether called
-///         from the off-chain address-printing script (`ComputeCloseManager.s.sol`) or the on-chain
-///         lifecycle test (`CloseLifecycleE2E.t.sol`). Both inherit this base so the salts and
-///         initcodes — and therefore the computed addresses — cannot diverge.
+///         by the address-printing entry point or the lifecycle test in `CloseLifecycleE2E.t.sol`.
+///         Both use this base so the salts and initcodes — and therefore the computed addresses —
+///         cannot diverge.
 ///
 /// SECURITY: this is test/deploy plumbing only; it does not affect on-chain verification logic.
 abstract contract CloseE2EBase is Test {
+    error FixtureGenerationMismatch(address candidateManager, address closeFixtureManager);
+
     // Canonical deterministic-deployment CREATE2 factory (present on anvil / Foundry).
     address internal constant FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -28,6 +31,7 @@ abstract contract CloseE2EBase is Test {
     bytes32 internal constant SALT_MV = keccak256("intmax-close-e2e/MleVerifier/v2-chain-pinned");
     bytes32 internal constant SALT_ROLLUP = keccak256("intmax-close-e2e/IntmaxRollup/v1");
     bytes32 internal constant SALT_SV = keccak256("intmax-close-e2e/SettlementVerifier/v1");
+    bytes32 internal constant SALT_MATERIALIZER = keccak256("intmax-close-e2e/CloseFundingMaterializer/v1");
     bytes32 internal constant SALT_MANAGER = keccak256("intmax-close-e2e/SettlementManager/v1");
 
     // Fixed constructor constants (must match between address computation and actual deploy).
@@ -60,6 +64,13 @@ abstract contract CloseE2EBase is Test {
         return type(ChannelSettlementVerifier).creationCode;
     }
 
+    function _materializerInitcode(address rollupAddr) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            type(CloseFundingMaterializer).creationCode,
+            abi.encode(IntmaxRollup(payable(rollupAddr)))
+        );
+    }
+
     /// IntmaxRollup initcode. `verifierForGatesDigest` only computes the (address-independent)
     /// gatesDigest; the rollup is bound to `mleVerifierAddr` (the CREATE2 MleVerifier).
     function _rollupInitcode(
@@ -86,7 +97,8 @@ abstract contract CloseE2EBase is Test {
     function _managerInitcode(
         string memory lifecycleJson,
         address settlementVerifierAddr,
-        address rollupAddr
+        address rollupAddr,
+        address materializerAddr
     ) internal pure returns (bytes memory) {
         uint8 bpSlot = uint8(vm.parseJsonUint(lifecycleJson, ".registration.bp_member_slot"));
         bytes32[] memory hashes = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_gs");
@@ -104,7 +116,7 @@ abstract contract CloseE2EBase is Test {
             abi.encode(
                 channelId, bpSlot, hashes[bpSlot], uint16(0), bytes32(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
                 INITIAL_BP_BOND, IChannelSettlementVerifier(settlementVerifierAddr),
-                IChannelRegistry(rollupAddr), bindings
+                IChannelRegistry(rollupAddr), materializerAddr, bindings
             )
         );
     }
@@ -116,20 +128,39 @@ abstract contract CloseE2EBase is Test {
     /// Predict the manager address (the close withdrawal recipient) from a (validity-VK, lifecycle)
     /// fixture pair, WITHOUT deploying anything except a throwaway MleVerifier used only to derive
     /// the gatesDigest.
-    /// @dev The VALIDITY VK, genesis state root and channel REGISTRATION are identical between the
-    ///      plain P2 fixtures and the close fixtures (same circuit, same empty genesis, same
-    ///      deterministic channel-1 member keys). So the address computed from the EXISTING P2
-    ///      fixtures (before the close fixtures exist) equals the address the test derives from the
-    ///      close fixtures — that's what lets us bake the manager address into the close proof.
+    /// @dev Before the close fixtures exist, the printer uses the plain P2 fixtures. Once both
+    ///      close fixture inputs exist, this function requires both pairs to derive the same exact
+    ///      Manager address. This turns a mixed circuit/VK generation into a hard failure instead
+    ///      of printing an address that would be baked into an unusable payout proof.
     function predictManagerAddressFrom(string memory vkJson, string memory lcJson)
         public returns (address managerAddr)
+    {
+        managerAddr = _predictManagerAddressUnchecked(vkJson, lcJson);
+
+        string memory closeVkPath =
+            string.concat(vm.projectRoot(), "/test/data/close_lifecycle_validity_mle.json");
+        string memory closeLifecyclePath = string.concat(vm.projectRoot(), "/test/data/close_lifecycle.json");
+        try vm.readFile(closeVkPath) returns (string memory closeVkJson) {
+            try vm.readFile(closeLifecyclePath) returns (string memory closeLifecycleJson) {
+                address closeFixtureManager =
+                    _predictManagerAddressUnchecked(closeVkJson, closeLifecycleJson);
+                if (managerAddr != closeFixtureManager) {
+                    revert FixtureGenerationMismatch(managerAddr, closeFixtureManager);
+                }
+            } catch {}
+        } catch {}
+    }
+
+    function _predictManagerAddressUnchecked(string memory vkJson, string memory lcJson)
+        private returns (address managerAddr)
     {
         MleVerifier tmp = new MleVerifier(block.chainid);
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
         address mvAddr = _predict(SALT_MV, _mleVerifierInitcode(block.chainid));
         address rollupAddr = _predict(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, mvAddr, tmp));
         address svAddr = _predict(SALT_SV, _settlementVerifierInitcode());
-        managerAddr = _predict(SALT_MANAGER, _managerInitcode(lcJson, svAddr, rollupAddr));
+        address materializerAddr = _predict(SALT_MATERIALIZER, _materializerInitcode(rollupAddr));
+        managerAddr = _predict(SALT_MANAGER, _managerInitcode(lcJson, svAddr, rollupAddr, materializerAddr));
     }
 
     // ── factory deploy ──
@@ -141,7 +172,8 @@ abstract contract CloseE2EBase is Test {
         require(a.code.length > 0, "no code deployed");
     }
 
-    /// Deploy MleVerifier → IntmaxRollup → ChannelSettlementVerifier → registerChannel → manager,
+    /// Deploy MleVerifier → IntmaxRollup → ChannelSettlementVerifier → materializer →
+    /// registerChannel → manager,
     /// all via the canonical CREATE2 factory with the fixed salts. SHARED by the address-printing
     /// script and the lifecycle test so they land at identical addresses (the factory is the CREATE2
     /// deployer, so the result depends only on salt + initcode, both fixed by the given fixtures).
@@ -159,6 +191,7 @@ abstract contract CloseE2EBase is Test {
         verifier_ = MleVerifier(_deploy(SALT_MV, _mleVerifierInitcode(block.chainid)));
         rollup_ = IntmaxRollup(payable(_deploy(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, address(verifier_), verifier_))));
         sv_ = ChannelSettlementVerifier(_deploy(SALT_SV, _settlementVerifierInitcode()));
+        address materializerAddr = _deploy(SALT_MATERIALIZER, _materializerInitcode(address(rollup_)));
 
         // registerChannel BEFORE the manager deploy (manager constructor binds to it, Finding E).
         {
@@ -174,7 +207,12 @@ abstract contract CloseE2EBase is Test {
         }
 
         manager_ = ChannelSettlementManager(
-            payable(_deploy(SALT_MANAGER, _managerInitcode(lcJson, address(sv_), address(rollup_))))
+            payable(
+                _deploy(
+                    SALT_MANAGER,
+                    _managerInitcode(lcJson, address(sv_), address(rollup_), materializerAddr)
+                )
+            )
         );
     }
 }

@@ -189,8 +189,9 @@ impl ChannelRegRecord {
     /// single u32 limb IMMEDIATELY AFTER `member_count`. Padding slots hash their zero values.
     /// `solidity_keccak256` treats each u32 as one big-endian 4-byte word, so this stream is
     /// byte-identical to the DEPLOYED Solidity `abi.encodePacked` preimage in
-    /// `IntmaxRollup._channelRegHashChain` (fixed `MAX_SIG_CLUSTER`-slot loop; verified by the pinned
-    /// differential test below + the Foundry counterpart — Option B restores this exact form).
+    /// `IntmaxRollup._channelRegHashChain` (fixed `MAX_SIG_CLUSTER`-slot loop; verified by the
+    /// pinned differential test below + the Foundry counterpart — Option B restores this exact
+    /// form).
     ///
     /// SECURITY (P3): `pk_b` enters this preimage between `pk_g` and `regev_pk_digest` so the
     /// in-circuit 3-field `MemberLeaf` (whose `pk_b` is split from the SAME witnessed Poseidon

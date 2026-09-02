@@ -37,9 +37,7 @@
 
 use intmax3_zkp::{
     common::{
-        balance_state::settled_tx_chain_push,
-        channel::burn_descriptor,
-        channel_id::ChannelId,
+        balance_state::settled_tx_chain_push, channel::burn_descriptor, channel_id::ChannelId,
     },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     utils::poseidon_hash_out::PoseidonHashOut,

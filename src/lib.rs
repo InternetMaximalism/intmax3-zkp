@@ -6,19 +6,35 @@ pub mod block_producer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod block_producer_service;
 pub mod circuits;
+pub mod close_funding;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod close_funding_publisher;
 pub mod common;
 pub mod constants;
+#[cfg(feature = "deprecated-msu")]
+#[deprecated(
+    note = "direct in-place member-set updates are retired; see doc/tasks/channel-change-msu.md"
+)]
+pub mod deprecated;
 pub mod ethereum_types;
 pub mod falcon_sig;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod live_balance_service;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod l1_finality;
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod l1_signer_reservation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod live_balance_service;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod partial_withdrawal_payout;
+pub mod poseidon_sig;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod proof_da;
-pub mod poseidon_sig;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod public_close_prover;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod public_close_publisher;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod public_validity_publisher;
 pub mod regev;
 pub mod utils;
 #[cfg(not(target_arch = "wasm32"))]

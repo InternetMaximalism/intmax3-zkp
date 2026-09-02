@@ -208,7 +208,7 @@ fn cli(args: &[&str], env: &[(&str, &str)], what: &str) -> String {
 }
 
 /// Like `cli` but tolerates a nonzero exit — returns (success, combined output). Used for the
-/// zero-credit token-1 claim, whose final `claimWithdrawalCredit(uint32)` pull CORRECTLY reverts
+/// zero-credit claim, whose final `claimWithdrawalCredit(bytes32)` pull CORRECTLY reverts
 /// (`NoWithdrawalCredit`) after the claim proof itself was accepted on-chain.
 ///
 /// B-2: its original caller (the pinned delegate-count close NEGATIVE) became a POSITIVE when the
@@ -600,11 +600,11 @@ fn two_token_cli_e2e() {
     // assertion below therefore still holds for the SAME reason it held before (no finalized
     // close), not because the close was refused.
     // Without a finalized close there is no accrual, so NOTHING may leave either lane: both
-    // pull-payment entry points refuse (`NoWithdrawalCredit`), the per-lane paid-out
-    // accumulators stay zero, and both REAL asset pools sit intact in the manager. (The
-    // positive per-token claim/payout path — per-token caps at payout, cross-token frame,
-    // nonzero-token submitPostCloseClaim — is covered by MultiTokenSettlement.t.sol and the
-    // native claim-proving suites; the on-chain two-token close accrual by CloseLifecycleE2E.)
+    // proof/nullifier-scoped payout entry point refuses (`NoWithdrawalCredit`), the per-lane
+    // paid-out accumulators stay zero, and both REAL asset pools sit intact in the manager.
+    // (The positive per-token claim/payout path — per-token caps at payout and cross-token frame —
+    // is covered by MultiTokenSettlement.t.sol and the native claim-proving suites; the on-chain
+    // two-token close accrual is covered by CloseLifecycleE2E.)
     // Assert the SPECIFIC revert — `NoWithdrawalCredit()` selector 0xe10881ae (=
     // `cast sig "NoWithdrawalCredit()"`) — via eth_call revert data, so an unrelated failure
     // (wrong address, out-of-gas, a different guard) cannot satisfy the conservation check.
@@ -630,11 +630,15 @@ fn two_token_cli_e2e() {
             "{what} must revert with NoWithdrawalCredit() (selector 0xe10881ae), got:\n{combined}"
         );
     };
-    expect_no_credit_revert("claimWithdrawalCredit()", &[], "claimWithdrawalCredit()");
     expect_no_credit_revert(
-        "claimWithdrawalCredit(uint32)",
-        &[&ERC20_INDEX.to_string()],
-        "claimWithdrawalCredit(t)",
+        "claimWithdrawalCredit(bytes32)",
+        &["0x0000000000000000000000000000000000000000000000000000000000000001"],
+        "claimWithdrawalCredit(missing ETH proof nullifier)",
+    );
+    expect_no_credit_revert(
+        "claimWithdrawalCredit(bytes32)",
+        &["0x0000000000000000000000000000000000000000000000000000000000000002"],
+        "claimWithdrawalCredit(missing ERC-20 proof nullifier)",
     );
 
     let credited_eth = cast_uint(&rpc, &manager, "totalCreditedOut(uint32)(uint256)", &["0"]);

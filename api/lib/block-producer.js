@@ -19,6 +19,7 @@ const LIVE_ROOT = process.env.LIVE_BALANCE_ROOT || path.join(WORK, 'producer', '
 const VALIDITY_SNAPSHOT = process.env.VALIDITY_SNAPSHOT || '';
 const VALIDITY_PROVER = process.env.VALIDITY_PROVER || '';
 const L1_ROLLUP = process.env.L1_ROLLUP || '';
+const L1_ROLLUP_RUNTIME_CODE_HASH = process.env.L1_ROLLUP_RUNTIME_CODE_HASH || '';
 const L1_CHAIN_ID = process.env.L1_CHAIN_ID || '';
 const L1_CONFIRMATIONS = process.env.L1_CONFIRMATIONS || '';
 
@@ -26,10 +27,11 @@ function daemonArgs() {
   const args = ['--journal', JOURNAL, '--supported-user-counts', ARITIES, '--live-root', LIVE_ROOT];
   if (process.env.INTMAX_REGEV_TEST_PROOFS === '1') args.push('--regev-test-proofs');
   if (VALIDITY_SNAPSHOT) {
-    if (!VALIDITY_PROVER || !L1_ROLLUP || !L1_CHAIN_ID) {
+    if (!VALIDITY_PROVER || !L1_ROLLUP || !L1_ROLLUP_RUNTIME_CODE_HASH || !L1_CHAIN_ID) {
       throw new Error(
-        'VALIDITY_SNAPSHOT requires VALIDITY_PROVER, L1_ROLLUP and L1_CHAIN_ID (the daemon ' +
-        'refuses a partial validity/L1 configuration)'
+        'VALIDITY_SNAPSHOT requires VALIDITY_PROVER, L1_ROLLUP, ' +
+        'L1_ROLLUP_RUNTIME_CODE_HASH and L1_CHAIN_ID (the daemon refuses a partial ' +
+        'validity/L1 deployment configuration)'
       );
     }
     args.push(
@@ -38,6 +40,7 @@ function daemonArgs() {
       '--l1-rpc-url', process.env.RPC || 'http://127.0.0.1:8545',
       '--l1-chain-id', L1_CHAIN_ID,
       '--l1-rollup', L1_ROLLUP,
+      '--l1-rollup-runtime-code-hash', L1_ROLLUP_RUNTIME_CODE_HASH,
     );
     if (L1_CONFIRMATIONS) args.push('--l1-confirmations', L1_CONFIRMATIONS);
   }
@@ -167,6 +170,26 @@ function postInterChannel(signedState, debitPayload, descriptor, requestId) {
   });
 }
 
+function prepareCloseFunding(signedState, plan, requestId) {
+  const body = { signedState, plan };
+  return execute({
+    command: 'prepareCloseFunding',
+    requestId: requestId || stableRequestId('close-funding-stage-v2', body),
+    ...body,
+  });
+}
+
+// Permanent compatibility tombstone. The old command authoritatively committed a terminal block
+// before its validity proof reached finalized L1 state. Keeping a local throw is intentional: an
+// older daemon must not turn a rolling JS deployment into an immediate-commit bypass.
+async function postCloseFunding() {
+  const error = new Error(
+    'postCloseFunding is retired: stage with prepareCloseFunding and commit only through acknowledgeValidity',
+  );
+  error.code = 'immediate_close_funding_retired';
+  throw error;
+}
+
 function syncOffchainHeads(signedStates, requestId) {
   return execute({
     command: 'syncOffchainHeads',
@@ -187,6 +210,10 @@ function proveValidity(requestId) {
 
 function validityArtifact() {
   return execute({ command: 'validityArtifact' });
+}
+
+function validityPostingArtifact() {
+  return execute({ command: 'validityPostingArtifact' });
 }
 
 function acknowledgeValidity(requestId, candidateId, transactionHash) {
@@ -238,6 +265,25 @@ function liveBaseHead(channelId) {
   return execute({ command: 'liveBaseHead', channelId });
 }
 
+function livePrepareCloseFunding(channelId, chainId, rollup, manager) {
+  return execute({
+    command: 'livePrepareCloseFunding', channelId, chainId, rollup, manager,
+  });
+}
+
+function liveSettleCloseFunding(channelId, producerReceipt, signedState, plan) {
+  return execute({
+    command: 'liveSettleCloseFunding', channelId, producerReceipt, signedState, plan,
+  });
+}
+
+function liveCloseFundingPayoutArtifacts(channelId, producerRequestId, withdrawalProver) {
+  return execute({
+    command: 'liveCloseFundingPayoutArtifacts',
+    channelId, producerRequestId, withdrawalProver,
+  });
+}
+
 // Every outgoing co-sign must be bound to the resident daemon's authoritative cursor. The
 // setup-time channel_backing.json nonce is intentionally not a fallback: it does not advance and
 // can make a channel debit succeed before the base settle rejects the stale nonce.
@@ -275,6 +321,8 @@ module.exports = {
   execute,
   postDeposit,
   postInterChannel,
+  prepareCloseFunding,
+  postCloseFunding,
   register,
   stableRequestId,
   canonicalJson,
@@ -283,6 +331,7 @@ module.exports = {
   validityStatus,
   proveValidity,
   validityArtifact,
+  validityPostingArtifact,
   acknowledgeValidity,
   validityFinalizeArtifact,
   liveStatus,
@@ -294,6 +343,9 @@ module.exports = {
   liveSendArtifact,
   liveBackingArtifact,
   liveBaseHead,
+  livePrepareCloseFunding,
+  liveSettleCloseFunding,
+  liveCloseFundingPayoutArtifacts,
   authoritativeBaseNonceEnv,
   liveReceiveInterChannel,
   liveBurnPayoutArtifacts,

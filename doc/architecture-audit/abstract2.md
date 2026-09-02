@@ -36,7 +36,9 @@ Security is divided into the following 5 properties (described later in §4):
 1. **Authorization** authorization (all-member signature. Signature target = `hash(H1, H2)`)
 2. **Double-spend / illicit mint prevention** no-double-spend (`commonState` + `validityProof`)
 3. **Solvency** solvency (`balanceProof` + `rangeProof` = `channelUpdateZKP` verification)
-4. **Exit / liveness** exit-liveness (close game + timeout + `lateBalanceProof` + withdrawal ZKP)
+4. **Exit safety / conditional liveness** (close game + timeout + withdrawal ZKP; the historical
+   `lateBalanceProof` lane is disabled, and final funding currently needs a fresh N-of-N terminal
+   child unless a pre-authorized exit kit exists)
 5. **Balance confidentiality** confidentiality (Regev encryption + `channelUpdateZKP`) — newly added in v2
 
 ---
@@ -64,7 +66,8 @@ Security is divided into the following 5 properties (described later in §4):
 - `encBalances : [LatticeCt; 3]` : the balances of the 3 people within the channel. **Member i's balance is encrypted with member i's `RegevPk`**,
   decryptable only by that person. Plaintext balances are kept nowhere.
 - `balanceProof` : the **ZKP proof** of "how much balance the whole channel currently has" (the balance circuit's `ProofWithPublicInputs`).
-  Generation requires `validityProof`. **Verified on L1 at withdrawal time** (both close's `finalBalanceProof` and late's `lateBalanceProof`).
+  Generation requires `validityProof`. The finalized close proof is verified for the active
+  withdrawal path. The historical late-proof branch is not active in the current Manager.
   Premise (soundness): once a tx is on L2 or has been broadcast, `balanceProof` reflects that tx and **cannot be forged** to an excessive balance.
   **`balanceProof` is not committed to `H1`** (because for inter-channel transfers the post-subtraction proof is not yet generated at signing time.
   Audit finding 3). The correspondence with the state is bound by `settledTxChain` below, and L1 checks it at close submission.
@@ -145,7 +148,9 @@ Security is divided into the following 5 properties (described later in §4):
   an intmax `Transfer` that burns the channel balance, submitted at close-state finalization.
 - `withdrawClaimZKP` (new): after close, a ZKP by which each member proves on L1, without decrypting, that "the plaintext of **their own encrypted balance**
   within `finalBalanceState.encBalances` is their withdrawal amount."
-- `lateBalanceProof` : a `balanceProof` after close (a proof of the same balance circuit). Stored on-chain as a **separate variable from the final state**.
+- `lateBalanceProof` : a historical/planned `balanceProof` after close (the same balance circuit).
+  It is **not stored or accepted by the current production Manager**; its post-close entry point is
+  disabled until a replacement proof/nullifier policy can rule out double credit.
 
 ### 2.5 Timeout constants
 
@@ -360,6 +365,12 @@ Order: `requestClose` → (`GRACE_BEFORE_PROCESS`=10 minutes) → `startProcess`
 4. At the end of the period, `finalBalanceState` / `finalBalanceProof` are finalized (preventing close with an old state).
 
 #### 3.5.4 `closeAndWithdraw` — **actor: each member / L1 / intmax L2**
+> **Implementation status (2026-09-02):** the individual claim proof is owner-generated, but the
+> currently implemented Rollup-to-Manager funding leg uses a fresh terminal child with fresh
+> N-of-N signatures. The steps below therefore describe the intended conservation flow, not an
+> unconditional unilateral-liveness guarantee. A signer-independent latest-head exit kit remains
+> a release blocker.
+
 - in: finalized `finalBalanceState` / `finalBalanceProof`, `closeBurnTx`, each member's `withdrawClaimZKP`
 1. **(burn tx submission)** After close-state finalization, the `member` submits `closeBurnTx` (= `Transfer { recipient: burnAddress, amount: withdrawCap, ... }`) together with `finalBalanceProof` to `L1`.
 2. **(processed as L2 burn)** The same `closeBurnTx` is also processed on intmax L2 as a "close-state-finalization burn tx", and the channel balance is removed from L2's spendable.
@@ -369,10 +380,19 @@ Order: `requestClose` → (`GRACE_BEFORE_PROCESS`=10 minutes) → `startProcess`
    `L1` enforces **Σ(withdrawals) ≤ `withdrawCap`**. Even if `finalBalanceState` claims more than `withdrawCap`, the excess cannot be withdrawn.
 
 #### 3.5.5 `claimLateTx` — **actor: the recipient (the receiver of a late tx)**
+> **Not active in the current contracts.** The post-close claim entry point deliberately reverts:
+> incoming value present in a closeable state is already part of the ordinary slot claim, and the
+> former second lane could double-credit it. Re-enabling this planned flow requires a new reviewed
+> proof/nullifier policy.
+
 - in: `lateBalanceProof`, `tx data`, `TxV2MerkleProof`
-1. For an intmax `Transfer` to the channel notified after the close-finalized version, the recipient creates a new `balanceProof` via ZKP with `lateBalanceProof` as input (the balance circuit is identical to `balanceProof`).
-2. Once verified on `L1`, the recipient receives it on-chain.
-3. `lateBalanceProof` is stored on-chain as a **separate variable** from `finalBalanceProof`.
+Historical intended flow (not executable in the current Manager):
+1. For an intmax `Transfer` to the channel notified after the close-finalized version, the recipient
+   would create a new `balanceProof` via ZKP with `lateBalanceProof` as input.
+2. A replacement L1 statement would have to prove that this value was not already credited by the
+   ordinary finalized-state claim before paying it.
+3. Only that redesigned statement could justify storing a separate late-proof state. The current
+   contract stores no such active lane.
 
 Supplement: `balanceProof` is always attached to the recipient at tx send time (`flowSend1`/`flowReceive3`). If the recipient does not have it, they ignore the sender.
 
@@ -389,7 +409,10 @@ This shows which of the **5 properties of §0** each mechanism guards.
   "A signature of only one side is invalid", which was an operational rule in v1, becomes **inexpressible by definition** in v2
   (a signature that authorizes only the transfer does not exist). Because the validity circuit verifies and constrains this signature as the substitute for the tx_tree_root signature
   (§3.3.5), it cannot be separated at the circuit level either.
-- **Close is possible with the last agreed state**: even if agreement breaks down, one can close on-chain with the last `BalanceState` signed by all.
+- **Close initiation uses the last agreed state**: even if agreement breaks down, a participant can
+  freeze the channel and publish the last `BalanceState` signed by all. Exact final L1 payout still
+  requires channel-scoped Rollup backing; today that backing is created by a fresh N-of-N terminal
+  child unless a future pre-authorized exit kit was atomically retained with the head.
 
 ### 4.2 Double-spend / illicit mint prevention no-double-spend
 - **`PublicState` (`commonState`)**: each channel holds "the block number at which a tx was last taken in" in
@@ -424,10 +447,16 @@ This shows which of the **5 properties of §0** each mechanism guards.
 - **`GRACE_BEFORE_PROCESS` (10 minutes)**: signatures or communication lag immediately before/after the request can be regarded as "all nonexistent".
 - **`SIGN_TIMEOUT` (3 minutes)**: if signatures are half-assembled and incomplete, it is regarded as a protocol violation, and exit is possible via close (liveness assurance).
 - **Close-request confirmation of both channels (`flowSend1`)**: do not transfer to a channel that has a close request.
-- **`withdrawClaimZKP`**: even if balances are encrypted, each member can prove their own share and withdraw **by themselves** (without the cooperation of other members)
-  (exit does not require the decryption cooperation of others).
-- **`lateBalanceProof`**: funds of an intmax tx that arrived after the close-finalized version can also be received by the recipient by on-chain verifying
-  the new `balanceProof` with `lateBalanceProof` as input (preventing the loss of funds). The same circuit as `balanceProof`.
+- **`withdrawClaimZKP`**: even if balances are encrypted, each member can generate the proof of
+  their own share without another member's decryption help. Claim generation and submission are
+  participant-owned; successful payout additionally requires the exact channel-scoped Manager
+  backing. The current funding producer obtains a fresh N-of-N signature on a terminal child, so
+  complete post-failure exit liveness is conditional on that cooperation. A retained,
+  pre-authorized latest-head exit kit is still required before this can be called unilateral.
+- **Late/post-close claims are disabled**: the current Manager rejects the historical
+  `lateBalanceProof`/post-close lane because a closeable state already credits that incoming value
+  to the ordinary slot balance. This document does not claim late-fund liveness until a replacement
+  statement prevents double credit and is implemented end to end.
 
 ### 4.5 Balance confidentiality confidentiality (newly added in v2)
 - **Regev-encrypted balances (`encBalances`)**: each person's balance is a ciphertext decryptable only with that person's `RegevPk`.

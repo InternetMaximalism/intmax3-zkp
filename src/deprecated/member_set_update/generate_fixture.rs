@@ -1,31 +1,32 @@
-//! Generate the on-chain test fixture for a REAL member-set-update MLE/WHIR proof (detail2 §Q-4,
-//! stage Q3 slice B tail).
+//! DEPRECATED: reproduce the historical direct member-set-update MLE/WHIR audit fixture
+//! from the retired stage-Q3 prototype.
 //!
-//! Produces the two artifacts `ChannelSettlementManager.applyMemberSetUpdate`'s Solidity tests
-//! consume, in the same schema as the close fixtures:
+//! Produces two artifacts retained for offline audit archaeology, in the same schema as the close
+//! fixtures. The production `ChannelSettlementManager` has no `applyMemberSetUpdate` selector;
+//! regression tests pin its pre-retirement selector as a literal.
 //!
-//!   - contracts/test/data/member_set_update_mle.json — the wrapped MemberSetUpdateCircuit MLE
-//!     proof + its VK params (`FixtureLib.parseProof` / `parseDeployData` schema).
-//!   - contracts/test/data/member_set_update.json — a descriptor with every value the Solidity
-//!     test needs: channelId, setVersion, old/new IMCM commitments, old/new counts, the joiner
-//!     recipient (zero — this fixture is a ROTATION of slot 1), and the old/new pk_g arrays the
-//!     test registers / applies.
+//!   - contracts/test/data/deprecated/member_set_update/member_set_update_mle.json — the wrapped
+//!     MemberSetUpdateCircuit MLE proof + its VK params (`FixtureLib.parseProof` /
+//!     `parseDeployData` schema).
+//!   - contracts/test/data/deprecated/member_set_update/member_set_update.json — a descriptor with
+//!     every value the Solidity test needs: channelId, setVersion, old/new IMCM commitments,
+//!     old/new counts, the joiner recipient (zero — this fixture is a ROTATION of slot 1), and the
+//!     old/new pk_g arrays the test registers / applies.
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED circuit public
 //! inputs (`MemberSetUpdatePublicInputs`, 26 limbs re-registered verbatim by `WrapperCircuit`).
 //! The rotation itself goes through the REAL wallet gate (`verify_member_set_update` — IMKR
 //! self-consent + the previous set's full N-of-N over IMMS) before anything is proved.
 //!
-//! Usage:  cargo run --release --bin generate_member_set_update_fixture
+//! Usage:  cargo run --release --features deprecated-msu --bin generate_member_set_update_fixture
 //!
 //! HEAVY COMPUTE: batch-aggregate prove + the update circuit (2^16) + WrapperCircuit + MLE/WHIR.
 
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
-    circuits::channel::member_set_update_circuit::{
-        MEMBER_SET_UPDATE_PUBLIC_INPUTS_LEN, MemberSetUpdateCircuit,
-        MemberSetUpdateCircuitWitness,
+    deprecated::member_set_update::circuit::{
+        MEMBER_SET_UPDATE_PUBLIC_INPUTS_LEN, MemberSetUpdateCircuit, MemberSetUpdateCircuitWitness,
     },
     ethereum_types::{address::Address, u32limb_trait::U32LimbTrait as _},
     utils::{
@@ -34,8 +35,11 @@ use intmax3_zkp::{
     },
     wallet_core::{
         C, D, F, FalconProverContext, MemberInfo, MemberKeys, build_record,
-        cosign_member_set_update, propose_rotate_key, prove_member_set_update_aggregate,
-        registered_cosigner_leaves, verify_member_set_update,
+        deprecated_member_set_update::{
+            cosign_member_set_update, propose_rotate_key, prove_member_set_update_aggregate,
+            verify_member_set_update,
+        },
+        registered_cosigner_leaves,
     },
 };
 use plonky2::{field::types::PrimeField64 as _, iop::witness::PartialWitness};
@@ -167,10 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Step 4: write outputs.
     // -----------------------------------------------------------------------
-    let out_dir = Path::new("contracts/test/data");
+    let out_dir = Path::new("contracts/test/data/deprecated/member_set_update");
     fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("member_set_update_mle.json"), &mle_json)?;
-    eprintln!("[msu] wrote contracts/test/data/member_set_update_mle.json");
+    eprintln!("[msu] wrote deprecated member_set_update_mle.json");
 
     let pk_gs = |ms: &[MemberInfo], count: usize| -> Vec<String> {
         (0..count).map(|i| ms[i].pk_g.to_hex()).collect()
@@ -191,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out_dir.join("member_set_update.json"),
         serde_json::to_string_pretty(&descriptor)?,
     )?;
-    eprintln!("[msu] wrote contracts/test/data/member_set_update.json");
+    eprintln!("[msu] wrote deprecated member_set_update.json");
     eprintln!("[msu] Done!");
     Ok(())
 }

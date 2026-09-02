@@ -349,12 +349,12 @@ impl ChannelRecord {
     /// `member_pubkeys_root`(8). `regev_pk_root` stays at the END of the preimage (detail2 §H-1).
     ///
     /// PREIMAGE (exact): `[IMCR, channel_id(1), bp_member_slot(1), split_u64(close_freeze_nonce),
-    /// status(1), member_count(1), delegate_count(1), member_hashes(1024*8), member_pubkeys_root(8),
-    /// special_close_penalty(8), regev_pk_root(8)]`. The `member_count` limb replaces the legacy
-    /// `CHANNEL_MEMBERS` constant limb in the same position; `delegate_count` is a single u32 limb
-    /// IMMEDIATELY AFTER `member_count` (delegate account). Hashing all 1024 hashes (not just the
-    /// active ones) plus both counts fixes the member/delegate/padding split under the member
-    /// signatures.
+    /// status(1), member_count(1), delegate_count(1), member_hashes(1024*8),
+    /// member_pubkeys_root(8), special_close_penalty(8), regev_pk_root(8)]`. The `member_count`
+    /// limb replaces the legacy `CHANNEL_MEMBERS` constant limb in the same position;
+    /// `delegate_count` is a single u32 limb IMMEDIATELY AFTER `member_count` (delegate
+    /// account). Hashing all 1024 hashes (not just the active ones) plus both counts fixes the
+    /// member/delegate/padding split under the member signatures.
     ///
     /// NOTE: this IMCR digest is NATIVE-ONLY (it has no in-circuit or Solidity recompute twin), so
     /// `delegate_count` is threaded here only.
@@ -835,7 +835,10 @@ impl InterChannelTx {
                 // the sender's otherwise-valid proof fail on the final wire object. The message
                 // already commits channel/sequence/H2/H1/era; those are the values the sender is
                 // authorizing, while the later blobs authenticate that same message separately.
-                self.signed_small_block.message.signing_digest().to_u32_vec(),
+                self.signed_small_block
+                    .message
+                    .signing_digest()
+                    .to_u32_vec(),
                 self.sender_delta_ct.digest().to_u32_vec(),
                 self.source_channel_id.to_u32_vec(),
                 self.destination_channel_id.to_u32_vec(),
@@ -1705,7 +1708,10 @@ pub(crate) fn hash_words(words: &[u32]) -> Bytes32 {
 /// SOLIDITY MIRROR: `ChannelSettlementVerifier.closeMemberSetCommitment` pads the same fixed eight
 /// cosigner slots (its internal constant retains the legacy `MAX_CHANNEL_MEMBERS` name but equals
 /// Rust `MAX_SIG_CLUSTER = 8`). The Rust and Solidity preimages therefore have identical width.
-pub fn close_member_set_commitment(hashes: &[Bytes32; MAX_SIG_CLUSTER], member_count: u8) -> Bytes32 {
+pub fn close_member_set_commitment(
+    hashes: &[Bytes32; MAX_SIG_CLUSTER],
+    member_count: u8,
+) -> Bytes32 {
     let count = member_count as usize;
     let mut words = Vec::with_capacity(2 + MAX_SIG_CLUSTER * 8);
     words.push(CLOSE_MEMBER_SET_DOMAIN);
@@ -1819,24 +1825,10 @@ mod tests {
         let tx_leaf = Bytes32::from_u32_slice(&[1; 8]).unwrap();
         let recipient = Bytes32::from_u32_slice(&[2; 8]).unwrap();
         let amount = U256::from(20u64);
-        let base = burn_descriptor(
-            ChannelId::new(7).unwrap(),
-            9,
-            tx_leaf,
-            recipient,
-            3,
-            amount,
-        );
+        let base = burn_descriptor(ChannelId::new(7).unwrap(), 9, tx_leaf, recipient, 3, amount);
         assert_ne!(
             base,
-            burn_descriptor(
-                ChannelId::new(8).unwrap(),
-                9,
-                tx_leaf,
-                recipient,
-                3,
-                amount,
-            ),
+            burn_descriptor(ChannelId::new(8).unwrap(), 9, tx_leaf, recipient, 3, amount,),
             "source channel must bind the IMD2 identity"
         );
         assert_ne!(
@@ -1939,8 +1931,8 @@ mod tests {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
 
-    /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_SIG_CLUSTER array (the cosigner cap,
-    /// used for `close_member_set_commitment`).
+    /// Pad an active prefix of COSIGNER pubkey hashes to the MAX_SIG_CLUSTER array (the cosigner
+    /// cap, used for `close_member_set_commitment`).
     fn pad_cosigner_hashes(active: &[Bytes32]) -> [Bytes32; MAX_SIG_CLUSTER] {
         std::array::from_fn(|i| active.get(i).copied().unwrap_or_default())
     }
@@ -1991,7 +1983,8 @@ mod tests {
         // The close circuit has no live withdrawal proof, so accepting a caller-chosen burn hash
         // would falsely present arbitrary telemetry as member-authorized withdrawal data.
         let mut burn_tx = close_tx.clone();
-        burn_tx.burn_tx_hash = Bytes32::from_u32_slice(&[0xdead, 0xbeef, 0, 0, 0, 0, 0, 0]).unwrap();
+        burn_tx.burn_tx_hash =
+            Bytes32::from_u32_slice(&[0xdead, 0xbeef, 0, 0, 0, 0, 0, 0]).unwrap();
         assert!(matches!(
             CloseIntent::new(&state, &burn_tx),
             Err(ChannelError::InvalidCloseBinding(_))
@@ -2065,8 +2058,8 @@ mod tests {
         assert_eq!(tampered.signing_digest(), intent_a.signing_digest());
     }
 
-    /// Shared Rust<->Solidity/circuit test vector: the same canonical state coordinates are hashed by
-    /// `ChannelSettlementManager.computeCloseIntentDigest` /
+    /// Shared Rust<->Solidity/circuit test vector: the same canonical state coordinates are hashed
+    /// by `ChannelSettlementManager.computeCloseIntentDigest` /
     /// `ChannelSettlementVerifier._closeIntentDigest` in
     /// contracts/test/ChannelSettlementManager.t.sol
     /// (`test_close_intent_digest_matches_rust_shared_vector`) and MUST produce the same
@@ -2267,9 +2260,10 @@ mod tests {
         ok_bp.validate().unwrap();
     }
 
-    /// `close_member_set_commitment` binds `member_count`: with the SAME 8-slot cosigner hash array, the
-    /// digest for count = 2 differs from count = 3. Proves member_count is genuinely part of the
-    /// preimage (not ignored), so two active sets that share a hash prefix cannot collide.
+    /// `close_member_set_commitment` binds `member_count`: with the SAME 8-slot cosigner hash
+    /// array, the digest for count = 2 differs from count = 3. Proves member_count is genuinely
+    /// part of the preimage (not ignored), so two active sets that share a hash prefix cannot
+    /// collide.
     #[test]
     fn close_member_set_commitment_binds_member_count() {
         let hashes = pad_cosigner_hashes(&[

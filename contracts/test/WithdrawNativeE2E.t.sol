@@ -7,7 +7,7 @@ import {FixtureLib} from "../script/FixtureLib.sol";
 import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 
 /// @title Full real on-chain native-ETH withdrawal payout (Phase 2).
-/// @notice The honest lifecycle through `withdrawNative` -> `withdraw()` pays real ETH, plus the
+/// @notice The honest lifecycle through `withdrawNative` -> `withdraw(amount)` pays real ETH, plus the
 ///         negative cases. The payout is bound to the finalized state by a REAL MLE/WHIR proof
 ///         (separate withdrawal VK) + the on-chain keccak re-fold of the withdrawal set.
 ///         Harness (setUp, lifecycle driver, fixture parsing) lives in `WithdrawNativeE2EBase`.
@@ -39,7 +39,7 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         // --- pull payment: recipient claims real ETH ---
         uint256 balBefore = recipient.balance;
         vm.prank(recipient);
-        rollup.withdraw();
+        rollup.withdraw(amount);
         assertEq(recipient.balance, balBefore + amount, "recipient received real ETH");
         assertEq(rollup.pendingWithdrawals(recipient), 0, "credit cleared after withdraw");
     }

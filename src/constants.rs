@@ -124,7 +124,8 @@ const _: () = assert!(
 ///
 /// SECURITY: this is a STATIC ZK-circuit size — the close/cancel circuits verify exactly
 /// `MAX_SIG_CLUSTER` SPHINCS+ cosigner slots (gating padding slots off via the active-bits unary
-/// decomposition). `member_count` is range-checked `2..=MAX_SIG_CLUSTER`; the invariant `member_count
+/// decomposition). `member_count` is range-checked `2..=MAX_SIG_CLUSTER`; the invariant
+/// `member_count
 /// + delegate_count <= MAX_CHANNEL_MEMBERS` still bounds the total active balance participants.
 /// Sizing the SIGNATURE work to 8 (rather than 1024) is what keeps the close/cancel circuit degree
 /// tractable — the H1 / balance-state work legitimately stays 1024 (delegates have balances).
@@ -464,7 +465,10 @@ mod tests {
                 INTER_CHANNEL_TX_DOMAIN_V3,
             ),
             ("IMMS MEMBER_SET_UPDATE_DOMAIN", MEMBER_SET_UPDATE_DOMAIN),
-            ("IMKR KEY_ROTATION_CONSENT_DOMAIN", KEY_ROTATION_CONSENT_DOMAIN),
+            (
+                "IMKR KEY_ROTATION_CONSENT_DOMAIN",
+                KEY_ROTATION_CONSENT_DOMAIN,
+            ),
             ("IMJC JOINER_CONSENT_DOMAIN", JOINER_CONSENT_DOMAIN),
             (
                 "IMI5 INTER_CHANNEL_TX_DOMAIN_V5",

@@ -40,7 +40,7 @@ Status: `Active(0) → ClosePending(1) → Closed(2)`. Mutators: `requestClose`,
 
 ### F35 — multi-level reentrancy on the payout paths
 - **Setup**: a malicious recipient contract that re-enters `claimWithdrawalCredit` / `pullChannelFunds`
-  / `withdraw()` from its `receive()`/fallback, including nested 3+ levels.
+  / `withdraw(amount)` from its `receive()`/fallback, including nested 3+ levels.
 - **Assert**: `nonReentrant` blocks all re-entries; credit/escrow accounting unchanged; no double pay.
   (Today only a simple 2-level claim reentry is tested.)
 

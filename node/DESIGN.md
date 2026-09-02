@@ -309,7 +309,9 @@ Driven by timers + tickets (W10/W8), each step idempotent and gated on contract 
 - Deposit/partial-withdrawal: `pw-submit` → after grace `pw-finalize` (timer
   `TIMER_PW_FINALIZE_DUE` fires when `block.timestamp ≥ deadline`).
 - Cooperative close: `close --CLOSE_REQUEST_ONLY` → wait grace → `close --CLOSE_SKIP_REQUEST`
-  (submit intent) → wait challenge window → `settle` (finalizeClose) → per-member `claim`.
+  (submit intent) → wait challenge window → `settle`
+  (`finalizeCloseGuarded(bytes32,uint64)`) → per-member `claim`. Request/finalize calldata is
+  pinned to a hash-authenticated durable close era before signing.
 - All timers are derived from on-chain values (`getPendingClose().challengeDeadline`,
   `closeRequestedAt + grace`) re-read each tick — never from local clocks alone.
 
@@ -362,7 +364,7 @@ ACTIVE ──CloseRequested(self)──▶ CLOSE_PENDING ──submit-intent─�
    │                                            challenge (A29) ▲      │
    │                                                                  ▼
    │                                                       CHALLENGE_WINDOW
-   │                                                                  │ finalizeClose
+   │                                                                  │ guarded finalize
    ▼                                                                  ▼
 DEFENSIVE (attack)                                                 CLOSED ──claim/pull──▶ SETTLED
 ```
@@ -379,8 +381,10 @@ PartialWithdrawal is an orthogonal sub-state on ACTIVE
 - Build and submit its own transactions (intra send, inter-channel send, burn) with real ZKPs,
   then **verify** the co-signed result before treating funds as moved.
 - Refresh its ciphertext when required (`canSend == false`).
-- Freeze unilaterally and produce/submit its finalized withdrawal claim without exposing its Regev
-  secret; once the manager's production rollup backing exists, pull that backing and its credit.
+- Freeze unilaterally and, from the public backing archived before head acceptance, produce/publish
+  the close proof without exposing any secret. After terminal funding has been validity-finalized
+  and atomically materialized for the Manager, produce/submit its finalized withdrawal claim with
+  the local Regev secret and pull the exact nullifier-scoped credit.
 - Detect co-signer misbehavior (withholding, equivocation, serving a non-extending head) and
   escalate to an on-chain exit.
 
@@ -472,9 +476,10 @@ a second failure ⇒ `COSIGNER_WITHHOLDING` or a genuine race — escalate per p
   positive token slot. WASM rechecks the finalized state digest, H1, and canonical close state-id,
   derives the amount by Regev decryption, self-verifies the inner and MLE/WHIR proofs, and returns
   no secret material. JavaScript re-decodes all 50 public inputs before submitting the exact ABI.
-  If a production live withdrawal has already created the manager's rollup backing, it then
-  permissionlessly calls `pullChannelFunds` / `pullChannelTokenFunds` and pulls the recipient's own
-  credit. These calls move existing `pendingWithdrawals[manager]` backing; they do not create it.
+  The production terminal-funding path creates the Manager's proof-bound Rollup credit from an
+  already N-of-N signed terminal child. Its publisher atomically materializes a complete native or
+  ERC-20 lane, then permissionlessly calls `pullChannelFunds` / `pullChannelTokenFunds` for exactly
+  the finalized channel cap before pulling the recipient's own nullifier-scoped credit.
   Transaction hashes and per-token progress are persisted before
   receipt waits; dropped/reverted transactions become retryable, while pending/mined hashes are
   not blindly resent. Exit completion accepts only this manager's finalized `WithdrawalClaimed`,
@@ -492,11 +497,16 @@ a second failure ⇒ `COSIGNER_WITHHOLDING` or a genuine race — escalate per p
   **exit mode**.
 - **Exit mode**: the delegate stops all sends and immediately derives the depth-10 participant path
   from its WASM-verified snapshot. With `INTMAX_DELEGATE_L1_PRIVATE_KEY` it verifies the manager's
-  immutable root/count and submits `requestCloseAsParticipant` from the exact leaf-bound recipient.
-  Exit mode is sticky until every positive finalized token balance is paid on L1. Withdrawal-claim
-  proving/submission is delegate-owned; both fund-pull legs are delegate-owned after the manager's
-  production rollup backing exists. The close-intent proof and creation of that backing remain
-  separate availability requirements in §6.3.
+  immutable root/count and submits guarded `requestCloseAsParticipant` calldata from the exact
+  leaf-bound recipient. The exact freeze nonce, monotone cancel floor and durable checkpoint are
+  journaled before the outbox signs. Guarded finalization additionally pins the manager-lifetime
+  `closeRequestGeneration`, preventing a cancelled raw transaction from targeting a later era.
+  Exit mode is sticky until every positive finalized token balance is paid on L1. Close-intent and
+  withdrawal-claim proving/submission are delegate-owned from the archives committed before head
+  acceptance. Publication and exact fund-pull legs are permissionless once the terminal child and
+  its proof artifacts exist. Section 6.3 records the remaining pre-authorized terminal-child and
+  producer-witness availability requirement; fresh N-of-N cooperation after failure is not called
+  unilateral exit.
 
 ### 4.9 Delegate state machine
 ```
@@ -620,20 +630,28 @@ A re-audit then flagged residuals, all fixed in a second round:
   recipient never clears the sticky exit).
 These paths are covered by the Node regression suite, including `test/adversarial.test.js`.
 
-### 6.3 Remaining availability seams
+### 6.3 Remaining availability and release-acceptance seams
 - Transport for delegate→co-signer beyond REST (WebSocket push for `SNAPSHOT_UPDATED`?).
 - Where the delegate obtains a *newer N-of-N head* to request a challenge when it suspects the
   co-signer (today only the co-signer can produce member signatures — documents the single-operator
   trust boundary; revisit under multi-operator).
 - A45 PW-cancel remains blocked on the era-fence model; the co-signer's PW-defense branch is
   alert-only until then.
-- Make the public balance attestation/verifier data needed by close-intent proving durably
-  available to every participant, then expose the close prover locally. The delegate can already
-  freeze via `requestCloseAsParticipant`, and after finalization its secret-preserving WASM claim
-  and direct claim submission no longer depend on a co-signer. The remaining censorship seam here
-  is specifically the transition from `ClosePending` to a proved `CloseSubmitted`, not
-  withdrawal-claim secret ownership.
-- Run a production live-withdrawal producer after close to create the rollup's
-  `pendingWithdrawals[manager]` / per-token equivalent. `pullChannelFunds` and
-  `pullChannelTokenFunds` are permissionless only after that backing exists; they cannot create it,
-  and the current full-withdrawal CLI intentionally fails closed on public-chain production use.
+- Public close-proof withholding after an accepted head is closed in the local protocol: head
+  acceptance is conditional on a content-addressed, native-verified and fsynced public-backing
+  archive, and `public_close_prover` plus `public_close_publisher` recover from it without a
+  coordinator. A release still needs a real public-chain restart/reorg acceptance run; mock and
+  chain-31337 evidence are not that run.
+- The production terminal withdrawal path now stages one complete N-of-N signed terminal child,
+  validity-finalizes it before authoritative live settlement, builds the existing withdrawal/MLE
+  artifacts, atomically materializes each complete asset lane through the immutable
+  `CloseFundingMaterializer`, and pulls exactly the proof-bound per-channel cap. It does not enlarge
+  or replace any proof. The signed terminal child must nevertheless already be obtainable under the
+  channel's availability model: asking a newly hostile/offline co-signer for a fresh signature only
+  after exit begins is not a unilateral-exit guarantee. This pre-authorization/exit-kit condition
+  remains a protocol acceptance item until the signer workflow and recovery tests establish it.
+- Browser/public claiming now pins Manager/Rollup/verifier/materializer identity, uses exact
+  nullifier-scoped payouts, and semantically adopts permissionless wrapper/front-run transactions
+  only from stable finalized receipts plus receipt-block getters. The fault-injection suite is
+  local; production key custody and a real public-chain native/ERC-20 E2E with restart and reorg
+  exercises remain mandatory release evidence.

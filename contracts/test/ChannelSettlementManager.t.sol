@@ -28,6 +28,10 @@ contract MockChannelRegistry is IChannelRegistry {
         verifier = verifier_;
     }
 
+    function isFinalizedStateRoot(bytes32) external pure returns (bool) {
+        return true;
+    }
+
     /// Register a channel's member set + bp from the active hashes (slot order) — mirrors the
     /// rollup's `registerChannel` recording (one-time, but the mock is permissive for test reuse).
     function register(
@@ -57,9 +61,9 @@ contract MockChannelRegistry is IChannelRegistry {
         channelBpPkG[channelId] = bpHash;
     }
 
-    // --- Native-payout stand-in for IntmaxRollup.withdraw() (P3 close→payout tests) ---
+    // --- Native-payout stand-in for IntmaxRollup.withdraw(amount) (P3 close→payout tests) ---
     // Models the rollup's pull-payment: the close pays the manager via withdrawNative, crediting
-    // pendingWithdrawals[manager]; the manager later calls withdraw() to pull that ETH.
+    // pendingWithdrawals[manager]; the manager later calls withdraw(amount) to pull that ETH.
     mapping(address => uint256) public pendingWithdrawals;
 
     /// Fund + credit a recipient's pull balance (simulates a finalized native withdrawal payout).
@@ -67,18 +71,24 @@ contract MockChannelRegistry is IChannelRegistry {
         pendingWithdrawals[recipient] += msg.value;
     }
 
-    function withdraw() external override {
-        uint256 amount = pendingWithdrawals[msg.sender];
-        require(amount > 0, "nothing to withdraw");
-        pendingWithdrawals[msg.sender] = 0;
-        (bool ok, ) = msg.sender.call{value: amount}("");
+    function withdraw(uint256 amount) external override {
+        uint256 pending = pendingWithdrawals[msg.sender];
+        require(amount > 0 && pending > 0, "nothing to withdraw");
+        uint256 paid = amount < pending ? amount : pending;
+        pendingWithdrawals[msg.sender] = pending - paid;
+        (bool ok, ) = msg.sender.call{value: paid}("");
         require(ok, "withdraw failed");
     }
 
-    mapping(bytes32 => bool) public partialWithdrawalAuthorized;
+    mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
 
     function authorizePartialWithdrawal(bytes32 authDigest) external override {
         partialWithdrawalAuthorized[authDigest] = true;
+    }
+
+    function consumePartialWithdrawalAuthorization(bytes32 authDigest) external {
+        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
+        delete partialWithdrawalAuthorized[authDigest];
     }
 
     // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
@@ -93,11 +103,12 @@ contract MockChannelRegistry is IChannelRegistry {
         pendingTokenWithdrawals[tokenIndex][recipient] += amount;
     }
 
-    function withdrawToken(uint32 tokenIndex) external override {
-        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
-        require(amount > 0, "nothing to withdraw");
-        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
-        require(tokenAddressOf[tokenIndex].transfer(msg.sender, amount), "token transfer failed");
+    function withdrawToken(uint32 tokenIndex, uint256 amount) external override {
+        uint256 pending = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        require(amount > 0 && pending > 0, "nothing to withdraw");
+        uint256 paid = amount < pending ? amount : pending;
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = pending - paid;
+        require(tokenAddressOf[tokenIndex].transfer(msg.sender, paid), "token transfer failed");
     }
 }
 
@@ -182,6 +193,7 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
+            address(this),
             bindings
         );
     }
@@ -291,6 +303,22 @@ contract ChannelSettlementManagerTest is Test {
             CHANNEL_ID,
             request.closeIntentDigest,
             manager.registeredMemberSetCommitment(),
+            pending.finalStateVersion,
+            request.revivedStateVersion,
+            request.revivedChannelStateDigest
+        );
+        return CloseTestLib.proofWithLimbs(limbs);
+    }
+
+    function _cancelCloseProofFor(
+        ChannelSettlementManager m,
+        ChannelSettlementManager.CancelCloseRequest memory request
+    ) internal view returns (MleVerifier.MleProof memory) {
+        ChannelSettlementManager.PendingClose memory pending = m.getPendingClose();
+        uint256[] memory limbs = verifier.expectedCancelCloseLimbs(
+            CHANNEL_ID,
+            request.closeIntentDigest,
+            m.registeredMemberSetCommitment(),
             pending.finalStateVersion,
             request.revivedStateVersion,
             request.revivedChannelStateDigest
@@ -510,8 +538,10 @@ contract ChannelSettlementManagerTest is Test {
 
     /// Two-step close preamble: a member freezes the channel and the grace window elapses.
     function _requestCloseAndElapseGrace() internal {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
     }
 
@@ -935,6 +965,7 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
+            address(this),
             b
         );
     }
@@ -986,6 +1017,7 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(registry)),
+            address(this),
             b
         );
         uint256 used = gasBefore - gasleft();
@@ -1039,6 +1071,7 @@ contract ChannelSettlementManagerTest is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             reg,
+            address(this),
             b
         );
     }
@@ -1120,10 +1153,13 @@ contract ChannelSettlementManagerTest is Test {
     function test_request_close_freezes_channel_and_emits() external {
         assertTrue(manager.isNativeSendAllowed(0));
 
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
+
         vm.expectEmit(true, false, false, true);
         emit CloseRequested(alice, uint64(block.timestamp), 1);
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
 
         assertEq(
             uint256(manager.channelStatus()),
@@ -1137,29 +1173,37 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function test_request_close_reverts_for_non_member() external {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(mallory);
         vm.expectRevert(ChannelSettlementManager.NotChannelMember.selector);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
     }
 
     function test_request_close_reverts_when_already_pending() external {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
 
+        freezeNonce = manager.currentCloseFreezeNonce();
+        cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(bob);
         vm.expectRevert(ChannelSettlementManager.ChannelAlreadyFrozen.selector);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
     }
 
     function test_request_close_reverts_when_closed() external {
         _requestCloseAndElapseGrace();
         _submitClose(_intent(1, 9, 22, 1));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.ChannelClosed.selector);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
     }
 
     function test_submit_close_intent_reverts_from_active_without_request() external {
@@ -1170,8 +1214,10 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function test_submit_close_intent_grace_period_boundary() external {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         uint256 requestedAt = block.timestamp;
 
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
@@ -1279,7 +1325,7 @@ contract ChannelSettlementManagerTest is Test {
         _submitClose(intent);
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
         assertEq(manager.finalizedStateVersion(), 41);
         assertEq(manager.finalizedSettledTxChain(), intent.finalSettledTxChain);
@@ -1319,8 +1365,10 @@ contract ChannelSettlementManagerTest is Test {
         manager.submitCloseIntent(reclose, recloseProof);
 
         // A fresh requestClose starts a fresh grace window.
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(bob);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         assertEq(manager.currentCloseFreezeNonce(), 1);
         vm.expectRevert(ChannelSettlementManager.GracePeriodNotElapsed.selector);
         manager.submitCloseIntent(reclose, recloseProof);
@@ -1349,7 +1397,7 @@ contract ChannelSettlementManagerTest is Test {
         assertFalse(manager.isNativeSendAllowed(0));
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
 
         assertEq(
             uint256(manager.channelStatus()),
@@ -1382,6 +1430,65 @@ contract ChannelSettlementManagerTest is Test {
 
         assertEq(manager.withdrawalCredits(0, alice), 30);
         assertEq(manager.withdrawalCredits(0, bob), 0, "the double-credit path is disabled");
+    }
+
+    function test_participantCloseGuardedRawCannotReplayAfterCancelRestoresFreezeNonce() external {
+        bytes32 USER_D = keccak256("guarded_delegate_pubkey_hash");
+        address dave = makeAddr("guarded-dave");
+        MockChannelRegistry reg = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
+        bytes32[] memory members = new bytes32[](2);
+        members[0] = USER_A;
+        members[1] = USER_B;
+        reg.register(uint32(CHANNEL_ID), BP_MEMBER_SLOT, members);
+
+        ChannelSettlementManager.MemberBinding[] memory bindings =
+            new ChannelSettlementManager.MemberBinding[](2);
+        bindings[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: alice});
+        bindings[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: bob});
+        bytes32[] memory participantPkGs = new bytes32[](3);
+        participantPkGs[0] = USER_A;
+        participantPkGs[1] = USER_B;
+        participantPkGs[2] = USER_D;
+        address[] memory participantRecipients = new address[](3);
+        participantRecipients[0] = alice;
+        participantRecipients[1] = bob;
+        participantRecipients[2] = dave;
+        (bytes32 root, bytes32[10] memory daveProof) =
+            _participantTree(participantPkGs, participantRecipients, 2);
+
+        ChannelSettlementManager m = new ChannelSettlementManager(
+            CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, root,
+            CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), address(this), bindings
+        );
+
+        vm.prank(dave);
+        m.requestCloseAsParticipant(2, USER_D, daveProof, 0, 0);
+        vm.warp(block.timestamp + GRACE);
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        m.submitCloseIntent(intent, _closeProofFor(m, intent));
+        bytes32 digest = m.computeCloseIntentDigest(intent);
+        ChannelSettlementManager.CancelCloseRequest memory cancel = ChannelSettlementManager
+            .CancelCloseRequest({
+                closeIntentDigest: digest,
+                revivedStateVersion: 13,
+                revivedChannelStateDigest: keccak256("guarded-revived-state")
+            });
+        m.cancelClose(cancel, _cancelCloseProofFor(m, cancel));
+
+        assertEq(m.currentCloseFreezeNonce(), 0, "cancel deliberately restores the freeze nonce");
+        assertEq(m.highestCancelledRevivedStateVersion(), 13, "cancel floor advances monotonically");
+        vm.prank(dave);
+        vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
+        m.requestCloseAsParticipant(2, USER_D, daveProof, 0, 0);
+
+        vm.prank(dave);
+        m.requestCloseAsParticipant(2, USER_D, daveProof, 0, 13);
+        assertEq(
+            uint256(m.channelStatus()),
+            uint256(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
+            "a freshly guarded request remains live"
+        );
     }
 
     /// Delegate account (Phase 4 / DA4): a DELEGATE is registered for the WITHDRAWAL path (its
@@ -1418,7 +1525,7 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager m = new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, participantRoot,
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), address(this), mb
         );
 
         // Only the two cosigners are materialized. The delegate identity remains available through
@@ -1437,14 +1544,14 @@ contract ChannelSettlementManagerTest is Test {
         // A wrong recipient cannot reuse Dave's path, while Dave retains unilateral close.
         vm.prank(mallory);
         vm.expectRevert(ChannelSettlementManager.InvalidParticipantProof.selector);
-        m.requestCloseAsParticipant(2, USER_D, daveProof);
+        m.requestCloseAsParticipant(2, USER_D, daveProof, 0, 0);
         vm.prank(dave);
-        m.requestCloseAsParticipant(2, USER_D, daveProof);
+        m.requestCloseAsParticipant(2, USER_D, daveProof, 0, 0);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         m.submitCloseIntent(intent, _closeProofFor(m, intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        m.finalizeClose();
+        m.finalizeCloseGuarded(m.getPendingClose().closeIntentDigest, m.closeRequestGeneration());
         bytes32 cid = m.finalizedCloseIntentDigest();
 
         // The DELEGATE withdraws its member-attested balance (40) — accepted.
@@ -1492,7 +1599,7 @@ contract ChannelSettlementManagerTest is Test {
         new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, bytes32(0),
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), address(this), mb
         );
     }
 
@@ -1682,7 +1789,7 @@ contract ChannelSettlementManagerTest is Test {
         _submitClose(intent);
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         assertEq(manager.finalizedEpoch(), 10);
         assertEq(manager.finalizedSmallBlockNumber(), 40);
         assertEq(manager.finalizedBurnTxHash(), intent.burnTxHash);
@@ -1697,20 +1804,54 @@ contract ChannelSettlementManagerTest is Test {
         _requestCloseAndElapseGrace();
         _submitClose(_intent(1, 9, 22, 1)); // channelFundAmount = 75
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         return manager.finalizedCloseIntentDigest();
     }
 
-    function _submitWd(bytes32 d, bytes32 memberHash, address recipient, uint64 amount) internal {
+    function _submitWd(bytes32 d, bytes32 memberHash, address recipient, uint64 amount)
+        internal
+        returns (bytes32)
+    {
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, memberHash, recipient, amount);
         manager.submitWithdrawalClaim(c, _withdrawalClaimProof(c));
+        return c.withdrawalNullifier;
     }
 
     /// Simulate the rollup paying this manager via a finalized native withdrawal, then pull it in.
     function _fundAndPull(MockChannelRegistry reg, ChannelSettlementManager m, uint256 amount) internal {
+        _materializeCloseFundingAuthorization(reg, m, 0);
         vm.deal(address(this), address(this).balance + amount);
         reg.creditWithdrawal{value: amount}(address(m));
         m.pullChannelFunds();
+    }
+
+    function _materializeCloseFundingAuthorization(
+        MockChannelRegistry reg,
+        ChannelSettlementManager m,
+        uint32 tokenIndex
+    ) internal returns (bytes32 authDigest) {
+        uint8 tokenCount = m.finalizedTokenCount();
+        uint32[10] memory tokenRegistry;
+        uint256[10] memory amounts;
+        for (uint256 slot = 0; slot < tokenCount; slot++) {
+            uint32 baseToken = m.finalizedTokenRegistry(slot);
+            tokenRegistry[slot] = baseToken;
+            amounts[slot] = m.finalizedChannelFundAmount(baseToken);
+        }
+        bytes32 fundsDigest = verifier.tokenFundsDigest(tokenRegistry, tokenCount, amounts);
+        bytes32 auxData = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4346),
+                block.chainid,
+                address(reg),
+                address(m),
+                m.channelId(),
+                m.currentCloseFreezeNonce(),
+                fundsDigest
+            )
+        );
+        authDigest = m.authorizeCloseFunding(tokenIndex, auxData);
+        reg.consumePartialWithdrawalAuthorization(authDigest);
     }
 
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
@@ -1744,7 +1885,7 @@ contract ChannelSettlementManagerTest is Test {
         b[2] = ChannelSettlementManager.MemberBinding({pkG: USER_C, recipient: carol});
         m = new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 0, bytes32(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), b
+            INITIAL_BP_BOND, IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), address(this), b
         );
     }
 
@@ -1757,43 +1898,79 @@ contract ChannelSettlementManagerTest is Test {
         assertEq(address(manager).balance, 0, "no stray ETH held");
     }
 
-    /// pullChannelFunds moves the manager's rollup credit into the manager and records it.
+    /// pullChannelFunds moves the exact finalized channel cap into the manager and records it.
     function test_p3_pullChannelFunds_recordsReceived() external {
-        _fundAndPull(registry, manager, 60);
-        assertEq(manager.receivedChannelFunds(0), 60, "receivedChannelFunds == pulled");
-        assertEq(address(manager).balance, 60, "manager holds the pulled ETH");
+        _finalizeDefault();
+        _fundAndPull(registry, manager, 75);
+        assertEq(manager.receivedChannelFunds(0), 75, "receivedChannelFunds == finalized cap");
+        assertEq(address(manager).balance, 75, "manager holds the exact backing");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlementManager.ChannelFundsAlreadyReceived.selector, 0)
+        );
+        manager.pullChannelFunds();
+    }
+
+    /// A close may use only a channel-fund root finalized by this manager's immutable Rollup.
+    /// A proof valid against another deployment/history must not become local backing authority.
+    function test_close_rejectsStateRootNotFinalizedByBoundRollup() external {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
+        vm.prank(alice);
+        manager.requestClose(freezeNonce, cancellationFloor);
+        vm.warp(block.timestamp + GRACE);
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        vm.mockCall(
+            address(registry),
+            abi.encodeCall(IChannelRegistry.isFinalizedStateRoot, (intent.channelFundIntmaxStateRoot)),
+            abi.encode(false)
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ChannelSettlementManager.ChannelFundStateRootNotFinalized.selector,
+                intent.channelFundIntmaxStateRoot
+            )
+        );
+        manager.submitCloseIntent(intent, proof);
     }
 
     /// Happy path: members claim their accrued credit as real native ETH.
     function test_p3_claimWithdrawalCredit_paysRealEth() external {
         bytes32 d = _finalizeDefault();
-        _submitWd(d, USER_A, alice, 30);
-        _submitWd(d, USER_B, bob, 20); // distinct nullifier (keyed by member hash)
+        bytes32 aliceNullifier = _submitWd(d, USER_A, alice, 30);
+        bytes32 bobNullifier = _submitWd(d, USER_B, bob, 20); // distinct nullifier (keyed by member hash)
         _fundAndPull(registry, manager, 75);
 
         uint256 aliceBefore = alice.balance;
         vm.prank(alice);
-        uint256 got = manager.claimWithdrawalCredit();
+        uint256 got = manager.claimWithdrawalCredit(aliceNullifier);
         assertEq(got, 30, "alice claims her credit");
         assertEq(alice.balance, aliceBefore + 30, "alice received real ETH");
         assertEq(manager.withdrawalCredits(0, alice), 0, "credit cleared");
         assertEq(manager.totalCreditedOut(0), 30, "paid-out accumulator");
 
         vm.prank(bob);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(bobNullifier);
         assertEq(bob.balance, 20, "bob received real ETH");
         assertEq(manager.totalCreditedOut(0), 50, "total paid out");
     }
 
-    /// CROSS-CHANNEL ISOLATION (non-negotiable): the manager cannot pay out more ETH than it
-    /// actually received from the rollup, even if intra-channel credits say otherwise.
-    function test_p3_claimWithdrawalCredit_cappedByReceivedFunds() external {
+    /// CROSS-CHANNEL ISOLATION: underfunded recipient credit is rejected atomically and creates no
+    /// payout capacity, even if intra-channel claims have already accrued.
+    function test_p3_underfundedPull_createsNoPayoutCapacity() external {
         bytes32 d = _finalizeDefault();
-        _submitWd(d, USER_A, alice, 30);   // credit = 30
-        _fundAndPull(registry, manager, 10); // but only 10 ETH actually received
+        bytes32 nullifier = _submitWd(d, USER_A, alice, 30);   // credit = 30
+        _materializeCloseFundingAuthorization(registry, manager, 0);
+        vm.deal(address(this), address(this).balance + 10);
+        registry.creditWithdrawal{value: 10}(address(manager));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlementManager.ChannelFundingMismatch.selector, 0, 75, 10)
+        );
+        manager.pullChannelFunds();
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(nullifier);
         assertEq(alice.balance, 0, "no over-cap payout");
     }
 
@@ -1826,20 +2003,22 @@ contract ChannelSettlementManagerTest is Test {
     function test_p3_claimWithdrawalCredit_reentrancyBlocked() external {
         ReentrantClaimer attacker = new ReentrantClaimer();
         (ChannelSettlementManager m, MockChannelRegistry reg) = _managerWithRecipient0(address(attacker));
-        attacker.setManager(m);
-
+        uint64 freezeNonce = m.currentCloseFreezeNonce();
+        uint64 cancellationFloor = m.highestCancelledRevivedStateVersion();
         vm.prank(bob);
-        m.requestClose();
+        m.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
         m.submitCloseIntent(intent, _closeProofFor(m, intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        m.finalizeClose();
+        m.finalizeCloseGuarded(m.getPendingClose().closeIntentDigest, m.closeRequestGeneration());
         bytes32 d = m.finalizedCloseIntentDigest();
 
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_A, address(attacker), 30);
         m.submitWithdrawalClaim(c, _withdrawalClaimProofFor(m, c));
+        attacker.setManager(m, c.withdrawalNullifier);
 
+        _materializeCloseFundingAuthorization(reg, m, 0);
         vm.deal(address(this), address(this).balance + 75);
         reg.creditWithdrawal{value: 75}(address(m));
         m.pullChannelFunds();
@@ -2093,11 +2272,13 @@ contract ChannelSettlementManagerTest is Test {
         ChannelSettlementManager m = new ChannelSettlementManager(
             CHANNEL_ID, BP_MEMBER_SLOT, USER_A, 1, keccak256("b2_delegate_snapshot"),
             CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY, INITIAL_BP_BOND,
-            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), mb
+            IChannelSettlementVerifier(address(verifier)), IChannelRegistry(address(reg)), address(this), mb
         );
 
+        uint64 freezeNonce = m.currentCloseFreezeNonce();
+        uint64 cancellationFloor = m.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        m.requestClose();
+        m.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
         ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
 
@@ -2122,7 +2303,7 @@ contract ChannelSettlementManagerTest is Test {
 
         m.submitCloseIntent(intent, exact);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        m.finalizeClose();
+        m.finalizeCloseGuarded(m.getPendingClose().closeIntentDigest, m.closeRequestGeneration());
         bytes32 cid = m.finalizedCloseIntentDigest();
 
         ChannelSettlementManager.WithdrawalClaim memory dClaim =
@@ -2620,20 +2801,22 @@ contract ChannelSettlementManagerTest is Test {
 /// @dev Attacker that re-enters claimWithdrawalCredit on receiving ETH (reentrancy test).
 contract ReentrantClaimer {
     ChannelSettlementManager public mgr;
+    bytes32 public withdrawalNullifier;
     uint256 public reenterCount;
 
-    function setManager(ChannelSettlementManager m) external {
+    function setManager(ChannelSettlementManager m, bytes32 nullifier) external {
         mgr = m;
+        withdrawalNullifier = nullifier;
     }
 
     function claim() external returns (uint256) {
-        return mgr.claimWithdrawalCredit();
+        return mgr.claimWithdrawalCredit(withdrawalNullifier);
     }
 
     receive() external payable {
         if (reenterCount == 0) {
             reenterCount = 1;
-            mgr.claimWithdrawalCredit(); // reentrant attempt; reverts under nonReentrant
+            mgr.claimWithdrawalCredit(withdrawalNullifier); // reentrant attempt; reverts under nonReentrant
         }
     }
 }

@@ -1193,9 +1193,9 @@ contract IntmaxRollupTest is Test {
         rollup.postBlockAndSubmit{value: 1 ether}(emptyBatch, bytes32(0), 0, bytes32(0), bytes32(0));
 
         vm.expectRevert(expected);
-        rollup.withdraw();
+        rollup.withdraw(1);
         vm.expectRevert(expected);
-        rollup.withdrawToken(7);
+        rollup.withdrawToken(7, 1);
     }
 
     function test_finalize_success() public {
@@ -1231,7 +1231,7 @@ contract IntmaxRollupTest is Test {
         // Pull-payment: stake credited to pendingWithdrawals, not pushed
         assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake should be credited");
         vm.prank(submitter);
-        rollup.withdraw();
+        rollup.withdraw(1 ether);
         assertEq(submitter.balance, stakeBalanceBefore, "stake should be withdrawn");
     }
 
@@ -1567,14 +1567,14 @@ contract IntmaxRollupTest is Test {
         // Pull-payment: rewards credited to pendingWithdrawals
         assertEq(r.pendingWithdrawals(reporter), expectedReward, "Reporter reward mismatch");
         assertEq(r.pendingWithdrawals(fraudTreasury), expectedTreasury, "Treasury share mismatch");
-        // Contract still holds the funds until withdraw()
+        // Contract still holds the funds until withdraw(amount)
         assertEq(address(r).balance, expectedReward + expectedTreasury, "Stakes in escrow");
         vm.prank(reporter);
-        r.withdraw();
+        r.withdraw(expectedReward);
         assertEq(reporter.balance, reporterBefore + expectedReward, "Reporter withdrew");
         // (treasury is an EOA in this test, so it can also withdraw)
         vm.prank(fraudTreasury);
-        r.withdraw();
+        r.withdraw(expectedTreasury);
         assertEq(fraudTreasury.balance, treasuryBefore + expectedTreasury, "Treasury withdrew");
         assertEq(address(r).balance, 0, "All funds withdrawn");
         assertEq(r.blockNumber(), 0, "Blocks should roll back");
@@ -1971,8 +1971,11 @@ contract IntmaxRollupTest is Test {
         assertEq(rollup.pendingWithdrawals(submitter), 1 ether, "stake credited");
         uint256 balBefore = submitter.balance;
         vm.prank(submitter);
-        rollup.withdraw();
-        assertEq(submitter.balance, balBefore + 1 ether, "stake withdrawn");
+        rollup.withdraw(0.4 ether);
+        assertEq(rollup.pendingWithdrawals(submitter), 0.6 ether, "unselected credit remains scoped on rollup");
+        vm.prank(submitter);
+        rollup.withdraw(0.6 ether);
+        assertEq(submitter.balance, balBefore + 1 ether, "stake withdrawn in exact slices");
         assertEq(rollup.pendingWithdrawals(submitter), 0, "no pending after withdraw");
     }
 

@@ -13,7 +13,7 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 ///           register(ch1) -> postBlock(b0) -> deposit{value} -> postBlock(b1) -> register(ch2) ->
 ///           postBlock(b2) -> postBlock(b3, ch1->ch2 transfer) -> postBlock(b4, ch2 withdrawal) ->
 ///           finalize(validity proof, sub 4) -> withdrawNative(ch2's withdrawal proof, recipient=EOA)
-///           -> withdraw() pays real ETH to the EOA.
+///           -> withdraw(amount) pays that exact ETH amount to the EOA.
 ///         This is the strongest local de-risk before spending real Sepolia ETH + 5x1ETH stakes:
 ///         it verifies BOTH real MLE/WHIR proofs (validity + ch2 withdrawal) against the cumulative
 ///         registration + deposit chains, with ch2's received funds exiting to L1 as native ETH.
@@ -106,7 +106,7 @@ contract C2CFullE2ETest is Test {
         // --- pull payment: the receiver (EOA) collects real ETH ---
         uint256 balBefore = recipient.balance;
         vm.prank(recipient);
-        rollup.withdraw();
+        rollup.withdraw(amount);
         assertEq(recipient.balance, balBefore + amount, "receiver got real ETH from the channel-to-channel exit");
         assertEq(rollup.pendingWithdrawals(recipient), 0, "credit cleared");
     }
@@ -160,7 +160,7 @@ contract C2CFullE2ETest is Test {
         assertEq(rollup.pendingWithdrawals(poster), STAKE, "finalized submission's stake refunded to poster");
         uint256 balBefore = poster.balance;
         vm.prank(poster);
-        rollup.withdraw();
+        rollup.withdraw(STAKE);
         assertEq(poster.balance, balBefore + STAKE, "poster pulled the refunded stake as real ETH");
         (address s4, bool spent4) = rollup.stakeInfo(finalSubId);
         assertEq(s4, address(0), "finalized submission's stakeInfo cleared");

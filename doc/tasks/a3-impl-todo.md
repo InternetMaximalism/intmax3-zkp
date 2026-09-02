@@ -60,7 +60,7 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
 - [ ] anvil で requestClose→submitCloseIntent 確認(P5 E2E)
 
 ## P4 — settle + withdraw + claim
-- [x] **`settle <manager> [rpc]` 実装(コンパイル OK)**: finalizeClose()(証明不要)を cast。close→Closed 遷移。
+- [x] **`settle <manager> [rpc]` 実装(コンパイル OK)**: durable checkpoint から pending digest と monotone request generation を読み、再検証直後に `finalizeCloseGuarded(bytes32,uint64)` を cast。close→Closed 遷移。旧 no-arg selector は production ABI から削除。
 - [x] **`claim <manager> <member_slot> [rpc]` 実装(Rust + Solidity コンパイル OK)**: close 再構築 → 検証済み WithdrawalClaimProver で withdrawal-claim MLE + descriptor 生成(amount は復号由来=over-claim 不可)→ RunClose に**動作する `submitWithdrawalClaimStep` を新規追加** → forge submit → claimWithdrawalCredit。env: CLAIM_RECIPIENT + CLOSE_* は close と一致必須。live は P5。
 - [x] **`withdraw` 完成(全パイプライン内包・anvil live 検証済)** — 決定: Q1=全パイプライン内包 / Q2=ビルダは wallet_core / Q3=anvil 含め全自動。計画+脅威モデルは `doc/tasks/a3-p4-withdraw-plan.md`。
   - **wallet_core::build_channel_withdrawal**(`ChannelWithdrawalParams`/`ChannelWithdrawalArtifacts`)= `generate_withdrawal_fixture` の全パイプライン(registration→deposit→withdrawal-tx の 3-block 再構築 + balance/single_withdrawal/chain/validity 証明 + wrap+MLE×2 + keccak re-fold + ext_commitment 一致 sanity)を移設。**generate_withdrawal_fixture は委譲化**(1 source of truth)。
@@ -91,7 +91,7 @@ CloseProver::new(balance_vd: &VerifierCircuitData) -> Self   // list = ListCircu
   1. **(訂正)close 経路 freeze-nonce は誤診=健全**: `CloseIntent::new`(channel.rs:763)が
      `close_freeze_nonce = state.close_freeze_nonce + 1` を計算し、回路も `pis = state+1` を強制。genesis(0)→ intent(1)、
      requestClose 後の manager(1)と**一致**。`CloseLifecycleE2E` の close-intent skip は **freeze ではなく member-set 不一致**が
-     主因で、**本統合(CLI member 統一)が解消**。**ただし別の本物のギャップ**: `cmd_close` は `requestClose()` 直後に
+     主因で、**本統合(CLI member 統一)が解消**。**ただし別の本物のギャップ**: `cmd_close` は guarded `requestClose(uint64,uint64)` 直後に
      `submitCloseIntent` を呼ぶが、後者は `GRACE_BEFORE_PROCESS_SECS=600` 経過を要求 → 実チェーンで `GracePeriodNotElapsed`。
      `cmd_close` を request/submit に分割 or E2E で `evm_increaseTime`(soundness 非該当=配線)。
   2. **integrated withdraw の deposit/registration folding 不一致(本物・真因)**: オンチェーンは「`deposit()`/`registerChannel`

@@ -6,7 +6,7 @@
 > tree. This corpus was audited against the codebase up to commit
 > `2c358ae` (2026-08-20). Production has moved since — notably `fd467ea`
 > (2026-08-24, sig-cluster: member cap 16 → 8, IMCM close-commitment
-> re-layout) and detail2 §Q (dynamic member-set updates). Divergences
+> re-layout) and the now-retired detail2 §Q direct member-set-update prototype. Divergences
 > found by the 2026-08-26 review are catalogued in
 > `doc/audit/audit25-08-2026.md` Part 4.3; the load-bearing ones
 > (constants, the §Q-falsified `member_set_immutable`, the contract line
@@ -93,7 +93,7 @@ since this summary's target commit.
 | Deposit chain: sequential append, no gaps/dups | `sequential_append` | DepositStep |
 | Signatures non-skippable (computed gate) | `signatures_not_skippable` | ValidityCircuit |
 | Signing block ⇒ exactly one accumulator fold, no reset/skip | `signing_block_advances`, `later_slots_preserve` | UpdateUser (NEW) |
-| Member-set binding, §Q-conditional (producer cannot rotate members outside a payload-bound MemberSetUpdate; RESTATED 2026-08-26 — the unconditional form was falsified by §Q) | `member_set_immutable_outside_update`, `member_root_change_requires_msu` | UpdateUser (RE-SYNCED) |
+| Member-set binding in the historical §Q model (SUPERSEDED 2026-09-02; production now forbids direct MSU entirely) | `member_set_immutable_outside_update`, `member_root_change_requires_msu` | UpdateUser (historical only) |
 | Registration root-swap: what block_step binds | `registration_root_swap_anchored` | UpdateUser (NEW) |
 | Nullifier invariant PRESERVED from genesis (spend-once induction) | `genesis_inv`, `insert_preserves_inv`, `reachable_key_absent` | IndexedMerkle (repaired) |
 | PublicState.is_equal ANDs all 5 fields (F-PUBST-1) | `publicStateEq_sound` | PublicStateEq (NEW) |
@@ -139,8 +139,8 @@ account-root change); (d) single-use on-chain (nullifier consumed, cross-call);
 adversarially reviewed for circularity: the proof term consumes the per-layer
 theorems; no proved conclusion is restated as an assumption field.
 
-> Contract coverage: `Coverage.lean` categorizes all remaining lines of all
-> THREE contracts (incl. the Manager close lifecycle and the §Q
+> Contract coverage: `Coverage.lean` categorizes the historical target's remaining lines in all
+> THREE contracts (including the Manager close lifecycle and the now-retired §Q
 > `applyMemberSetUpdate` / `verifyMemberSetUpdate` entries; line map
 > RE-POINTED 2026-08-26 after drifting ~300-350 lines). `verifySpecialClose` /
 > `verifyLateOutgoingDebit` are classified DISABLED STUB (forgeable `_matches`

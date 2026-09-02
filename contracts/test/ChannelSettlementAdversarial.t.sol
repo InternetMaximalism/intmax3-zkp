@@ -18,9 +18,13 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     // ── helpers ──
 
-    function _submitWd(bytes32 d, bytes32 member, address recipient, uint64 amount) internal {
+    function _submitWd(bytes32 d, bytes32 member, address recipient, uint64 amount)
+        internal
+        returns (bytes32)
+    {
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, member, recipient, amount);
         manager.submitWithdrawalClaim(c, _withdrawalClaimProof(c));
+        return c.withdrawalNullifier;
     }
 
     function _submitPc(bytes32 d, bytes32 tx_, bytes32 receiver, address recipient, uint64 amount) internal {
@@ -37,7 +41,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         _finalizeDefault();
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.NoWithdrawalCredit.selector);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(bytes32(uint256(1)));
     }
 
     /// Credit accrued (claim accepted) but funds NOT yet pulled → payout capped at received==0 →
@@ -45,18 +49,18 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     /// the manager never pays ETH it has not received, even for a fully-proven claim.
     function test_C17_claim_before_pull_reverts_then_succeeds_after() external {
         bytes32 d = _finalizeDefault();
-        _submitWd(d, USER_A, alice, 40);
+        bytes32 nullifier = _submitWd(d, USER_A, alice, 40);
 
         // receivedChannelFunds == 0 → cap blocks the payout.
         vm.prank(alice);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(nullifier);
 
         // Pull the channel ETH, then the same credit pays out.
-        _fundAndPull(registry, manager, 40);
+        _fundAndPull(registry, manager, DEFAULT_FUND_AMOUNT);
         uint256 balBefore = alice.balance;
         vm.prank(alice);
-        uint256 paid = manager.claimWithdrawalCredit();
+        uint256 paid = manager.claimWithdrawalCredit(nullifier);
         assertEq(paid, 40, "pays the accrued credit after pull");
         assertEq(alice.balance - balBefore, 40, "alice received real ETH");
         assertEq(manager.totalCreditedOut(0), 40, "totalCreditedOut tracks the payout");
@@ -66,30 +70,23 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     // C18 — intent over-declares fund vs actually received: the received cap wins.
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Intent declares 100, but only 50 ETH is actually pulled. Two members accrue 40 each (80 ≤ 100
-    /// accrual cap, both ACCEPTED). At payout the aggregate is capped by receivedChannelFunds (50):
-    /// the first claimer is paid 40, the second can take at most 10 more — its full 40 reverts.
-    /// SECURITY: aggregate ETH out (totalCreditedOut) can NEVER exceed the 50 actually received,
-    /// regardless of the inflated 100 in the intent.
-    function test_C18_intent_overdeclares_received_cap_wins() external {
+    /// Intent declares 100, but only 50 ETH reaches the rollup recipient ledger. The exact pull
+    /// rejects the underfunded/mixed ledger atomically: no partial payout capacity is created and
+    /// the rollup credit remains recoverable for operator reconciliation.
+    function test_C18_underfunded_pull_reverts_atomically() external {
         bytes32 d = _finalizeWithFund(100);
         _submitWd(d, USER_A, alice, 40);
         _submitWd(d, USER_B, bob, 40);
         assertEq(manager.totalWithdrawn(0), 80, "both claims accrue under the 100 cap");
 
-        _fundAndPull(registry, manager, 50); // intent said 100, reality is 50
-
-        vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 40, "first claimer paid in full from the 50");
-
-        // bob is owed 40 but only 10 remains under receivedChannelFunds=50 → revert (no partial pay).
-        vm.prank(bob);
-        vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
-        manager.claimWithdrawalCredit();
-
-        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency: out <= received");
-        assertEq(manager.totalCreditedOut(0), 40, "only 40 of the 50 was claimable by the first mover");
-        assertEq(address(manager).balance, 10, "10 received ETH remains, owed to bob but capped");
+        _materializeCloseFundingAuthorization(registry, manager, 0);
+        vm.deal(address(this), address(this).balance + 50);
+        registry.creditWithdrawal{value: 50}(address(manager));
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.ChannelFundingMismatch.selector, 0, 100, 50));
+        manager.pullChannelFunds();
+        assertEq(registry.pendingWithdrawals(address(manager)), 50, "rollup pull rolled back");
+        assertEq(manager.receivedChannelFunds(0), 0, "no partial channel capacity");
+        assertEq(address(manager).balance, 0, "manager did not retain mismatched value");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -117,8 +114,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         assertEq(manager.totalWithdrawn(0), 40, "the disabled leg accrues nothing");
 
         // The cap still binds on the leg that remains: 40 + 36 > 75 is refused, 40 + 35 == 75 fits.
-        ChannelSettlementManager.WithdrawalClaim memory over =
-            _withdrawalClaim(d, USER_B, bob, 36);
+        ChannelSettlementManager.WithdrawalClaim memory over = _withdrawalClaim(d, USER_B, bob, 36);
         MleVerifier.MleProof memory overProof = _withdrawalClaimProof(over);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(over, overProof);
@@ -143,72 +139,68 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
     // Payout-cap across many members (cross-channel solvency, single manager view).
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Accrue the full 75 across A/B/C, but only 30 ETH is pulled. Members claim in order; the
-    /// aggregate ETH paid out can never exceed 30. The unpaid members revert — fail-closed.
-    function test_received_cap_across_members() external {
+    /// Accrue the full 75 across A/B/C, but present only 30 ETH. Exact reconciliation refuses the
+    /// partial backing before any member can race to consume it.
+    function test_underfunded_credit_creates_no_first_mover_payout() external {
         bytes32 d = _finalizeDefault(); // fund = 75
-        _submitWd(d, USER_A, alice, 25);
+        bytes32 aliceNullifier = _submitWd(d, USER_A, alice, 25);
         _submitWd(d, USER_B, bob, 25);
         _submitWd(d, USER_C, carol, 25);
 
-        _fundAndPull(registry, manager, 30);
-
+        _materializeCloseFundingAuthorization(registry, manager, 0);
+        vm.deal(address(this), address(this).balance + 30);
+        registry.creditWithdrawal{value: 30}(address(manager));
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.ChannelFundingMismatch.selector, 0, 75, 30));
+        manager.pullChannelFunds();
+        assertEq(manager.receivedChannelFunds(0), 0);
         vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 25, "alice paid 25");
-        // 25 already out; bob (25) would push to 50 > 30 → revert.
-        vm.prank(bob);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
-        manager.claimWithdrawalCredit();
-
-        assertEq(manager.totalCreditedOut(0), 25, "aggregate out is bounded by received (30)");
-        assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency holds");
+        manager.claimWithdrawalCredit(aliceNullifier);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Over-pull: received > declared fund. Surplus ETH is LOCKED (no extraction path).
-    // This is a liveness/efficiency observation, NOT a theft vector — documented so a regression
-    // that turned the surplus into an over-payout would be caught.
+    // Mixed/over-credit cannot permanently DoS the channel's exact cap reconciliation.
     // ─────────────────────────────────────────────────────────────────────────
 
-    function test_overpull_surplus_is_locked_not_payable() external {
+    function test_exactPull_leavesUnrelatedSurplusInRollupLedger() external {
         bytes32 d = _finalizeDefault(); // fund = 75
-        _submitWd(d, USER_A, alice, 25);
-        _submitWd(d, USER_B, bob, 25);
-        _submitWd(d, USER_C, carol, 25); // total accrued 75 (the whole fund)
+        bytes32 aliceNullifier = _submitWd(d, USER_A, alice, 25);
+        bytes32 bobNullifier = _submitWd(d, USER_B, bob, 25);
+        bytes32 carolNullifier = _submitWd(d, USER_C, carol, 25); // total accrued 75 (the whole fund)
 
-        _fundAndPull(registry, manager, 100); // rollup paid MORE than the declared fund
+        _materializeCloseFundingAuthorization(registry, manager, 0);
+        vm.deal(address(this), address(this).balance + 100);
+        registry.creditWithdrawal{value: 100}(address(manager));
+        assertEq(manager.pullChannelFunds(), 75, "only exact channel cap transferred");
+        assertEq(registry.pendingWithdrawals(address(manager)), 25, "unrelated credit stays in rollup");
+        assertEq(manager.receivedChannelFunds(0), 75, "proof-bound cap counted exactly");
+        assertEq(address(manager).balance, 75, "manager receives no surplus");
 
         vm.prank(alice);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(aliceNullifier);
         vm.prank(bob);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(bobNullifier);
         vm.prank(carol);
-        manager.claimWithdrawalCredit();
-
-        // All accrued credit (75) is paid; nobody can claim the surplus 25 — accrual is capped at
-        // the declared fund, so the extra ETH is stranded in the manager with no extraction path.
-        assertEq(manager.totalCreditedOut(0), 75, "only the declared fund is ever paid out");
-        assertEq(address(manager).balance, 25, "surplus 25 ETH locked in the manager (no admin path)");
-
-        // No further credit exists, so any further claim reverts.
-        vm.prank(alice);
-        vm.expectRevert(ChannelSettlementManager.NoWithdrawalCredit.selector);
-        manager.claimWithdrawalCredit();
+        manager.claimWithdrawalCredit(carolNullifier);
+        assertEq(manager.totalCreditedOut(0), 75, "members cannot consume surplus");
+        assertEq(address(manager).balance, 0, "channel backing paid exactly");
+        assertEq(registry.pendingWithdrawals(address(manager)), 25, "surplus was never swept");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Ordering: claims are gated on the manager's OWN finalizeClose (status==Closed), independent of
-    // whether funds were pulled (which is permissionless and works pre-close).
+    // Ordering: both pull and claims are gated on this manager's finalized close.
     // ─────────────────────────────────────────────────────────────────────────
 
-    function test_pull_works_before_close_but_claims_gated_on_closed() external {
-        // Pull funds while still Active (permissionless, only moves pendingWithdrawals[manager]).
-        _fundAndPull(registry, manager, 40);
-        assertEq(manager.receivedChannelFunds(0), 40, "funds pullable pre-close");
+    function test_pull_and_claim_are_both_gated_on_closed() external {
+        vm.deal(address(this), address(this).balance + 40);
+        registry.creditWithdrawal{value: 40}(address(manager));
+        vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
+        manager.pullChannelFunds();
+        assertEq(registry.pendingWithdrawals(address(manager)), 40, "pre-close credit stays in rollup");
+        assertEq(manager.receivedChannelFunds(0), 0);
 
         // A withdrawal claim before any finalize → CloseNotActive (status != Closed).
-        ChannelSettlementManager.WithdrawalClaim memory c =
-            _withdrawalClaim(bytes32(uint256(1)), USER_A, alice, 10);
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(bytes32(uint256(1)), USER_A, alice, 10);
         MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
         manager.submitWithdrawalClaim(c, proof);
@@ -235,8 +227,8 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         assertEq(manager.totalWithdrawn(0), accepted, "accrual == sum of accepted amounts");
         assertLe(manager.totalWithdrawn(0), DEFAULT_FUND_AMOUNT, "accrual never exceeds the fund");
         // Conservation (no payouts): totalWithdrawn == Σ credits across the three recipients.
-        uint256 sumCredits = manager.withdrawalCredits(0, alice)
-            + manager.withdrawalCredits(0, bob) + manager.withdrawalCredits(0, carol);
+        uint256 sumCredits = manager.withdrawalCredits(0, alice) + manager.withdrawalCredits(0, bob)
+            + manager.withdrawalCredits(0, carol);
         assertEq(manager.totalWithdrawn(0), sumCredits, "conservation: accrual == sum credits");
     }
 
@@ -251,8 +243,8 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
 
     function test_A6_bpBondCredits_mutator_removed_and_pot_still_inert() external {
         bytes32 d = _finalizeDefault();
-        _submitWd(d, USER_A, alice, 25);
-        _fundAndPull(registry, manager, 25);
+        bytes32 nullifier = _submitWd(d, USER_A, alice, 25);
+        _fundAndPull(registry, manager, DEFAULT_FUND_AMOUNT);
 
         uint256 bondBefore = manager.bpBondCredits();
         uint256 managerEthBefore = address(manager).balance;
@@ -260,28 +252,26 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         // (a) The free mutator is gone at the ABI level: a raw call on the old selector hits no
         //     function and (with no receive/fallback for calldata) reverts.
         vm.prank(mallory);
-        (bool ok, ) = address(manager).call(
-            abi.encodeWithSignature("fundBpBondCredits(uint256)", type(uint128).max)
-        );
+        (bool ok,) = address(manager).call(abi.encodeWithSignature("fundBpBondCredits(uint256)", type(uint128).max));
         assertFalse(ok, "fundBpBondCredits must no longer exist");
         assertEq(manager.bpBondCredits(), bondBefore, "bond pot unchanged by the removed mutator");
         assertEq(address(manager).balance, managerEthBefore, "no ETH moved");
 
         // (b) The pot still feeds nothing: the legitimate claim is capped by funds RECEIVED, and
         //     the constructor-seeded bond does not raise that ceiling.
-        assertEq(manager.receivedChannelFunds(0), 25, "received funds unaffected by the bond pot");
+        assertEq(manager.receivedChannelFunds(0), DEFAULT_FUND_AMOUNT, "received funds unaffected by the bond pot");
         assertEq(manager.totalWithdrawn(0), 25, "accrual unaffected by the bond pot");
         vm.prank(alice);
-        assertEq(manager.claimWithdrawalCredit(), 25, "payout capped by received, not by bond");
+        assertEq(manager.claimWithdrawalCredit(nullifier), 25, "payout capped by received, not by bond");
         assertLe(manager.totalCreditedOut(0), manager.receivedChannelFunds(0), "solvency holds");
     }
 
     /// Submit one salted withdrawal claim; return the amount if accepted, 0 if the cap rejected it.
     function _tryAccrue(bytes32 d, bytes32 member, address recipient, uint64 amount, uint256 salt)
-        internal returns (uint256)
+        internal
+        returns (uint256)
     {
-        ChannelSettlementManager.WithdrawalClaim memory c =
-            _withdrawalClaimSalted(d, member, recipient, amount, salt);
+        ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaimSalted(d, member, recipient, amount, salt);
         try manager.submitWithdrawalClaim(c, _withdrawalClaimProofFor(manager, c)) {
             return amount;
         } catch {

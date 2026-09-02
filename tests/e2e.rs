@@ -212,7 +212,7 @@ fn e2e_deposit_validity_withdrawal() {
         channel_action_indices: None,
         channel_actions: None,
         channel_action_merkle_proofs: None,
-            };
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();
@@ -346,7 +346,7 @@ fn e2e_deposit_validity_withdrawal() {
         channel_action_indices: None,
         channel_actions: None,
         channel_action_merkle_proofs: None,
-            };
+    };
 
     {
         let mut generator = block_witness_generator.borrow_mut();

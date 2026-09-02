@@ -109,8 +109,9 @@ pub struct ChannelClosePublicInputsTarget {
     /// keys and matched on L1 against the channel's registered member set.
     pub member_set_commitment: Bytes32Target,
     /// Number of ACTIVE cosigners, range-checked `2..=MAX_SIG_CLUSTER` (enforced in-circuit by the
-    /// MAX_SIG_CLUSTER-bit unary decomposition) and used to gate per-slot signature verification and
-    /// the member_set_commitment select. Single limb. Cosigners only — delegates never sign.
+    /// MAX_SIG_CLUSTER-bit unary decomposition) and used to gate per-slot signature verification
+    /// and the member_set_commitment select. Single limb. Cosigners only — delegates never
+    /// sign.
     pub member_count: Target,
     /// Delegate account: number of DELEGATE participants. Single limb, appended after
     /// `member_count`. Anchored in-circuit ONLY into the H1 recompute (immediately after
@@ -503,8 +504,9 @@ where
         //
         // SECURITY (cosigner/delegate split): sized to MAX_SIG_CLUSTER, NOT the balance-slot
         // capacity MAX_CHANNEL_MEMBERS — only COSIGNERS sign the close, delegates hold balances
-        // without signing. The sum-binding below then also enforces `member_count <= MAX_SIG_CLUSTER`
-        // IN-CIRCUIT (a sum of MAX_SIG_CLUSTER bits cannot exceed MAX_SIG_CLUSTER).
+        // without signing. The sum-binding below then also enforces `member_count <=
+        // MAX_SIG_CLUSTER` IN-CIRCUIT (a sum of MAX_SIG_CLUSTER bits cannot exceed
+        // MAX_SIG_CLUSTER).
         let mut active_bits: Vec<plonky2::iop::target::BoolTarget> =
             Vec::with_capacity(MAX_SIG_CLUSTER);
         for _ in 0..MAX_SIG_CLUSTER {
@@ -792,8 +794,8 @@ where
         //    proof (pk limbs come from the gadget's `Bytes32Target::from_hash_out` safe 32-bit
         //    split of the Poseidon digest, multiplied by a boolean presence flag; message limbs are
         //    range-checked at allocation in the leaf circuit and copied upward; signer_count is a
-        //    sum of at most MAX_SIG_CLUSTER leaf constants each equal to 1), so feeding them to the keccak
-        //    gadget (which does NOT range-check) is sound without re-checking.
+        //    sum of at most MAX_SIG_CLUSTER leaf constants each equal to 1), so feeding them to the
+        //    keccak gadget (which does NOT range-check) is sound without re-checking.
         let agg_proof = add_proof_target_and_verify(agg_vd, &mut builder);
 
         // (f-i) message == recomputed IMCH digest (the same digest the members must sign).
@@ -1728,10 +1730,8 @@ mod tests {
             "prove() must still refuse member_count = 1 natively"
         );
         assert!(matches!(
-            fx.close_circuit.fill_witness(
-                &witness.close.to_public_inputs().unwrap(),
-                &witness
-            ),
+            fx.close_circuit
+                .fill_witness(&witness.close.to_public_inputs().unwrap(), &witness),
             Err(ChannelCloseCircuitError::InvalidMemberAuth(_))
         ));
 
@@ -1873,8 +1873,7 @@ mod tests {
 
         let mut bad_burn = canonical.clone();
         let mut burn_tx = witness.close.close_tx.clone();
-        burn_tx.burn_tx_hash =
-            Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap();
+        burn_tx.burn_tx_hash = Bytes32::from_u32_slice(&[9, 8, 7, 6, 0, 0, 0, 0]).unwrap();
         bad_burn.burn_tx_hash = burn_tx.burn_tx_hash;
         bad_burn.close_withdrawal_digest = burn_tx.signing_digest();
 
@@ -2066,7 +2065,8 @@ mod tests {
 
     /// Negative (iii) — H1/version anchoring: claiming a `final_state_version` PI different
     /// from the one inside the signed H1 preimage must fail — the version PI feeds the H1, IMCH
-    /// and therefore the IMCH keccak, so the tampered value breaks the recomputed-digest connection.
+    /// and therefore the IMCH keccak, so the tampered value breaks the recomputed-digest
+    /// connection.
     #[cfg_attr(debug_assertions, ignore = "run with --release")]
     #[test]
     fn channel_close_circuit_rejects_tampered_final_state_version() {

@@ -519,7 +519,7 @@ fn unified_inter_channel_transfer_e2e() {
         channel_action_indices: None,
         channel_actions: None,
         channel_action_merkle_proofs: None,
-            };
+    };
     {
         let mut g = bwgen.borrow_mut();
         g.next_imsb_state_commitment_root = Some(h1_prime);

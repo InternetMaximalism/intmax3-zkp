@@ -24,16 +24,19 @@ use crate::{
         ProductionBlockProducer, ProductionBlockProducerError, ProductionChannelHead,
         ProductionDepositRequest,
     },
+    close_funding::CloseFundingPlan,
     common::channel::{ChannelRecord, ChannelState},
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     utils::poseidon_hash_out::PoseidonHashOut,
-    wallet_core::{ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo},
+    wallet_core::{
+        ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+    },
 };
 
 pub const PRODUCTION_JOURNAL_MAGIC: &str = "INTMAX_KEYLESS_BLOCK_PRODUCER";
 pub const PRODUCTION_JOURNAL_VERSION: u32 = 1;
-pub const MEMBER_SET_UPDATE_DISABLED_REASON: &str =
-    "member-set updates are disabled in this release because settlement and validity member roots are not atomically anchored";
+pub const MEMBER_SET_UPDATE_RETIRED_REASON: &str = "direct member-set updates are retired; close the old channel by unanimous consent and migrate into a newly registered channel";
+pub const IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON: &str = "immediate close-funding commit is retired; use prepare_close_funding, prove the prepared candidate, then commit_prepared_close_funding";
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -90,6 +93,11 @@ enum ProductionJournalAction {
         descriptor: InterChannelTransferDescriptor,
         timestamp: u64,
     },
+    PostCloseFunding {
+        signed_state: ChannelState,
+        plan: CloseFundingPlan,
+        timestamp: u64,
+    },
     /// detail2 §Q-3: one member-set-update block (rotate / add on the registered cluster).
     PostMemberSetUpdate {
         signed_state: ChannelState,
@@ -107,6 +115,7 @@ impl ProductionJournalAction {
             | Self::PostDeposit { timestamp, .. }
             | Self::SyncOffchainHeads { timestamp, .. }
             | Self::PostInterChannel { timestamp, .. }
+            | Self::PostCloseFunding { timestamp, .. }
             | Self::PostMemberSetUpdate { timestamp, .. } => *timestamp,
         }
     }
@@ -170,6 +179,11 @@ struct ProductionJournalFile {
     generation: u64,
     tail_hash: Bytes32,
     entries: Vec<ProductionJournalEntry>,
+    /// A semantically replayed candidate that is durable but is not yet authoritative. Keeping
+    /// this optional field in journal v1 is backwards compatible: legacy files deserialize it as
+    /// `None`, while its entry uses the same hash material it will retain after commit.
+    #[serde(default)]
+    prepared: Option<ProductionJournalEntry>,
 }
 
 impl ProductionJournalFile {
@@ -182,11 +196,12 @@ impl ProductionJournalFile {
             generation: 0,
             tail_hash,
             entries: Vec::new(),
+            prepared: None,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockProducerReceipt {
     pub request_id: String,
@@ -212,6 +227,19 @@ pub struct BlockProducerAnchor {
     pub timestamp: u64,
     pub extended_state_commitment: Bytes32,
     pub bp_sig_chain: Bytes32,
+}
+
+impl BlockProducerAnchor {
+    fn from_entry(entry: &ProductionJournalEntry) -> Self {
+        Self {
+            generation: entry.generation,
+            entry_hash: entry.entry_hash,
+            block_number: entry.result.block_number,
+            timestamp: entry.result.timestamp,
+            extended_state_commitment: extended_state_commitment(&entry.result),
+            bp_sig_chain: entry.result.bp_sig_chain,
+        }
+    }
 }
 
 impl BlockProducerReceipt {
@@ -269,6 +297,16 @@ pub enum BlockProducerCommand {
         debit_payload: InterChannelDebitPayload,
         descriptor: InterChannelTransferDescriptor,
     },
+    PostCloseFunding {
+        request_id: String,
+        signed_state: ChannelState,
+        plan: CloseFundingPlan,
+    },
+    PrepareCloseFunding {
+        request_id: String,
+        signed_state: ChannelState,
+        plan: CloseFundingPlan,
+    },
     PostMemberSetUpdate {
         request_id: String,
         signed_state: ChannelState,
@@ -292,6 +330,7 @@ pub struct BlockProducerService {
     _journal_lock: JournalLock,
     disk: ProductionJournalFile,
     producer: ProductionBlockProducer,
+    prepared_producer: Option<ProductionBlockProducer>,
     poisoned: bool,
 }
 
@@ -325,12 +364,13 @@ impl BlockProducerService {
                 disk.supported_user_counts, supported_user_counts
             )));
         }
-        let producer = verify_and_replay(&disk)?;
+        let (producer, prepared_producer) = verify_and_replay(&disk)?;
         Ok(Self {
             journal_path,
             _journal_lock: journal_lock,
             disk,
             producer,
+            prepared_producer,
             poisoned: false,
         })
     }
@@ -388,11 +428,25 @@ impl BlockProducerService {
             } => Ok(BlockProducerCommandResult::Receipt(
                 self.post_inter_channel(request_id, signed_state, debit_payload, descriptor)?,
             )),
-            BlockProducerCommand::PostMemberSetUpdate { .. } => Err(
-                BlockProducerServiceError::InvalidRequest(
-                    MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
-                ),
-            ),
+            BlockProducerCommand::PostCloseFunding {
+                request_id: _,
+                signed_state: _,
+                plan: _,
+            } => Err(BlockProducerServiceError::InvalidRequest(
+                IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON.to_string(),
+            )),
+            BlockProducerCommand::PrepareCloseFunding {
+                request_id,
+                signed_state,
+                plan,
+            } => Ok(BlockProducerCommandResult::Receipt(
+                self.prepare_close_funding(request_id, signed_state, plan)?,
+            )),
+            BlockProducerCommand::PostMemberSetUpdate { .. } => {
+                Err(BlockProducerServiceError::InvalidRequest(
+                    MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
+                ))
+            }
         }
     }
 
@@ -402,6 +456,7 @@ impl BlockProducerService {
         snapshot: ChannelSnapshot,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         self.ensure_healthy()?;
+        self.ensure_no_prepared()?;
         validate_request_id(&request_id)?;
         let fingerprint = request_fingerprint("register", &snapshot)?;
         if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
@@ -426,6 +481,7 @@ impl BlockProducerService {
         descriptor: InterChannelTransferDescriptor,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         self.ensure_healthy()?;
+        self.ensure_no_prepared()?;
         validate_request_id(&request_id)?;
         let fingerprint = request_fingerprint(
             "postInterChannel",
@@ -468,8 +524,223 @@ impl BlockProducerService {
         )
     }
 
-    /// Release safety gate: cross-layer member-set updates cannot be admitted until the validity
-    /// member root and settlement authorization set advance atomically.
+    pub fn post_close_funding(
+        &mut self,
+        _request_id: String,
+        _signed_state: ChannelState,
+        _plan: CloseFundingPlan,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        Err(BlockProducerServiceError::InvalidRequest(
+            IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON.to_string(),
+        ))
+    }
+
+    /// Durably stage one terminal close-funding mutation without advancing the authoritative
+    /// journal tail or producer. The returned receipt identifies the candidate which downstream
+    /// validity code must prove before calling [`Self::commit_prepared_close_funding`].
+    pub fn prepare_close_funding(
+        &mut self,
+        request_id: String,
+        signed_state: ChannelState,
+        plan: CloseFundingPlan,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        validate_request_id(&request_id)?;
+        let fingerprint = request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint {
+                signed_state: &signed_state,
+                plan: &plan,
+            },
+        )?;
+        if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
+            return Ok(receipt);
+        }
+
+        if let Some(prepared) = &self.disk.prepared {
+            if prepared.request_id != request_id {
+                return Err(BlockProducerServiceError::Conflict(format!(
+                    "prepared request {:?} freezes the authoritative producer",
+                    prepared.request_id
+                )));
+            }
+            if prepared.request_fingerprint != fingerprint {
+                return Err(BlockProducerServiceError::Conflict(format!(
+                    "request id {request_id:?} is already prepared with different content"
+                )));
+            }
+            return Ok(BlockProducerReceipt::from_entry(prepared));
+        }
+
+        for entry in &self.disk.entries {
+            let accepted_digest = match &entry.action {
+                ProductionJournalAction::PostCloseFunding {
+                    signed_state: accepted,
+                    ..
+                }
+                | ProductionJournalAction::PostInterChannel {
+                    signed_state: accepted,
+                    ..
+                } => Some(accepted.digest),
+                ProductionJournalAction::SyncOffchainHeads { signed_states, .. } => signed_states
+                    .iter()
+                    .find(|state| state.digest == signed_state.digest)
+                    .map(|state| state.digest),
+                _ => None,
+            };
+            if accepted_digest == Some(signed_state.digest) {
+                return Err(BlockProducerServiceError::Conflict(format!(
+                    "channel state {} was already admitted by request {}",
+                    signed_state.digest, entry.request_id
+                )));
+            }
+        }
+
+        let timestamp = self.next_timestamp()?;
+        let action = ProductionJournalAction::PostCloseFunding {
+            signed_state,
+            plan,
+            timestamp,
+        };
+        let (candidate, entry) = self.build_candidate_entry(request_id, fingerprint, action)?;
+        let receipt = BlockProducerReceipt::from_entry(&entry);
+        let mut next_disk = self.disk.clone();
+        next_disk.prepared = Some(entry);
+        if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.disk = next_disk;
+        self.prepared_producer = Some(candidate);
+        Ok(receipt)
+    }
+
+    /// Promote the exact prepared close-funding entry to the authoritative journal. Persistence
+    /// happens before the in-memory producer advances; any persistence error poisons the process
+    /// because the durable rename/fsync boundary may be uncertain.
+    pub fn commit_prepared_close_funding(
+        &mut self,
+        request_id: String,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+        expected_anchor: &BlockProducerAnchor,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        validate_request_id(&request_id)?;
+        let fingerprint = request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint { signed_state, plan },
+        )?;
+        if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
+            let committed = self
+                .disk
+                .entries
+                .iter()
+                .find(|entry| entry.request_id == request_id)
+                .expect("idempotent receipt came from an entry");
+            if BlockProducerAnchor::from_entry(committed) != *expected_anchor {
+                return Err(BlockProducerServiceError::Conflict(
+                    "committed close-funding receipt does not match the expected prepared anchor"
+                        .to_string(),
+                ));
+            }
+            return Ok(receipt);
+        }
+
+        let prepared = self.disk.prepared.as_ref().ok_or_else(|| {
+            BlockProducerServiceError::InvalidRequest(
+                "no close-funding candidate is prepared".to_string(),
+            )
+        })?;
+        if prepared.request_id != request_id || prepared.request_fingerprint != fingerprint {
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "commit does not match prepared request {:?}",
+                prepared.request_id
+            )));
+        }
+        if BlockProducerAnchor::from_entry(prepared) != *expected_anchor {
+            return Err(BlockProducerServiceError::Conflict(
+                "prepared close-funding anchor does not match the proof-bound anchor".to_string(),
+            ));
+        }
+        self.promote_prepared(expected_anchor)
+    }
+
+    /// Commit using only the exact proof-bound prepared anchor. This intentionally has no command
+    /// variant: only the local validity acknowledgement path may cross this boundary.
+    pub fn commit_prepared_close_funding_at_anchor(
+        &mut self,
+        expected_anchor: &BlockProducerAnchor,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        if let Some(committed) = self.committed_entry_at_anchor(expected_anchor) {
+            if !matches!(
+                &committed.action,
+                ProductionJournalAction::PostCloseFunding { .. }
+            ) {
+                return Err(BlockProducerServiceError::Conflict(
+                    "committed anchor is not a terminal close-funding entry".to_string(),
+                ));
+            }
+            return Ok(BlockProducerReceipt::from_entry(committed));
+        }
+        if self.disk.prepared.is_none() {
+            return Err(BlockProducerServiceError::InvalidRequest(
+                "no close-funding candidate is prepared at the requested anchor".to_string(),
+            ));
+        }
+        self.promote_prepared(expected_anchor)
+    }
+
+    fn promote_prepared(
+        &mut self,
+        expected_anchor: &BlockProducerAnchor,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        let prepared = self.disk.prepared.as_ref().ok_or_else(|| {
+            BlockProducerServiceError::InvalidRequest(
+                "no close-funding candidate is prepared".to_string(),
+            )
+        })?;
+        if BlockProducerAnchor::from_entry(prepared) != *expected_anchor {
+            return Err(BlockProducerServiceError::Conflict(
+                "prepared close-funding anchor does not match the proof-bound anchor".to_string(),
+            ));
+        }
+        if !matches!(
+            &prepared.action,
+            ProductionJournalAction::PostCloseFunding { .. }
+        ) {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry is not close funding".to_string(),
+            ));
+        }
+        if self.prepared_producer.is_none() {
+            return Err(BlockProducerServiceError::Journal(
+                "verified prepared producer candidate is absent".to_string(),
+            ));
+        }
+        let receipt = BlockProducerReceipt::from_entry(prepared);
+        let mut next_disk = self.disk.clone();
+        let entry = next_disk.prepared.take().expect("prepared checked above");
+        next_disk.entries.push(entry);
+        next_disk.generation = receipt.generation;
+        next_disk.tail_hash = receipt.entry_hash;
+        if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        // Persistence is now authoritative. Moving the already-verified candidate avoids a second
+        // potentially large producer clone on the proof acknowledgement path.
+        let candidate = self
+            .prepared_producer
+            .take()
+            .expect("prepared producer presence was checked before persistence");
+        self.disk = next_disk;
+        self.producer = candidate;
+        Ok(receipt)
+    }
+
+    /// Permanent compatibility tombstone for the retired direct member-set-update request.
     pub fn post_member_set_update(
         &mut self,
         _request_id: String,
@@ -479,12 +750,13 @@ impl BlockProducerService {
         _new_members: Vec<MemberInfo>,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         Err(BlockProducerServiceError::InvalidRequest(
-            MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
+            MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
         ))
     }
 
-    /// Retained only as a future implementation; no production command calls this method.
-    #[allow(dead_code)]
+    /// Deprecated audit-only implementation; excluded from every default/release build.
+    #[cfg(feature = "deprecated-msu")]
+    #[allow(dead_code, deprecated)]
     fn post_member_set_update_future(
         &mut self,
         request_id: String,
@@ -541,6 +813,7 @@ impl BlockProducerService {
         deposit: ProductionDepositRequest,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         self.ensure_healthy()?;
+        self.ensure_no_prepared()?;
         validate_request_id(&request_id)?;
         let fingerprint = request_fingerprint("postDeposit", &deposit)?;
         if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
@@ -560,6 +833,7 @@ impl BlockProducerService {
         signed_states: Vec<ChannelState>,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         self.ensure_healthy()?;
+        self.ensure_no_prepared()?;
         validate_request_id(&request_id)?;
         if signed_states.is_empty() {
             return Err(BlockProducerServiceError::InvalidRequest(
@@ -607,6 +881,72 @@ impl BlockProducerService {
     pub fn producer(&self) -> Result<&ProductionBlockProducer, BlockProducerServiceError> {
         self.ensure_healthy()?;
         Ok(&self.producer)
+    }
+
+    /// Return the durable, non-authoritative prepared receipt, if one exists.
+    pub fn prepared_receipt(
+        &self,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        Ok(self
+            .disk
+            .prepared
+            .as_ref()
+            .map(BlockProducerReceipt::from_entry))
+    }
+
+    /// Authenticate the prepared receipt against the exact close-funding request body.
+    pub fn prepared_receipt_for_close_funding(
+        &self,
+        request_id: &str,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint { signed_state, plan },
+        )?;
+        let Some(prepared) = self.disk.prepared.as_ref() else {
+            return Ok(None);
+        };
+        if prepared.request_id != request_id {
+            return Ok(None);
+        }
+        if prepared.request_fingerprint != fingerprint {
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "request id {request_id:?} is prepared with different content"
+            )));
+        }
+        Ok(Some(BlockProducerReceipt::from_entry(prepared)))
+    }
+
+    /// Anchor for the durable candidate. This is intentionally separate from
+    /// [`Self::current_anchor`], which remains the authoritative committed tail.
+    pub fn prepared_anchor(
+        &self,
+    ) -> Result<Option<BlockProducerAnchor>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        Ok(self
+            .disk
+            .prepared
+            .as_ref()
+            .map(BlockProducerAnchor::from_entry))
+    }
+
+    /// Borrow the semantically replayed prepared producer for proof construction without cloning
+    /// its potentially large witness state. It remains non-authoritative until explicit commit.
+    pub fn prepared_producer(
+        &self,
+    ) -> Result<Option<&ProductionBlockProducer>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        Ok(self.prepared_producer.as_ref())
+    }
+
+    pub fn prepared_producer_clone(
+        &self,
+    ) -> Result<Option<ProductionBlockProducer>, BlockProducerServiceError> {
+        Ok(self.prepared_producer()?.cloned())
     }
 
     /// Return the receipt authenticated by the verified, hash-chained journal for `request_id`.
@@ -670,6 +1010,65 @@ impl BlockProducerService {
             .ok_or_else(|| BlockProducerServiceError::Journal("current anchor is absent".into()))
     }
 
+    /// Reconstruct the keyless producer at one exact authenticated historical journal anchor.
+    ///
+    /// Terminal withdrawal proofs must use the extended public state which existed when their
+    /// close-funding transaction was committed. Reusing the current producer after an unrelated
+    /// channel advances would create a valid descendant proof whose public anchor no longer
+    /// matches the immutable terminal receipt. The journal already contains every public input
+    /// needed for deterministic replay, so no additional witness/proof bytes are persisted and no
+    /// signing material is introduced.
+    pub fn producer_at_anchor(
+        &self,
+        anchor: &BlockProducerAnchor,
+    ) -> Result<ProductionBlockProducer, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let authenticated = self
+            .anchor_at_generation(anchor.generation)?
+            .ok_or_else(|| {
+                BlockProducerServiceError::Conflict(format!(
+                    "producer anchor generation {} is beyond the committed journal",
+                    anchor.generation
+                ))
+            })?;
+        if authenticated != *anchor {
+            return Err(BlockProducerServiceError::Conflict(
+                "supplied producer anchor does not match the authenticated journal entry".into(),
+            ));
+        }
+
+        if anchor.generation == self.disk.generation {
+            return Ok(self.producer.clone());
+        }
+
+        let entry_count = usize::try_from(anchor.generation).map_err(|_| {
+            BlockProducerServiceError::Journal(
+                "historical producer generation does not fit this platform".into(),
+            )
+        })?;
+        let mut producer = ProductionBlockProducer::new(&self.disk.supported_user_counts);
+        for (index, entry) in self.disk.entries.iter().take(entry_count).enumerate() {
+            apply_action(&mut producer, &entry.action).map_err(|error| {
+                BlockProducerServiceError::Journal(format!(
+                    "historical producer replay failed at entry {}: {error}",
+                    index + 1
+                ))
+            })?;
+            if ProducerHeadSnapshot::capture(&producer) != entry.result {
+                return Err(BlockProducerServiceError::Journal(format!(
+                    "historical producer replay diverged at entry {}",
+                    index + 1
+                )));
+            }
+        }
+        if producer.holds_any_local_signing_keys() {
+            return Err(BlockProducerServiceError::Journal(
+                "historical producer replay retained a fixture signing key".into(),
+            ));
+        }
+        Ok(producer)
+    }
+
     /// Authenticate a deposit receipt against both its request id and canonical request body.
     pub fn receipt_for_deposit(
         &self,
@@ -702,9 +1101,105 @@ impl BlockProducerService {
         self.idempotent_receipt(request_id, fingerprint)
     }
 
+    /// Authenticate a terminal close-funding receipt against its complete signed state and plan.
+    pub fn receipt_for_close_funding(
+        &self,
+        request_id: &str,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint { signed_state, plan },
+        )?;
+        self.idempotent_receipt(request_id, fingerprint)
+    }
+
+    /// Retrieve an already-committed close-funding receipt only when both the canonical request
+    /// body and the proof-bound prepared anchor match. This is the crash/replay lookup used after
+    /// an acknowledgement may already have committed the candidate.
+    pub fn committed_receipt_for_close_funding_at_anchor(
+        &self,
+        request_id: &str,
+        signed_state: &ChannelState,
+        plan: &CloseFundingPlan,
+        prepared_anchor: &BlockProducerAnchor,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint { signed_state, plan },
+        )?;
+        let Some(entry) = self
+            .disk
+            .entries
+            .iter()
+            .find(|entry| entry.request_id == request_id)
+        else {
+            return Ok(None);
+        };
+        if entry.request_fingerprint != fingerprint {
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "request id {request_id:?} was committed with different content"
+            )));
+        }
+        if BlockProducerAnchor::from_entry(entry) != *prepared_anchor {
+            return Err(BlockProducerServiceError::Conflict(
+                "committed close-funding entry does not match the proof-bound prepared anchor"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(BlockProducerReceipt::from_entry(entry)))
+    }
+
+    /// Look up any already-committed canonical journal receipt by its complete anchor. This is
+    /// intentionally action-agnostic because the ordinary validity acknowledgement path uses the
+    /// same crash-replay primitive. Terminal-only callers must separately check their action kind.
+    pub fn committed_receipt_at_anchor(
+        &self,
+        committed_anchor: &BlockProducerAnchor,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        Ok(self
+            .committed_entry_at_anchor(committed_anchor)
+            .map(BlockProducerReceipt::from_entry))
+    }
+
+    fn committed_entry_at_anchor(
+        &self,
+        committed_anchor: &BlockProducerAnchor,
+    ) -> Option<&ProductionJournalEntry> {
+        if committed_anchor.generation == 0 || committed_anchor.generation > self.disk.generation {
+            return None;
+        }
+        let entry_index = committed_anchor
+            .generation
+            .checked_sub(1)
+            .and_then(|generation| usize::try_from(generation).ok());
+        let Some(entry) = entry_index.and_then(|index| self.disk.entries.get(index)) else {
+            return None;
+        };
+        if BlockProducerAnchor::from_entry(entry) != *committed_anchor {
+            return None;
+        }
+        Some(entry)
+    }
+
     fn ensure_healthy(&self) -> Result<(), BlockProducerServiceError> {
         if self.poisoned {
             Err(BlockProducerServiceError::Poisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_no_prepared(&self) -> Result<(), BlockProducerServiceError> {
+        if let Some(prepared) = &self.disk.prepared {
+            Err(BlockProducerServiceError::Conflict(format!(
+                "prepared close-funding request {:?} freezes all other producer mutations",
+                prepared.request_id
+            )))
         } else {
             Ok(())
         }
@@ -765,6 +1260,31 @@ impl BlockProducerService {
         request_fingerprint: Bytes32,
         action: ProductionJournalAction,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_no_prepared()?;
+        let (candidate, entry) =
+            self.build_candidate_entry(request_id, request_fingerprint, action)?;
+        let receipt = BlockProducerReceipt::from_entry(&entry);
+        let mut next_disk = self.disk.clone();
+        next_disk.entries.push(entry);
+        next_disk.generation = receipt.generation;
+        next_disk.tail_hash = receipt.entry_hash;
+        if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+            // A failed parent-directory fsync can leave an indeterminate (old or new) durable
+            // name. Never continue from the in-memory predecessor; restart and replay the disk.
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.disk = next_disk;
+        self.producer = candidate;
+        Ok(receipt)
+    }
+
+    fn build_candidate_entry(
+        &self,
+        request_id: String,
+        request_fingerprint: Bytes32,
+        action: ProductionJournalAction,
+    ) -> Result<(ProductionBlockProducer, ProductionJournalEntry), BlockProducerServiceError> {
         let mut candidate = self.producer.clone();
         apply_action(&mut candidate, &action)?;
         if candidate.holds_any_local_signing_keys() {
@@ -786,19 +1306,7 @@ impl BlockProducerService {
             entry_hash: Bytes32::default(),
         };
         entry.entry_hash = journal_entry_hash(&entry)?;
-        let receipt = BlockProducerReceipt::from_entry(&entry);
-
-        self.disk.entries.push(entry);
-        self.disk.generation = generation;
-        self.disk.tail_hash = receipt.entry_hash;
-        if let Err(error) = persist_journal(&self.journal_path, &self.disk) {
-            // A failed parent-directory fsync can leave an indeterminate (old or new) durable
-            // name. Never continue from the in-memory predecessor; restart and replay the disk.
-            self.poisoned = true;
-            return Err(error);
-        }
-        self.producer = candidate;
-        Ok(receipt)
+        Ok((candidate, entry))
     }
 }
 
@@ -808,6 +1316,13 @@ struct PostFingerprint<'a> {
     signed_state: &'a ChannelState,
     debit_payload: &'a InterChannelDebitPayload,
     descriptor: &'a InterChannelTransferDescriptor,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseFundingFingerprint<'a> {
+    signed_state: &'a ChannelState,
+    plan: &'a CloseFundingPlan,
 }
 
 fn apply_action(
@@ -840,9 +1355,16 @@ fn apply_action(
                 *timestamp,
             )?;
         }
+        ProductionJournalAction::PostCloseFunding {
+            signed_state,
+            plan,
+            timestamp,
+        } => {
+            producer.produce_close_funding_block(signed_state, plan, *timestamp)?;
+        }
         ProductionJournalAction::PostMemberSetUpdate { .. } => {
             return Err(BlockProducerServiceError::InvalidRequest(
-                MEMBER_SET_UPDATE_DISABLED_REASON.to_string(),
+                MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
             ));
         }
     }
@@ -851,7 +1373,7 @@ fn apply_action(
 
 fn verify_and_replay(
     disk: &ProductionJournalFile,
-) -> Result<ProductionBlockProducer, BlockProducerServiceError> {
+) -> Result<(ProductionBlockProducer, Option<ProductionBlockProducer>), BlockProducerServiceError> {
     if disk.magic != PRODUCTION_JOURNAL_MAGIC {
         return Err(BlockProducerServiceError::Journal(format!(
             "magic {:?} is not {:?}",
@@ -865,17 +1387,12 @@ fn verify_and_replay(
         )));
     }
     validate_supported_user_counts(&disk.supported_user_counts)?;
-    if let Some((index, _)) = disk
-        .entries
-        .iter()
-        .enumerate()
-        .find(|(_, entry)| {
-            matches!(
-                &entry.action,
-                ProductionJournalAction::PostMemberSetUpdate { .. }
-            )
-        })
-    {
+    if let Some((index, _)) = disk.entries.iter().enumerate().find(|(_, entry)| {
+        matches!(
+            &entry.action,
+            ProductionJournalAction::PostMemberSetUpdate { .. }
+        )
+    }) {
         return Err(BlockProducerServiceError::Journal(format!(
             "entry {} contains a disabled legacy member-set update; operator migration is required",
             index + 1
@@ -953,7 +1470,75 @@ fn verify_and_replay(
             "journal tail hash does not match the verified entry chain".to_string(),
         ));
     }
-    Ok(producer)
+
+    let prepared_producer = if let Some(prepared) = &disk.prepared {
+        let expected_generation = disk.generation.checked_add(1).ok_or_else(|| {
+            BlockProducerServiceError::Journal(
+                "prepared entry generation overflows the journal".to_string(),
+            )
+        })?;
+        if prepared.generation != expected_generation || prepared.prev_entry_hash != disk.tail_hash
+        {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry has a broken generation or previous-hash link".to_string(),
+            ));
+        }
+        validate_request_id(&prepared.request_id).map_err(|e| {
+            BlockProducerServiceError::Journal(format!("prepared entry request id: {e}"))
+        })?;
+        if request_ids.contains(&prepared.request_id) {
+            return Err(BlockProducerServiceError::Journal(format!(
+                "prepared request id {:?} already exists in the authoritative journal",
+                prepared.request_id
+            )));
+        }
+        if !matches!(
+            &prepared.action,
+            ProductionJournalAction::PostCloseFunding { .. }
+        ) {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry is not a terminal close-funding action".to_string(),
+            ));
+        }
+        let expected_fingerprint = fingerprint_for_action(&prepared.action)?;
+        if prepared.request_fingerprint != expected_fingerprint {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry request fingerprint mismatch".to_string(),
+            ));
+        }
+        if prepared.action.timestamp() <= prior_timestamp {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry timestamp is not strictly monotonic".to_string(),
+            ));
+        }
+        let expected_hash = journal_entry_hash(prepared)?;
+        if prepared.entry_hash != expected_hash {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry hash mismatch".to_string(),
+            ));
+        }
+
+        let mut candidate = producer.clone();
+        apply_action(&mut candidate, &prepared.action).map_err(|e| {
+            BlockProducerServiceError::Journal(format!(
+                "prepared entry semantic replay failed: {e}"
+            ))
+        })?;
+        if ProducerHeadSnapshot::capture(&candidate) != prepared.result {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry replayed to a different producer head".to_string(),
+            ));
+        }
+        if candidate.holds_any_local_signing_keys() {
+            return Err(BlockProducerServiceError::Journal(
+                "prepared entry replay retained a fixture signing key".to_string(),
+            ));
+        }
+        Some(candidate)
+    } else {
+        None
+    };
+    Ok((producer, prepared_producer))
 }
 
 #[derive(Serialize)]
@@ -1046,6 +1631,12 @@ fn fingerprint_for_action(
                 debit_payload,
                 descriptor,
             },
+        ),
+        ProductionJournalAction::PostCloseFunding {
+            signed_state, plan, ..
+        } => request_fingerprint(
+            "postCloseFunding",
+            &CloseFundingFingerprint { signed_state, plan },
         ),
         ProductionJournalAction::PostMemberSetUpdate {
             signed_state,

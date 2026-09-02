@@ -1,8 +1,10 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, readJson, rollupOf } = require('../lib/cli');
+const { cli, wc, RPC, readJson, rollupOf, chainId } = require('../lib/cli');
 const { publicBacking } = require('../../node/common/public-backing');
 const producer = require('../lib/block-producer');
+const { withLock } = require('../lib/lock');
+const { flushPublishedHead } = require('../lib/producer-head');
 
 // ONE shared implementation of the manifest validation + chain verification (node/common), so the
 // api, the node programs and the wallet relay cannot drift on what "verified" means. If the module
@@ -62,12 +64,13 @@ function tokenRegistryFor(ch) {
 
 // GET /api/v1/channel/:ch/snapshot (A6/A39)
 router.get('/snapshot', (req, res) => {
-  try {
-    const ch = Number(req.params.ch);
+  const ch = Number(req.params.ch);
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
     res.json(readJson(wc(ch, 'channel_snapshot.json')));
-  } catch (e) {
+  }).catch(() => {
     res.status(404).json({ error: 'no channel yet' });
-  }
+  });
 });
 
 // GET /api/v1/channel/:ch/status (A40)
@@ -132,13 +135,27 @@ router.get('/tokens', (req, res) => {
 });
 
 // GET /api/v1/channel/:ch/backing (A43)
-router.get('/backing', (req, res) => {
-  try {
-    const ch = Number(req.params.ch);
-    res.json(publicBacking(readJson(wc(ch, 'channel_backing.json'))));
-  } catch (e) {
-    res.status(404).json({ error: 'no deposit backing yet' });
-  }
+router.get('/backing', async (req, res) => {
+  const ch = Number(req.params.ch);
+  withLock(ch, async () => {
+    await flushPublishedHead(ch);
+    const deployment = publicBacking(readJson(wc(ch, 'channel_backing.json')));
+    const artifact = await producer.liveBackingArtifact(ch);
+    res.json({
+      schemaVersion: 2,
+      source: 'liveBalanceService',
+      // The transport context is a security binding consumed by public_close_prover. Read the
+      // configured RPC, not a caller/operator environment label that can silently name another
+      // chain while serving an otherwise valid proof bundle.
+      chainId: chainId(),
+      rollup: deployment.rollup,
+      ...artifact,
+    });
+  }).catch((e) => {
+    // Never fall back to setup-time channel_backing.json: doing so would publish a stale settle
+    // chain exactly while the newest balance proof is awaiting its N-of-N channel binding.
+    res.status(409).json({ error: String(e.message || e) });
+  });
 });
 
 // Public base send cursor. The full private witness stays operator-local; wallets need only this
@@ -186,17 +203,19 @@ router.get('/registration-record', (req, res) => {
 });
 
 // GET /api/v1/channel/:ch/deposit/info (A42)
-router.get('/deposit/info', (req, res) => {
+router.get('/deposit/info', async (req, res) => {
   try {
     const ch = Number(req.params.ch);
     const backing = readJson(wc(ch, 'channel_backing.json'));
     if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
-    if (!backing.deposit_recipient) throw new Error('no deposit_recipient in channel_backing.json');
+    const depositRecipient = await producer.livePrepareDepositRecipient(ch);
     res.json({
       rollup: backing.rollup,
-      depositRecipient: backing.deposit_recipient,
+      depositRecipient,
       rpc: RPC,
-      chainId: parseInt(process.env.CHAIN_ID || '31337', 10),
+      // Same authority as /backing: an operator label must not contradict the RPC the deposit
+      // will actually be submitted to.
+      chainId: chainId(),
     });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });

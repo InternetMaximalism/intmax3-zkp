@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
-const { flushPublishedHead, syncStateIfNeeded } = require('../lib/producer-head');
+const { flushPublishedHead, publishOffchainSnapshot } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
 
@@ -13,7 +13,7 @@ router.post('/cosign', (req, res) => {
     writeJson(wc(ch, 'payload.json'), req.body);
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
     const state = readJson(wc(ch, 'cosigned.json'));
-    await syncStateIfNeeded(state);
+    await publishOffchainSnapshot(ch, state);
     res.json(state);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -29,7 +29,7 @@ router.post('/cosign-refresh', (req, res) => {
     writeJson(wc(ch, 'refresh_payload.json'), req.body);
     cli(ch, ['cosign-refresh', 'refresh_payload.json', 'refresh_cosigned.json']);
     const state = readJson(wc(ch, 'refresh_cosigned.json'));
-    await syncStateIfNeeded(state);
+    await publishOffchainSnapshot(ch, state);
     res.json(state);
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -56,7 +56,7 @@ router.post('/send', (req, res) => {
     writeJson(wc(ch, 'payload.json'), payload);
     cli(ch, ['cosign', 'payload.json', 'cosigned.json']);
     const snapshot = readJson(wc(ch, 'cosigned.json'));
-    const headSyncReceipt = await syncStateIfNeeded(snapshot);
+    const { headSyncReceipt } = await publishOffchainSnapshot(ch, snapshot);
     res.json({ snapshot, headSyncReceipt });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));

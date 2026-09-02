@@ -8,10 +8,21 @@ async function flushLastDepositImport(ch) {
   if (!fs.existsSync(artifactPath)) return null;
   const artifact = readJson(artifactPath);
   if (!artifact.fundImportState || !artifact.bundleApplyState) return null;
-  return producer.syncOffchainHeads([
+  const depositPath = wc(ch, 'producer_deposit.json');
+  const snapshotPath = wc(ch, 'channel_snapshot.json');
+  if (!fs.existsSync(depositPath) || !fs.existsSync(snapshotPath)) {
+    throw new Error('deposit recovery is missing producer_deposit.json or channel_snapshot.json');
+  }
+  const deposit = readJson(depositPath);
+  const producerReceipt = await producer.postDeposit(deposit);
+  const liveReceipt = await producer.liveReceiveConfiguredDeposit(ch, producerReceipt, deposit);
+  const snapshot = readJson(snapshotPath);
+  const liveStatus = await producer.liveBindSnapshot(ch, snapshot);
+  const headSyncReceipt = await producer.syncOffchainHeads([
     artifact.fundImportState,
     artifact.bundleApplyState,
   ]);
+  return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
 // One crash-recoverable production ordering for every API deposit import:
@@ -25,6 +36,10 @@ async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDeposito
   cli(ch, ['inspect-l1-deposit', String(txHash), RPC, 'producer_deposit.json']);
   const deposit = readJson(wc(ch, 'producer_deposit.json'));
   const producerReceipt = await producer.postDeposit(deposit);
+  // Phase 1 is durable before the N-of-N channel import. This consumes the exact journaled L1
+  // leaf into the resident balance proof, but deliberately withholds public head adoption until
+  // the resulting proof is bound to the signed channel snapshot below.
+  const liveReceipt = await producer.liveReceiveConfiguredDeposit(ch, producerReceipt, deposit);
 
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
   let artifact = null;
@@ -55,11 +70,13 @@ async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDeposito
   if (!artifact.fundImportState || !artifact.bundleApplyState) {
     throw new Error('l1_import_cosigned.json lacks the two N-of-N signed import states');
   }
+  const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+  const liveStatus = await producer.liveBindSnapshot(ch, snapshot);
   const headSyncReceipt = await producer.syncOffchainHeads([
     artifact.fundImportState,
     artifact.bundleApplyState,
   ]);
-  return { deposit, producerReceipt, headSyncReceipt, artifact };
+  return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
 module.exports = { importL1Deposit };

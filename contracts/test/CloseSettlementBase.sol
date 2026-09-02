@@ -13,6 +13,7 @@ import {MleVerifier} from "@mle/MleVerifier.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 import {IERC20} from "../src/SafeERC20.sol";
+import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 
 /// @dev Minimal stand-in for `IntmaxRollup`'s registration + native-payout surface, byte-identical
 ///      to the one in `ChannelSettlementManager.t.sol`. Copied (not imported) so this base does not
@@ -26,6 +27,10 @@ contract MockRollupRegistry is IChannelRegistry {
 
     constructor(IChannelSettlementVerifier verifier_) {
         verifier = verifier_;
+    }
+
+    function isFinalizedStateRoot(bytes32) external pure returns (bool) {
+        return true;
     }
 
     function register(uint32 channelId, uint8 bpMemberSlot, bytes32[] memory activeHashes) external {
@@ -45,20 +50,77 @@ contract MockRollupRegistry is IChannelRegistry {
         pendingWithdrawals[recipient] += msg.value;
     }
 
-    function withdraw() external override {
-        uint256 amount = pendingWithdrawals[msg.sender];
-        require(amount > 0, "nothing to withdraw");
-        pendingWithdrawals[msg.sender] = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
+    function withdraw(uint256 amount) external override {
+        uint256 pending = pendingWithdrawals[msg.sender];
+        require(amount > 0 && pending > 0, "nothing to withdraw");
+        uint256 paid = amount < pending ? amount : pending;
+        pendingWithdrawals[msg.sender] = pending - paid;
+        (bool ok,) = msg.sender.call{value: paid}("");
         require(ok, "withdraw failed");
     }
 
-    mapping(bytes32 => bool) public partialWithdrawalAuthorized;
+    mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
     mapping(bytes32 => uint256) public partialWithdrawalAuthorizationCalls;
+    bool public rejectAtomicWithdrawal;
 
     function authorizePartialWithdrawal(bytes32 authDigest) external override {
         partialWithdrawalAuthorized[authDigest] = true;
         partialWithdrawalAuthorizationCalls[authDigest] += 1;
+    }
+
+    /// Test-only image of the Rollup withdrawal proof consuming its one-shot IPW2 latch.
+    function consumePartialWithdrawalAuthorization(bytes32 authDigest) external {
+        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
+        delete partialWithdrawalAuthorized[authDigest];
+    }
+
+    function setRejectAtomicWithdrawal(bool reject_) external {
+        rejectAtomicWithdrawal = reject_;
+    }
+
+    function withdrawNative(
+        IntmaxRollup.Withdrawal[] calldata withdrawals,
+        address,
+        MleVerifier.MleProof calldata
+    ) external {
+        if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
+        for (uint256 i = 0; i < withdrawals.length; ++i) {
+            IntmaxRollup.Withdrawal calldata withdrawal = withdrawals[i];
+            require(withdrawal.tokenIndex == 0, "not native");
+            _consumeAndCredit(withdrawal);
+        }
+    }
+
+    function withdrawERC20(
+        IntmaxRollup.Withdrawal[] calldata withdrawals,
+        address,
+        MleVerifier.MleProof calldata
+    ) external {
+        if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
+        for (uint256 i = 0; i < withdrawals.length; ++i) {
+            IntmaxRollup.Withdrawal calldata withdrawal = withdrawals[i];
+            require(withdrawal.tokenIndex != 0, "not ERC-20");
+            _consumeAndCredit(withdrawal);
+        }
+    }
+
+    function _consumeAndCredit(IntmaxRollup.Withdrawal calldata withdrawal) private {
+        bytes32 authDigest = keccak256(
+            abi.encodePacked(
+                bytes4(0x49505732),
+                withdrawal.recipient,
+                withdrawal.tokenIndex,
+                withdrawal.amount,
+                withdrawal.auxData
+            )
+        );
+        require(partialWithdrawalAuthorized[authDigest], "authorization not issued");
+        delete partialWithdrawalAuthorized[authDigest];
+        if (withdrawal.tokenIndex == 0) {
+            pendingWithdrawals[withdrawal.recipient] += withdrawal.amount;
+        } else {
+            pendingTokenWithdrawals[withdrawal.tokenIndex][withdrawal.recipient] += withdrawal.amount;
+        }
     }
 
     // --- Multi-token (multitoken Phase 3): ERC-20 pull-payment + set-once registry mirror ---
@@ -75,11 +137,12 @@ contract MockRollupRegistry is IChannelRegistry {
         pendingTokenWithdrawals[tokenIndex][recipient] += amount;
     }
 
-    function withdrawToken(uint32 tokenIndex) external override {
-        uint256 amount = pendingTokenWithdrawals[tokenIndex][msg.sender];
-        require(amount > 0, "nothing to withdraw");
-        pendingTokenWithdrawals[tokenIndex][msg.sender] = 0;
-        require(tokenAddressOf[tokenIndex].transfer(msg.sender, amount), "token transfer failed");
+    function withdrawToken(uint32 tokenIndex, uint256 amount) external override {
+        uint256 pending = pendingTokenWithdrawals[tokenIndex][msg.sender];
+        require(amount > 0 && pending > 0, "nothing to withdraw");
+        uint256 paid = amount < pending ? amount : pending;
+        pendingTokenWithdrawals[tokenIndex][msg.sender] = pending - paid;
+        require(tokenAddressOf[tokenIndex].transfer(msg.sender, paid), "token transfer failed");
     }
 }
 
@@ -137,6 +200,16 @@ abstract contract CloseSettlementBase is Test {
         internal
         returns (ChannelSettlementManager m)
     {
+        return _deployManagerWithMaterializer(reg, rA, rB, rC, address(this));
+    }
+
+    function _deployManagerWithMaterializer(
+        MockRollupRegistry reg,
+        address rA,
+        address rB,
+        address rC,
+        address materializer
+    ) internal returns (ChannelSettlementManager m) {
         ChannelSettlementManager.MemberBinding[] memory bindings = new ChannelSettlementManager.MemberBinding[](3);
         bindings[0] = ChannelSettlementManager.MemberBinding({pkG: USER_A, recipient: rA});
         bindings[1] = ChannelSettlementManager.MemberBinding({pkG: USER_B, recipient: rB});
@@ -152,6 +225,7 @@ abstract contract CloseSettlementBase is Test {
             INITIAL_BP_BOND,
             IChannelSettlementVerifier(address(verifier)),
             IChannelRegistry(address(reg)),
+            materializer,
             bindings
         );
     }
@@ -517,8 +591,10 @@ abstract contract CloseSettlementBase is Test {
     // ── lifecycle drivers ──
 
     function _requestCloseAndElapseGrace() internal {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
         vm.prank(alice);
-        manager.requestClose();
+        manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + GRACE);
     }
 
@@ -531,7 +607,7 @@ abstract contract CloseSettlementBase is Test {
         _requestCloseAndElapseGrace();
         _submitClose(_intent(1, 9, 22, 1));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         return manager.finalizedCloseIntentDigest();
     }
 
@@ -541,15 +617,47 @@ abstract contract CloseSettlementBase is Test {
         ChannelSettlementManager.CloseIntent memory intent = _intentWithFund(1, 9, 22, 1, channelFundAmount);
         manager.submitCloseIntent(intent, _closeProof(intent));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeClose();
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         return manager.finalizedCloseIntentDigest();
     }
 
     /// Simulate the rollup paying this manager via a finalized native withdrawal, then pull it in.
     function _fundAndPull(MockRollupRegistry reg, ChannelSettlementManager m, uint256 amount) internal {
+        _materializeCloseFundingAuthorization(reg, m, 0);
         vm.deal(address(this), address(this).balance + amount);
         reg.creditWithdrawal{value: amount}(address(m));
         m.pullChannelFunds();
+    }
+
+    /// Reconstruct the terminal IMCF/IPW2 tuple and simulate its proof-backed one-shot
+    /// consumption. Generic recipient credit alone must never make a Manager pull-ready.
+    function _materializeCloseFundingAuthorization(
+        MockRollupRegistry reg,
+        ChannelSettlementManager m,
+        uint32 tokenIndex
+    ) internal returns (bytes32 authDigest) {
+        uint8 tokenCount = m.finalizedTokenCount();
+        uint32[10] memory tokenRegistry;
+        uint256[10] memory amounts;
+        for (uint256 slot = 0; slot < tokenCount; slot++) {
+            uint32 baseToken = m.finalizedTokenRegistry(slot);
+            tokenRegistry[slot] = baseToken;
+            amounts[slot] = m.finalizedChannelFundAmount(baseToken);
+        }
+        bytes32 fundsDigest = verifier.tokenFundsDigest(tokenRegistry, tokenCount, amounts);
+        bytes32 auxData = keccak256(
+            abi.encodePacked(
+                bytes4(0x494d4346),
+                block.chainid,
+                address(reg),
+                address(m),
+                m.channelId(),
+                m.currentCloseFreezeNonce(),
+                fundsDigest
+            )
+        );
+        authDigest = m.authorizeCloseFunding(tokenIndex, auxData);
+        reg.consumePartialWithdrawalAuthorization(authDigest);
     }
 
     /// Allow this base (acting as the funder of `creditWithdrawal`) to receive ETH refunds if any.

@@ -3,8 +3,8 @@
 //! The balance/withdrawal prover owns private witness material; this module deliberately accepts
 //! only its public proof artefacts.  It then records the irreversible L1 boundary in three durable
 //! phases: prepared proof, settlement-manager finalization (`finalizePartialWithdrawal`), proof
-//! payout (`withdrawNative`/`withdrawERC20`) and recipient pull (`withdraw`/`withdrawToken`). If the
-//! proved recipient is external to the local signer, a durable handoff completes the local
+//! payout (`withdrawNative`/`withdrawERC20`) and recipient pull (`withdraw`/`withdrawToken`). If
+//! the proved recipient is external to the local signer, a durable handoff completes the local
 //! workflow at the proof-payout boundary without claiming the recipient pulled. A caller may
 //! resume any phase after a crash, but it may never replace an in-flight withdrawal or mark it
 //! complete from an authorization alone.
@@ -150,9 +150,9 @@ pub struct BroadcastIntent {
     pub caller_nonce: u64,
     /// Keccak of the exact calldata produced by the local dry-run and intended for this nonce.
     pub calldata_hash: Bytes32,
-    /// Exact on-chain pull-credit value observed immediately before the transaction may be sent.
-    /// Persisting it before broadcast makes the post-receipt delta check recoverable after a
-    /// process crash; a retry must never silently substitute a newer balance.
+    /// On-chain pull credit observed before signing. This is an availability check, not an exact
+    /// state pin: unrelated credits may arrive before mining. The amount-scoped Rollup calldata,
+    /// its hash, and the canonical receipt bind the exact amount this operation consumes.
     pub credit_before: U256,
 }
 
@@ -677,7 +677,7 @@ impl PartialWithdrawalPayoutStore {
                     "recipient pull was delegated to the external proved recipient".into(),
                 ));
             }
-            let payout = candidate.payout_confirmation.as_ref().ok_or_else(|| {
+            let _payout = candidate.payout_confirmation.as_ref().ok_or_else(|| {
                 PartialWithdrawalPayoutError::InvalidRequest(
                     "cannot pull before the proof payout has a successful receipt".into(),
                 )
@@ -686,10 +686,10 @@ impl PartialWithdrawalPayoutStore {
                 return Ok(());
             }
             if intent.caller != candidate.artifacts.withdrawal.recipient
-                || intent.credit_before != payout.credit_after
+                || intent.credit_before < candidate.artifacts.withdrawal.amount
             {
                 return Err(PartialWithdrawalPayoutError::InvalidRequest(
-                    "pull intent must pin the proved recipient and exact post-payout credit".into(),
+                    "pull intent must pin the proved recipient and observe enough credit".into(),
                 ));
             }
             match &candidate.pull_broadcast {
@@ -1003,9 +1003,11 @@ fn validate_finalize_confirmation(
     receipt
         .finalized_checkpoint
         .covers_receipt(receipt.block_number, receipt.block_hash)
-        .map_err(|error| PartialWithdrawalPayoutError::InvalidRequest(format!(
-            "manager-finalization receipt is not covered by a durable L1 checkpoint: {error}"
-        )))?;
+        .map_err(|error| {
+            PartialWithdrawalPayoutError::InvalidRequest(format!(
+                "manager-finalization receipt is not covered by a durable L1 checkpoint: {error}"
+            ))
+        })?;
     if receipt.tx_hash == Bytes32::default()
         || receipt.block_hash == Bytes32::default()
         || !receipt.success
@@ -1054,9 +1056,11 @@ fn validate_payout_confirmation(
     receipt
         .finalized_checkpoint
         .covers_receipt(receipt.block_number, receipt.block_hash)
-        .map_err(|error| PartialWithdrawalPayoutError::InvalidRequest(format!(
-            "payout receipt is not covered by a durable L1 checkpoint: {error}"
-        )))?;
+        .map_err(|error| {
+            PartialWithdrawalPayoutError::InvalidRequest(format!(
+                "payout receipt is not covered by a durable L1 checkpoint: {error}"
+            ))
+        })?;
     if receipt.tx_hash == Bytes32::default()
         || receipt.block_hash == Bytes32::default()
         || !receipt.success
@@ -1098,7 +1102,7 @@ fn validate_pull_confirmation(
     candidate: &PartialWithdrawalCandidate,
     confirmation: &PullConfirmation,
 ) -> Result<(), PartialWithdrawalPayoutError> {
-    let payout = candidate.payout_confirmation.as_ref().ok_or_else(|| {
+    let _payout = candidate.payout_confirmation.as_ref().ok_or_else(|| {
         PartialWithdrawalPayoutError::InvalidRequest(
             "proof payout must precede pull confirmation".into(),
         )
@@ -1110,7 +1114,7 @@ fn validate_pull_confirmation(
     })?;
     if intent.caller != candidate.artifacts.withdrawal.recipient
         || confirmation.credit_before != intent.credit_before
-        || intent.credit_before != payout.credit_after
+        || intent.credit_before < candidate.artifacts.withdrawal.amount
     {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
             "recipient or pre-broadcast credit changed across the durable pull boundary".into(),
@@ -1120,9 +1124,11 @@ fn validate_pull_confirmation(
     receipt
         .finalized_checkpoint
         .covers_receipt(receipt.block_number, receipt.block_hash)
-        .map_err(|error| PartialWithdrawalPayoutError::InvalidRequest(format!(
-            "pull receipt is not covered by a durable L1 checkpoint: {error}"
-        )))?;
+        .map_err(|error| {
+            PartialWithdrawalPayoutError::InvalidRequest(format!(
+                "pull receipt is not covered by a durable L1 checkpoint: {error}"
+            ))
+        })?;
     if receipt.tx_hash == Bytes32::default()
         || receipt.block_hash == Bytes32::default()
         || !receipt.success
@@ -1141,11 +1147,9 @@ fn validate_pull_confirmation(
             "pull receipt failed or targets the wrong chain/rollup/caller/function".into(),
         ));
     }
-    if confirmation.credit_before < candidate.artifacts.withdrawal.amount
-        || confirmation.credit_after != U256::default()
-    {
+    if confirmation.credit_before < candidate.artifacts.withdrawal.amount {
         return Err(PartialWithdrawalPayoutError::InvalidRequest(
-            "recipient pull did not consume the on-chain credit".into(),
+            "recipient pull began without enough on-chain credit".into(),
         ));
     }
     Ok(())
@@ -1265,17 +1269,18 @@ fn verify_disk(disk: &PayoutSnapshot) -> Result<(), PartialWithdrawalPayoutError
             "pull",
         )?;
         if let Some(intent) = &active.pull_broadcast {
-            let payout = active.payout_confirmation.as_ref().ok_or_else(|| {
+            let _payout = active.payout_confirmation.as_ref().ok_or_else(|| {
                 PartialWithdrawalPayoutError::Snapshot(
                     "snapshot begins a pull without a payout confirmation".into(),
                 )
             })?;
             if intent.caller != active.artifacts.withdrawal.recipient
                 || intent.calldata_hash == Bytes32::default()
-                || intent.credit_before != payout.credit_after
+                || intent.credit_before < active.artifacts.withdrawal.amount
             {
                 return Err(PartialWithdrawalPayoutError::Snapshot(
-                    "stored pull intent substituted its recipient or pre-broadcast credit".into(),
+                    "stored pull intent substituted its recipient or lacked sufficient credit"
+                        .into(),
                 ));
             }
         }

@@ -70,21 +70,25 @@ a later complete scan restores readiness.
 ## Status / limitations (see DESIGN.md §6.3)
 - Delegate close **initiation** is unilateral: after importing an N-of-N-authenticated snapshot it
   derives the immutable depth-10 participant path, checks the configured L1 key owns the signed
-  recipient, checks the manager's root/count, and submits `requestCloseAsParticipant` itself.
+  recipient, checks the manager's root/count, and submits the five-argument guarded
+  `requestCloseAsParticipant` itself. Its durable outbox pins the freeze nonce/cancellation floor;
+  guarded finalization separately pins the pending digest and monotone request generation.
 - Once a close is finalized, delegate claim proving/submission is local and multi-token: every
   WASM-authenticated snapshot is archived by digest, `wallet_withdrawal_claim` re-imports the
   exact finalized state,
   proves with the in-WASM Regev secret, and exports only public claim/MLE calldata. The delegate
-  validates all 50 public inputs and submits each positive token claim. If a production live
-  withdrawal has already created the manager's rollup backing, the delegate permissionlessly pulls
-  that existing backing and its own credit with the signed recipient key. Those pull functions do
-  not create `pendingWithdrawals[manager]`; the live withdrawal producer is a separate availability
-  requirement. The
-  co-signer's `/close/claim` route remains an authenticated legacy compatibility proxy, not the
-  production delegate path.
-- A hostile coordinator can still withhold the public balance attestation needed to build and
-  submit the close-intent proof after the delegate freezes the channel. That availability seam is
-  distinct from claim secrecy and remains explicit in DESIGN.md §6.3.
+  validates all 50 public inputs and submits each positive token claim. Production close funding
+  uses the terminal N-of-N signed child, the resident validity producer, and the keyless
+  `close_funding_publisher` to materialize the complete proof-bound native/ERC-20 lane atomically;
+  the delegate then permissionlessly pulls its exact nullifier-scoped payout with the signed
+  recipient key. The co-signer's `/close/claim` route remains an authenticated legacy
+  compatibility proxy, not the production delegate path.
+- A delegate does not accept a signed head until the byte-exact public balance backing for that
+  digest has been size-bounded, cryptographically verified against the release-pinned verifier
+  data, and fsynced into its immutable archive. From that archive it can run the keyless close
+  prover and the crash-safe public close publisher without asking the coordinator for proof
+  material after a freeze. See DESIGN.md §6.3 for the remaining operational and terminal-signature
+  availability conditions.
 - Post-close claims are disabled on-chain because an incoming transfer present in a closeable
   state is already included in the ordinary slot-balance claim; a second claim would double-credit.
 - A45 partial-withdrawal cancel is alert-only (era-fence unsatisfiable — see `api/API-DESIGN.md`).

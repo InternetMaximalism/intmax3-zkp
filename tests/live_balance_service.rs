@@ -2,16 +2,16 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use intmax3_zkp::wallet_core::canonical_inter_channel_base_transfer;
-use intmax3_zkp::circuits::balance::common::recipient::extract_address_from_recipient;
 use intmax3_zkp::{
     block_producer::{ProductionBlockProducerError, ProductionDepositRequest},
     block_producer_service::{BlockProducerService, BlockProducerServiceError},
-    circuits::balance::common::recipient::calculate_recipient_from_user_id,
+    circuits::balance::common::recipient::{
+        calculate_recipient_from_user_id, extract_address_from_recipient,
+    },
     common::{
         balance_state::settled_tx_chain_push,
         channel::ChannelState,
@@ -29,8 +29,9 @@ use intmax3_zkp::{
         BuiltInterChannelSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, attach_small_block_signatures,
         build_burn_send_token_at_base_nonce, build_inter_channel_credit,
-        build_inter_channel_send_token_at_base_nonce, build_record,
-        default_settled_tx_accumulator, sign_state, verify_snapshot,
+        build_inter_channel_send_token_at_base_nonce, build_record, build_token_register,
+        canonical_inter_channel_base_transfer, default_settled_tx_accumulator, sign_state,
+        verify_snapshot,
     },
 };
 use rand010::{SeedableRng as _, rngs::StdRng};
@@ -117,6 +118,339 @@ fn build_burn(
         rng,
     )
     .expect("build canonical burn")
+}
+
+fn token_registration_child(
+    snapshot: &ChannelSnapshot,
+    keys: &[MemberKeys],
+    token_index: u32,
+) -> ChannelState {
+    let proposed = build_token_register(&keys[0], snapshot, 0, token_index)
+        .expect("build canonical token-register child");
+    sign_all(proposed, keys)
+}
+
+fn snapshot_with_state(template: &ChannelSnapshot, state: ChannelState) -> ChannelSnapshot {
+    ChannelSnapshot {
+        record: template.record.clone(),
+        state,
+        members: template.members.clone(),
+        settled_tx_accumulator: template.settled_tx_accumulator.clone(),
+    }
+}
+
+fn assert_bind_rejected_without_mutation(
+    live: &mut LiveBalanceService,
+    balance_path: &Path,
+    snapshot: &ChannelSnapshot,
+) {
+    // Keep this precondition explicit: the negative vectors below are fully formed, N-of-N
+    // signed snapshots.  The live-backing continuity boundary, rather than signature parsing or
+    // malformed input, must be what refuses them.
+    verify_snapshot(snapshot, None).expect("negative vector remains a valid N-of-N snapshot");
+
+    let bytes_before = fs::read(balance_path).expect("read live snapshot before refusal");
+    let status_before = live.status().expect("status before refusal");
+    let attestation_before = live.attestation().expect("attestation before refusal");
+    let backing_before = serde_json::to_vec(
+        &live
+            .channel_backing_artifact()
+            .expect("backing before refusal"),
+    )
+    .expect("serialize backing before refusal");
+
+    assert!(matches!(
+        live.bind_signed_snapshot(snapshot),
+        Err(LiveBalanceServiceError::InvalidRequest(_)) | Err(LiveBalanceServiceError::Snapshot(_))
+    ));
+
+    assert_eq!(
+        fs::read(balance_path).expect("read live snapshot after refusal"),
+        bytes_before,
+        "a refused rebind must not rewrite even one durable snapshot byte"
+    );
+    assert_eq!(
+        live.status().expect("status after refusal"),
+        status_before,
+        "a refused rebind must not mutate any in-memory public/base cursor"
+    );
+    assert_eq!(
+        live.attestation()
+            .expect("attestation after refusal")
+            .balance_proof,
+        attestation_before.balance_proof,
+        "a refused rebind must not replace or reprove the balance proof"
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &live
+                .channel_backing_artifact()
+                .expect("backing after refusal"),
+        )
+        .expect("serialize backing after refusal"),
+        backing_before,
+        "the public backing artifact must remain byte-identical after refusal"
+    );
+}
+
+#[test]
+fn zero_funded_binding_and_h2_zero_head_rebinding_are_exact_and_fail_closed() {
+    std::thread::Builder::new()
+        .name("live-backing-rebind".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_zero_funded_binding_and_h2_zero_head_rebinding)
+        .expect("spawn large-stack backing test")
+        .join()
+        .expect("live backing test thread");
+}
+
+fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
+    let directory = TestDirectory::new();
+    let producer_path = directory.producer();
+    let balance_path = directory.balance();
+    let channel_id = ChannelId::new(CHANNEL as u64).expect("channel id");
+    let producer = BlockProducerService::open(&producer_path, &[2]).expect("producer");
+    let mut live = LiveBalanceService::initialize(&balance_path, channel_id, Salt::default())
+        .expect("initialize zero-funded live balance");
+
+    let mut rng = StdRng::seed_from_u64(0xBACC_1A11);
+    let keys: Vec<MemberKeys> = (0..2).map(|_| MemberKeys::generate(&mut rng)).collect();
+    let members: Vec<MemberInfo> = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, keys)| member_info(slot, keys))
+        .collect();
+    let record = build_record(CHANNEL, &members, 0, 0).expect("record");
+    let (first_zero, _) =
+        encrypt_amount(&mut rng, &keys[0].regev_pk, 0).expect("encrypt first zero");
+    let (second_zero, _) =
+        encrypt_amount(&mut rng, &keys[1].regev_pk, 0).expect("encrypt second zero");
+    let regev_digests: Vec<Bytes32> = keys
+        .iter()
+        .map(|keys| Bytes32::from(keys.regev_pk.poseidon_digest()))
+        .collect();
+    let exits = [
+        Address::from_u32_slice(&[0, 0, 0, 0, 0xA1]).expect("first exit"),
+        Address::from_u32_slice(&[0, 0, 0, 0, 0xA2]).expect("second exit"),
+    ];
+    let genesis = assemble_genesis_state_backed(
+        &record,
+        &[first_zero, second_zero],
+        &regev_digests,
+        &exits,
+        0,
+        Bytes32::default(),
+        Bytes32::default(),
+    )
+    .expect("zero-funded genesis");
+    let genesis_snapshot = ChannelSnapshot {
+        record: record.clone(),
+        state: sign_all(genesis, &keys),
+        members: members.clone(),
+        settled_tx_accumulator: default_settled_tx_accumulator(),
+    };
+    verify_snapshot(&genesis_snapshot, None).expect("valid zero-funded genesis snapshot");
+
+    assert!(
+        live.channel_backing_artifact().is_err(),
+        "a fresh unbound balance must not expose public backing"
+    );
+    let unbound = live.status().expect("unbound status");
+    let proof_before_binding = live.attestation().expect("initial proof").balance_proof;
+    live.bind_signed_snapshot(&genesis_snapshot)
+        .expect("bind a genuinely zero-funded N-of-N genesis");
+    let bound = live.status().expect("bound status");
+    assert_eq!(bound.balance_generation, unbound.balance_generation);
+    assert_eq!(bound.base_nonce, unbound.base_nonce);
+    assert_eq!(bound.private_commitment, unbound.private_commitment);
+    assert_eq!(bound.settled_tx_chain, unbound.settled_tx_chain);
+    assert_eq!(bound.proof_size, unbound.proof_size);
+    assert_eq!(bound.applied_transition_count, 0);
+    assert_eq!(
+        bound.signed_head_digest,
+        Some(genesis_snapshot.state.digest)
+    );
+    assert_eq!(
+        live.attestation().expect("bound proof").balance_proof,
+        proof_before_binding,
+        "initial binding must reuse the exact resident proof bytes"
+    );
+
+    // An exact ordinary child may update only the public N-of-N head.  It must neither invoke a
+    // prover nor move the private/base cursor, proof bytes, settled history, or accumulator root.
+    let child = token_registration_child(&genesis_snapshot, &keys, 7);
+    let child_snapshot = snapshot_with_state(&genesis_snapshot, child.clone());
+    verify_snapshot(&child_snapshot, None).expect("valid exact H2=0 child");
+    let status_before_child = live.status().expect("status before child");
+    let backing_before_child = live.channel_backing_artifact().expect("genesis backing");
+    let proof_before_child = live
+        .attestation()
+        .expect("proof before child")
+        .balance_proof;
+    live.bind_signed_snapshot(&child_snapshot)
+        .expect("advance exact H2=0 child");
+    let status_after_child = live.status().expect("status after child");
+    let backing_after_child = live.channel_backing_artifact().expect("child backing");
+    assert_eq!(status_after_child.signed_head_digest, Some(child.digest));
+    assert_eq!(backing_after_child.signed_head, child);
+    assert_eq!(
+        status_after_child.balance_generation,
+        status_before_child.balance_generation
+    );
+    assert_eq!(
+        status_after_child.base_nonce,
+        status_before_child.base_nonce
+    );
+    assert_eq!(
+        status_after_child.private_commitment,
+        status_before_child.private_commitment
+    );
+    assert_eq!(
+        status_after_child.settled_tx_chain,
+        status_before_child.settled_tx_chain
+    );
+    assert_eq!(
+        status_after_child.proof_size,
+        status_before_child.proof_size
+    );
+    assert_eq!(
+        status_after_child.applied_transition_count,
+        status_before_child.applied_transition_count
+    );
+    assert_eq!(
+        live.attestation().expect("proof after child").balance_proof,
+        proof_before_child,
+        "ordinary head archival must not alter proof bytes"
+    );
+    assert_eq!(
+        backing_after_child.balance_verifier_data,
+        backing_before_child.balance_verifier_data
+    );
+    assert_eq!(
+        backing_after_child
+            .signed_head
+            .channel_fund
+            .intmax_state_root,
+        backing_before_child
+            .signed_head
+            .channel_fund
+            .intmax_state_root
+    );
+    assert_eq!(
+        backing_after_child
+            .signed_head
+            .balance_state
+            .settled_tx_accumulator_root,
+        backing_before_child
+            .signed_head
+            .balance_state
+            .settled_tx_accumulator_root
+    );
+
+    // Exact replay is a no-write idempotent success.
+    let accepted_bytes = fs::read(&balance_path).expect("accepted snapshot bytes");
+    live.bind_signed_snapshot(&child_snapshot)
+        .expect("exact accepted-head replay");
+    assert_eq!(
+        fs::read(&balance_path).expect("snapshot after exact replay"),
+        accepted_bytes
+    );
+
+    // A different child of the old genesis is a sibling, even if its counters are locally
+    // plausible. It cannot replace the already archived child.
+    let sibling = token_registration_child(&genesis_snapshot, &keys, 8);
+    assert_ne!(sibling.digest, child_snapshot.state.digest);
+    assert_bind_rejected_without_mutation(
+        &mut live,
+        &balance_path,
+        &snapshot_with_state(&genesis_snapshot, sibling),
+    );
+
+    // A descendant must advance epoch and state-version by exactly one, never skip a link.
+    let grandchild = token_registration_child(&child_snapshot, &keys, 8);
+    let grandchild_snapshot = snapshot_with_state(&child_snapshot, grandchild);
+    let skipped = token_registration_child(&grandchild_snapshot, &keys, 9);
+    assert_bind_rejected_without_mutation(
+        &mut live,
+        &balance_path,
+        &snapshot_with_state(&child_snapshot, skipped),
+    );
+
+    // The resident balance proof is the authority for the settled chain.
+    let canonical_next = token_registration_child(&child_snapshot, &keys, 8);
+    let mut wrong_chain = canonical_next.clone();
+    wrong_chain.balance_state.settled_tx_chain = fresh_root(0xC1A1);
+    wrong_chain = sign_all(wrong_chain.with_computed_digest(), &keys);
+    assert_bind_rejected_without_mutation(
+        &mut live,
+        &balance_path,
+        &snapshot_with_state(&child_snapshot, wrong_chain),
+    );
+
+    // The hidden private asset tree, not a newly supplied signed header, is authoritative for
+    // every close-fund amount.
+    let mut unbacked_fund = canonical_next.clone();
+    unbacked_fund.channel_fund.amounts[0] = U256::from(1u64);
+    unbacked_fund = sign_all(unbacked_fund.with_computed_digest(), &keys);
+    assert_bind_rejected_without_mutation(
+        &mut live,
+        &balance_path,
+        &snapshot_with_state(&child_snapshot, unbacked_fund),
+    );
+
+    // H2!=0 is a base-moving transition and belongs exclusively to settle_* paths.
+    let mut nonzero_h2 = canonical_next.clone();
+    nonzero_h2.h2_tag = fresh_root(0xA202);
+    nonzero_h2 = sign_all(nonzero_h2.with_computed_digest(), &keys);
+    assert_bind_rejected_without_mutation(
+        &mut live,
+        &balance_path,
+        &snapshot_with_state(&child_snapshot, nonzero_h2),
+    );
+
+    // These base-settlement headers are immutable across an ordinary H2=0 send/refresh. A signed
+    // child must not smuggle a fabricated L1 root, nullifier era, incoming escrow, or settled-tx
+    // accumulator into the public-close backing artifact.
+    for (label, forged_state) in [
+        ("intmax root", {
+            let mut state = canonical_next.clone();
+            state.channel_fund.intmax_state_root = fresh_root(0xA301);
+            sign_all(state.with_computed_digest(), &keys)
+        }),
+        ("shared nullifier root", {
+            let mut state = canonical_next.clone();
+            state.shared_native_nullifier_root = fresh_root(0xA302);
+            sign_all(state.with_computed_digest(), &keys)
+        }),
+        ("unallocated incoming", {
+            let mut state = canonical_next.clone();
+            state.unallocated_confirmed_incoming = U256::from(1u64);
+            sign_all(state.with_computed_digest(), &keys)
+        }),
+        ("settled accumulator root", {
+            let mut state = canonical_next.clone();
+            state.balance_state.settled_tx_accumulator_root = fresh_root(0xA303);
+            sign_all(state.with_computed_digest(), &keys)
+        }),
+    ] {
+        let forged = snapshot_with_state(&child_snapshot, forged_state);
+        assert_bind_rejected_without_mutation(&mut live, &balance_path, &forged);
+        eprintln!("ordinary rebind rejected forged {label}");
+    }
+
+    // Persistence/restart must expose only the accepted child, never one of the refused heads.
+    drop(live);
+    let reopened = LiveBalanceService::open(&balance_path, &producer)
+        .expect("reopen after accepted and refused rebinds");
+    let reopened_status = reopened.status().expect("reopened status");
+    assert_eq!(reopened_status, status_after_child);
+    assert_eq!(
+        reopened
+            .channel_backing_artifact()
+            .expect("reopened backing")
+            .signed_head,
+        child_snapshot.state
+    );
 }
 
 #[test]
@@ -216,12 +550,7 @@ fn run_live_balance_e2e() {
     verify_snapshot(&backed_snapshot, None).expect("valid backed snapshot");
 
     let received = live
-        .receive_deposit_unbound(
-            &producer,
-            &deposit_receipt,
-            &deposit_request,
-            deposit_salt,
-        )
+        .receive_deposit_unbound(&producer, &deposit_receipt, &deposit_request, deposit_salt)
         .expect("real unbound receive-deposit proof");
     assert_eq!(received.settled_tx_chain, deposit_chain);
     assert_eq!(
@@ -229,16 +558,15 @@ fn run_live_balance_e2e() {
         "receive does not consume send nonce"
     );
     assert_eq!(
-        live.receive_deposit_unbound(
-            &producer,
-            &deposit_receipt,
-            &deposit_request,
-            deposit_salt,
-        )
-        .expect("unbound receive retry is idempotent"),
+        live.receive_deposit_unbound(&producer, &deposit_receipt, &deposit_request, deposit_salt,)
+            .expect("unbound receive retry is idempotent"),
         received
     );
-    assert!(live.status().expect("unbound status").awaiting_channel_binding);
+    assert!(
+        live.status()
+            .expect("unbound status")
+            .awaiting_channel_binding
+    );
     assert!(live.channel_backing_artifact().is_err());
 
     // Crash exactly between phase 1 (proof durable) and phase 2 (signed genesis bind), then bind
@@ -246,10 +574,19 @@ fn run_live_balance_e2e() {
     drop(live);
     let mut live = LiveBalanceService::open(&balance_path, &producer)
         .expect("restart with an unbound deposit proof");
-    assert!(live.status().expect("recovered unbound status").awaiting_channel_binding);
+    assert!(
+        live.status()
+            .expect("recovered unbound status")
+            .awaiting_channel_binding
+    );
     live.bind_signed_snapshot(&backed_snapshot)
         .expect("bind N-of-N genesis after restart");
-    assert!(!live.status().expect("bound status").awaiting_channel_binding);
+    assert!(
+        !live
+            .status()
+            .expect("bound status")
+            .awaiting_channel_binding
+    );
     assert_eq!(
         live.receive_deposit(
             &producer,
@@ -448,8 +785,7 @@ fn run_live_balance_e2e() {
         )
         .expect("prove SECOND consecutive burn withdrawal (P3-2)");
     assert_ne!(
-        second_burn_proof.withdrawal.nullifier,
-        first_burn_proof.withdrawal.nullifier,
+        second_burn_proof.withdrawal.nullifier, first_burn_proof.withdrawal.nullifier,
         "consecutive burns must yield distinct nullifiers"
     );
 
@@ -516,15 +852,11 @@ fn run_live_balance_e2e() {
         token_index: 0,
         amount: U256::from(DESTINATION_DEPOSIT_AMOUNT),
         aux_data: Bytes32::default(),
-        expected_deposit_hash_chain: destination_deposit.hash_with_prev_hash(
-            deposit.hash_with_prev_hash(Bytes32::default()),
-        ),
+        expected_deposit_hash_chain: destination_deposit
+            .hash_with_prev_hash(deposit.hash_with_prev_hash(Bytes32::default())),
     };
     let destination_deposit_receipt = producer
-        .post_deposit(
-            "l1:deposit:1".into(),
-            destination_deposit_request.clone(),
-        )
+        .post_deposit("l1:deposit:1".into(), destination_deposit_request.clone())
         .expect("durable destination L1 deposit block");
 
     let destination_keys: Vec<MemberKeys> =
@@ -534,8 +866,8 @@ fn run_live_balance_e2e() {
         .enumerate()
         .map(|(slot, keys)| member_info(slot, keys))
         .collect();
-    let destination_record = build_record(DESTINATION_CHANNEL, &destination_members, 0, 0)
-        .expect("destination record");
+    let destination_record =
+        build_record(DESTINATION_CHANNEL, &destination_members, 0, 0).expect("destination record");
     let (destination_funded_ciphertext, _) = encrypt_amount(
         &mut rng,
         &destination_keys[0].regev_pk,
@@ -553,10 +885,8 @@ fn run_live_balance_e2e() {
         Address::from_u32_slice(&[0, 0, 0, 0, 3]).expect("destination exit 1"),
         Address::from_u32_slice(&[0, 0, 0, 0, 4]).expect("destination exit 2"),
     ];
-    let destination_deposit_chain = settled_tx_chain_push(
-        Bytes32::default(),
-        destination_deposit.nullifier(),
-    );
+    let destination_deposit_chain =
+        settled_tx_chain_push(Bytes32::default(), destination_deposit.nullifier());
     let destination_genesis = assemble_genesis_state_backed(
         &destination_record,
         &[
@@ -588,10 +918,7 @@ fn run_live_balance_e2e() {
         .bind_signed_snapshot(&destination_backed_snapshot)
         .expect("bind destination signed genesis");
     producer
-        .register(
-            "register:42".into(),
-            destination_backed_snapshot.clone(),
-        )
+        .register("register:42".into(), destination_backed_snapshot.clone())
         .expect("register destination head");
 
     // The normal transfer keeps the encrypted channel receiver key and the base-layer UID
@@ -690,22 +1017,22 @@ fn run_live_balance_e2e() {
     assert_eq!(destination_receive.base_nonce, 0);
     assert_eq!(
         destination_receive.settled_tx_chain,
-        credit
-            .bundle_apply_state
-            .balance_state
-            .settled_tx_chain
+        credit.bundle_apply_state.balance_state.settled_tx_chain
     );
     assert_eq!(
         destination_receive.settled_tx_chain,
         settled_tx_chain_push(
             destination_deposit_chain,
-            inter.transfer_descriptor.inter_channel_tx.tx_leaf_hash().expect("tx leaf"),
+            inter
+                .transfer_descriptor
+                .inter_channel_tx
+                .tx_leaf_hash()
+                .expect("tx leaf"),
         ),
         "destination base and channel heads fold the incoming transfer exactly once"
     );
     assert_eq!(
-        source_inter_settle.settled_tx_chain,
-        inter_state.balance_state.settled_tx_chain,
+        source_inter_settle.settled_tx_chain, inter_state.balance_state.settled_tx_chain,
         "source base and signed channel heads fold the outgoing transfer exactly once"
     );
 
@@ -736,11 +1063,13 @@ fn run_live_balance_e2e() {
         Err(LiveBalanceServiceError::InvalidRequest(_))
             | Err(LiveBalanceServiceError::ProducerReconciliation(_))
     ));
-    assert!(intmax3_zkp::wallet_core::verify_inter_channel_descriptor_matches_debit(
-        &inter.debit_payload,
-        &wrong_destination_salt,
-    )
-    .is_err());
+    assert!(
+        intmax3_zkp::wallet_core::verify_inter_channel_descriptor_matches_debit(
+            &inter.debit_payload,
+            &wrong_destination_salt,
+        )
+        .is_err()
+    );
     drop(destination_live);
 
     // A body mutation under an already settled request id is rejected rather than treated as a
@@ -758,6 +1087,111 @@ fn run_live_balance_e2e() {
         Err(LiveBalanceServiceError::InvalidRequest(_))
             | Err(LiveBalanceServiceError::ProducerReconciliation(_))
     ));
+
+    // The release close path is a terminal, ordinary TxV2 send: every remaining asset is paid
+    // to the immutable Manager under one shared IMCF authorization, then the exact N-of-N child
+    // is settled into the resident balance IVC. No close-specific circuit or VK is introduced.
+    let rollup = Address::from_u32_slice(&[0x524f_4c4c; 5]).expect("rollup address");
+    let manager = Address::from_u32_slice(&[0x4d41_4e47; 5]).expect("manager address");
+    let proposal = live
+        .prepare_close_funding(1, rollup, manager)
+        .expect("prepare exact terminal funding plan");
+    assert_eq!(proposal.plan.base_nonce, 3);
+    assert_eq!(proposal.plan.transfers.len(), 1);
+    assert_eq!(proposal.plan.transfers[0].token_index, 0);
+    assert_eq!(proposal.plan.transfers[0].amount, U256::from(78u64));
+    let close_state = sign_all(proposal.proposed_state, &keys);
+    let close_receipt = producer
+        .post_close_funding(
+            "close-funding:41".into(),
+            close_state.clone(),
+            proposal.plan.clone(),
+        )
+        .expect("producer admits terminal funding block");
+    let close_settle = live
+        .settle_close_funding(&producer, &close_receipt, &close_state, &proposal.plan)
+        .expect("settle terminal funding into live balance proof");
+    assert_eq!(close_settle.base_nonce, 4);
+    let close_status = live.status().expect("terminal live status");
+    assert!(close_status.terminal_close_funding);
+    assert_eq!(
+        close_status.close_funding_plan_digest,
+        Some(proposal.plan.plan_digest)
+    );
+    assert!(matches!(
+        live.prepare_close_funding(1, rollup, manager),
+        Err(LiveBalanceServiceError::InvalidRequest(message)) if message.contains("terminal")
+    ));
+
+    // Extract the paid leaf from the proved Spend/TxV2 history, aggregate it through the existing
+    // withdrawal circuits, wrap it and self-verify the MLE artifact. This is the public/operator
+    // handoff later submitted to the Rollup after Manager close finalization.
+    let close_artifacts = live
+        .close_funding_payout_artifacts(&producer, "close-funding:41", payout_prover)
+        .expect("terminal close-funding payout artifacts");
+    assert_eq!(close_artifacts.plan_digest, proposal.plan.plan_digest);
+    assert_eq!(
+        close_artifacts.funding_aux_data,
+        proposal.plan.funding_aux_data
+    );
+    assert_eq!(close_artifacts.lanes.len(), 1);
+    assert_eq!(close_artifacts.lanes[0].withdrawals.len(), 1);
+    assert_eq!(
+        close_artifacts.lanes[0].withdrawals[0].amount,
+        U256::from(78u64)
+    );
+    assert_eq!(
+        close_artifacts.lanes[0].withdrawals[0].aux_data,
+        proposal.plan.funding_aux_data
+    );
+    assert!(close_artifacts.lanes[0].withdrawal_mle_json.len() > 100_000);
+    // A one-leaf terminal lane uses exactly the same frozen proof statements as the pre-existing
+    // one-leaf burn payout above.  These byte-for-byte size equalities make an accidental circuit
+    // or recursion-layout expansion a release-test failure instead of a documentation claim.
+    assert_eq!(
+        close_artifacts.lanes[0]
+            .metrics
+            .single_withdrawal_proof_bytes,
+        first_artifacts.metrics.single_withdrawal_proof_bytes
+    );
+    assert_eq!(
+        close_artifacts.lanes[0]
+            .metrics
+            .withdrawal_chain_proof_bytes,
+        first_artifacts.metrics.withdrawal_chain_proof_bytes
+    );
+    assert_eq!(
+        close_artifacts.lanes[0]
+            .metrics
+            .withdrawal_final_proof_bytes,
+        first_artifacts.metrics.withdrawal_final_proof_bytes
+    );
+    eprintln!(
+        "terminal close lane metrics: single={}ms/{}B chain={}ms/{}B final={}ms/{}B wrap+mle={}ms json={}B",
+        close_artifacts.lanes[0].metrics.single_withdrawal_millis,
+        close_artifacts.lanes[0]
+            .metrics
+            .single_withdrawal_proof_bytes,
+        close_artifacts.lanes[0].metrics.withdrawal_chain_millis,
+        close_artifacts.lanes[0]
+            .metrics
+            .withdrawal_chain_proof_bytes,
+        close_artifacts.lanes[0].metrics.withdrawal_final_millis,
+        close_artifacts.lanes[0]
+            .metrics
+            .withdrawal_final_proof_bytes,
+        close_artifacts.lanes[0].metrics.wrap_mle_millis,
+        close_artifacts.lanes[0].metrics.mle_json_bytes,
+    );
+
+    drop(live);
+    let live = LiveBalanceService::open(&balance_path, &producer)
+        .expect("terminal marker and zero asset vector survive restart");
+    assert!(
+        live.status()
+            .expect("restarted status")
+            .terminal_close_funding
+    );
 
     drop(live);
     let mut damaged = fs::read(&balance_path).expect("read snapshot");
