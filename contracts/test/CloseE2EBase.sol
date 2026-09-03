@@ -214,5 +214,11 @@ abstract contract CloseE2EBase is Test {
                 )
             )
         );
+        // Register the Manager exactly as `DeployCloseCli.s.sol` does. Registration discovers the
+        // Manager's `closeFundingMaterializer()` and binds the channel to the set-once close
+        // satellite; without it every `requestClose` reverts `NotBoundManager` (this was masked
+        // until the Rollup's materializer discovery was fixed).
+        vm.prank(FACTORY);
+        rollup_.registerSettlementManager(address(manager_));
     }
 }
