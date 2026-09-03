@@ -131,6 +131,23 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Active));
     }
 
+    function test_partialWithdrawal_requires_attested_backing_but_allows_historical_anchor() public {
+        ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
+
+        _testBackingAvailable = false;
+        vm.expectRevert(bytes("backing unavailable"));
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+
+        // A later post must not strand a previously signed burn B. Its exact finalized backing is
+        // still required, but terminal-close freshness is deliberately not applied to this lane.
+        _testBackingAvailable = true;
+        _testBackingCurrent = false;
+        manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
+        assertTrue(manager.partialWithdrawalPending());
+    }
+
     /// The common close-proof gate also protects the production partial-withdrawal entry point;
     /// supplying a proof whose mock PIs match the noncanonical metadata does not bypass it.
     function test_partialWithdrawal_rejects_noncanonical_close_metadata() public {

@@ -147,6 +147,31 @@ contract ChannelSettlementManagerTest is Test {
     bytes32 internal constant SHARED_VECTOR_DIGEST =
         0x02dd6084b2c3921fb635639fab58406994068a7cdfca286992eac9e57c373778;
 
+    mapping(uint32 => uint64) internal _testFrozenExitGeneration;
+    mapping(uint32 => bytes32) public materializedChannelExit;
+    bool internal _testBackingAvailable = true;
+    bool internal _testBackingCurrent = true;
+
+    function freezeFromManager(uint32 channelId, uint64 generation) external {
+        require(_testFrozenExitGeneration[channelId] == 0, "already frozen");
+        _testFrozenExitGeneration[channelId] = generation;
+    }
+
+    function unfreezeFromManager(uint32 channelId, uint64 generation) external {
+        require(_testFrozenExitGeneration[channelId] == generation, "wrong generation");
+        delete _testFrozenExitGeneration[channelId];
+    }
+
+    function requireSignedHeadBacking(uint32 channelId, bytes32, bytes32) external view {
+        bool requireCurrent = ChannelSettlementManager(payable(msg.sender)).channelStatus()
+            != ChannelSettlementManager.ChannelLifecycleStatus.Active;
+        require(
+            msg.sender.code.length != 0 && channelId == uint32(CHANNEL_ID) && _testBackingAvailable
+                && (!requireCurrent || _testBackingCurrent),
+            "backing unavailable"
+        );
+    }
+
     function setUp() external {
         verifier = new ChannelSettlementVerifier();
         // Phase A close path: a real `verifyCloseIntent` rebinds the 103-limb close public inputs and
@@ -660,6 +685,25 @@ contract ChannelSettlementManagerTest is Test {
         proof = _closeProof(intent);
         vm.expectRevert(ChannelSettlementManager.NonCanonicalCloseMetadata.selector);
         manager.submitCloseIntent(intent, proof);
+    }
+
+    function test_close_requires_available_current_whole_vector_backing() external {
+        _requestCloseAndElapseGrace();
+        ChannelSettlementManager.CloseIntent memory intent = _intent(1, 9, 22, 1);
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+
+        _testBackingAvailable = false;
+        vm.expectRevert(bytes("backing unavailable"));
+        manager.submitCloseIntent(intent, proof);
+
+        _testBackingAvailable = true;
+        _testBackingCurrent = false;
+        vm.expectRevert(bytes("backing unavailable"));
+        manager.submitCloseIntent(intent, proof);
+
+        _testBackingCurrent = true;
+        manager.submitCloseIntent(intent, proof);
+        assertTrue(manager.getPendingClose().active);
     }
 
     /// Shared Rust<->Solidity test vector: `computeCloseIntentDigest` must be byte-identical to
@@ -1826,32 +1870,12 @@ contract ChannelSettlementManagerTest is Test {
     }
 
     function _materializeCloseFundingAuthorization(
-        MockChannelRegistry reg,
+        MockChannelRegistry,
         ChannelSettlementManager m,
-        uint32 tokenIndex
+        uint32
     ) internal returns (bytes32 authDigest) {
-        uint8 tokenCount = m.finalizedTokenCount();
-        uint32[10] memory tokenRegistry;
-        uint256[10] memory amounts;
-        for (uint256 slot = 0; slot < tokenCount; slot++) {
-            uint32 baseToken = m.finalizedTokenRegistry(slot);
-            tokenRegistry[slot] = baseToken;
-            amounts[slot] = m.finalizedChannelFundAmount(baseToken);
-        }
-        bytes32 fundsDigest = verifier.tokenFundsDigest(tokenRegistry, tokenCount, amounts);
-        bytes32 auxData = keccak256(
-            abi.encodePacked(
-                bytes4(0x494d4346),
-                block.chainid,
-                address(reg),
-                address(m),
-                m.channelId(),
-                m.currentCloseFreezeNonce(),
-                fundsDigest
-            )
-        );
-        authDigest = m.authorizeCloseFunding(tokenIndex, auxData);
-        reg.consumePartialWithdrawalAuthorization(authDigest);
+        authDigest = m.finalizedCloseIntentDigest();
+        materializedChannelExit[uint32(m.channelId())] = authDigest;
     }
 
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)

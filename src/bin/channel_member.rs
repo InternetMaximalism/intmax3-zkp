@@ -73,7 +73,7 @@ use intmax3_zkp::{
         balance_state::{BalanceState, settled_tx_chain_push, tx_leaf_hash},
         channel::{
             ChannelRecord, ChannelState, CloseIntent, CloseWithdrawal, InterChannelTx,
-            MemberSignature, burn_descriptor, close_member_set_commitment,
+            MemberSignature, burn_descriptor, close_member_set_commitment, token_funds_digest,
         },
         channel_id::ChannelId,
         deposit::Deposit,
@@ -89,6 +89,10 @@ use intmax3_zkp::{
     proof_da::{
         DecodedBlobTransaction, ValidatedBlobSidecars, submitted_id_from_receipt,
         validate_decoded_blob_transaction,
+    },
+    public_close_prover::{
+        MAX_BALANCE_VERIFIER_DATA_BYTES, MAX_PUBLIC_BACKING_ENVELOPE_BYTES,
+        PublicCloseExpectations, parse_public_close_backing_envelope, verify_public_backing,
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::{
@@ -123,6 +127,7 @@ use plonky2::{
 };
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 // Base-layer proof config (matches `BalanceProcessor` / `wallet_core`).
 type BF = GoldilocksField;
@@ -160,6 +165,13 @@ const BP_SLOT: u8 = 0;
 const BACKING_FILE: &str = "channel_backing.json"; // settled_tx_chain / intmax_state_root / fund
 const ATTESTATION_FILE: &str = "channel_attestation.bin"; // the channel's base-layer balance proof
 const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data (the gate needs only this)
+/// Production `deploy-settlement` consumes a complete, self-verified `public_close_prover` bundle
+/// from this directory. Only its CloseAssetBacking artifact is staged into Foundry's read-only
+/// input directory; the close-intent VK is never reused for the backing circuit.
+const PUBLIC_CLOSE_BUNDLE_ENV: &str = "INTMAX_PUBLIC_CLOSE_BUNDLE";
+const STAGED_CLOSE_BACKING_MANIFEST: &str = "close_asset_backing_manifest.json";
+const STAGED_CLOSE_BACKING_MLE: &str = "close_asset_backing_mle.json";
+const STAGED_CLOSE_BACKING_PUBLIC_INPUTS: &str = "close_asset_backing_public_inputs.json";
 // A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
 // `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
 const CLOSE_INTENT_FILE: &str = "close_intent.json";
@@ -266,20 +278,24 @@ struct ControlledMember {
 /// `applied_tx_identities` and the old entries were dropped without a diagnostic. A security
 /// ledger that resets itself in silence is worse than no ledger, because the operator believes it
 /// is running. Bump this whenever the on-disk shape of a ledger changes.
-const STATE_SCHEMA_VERSION: u32 = 3;
+const STATE_SCHEMA_VERSION: u32 = 4;
 
 /// The replay-ledger keys `cli_state.json` MUST carry. SECURITY: `load_state` checks for these BY
 /// NAME and fails LOUDLY on absence — the enumeration is deliberately in one auditable place. Add
 /// a key here the moment a new ledger is added; RENAMING a key here without a
 /// `STATE_SCHEMA_VERSION` bump is the exact mistake this list exists to make impossible to repeat.
-const REQUIRED_LEDGER_KEYS: [&str; 4] = [
+const REQUIRED_LEDGER_KEYS: [&str; 5] = [
     "applied_tx_identities",
     "spent_tx_identities",
     "imported_deposits",
     "state_signing_ledger",
+    "signer_exit_kit_receipt",
 ];
 const SETTLEMENT_BINDING_KEY: &str = "settlement_binding";
 const STATE_SIGNING_LEDGER_KEY: &str = "state_signing_ledger";
+const SIGNER_EXIT_KIT_RECEIPT_KEY: &str = "signer_exit_kit_receipt";
+const SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const SIGNER_EXIT_KIT_ARCHIVE_DIR: &str = ".signer-exit-kits";
 
 /// Why a member key signed a particular child. This is durable security metadata, not a display
 /// label: replay is accepted only when the successor, purpose and optional plan digest all agree.
@@ -305,6 +321,160 @@ impl StateSigningPurpose {
     fn is_terminal(self) -> bool {
         self == Self::CloseFunding
     }
+
+    /// These transitions change the L1-backed asset/composition statement. The current protocol
+    /// can materialize their signer-independent exit kit only *after* it receives an N-of-N state,
+    /// which is too late: once the final signature exists a coordinator can withhold both the
+    /// state and the newly required proof. Keep every such path fail-closed at the common signing
+    /// primitive until a pre-sign prepare+fsync receipt is part of this API.
+    fn requires_prepared_exit_kit(self) -> bool {
+        matches!(
+            self,
+            Self::InterChannelDebit
+                | Self::InterChannelFundImport
+                | Self::InterChannelBundleApply
+                | Self::BurnDebit
+                | Self::TokenRegister
+                | Self::L1DepositFundImport
+                | Self::L1DepositBundleApply
+                | Self::CloseFunding
+        )
+    }
+
+    /// H2=0 value-preserving successors may reuse the predecessor's backing proof, but only when
+    /// the complete proof statement key is unchanged. Genesis has no predecessor and delegate
+    /// enrollment is handled by its separate zero-opening construction.
+    fn reuses_predecessor_exit_kit(self) -> bool {
+        matches!(
+            self,
+            Self::InChannelSend | Self::InChannelBatch | Self::BalanceRefresh
+        )
+    }
+}
+
+/// Crash-safe evidence that this signer personally obtained and cryptographically verified a
+/// complete public exit artifact before releasing another signature. The large envelope lives in
+/// a content-addressed archive; this small receipt stays in `cli_state.json` and is carried across
+/// every H2=0 successor whose exact backing statement remains unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignerExitKitReceipt {
+    schema_version: u32,
+    archive_sha256: [u8; 32],
+    balance_verifier_data_sha256: [u8; 32],
+    chain_id: u64,
+    rollup: Address,
+    source_signed_head_digest: Bytes32,
+    channel_id: ChannelId,
+    settled_tx_chain: Bytes32,
+    token_funds_digest: Bytes32,
+}
+
+fn exit_kit_statement_key(state: &ChannelState) -> (ChannelId, Bytes32, Bytes32) {
+    (
+        state.channel_id,
+        state.balance_state.settled_tx_chain,
+        token_funds_digest(
+            &state.balance_state.token_registry,
+            state.balance_state.token_count,
+            &state.channel_fund.amounts,
+        ),
+    )
+}
+
+fn exit_kit_receipt_archive_path(receipt: &SignerExitKitReceipt) -> PathBuf {
+    Path::new(SIGNER_EXIT_KIT_ARCHIVE_DIR)
+        .join(format!("{}.json", hex::encode(receipt.archive_sha256)))
+}
+
+fn validate_exit_kit_receipt_for_head(
+    receipt: &SignerExitKitReceipt,
+    head: &ChannelState,
+) -> Result<(), String> {
+    if receipt.schema_version != SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION {
+        return Err(format!(
+            "signer exit-kit receipt schema {} is not supported version {}",
+            receipt.schema_version, SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION
+        ));
+    }
+    if receipt.archive_sha256 == [0; 32]
+        || receipt.balance_verifier_data_sha256 == [0; 32]
+        || receipt.chain_id == 0
+        || receipt.rollup == Address::default()
+        || receipt.source_signed_head_digest == Bytes32::default()
+    {
+        return Err("signer exit-kit receipt contains a zero security binding".into());
+    }
+    let expected = exit_kit_statement_key(head);
+    let actual = (
+        receipt.channel_id,
+        receipt.settled_tx_chain,
+        receipt.token_funds_digest,
+    );
+    if actual != expected {
+        return Err(format!(
+            "signer exit-kit receipt does not compose with the durable head \
+             (receipt={actual:?}, head={expected:?})"
+        ));
+    }
+    Ok(())
+}
+
+/// Enforce the signature-release half of the signer-independent-exit invariant before looking up
+/// an old signature and, critically, before invoking the signer. There is deliberately no
+/// "operator override": an exact historical replay is still an external release and must pass the
+/// current safety gate too.
+fn enforce_exit_kit_before_signature_release(
+    cli: &mut CliState,
+    successor: &ChannelState,
+    purpose: StateSigningPurpose,
+) -> Result<(), String> {
+    if purpose.requires_prepared_exit_kit() {
+        return Err(format!(
+            "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} before signature release; \
+             this asset/composition-moving transition has no exact durable pre-sign exit kit. \
+             Stage and fsync the exact (channel_id, settled_tx_chain, token_funds_digest) kit \
+             before enabling this signing purpose"
+        ));
+    }
+
+    if purpose.reuses_predecessor_exit_kit() {
+        let predecessor = &cli.snapshot.state;
+        if successor.prev_digest != predecessor.digest {
+            return Err(
+                "EXIT-KIT REUSE REFUSAL: successor does not extend the locally durable signed head"
+                    .into(),
+            );
+        }
+        if successor.h2_tag != Bytes32::default() {
+            return Err(
+                "EXIT-KIT REUSE REFUSAL: only an H2=0 successor may reuse the predecessor kit"
+                    .into(),
+            );
+        }
+        let predecessor_key = exit_kit_statement_key(predecessor);
+        let successor_key = exit_kit_statement_key(successor);
+        if successor_key != predecessor_key {
+            return Err(format!(
+                "EXIT-KIT REUSE REFUSAL: H2=0 is insufficient; exact \
+                 (channel_id, settled_tx_chain, token_funds_digest) equality is required \
+                (predecessor={predecessor_key:?}, successor={successor_key:?})"
+            ));
+        }
+
+        let receipt = cli.signer_exit_kit_receipt.as_ref().ok_or_else(|| {
+            "SIGNER-INDEPENDENT EXIT REQUIRED: the durable predecessor has no cryptographically \
+             verified signer exit-kit receipt; legacy/key-equality-only reuse is forbidden"
+                .to_string()
+        })?;
+        validate_exit_kit_receipt_for_head(receipt, predecessor)?;
+        if !cli.signer_exit_kit_receipt_verified {
+            verify_persisted_signer_exit_kit(cli)?;
+            cli.signer_exit_kit_receipt_verified = true;
+        }
+    }
+
+    Ok(())
 }
 
 /// One crash-safe anti-equivocation decision. The map key repeats the first three fields in a
@@ -417,6 +587,15 @@ struct CliState {
     /// `load_state` names the missing key and `migrate-state` may add null only while no local
     /// settlement record exists.  Once Some, no command clears it.
     settlement_binding: Option<SettlementBinding>,
+    /// No serde default: a legacy file must explicitly migrate to `null`, after which every
+    /// H2=0 signature path still fails closed until `install-exit-kit` verifies and archives an
+    /// exact public artifact. Merely matching the three composition fields is not a receipt.
+    signer_exit_kit_receipt: Option<SignerExitKitReceipt>,
+    /// Process-local verification cache. This is deliberately never serialized: every new CLI
+    /// invocation re-hashes the archive and cryptographically verifies its Balance/backing proofs
+    /// once before the first signature is released.
+    #[serde(skip)]
+    signer_exit_kit_receipt_verified: bool,
     /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
     /// (`InterChannelTx::replay_identity()` — the token-FREE fold over
     /// `(source, dest, tx_tree_root, tx_leaf)`) already CREDITED into THIS channel (the
@@ -536,6 +715,11 @@ fn terminal_signing_reservation(
 /// signature is checked before persistence.
 fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
     let record = &state.snapshot.record;
+    if let Some(receipt) = &state.signer_exit_kit_receipt {
+        validate_exit_kit_receipt_for_head(receipt, &state.snapshot.state)?;
+    } else if state.signer_exit_kit_receipt_verified {
+        return Err("exit-kit verification cache is set without a durable receipt".into());
+    }
     for (key, entry) in &state.state_signing_ledger {
         let expected_key = state_signing_ledger_key(
             entry.channel_id,
@@ -628,6 +812,11 @@ where
             "close-funding requires exactly one plan_digest; other purposes forbid it".into(),
         );
     }
+
+    // SECURITY: this is intentionally before both terminal/anti-equivocation replay lookup and
+    // `signer`. Returning stored signature bytes is still an external release; grandfathering an
+    // unsafe historical decision here would recreate the signer-withholding failure.
+    enforce_exit_kit_before_signature_release(cli, successor, purpose)?;
 
     let requested_terminal = plan_digest.map(|plan| {
         (
@@ -2404,10 +2593,13 @@ fn cmd_migrate_state(args: &[String]) {
         .filter(|k| !obj.contains_key(*k))
         .collect();
     let missing_signing = missing.contains(&STATE_SIGNING_LEDGER_KEY);
+    let missing_exit_kit_receipt = missing.contains(&SIGNER_EXIT_KIT_RECEIPT_KEY);
     let missing_replay: Vec<&str> = missing
         .iter()
         .copied()
-        .filter(|key| *key != STATE_SIGNING_LEDGER_KEY)
+        .filter(|key| {
+            *key != STATE_SIGNING_LEDGER_KEY && *key != SIGNER_EXIT_KIT_RECEIPT_KEY
+        })
         .collect();
     let stale_version = obj
         .get("state_schema_version")
@@ -2451,6 +2643,17 @@ fn cmd_migrate_state(args: &[String]) {
         obj.insert(
             STATE_SIGNING_LEDGER_KEY.to_string(),
             serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+    if missing_exit_kit_receipt {
+        obj.insert(
+            SIGNER_EXIT_KIT_RECEIPT_KEY.to_string(),
+            serde_json::Value::Null,
+        );
+        eprintln!(
+            "[state] SECURITY: migrated legacy state with no signer exit-kit receipt to explicit \
+             null. H2=0 signing remains disabled until `install-exit-kit` cryptographically \
+             verifies and fsyncs an exact public artifact."
         );
     }
     if missing_settlement_binding {
@@ -2672,6 +2875,252 @@ fn load_backing() -> (
         },
         backing,
     )
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn validate_signer_exit_kit_archive_directory() -> Result<(), String> {
+    let path = Path::new(SIGNER_EXIT_KIT_ARCHIVE_DIR);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "signer exit-kit archive {} is not a real directory",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            if metadata.permissions().mode() & 0o077 != 0 {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                    format!(
+                        "restrict signer exit-kit archive {} to 0700: {error}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|error| {
+                format!(
+                    "create signer exit-kit archive {}: {error}",
+                    path.display()
+                )
+            })?;
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                format!(
+                    "restrict signer exit-kit archive {} to 0700: {error}",
+                    path.display()
+                )
+            })?;
+            FileSync::sync_directory(Path::new("."));
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect signer exit-kit archive {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Derive independent verification context from the signer's existing durable state. A public
+/// envelope never gets to choose its own chain, rollup or Balance verifier key. Before a
+/// production settlement is ACTIVE there is intentionally no production context; only local
+/// chain 31337 may install a receipt from the rollup already pinned by `setup-backing`.
+fn signer_exit_kit_context(cli: &CliState) -> Result<(u64, Address, [u8; 32]), String> {
+    let vd_bytes = read_bounded_regular_file(
+        Path::new(BALANCE_VD_FILE),
+        MAX_BALANCE_VERIFIER_DATA_BYTES as u64,
+        "local Balance verifier data",
+    )?;
+    let vd_sha256 = sha256_bytes(&vd_bytes);
+
+    if let Some(binding) = &cli.settlement_binding {
+        if binding.status != SettlementBindingStatus::Active {
+            return Err(
+                "cannot install/verify an exit-kit receipt while settlement is only PREPARED"
+                    .into(),
+            );
+        }
+        let rollup = Address::from_hex(binding.rollup.trim())
+            .map_err(|error| format!("parse durable settlement rollup: {error}"))?;
+        if rollup == Address::default() {
+            return Err("durable settlement binding contains a zero rollup".into());
+        }
+        let chain_id = match (&binding.deployment, &binding.activation_checkpoint) {
+            (Some(deployment), Some(checkpoint)) => {
+                if checkpoint.chain_id != deployment.chain_id {
+                    return Err(
+                        "settlement deployment and activation checkpoint disagree on chain id"
+                            .into(),
+                    );
+                }
+                deployment.chain_id
+            }
+            (None, None) => DEVNET_CHAIN_ID,
+            _ => {
+                return Err(
+                    "settlement binding has incomplete production chain/finality context".into(),
+                );
+            }
+        };
+        return Ok((chain_id, rollup, vd_sha256));
+    }
+
+    let backing_bytes = read_bounded_regular_file(
+        Path::new(BACKING_FILE),
+        1024 * 1024,
+        "local channel backing",
+    )?;
+    let backing: ChannelBacking = serde_json::from_slice(&backing_bytes)
+        .map_err(|error| format!("parse local channel backing: {error}"))?;
+    let rollup = Address::from_hex(backing.rollup.trim())
+        .map_err(|error| format!("parse local backing rollup: {error}"))?;
+    if rollup == Address::default() {
+        return Err("local channel backing contains a zero rollup".into());
+    }
+    Ok((DEVNET_CHAIN_ID, rollup, vd_sha256))
+}
+
+fn verified_signer_exit_kit_receipt(
+    cli: &CliState,
+    envelope_bytes: &[u8],
+    require_current_source_head: bool,
+) -> Result<SignerExitKitReceipt, String> {
+    let envelope = parse_public_close_backing_envelope(envelope_bytes)
+        .map_err(|error| format!("parse public signer exit-kit envelope: {error}"))?;
+    let (chain_id, rollup, vd_sha256) = signer_exit_kit_context(cli)?;
+    let expected = PublicCloseExpectations {
+        channel_id: cli.snapshot.record.channel_id,
+        chain_id,
+        rollup,
+        balance_verifier_data_sha256: Some(vd_sha256),
+    };
+    let verification = verify_public_backing(&envelope, &expected)
+        .map_err(|error| format!("cryptographically verify signer exit kit: {error}"))?;
+    if !verification.self_verified {
+        return Err("public backing verifier returned a non-verified receipt".into());
+    }
+
+    let source_head = &envelope.backing.signed_head;
+    if require_current_source_head
+        && (source_head.digest != cli.snapshot.state.digest
+            || envelope.backing.channel_record != cli.snapshot.record)
+    {
+        return Err(
+            "exit-kit source is not the signer's exact current head and channel record".into(),
+        );
+    }
+    let kit = envelope
+        .backing
+        .signed_head_exit_kit
+        .as_ref()
+        .ok_or_else(|| "verified public backing unexpectedly omitted its exit kit".to_string())?;
+    let receipt = SignerExitKitReceipt {
+        schema_version: SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION,
+        archive_sha256: sha256_bytes(envelope_bytes),
+        balance_verifier_data_sha256: vd_sha256,
+        chain_id,
+        rollup,
+        source_signed_head_digest: source_head.digest,
+        channel_id: kit.backing_public_inputs.channel_id,
+        settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
+        token_funds_digest: kit.backing_public_inputs.token_funds_digest,
+    };
+    validate_exit_kit_receipt_for_head(&receipt, source_head)?;
+    if require_current_source_head {
+        validate_exit_kit_receipt_for_head(&receipt, &cli.snapshot.state)?;
+    }
+    Ok(receipt)
+}
+
+/// Re-open, re-hash and cryptographically verify the exact archived envelope once per process.
+/// The boolean cache is non-serialized, so a restart can never trust yesterday's filesystem.
+fn verify_persisted_signer_exit_kit(cli: &CliState) -> Result<(), String> {
+    let receipt = cli.signer_exit_kit_receipt.as_ref().ok_or_else(|| {
+        "SIGNER-INDEPENDENT EXIT REQUIRED: no signer exit-kit receipt is installed".to_string()
+    })?;
+    validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state)?;
+    validate_signer_exit_kit_archive_directory()?;
+    let path = exit_kit_receipt_archive_path(receipt);
+    let bytes = read_bounded_regular_file(
+        &path,
+        MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+        "content-addressed signer exit-kit envelope",
+    )?;
+    if sha256_bytes(&bytes) != receipt.archive_sha256 {
+        return Err(format!(
+            "signer exit-kit archive {} does not match its SHA-256 receipt",
+            path.display()
+        ));
+    }
+    let recomputed = verified_signer_exit_kit_receipt(cli, &bytes, false)?;
+    if &recomputed != receipt {
+        return Err(
+            "cryptographically reverified signer exit-kit archive differs from its durable receipt"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_install_exit_kit(args: &[String]) {
+    let envelope_path = args
+        .get(1)
+        .unwrap_or_else(|| die("install-exit-kit <public_backing_envelope.json>"));
+    let envelope_bytes = read_bounded_regular_file(
+        Path::new(envelope_path),
+        MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+        "public signer exit-kit envelope",
+    )
+    .unwrap_or_else(|error| die(error));
+    let mut cli = load_state();
+    let receipt = verified_signer_exit_kit_receipt(&cli, &envelope_bytes, true)
+        .unwrap_or_else(|error| die(format!("REFUSING signer exit-kit install: {error}")));
+
+    validate_signer_exit_kit_archive_directory().unwrap_or_else(|error| die(error));
+    let archive_path = exit_kit_receipt_archive_path(&receipt);
+    match fs::symlink_metadata(&archive_path) {
+        Ok(_) => {
+            let existing = read_bounded_regular_file(
+                &archive_path,
+                MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+                "existing content-addressed signer exit-kit envelope",
+            )
+            .unwrap_or_else(|error| die(error));
+            if existing != envelope_bytes {
+                die("content-addressed signer exit-kit path contains different bytes");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_private_bytes_at(&archive_path, &envelope_bytes);
+        }
+        Err(error) => die(format!(
+            "inspect signer exit-kit archive {}: {error}",
+            archive_path.display()
+        )),
+    }
+
+    // Archive fsync happens first; only then may the small state receipt point to it. A crash can
+    // leave an unreferenced content-addressed file, never a receipt naming missing bytes.
+    cli.signer_exit_kit_receipt = Some(receipt.clone());
+    cli.signer_exit_kit_receipt_verified = true;
+    save_state(&cli);
+    println!(
+        "install-exit-kit OK: verified+fsynced head {} statement ({}, {}, {}) at {}",
+        receipt.source_signed_head_digest,
+        receipt.channel_id.as_u64(),
+        receipt.settled_tx_chain,
+        receipt.token_funds_digest,
+        archive_path.display()
+    );
 }
 
 // anvil dev account[0] private key — a PUBLIC throwaway (safe on the CLI; NEVER a real key).
@@ -8201,6 +8650,7 @@ fn main() {
         // delegate SENDING
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
+        "install-exit-kit" => cmd_install_exit_kit(&args),
         "cosign" => cmd_cosign(&args),
         "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
@@ -8246,7 +8696,7 @@ fn main() {
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -8379,6 +8829,11 @@ fn cmd_init(args: &[String]) {
         imported_deposits: prior_imported,
         state_signing_ledger: prior_signing_ledger,
         settlement_binding: None,
+        // A delegate join changes the authenticated channel record. Even though its balance row
+        // opens at zero, do not carry an archive verified against the older record: the new head
+        // must be exported, verified and installed before any subsequent signature is released.
+        signer_exit_kit_receipt: None,
+        signer_exit_kit_receipt_verified: false,
     };
 
     // No signature leaves the process before the decision and exact bytes are fsynced in `cli`.
@@ -10786,6 +11241,7 @@ enum RealSettlementDeployMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SettlementBroadcastAddresses {
+    mle_verifier: String,
     verifier: String,
     manager: String,
     materializer: String,
@@ -10795,7 +11251,412 @@ struct SettlementBroadcastAddresses {
 }
 
 const SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const PUBLIC_CLOSE_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
+const CLOSE_BACKING_MLE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES: u64 = 64 * 1024;
+const CLOSE_BACKING_PUBLIC_INPUTS: usize = 26;
+const CLOSE_BACKING_MLE_PROTOCOL_VERSION: u64 = 1;
+const CLOSE_BACKING_MLE_CONSTITUENT_FIELDS: [&str; 6] = [
+    "preprocessedIndividualEvals",
+    "witnessIndividualEvals",
+    "inverseHelpersEvalsAtRInv",
+    "inverseHelpersEvalsAtRH",
+    "preprocessedIndividualEvalsAtRGateV2",
+    "witnessIndividualEvalsAtRGateV2",
+];
+const CLOSE_BACKING_STAGED_FILES: [&str; 3] = [
+    STAGED_CLOSE_BACKING_MANIFEST,
+    STAGED_CLOSE_BACKING_MLE,
+    STAGED_CLOSE_BACKING_PUBLIC_INPUTS,
+];
 const SETTLEMENT_PLAN_DOMAIN: &[u8] = b"INTMAX_SETTLEMENT_DEPLOY_PLAN_V1";
+
+#[derive(Debug)]
+struct ValidatedCloseBackingBundle {
+    manifest: Vec<u8>,
+    mle: Vec<u8>,
+    public_inputs: Vec<u8>,
+}
+
+fn read_bounded_regular_file(path: &Path, maximum: u64, what: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("stat {what} {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "{what} {} is not a regular non-symlink file",
+            path.display()
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "{what} {} is {} bytes, above the {maximum}-byte limit",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    let bytes =
+        fs::read(path).map_err(|error| format!("read {what} {}: {error}", path.display()))?;
+    if bytes.len() as u64 > maximum {
+        return Err(format!(
+            "{what} {} changed while reading and now exceeds the {maximum}-byte limit",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn json_required_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("JSON field `{field}` is missing or not a canonical u64"))
+}
+
+fn json_required_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("public-close manifest `{field}` is missing or not a string"))
+}
+
+fn canonical_hex(value: &str, bytes: usize, what: &str) -> Result<String, String> {
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    if body.len() != bytes * 2 || !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("{what} must be exactly {bytes} bytes of hex"));
+    }
+    Ok(format!("0x{}", body.to_ascii_lowercase()))
+}
+
+fn close_backing_sha256(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn close_backing_public_input(value: &serde_json::Value, index: usize) -> Result<u64, String> {
+    match value {
+        serde_json::Value::String(value) => value.parse::<u64>().map_err(|_| {
+            format!("CloseAssetBacking public input {index} is not a canonical decimal u64")
+        }),
+        serde_json::Value::Number(value) => value.as_u64().ok_or_else(|| {
+            format!("CloseAssetBacking public input {index} is not a canonical u64")
+        }),
+        _ => Err(format!(
+            "CloseAssetBacking public input {index} is neither a decimal string nor an integer"
+        )),
+    }
+}
+
+fn parse_close_backing_public_inputs(
+    value: &serde_json::Value,
+    what: &str,
+) -> Result<Vec<u64>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{what} must be a JSON array"))?;
+    if values.len() != CLOSE_BACKING_PUBLIC_INPUTS {
+        return Err(format!(
+            "{what} has {} limbs; the CloseAssetBacking circuit requires exactly {CLOSE_BACKING_PUBLIC_INPUTS}",
+            values.len()
+        ));
+    }
+    let parsed = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| close_backing_public_input(value, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed[..25].iter().any(|value| *value > u32::MAX as u64) {
+        return Err(format!("{what} contains a non-canonical u32 limb"));
+    }
+    if parsed[25] >= (1u64 << 63) {
+        return Err(format!("{what} anchor block is not a canonical u63"));
+    }
+    Ok(parsed)
+}
+
+fn close_backing_limb_bytes32(inputs: &[u64], offset: usize) -> String {
+    let mut bytes = [0u8; 32];
+    for index in 0..8 {
+        bytes[index * 4..index * 4 + 4]
+            .copy_from_slice(&(inputs[offset + index] as u32).to_be_bytes());
+    }
+    format!("0x{}", hex::encode(bytes))
+}
+
+/// Enforce the same release envelope as the public publisher. These fields are deliberately not
+/// part of Solidity's proof tuple, so the deployment driver must refuse a legacy or width-mismatched
+/// artifact before its VK becomes the materializer's immutable set-once key.
+fn validate_close_backing_mle_release_envelope(
+    mle: &serde_json::Value,
+) -> Result<(), String> {
+    if json_required_u64(mle, "protocolVersion")? != CLOSE_BACKING_MLE_PROTOCOL_VERSION {
+        return Err(format!(
+            "backing MLE protocolVersion is not release version {CLOSE_BACKING_MLE_PROTOCOL_VERSION}"
+        ));
+    }
+    let mut constituent_width = 2usize;
+    for field in CLOSE_BACKING_MLE_CONSTITUENT_FIELDS {
+        let length = mle
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("backing MLE `{field}` is missing or not an array"))?
+            .len();
+        constituent_width = constituent_width.max(length);
+    }
+    if json_required_u64(mle, "constituentWidth")?
+        != u64::try_from(constituent_width)
+            .map_err(|_| "backing MLE constituent width does not fit u64".to_string())?
+    {
+        return Err(format!(
+            "backing MLE constituentWidth does not equal canonical width {constituent_width}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_close_backing_bundle_bytes(
+    manifest_bytes: &[u8],
+    mle_bytes: &[u8],
+    public_input_bytes: &[u8],
+    chain_id: u64,
+    rollup: &str,
+    channel_id: u32,
+    balance_vd_sha256: &str,
+) -> Result<(), String> {
+    let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes)
+        .map_err(|error| format!("parse public-close manifest: {error}"))?;
+    if !manifest.is_object() {
+        return Err("public-close manifest must be a JSON object".to_string());
+    }
+    if json_required_u64(&manifest, "schemaVersion")? != 2 {
+        return Err("public-close manifest schemaVersion must be 2".to_string());
+    }
+    if json_required_u64(&manifest, "chainId")? != chain_id {
+        return Err("public-close manifest belongs to a different chain".to_string());
+    }
+    if canonical_hex(
+        json_required_string(&manifest, "rollup")?,
+        20,
+        "manifest rollup",
+    )? != canonical_hex(rollup, 20, "backing rollup")?
+    {
+        return Err("public-close manifest belongs to a different rollup".to_string());
+    }
+    if json_required_u64(&manifest, "channelId")? != u64::from(channel_id) {
+        return Err("public-close manifest belongs to a different channel".to_string());
+    }
+    if manifest
+        .get("selfVerified")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || manifest
+            .get("keyMaterialConsumed")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "public-close manifest must be self-verified and key-material independent".to_string(),
+        );
+    }
+    if canonical_hex(
+        json_required_string(&manifest, "balanceVerifierDataSha256")?,
+        32,
+        "manifest balance verifier-data SHA-256",
+    )? != canonical_hex(balance_vd_sha256, 32, "local balance verifier-data SHA-256")?
+    {
+        return Err(
+            "public-close bundle was built against different Balance verifier data".to_string(),
+        );
+    }
+    if json_required_string(&manifest, "backingMleFile")? != "backing_mle.json"
+        || json_required_string(&manifest, "backingPublicInputsFile")?
+            != "backing_public_inputs.json"
+    {
+        return Err("public-close manifest names unexpected backing files".to_string());
+    }
+    if json_required_u64(&manifest, "backingMleBytes")? != mle_bytes.len() as u64
+        || canonical_hex(
+            json_required_string(&manifest, "backingMleSha256")?,
+            32,
+            "manifest backing MLE SHA-256",
+        )? != close_backing_sha256(mle_bytes)
+    {
+        return Err("backing_mle.json does not match its manifest length/SHA-256".to_string());
+    }
+    if canonical_hex(
+        json_required_string(&manifest, "backingPublicInputsSha256")?,
+        32,
+        "manifest backing public-input SHA-256",
+    )? != close_backing_sha256(public_input_bytes)
+    {
+        return Err("backing_public_inputs.json does not match its manifest SHA-256".to_string());
+    }
+    if json_required_u64(&manifest, "backingPublicInputCount")?
+        != CLOSE_BACKING_PUBLIC_INPUTS as u64
+    {
+        return Err("manifest does not declare the exact 26-limb backing statement".to_string());
+    }
+
+    let mle: serde_json::Value = serde_json::from_slice(mle_bytes)
+        .map_err(|error| format!("parse backing_mle.json: {error}"))?;
+    validate_close_backing_mle_release_envelope(&mle)?;
+    if json_required_u64(&mle, "degreeBits")? == 0 {
+        return Err("backing MLE has a disabled degreeBits=0 VK".to_string());
+    }
+    let mle_inputs = parse_close_backing_public_inputs(
+        mle.get("publicInputs")
+            .ok_or_else(|| "backing MLE has no publicInputs".to_string())?,
+        "backing MLE publicInputs",
+    )?;
+    let public_input_json: serde_json::Value = serde_json::from_slice(public_input_bytes)
+        .map_err(|error| format!("parse backing_public_inputs.json: {error}"))?;
+    let separate_inputs =
+        parse_close_backing_public_inputs(&public_input_json, "backing_public_inputs.json")?;
+    if mle_inputs != separate_inputs {
+        return Err(
+            "backing MLE and separate public-input file describe different statements".to_string(),
+        );
+    }
+    if mle_inputs[0] != u64::from(channel_id) {
+        return Err("backing MLE public inputs belong to a different channel".to_string());
+    }
+    let declared_root = canonical_hex(
+        json_required_string(&manifest, "backingFinalizedExtendedStateCommitment")?,
+        32,
+        "manifest backing finalized root",
+    )?;
+    if close_backing_limb_bytes32(&mle_inputs, 17) != declared_root {
+        return Err("backing MLE finalized root differs from its manifest".to_string());
+    }
+    if json_required_u64(&manifest, "backingAnchorBlockNumber")? != mle_inputs[25] {
+        return Err("backing MLE anchor block differs from its manifest".to_string());
+    }
+    Ok(())
+}
+
+fn load_close_backing_bundle(
+    bundle_dir: &Path,
+    chain_id: u64,
+    rollup: &str,
+    channel_id: u32,
+    balance_vd_sha256: &str,
+) -> Result<ValidatedCloseBackingBundle, String> {
+    let metadata = fs::symlink_metadata(bundle_dir)
+        .map_err(|error| format!("stat public-close bundle {}: {error}", bundle_dir.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "public-close bundle {} is not a real non-symlink directory",
+            bundle_dir.display()
+        ));
+    }
+    let manifest = read_bounded_regular_file(
+        &bundle_dir.join("public_close_manifest.json"),
+        PUBLIC_CLOSE_MANIFEST_MAX_BYTES,
+        "public-close manifest",
+    )?;
+    let mle = read_bounded_regular_file(
+        &bundle_dir.join("backing_mle.json"),
+        CLOSE_BACKING_MLE_MAX_BYTES,
+        "CloseAssetBacking MLE artifact",
+    )?;
+    let public_inputs = read_bounded_regular_file(
+        &bundle_dir.join("backing_public_inputs.json"),
+        CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES,
+        "CloseAssetBacking public inputs",
+    )?;
+    validate_close_backing_bundle_bytes(
+        &manifest,
+        &mle,
+        &public_inputs,
+        chain_id,
+        rollup,
+        channel_id,
+        balance_vd_sha256,
+    )?;
+    Ok(ValidatedCloseBackingBundle {
+        manifest,
+        mle,
+        public_inputs,
+    })
+}
+
+/// Stage one exact, self-verified CloseAssetBacking artifact before the PREPARED deployment
+/// boundary. A retry never imports a new bundle: it revalidates the already plan-digested files.
+fn stage_close_backing_bundle(
+    contracts_dir: &Path,
+    resume_prepared: bool,
+    chain_id: u64,
+    rollup: &str,
+    channel_id: u32,
+) {
+    secure_private_path(Path::new(BALANCE_VD_FILE));
+    let balance_vd = fs::read(BALANCE_VD_FILE)
+        .unwrap_or_else(|error| die(format!("read {BALANCE_VD_FILE}: {error}")));
+    let balance_vd_sha256 = close_backing_sha256(&balance_vd);
+    let data_dir = contracts_dir.join("test/data");
+    let staged_manifest = data_dir.join(STAGED_CLOSE_BACKING_MANIFEST);
+    let staged_mle = data_dir.join(STAGED_CLOSE_BACKING_MLE);
+    let staged_public_inputs = data_dir.join(STAGED_CLOSE_BACKING_PUBLIC_INPUTS);
+
+    if !resume_prepared {
+        let bundle = std::env::var(PUBLIC_CLOSE_BUNDLE_ENV).unwrap_or_else(|_| {
+            die(format!(
+                "production deploy-settlement requires {PUBLIC_CLOSE_BUNDLE_ENV}=<directory> \
+                 naming a self-verified `public_close_prover --output-dir` bundle. The backing VK \
+                 cannot be inferred from or replaced by close_intent_mle.json."
+            ))
+        });
+        let bundle = load_close_backing_bundle(
+            Path::new(&bundle),
+            chain_id,
+            rollup,
+            channel_id,
+            &balance_vd_sha256,
+        )
+        .unwrap_or_else(|error| die(format!("invalid {PUBLIC_CLOSE_BUNDLE_ENV}: {error}")));
+        // Manifest is the commit marker: a crash before it lands leaves no apparently complete
+        // staged set, and no PREPARED state has been written yet.
+        write_private_bytes_at(&staged_mle, &bundle.mle);
+        write_private_bytes_at(&staged_public_inputs, &bundle.public_inputs);
+        write_private_bytes_at(&staged_manifest, &bundle.manifest);
+    }
+
+    let staged = ValidatedCloseBackingBundle {
+        manifest: read_bounded_regular_file(
+            &staged_manifest,
+            PUBLIC_CLOSE_MANIFEST_MAX_BYTES,
+            "staged public-close manifest",
+        )
+        .unwrap_or_else(|error| die(error)),
+        mle: read_bounded_regular_file(
+            &staged_mle,
+            CLOSE_BACKING_MLE_MAX_BYTES,
+            "staged CloseAssetBacking MLE artifact",
+        )
+        .unwrap_or_else(|error| die(error)),
+        public_inputs: read_bounded_regular_file(
+            &staged_public_inputs,
+            CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES,
+            "staged CloseAssetBacking public inputs",
+        )
+        .unwrap_or_else(|error| die(error)),
+    };
+    validate_close_backing_bundle_bytes(
+        &staged.manifest,
+        &staged.mle,
+        &staged.public_inputs,
+        chain_id,
+        rollup,
+        channel_id,
+        &balance_vd_sha256,
+    )
+    .unwrap_or_else(|error| {
+        die(format!(
+            "staged CloseAssetBacking deployment input is invalid: {error}; refusing to deploy or resume"
+        ))
+    });
+}
 
 fn append_deployment_digest_field(preimage: &mut Vec<u8>, field: &[u8]) {
     preimage.extend_from_slice(&(field.len() as u64).to_be_bytes());
@@ -10851,6 +11712,13 @@ fn settlement_deployment_plan_digest(
         let relative = format!("test/data/{relative}");
         let bytes = fs::read(contracts_dir.join(&relative))
             .map_err(|e| format!("read settlement fixture {relative}: {e}"))?;
+        append_deployment_digest_field(&mut preimage, relative.as_bytes());
+        append_deployment_digest_field(&mut preimage, &bytes);
+    }
+    for relative in CLOSE_BACKING_STAGED_FILES {
+        let relative = format!("test/data/{relative}");
+        let bytes = fs::read(contracts_dir.join(&relative))
+            .map_err(|e| format!("read staged CloseAssetBacking input {relative}: {e}"))?;
         append_deployment_digest_field(&mut preimage, relative.as_bytes());
         append_deployment_digest_field(&mut preimage, &bytes);
     }
@@ -11304,7 +12172,7 @@ fn validate_settlement_broadcast_value(
         settlement_artifact_contract_address(tx, &what)?;
         core_start += 1;
     }
-    const CORE_TRANSACTION_COUNT: usize = 10;
+    const CORE_TRANSACTION_COUNT: usize = 11;
     if transactions.len() != core_start + CORE_TRANSACTION_COUNT {
         return Err(format!(
             "broadcast artifact has {} core transactions after {core_start} library creates; \
@@ -11350,14 +12218,38 @@ fn validate_settlement_broadcast_value(
                 .to_string(),
         );
     }
+    let backing_initializer = &core[2];
     validate_settlement_tx_shape(
-        &core[2],
+        backing_initializer,
+        "CALL",
+        "CloseFundingMaterializer",
+        Some("initializeBackingVk("),
+        "CloseAssetBacking VK initializer",
+    )?;
+    validate_settlement_call_target(
+        backing_initializer,
+        &materializer,
+        "CloseAssetBacking VK initializer",
+    )?;
+    let backing_args =
+        settlement_artifact_args(backing_initializer, "CloseAssetBacking VK initializer")?;
+    if backing_args
+        .first()
+        .is_none_or(|arg| strip0x(arg) != strip0x(&mle))
+    {
+        return Err(
+            "CloseAssetBacking VK is not bound to the MleVerifier created by this run".to_string(),
+        );
+    }
+    validate_settlement_call_input(backing_initializer, "CloseAssetBacking VK initializer")?;
+    validate_settlement_tx_shape(
+        &core[3],
         "CREATE",
         "ChannelSettlementVerifier",
         None,
         "settlement verifier deploy",
     )?;
-    let verifier = settlement_artifact_contract_address(&core[2], "settlement verifier deploy")?;
+    let verifier = settlement_artifact_contract_address(&core[3], "settlement verifier deploy")?;
 
     for (offset, function) in [
         "initializeCloseVk(",
@@ -11368,7 +12260,7 @@ fn validate_settlement_broadcast_value(
     .iter()
     .enumerate()
     {
-        let tx = &core[3 + offset];
+        let tx = &core[4 + offset];
         let what = format!("settlement verifier initializer {function}");
         validate_settlement_tx_shape(
             tx,
@@ -11406,7 +12298,7 @@ fn validate_settlement_broadcast_value(
         return Err("staged record has no valid block-proposer member".to_string());
     }
 
-    let register = &core[7];
+    let register = &core[8];
     validate_settlement_tx_shape(
         register,
         "CALL",
@@ -11447,7 +12339,7 @@ fn validate_settlement_broadcast_value(
     }
     validate_settlement_call_input(register, "registerChannel")?;
 
-    let manager_deploy = &core[8];
+    let manager_deploy = &core[9];
     validate_settlement_tx_shape(
         manager_deploy,
         "CREATE",
@@ -11522,7 +12414,7 @@ fn validate_settlement_broadcast_value(
         );
     }
 
-    let register_manager = &core[9];
+    let register_manager = &core[10];
     validate_settlement_tx_shape(
         register_manager,
         "CALL",
@@ -11569,6 +12461,7 @@ fn validate_settlement_broadcast_value(
     )?;
 
     Ok(SettlementBroadcastAddresses {
+        mle_verifier: mle,
         verifier,
         manager,
         materializer,
@@ -11779,8 +12672,15 @@ mod settlement_broadcast_recovery_tests {
                 Some(vec![ROLLUP.to_string()]),
                 &materializer_input,
             ),
-            create_tx(
+            call_tx(
                 START_NONCE + 2,
+                "CloseFundingMaterializer",
+                MATERIALIZER,
+                "initializeBackingVk(address)",
+                vec![MLE.to_string()],
+            ),
+            create_tx(
+                START_NONCE + 3,
                 "ChannelSettlementVerifier",
                 VERIFIER,
                 None,
@@ -11797,7 +12697,7 @@ mod settlement_broadcast_recovery_tests {
         .enumerate()
         {
             transactions.push(call_tx(
-                START_NONCE + 3 + offset as u64,
+                START_NONCE + 4 + offset as u64,
                 "ChannelSettlementVerifier",
                 VERIFIER,
                 function,
@@ -11805,7 +12705,7 @@ mod settlement_broadcast_recovery_tests {
             ));
         }
         transactions.push(call_tx(
-            START_NONCE + 7,
+            START_NONCE + 8,
             "IntmaxRollup",
             ROLLUP,
             "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
@@ -11820,14 +12720,14 @@ mod settlement_broadcast_recovery_tests {
             ],
         ));
         transactions.push(create_tx(
-            START_NONCE + 8,
+            START_NONCE + 9,
             "ChannelSettlementManager",
             MANAGER,
             Some(manager_args),
             &manager_input,
         ));
         transactions.push(call_tx(
-            START_NONCE + 9,
+            START_NONCE + 10,
             "IntmaxRollup",
             ROLLUP,
             "registerSettlementManager(address)",
@@ -11837,6 +12737,228 @@ mod settlement_broadcast_recovery_tests {
             serde_json::json!({"chain": CHAIN_ID, "transactions": transactions}),
             reg,
         )
+    }
+
+    fn backing_bundle_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>, String) {
+        let mut inputs = vec![0u64; CLOSE_BACKING_PUBLIC_INPUTS];
+        inputs[0] = 7;
+        for (index, value) in inputs.iter_mut().enumerate().take(25).skip(1) {
+            *value = index as u64;
+        }
+        inputs[25] = 42;
+        let serialized_inputs = inputs
+            .iter()
+            .map(|value| serde_json::Value::String(value.to_string()))
+            .collect::<Vec<_>>();
+        let mle = serde_json::to_vec(&serde_json::json!({
+            "protocolVersion": CLOSE_BACKING_MLE_PROTOCOL_VERSION,
+            "constituentWidth": 3,
+            "degreeBits": 8,
+            "publicInputs": serialized_inputs,
+            "preprocessedIndividualEvals": [1, 2],
+            "witnessIndividualEvals": [1, 2, 3],
+            "inverseHelpersEvalsAtRInv": [],
+            "inverseHelpersEvalsAtRH": [],
+            "preprocessedIndividualEvalsAtRGateV2": [1],
+            "witnessIndividualEvalsAtRGateV2": [1, 2],
+        }))
+        .unwrap();
+        let public_inputs = serde_json::to_vec(&inputs).unwrap();
+        let balance_vd_sha256 = close_backing_sha256(b"pinned balance verifier data");
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "chainId": CHAIN_ID,
+            "rollup": ROLLUP,
+            "channelId": 7,
+            "balanceVerifierDataSha256": balance_vd_sha256,
+            "backingMleFile": "backing_mle.json",
+            "backingMleBytes": mle.len(),
+            "backingMleSha256": close_backing_sha256(&mle),
+            "backingPublicInputsFile": "backing_public_inputs.json",
+            "backingPublicInputCount": CLOSE_BACKING_PUBLIC_INPUTS,
+            "backingPublicInputsSha256": close_backing_sha256(&public_inputs),
+            "backingFinalizedExtendedStateCommitment": close_backing_limb_bytes32(&inputs, 17),
+            "backingAnchorBlockNumber": 42,
+            "keyMaterialConsumed": false,
+            "selfVerified": true,
+        }))
+        .unwrap();
+        (manifest, mle, public_inputs, balance_vd_sha256)
+    }
+
+    #[test]
+    fn backing_bundle_is_exactly_bound_and_close_vk_substitution_is_rejected() {
+        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+        validate_close_backing_bundle_bytes(
+            &manifest,
+            &mle,
+            &public_inputs,
+            CHAIN_ID,
+            ROLLUP,
+            7,
+            &balance_vd_sha256,
+        )
+        .expect("exact CloseAssetBacking bundle");
+
+        let mut close_mle: serde_json::Value = serde_json::from_slice(&mle).unwrap();
+        close_mle["publicInputs"] = serde_json::json!(vec!["0"; 103]);
+        let close_mle = serde_json::to_vec(&close_mle).unwrap();
+        let mut substituted_manifest: serde_json::Value =
+            serde_json::from_slice(&manifest).unwrap();
+        substituted_manifest["backingMleBytes"] = serde_json::json!(close_mle.len());
+        substituted_manifest["backingMleSha256"] =
+            serde_json::json!(close_backing_sha256(&close_mle));
+        assert!(
+            validate_close_backing_bundle_bytes(
+                &serde_json::to_vec(&substituted_manifest).unwrap(),
+                &close_mle,
+                &public_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                7,
+                &balance_vd_sha256,
+            )
+            .unwrap_err()
+            .contains("exactly 26"),
+            "a close-proof-shaped MLE must never initialize the backing VK"
+        );
+    }
+
+    #[test]
+    fn backing_bundle_rejects_legacy_and_width_mismatched_mle_envelopes() {
+        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+        for (field, replacement, needle) in [
+            (
+                "protocolVersion",
+                serde_json::json!(0),
+                "protocolVersion",
+            ),
+            (
+                "constituentWidth",
+                serde_json::json!(99),
+                "constituentWidth",
+            ),
+        ] {
+            let mut changed_mle: serde_json::Value = serde_json::from_slice(&mle).unwrap();
+            changed_mle[field] = replacement;
+            let changed_mle = serde_json::to_vec(&changed_mle).unwrap();
+            let mut changed_manifest: serde_json::Value =
+                serde_json::from_slice(&manifest).unwrap();
+            changed_manifest["backingMleBytes"] = serde_json::json!(changed_mle.len());
+            changed_manifest["backingMleSha256"] =
+                serde_json::json!(close_backing_sha256(&changed_mle));
+            let error = validate_close_backing_bundle_bytes(
+                &serde_json::to_vec(&changed_manifest).unwrap(),
+                &changed_mle,
+                &public_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                7,
+                &balance_vd_sha256,
+            )
+            .unwrap_err();
+            assert!(error.contains(needle), "unexpected refusal: {error}");
+        }
+    }
+
+    #[test]
+    fn backing_bundle_rejects_hash_context_and_split_public_input_substitution() {
+        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+        let check =
+            |manifest: &[u8], mle: &[u8], public_inputs: &[u8], chain, rollup, channel, vd| {
+                validate_close_backing_bundle_bytes(
+                    manifest,
+                    mle,
+                    public_inputs,
+                    chain,
+                    rollup,
+                    channel,
+                    vd,
+                )
+            };
+        assert!(
+            check(
+                &manifest,
+                &mle,
+                &public_inputs,
+                2,
+                ROLLUP,
+                7,
+                &balance_vd_sha256
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &manifest,
+                &mle,
+                &public_inputs,
+                CHAIN_ID,
+                "0x0000000000000000000000000000000000000099",
+                7,
+                &balance_vd_sha256,
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &manifest,
+                &mle,
+                &public_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                8,
+                &balance_vd_sha256
+            )
+            .is_err()
+        );
+        let other_vd_sha256 = close_backing_sha256(b"other vd");
+        assert!(
+            check(
+                &manifest,
+                &mle,
+                &public_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                7,
+                &other_vd_sha256,
+            )
+            .is_err()
+        );
+
+        let mut tampered_mle = mle.clone();
+        tampered_mle.push(b' ');
+        assert!(
+            check(
+                &manifest,
+                &tampered_mle,
+                &public_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                7,
+                &balance_vd_sha256
+            )
+            .is_err()
+        );
+        let mut split_inputs: serde_json::Value = serde_json::from_slice(&public_inputs).unwrap();
+        split_inputs[1] = serde_json::json!(99);
+        let split_inputs = serde_json::to_vec(&split_inputs).unwrap();
+        let mut split_manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        split_manifest["backingPublicInputsSha256"] =
+            serde_json::json!(close_backing_sha256(&split_inputs));
+        assert!(
+            check(
+                &serde_json::to_vec(&split_manifest).unwrap(),
+                &mle,
+                &split_inputs,
+                CHAIN_ID,
+                ROLLUP,
+                7,
+                &balance_vd_sha256,
+            )
+            .unwrap_err()
+            .contains("different statements")
+        );
     }
 
     #[test]
@@ -11866,28 +12988,54 @@ mod settlement_broadcast_recovery_tests {
         let addresses =
             validate_settlement_broadcast_value(&artifact, &intent(), &reg, ROLLUP).unwrap();
         assert_eq!(strip0x(&addresses.verifier), strip0x(VERIFIER));
+        assert_eq!(strip0x(&addresses.mle_verifier), strip0x(MLE));
         assert_eq!(strip0x(&addresses.manager), strip0x(MANAGER));
         assert_eq!(strip0x(&addresses.materializer), strip0x(MATERIALIZER));
-        assert_eq!(addresses.registration_nonce, START_NONCE + 9);
+        assert_eq!(addresses.registration_nonce, START_NONCE + 10);
         assert_ne!(addresses.registration_tx_hash, Bytes32::default());
         assert_ne!(addresses.registration_calldata_hash, Bytes32::default());
 
+        let mut backing_vk_targets_other_contract = artifact.clone();
+        backing_vk_targets_other_contract["transactions"][2]["transaction"]["to"] =
+            serde_json::json!(VERIFIER);
+        assert!(
+            validate_settlement_broadcast_value(
+                &backing_vk_targets_other_contract,
+                &intent(),
+                &reg,
+                ROLLUP,
+            )
+            .is_err()
+        );
+        let mut backing_vk_uses_other_mle = artifact.clone();
+        backing_vk_uses_other_mle["transactions"][2]["arguments"][0] =
+            serde_json::json!("0x0000000000000000000000000000000000000099");
+        assert!(
+            validate_settlement_broadcast_value(
+                &backing_vk_uses_other_mle,
+                &intent(),
+                &reg,
+                ROLLUP,
+            )
+            .is_err()
+        );
+
         let mut wrong_nonce = artifact.clone();
-        wrong_nonce["transactions"][4]["transaction"]["nonce"] =
+        wrong_nonce["transactions"][5]["transaction"]["nonce"] =
             serde_json::json!(format!("0x{:x}", START_NONCE + 99));
         assert!(
             validate_settlement_broadcast_value(&wrong_nonce, &intent(), &reg, ROLLUP).is_err()
         );
 
         let mut wrong_rollup = artifact.clone();
-        wrong_rollup["transactions"][7]["transaction"]["to"] =
+        wrong_rollup["transactions"][8]["transaction"]["to"] =
             serde_json::json!("0x0000000000000000000000000000000000000099");
         assert!(
             validate_settlement_broadcast_value(&wrong_rollup, &intent(), &reg, ROLLUP).is_err()
         );
 
         let mut wrong_root = artifact.clone();
-        wrong_root["transactions"][8]["arguments"][4] =
+        wrong_root["transactions"][9]["arguments"][4] =
             serde_json::json!(format!("0x{:064x}", 999));
         assert!(validate_settlement_broadcast_value(&wrong_root, &intent(), &reg, ROLLUP).is_err());
 
@@ -11905,7 +13053,7 @@ mod settlement_broadcast_recovery_tests {
         );
 
         let mut manager_bound_to_other_materializer = artifact.clone();
-        manager_bound_to_other_materializer["transactions"][8]["arguments"][10] =
+        manager_bound_to_other_materializer["transactions"][9]["arguments"][10] =
             serde_json::json!("0x0000000000000000000000000000000000000099");
         assert!(
             validate_settlement_broadcast_value(
@@ -11918,7 +13066,7 @@ mod settlement_broadcast_recovery_tests {
         );
 
         let mut annotated_call_with_other_input = artifact.clone();
-        annotated_call_with_other_input["transactions"][9]["transaction"]["input"] = serde_json::json!(
+        annotated_call_with_other_input["transactions"][10]["transaction"]["input"] = serde_json::json!(
             "0xa01b29350000000000000000000000000000000000000000000000000000000000000099"
         );
         assert!(
@@ -11932,13 +13080,13 @@ mod settlement_broadcast_recovery_tests {
         );
 
         let mut zero_final_hash = artifact.clone();
-        zero_final_hash["transactions"][9]["hash"] = serde_json::json!(format!("0x{:064x}", 0));
+        zero_final_hash["transactions"][10]["hash"] = serde_json::json!(format!("0x{:064x}", 0));
         assert!(
             validate_settlement_broadcast_value(&zero_final_hash, &intent(), &reg, ROLLUP).is_err()
         );
 
         let mut value_bearing_registration = artifact.clone();
-        value_bearing_registration["transactions"][9]["transaction"]["value"] =
+        value_bearing_registration["transactions"][10]["transaction"]["value"] =
             serde_json::json!("0x1");
         assert!(
             validate_settlement_broadcast_value(
@@ -12156,6 +13304,8 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
 /// `cli_reg_record.json` this command stages itself. They carry the MLE/WHIR VERIFIER DATA of the
 /// validity, withdrawal, close, withdrawal-claim, post-close-claim and cancel-close circuits —
 /// channel- and member-independent, which is why a checked-in copy is the right source.
+/// The Balance-VD-dependent CloseAssetBacking VK is intentionally absent: it is staged from the
+/// independently checked `INTMAX_PUBLIC_CLOSE_BUNDLE` and plan-digested separately.
 ///
 /// Checked up front so a missing one is an actionable error here, not a `vm.readFile` revert
 /// buried in forge output after the operator has already paid for a broadcast.
@@ -12358,12 +13508,13 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let backing_rollup_hex = backing_rollup.to_hex();
     let broadcaster = l1_signer.address();
 
-    // ── Stage the ONE input the script takes that is not checked in. ──
+    // ── Stage every runtime input the script takes that is not checked in. ──
     //
     // LIVENESS: `DeployCloseCli.s.sol` reads `test/data/cli_reg_record.json`. Only the Rust E2Es
     // ever staged it (they copy it after `export-reg-record` runs in the repo root); no product
-    // driver did, so the real script was unreachable from the CLI at all. Same record, same single
-    // derivation: every identity and recipient comes from the fully verified live snapshot.
+    // driver did, so the real script was unreachable from the CLI at all. The registration record
+    // keeps one derivation from the verified live snapshot; the distinct backing bundle is checked
+    // and staged below before the PREPARED deployment identity is fsynced.
     let reg = build_live_settlement_reg_record(&state);
     let broadcaster_is_active = reg["recipients"].as_array().is_some_and(|recipients| {
         recipients.iter().any(|r| {
@@ -12404,6 +13555,17 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             "backing rollup {backing_rollup_hex} has no KZG verifier"
         ));
     }
+    let resume_prepared = state
+        .settlement_binding
+        .as_ref()
+        .is_some_and(|binding| binding.status == SettlementBindingStatus::Prepared);
+    stage_close_backing_bundle(
+        &contracts_dir,
+        resume_prepared,
+        chain_id,
+        &backing_rollup_hex,
+        channel_id,
+    );
     let data_dir = contracts_dir.join("test").join("data");
     let reg_path = data_dir.join("cli_reg_record.json");
     fs::write(
@@ -12532,6 +13694,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         )
     });
     let activation_checkpoint = registration_receipt.finalized_checkpoint;
+    let mle_verifier = addresses.mle_verifier;
     let verifier = addresses.verifier;
     let manager = addresses.manager;
     let materializer = addresses.materializer;
@@ -12545,7 +13708,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     // deploy "succeeded": the withdrawal VK (money in, no money out), `registerSettlementManager`
     // (pw-finalize reverts after the user waited out the challenge period), and the
     // cancel-close / post-close-claim VKs (audit622 A-M4).
-    for address in [&verifier, &manager, &materializer] {
+    for address in [&mle_verifier, &verifier, &manager, &materializer] {
         if strip0x(&cast_code_at(
             rpc,
             address,
@@ -12581,6 +13744,26 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
          WithdrawalVkNotSet() forever and the rollup can accept deposits it can never pay out.",
         &activation_checkpoint,
     );
+    require_true_at(
+        rpc,
+        &materializer,
+        "backingVkInitialized()(bool)",
+        "Without the distinct CloseAssetBacking VK, an N-of-N signed head can close but its exact whole-token vector can never be materialized into Rollup withdrawals.",
+        &activation_checkpoint,
+    );
+    let backing_mle_verifier = cast_call_at(
+        rpc,
+        &materializer,
+        "backingMleVerifier()(address)",
+        &[],
+        activation_checkpoint.block_number,
+    );
+    if !backing_mle_verifier.eq_ignore_ascii_case(&mle_verifier) {
+        die(format!(
+            "post-deploy check FAILED: materializer {materializer} is bound to MLE verifier \
+             {backing_mle_verifier}, not the verifier {mle_verifier} created and pinned by this run"
+        ));
+    }
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -12820,6 +14003,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &serde_json::json!({
             "manager": manager,
             "verifier": verifier,
+            "mle_verifier": mle_verifier,
             "rollup": rollup,
             "close_funding_materializer": materializer,
             "activation_checkpoint": activation_checkpoint,
@@ -12829,7 +14013,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     println!(
         "deploy-settlement OK (real chain {chain_id}): manager={manager}, verifier={verifier}, \
          materializer={materializer}, rollup={rollup}\n\
-         Verified on-chain: withdrawal VK set, all four settlement VKs set, channel {channel_id} \
+         Verified on-chain: withdrawal VK set, the distinct CloseAssetBacking VK and all four settlement VKs set, channel {channel_id} \
          registered, manager registered as a settlement authorizer, participant root/count match \
          the signed live snapshot, and delegate joins are durably frozen in cli_state.json. All \
          activation reads were pinned to finalized block {} ({}).\n\
@@ -15824,6 +17008,19 @@ mod signing_ledger_tests {
             Bytes32::default(),
         )
         .expect("zero-funded genesis");
+        let (channel_id, settled_tx_chain, token_funds_digest) =
+            exit_kit_statement_key(&genesis);
+        let receipt = SignerExitKitReceipt {
+            schema_version: SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION,
+            archive_sha256: [0x11; 32],
+            balance_verifier_data_sha256: [0x22; 32],
+            chain_id: DEVNET_CHAIN_ID,
+            rollup: Address::from_hex("0x0000000000000000000000000000000000000043").unwrap(),
+            source_signed_head_digest: genesis.digest,
+            channel_id,
+            settled_tx_chain,
+            token_funds_digest,
+        };
 
         CliState {
             state_schema_version: STATE_SCHEMA_VERSION,
@@ -15839,6 +17036,11 @@ mod signing_ledger_tests {
             spent_tx_identities: HashSet::new(),
             imported_deposits: HashSet::new(),
             state_signing_ledger: BTreeMap::new(),
+            signer_exit_kit_receipt: Some(receipt),
+            // Unit tests exercise the release policy itself. Production deserialization always
+            // resets this skipped field to false and must re-open + cryptographically verify the
+            // content-addressed archive before signing.
+            signer_exit_kit_receipt_verified: true,
         }
     }
 
@@ -15904,84 +17106,171 @@ mod signing_ledger_tests {
     }
 
     #[test]
-    fn terminal_reservation_has_no_release_and_allows_only_the_exact_tuple() {
+    fn asset_or_composition_moving_purposes_fail_before_signing() {
+        let template = fixture();
+        let record = template.snapshot.record.clone();
+        let controlled = template.controlled[0].clone();
+        let successor = child_of(&template.snapshot.state, 1);
+        let blocked = [
+            StateSigningPurpose::InterChannelDebit,
+            StateSigningPurpose::InterChannelFundImport,
+            StateSigningPurpose::InterChannelBundleApply,
+            StateSigningPurpose::BurnDebit,
+            StateSigningPurpose::TokenRegister,
+            StateSigningPurpose::L1DepositFundImport,
+            StateSigningPurpose::L1DepositBundleApply,
+            StateSigningPurpose::CloseFunding,
+        ];
+
+        for purpose in blocked {
+            let mut cli = template.clone();
+            let plan_digest = purpose.is_terminal().then(|| {
+                Bytes32::from_hex(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap()
+            });
+
+            let refusal = ledgered_state_signature_with(
+                &mut cli,
+                &record,
+                &controlled,
+                &successor,
+                purpose,
+                plan_digest,
+                None,
+                |_| panic!("{purpose:?} must be refused before invoking the signer"),
+            )
+            .unwrap_err();
+            assert!(
+                refusal.contains("SIGNER-INDEPENDENT EXIT REQUIRED"),
+                "unexpected refusal for {purpose:?}: {refusal}"
+            );
+            assert!(
+                cli.state_signing_ledger.is_empty(),
+                "{purpose:?} must not leave a signing decision behind"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_historical_signature_is_not_released_from_the_ledger() {
         let mut cli = fixture();
         let record = cli.snapshot.record.clone();
         let controlled = cli.controlled[0].clone();
-        let terminal = child_of(&cli.snapshot.state, 1);
-        let plan =
-            Bytes32::from_hex("0x1111111111111111111111111111111111111111111111111111111111111111")
-                .unwrap();
-
-        let first = ledgered_state_signature_with(
-            &mut cli,
-            &record,
-            &controlled,
-            &terminal,
-            StateSigningPurpose::CloseFunding,
-            Some(plan),
-            None,
-            |keys| sign_state(keys, controlled.slot as u8, &terminal).map_err(|e| e.to_string()),
-        )
-        .expect("terminal decision");
-        validate_signing_security_state(&cli).expect("predecessor may remain the local head");
-
-        let replay = ledgered_state_signature_with(
-            &mut cli,
-            &record,
-            &controlled,
-            &terminal,
-            StateSigningPurpose::CloseFunding,
-            Some(plan),
-            None,
-            |_| panic!("an exact terminal replay must not invoke a signer"),
-        )
-        .expect("exact terminal replay");
-        assert_eq!(first, replay);
-
-        let different_plan =
-            Bytes32::from_hex("0x2222222222222222222222222222222222222222222222222222222222222222")
-                .unwrap();
-        let refusal = ledgered_state_signature_with(
-            &mut cli,
-            &record,
-            &controlled,
-            &terminal,
-            StateSigningPurpose::CloseFunding,
-            Some(different_plan),
-            None,
-            |_| panic!("a changed terminal plan must be refused before signing"),
-        )
-        .unwrap_err();
-        assert!(
-            refusal.contains("TERMINAL SIGNING RESERVATION"),
-            "{refusal}"
+        let successor = child_of(&cli.snapshot.state, 1);
+        let keys = keys_for(controlled.keygen_seed);
+        let signature = sign_state(&keys, controlled.slot as u8, &successor).unwrap();
+        let key =
+            state_signing_ledger_key(successor.channel_id, successor.prev_digest, controlled.slot);
+        cli.state_signing_ledger.insert(
+            key,
+            StateSigningLedgerEntry {
+                channel_id: successor.channel_id,
+                predecessor_digest: successor.prev_digest,
+                member_slot: controlled.slot,
+                successor_digest: successor.digest,
+                purpose: StateSigningPurpose::BurnDebit,
+                plan_digest: None,
+                signature,
+            },
         );
 
         let refusal = ledgered_state_signature_with(
             &mut cli,
             &record,
             &controlled,
-            &terminal,
+            &successor,
+            StateSigningPurpose::BurnDebit,
+            None,
+            None,
+            |_| panic!("ledger replay must not invoke the signer"),
+        )
+        .unwrap_err();
+        assert!(
+            refusal.contains("SIGNER-INDEPENDENT EXIT REQUIRED"),
+            "stored bytes must not bypass the release gate: {refusal}"
+        );
+    }
+
+    #[test]
+    fn legacy_head_without_a_non_vacuous_receipt_cannot_reuse_h2_zero() {
+        let mut cli = fixture();
+        cli.signer_exit_kit_receipt = None;
+        cli.signer_exit_kit_receipt_verified = false;
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let successor = child_of(&cli.snapshot.state, 1);
+
+        let refusal = ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &successor,
             StateSigningPurpose::InChannelSend,
             None,
             None,
-            |_| panic!("post-terminal non-close signing must be refused before signing"),
+            |_| panic!("missing-receipt refusal must happen before signing"),
         )
         .unwrap_err();
         assert!(
-            refusal.contains("TERMINAL SIGNING RESERVATION"),
-            "{refusal}"
+            refusal.contains("no cryptographically verified signer exit-kit receipt"),
+            "key equality must not become a vacuous receipt: {refusal}"
+        );
+        assert!(cli.state_signing_ledger.is_empty());
+    }
+
+    fn assert_exit_kit_reuse_refused(mut cli: CliState, successor: ChannelState, needle: &str) {
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let refusal = ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &successor,
+            StateSigningPurpose::InChannelSend,
+            None,
+            None,
+            |_| panic!("exit-kit reuse refusal must happen before signing"),
+        )
+        .unwrap_err();
+        assert!(refusal.contains(needle), "unexpected refusal: {refusal}");
+        assert!(cli.state_signing_ledger.is_empty());
+    }
+
+    #[test]
+    fn h2_zero_reuse_requires_exact_predecessor_and_statement_key() {
+        let cli = fixture();
+
+        let mut wrong_predecessor = child_of(&cli.snapshot.state, 1);
+        wrong_predecessor.prev_digest =
+            Bytes32::from_hex("0x1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        wrong_predecessor = wrong_predecessor.with_computed_digest();
+        assert_exit_kit_reuse_refused(
+            cli.clone(),
+            wrong_predecessor,
+            "does not extend the locally durable signed head",
         );
 
-        cli.snapshot.state = terminal.clone();
-        validate_signing_security_state(&cli).expect("the reserved terminal may become the head");
-        cli.snapshot.state = child_of(&terminal, 1);
-        assert!(
-            validate_signing_security_state(&cli)
-                .unwrap_err()
-                .contains("permits only predecessor")
-        );
+        let mut nonzero_h2 = child_of(&cli.snapshot.state, 1);
+        nonzero_h2.h2_tag =
+            Bytes32::from_hex("0x2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
+        nonzero_h2 = nonzero_h2.with_computed_digest();
+        assert_exit_kit_reuse_refused(cli.clone(), nonzero_h2, "only an H2=0 successor");
+
+        let mut changed_chain = child_of(&cli.snapshot.state, 1);
+        changed_chain.balance_state.settled_tx_chain =
+            Bytes32::from_hex("0x3333333333333333333333333333333333333333333333333333333333333333")
+                .unwrap();
+        changed_chain = changed_chain.with_computed_digest();
+        assert_exit_kit_reuse_refused(cli.clone(), changed_chain, "exact (channel_id");
+
+        let mut changed_funds = child_of(&cli.snapshot.state, 1);
+        changed_funds.channel_fund.amounts[0] = U256::from(1u64);
+        changed_funds = changed_funds.with_computed_digest();
+        assert_exit_kit_reuse_refused(cli, changed_funds, "exact (channel_id");
     }
 
     #[test]
@@ -16276,6 +17565,16 @@ mod deploy_plan_tests {
         assert!(
             script.contains("cli_reg_record.json"),
             "the staged registration record must still be what the script reads"
+        );
+        for f in CLOSE_BACKING_STAGED_FILES {
+            assert!(
+                script.contains(f),
+                "runtime-staged CloseAssetBacking input {f} is plan-digested but the production script never reads it"
+            );
+        }
+        assert!(
+            script.contains("initializeBackingVk"),
+            "the production script must initialize the distinct CloseAssetBacking VK"
         );
     }
 }

@@ -162,6 +162,19 @@ contract IntmaxRollup {
     error MemberCountOrArrayLenInvalid();
     error MemberPubkeyHashesNotDistinct();
     error ReleaseRuntimeUnavailable();
+    error InvalidChannelExitManager();
+    error ChannelExitManagerAlreadyRegistered();
+    error NotChannelExitManager();
+    error NotChannelExitMaterializer();
+    error ChannelExitAlreadyFrozen();
+    error ChannelExitNotFrozen();
+    error ChannelExitGenerationMismatch();
+    error ChannelAlreadyExited();
+    error ChannelExitHasUnfinalizedBlocks();
+    error ChannelExitManagerNotClosed();
+    error ChannelExitStatementMismatch();
+    error ChannelExitTokenCountOutOfRange();
+    error ChannelExitDuplicateToken();
 
     /// @dev The currently unreleased MLE engine makes the rollup local-only.
     ///      Repeating this at the value boundary covers code/state migration
@@ -479,6 +492,12 @@ contract IntmaxRollup {
 
     /// @notice Registered settlement managers that may call `authorizePartialWithdrawal`.
     mapping(address => bool) public isRegisteredSettlementManager;
+
+    /// @dev One audited close materializer per Rollup. It stores exact channel→Manager bindings
+    ///      plus the freeze/reorg journal; escrow mutations remain in this contract. Set on the
+    ///      first real Manager registration and immutable thereafter. Legacy authorization mocks
+    ///      without `channelId()` do not initialize it.
+    address private _channelExitMaterializer;
 
     /// @notice Whitelisted block producers that may call `postBlockAndSubmit`.
     /// SECURITY: block posting is permissioned. The set is empty at deploy (fail-closed —
@@ -847,13 +866,58 @@ contract IntmaxRollup {
         emit WithdrawalVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
     }
 
-    /// @notice Register a channel settlement manager that may authorize partial withdrawals.
-    ///         Deployer-only, additive (no removal). A manager earns `authorizePartialWithdrawal`
-    ///         call rights after verifying a finalized close proof (N-of-N channel consent).
+    /// @notice Register a settlement Manager. Legacy partial-withdrawal mocks without the immutable
+    ///         `closeFundingMaterializer()` getter retain their historical authorization behavior;
+    ///         a real Manager is additionally bound atomically to the set-once close satellite.
     function registerSettlementManager(address manager) external {
         _requireDeployer();
         isRegisteredSettlementManager[manager] = true;
+        address materializer;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x492fbb9e)) // closeFundingMaterializer()
+            if and(staticcall(gas(), manager, ptr, 4, ptr, 32), eq(returndatasize(), 32)) {
+                materializer := mload(ptr)
+            }
+        }
+        if (materializer != address(0)) {
+            if (materializer.code.length == 0) revert InvalidChannelExitManager();
+            address installed = _channelExitMaterializer;
+            if (installed == address(0)) _channelExitMaterializer = materializer;
+            else if (installed != materializer) revert InvalidChannelExitManager();
+            assembly ("memory-safe") {
+                let ptr := mload(0x40)
+                mstore(ptr, shl(224, 0x3c72b923)) // bindManager(address)
+                mstore(add(ptr, 4), manager)
+                if iszero(call(gas(), materializer, 0, ptr, 36, 0, 0)) {
+                    returndatacopy(ptr, 0, returndatasize())
+                    revert(ptr, returndatasize())
+                }
+            }
+        }
         emit SettlementManagerRegistered(manager);
+    }
+
+    /// @notice One asset write within the materializer's complete atomic H-vector transaction.
+    /// @dev No token call occurs here. The only caller is the set-once audited materializer; its
+    ///      outer frame validates uniqueness/completeness and any later failure reverts all writes.
+    function creditChannelExit(address manager, uint32 tokenIndex, uint256 amount) external releaseRuntime {
+        if (msg.sender != _channelExitMaterializer) revert InvalidChannelExitManager();
+        if (tokenIndex == 0) {
+            _creditNativeEscrow(manager, amount);
+        } else {
+            _creditTokenEscrow(tokenIndex, manager, amount);
+        }
+    }
+
+    function _creditNativeEscrow(address recipient, uint256 amount) private {
+        totalEscrowed -= amount;
+        pendingWithdrawals[recipient] += amount;
+    }
+
+    function _creditTokenEscrow(uint32 tokenIndex, address recipient, uint256 amount) private {
+        escrowedByToken[tokenIndex] -= amount;
+        pendingTokenWithdrawals[tokenIndex][recipient] += amount;
     }
 
     /// @notice Authorize (or revoke) a block-producer address for `postBlockAndSubmit`.
@@ -1133,11 +1197,27 @@ contract IntmaxRollup {
         uint64 previousPostingRound = postingRound;
         postingRound++;
         uint64 currentRound = postingRound;
+        address exitMaterializer = _channelExitMaterializer;
 
         // --- Iterate over sub-blocks ---
         uint256 lastIdx = subBlocks.length - 1;
         for (uint256 i = 0; i < subBlocks.length; i++) {
             currentBlockNumber++;
+            // The set-once close satellite rejects a post to a frozen/exited bound channel and
+            // journals this exact per-channel predecessor for fraud/timeout rollback.
+            if (exitMaterializer != address(0)) {
+                uint32 postedChannel = subBlocks[i].channelId;
+                assembly ("memory-safe") {
+                    let ptr := mload(0x40)
+                    mstore(ptr, shl(224, 0x194a42eb)) // recordPost(uint32,uint64)
+                    mstore(add(ptr, 4), postedChannel)
+                    mstore(add(ptr, 36), currentBlockNumber)
+                    if iszero(call(gas(), exitMaterializer, 0, ptr, 68, 0, 0)) {
+                        returndatacopy(ptr, 0, returndatasize())
+                        revert(ptr, returndatasize())
+                    }
+                }
+            }
 
             // Deposits: every block carries the cumulative chain. Intermediate sub-blocks carry the
             // chain as of the previous round (this round's deposits are all assigned to the last
@@ -1410,12 +1490,21 @@ contract IntmaxRollup {
         pure
         returns (bytes32)
     {
-        bytes memory memberSetPreimage = abi.encodePacked(bytes4(CLOSE_MEMBER_SET_DOMAIN), memberCount);
-        for (uint256 i = 0; i < MAX_CHANNEL_MEMBERS; i++) {
-            bytes32 slot = i < memberCount ? memberPkGs[i] : bytes32(0);
-            memberSetPreimage = abi.encodePacked(memberSetPreimage, slot);
+        bytes32 result;
+        assembly ("memory-safe") {
+            // Exact 264-byte abi.encodePacked image:
+            // bytes4 domain || uint32 count || bytes32[8] member hashes.
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, CLOSE_MEMBER_SET_DOMAIN))
+            mstore(add(ptr, 4), shl(224, memberCount))
+            let activeBytes := shl(5, memberCount)
+            calldatacopy(add(ptr, 8), memberPkGs.offset, activeBytes)
+            // CALLDATACOPY past calldata returns zero bytes, giving exact fixed-eight padding.
+            calldatacopy(add(ptr, add(8, activeBytes)), calldatasize(), sub(256, activeBytes))
+            result := keccak256(ptr, 264)
+            mstore(0x40, add(ptr, 288))
         }
-        return keccak256(memberSetPreimage);
+        return result;
     }
 
     /// @dev R3 WORD-ALIGNED fixed-8 reg-chain preimage (D6 pad-to-MAX + delegate account). The
@@ -1774,8 +1863,7 @@ contract IntmaxRollup {
             if (w.tokenIndex != ETH_TOKEN_INDEX) revert WithdrawalNotEthToken();
             _consumeWithdrawalGuard(w);
             // GLOBAL solvency ceiling: Solidity 0.8 underflow reverts if Σ would exceed real escrow.
-            totalEscrowed -= w.amount;
-            pendingWithdrawals[w.recipient] += w.amount;
+            _creditNativeEscrow(w.recipient, w.amount);
             emit NativeWithdrawn(w.recipient, w.amount, w.nullifier, wdBlockNumber);
         }
     }
@@ -1809,8 +1897,7 @@ contract IntmaxRollup {
             if (address(tokenAddressOf[w.tokenIndex]) == address(0)) revert TokenIndexNotRegistered();
             _consumeWithdrawalGuard(w);
             // PER-TOKEN solvency ceiling (TM-1 layer b): underflow-revert on over-release.
-            escrowedByToken[w.tokenIndex] -= w.amount;
-            pendingTokenWithdrawals[w.tokenIndex][w.recipient] += w.amount;
+            _creditTokenEscrow(w.tokenIndex, w.recipient, w.amount);
             emit Erc20Withdrawn(w.recipient, w.tokenIndex, w.amount, w.nullifier, wdBlockNumber);
         }
     }
@@ -2313,11 +2400,27 @@ contract IntmaxRollup {
         postingRound = meta.postingRoundBefore;
 
         if (meta.endBlockNumber >= meta.startBlockNumber && meta.endBlockNumber != 0) {
-            for (uint64 bn = meta.startBlockNumber; bn <= meta.endBlockNumber; bn++) {
+            uint64 bn = meta.endBlockNumber;
+            address exitMaterializer = _channelExitMaterializer;
+            while (true) {
+                if (exitMaterializer != address(0)) {
+                    assembly ("memory-safe") {
+                        let ptr := mload(0x40)
+                        mstore(ptr, shl(224, 0x2d97f88f)) // rollbackPost(uint64)
+                        mstore(add(ptr, 4), bn)
+                        if iszero(call(gas(), exitMaterializer, 0, ptr, 36, 0, 0)) {
+                            returndatacopy(ptr, 0, returndatasize())
+                            revert(ptr, returndatasize())
+                        }
+                    }
+                }
                 delete blockDepositHash[bn];
                 delete blockChannelRegHash[bn];
                 delete blockHashChainAt[bn];
-                if (bn == meta.endBlockNumber) break;
+                if (bn == meta.startBlockNumber) break;
+                unchecked {
+                    --bn;
+                }
             }
         }
 
@@ -2386,22 +2489,21 @@ contract IntmaxRollup {
     ///      final_block_chain (8×u32) || final_ext_commitment (8×u32) ||
     ///      prover (5×u32) = 41 u32 words = 164 bytes.
     function _computeValidityPIHash(ValidityPublicInputs calldata pis) internal pure returns (bytes32) {
-        // Pack into the same u32 layout as Rust's to_u32_vec():
-        //   BlockNumber → [lo32, hi32] of the u64
-        //   Bytes32     → 8 × u32 (big-endian byte order within each u32 matches Rust's U32LimbTrait)
-        //   Address     → 5 × u32
-        // All concatenated and passed through solidity keccak256.
-        return keccak256(
-            abi.encodePacked(
-                pis.initialBlockNumber,
-                pis.initialBlockChain,
-                pis.initialExtCommitment,
-                pis.finalBlockNumber,
-                pis.finalBlockChain,
-                pis.finalExtCommitment,
-                pis.prover
-            )
-        );
+        bytes32 result;
+        assembly ("memory-safe") {
+            // Exact abi.encodePacked image of the seven static fields: 8+32+32+8+32+32+20.
+            let ptr := mload(0x40)
+            mstore(ptr, shl(192, calldataload(pis)))
+            mstore(add(ptr, 8), calldataload(add(pis, 32)))
+            mstore(add(ptr, 40), calldataload(add(pis, 64)))
+            mstore(add(ptr, 72), shl(192, calldataload(add(pis, 96))))
+            mstore(add(ptr, 80), calldataload(add(pis, 128)))
+            mstore(add(ptr, 112), calldataload(add(pis, 160)))
+            mstore(add(ptr, 144), shl(96, calldataload(add(pis, 192))))
+            result := keccak256(ptr, 164)
+            mstore(0x40, add(ptr, 192))
+        }
+        return result;
     }
 
     /// @dev SECURITY: Check that the MLE proof's public inputs encode piHash as 8 big-endian u32

@@ -24,8 +24,13 @@ use crate::{
         ProductionBlockProducer, ProductionBlockProducerError, ProductionChannelHead,
         ProductionDepositRequest,
     },
+    circuits::validity::block_hash_chain::ext_public_state::ExtendedPublicState,
     close_funding::CloseFundingPlan,
-    common::channel::{ChannelRecord, ChannelState},
+    common::{
+        channel::{ChannelRecord, ChannelState},
+        public_state::PublicState,
+        u63::{BlockNumber, U63},
+    },
     ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _},
     utils::poseidon_hash_out::PoseidonHashOut,
     wallet_core::{
@@ -36,7 +41,7 @@ use crate::{
 pub const PRODUCTION_JOURNAL_MAGIC: &str = "INTMAX_KEYLESS_BLOCK_PRODUCER";
 pub const PRODUCTION_JOURNAL_VERSION: u32 = 1;
 pub const MEMBER_SET_UPDATE_RETIRED_REASON: &str = "direct member-set updates are retired; close the old channel by unanimous consent and migrate into a newly registered channel";
-pub const IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON: &str = "immediate close-funding commit is retired; use prepare_close_funding, prove the prepared candidate, then commit_prepared_close_funding";
+pub const IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON: &str = "cooperative terminal-child close funding is retired; close the existing N-of-N signed head with its signer-independent exit kit";
 const MAX_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -435,13 +440,11 @@ impl BlockProducerService {
             } => Err(BlockProducerServiceError::InvalidRequest(
                 IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON.to_string(),
             )),
-            BlockProducerCommand::PrepareCloseFunding {
-                request_id,
-                signed_state,
-                plan,
-            } => Ok(BlockProducerCommandResult::Receipt(
-                self.prepare_close_funding(request_id, signed_state, plan)?,
-            )),
+            BlockProducerCommand::PrepareCloseFunding { .. } => {
+                Err(BlockProducerServiceError::InvalidRequest(
+                    IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON.to_string(),
+                ))
+            }
             BlockProducerCommand::PostMemberSetUpdate { .. } => {
                 Err(BlockProducerServiceError::InvalidRequest(
                     MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
@@ -1008,6 +1011,53 @@ impl BlockProducerService {
     pub fn current_anchor(&self) -> Result<BlockProducerAnchor, BlockProducerServiceError> {
         self.anchor_at_generation(self.disk.generation)?
             .ok_or_else(|| BlockProducerServiceError::Journal("current anchor is absent".into()))
+    }
+
+    /// Resolve the exact authenticated extended state whose inner public state a Balance proof
+    /// exposes. Balance proofs deliberately do not expose the extended hash-chain fields, so a
+    /// caller must never fill those fields from the producer's *current* head after unrelated
+    /// channels have advanced. The verified journal is the canonical archive for that preimage.
+    ///
+    /// If two journal generations somehow carry the same inner state with different extended
+    /// commitments, the projection is ambiguous and fails closed. Repeated identical snapshots
+    /// are harmless and collapse to the same result.
+    pub fn extended_public_state_matching(
+        &self,
+        inner: &PublicState,
+    ) -> Result<ExtendedPublicState, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+
+        let genesis = ProductionBlockProducer::new(&self.disk.supported_user_counts);
+        let genesis_head = ProducerHeadSnapshot::capture(&genesis);
+        let mut matched: Option<ExtendedPublicState> = None;
+
+        let mut consider = |head: &ProducerHeadSnapshot| -> Result<(), BlockProducerServiceError> {
+            let candidate = extended_public_state(head);
+            if candidate.inner != *inner {
+                return Ok(());
+            }
+            if let Some(previous) = &matched {
+                if previous.commitment() != candidate.commitment() {
+                    return Err(BlockProducerServiceError::Conflict(
+                        "balance public state matches multiple producer journal anchors with different extended commitments"
+                            .into(),
+                    ));
+                }
+            } else {
+                matched = Some(candidate);
+            }
+            Ok(())
+        };
+
+        consider(&genesis_head)?;
+        for entry in &self.disk.entries {
+            consider(&entry.result)?;
+        }
+        matched.ok_or_else(|| {
+            BlockProducerServiceError::Conflict(
+                "balance public state is absent from the authenticated producer journal".into(),
+            )
+        })
     }
 
     /// Reconstruct the keyless producer at one exact authenticated historical journal anchor.
@@ -1673,15 +1723,7 @@ fn hash_serializable<T: Serialize>(value: &T) -> Result<Bytes32, BlockProducerSe
     })
 }
 
-fn extended_state_commitment(head: &ProducerHeadSnapshot) -> Bytes32 {
-    use crate::{
-        circuits::validity::block_hash_chain::ext_public_state::ExtendedPublicState,
-        common::{
-            public_state::PublicState,
-            u63::{BlockNumber, U63},
-        },
-    };
-
+fn extended_public_state(head: &ProducerHeadSnapshot) -> ExtendedPublicState {
     ExtendedPublicState::new(
         PublicState {
             block_number: BlockNumber::new(head.block_number)
@@ -1697,7 +1739,10 @@ fn extended_state_commitment(head: &ProducerHeadSnapshot) -> Bytes32 {
         head.channel_reg_hash_chain,
         head.bp_sig_chain,
     )
-    .commitment()
+}
+
+fn extended_state_commitment(head: &ProducerHeadSnapshot) -> Bytes32 {
+    extended_public_state(head).commitment()
 }
 
 fn read_journal(path: &Path) -> Result<ProductionJournalFile, BlockProducerServiceError> {
@@ -1755,10 +1800,11 @@ fn persist_journal(
         ))
     })?;
     let tmp_name = format!(
-        ".{}.tmp.{}.{}",
+        ".{}.tmp.{}.{}.{}",
         file_name.to_string_lossy(),
         std::process::id(),
-        disk.generation
+        disk.generation,
+        rand::random::<u64>()
     );
     let tmp_path = parent.join(tmp_name);
     reject_symlink(&tmp_path, "journal temporary file")?;

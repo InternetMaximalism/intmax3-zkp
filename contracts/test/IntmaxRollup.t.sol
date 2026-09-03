@@ -1196,6 +1196,8 @@ contract IntmaxRollupTest is Test {
         rollup.withdraw(1);
         vm.expectRevert(expected);
         rollup.withdrawToken(7, 1);
+        vm.expectRevert(expected);
+        rollup.creditChannelExit(address(this), 0, 1);
     }
 
     function test_finalize_success() public {

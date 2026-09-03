@@ -309,23 +309,15 @@ contract DeployGuardsTest is Test {
         );
     }
 
-    /// END-TO-END for the script layer: run the real settlement deploy script against a public
-    /// chain id and read the challenge period off the manager it produced. This fires if the
-    /// script reintroduces a literal (the constructor floor reverts the whole deploy) AND if the
-    /// floor is removed while a literal is reintroduced (the assertion fails).
-    ///
-    /// This targets `DeployCloseCli.s.sol` — the production settlement deployer — via the harness
-    /// above. It used to target `DeployClose.s.sol`, which is now hard-gated to the devnet (see the
-    /// HOLE-2 tests below), so this is strictly better coverage: the script under test is the one a
-    /// real deployment actually uses.
-    function test_deployCloseCliScript_realChain_refusesUnreleasedMleEngine() public {
+    /// The production script must attach settlement components to an already deployed escrow
+    /// rollup. A fresh public-chain rollup cannot carry the accepted channel/head context needed to
+    /// authenticate the backing VK bundle, so it must fail before any verifier is deployed.
+    function test_deployCloseCliScript_realChain_requiresExistingRollup() public {
         vm.chainId(REAL_CHAIN_ID);
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployCloseCliHarness script = new DeployCloseCliHarness();
-        vm.expectRevert(
-            abi.encodeWithSelector(InvalidMleVerifierChainId.selector, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID, REAL_CHAIN_ID)
-        );
+        vm.expectRevert(bytes("public settlement requires existing rollup"));
         script.run();
     }
 
@@ -479,7 +471,7 @@ contract DeployGuardsTest is Test {
     function test_deployCloseCliScript_localDevnet_removedMsuSelectorCannotMutate() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (, , ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
+        (,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
 
         uint8 beforeCount = manager.activeMemberCount();
         bytes32 beforeBp = manager.bpPkG();
@@ -491,16 +483,12 @@ contract DeployGuardsTest is Test {
         proposed[beforeCount - 1] = keccak256("must-not-be-installed");
         MleVerifier.MleProof memory noProof;
 
-        (bool ok, bytes memory revertData) = address(manager).call(
-            abi.encodeWithSelector(
-                LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR,
-                proposed,
-                beforeCount,
-                address(0),
-                uint64(1),
-                noProof
-            )
-        );
+        (bool ok, bytes memory revertData) = address(manager)
+            .call(
+                abi.encodeWithSelector(
+                    LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR, proposed, beforeCount, address(0), uint64(1), noProof
+                )
+            );
         assertFalse(ok, "removed MSU selector unexpectedly succeeded");
         assertEq(revertData.length, 0, "removed MSU selector unexpectedly has an active decoder");
 

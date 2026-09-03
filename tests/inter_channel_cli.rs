@@ -126,6 +126,8 @@ struct CliState {
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
     settlement_binding: Option<serde_json::Value>,
+    /// Private binary receipt; retained losslessly so fixture rewrites cannot erase it.
+    signer_exit_kit_receipt: Option<serde_json::Value>,
     /// SECURITY (replay ledger, B side): identities already CREDITED into this channel. Mirrors
     /// `CliState::applied_tx_identities` — keyed on the token-FREE
     /// `InterChannelTx::replay_identity()`, NEVER on the token-bearing `tx_hash`.
@@ -298,7 +300,7 @@ fn write_json_file<T: Serialize>(path: &std::path::Path, v: &T) {
 }
 
 /// Must match `channel_member.rs`'s `STATE_SCHEMA_VERSION`. See the mirror field's comment.
-const STATE_SCHEMA_VERSION: u32 = 3;
+const STATE_SCHEMA_VERSION: u32 = 4;
 
 fn cli_state(fx: ChannelFixture) -> CliState {
     CliState {
@@ -306,6 +308,7 @@ fn cli_state(fx: ChannelFixture) -> CliState {
         controlled: fx.controlled,
         snapshot: fx.snapshot,
         settlement_binding: None,
+        signer_exit_kit_receipt: None,
         applied_tx_identities: HashSet::new(),
         spent_tx_identities: HashSet::new(),
         imported_deposits: HashSet::new(),

@@ -2,6 +2,11 @@ const { Router } = require('express');
 const fs = require('fs');
 const { cli, wc, RPC, readJson, rollupOf, chainId } = require('../lib/cli');
 const { publicBacking } = require('../../node/common/public-backing');
+const {
+  LIVE_BALANCE_SNAPSHOT_VERSION,
+  PUBLIC_BACKING_SCHEMA_VERSION,
+  validateSignedHeadExitKit,
+} = require('../../node/delegate/backing-vault');
 const producer = require('../lib/block-producer');
 const { withLock } = require('../lib/lock');
 const { flushPublishedHead } = require('../lib/producer-head');
@@ -141,8 +146,19 @@ router.get('/backing', async (req, res) => {
     await flushPublishedHead(ch);
     const deployment = publicBacking(readJson(wc(ch, 'channel_backing.json')));
     const artifact = await producer.liveBackingArtifact(ch);
+    if (!artifact || !artifact.baseHead
+        || artifact.baseHead.snapshotVersion !== LIVE_BALANCE_SNAPSHOT_VERSION) {
+      throw new Error(`public backing requires live snapshot version ${LIVE_BALANCE_SNAPSHOT_VERSION}`);
+    }
+    const signedSettledTxChain = artifact.signedHead
+      && artifact.signedHead.balanceState
+      && artifact.signedHead.balanceState.settledTxChain;
+    // Only the live public close surface requires this kit. Historical inter-channel
+    // `sourceBacking` records remain readable and may predate v4, but they are never substituted
+    // here for a signer-independent close artifact.
+    validateSignedHeadExitKit(artifact.signedHeadExitKit, ch, signedSettledTxChain);
     res.json({
-      schemaVersion: 2,
+      schemaVersion: PUBLIC_BACKING_SCHEMA_VERSION,
       source: 'liveBalanceService',
       // The transport context is a security binding consumed by public_close_prover. Read the
       // configured RPC, not a caller/operator environment label that can silently name another

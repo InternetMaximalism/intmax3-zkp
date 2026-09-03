@@ -9,6 +9,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::{
+    cell::OnceCell,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::{
@@ -33,6 +34,9 @@ use crate::{
             common::recipient::calculate_recipient_from_user_id,
             spend_circuit::{SpendCircuit, SpendPublicInputs},
         },
+        channel::close_asset_backing_circuit::{
+            CloseAssetBackingCircuit, CloseAssetBackingPublicInputs, CloseAssetBackingWitness,
+        },
         withdraw::{
             single_withdrawal_circuit::{
                 SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN, SingleWithdawalCircuit,
@@ -52,7 +56,7 @@ use crate::{
     },
     common::{
         balance_state::settled_tx_chain_push,
-        channel::{ChannelRecord, ChannelState},
+        channel::{ChannelRecord, ChannelState, token_funds_digest},
         channel_id::ChannelId,
         private_state::FullPrivateState,
         salt::Salt,
@@ -87,9 +91,12 @@ const SNAPSHOT_MAGIC: &[u8; 16] = b"IMLIVEBALANCE001";
 // from the POST-send head proof to the PRE-send proof a ReceiveTransfer can actually connect
 // (receive_transfer_circuit.rs:263). v1 journals stored a proof that could never serve a
 // receive, so they are rejected fail-closed by version rather than by a confusing serde error.
-// v3: terminal close-funding material is persisted in the same atomic snapshot as its spent base
-// nonce. Version 2 is read and migrated in-memory with `terminal_close_funding = None`.
-pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 3;
+// v3: terminal close-funding material was persisted in the same atomic snapshot as its spent base
+// nonce. Version 4 retires that cooperative terminal-child route and durably archives the
+// signer-independent exact-vector backing proof required to exit from the last N-of-N head H.
+pub const LIVE_BALANCE_SNAPSHOT_VERSION: u32 = 4;
+pub const SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION: u32 = 1;
+const MAX_SIGNED_HEAD_EXIT_KIT_PROOF_BYTES: usize = 16 * 1024 * 1024;
 const SNAPSHOT_HEADER_BYTES: usize = 16 + 4 + 8 + 32;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_APPLIED_TRANSITIONS: usize = 1_000_000;
@@ -228,6 +235,22 @@ pub struct LiveChannelBackingArtifact {
     pub balance_verifier_data: Vec<u8>,
     pub channel_record: ChannelRecord,
     pub signed_head: ChannelState,
+    /// Durable proof created while the private Balance opening was available. Anyone holding H
+    /// and this kit can later wrap/prove it for L1; no new channel or cosigner signature exists in
+    /// that process. Historical transfer artifacts may omit it because they are not close heads.
+    pub signed_head_exit_kit: Option<SignedHeadExitKit>,
+}
+
+/// Public, signer-independent remainder of a close. Its proof binds one complete authenticated
+/// asset vector to a finalized Balance state. It intentionally does not bind the signed-head
+/// digest: an H2=0 redistribution with the same `(channel, settled chain, token vector)` can reuse
+/// the proof without changing normal-state proof size or latency.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedHeadExitKit {
+    pub schema_version: u32,
+    pub backing_public_inputs: CloseAssetBackingPublicInputs,
+    pub backing_proof: Vec<u8>,
 }
 
 /// Public proof material exported by a durable source send and consumed by the destination's
@@ -323,9 +346,30 @@ struct LiveBalanceSnapshot {
     /// Once present, the base collateral has been spent to the immutable Manager. Every later
     /// balance/channel mutation is refused; only proof export and the ordinary close flow remain.
     terminal_close_funding: Option<StoredCloseFundingMaterial>,
+    /// Required whenever a fully-bound signed head is present. This proof is committed atomically
+    /// with adoption of H, so an unavailable cosigner cannot make that already-signed H unexitable.
+    signed_head_exit_kit: Option<SignedHeadExitKit>,
 }
 
-/// Exact v2 payload layout, retained only for a one-way, proof-verified migration to v3.
+/// Exact v3 payload layout, retained only for a one-way, proof-verified migration to v4.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveBalanceSnapshotV3 {
+    channel_id: ChannelId,
+    balance_generation: u64,
+    balance_proof: Vec<u8>,
+    full_private_state: FullPrivateState,
+    base_nonce: u32,
+    channel_record: Option<ChannelRecord>,
+    channel_members: Option<Vec<MemberInfo>>,
+    signed_head: Option<ChannelState>,
+    awaiting_channel_binding: bool,
+    pending_deposit_salt: Option<Salt>,
+    applied: Vec<AppliedTransition>,
+    terminal_close_funding: Option<StoredCloseFundingMaterial>,
+}
+
+/// Exact v2 payload layout, retained only for a one-way, proof-verified migration to v4.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiveBalanceSnapshotV2 {
@@ -357,6 +401,27 @@ impl From<LiveBalanceSnapshotV2> for LiveBalanceSnapshot {
             pending_deposit_salt: old.pending_deposit_salt,
             applied: old.applied,
             terminal_close_funding: None,
+            signed_head_exit_kit: None,
+        }
+    }
+}
+
+impl From<LiveBalanceSnapshotV3> for LiveBalanceSnapshot {
+    fn from(old: LiveBalanceSnapshotV3) -> Self {
+        Self {
+            channel_id: old.channel_id,
+            balance_generation: old.balance_generation,
+            balance_proof: old.balance_proof,
+            full_private_state: old.full_private_state,
+            base_nonce: old.base_nonce,
+            channel_record: old.channel_record,
+            channel_members: old.channel_members,
+            signed_head: old.signed_head,
+            awaiting_channel_binding: old.awaiting_channel_binding,
+            pending_deposit_salt: old.pending_deposit_salt,
+            applied: old.applied,
+            terminal_close_funding: old.terminal_close_funding,
+            signed_head_exit_kit: None,
         }
     }
 }
@@ -368,6 +433,7 @@ pub struct LiveBalanceService {
     disk: LiveBalanceSnapshot,
     spend: SpendCircuit<F, C, D>,
     balance: BalanceProcessor<F, C, D>,
+    close_asset_backing: OnceCell<CloseAssetBackingCircuit<F, C, D>>,
     poisoned: bool,
 }
 
@@ -440,8 +506,9 @@ impl LiveBalanceService {
             pending_deposit_salt,
             applied: Vec::new(),
             terminal_close_funding: None,
+            signed_head_exit_kit: None,
         };
-        verify_snapshot_semantics(&disk, &spend, &balance, None)?;
+        verify_snapshot_semantics(&disk, &spend, &balance, None, None, true)?;
         persist_snapshot(&snapshot_path, &disk)?;
         Ok(Self {
             snapshot_path,
@@ -449,6 +516,7 @@ impl LiveBalanceService {
             disk,
             spend,
             balance,
+            close_asset_backing: OnceCell::new(),
             poisoned: false,
         })
     }
@@ -468,17 +536,39 @@ impl LiveBalanceService {
         }
         verify_private_mode(&snapshot_path, "snapshot")?;
         let snapshot_lock = SnapshotLock::acquire(&snapshot_path)?;
-        let disk = read_snapshot(&snapshot_path)?;
+        let (disk, source_version) = read_snapshot(&snapshot_path)?;
         let (spend, balance) = build_circuits();
-        verify_snapshot_semantics(&disk, &spend, &balance, Some(producer))?;
-        Ok(Self {
+        // Legacy snapshots are verified without trusting a missing v4 kit, then upgraded through
+        // the same proof-generation and atomic persistence path as a newly accepted H. A native
+        // v4 snapshot must already carry and verify its kit.
+        if source_version < LIVE_BALANCE_SNAPSHOT_VERSION {
+            verify_snapshot_semantics(
+                &disk,
+                &spend,
+                &balance,
+                Some(producer),
+                None,
+                false,
+            )?;
+        }
+        let mut service = Self {
             snapshot_path,
             _snapshot_lock: snapshot_lock,
             disk,
             spend,
             balance,
+            close_asset_backing: OnceCell::new(),
             poisoned: false,
-        })
+        };
+        if source_version < LIVE_BALANCE_SNAPSHOT_VERSION {
+            let mut candidate = service.disk.clone();
+            service.install_signed_head_exit_kit(&mut candidate, producer)?;
+            service.verify_candidate_semantics(&candidate, Some(producer))?;
+            service.commit(candidate)?;
+        } else {
+            service.verify_candidate_semantics(&service.disk, Some(producer))?;
+        }
+        Ok(service)
     }
 
     pub fn status(&self) -> Result<LiveBalanceStatus, LiveBalanceServiceError> {
@@ -593,6 +683,11 @@ impl LiveBalanceService {
                 "live balance proof has no bound N-of-N channel head".into(),
             )
         })?;
+        let signed_head_exit_kit = self.disk.signed_head_exit_kit.clone().ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "bound N-of-N channel head has no signer-independent exit kit".into(),
+            )
+        })?;
         Ok(LiveChannelBackingArtifact {
             base_head: self.base_head_artifact()?,
             balance_attestation: self.attestation()?,
@@ -605,12 +700,13 @@ impl LiveBalanceService {
             )?,
             channel_record: record,
             signed_head,
+            signed_head_exit_kit: Some(signed_head_exit_kit),
         })
     }
 
-    /// Construct the one canonical terminal child that pays the complete live asset vector to
-    /// `manager`. This is read-only; members sign `proposed_state` through the existing detached
-    /// N-of-N flow before the producer accepts it.
+    /// Legacy library helper for fixture compatibility. Production command routing rejects this
+    /// cooperative terminal-child path; new closes use the already signed H plus its exit kit.
+    #[deprecated(note = "use the signer-independent signed-head exit kit")]
     pub fn prepare_close_funding(
         &self,
         chain_id: u64,
@@ -754,6 +850,7 @@ impl LiveBalanceService {
                     })?,
                 channel_record: material.channel_record.clone(),
                 signed_head: material.signed_head.clone(),
+                signed_head_exit_kit: None,
             },
             spend_proof: material.spend_proof.clone(),
         })
@@ -771,7 +868,7 @@ impl LiveBalanceService {
     ) -> Result<LiveBalanceReceipt, LiveBalanceServiceError> {
         let result =
             self.receive_deposit_unbound(producer, producer_receipt, request, deposit_salt)?;
-        self.bind_signed_snapshot(signed_snapshot)?;
+        self.bind_signed_snapshot(producer, signed_snapshot)?;
         Ok(result)
     }
 
@@ -861,7 +958,7 @@ impl LiveBalanceService {
             result: result.clone(),
             send_material: None,
         });
-        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
+        self.verify_candidate_semantics(&candidate, Some(producer))?;
         self.commit(candidate)?;
         Ok(result)
     }
@@ -910,6 +1007,7 @@ impl LiveBalanceService {
     /// `settle_*` methods and remain forbidden here.
     pub fn bind_signed_snapshot(
         &mut self,
+        producer: &BlockProducerService,
         signed_snapshot: &ChannelSnapshot,
     ) -> Result<(), LiveBalanceServiceError> {
         self.ensure_healthy()?;
@@ -962,7 +1060,8 @@ impl LiveBalanceService {
                 candidate.channel_record = Some(signed_snapshot.record.clone());
                 candidate.channel_members = Some(signed_snapshot.members.clone());
                 candidate.signed_head = Some(signed_snapshot.state.clone());
-                verify_snapshot_semantics(&candidate, &self.spend, &self.balance, None)?;
+                self.install_signed_head_exit_kit(&mut candidate, producer)?;
+                self.verify_candidate_semantics(&candidate, Some(producer))?;
                 return self.commit(candidate);
             }
             let previous = self.disk.signed_head.as_ref().ok_or_else(|| {
@@ -1021,7 +1120,8 @@ impl LiveBalanceService {
             candidate.channel_record = Some(signed_snapshot.record.clone());
             candidate.channel_members = Some(signed_snapshot.members.clone());
             candidate.signed_head = Some(signed_snapshot.state.clone());
-            verify_snapshot_semantics(&candidate, &self.spend, &self.balance, None)?;
+            self.install_signed_head_exit_kit(&mut candidate, producer)?;
+            self.verify_candidate_semantics(&candidate, Some(producer))?;
             return self.commit(candidate);
         }
         verify_record_and_head_continuity(
@@ -1037,7 +1137,8 @@ impl LiveBalanceService {
         candidate.signed_head = Some(signed_snapshot.state.clone());
         candidate.awaiting_channel_binding = false;
         candidate.pending_deposit_salt = None;
-        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, None)?;
+        self.install_signed_head_exit_kit(&mut candidate, producer)?;
+        self.verify_candidate_semantics(&candidate, Some(producer))?;
         self.commit(candidate)
     }
 
@@ -1231,7 +1332,8 @@ impl LiveBalanceService {
                 signed_head: signed_state.clone(),
             }),
         });
-        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
+        self.install_signed_head_exit_kit(&mut candidate, producer)?;
+        self.verify_candidate_semantics(&candidate, Some(producer))?;
         self.commit(candidate)?;
         Ok(result)
     }
@@ -1240,6 +1342,7 @@ impl LiveBalanceService {
     /// IVC. The existing fixed-width Spend/SendTx circuits are reused: all nonzero token funds are
     /// debited by one Spend proof, while transfer index 0 folds the shared IMCF aux value exactly
     /// once into the signed settle chain.
+    #[deprecated(note = "production uses the signer-independent signed-head exit kit")]
     pub fn settle_close_funding(
         &mut self,
         producer: &BlockProducerService,
@@ -1380,7 +1483,7 @@ impl LiveBalanceService {
                 signed_head: signed_state.clone(),
             }),
         });
-        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
+        self.verify_candidate_semantics(&candidate, Some(producer))?;
         self.commit(candidate)?;
         Ok(result)
     }
@@ -1647,7 +1750,8 @@ impl LiveBalanceService {
             result: result.clone(),
             send_material: None,
         });
-        verify_snapshot_semantics(&candidate, &self.spend, &self.balance, Some(producer))?;
+        self.install_signed_head_exit_kit(&mut candidate, producer)?;
+        self.verify_candidate_semantics(&candidate, Some(producer))?;
         self.commit(candidate)?;
         Ok(result)
     }
@@ -1953,6 +2057,7 @@ impl LiveBalanceService {
     /// vector was already spent by [`Self::settle_close_funding`]; this method only extracts those
     /// exact settled leaves from the live history. It emits one native chain and one ERC-20 chain
     /// at most, keeping final proof count and on-chain proof size independent of token count.
+    #[deprecated(note = "the terminal-child/IPW2 materialization route is retired on L1")]
     pub fn close_funding_payout_artifacts(
         &self,
         producer: &BlockProducerService,
@@ -2304,6 +2409,119 @@ impl LiveBalanceService {
         })
     }
 
+    fn close_asset_backing_circuit(&self) -> &CloseAssetBackingCircuit<F, C, D> {
+        self.close_asset_backing
+            .get_or_init(|| CloseAssetBackingCircuit::new(&self.balance.balance_vd()))
+    }
+
+    fn verify_candidate_semantics(
+        &self,
+        candidate: &LiveBalanceSnapshot,
+        producer: Option<&BlockProducerService>,
+    ) -> Result<(), LiveBalanceServiceError> {
+        let backing_circuit = candidate
+            .signed_head_exit_kit
+            .as_ref()
+            .map(|_| self.close_asset_backing_circuit());
+        verify_snapshot_semantics(
+            candidate,
+            &self.spend,
+            &self.balance,
+            producer,
+            backing_circuit,
+            true,
+        )
+    }
+
+    /// Install the signer-independent proof before a signed head becomes durable. The proof may
+    /// be reused only when all three composition keys consumed on L1 are unchanged; otherwise it
+    /// is regenerated from the exact current private opening and an authenticated historical
+    /// producer state. No current-head substitution is permitted.
+    fn install_signed_head_exit_kit(
+        &self,
+        candidate: &mut LiveBalanceSnapshot,
+        producer: &BlockProducerService,
+    ) -> Result<(), LiveBalanceServiceError> {
+        if candidate.awaiting_channel_binding || candidate.signed_head.is_none() {
+            candidate.signed_head_exit_kit = None;
+            return Ok(());
+        }
+        let head = candidate
+            .signed_head
+            .clone()
+            .expect("checked signed head presence");
+        verify_close_asset_vector(candidate, &head)?;
+        let expected_token_funds_digest = token_funds_digest(
+            &head.balance_state.token_registry,
+            head.balance_state.token_count,
+            &head.channel_fund.amounts,
+        );
+        if candidate.signed_head_exit_kit.as_ref().is_some_and(|kit| {
+            kit.schema_version == SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION
+                && kit.backing_public_inputs.channel_id == head.channel_id
+                && kit.backing_public_inputs.settled_tx_chain
+                    == head.balance_state.settled_tx_chain
+                && kit.backing_public_inputs.token_funds_digest == expected_token_funds_digest
+        }) {
+            return Ok(());
+        }
+
+        let balance_proof = decode_balance_proof(candidate, &self.balance)?;
+        let balance_pis = balance_public_inputs(&balance_proof, &self.balance)?;
+        let extended_public_state = producer
+            .extended_public_state_matching(&balance_pis.public_state)
+            .map_err(|error| {
+                LiveBalanceServiceError::ProducerReconciliation(format!(
+                    "resolve exact Balance proof anchor for signed-head exit kit: {error}"
+                ))
+            })?;
+        let witness = CloseAssetBackingWitness::from_full_private_state_and_channel_state(
+            &candidate.full_private_state,
+            &head,
+            balance_proof,
+            extended_public_state,
+            &self.balance.balance_vd(),
+        )
+        .map_err(|error| {
+            LiveBalanceServiceError::Transition(format!(
+                "construct signer-independent close backing witness: {error}"
+            ))
+        })?;
+        let circuit = self.close_asset_backing_circuit();
+        let proof = circuit.prove(&witness).map_err(|error| {
+            LiveBalanceServiceError::Transition(format!(
+                "prove signer-independent close backing: {error}"
+            ))
+        })?;
+        circuit.data.verify(proof.clone()).map_err(|error| {
+            LiveBalanceServiceError::Transition(format!(
+                "self-verify signer-independent close backing: {error:?}"
+            ))
+        })?;
+        let backing_public_inputs = CloseAssetBackingPublicInputs::from_pis(&proof.public_inputs)
+            .map_err(|error| {
+                LiveBalanceServiceError::Transition(format!(
+                    "decode signer-independent close backing public inputs: {error}"
+                ))
+            })?;
+        if backing_public_inputs.channel_id != head.channel_id
+            || backing_public_inputs.settled_tx_chain
+                != head.balance_state.settled_tx_chain
+            || backing_public_inputs.token_funds_digest != expected_token_funds_digest
+        {
+            return Err(LiveBalanceServiceError::Transition(
+                "self-verified close backing does not compose with the complete signed head"
+                    .into(),
+            ));
+        }
+        candidate.signed_head_exit_kit = Some(SignedHeadExitKit {
+            schema_version: SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
+            backing_public_inputs,
+            backing_proof: proof.to_bytes(),
+        });
+        Ok(())
+    }
+
     fn idempotent_result(
         &self,
         request_id: &str,
@@ -2594,6 +2812,8 @@ fn verify_snapshot_semantics(
     spend: &SpendCircuit<F, C, D>,
     balance: &BalanceProcessor<F, C, D>,
     producer: Option<&BlockProducerService>,
+    backing_circuit: Option<&CloseAssetBackingCircuit<F, C, D>>,
+    require_exit_kit: bool,
 ) -> Result<(), LiveBalanceServiceError> {
     if disk.applied.len() > MAX_APPLIED_TRANSITIONS
         || disk.balance_generation != disk.applied.len() as u64
@@ -2673,6 +2893,84 @@ fn verify_snapshot_semantics(
                 "channel record, member set, and signed head must be persisted together".into(),
             ));
         }
+    }
+
+    if disk.awaiting_channel_binding || disk.signed_head.is_none() {
+        if disk.signed_head_exit_kit.is_some() {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "an unbound live balance carries a stale signed-head exit kit".into(),
+            ));
+        }
+    } else if let Some(kit) = &disk.signed_head_exit_kit {
+        let circuit = backing_circuit.ok_or_else(|| {
+            LiveBalanceServiceError::Snapshot(
+                "signed-head exit kit verifier circuit was not supplied".into(),
+            )
+        })?;
+        if kit.schema_version != SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION {
+            return Err(LiveBalanceServiceError::Snapshot(format!(
+                "unsupported signed-head exit kit schema {}",
+                kit.schema_version
+            )));
+        }
+        if kit.backing_proof.is_empty()
+            || kit.backing_proof.len() > MAX_SIGNED_HEAD_EXIT_KIT_PROOF_BYTES
+        {
+            return Err(LiveBalanceServiceError::Snapshot(format!(
+                "signed-head exit backing proof has invalid byte length {}",
+                kit.backing_proof.len()
+            )));
+        }
+        let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(
+            kit.backing_proof.clone(),
+            &circuit.data.common,
+        )
+        .map_err(|error| {
+            LiveBalanceServiceError::Snapshot(format!(
+                "decode signed-head exit backing proof: {error}"
+            ))
+        })?;
+        if proof.to_bytes() != kit.backing_proof {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "signed-head exit backing proof is not canonically serialized".into(),
+            ));
+        }
+        circuit.data.verify(proof.clone()).map_err(|error| {
+            LiveBalanceServiceError::Snapshot(format!(
+                "verify signed-head exit backing proof: {error:?}"
+            ))
+        })?;
+        let proved = CloseAssetBackingPublicInputs::from_pis(&proof.public_inputs).map_err(
+            |error| {
+                LiveBalanceServiceError::Snapshot(format!(
+                    "decode signed-head exit backing public inputs: {error}"
+                ))
+            },
+        )?;
+        if proved != kit.backing_public_inputs {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "stored signed-head exit backing metadata differs from its proof".into(),
+            ));
+        }
+        let head = disk.signed_head.as_ref().expect("checked signed head");
+        if proved.channel_id != head.channel_id
+            || proved.settled_tx_chain != head.balance_state.settled_tx_chain
+            || proved.token_funds_digest
+                != token_funds_digest(
+                    &head.balance_state.token_registry,
+                    head.balance_state.token_count,
+                    &head.channel_fund.amounts,
+                )
+        {
+            return Err(LiveBalanceServiceError::Snapshot(
+                "signed-head exit backing proof does not bind the complete current H vector"
+                    .into(),
+            ));
+        }
+    } else if require_exit_kit {
+        return Err(LiveBalanceServiceError::Snapshot(
+            "a bound N-of-N signed head has no signer-independent exit kit".into(),
+        ));
     }
 
     let mut previous_producer_generation = 0u64;
@@ -2923,7 +3221,7 @@ fn prepare_snapshot_path(path: &Path) -> Result<PathBuf, LiveBalanceServiceError
     Ok(path)
 }
 
-fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceError> {
+fn read_snapshot(path: &Path) -> Result<(LiveBalanceSnapshot, u32), LiveBalanceServiceError> {
     let metadata = fs::metadata(path).map_err(|e| {
         LiveBalanceServiceError::Snapshot(format!("stat snapshot {}: {e}", path.display()))
     })?;
@@ -2949,7 +3247,7 @@ fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceE
         ));
     }
     let version = u32::from_le_bytes(bytes[16..20].try_into().expect("fixed header"));
-    if version != 2 && version != LIVE_BALANCE_SNAPSHOT_VERSION {
+    if version != 2 && version != 3 && version != LIVE_BALANCE_SNAPSHOT_VERSION {
         return Err(LiveBalanceServiceError::Snapshot(format!(
             "unsupported snapshot version {version}"
         )));
@@ -2981,6 +3279,15 @@ fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceE
             LiveBalanceServiceError::Snapshot(format!("decode v2 snapshot payload: {e}"))
         })?;
         (LiveBalanceSnapshot::from(old), consumed)
+    } else if version == 3 {
+        let (old, consumed) = bincode::serde::decode_from_slice::<LiveBalanceSnapshotV3, _>(
+            payload,
+            bincode::config::standard(),
+        )
+        .map_err(|e| {
+            LiveBalanceServiceError::Snapshot(format!("decode v3 snapshot payload: {e}"))
+        })?;
+        (LiveBalanceSnapshot::from(old), consumed)
     } else {
         bincode::serde::decode_from_slice::<LiveBalanceSnapshot, _>(
             payload,
@@ -2993,7 +3300,7 @@ fn read_snapshot(path: &Path) -> Result<LiveBalanceSnapshot, LiveBalanceServiceE
             "snapshot bincode payload has trailing data".into(),
         ));
     }
-    Ok(disk)
+    Ok((disk, version))
 }
 
 fn persist_snapshot(
@@ -3025,10 +3332,11 @@ fn persist_snapshot(
         ))
     })?;
     let tmp_path = parent.join(format!(
-        ".{}.tmp.{}.{}",
+        ".{}.tmp.{}.{}.{}",
         file_name.to_string_lossy(),
         std::process::id(),
-        disk.balance_generation
+        disk.balance_generation,
+        rand::random::<u64>()
     ));
     reject_symlink(&tmp_path, "snapshot temporary file")?;
     let mut file = OpenOptions::new()

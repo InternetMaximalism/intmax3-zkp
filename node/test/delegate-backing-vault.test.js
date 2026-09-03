@@ -20,6 +20,27 @@ const PK1 = `0x${'44'.repeat(32)}`;
 const RECIPIENT0 = `0x${'55'.repeat(20)}`;
 const RECIPIENT1 = `0x${'66'.repeat(20)}`;
 const ROLLUP = `0x${'77'.repeat(20)}`;
+const TOKEN_FUNDS_DIGEST = `0x${'88'.repeat(32)}`;
+const FINALIZED_EXTENDED_STATE_COMMITMENT = `0x${'99'.repeat(32)}`;
+const ANCHOR_BLOCK_NUMBER = 12;
+
+function bytes32Limbs(value) {
+  return Array.from(
+    { length: 8 },
+    (_, index) => Number.parseInt(value.slice(2 + index * 8, 10 + index * 8), 16),
+  );
+}
+
+function exitPublicInputs(backing) {
+  const inputs = backing.signedHeadExitKit.backingPublicInputs;
+  return [
+    inputs.channelId,
+    ...bytes32Limbs(inputs.settledTxChain),
+    ...bytes32Limbs(inputs.tokenFundsDigest),
+    ...bytes32Limbs(inputs.finalizedExtendedStateCommitment),
+    inputs.anchorBlockNumber,
+  ];
+}
 
 function fixture(digest = DIGEST) {
   const record = {
@@ -33,11 +54,13 @@ function fixture(digest = DIGEST) {
     epoch: 4,
     digest,
     memberSignatures: [{ memberSlot: 0, signature: [1] }],
-    channelFund: { channelId: 7, amounts: ['9', '0'] },
+    channelFund: { channelId: 7, amounts: ['9', ...Array(9).fill('0')] },
     balanceState: {
       channelId: 7,
       memberCount: 1,
       delegateCount: 1,
+      tokenCount: 1,
+      tokenRegistry: Array(10).fill(0),
       recipients: [RECIPIENT0, RECIPIENT1],
       stateVersion: 8,
       settledTxChain: CHAIN,
@@ -45,12 +68,12 @@ function fixture(digest = DIGEST) {
   };
   const snapshot = { record, state, members: [] };
   const backing = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     source: 'liveBalanceService',
     chainId: 31337,
     rollup: ROLLUP,
     baseHead: {
-      snapshotVersion: 3,
+      snapshotVersion: 4,
       channelId: 7,
       settledTxChain: CHAIN,
       signedHeadDigest: digest,
@@ -61,13 +84,24 @@ function fixture(digest = DIGEST) {
     balanceVerifierData: [4, 5, 6, 7],
     channelRecord: structuredClone(record),
     signedHead: structuredClone(state),
+    signedHeadExitKit: {
+      schemaVersion: 1,
+      backingProof: [8, 9, 10, 11],
+      backingPublicInputs: {
+        channelId: 7,
+        settledTxChain: CHAIN,
+        tokenFundsDigest: TOKEN_FUNDS_DIGEST,
+        finalizedExtendedStateCommitment: FINALIZED_EXTENDED_STATE_COMMITMENT,
+        anchorBlockNumber: ANCHOR_BLOCK_NUMBER,
+      },
+    },
   };
   return { snapshot, backing };
 }
 
 function receiptFor(backing) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     chainId: backing.chainId,
     rollup: backing.rollup,
     channelId: backing.signedHead.channelId,
@@ -75,6 +109,13 @@ function receiptFor(backing) {
     balanceVerifierDataSha256: `0x${crypto.createHash('sha256')
       .update(Buffer.from(backing.balanceVerifierData)).digest('hex')}`,
     balanceProofBytes: backing.balanceAttestation.balanceProof.length,
+    signedHeadExitKitSchemaVersion: backing.signedHeadExitKit.schemaVersion,
+    backingProofBytes: backing.signedHeadExitKit.backingProof.length,
+    backingPublicInputs: exitPublicInputs(backing),
+    backingFinalizedExtendedStateCommitment:
+      backing.signedHeadExitKit.backingPublicInputs.finalizedExtendedStateCommitment,
+    backingAnchorBlockNumber:
+      backing.signedHeadExitKit.backingPublicInputs.anchorBlockNumber,
     selfVerified: true,
   };
 }
@@ -122,6 +163,14 @@ test('BackingVault validates, size-bounds and immutably archives each exact sign
     );
     assert.deepEqual(vault.load(DIGEST, snapshot), backing);
 
+    const differentExitProof = structuredClone(backing);
+    differentExitProof.signedHeadExitKit.backingProof = [12, 13, 14, 15];
+    assert.throws(
+      () => vault.save(differentExitProof, snapshot, receiptFor(differentExitProof)),
+      /refusing to overwrite different backing/,
+    );
+    assert.deepEqual(vault.load(DIGEST, snapshot), backing);
+
     const second = fixture(`0x${'88'.repeat(32)}`);
     const secondFile = vault.save(second.backing, second.snapshot, receiptFor(second.backing));
     assert.notEqual(secondFile, file);
@@ -137,15 +186,51 @@ test('BackingVault validates, size-bounds and immutably archives each exact sign
 test('backing validation binds chain, rollup, exact signed state/record and settled chain', () => {
   const { snapshot, backing } = fixture();
   const authority = { channelId: 7, chainId: 31337, rollup: ROLLUP };
-  assert.equal(validateBackingEnvelope(backing, snapshot, authority).digest, DIGEST);
+  const checked = validateBackingEnvelope(backing, snapshot, authority);
+  assert.equal(checked.digest, DIGEST);
+  assert.equal(checked.signedHeadExitKitSchemaVersion, 1);
+  assert.equal(checked.backingProofBytes, 4);
+  assert.equal(checked.backingPublicInputs.length, 26);
+  assert.equal(checked.backingPublicInputs[0], 7);
+  assert.deepEqual(checked.backingPublicInputs.slice(1, 9), bytes32Limbs(CHAIN));
+  assert.deepEqual(checked.backingPublicInputs.slice(9, 17), bytes32Limbs(TOKEN_FUNDS_DIGEST));
+  assert.deepEqual(
+    checked.backingPublicInputs.slice(17, 25),
+    bytes32Limbs(FINALIZED_EXTENDED_STATE_COMMITMENT),
+  );
+  assert.equal(checked.backingPublicInputs[25], ANCHOR_BLOCK_NUMBER);
   for (const [name, mutate, pattern] of [
     ['chain', (x) => { x.chainId = 1; }, /chainId differs/],
     ['rollup', (x) => { x.rollup = `0x${'99'.repeat(20)}`; }, /rollup differs/],
+    ['envelope schema', (x) => { x.schemaVersion = 2; }, /schema version 3/],
+    ['live schema', (x) => { x.baseHead.snapshotVersion = 3; }, /snapshot version must be 4/],
     ['head', (x) => { x.signedHead.digest = `0x${'aa'.repeat(32)}`; }, /exact accepted signed-head/],
     ['base digest', (x) => { x.baseHead.signedHeadDigest = `0x${'bb'.repeat(32)}`; }, /exact accepted signed-head/],
     ['settled chain', (x) => { x.baseHead.settledTxChain = `0x${'cc'.repeat(32)}`; }, /settled chain differs/],
     ['record', (x) => { x.channelRecord.memberCount = 2; }, /signed head\/record differs/],
     ['unbound', (x) => { x.baseHead.awaitingChannelBinding = true; }, /awaiting N-of-N/],
+    ['missing exit kit', (x) => { delete x.signedHeadExitKit; }, /signedHeadExitKit must be an object/],
+    ['empty exit proof', (x) => { x.signedHeadExitKit.backingProof = []; }, /nonempty byte array/],
+    ['exit kit schema', (x) => { x.signedHeadExitKit.schemaVersion = 2; }, /schemaVersion must be 1/],
+    ['exit kit extra MLE', (x) => { x.signedHeadExitKit.backingMleJson = '{}'; }, /unexpected schema/],
+    ['exit PI extra digest', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.signedHeadDigest = DIGEST;
+    }, /unexpected schema/],
+    ['exit channel', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.channelId = 8;
+    }, /exit backing channelId differs/],
+    ['exit settled chain', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.settledTxChain = `0x${'dd'.repeat(32)}`;
+    }, /exit backing settled chain differs/],
+    ['exit TFD', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.tokenFundsDigest = 'not-bytes32';
+    }, /tokenFundsDigest must be bytes32/],
+    ['exit root', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.finalizedExtendedStateCommitment = null;
+    }, /finalizedExtendedStateCommitment must be bytes32/],
+    ['exit anchor', (x) => {
+      x.signedHeadExitKit.backingPublicInputs.anchorBlockNumber = -1;
+    }, /anchorBlockNumber must be a canonical unsigned integer/],
   ]) {
     const bad = structuredClone(backing);
     mutate(bad);
@@ -338,6 +423,27 @@ test('archive refuses missing/substituted native receipts and persists an exact 
     vault.abort(staged);
     assert.equal(fs.existsSync(vault.metadataFor(DIGEST)), false);
 
+    staged = vault.prepare(backing, snapshot);
+    const wrongBackingInputs = receiptFor(backing);
+    wrongBackingInputs.backingPublicInputs[9] =
+      (wrongBackingInputs.backingPublicInputs[9] + 1) % 0x1_0000_0000;
+    assert.throws(
+      () => vault.acceptVerification(staged, wrongBackingInputs),
+      /differs from the canonical backing file/,
+    );
+    vault.abort(staged);
+    assert.equal(fs.existsSync(vault.metadataFor(DIGEST)), false);
+
+    staged = vault.prepare(backing, snapshot);
+    const incomplete = receiptFor(backing);
+    delete incomplete.backingProofBytes;
+    assert.throws(
+      () => vault.acceptVerification(staged, incomplete),
+      /unexpected schema/,
+    );
+    vault.abort(staged);
+    assert.equal(fs.existsSync(vault.metadataFor(DIGEST)), false);
+
     const file = vault.save(backing, snapshot, receiptFor(backing));
     const archived = vault.loadVerified(DIGEST, snapshot);
     assert.deepEqual(archived.backing, backing);
@@ -345,6 +451,15 @@ test('archive refuses missing/substituted native receipts and persists an exact 
     assert.equal(archived.verification.signedHeadDigest, DIGEST);
     assert.equal(archived.verification.settledTxChain, CHAIN);
     assert.equal(archived.verification.backingBytes, Buffer.byteLength(JSON.stringify(backing)));
+    assert.equal(archived.verification.schemaVersion, 2);
+    assert.equal(archived.verification.signedHeadExitKitSchemaVersion, 1);
+    assert.equal(archived.verification.backingProofBytes, 4);
+    assert.deepEqual(archived.verification.backingPublicInputs, exitPublicInputs(backing));
+    assert.equal(
+      archived.verification.backingFinalizedExtendedStateCommitment,
+      FINALIZED_EXTENDED_STATE_COMMITMENT,
+    );
+    assert.equal(archived.verification.backingAnchorBlockNumber, ANCHOR_BLOCK_NUMBER);
     assert.equal(fs.statSync(vault.metadataFor(DIGEST)).mode & 0o777, 0o600);
 
     // Exact replay reuses the durable native receipt rather than re-verifying every poll.

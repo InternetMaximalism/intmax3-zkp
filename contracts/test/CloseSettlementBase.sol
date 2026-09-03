@@ -176,6 +176,31 @@ abstract contract CloseSettlementBase is Test {
     /// The default intent's declared channel-fund amount (== the accrual cap once finalized).
     uint64 internal constant DEFAULT_FUND_AMOUNT = 75;
 
+    mapping(uint32 => uint64) internal _testFrozenExitGeneration;
+    mapping(uint32 => bytes32) public materializedChannelExit;
+    bool internal _testBackingAvailable = true;
+    bool internal _testBackingCurrent = true;
+
+    function freezeFromManager(uint32 channelId, uint64 generation) external {
+        require(_testFrozenExitGeneration[channelId] == 0, "already frozen");
+        _testFrozenExitGeneration[channelId] = generation;
+    }
+
+    function unfreezeFromManager(uint32 channelId, uint64 generation) external {
+        require(_testFrozenExitGeneration[channelId] == generation, "wrong generation");
+        delete _testFrozenExitGeneration[channelId];
+    }
+
+    function requireSignedHeadBacking(uint32 channelId, bytes32, bytes32) external view {
+        bool requireCurrent = ChannelSettlementManager(payable(msg.sender)).channelStatus()
+            != ChannelSettlementManager.ChannelLifecycleStatus.Active;
+        require(
+            msg.sender.code.length != 0 && channelId == uint32(CHANNEL_ID) && _testBackingAvailable
+                && (!requireCurrent || _testBackingCurrent),
+            "backing unavailable"
+        );
+    }
+
     function setUp() public virtual {
         verifier = new ChannelSettlementVerifier();
         mockMle = new MockMleVerifier();
@@ -629,35 +654,15 @@ abstract contract CloseSettlementBase is Test {
         m.pullChannelFunds();
     }
 
-    /// Reconstruct the terminal IMCF/IPW2 tuple and simulate its proof-backed one-shot
-    /// consumption. Generic recipient credit alone must never make a Manager pull-ready.
+    /// Simulate the immutable materializer's exact close-digest receipt. Generic recipient credit
+    /// alone must never make a Manager pull-ready.
     function _materializeCloseFundingAuthorization(
-        MockRollupRegistry reg,
+        MockRollupRegistry,
         ChannelSettlementManager m,
-        uint32 tokenIndex
+        uint32
     ) internal returns (bytes32 authDigest) {
-        uint8 tokenCount = m.finalizedTokenCount();
-        uint32[10] memory tokenRegistry;
-        uint256[10] memory amounts;
-        for (uint256 slot = 0; slot < tokenCount; slot++) {
-            uint32 baseToken = m.finalizedTokenRegistry(slot);
-            tokenRegistry[slot] = baseToken;
-            amounts[slot] = m.finalizedChannelFundAmount(baseToken);
-        }
-        bytes32 fundsDigest = verifier.tokenFundsDigest(tokenRegistry, tokenCount, amounts);
-        bytes32 auxData = keccak256(
-            abi.encodePacked(
-                bytes4(0x494d4346),
-                block.chainid,
-                address(reg),
-                address(m),
-                m.channelId(),
-                m.currentCloseFreezeNonce(),
-                fundsDigest
-            )
-        );
-        authDigest = m.authorizeCloseFunding(tokenIndex, auxData);
-        reg.consumePartialWithdrawalAuthorization(authDigest);
+        authDigest = m.finalizedCloseIntentDigest();
+        materializedChannelExit[uint32(m.channelId())] = authDigest;
     }
 
     /// Allow this base (acting as the funder of `creditWithdrawal`) to receive ETH refunds if any.

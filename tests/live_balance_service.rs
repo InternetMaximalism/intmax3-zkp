@@ -14,7 +14,7 @@ use intmax3_zkp::{
     },
     common::{
         balance_state::settled_tx_chain_push,
-        channel::ChannelState,
+        channel::{ChannelState, token_funds_digest},
         channel_id::ChannelId,
         deposit::Deposit,
         salt::Salt,
@@ -141,6 +141,7 @@ fn snapshot_with_state(template: &ChannelSnapshot, state: ChannelState) -> Chann
 
 fn assert_bind_rejected_without_mutation(
     live: &mut LiveBalanceService,
+    producer: &BlockProducerService,
     balance_path: &Path,
     snapshot: &ChannelSnapshot,
 ) {
@@ -160,7 +161,7 @@ fn assert_bind_rejected_without_mutation(
     .expect("serialize backing before refusal");
 
     assert!(matches!(
-        live.bind_signed_snapshot(snapshot),
+        live.bind_signed_snapshot(producer, snapshot),
         Err(LiveBalanceServiceError::InvalidRequest(_)) | Err(LiveBalanceServiceError::Snapshot(_))
     ));
 
@@ -209,6 +210,22 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     let producer_path = directory.producer();
     let balance_path = directory.balance();
     let channel_id = ChannelId::new(CHANNEL as u64).expect("channel id");
+    // A hard crash in v3 used a deterministic `(pid,generation)` temporary name. PID reuse must
+    // not permanently block the v4 recovery write; new commits add an unpredictable nonce.
+    let legacy_producer_orphan = producer_path.parent().expect("producer parent").join(format!(
+        ".{}.tmp.{}.0",
+        producer_path.file_name().expect("producer filename").to_string_lossy(),
+        std::process::id(),
+    ));
+    let legacy_balance_orphan = balance_path.parent().expect("balance parent").join(format!(
+        ".{}.tmp.{}.0",
+        balance_path.file_name().expect("balance filename").to_string_lossy(),
+        std::process::id(),
+    ));
+    fs::write(&legacy_producer_orphan, b"orphaned-v3-journal-temp")
+        .expect("seed legacy producer orphan");
+    fs::write(&legacy_balance_orphan, b"orphaned-v3-balance-temp")
+        .expect("seed legacy balance orphan");
     let producer = BlockProducerService::open(&producer_path, &[2]).expect("producer");
     let mut live = LiveBalanceService::initialize(&balance_path, channel_id, Salt::default())
         .expect("initialize zero-funded live balance");
@@ -257,7 +274,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     );
     let unbound = live.status().expect("unbound status");
     let proof_before_binding = live.attestation().expect("initial proof").balance_proof;
-    live.bind_signed_snapshot(&genesis_snapshot)
+    live.bind_signed_snapshot(&producer, &genesis_snapshot)
         .expect("bind a genuinely zero-funded N-of-N genesis");
     let bound = live.status().expect("bound status");
     assert_eq!(bound.balance_generation, unbound.balance_generation);
@@ -275,6 +292,29 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
         proof_before_binding,
         "initial binding must reuse the exact resident proof bytes"
     );
+    let genesis_backing = live
+        .channel_backing_artifact()
+        .expect("bound genesis backing");
+    let genesis_exit_kit = genesis_backing
+        .signed_head_exit_kit
+        .clone()
+        .expect("every accepted N-of-N H has an exit kit");
+    assert_eq!(genesis_exit_kit.schema_version, 1);
+    assert_eq!(genesis_exit_kit.backing_public_inputs.channel_id, channel_id);
+    assert_eq!(
+        genesis_exit_kit.backing_public_inputs.settled_tx_chain,
+        genesis_snapshot.state.balance_state.settled_tx_chain
+    );
+    assert_eq!(
+        genesis_exit_kit.backing_public_inputs.token_funds_digest,
+        token_funds_digest(
+            &genesis_snapshot.state.balance_state.token_registry,
+            genesis_snapshot.state.balance_state.token_count,
+            &genesis_snapshot.state.channel_fund.amounts,
+        ),
+        "the kit binds the complete H vector, not a per-token minimum"
+    );
+    assert!(!genesis_exit_kit.backing_proof.is_empty());
 
     // An exact ordinary child may update only the public N-of-N head.  It must neither invoke a
     // prover nor move the private/base cursor, proof bytes, settled history, or accumulator root.
@@ -287,10 +327,14 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
         .attestation()
         .expect("proof before child")
         .balance_proof;
-    live.bind_signed_snapshot(&child_snapshot)
+    live.bind_signed_snapshot(&producer, &child_snapshot)
         .expect("advance exact H2=0 child");
     let status_after_child = live.status().expect("status after child");
     let backing_after_child = live.channel_backing_artifact().expect("child backing");
+    let child_exit_kit = backing_after_child
+        .signed_head_exit_kit
+        .clone()
+        .expect("ordinary accepted child has an exit kit");
     assert_eq!(status_after_child.signed_head_digest, Some(child.digest));
     assert_eq!(backing_after_child.signed_head, child);
     assert_eq!(
@@ -346,10 +390,23 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
             .balance_state
             .settled_tx_accumulator_root
     );
+    assert_eq!(
+        child_exit_kit.backing_public_inputs.token_funds_digest,
+        token_funds_digest(
+            &child.balance_state.token_registry,
+            child.balance_state.token_count,
+            &child.channel_fund.amounts,
+        )
+    );
+    assert_ne!(
+        child_exit_kit.backing_public_inputs.token_funds_digest,
+        genesis_exit_kit.backing_public_inputs.token_funds_digest,
+        "changing the authenticated registry regenerates the whole-vector kit"
+    );
 
     // Exact replay is a no-write idempotent success.
     let accepted_bytes = fs::read(&balance_path).expect("accepted snapshot bytes");
-    live.bind_signed_snapshot(&child_snapshot)
+    live.bind_signed_snapshot(&producer, &child_snapshot)
         .expect("exact accepted-head replay");
     assert_eq!(
         fs::read(&balance_path).expect("snapshot after exact replay"),
@@ -362,6 +419,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     assert_ne!(sibling.digest, child_snapshot.state.digest);
     assert_bind_rejected_without_mutation(
         &mut live,
+        &producer,
         &balance_path,
         &snapshot_with_state(&genesis_snapshot, sibling),
     );
@@ -372,6 +430,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     let skipped = token_registration_child(&grandchild_snapshot, &keys, 9);
     assert_bind_rejected_without_mutation(
         &mut live,
+        &producer,
         &balance_path,
         &snapshot_with_state(&child_snapshot, skipped),
     );
@@ -383,6 +442,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     wrong_chain = sign_all(wrong_chain.with_computed_digest(), &keys);
     assert_bind_rejected_without_mutation(
         &mut live,
+        &producer,
         &balance_path,
         &snapshot_with_state(&child_snapshot, wrong_chain),
     );
@@ -394,6 +454,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     unbacked_fund = sign_all(unbacked_fund.with_computed_digest(), &keys);
     assert_bind_rejected_without_mutation(
         &mut live,
+        &producer,
         &balance_path,
         &snapshot_with_state(&child_snapshot, unbacked_fund),
     );
@@ -404,6 +465,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
     nonzero_h2 = sign_all(nonzero_h2.with_computed_digest(), &keys);
     assert_bind_rejected_without_mutation(
         &mut live,
+        &producer,
         &balance_path,
         &snapshot_with_state(&child_snapshot, nonzero_h2),
     );
@@ -434,7 +496,7 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
         }),
     ] {
         let forged = snapshot_with_state(&child_snapshot, forged_state);
-        assert_bind_rejected_without_mutation(&mut live, &balance_path, &forged);
+        assert_bind_rejected_without_mutation(&mut live, &producer, &balance_path, &forged);
         eprintln!("ordinary rebind rejected forged {label}");
     }
 
@@ -450,6 +512,17 @@ fn run_zero_funded_binding_and_h2_zero_head_rebinding() {
             .expect("reopened backing")
             .signed_head,
         child_snapshot.state
+    );
+    let reopened_kit = reopened
+        .channel_backing_artifact()
+        .expect("reopened backing with exit kit")
+        .signed_head_exit_kit
+        .expect("persisted exit kit");
+    assert_eq!(reopened_kit.backing_proof, child_exit_kit.backing_proof);
+    assert_eq!(
+        reopened_kit.backing_public_inputs,
+        child_exit_kit.backing_public_inputs,
+        "restart must retain the exact proof-bound composition fields"
     );
 }
 
@@ -579,7 +652,7 @@ fn run_live_balance_e2e() {
             .expect("recovered unbound status")
             .awaiting_channel_binding
     );
-    live.bind_signed_snapshot(&backed_snapshot)
+    live.bind_signed_snapshot(&producer, &backed_snapshot)
         .expect("bind N-of-N genesis after restart");
     assert!(
         !live
@@ -915,7 +988,7 @@ fn run_live_balance_e2e() {
         )
         .expect("destination receive-deposit proof");
     destination_live
-        .bind_signed_snapshot(&destination_backed_snapshot)
+        .bind_signed_snapshot(&producer, &destination_backed_snapshot)
         .expect("bind destination signed genesis");
     producer
         .register("register:42".into(), destination_backed_snapshot.clone())

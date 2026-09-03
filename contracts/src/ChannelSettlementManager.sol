@@ -173,6 +173,16 @@ interface IChannelRegistry {
     function partialWithdrawalAuthorized(bytes32 authDigest) external view returns (bool);
 }
 
+/// @dev Channel-scoped close journal kept in the immutable materializer satellite. Calling it
+///      directly saves scarce Rollup runtime bytes while the Rollup still invokes the same journal
+///      at every post/rollback and authenticates every escrow mutation to this exact contract.
+interface ICloseFundingMaterializerState {
+    function freezeFromManager(uint32 channelId, uint64 generation) external;
+    function unfreezeFromManager(uint32 channelId, uint64 generation) external;
+    function materializedChannelExit(uint32 channelId) external view returns (bytes32);
+    function requireSignedHeadBacking(uint32 channelId, bytes32 settledTxChain, bytes32 tokenFundsDigest) external view;
+}
+
 // The protocol challenge period, at FILE level so deploy tooling can reference it before any
 // manager exists (Solidity cannot read a contract's constant through the contract type).
 // `ChannelSettlementManager.CHALLENGE_PERIOD_SECS` aliases this — there is exactly one 86,400 in
@@ -188,6 +198,7 @@ contract ChannelSettlementManager {
     error ReleaseRuntimeUnavailable();
     error InvalidCloseFundingMaterializer();
     error OnlyCloseFundingMaterializer();
+    error CooperativeCloseFundingDeprecated();
 
     /// One SPHINCS+ key per member (D6 pad-to-MAX): a channel has between 2 and
     /// `MAX_MEMBER_COUNT` ACTIVE members, identified by their SPHINCS+ pubkey hash (bytes32), slot
@@ -209,7 +220,6 @@ contract ChannelSettlementManager {
     uint256 internal constant MAX_CHANNEL_TOKENS = 10;
     /// "IMCF" — terminal close-funding aux-data domain. MUST equal Rust
     /// `src/close_funding.rs::CLOSE_FUNDING_DOMAIN`.
-    uint32 internal constant CLOSE_FUNDING_DOMAIN = 0x494d4346;
 
     error InvalidChannelId();
     error InvalidBpMemberSlot();
@@ -243,11 +253,14 @@ contract ChannelSettlementManager {
     /// A1: the cancel does not exhibit strictly newer material than a previous cancel — i.e. it is a
     /// REPLAY of an already-consumed cancel proof. See `cancelClose`.
     error CancelCloseReplay();
-    /// A3 (round 2) — REMOVED in round 3. `finalizeClose` no longer refuses a close that is older
-    /// than an authorized burn; it settles and DEDUCTS the burn from that token's accrual cap. The
-    /// refusal was the last of four latches that made `ClosePending` terminal (R3-1). The selector
-    /// is deliberately gone rather than kept as a fail-closed stub: nothing may reintroduce a
-    /// version-dependent revert on the only remaining exit. See the R3-1 block in `finalizeClose`.
+    /// A close source must be the whole authenticated burn state (or a strictly newer whole
+    /// state), never a component-wise blend of an older close and a newer burn snapshot. This is
+    /// checked before a pending close is installed, so it cannot turn an expired ClosePending
+    /// record into a terminal state-machine latch.
+    error CloseOlderThanAuthorizedBurn();
+    /// Equal `(epoch,stateVersion)` identifies the authorized burn state itself. A different close
+    /// identity at that same ordering key is an equivocated fork, not the authenticated B state.
+    error CloseForksAuthorizedBurn();
     error CloseIntentDigestMismatch();
     /// M-9: ABI-retained close metadata must use the single representation authenticated by the
     /// close circuit: nonce == freeze nonce and zero snapshot/burn sentinels.
@@ -401,10 +414,6 @@ contract ChannelSettlementManager {
     );
 
     event PartialWithdrawalFinalized(bytes32 indexed authDigest, bytes32 indexed chainKey);
-    /// @notice R3-1: emitted by `finalizeClose` when the settled close is strictly older than an
-    ///         already-authorized burn and the burn's value is therefore deducted from that token's
-    ///         accrual cap instead of the settlement being refused.
-    event AuthorizedBurnDeducted(uint32 indexed tokenIndex, uint256 deducted, uint256 remainingFundAmount);
 
     event PartialWithdrawalCancelled(
         bytes32 indexed authDigest, bytes32 indexed revivedChannelStateDigest, uint64 revivedStateVersion
@@ -751,16 +760,16 @@ contract ChannelSettlementManager {
     /// already authorized on the rollup. Zero until the first `finalizePartialWithdrawal`.
     uint64 public authorizedBurnEpoch;
     uint64 public authorizedBurnStateVersion;
+    /// Canonical IMCS identity of the whole latest proof-authenticated burn state. The ordering
+    /// high-water alone is insufficient: two equivocated states can share `(epoch,stateVersion)`.
+    bytes32 public authorizedBurnCloseIntentDigest;
     /// @notice Cumulative gross amount of every unique burn this manager authorized, per BASE token.
-    /// Telemetry only: gross-burn subtraction is NOT a sound close cap when the channel receives
-    /// credits between the stale close and a later burn. Settlement uses the newest proof-bound
-    /// post-burn fund snapshot below instead.
+    /// Telemetry only: settlement never subtracts this value from another state's vector.
     mapping(uint32 => uint256) public authorizedBurnAmount;
     /// @notice Newest authorized burn state's proof-bound POST-burn channel fund, by BASE token.
-    /// For a stale close at V and this newer observed state B, the safe live cap is
-    /// `min(fund(V), fund(B))`: it prevents re-drawing net value already removed through B while
-    /// preserving replenishing credits included through B. `authorizedBurnSnapshotActive` avoids
-    /// treating the valid genesis coordinate (epoch=0, version=0) as "no snapshot".
+    /// Audit/observability only. It is never combined with a different close state. A close is
+    /// admitted only at this exact whole-state identity or at a strictly newer authenticated
+    /// state; `authorizedBurnSnapshotActive` distinguishes genesis coordinate `(0,0)` from unset.
     bool public authorizedBurnSnapshotActive;
     mapping(uint32 => uint256) public authorizedBurnPostFundAmount;
     uint32[10] public authorizedBurnTokenRegistry;
@@ -776,9 +785,9 @@ contract ChannelSettlementManager {
     /// replay floor. Nullifier and malleable close-intent fields therefore cannot reset the window.
     mapping(bytes32 => uint64) public cancelledPartialWithdrawalReviewUntil;
 
-    /// @notice True once this logical IMBK burn has contributed to the stale-close deduction
-    /// ledger. Re-authorizing the same genuine burn remains allowed (and re-calls the rollup
-    /// idempotently), but can never accrue its amount or high-water mark twice.
+    /// @notice True once this logical IMBK burn has advanced the authenticated-burn high-water.
+    /// Re-authorizing the same genuine burn remains allowed (and re-calls the rollup idempotently),
+    /// but can never accrue its telemetry amount or state identity twice.
     mapping(bytes32 => bool) public accountedPartialWithdrawalBurn;
 
     PendingClose public pendingClose;
@@ -844,18 +853,16 @@ contract ChannelSettlementManager {
     ///         exposed via the auto-getter (per-index).
     uint32[10] public finalizedTokenRegistry;
     uint8 public finalizedTokenCount;
-    /// @notice Exact IMTF digest of the proof-bound full-width vectors that settled. This remains
-    ///         the original signed digest even if `finalizeClose` subsequently lowers one payout
-    ///         cap against a newer authorized-burn snapshot.
-    bytes32 private _finalizedTokenFundsDigest;
+    /// @notice Exact IMTF digest of the proof-bound full-width vectors that settled. Every field
+    ///         comes from one authenticated state; settlement never synthesizes a vector by
+    ///         combining a close with a different burn generation.
+    bytes32 public finalizedTokenFundsDigest;
     /// @notice Lifetime one-shot latch per funded base token. Rollup IPW2 flags are consumed by
     ///         payout; this independent latch prevents a consumed close authorization being
     ///         re-enabled. A token with no finalized nonzero cap is never authorizable.
-    mapping(uint32 => bool) private _closeFundingAuthorizationIssued;
-
-    /// @notice The only contract allowed to create terminal IPW2 authorizations. It atomically
-    ///         consumes a COMPLETE native/ERC-20 lane in the same transaction, so an unbound
-    ///         proof nullifier can never pre-consume a single authorization and wedge the lane.
+    /// @notice The only contract allowed to materialize the complete signed-head vector. The old
+    ///         terminal-child/IPW2 route is retired: this immutable calls the rollup's one-shot
+    ///         whole-state path and never asks cosigners for another channel signature.
     address public immutable closeFundingMaterializer;
 
     mapping(bytes32 => bool) public usedWithdrawalNullifiers;
@@ -1134,10 +1141,10 @@ contract ChannelSettlementManager {
     /// @notice Step 1 of the two-step close for a cosigner whose deployment binding is materialized
     /// in the small on-chain mapping.  The first close intent can only be processed after
     /// `GRACE_BEFORE_PROCESS_SECS`.
-    function requestClose(
-        uint64 expectedCurrentCloseFreezeNonce,
-        uint64 expectedHighestCancelledRevivedStateVersion
-    ) external releaseRuntime {
+    function requestClose(uint64 expectedCurrentCloseFreezeNonce, uint64 expectedHighestCancelledRevivedStateVersion)
+        external
+        releaseRuntime
+    {
         if (
             currentCloseFreezeNonce != expectedCurrentCloseFreezeNonce
                 || highestCancelledRevivedStateVersion != expectedHighestCancelledRevivedStateVersion
@@ -1176,6 +1183,11 @@ contract ChannelSettlementManager {
         currentCloseFreezeNonce += 1;
         channelStatus = ChannelLifecycleStatus.ClosePending;
         closeRequestedAt = uint64(block.timestamp);
+        // Atomic with the local transition: a revert in the rollup-side exact manager/channel
+        // binding unwinds the nonce, generation and status writes above. Once frozen, no new block
+        // for this channel can race the signed head being closed.
+        ICloseFundingMaterializerState(closeFundingMaterializer)
+            .freezeFromManager(uint32(channelId), closeRequestGeneration);
         emit CloseRequested(msg.sender, closeRequestedAt, currentCloseFreezeNonce);
     }
 
@@ -1192,6 +1204,32 @@ contract ChannelSettlementManager {
         // token_count is constrained to 1..=10 and keccak is collision-resistant).
         if (intent.tokenCount == 0 || intent.tokenCount > 10) revert TokenCountOutOfRange();
         _checkCloseProof(intent, proof);
+
+        bytes32 closeIntentDigest = computeCloseIntentDigest(intent);
+        if (authorizedBurnSnapshotActive) {
+            bool belowBurn = intent.finalEpoch < authorizedBurnEpoch
+                || (intent.finalEpoch == authorizedBurnEpoch && intent.finalStateVersion < authorizedBurnStateVersion);
+            if (belowBurn) revert CloseOlderThanAuthorizedBurn();
+            if (
+                intent.finalEpoch == authorizedBurnEpoch && intent.finalStateVersion == authorizedBurnStateVersion
+                    && closeIntentDigest != authorizedBurnCloseIntentDigest
+            ) revert CloseForksAuthorizedBurn();
+        }
+        // A submitted burn is already proof-authenticated even while its challenge timer is
+        // running. `requestClose` may freeze the channel before that timer expires, so checking
+        // only the finalized-burn high-water would still admit V while a newer B is pending and
+        // would strand B after V settled. Apply the identical whole-state rule to that candidate.
+        if (partialWithdrawalPending) {
+            bool belowPendingBurn = intent.finalEpoch < pendingPartialWithdrawalEpoch
+                || (intent.finalEpoch == pendingPartialWithdrawalEpoch
+                    && intent.finalStateVersion < pendingPartialWithdrawalStateVersion);
+            if (belowPendingBurn) revert CloseOlderThanAuthorizedBurn();
+            if (
+                intent.finalEpoch == pendingPartialWithdrawalEpoch
+                    && intent.finalStateVersion == pendingPartialWithdrawalStateVersion
+                    && closeIntentDigest != pendingPartialWithdrawalCloseIntentDigest
+            ) revert CloseForksAuthorizedBurn();
+        }
 
         if (pendingClose.active) {
             // Challenge path: a newer signed state replaces the pending one.
@@ -1270,7 +1308,6 @@ contract ChannelSettlementManager {
             closeChallengeHorizon = uint64(block.timestamp + 2 * uint256(challengePeriod));
         }
 
-        bytes32 closeIntentDigest = computeCloseIntentDigest(intent);
         // Isolated frame for the 15-field PendingClose build (via-IR stack limit).
         _storePendingClose(intent, closeIntentDigest);
 
@@ -1466,6 +1503,11 @@ contract ChannelSettlementManager {
         highestCancelledRevivedStateVersion = request.revivedStateVersion;
 
         bytes32 closeIntentDigest = pendingClose.closeIntentDigest;
+        // Exact-generation thaw occurs while this manager still exposes ClosePending. A delayed
+        // cancel from an older era cannot unfreeze a later request because closeRequestGeneration
+        // is deliberately never restored.
+        ICloseFundingMaterializerState(closeFundingMaterializer)
+            .unfreezeFromManager(uint32(channelId), closeRequestGeneration);
         delete pendingClose;
         channelStatus = ChannelLifecycleStatus.Active;
         // Restoring Active ends the frozen era; a future close needs a fresh requestClose()
@@ -1562,10 +1604,10 @@ contract ChannelSettlementManager {
     /// @dev A newer valid close may replace an older pending close until its challenge deadline.
     ///      The digest check happens before any finalized state or accounting mutation, so a
     ///      preflight-to-mining replacement cannot redirect a signed finalization transaction.
-    function finalizeCloseGuarded(
-        bytes32 expectedCloseIntentDigest,
-        uint64 expectedCloseRequestGeneration
-    ) external releaseRuntime {
+    function finalizeCloseGuarded(bytes32 expectedCloseIntentDigest, uint64 expectedCloseRequestGeneration)
+        external
+        releaseRuntime
+    {
         if (!pendingClose.active) revert CloseNotActive();
         if (
             pendingClose.closeIntentDigest != expectedCloseIntentDigest
@@ -1584,60 +1626,9 @@ contract ChannelSettlementManager {
         if (block.timestamp <= pendingClose.challengeDeadline) {
             revert ChallengeWindowOpen();
         }
-        // ── SECURITY (A3/R3-1/R3-5 — H-6's missing direction): a close strictly OLDER than an
-        //    already-authorized burn must not re-draw value removed in the later state.
-        //
-        //    H-6's gate in `finalizePartialWithdrawal` is evaluated ONCE, at burn-authorization
-        //    time, against whatever has settled BY THEN. Reversing the order defeats it: authorize
-        //    the burn while `Active`, THEN settle a close at a pre-burn state. That close's
-        //    `channelFundAmounts` still carries the burned amount, it becomes the
-        //    `finalizedChannelFundAmount` accrual cap below, and nothing ever revisits the
-        //    authorization — the escrow pays the burn AND the same value again through withdrawal
-        //    claims. This is the exact double-draw H-6 names as its purpose, reached by the
-        //    other side. (It was equally reachable under the old era fence, so it is a residual
-        //    rather than a round-1 regression — but the H-6 comment claimed the replacement "keeps
-        //    the protection exactly", which was an overstatement in this direction. Corrected there.)
-        //
-        //    Let the close settle at V and let B be the newest burn state this manager authorized.
-        //    Both `fund(V)` and `fund(B)` are proof-bound POST-state vectors. If V < B, cap each
-        //    token at `min(fund(V), fund(B))`. This is exact through B: every burn/outflow through B
-        //    lowers `fund(B)`, while any deposit/incoming credit through B replenishes it.
-        //
-        //    CORRECTION (R3-1, round 3): round 2 REFUSED the settlement here, and claimed the refusal
-        //    was "a deferral, not a brick" because `cancelClose` and challenge-replacement remained
-        //    open. THAT CLAIM WAS FALSE, and the falsification is a total, permanent, honest-reachable
-        //    fund lock (`RedTeamRound3.t.sol::test_R3_BREAK_A1xA3_closePendingIsTerminal`). A1's
-        //    MANAGER-LIFETIME floor `highestCancelledRevivedStateVersion` consumes exactly the
-        //    material the deferral argument depends on: once ANY cancel has spent the top of the
-        //    signed-state supply (the ordinary, intended use of `cancelClose` — cancel a stale close
-        //    with the head state), no later cancel at that version is admissible EVER. Then, past the
-        //    horizon, `finalizeClose` reverted `CloseOlderThanAuthorizedBurn`, `cancelClose` reverted
-        //    `CancelCloseReplay`, `submitCloseIntent` reverted `ChallengeWindowClosed` and
-        //    `requestClose` reverted `ChannelAlreadyFrozen` — `ClosePending` was TERMINAL and every
-        //    channel fund was unreachable forever. The naturally-armed form needs only a withholding
-        //    coordinator: a burn at the withheld head is unvetoable, so the mark lands above every
-        //    honest close by construction.
-        //
-        //    THE FIX — ADJUST THE CAP, DO NOT REFUSE THE TRANSITION. The property this guard owes is
-        //    "the escrow is not drawn twice for the same value", NOT "this close may not settle".
-        //    `finalizeClose` therefore has NO version-dependent revert left: past the
-        //    challenge deadline it always succeeds, which is the invariant round 3 requires
-        //    (`ChannelSettlementInvariant.t.sol::invariant_closePendingAlwaysHasAReachableExit`).
-        //
-        //    R3-5 CORRECTION. Gross suffix subtraction was safe against double draw but NOT exact:
-        //    V fund=10; then credit=10; then burn=10; B fund=10. Burn payout 10 plus stale-close
-        //    cap 10 is fully backed by 20, while subtracting the gross burn from V trapped the
-        //    original 10. The proof-bound B snapshot fixes that fund-strand class.
-        //
-        //    RESIDUAL: this snapshot knows every flow THROUGH B, but not an inter-channel outgoing
-        //    after the last authorized burn. End-to-end stale-close solvency therefore still relies
-        //    on the close challenge/watchtower path until L1 advances a proof-bound fund high-water
-        //    on every outgoing transition. This cap must not be described as closing that separate
-        //    late-outgoing architecture gap.
-        bool closeOlderThanAuthorizedBurn = authorizedBurnSnapshotActive
-            && (authorizedBurnEpoch > pendingClose.finalEpoch
-                || (authorizedBurnEpoch == pendingClose.finalEpoch
-                    && authorizedBurnStateVersion > pendingClose.finalStateVersion));
+        // A pending close is already known to be the whole authorized-burn state, or a strictly
+        // newer whole state: `submitCloseIntent` applies the high-water check BEFORE installing it.
+        // Finalization therefore never has to splice amounts from two state generations.
 
         finalizedCloseIntentDigest = pendingClose.closeIntentDigest;
         finalizedChannelStateDigest = pendingClose.finalChannelStateDigest;
@@ -1660,13 +1651,6 @@ contract ChannelSettlementManager {
         // — TM-1 layer a — makes duplicates unreachable; the rollup's `escrowedByToken` ceiling —
         // layer b — bounds any residue independently).
         uint8 tc = pendingClose.tokenCount;
-        // Keep a fixed-width memory image for the terminal funding identity. In the ordinary case
-        // this is byte-for-byte the close proof's vector. If the stale-burn rule below lowers a cap,
-        // the terminal withdrawal must instead prove that exact adjusted vector from a signed,
-        // validity-finalized head; no such head means funding safely remains unavailable rather
-        // than authenticating the stale larger amount.
-        uint32[10] memory terminalTokenRegistry = pendingClose.tokenRegistry;
-        uint256[10] memory terminalFundAmounts = pendingClose.channelFundAmounts;
         finalizedTokenCount = tc;
         for (uint256 t = 0; t < tc; t++) {
             uint32 baseToken = pendingClose.tokenRegistry[t];
@@ -1674,37 +1658,9 @@ contract ChannelSettlementManager {
             finalizedChannelFundAmount[baseToken] += pendingClose.channelFundAmounts[t];
         }
 
-        // ── R3-1/R3-5: cap against the newest later proof-bound POST-burn fund snapshot, applied
-        //    AFTER the accrual loop has finished summing. A second pass preserves a safe aggregate
-        //    even if a duplicate base index somehow crosses the circuit's registry-injectivity
-        //    check.
-        //
-        //    Burns authorized AFTER this point (status `Closed`) cannot be over-counted: the
-        //    `settledBeforeBurn` gate in `finalizePartialWithdrawal` refuses every burn newer than
-        //    the settled close.
-        //
-        //    Iterating the SETTLED registry (not the ledger) is complete, not a miss: a burn's token
-        //    is checked against the BURN intent's proof-bound registry at submission, and a base
-        //    token absent from the CLOSE's registry has no `channelFundAmounts` slot in this
-        //    settlement — so there is nothing for it to over-count and nothing to deduct.
-        if (closeOlderThanAuthorizedBurn) {
-            for (uint256 t = 0; t < tc; t++) {
-                uint32 baseToken = pendingClose.tokenRegistry[t];
-                uint256 cap = finalizedChannelFundAmount[baseToken];
-                uint256 observedPostBurnFund = authorizedBurnPostFundAmount[baseToken];
-                if (observedPostBurnFund >= cap) continue;
-                finalizedChannelFundAmount[baseToken] = observedPostBurnFund;
-                terminalFundAmounts[t] = observedPostBurnFund;
-                emit AuthorizedBurnDeducted(baseToken, cap - observedPostBurnFund, observedPostBurnFund);
-            }
-        }
-
-        // IMCF must authenticate the exact per-token amounts this Manager will accept and pull.
-        // Retaining the pre-adjustment digest here would make every honest terminal proof for the
-        // later post-burn head fail `CloseFundingAuxMismatch`, permanently locking a safely
-        // finalized stale close. The Rollup withdrawal proof remains the independent evidence that
-        // this adjusted vector actually occurs in a signed, finalized channel head.
-        _finalizedTokenFundsDigest = verifier.tokenFundsDigest(terminalTokenRegistry, tc, terminalFundAmounts);
+        // IMCF authenticates the exact registry and amount vector of this ONE finalized state.
+        finalizedTokenFundsDigest =
+            verifier.tokenFundsDigest(pendingClose.tokenRegistry, tc, pendingClose.channelFundAmounts);
 
         // NOTE (Phase 2b review MINOR 3, examined for Phase 3): the Rust-side
         // `unallocated_confirmed_incoming` scalar is NOT consumed anywhere in this Manager (it is
@@ -1978,12 +1934,12 @@ contract ChannelSettlementManager {
         //    drawn twice.
         //
         //    THE REPLACEMENT protects the ORDER "close settles, then burn is authorized" and drops
-        //    the strand. It is evaluated ONCE, here, so on its own it says NOTHING about the reverse
-        //    order — authorize first, settle a pre-burn close after — which reaches the identical
-        //    double-draw. That direction is now closed by the A3 guard in `finalizeClose`, using the
-        //    `authorizedBurn{Epoch,StateVersion}` high-water mark this function records below. The
-        //    two together cover both orders; NEITHER covers both alone, and the original "keeps the
-        //    protection exactly" claimed otherwise. The three cases this gate decides:
+        //    the strand. The reverse order is closed earlier, at `submitCloseIntent`: a close below
+        //    either the finalized or pending burn state is never installed, and an equal-version
+        //    fork must carry the identical whole-state close-intent digest. `finalizeClose` then
+        //    stores that already-admitted exact vector; it does not mix a burn token from B into a
+        //    different V vector. Together the admission rule and this gate cover both orderings.
+        //    The three cases this gate decides:
         //      - Active     — no close has settled, no `channelFundAmounts` has been drawn, so no
         //                     double-draw is possible. Authorize.
         //      - ClosePending — the settlement version is not yet DECIDED. Refuse WITHOUT
@@ -2034,6 +1990,7 @@ contract ChannelSettlementManager {
             authorizedBurnSnapshotActive = true;
             authorizedBurnEpoch = pendingPartialWithdrawalEpoch;
             authorizedBurnStateVersion = pendingPartialWithdrawalStateVersion;
+            authorizedBurnCloseIntentDigest = pendingPartialWithdrawalCloseIntentDigest;
         }
 
         delete partialWithdrawalPending;
@@ -2130,8 +2087,9 @@ contract ChannelSettlementManager {
         //    proof-derived nullifier, so an authorization carrying an attacker-chosen nullifier is
         //    inert. What this cancel genuinely buys is LIVENESS — vetoing a griefer's
         //    wrong-nullifier submission so the honest burner need not wait out its window — and,
-        //    since round 3, that is all it is claimed to buy. The reverse-order double-draw it was
-        //    also leaned on for is handled where it belongs, by the R3-1 deduction in `finalizeClose`.
+        //    since round 3, that is all it is claimed to buy. The reverse-order double-draw is
+        //    handled at close ADMISSION: a close older than B is never installed, while B itself
+        //    (or one strictly newer whole state) settles without mixing fields across states.
         //
         //    NON-LOCKOUT. `cancelledPartialWithdrawalRevivedVersion[D]` is zero for every burn no
         //    one has yet cancelled, so an honest cancel of a genuinely stale PW is never impeded by
@@ -2318,38 +2276,12 @@ contract ChannelSettlementManager {
         revert PostCloseClaimDisabled();
     }
 
-    /// @notice Pre-authorize one proof-backed terminal close payout on the bound Rollup.
-    /// @dev Callable only by the immutable permissionless `CloseFundingMaterializer`, which invokes
-    ///      this for every nonzero token in a complete asset lane and consumes the flags with the
-    ///      verified Rollup withdrawal before the transaction can return. The supplied aux is
-    ///      independently recomputed from immutable/finalized state. Amount and recipient are
-    ///      never caller fields; the accepted tuple is the Rollup's one-shot IPW2 second factor.
-    function authorizeCloseFunding(uint32 tokenIndex, bytes32 auxData)
-        external
-        releaseRuntime
-        returns (bytes32 authDigest)
-    {
-        if (msg.sender != closeFundingMaterializer) revert OnlyCloseFundingMaterializer();
-        if (channelStatus != ChannelLifecycleStatus.Closed) revert CloseNotActive();
-        uint256 amount = finalizedChannelFundAmount[tokenIndex];
-        // Rust omits zero-fund entries. Since only finalized registry entries populate this map, a
-        // zero cap also fail-closes every arbitrary/non-finalized token without another scan.
-        if (amount == 0 || receivedChannelFunds[tokenIndex] != 0) {
-            revert ChannelFundsAlreadyReceived(tokenIndex);
-        }
-        if (_closeFundingAuthorizationIssued[tokenIndex]) {
-            revert CloseFundingAlreadyAuthorized(tokenIndex);
-        }
-
-        // Rust `close_funding_aux_data`: exactly 30 u32 words / 120 packed bytes — bytes4 domain,
-        // uint256 chain id, addresses, bytes4 channel id, uint64 freeze nonce, bytes32 IMTF.
-        bytes32 expectedAux = _closeFundingAuxData();
-        if (auxData != expectedAux) revert CloseFundingAuxMismatch();
-        authDigest = _closeFundingAuthDigest(tokenIndex, amount, auxData);
-        // CEI: a Rollup revert rolls the latch back; a successful payout can never be re-authorized
-        // after the Rollup consumes its one-shot flag.
-        _closeFundingAuthorizationIssued[tokenIndex] = true;
-        registry.authorizePartialWithdrawal(authDigest);
+    /// @notice ABI-retained fail-closed tombstone for the old terminal-child/IPW2 close path.
+    /// @dev A close is now funded only by `CloseFundingMaterializer.materializeSignedHead`, which
+    ///      consumes the finalized H vector as one atomic operation. Keeping this selector makes
+    ///      stale publishers fail explicitly instead of accidentally re-enabling double funding.
+    function authorizeCloseFunding(uint32, bytes32) external pure returns (bytes32) {
+        revert CooperativeCloseFundingDeprecated();
     }
 
     /// @notice Pull this CLOSED channel's remaining native backing from the bound rollup.
@@ -2386,16 +2318,13 @@ contract ChannelSettlementManager {
         uint256 received = receivedChannelFunds[tokenIndex];
         uint256 cap = finalizedChannelFundAmount[tokenIndex];
         if (received >= cap) revert ChannelFundsAlreadyReceived(tokenIndex);
-        // A recipient-wide Rollup credit is not evidence that THIS channel's terminal payout ran:
-        // an unrelated withdrawal (or a deliberate donation) may already be pending for the same
-        // Manager address.  The terminal flow first installs this exact IMCF/IPW2 authorization;
-        // only the proof-verified Rollup withdrawal can consume it.  Requiring issued+consumed
-        // closes the authorize→proof TOCTOU without changing any proof, PI, or withdrawal ABI.
-        if (!_closeFundingAuthorizationIssued[tokenIndex]) {
-            revert CloseFundingProofNotMaterialized(tokenIndex);
-        }
-        bytes32 authDigest = _closeFundingAuthDigest(tokenIndex, cap, _closeFundingAuxData());
-        if (registry.partialWithdrawalAuthorized(authDigest)) {
+        // A recipient-wide credit is not channel authority. The rollup records the exact IMCS
+        // identity only after its bound materializer has validated and atomically credited every
+        // active token in H. This single equality replaces token-by-token IPW2 flags.
+        if (
+            ICloseFundingMaterializerState(closeFundingMaterializer).materializedChannelExit(uint32(channelId))
+                != finalizedCloseIntentDigest
+        ) {
             revert CloseFundingProofNotMaterialized(tokenIndex);
         }
         uint256 expected = cap - received;
@@ -2411,32 +2340,6 @@ contract ChannelSettlementManager {
         if (pulled != expected) revert ChannelFundingMismatch(tokenIndex, expected, pulled);
         receivedChannelFunds[tokenIndex] = cap;
         emit ChannelFundsPulled(tokenIndex, expected, cap);
-    }
-
-    /// @dev Rust `close_funding_aux_data`, factored so authorization and pull re-derive the same
-    ///      terminal identity. Keeping this as a pure recomputation avoids another mutable latch.
-    function _closeFundingAuxData() private view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                bytes4(CLOSE_FUNDING_DOMAIN),
-                uint256(block.chainid),
-                address(registry),
-                address(this),
-                channelId,
-                currentCloseFreezeNonce,
-                _finalizedTokenFundsDigest
-            )
-        );
-    }
-
-    function _closeFundingAuthDigest(uint32 tokenIndex, uint256 amount, bytes32 auxData)
-        private
-        view
-        returns (bytes32)
-    {
-        return keccak256(
-            abi.encodePacked(bytes4(0x49505732), address(this), tokenIndex, amount, auxData) // "IPW2"
-        );
     }
 
     /// @notice Claim exactly the payout committed by one accepted withdrawal proof.
@@ -2541,6 +2444,16 @@ contract ChannelSettlementManager {
         // A later join/membership change must therefore create a new explicitly activated
         // settlement snapshot; it cannot ride this manager's verifier binding.
         if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
+        // `verifyCloseIntent` has just strict-bound PI limbs 95..102 to the verifier's canonical
+        // IMTF recomputation over the complete ten-token vectors. Reusing those authenticated
+        // limbs avoids ABI-encoding both fixed arrays a second time in this size-constrained
+        // Manager; it does not trust an unverified caller field.
+        bytes32 fundsDigest;
+        for (uint256 i = 95; i < 103; ++i) {
+            fundsDigest = bytes32((uint256(fundsDigest) << 32) | proof.publicInputs[i]);
+        }
+        ICloseFundingMaterializerState(closeFundingMaterializer)
+            .requireSignedHeadBacking(uint32(channelId), intent.finalSettledTxChain, fundsDigest);
     }
 
     /// @dev M-9 release invariant. Member signatures authenticate the final ChannelState, not

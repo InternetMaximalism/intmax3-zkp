@@ -9,14 +9,17 @@ const fs = require('fs');
 const path = require('path');
 const { isDeepStrictEqual } = require('util');
 
-const PUBLIC_BACKING_SCHEMA_VERSION = 2;
-const LIVE_BALANCE_SNAPSHOT_VERSION = 3;
+const PUBLIC_BACKING_SCHEMA_VERSION = 3;
+const LIVE_BALANCE_SNAPSHOT_VERSION = 4;
+const SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION = 1;
+const CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN = 26;
 const DEVELOPMENT_CHAIN_ID = 31_337;
 const MAX_BACKING_BYTES = 64 * 1024 * 1024;
 const MAX_BALANCE_COMPONENT_BYTES = 16 * 1024 * 1024;
+const MAX_BACKING_PROOF_BYTES = 16 * 1024 * 1024;
 const MAX_VERIFICATION_METADATA_BYTES = 64 * 1024;
-const PUBLIC_BACKING_VERIFICATION_SCHEMA_VERSION = 1;
-const VERIFICATION_METADATA_SCHEMA_VERSION = 1;
+const PUBLIC_BACKING_VERIFICATION_SCHEMA_VERSION = 2;
+const VERIFICATION_METADATA_SCHEMA_VERSION = 2;
 const VERIFICATION_SOURCE = 'public_close_prover --verify-only';
 const STAGED_BY = Symbol('BackingVault staged artifact');
 
@@ -61,6 +64,109 @@ function bytes(value, maximum, label) {
   return value;
 }
 
+function exactKeys(value, expected, label) {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (!isDeepStrictEqual(actual, wanted)) {
+    throw new Error(`${label} has an unexpected schema`);
+  }
+}
+
+function bytes32Limbs(value) {
+  const hex = value.slice(2);
+  return Array.from(
+    { length: 8 },
+    (_, index) => Number.parseInt(hex.slice(index * 8, index * 8 + 8), 16),
+  );
+}
+
+// The live source persists the inner Plonky2 proof, not an MLE wrapper. The five semantic fields
+// below expand to the exact 26-limb CloseAssetBacking public-input vector that a participant can
+// later wrap without any channel signer. Keeping the schema exact also prevents an unverified
+// `backingMleJson` look-alike from being mistaken for durable source material.
+function validateSignedHeadExitKit(value, expectedChannelId, expectedSettledTxChain) {
+  const expectedChannel = uint(expectedChannelId, 0xffffffff, 'expected exit-kit channelId');
+  const expectedSettled = canonicalDigest(
+    expectedSettledTxChain,
+    'expected exit-kit settledTxChain',
+  );
+  const kit = plainObject(value, 'backing.signedHeadExitKit');
+  exactKeys(
+    kit,
+    ['schemaVersion', 'backingPublicInputs', 'backingProof'],
+    'backing.signedHeadExitKit',
+  );
+  if (uint(kit.schemaVersion, 0xffffffff, 'signed-head exit kit schemaVersion')
+      !== SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION) {
+    throw new Error(
+      `signed-head exit kit schemaVersion must be ${SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION}`,
+    );
+  }
+  const proof = bytes(
+    kit.backingProof,
+    MAX_BACKING_PROOF_BYTES,
+    'signed-head exit backing proof',
+  );
+  const inputs = plainObject(
+    kit.backingPublicInputs,
+    'backing.signedHeadExitKit.backingPublicInputs',
+  );
+  exactKeys(
+    inputs,
+    [
+      'channelId',
+      'settledTxChain',
+      'tokenFundsDigest',
+      'finalizedExtendedStateCommitment',
+      'anchorBlockNumber',
+    ],
+    'backing.signedHeadExitKit.backingPublicInputs',
+  );
+  const channelId = uint(inputs.channelId, 0xffffffff, 'exit backing channelId');
+  if (channelId !== expectedChannel) {
+    throw new Error('signed-head exit backing channelId differs from the accepted signed head');
+  }
+  const settledTxChain = canonicalDigest(
+    inputs.settledTxChain,
+    'exit backing settledTxChain',
+  );
+  if (settledTxChain !== expectedSettled) {
+    throw new Error('signed-head exit backing settled chain differs from the accepted signed head');
+  }
+  const tokenFundsDigest = canonicalDigest(
+    inputs.tokenFundsDigest,
+    'exit backing tokenFundsDigest',
+  );
+  const finalizedExtendedStateCommitment = canonicalDigest(
+    inputs.finalizedExtendedStateCommitment,
+    'exit backing finalizedExtendedStateCommitment',
+  );
+  // JSON numbers above 2^53 cannot be authenticated losslessly by this process. Real L1 block
+  // numbers are far below that ceiling; reject rather than round a future oversized U63 anchor.
+  const anchorBlockNumber = uint(
+    inputs.anchorBlockNumber,
+    Number.MAX_SAFE_INTEGER,
+    'exit backing anchorBlockNumber',
+  );
+  const publicInputs = [
+    channelId,
+    ...bytes32Limbs(settledTxChain),
+    ...bytes32Limbs(tokenFundsDigest),
+    ...bytes32Limbs(finalizedExtendedStateCommitment),
+    anchorBlockNumber,
+  ];
+  if (publicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
+    throw new Error('signed-head exit backing public inputs do not contain exactly 26 limbs');
+  }
+  return {
+    schemaVersion: SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
+    proof,
+    publicInputs,
+    finalizedExtendedStateCommitment,
+    anchorBlockNumber,
+  };
+}
+
 function sha256Hex(value) {
   return `0x${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
@@ -101,7 +207,7 @@ function validateBackingEnvelope(backing, snapshot, authority, maximumBytes = MA
   }
   if (backing.schemaVersion !== PUBLIC_BACKING_SCHEMA_VERSION
       || backing.source !== 'liveBalanceService') {
-    throw new Error('public backing must be liveBalanceService schema version 2');
+    throw new Error(`public backing must be liveBalanceService schema version ${PUBLIC_BACKING_SCHEMA_VERSION}`);
   }
   if (uint(backing.chainId, Number.MAX_SAFE_INTEGER, 'backing chainId') !== expectedChainId) {
     throw new Error('public backing chainId differs from configured chain');
@@ -170,6 +276,7 @@ function validateBackingEnvelope(backing, snapshot, authority, maximumBytes = MA
   if (expectedVdPin && verifierDataSha256 !== expectedVdPin) {
     throw new Error('public backing balance verifier data differs from the configured SHA-256 pin');
   }
+  const exitKit = validateSignedHeadExitKit(backing.signedHeadExitKit, expectedChannelId, settled);
   return {
     digest,
     settledTxChain: settled,
@@ -178,12 +285,21 @@ function validateBackingEnvelope(backing, snapshot, authority, maximumBytes = MA
     backingSha256: sha256Hex(Buffer.from(serialized, 'utf8')),
     verifierDataSha256,
     balanceProofBytes: proof.length,
+    signedHeadExitKitSchemaVersion: exitKit.schemaVersion,
+    backingProofBytes: exitKit.proof.length,
+    backingPublicInputs: exitKit.publicInputs,
+    backingFinalizedExtendedStateCommitment: exitKit.finalizedExtendedStateCommitment,
+    backingAnchorBlockNumber: exitKit.anchorBlockNumber,
   };
 }
 
 function validateVerificationReceipt(receipt, checked, authority) {
   const value = plainObject(receipt, 'public backing verification receipt');
   const expectedKeys = [
+    'backingAnchorBlockNumber',
+    'backingFinalizedExtendedStateCommitment',
+    'backingProofBytes',
+    'backingPublicInputs',
     'balanceProofBytes',
     'balanceVerifierDataSha256',
     'chainId',
@@ -192,6 +308,7 @@ function validateVerificationReceipt(receipt, checked, authority) {
     'schemaVersion',
     'selfVerified',
     'signedHeadDigest',
+    'signedHeadExitKitSchemaVersion',
   ];
   const actualKeys = Object.keys(value).sort();
   if (!isDeepStrictEqual(actualKeys, expectedKeys)) {
@@ -219,6 +336,38 @@ function validateVerificationReceipt(receipt, checked, authority) {
       MAX_BALANCE_COMPONENT_BYTES,
       'verification receipt balance proof bytes',
     ),
+    signedHeadExitKitSchemaVersion: uint(
+      value.signedHeadExitKitSchemaVersion,
+      0xffffffff,
+      'verification receipt signed-head exit kit schemaVersion',
+    ),
+    backingProofBytes: uint(
+      value.backingProofBytes,
+      MAX_BACKING_PROOF_BYTES,
+      'verification receipt backing proof bytes',
+    ),
+    backingPublicInputs: (() => {
+      if (!Array.isArray(value.backingPublicInputs)
+          || value.backingPublicInputs.length !== CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN) {
+        throw new Error('verification receipt backing public inputs must contain exactly 26 limbs');
+      }
+      return value.backingPublicInputs.map((input, index) => uint(
+        input,
+        index === CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN - 1
+          ? Number.MAX_SAFE_INTEGER
+          : 0xffffffff,
+        `verification receipt backing publicInputs[${index}]`,
+      ));
+    })(),
+    backingFinalizedExtendedStateCommitment: canonicalDigest(
+      value.backingFinalizedExtendedStateCommitment,
+      'verification receipt backing finalized extended-state commitment',
+    ),
+    backingAnchorBlockNumber: uint(
+      value.backingAnchorBlockNumber,
+      Number.MAX_SAFE_INTEGER,
+      'verification receipt backing anchor block number',
+    ),
     selfVerified: true,
   };
   const expected = {
@@ -233,7 +382,13 @@ function validateVerificationReceipt(receipt, checked, authority) {
   }
   if (normalized.signedHeadDigest !== checked.digest
       || normalized.balanceVerifierDataSha256 !== checked.verifierDataSha256
-      || normalized.balanceProofBytes !== checked.balanceProofBytes) {
+      || normalized.balanceProofBytes !== checked.balanceProofBytes
+      || normalized.signedHeadExitKitSchemaVersion !== checked.signedHeadExitKitSchemaVersion
+      || normalized.backingProofBytes !== checked.backingProofBytes
+      || !isDeepStrictEqual(normalized.backingPublicInputs, checked.backingPublicInputs)
+      || normalized.backingFinalizedExtendedStateCommitment
+        !== checked.backingFinalizedExtendedStateCommitment
+      || normalized.backingAnchorBlockNumber !== checked.backingAnchorBlockNumber) {
     throw new Error('public backing verification receipt differs from the canonical backing file');
   }
   return normalized;
@@ -253,6 +408,12 @@ function verificationMetadata(receipt, checked, authority) {
     settledTxChain: checked.settledTxChain,
     balanceVerifierDataSha256: normalizedReceipt.balanceVerifierDataSha256,
     balanceProofBytes: normalizedReceipt.balanceProofBytes,
+    signedHeadExitKitSchemaVersion: normalizedReceipt.signedHeadExitKitSchemaVersion,
+    backingProofBytes: normalizedReceipt.backingProofBytes,
+    backingPublicInputs: normalizedReceipt.backingPublicInputs,
+    backingFinalizedExtendedStateCommitment:
+      normalizedReceipt.backingFinalizedExtendedStateCommitment,
+    backingAnchorBlockNumber: normalizedReceipt.backingAnchorBlockNumber,
     verification: normalizedReceipt,
   };
 }
@@ -538,10 +699,14 @@ module.exports = {
   DEVELOPMENT_CHAIN_ID,
   LIVE_BALANCE_SNAPSHOT_VERSION,
   MAX_BACKING_BYTES,
+  MAX_BACKING_PROOF_BYTES,
   MAX_BALANCE_COMPONENT_BYTES,
   MAX_VERIFICATION_METADATA_BYTES,
+  PUBLIC_BACKING_SCHEMA_VERSION,
   PUBLIC_BACKING_VERIFICATION_SCHEMA_VERSION,
+  SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
   validateBackingEnvelope,
+  validateSignedHeadExitKit,
   validateVerificationMetadata,
   validateVerificationReceipt,
 };

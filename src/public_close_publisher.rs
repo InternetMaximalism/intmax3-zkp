@@ -1,7 +1,7 @@
 //! Durable, release-pinned publication of a keyless public close proof.
 //!
 //! `public_close_prover` deliberately has no L1 key.  This module is the narrow operator boundary
-//! that consumes its immutable six-file bundle, builds the exact `submitCloseIntent` calldata and
+//! that consumes its immutable schema-v2 bundle, builds the exact `submitCloseIntent` calldata and
 //! publishes it with an encrypted Foundry-keystore account.  Every signed transaction is fsynced
 //! before broadcast.  A restart only ever resends those exact raw bytes.
 
@@ -25,43 +25,55 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    circuits::channel::close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+    circuits::channel::{
+        close_asset_backing_circuit::{
+            CloseAssetBackingPublicInputs, CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN,
+        },
+        close_pis::{ChannelClosePublicInputs, CHANNEL_CLOSE_PUBLIC_INPUTS_LEN},
+    },
     common::{
-        channel::{CloseIntent, close_member_set_commitment, token_funds_digest},
+        channel::{close_member_set_commitment, token_funds_digest, CloseIntent},
         channel_id::ChannelId,
     },
     constants::MAX_SIG_CLUSTER,
     ethereum_types::{bytes32::Bytes32, u256::U256},
-    l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource, L1FinalizedCheckpoint},
+    l1_finality::{L1FinalitySource, L1FinalizedCheckpoint, ANVIL_CHAIN_ID},
     l1_signer_reservation::{self, SignerReservation},
     public_close_prover::PublicCloseIntentDescriptor,
 };
 
-const JOURNAL_VERSION: u32 = 3;
-const PUBLIC_CLOSE_MANIFEST_VERSION: u32 = 1;
-const DEPLOYMENT_MANIFEST_VERSION: u32 = 1;
+const JOURNAL_VERSION: u32 = 5;
+const PUBLIC_CLOSE_MANIFEST_VERSION: u32 = 2;
+const DEPLOYMENT_MANIFEST_VERSION: u32 = 3;
+const PUBLICATION_VERSION: u32 = 3;
 const MLE_PROOF_ABI_VERSION: u8 = 2;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_INTENT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PUBLIC_INPUT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CLOSE_PROOF_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MLE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BACKING_PROOF_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_BACKING_PUBLIC_INPUT_BYTES: u64 = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 40 * 1024 * 1024;
 const MAX_RAW_TRANSACTION_CHARS: usize = 40 * 1024 * 1024;
 const MAX_RPC_JSON_BYTES: usize = 48 * 1024 * 1024;
 const PUBLIC_CHALLENGE_PERIOD_FLOOR: u64 = 86_400;
 
-pub const SUBMIT_CLOSE_SIGNATURE: &str = concat!(
-    "submitCloseIntent(",
-    "(uint64,uint64,uint64,uint64,bytes32,bytes32,uint256[10],uint32[10],uint8,bytes32,bytes32,bytes32,uint64,uint64,bytes32,bytes32),",
-    "(uint256,uint256,uint256[],bytes,bytes,bytes32,bytes32,bytes32,uint256,uint256,uint256[],uint256,uint256,uint256[],uint256,uint256,uint256,uint256,((uint256[])[]),uint256[],uint256,uint256,uint256,uint256,bytes32,uint256,((uint256[])[]),((uint256[])[]),uint256,uint256,uint256[],uint256[],uint256[],uint256[],uint256,uint256,uint256,uint256,((uint256[])[]),uint256[],uint256[],uint256,uint256,uint256,uint256,uint256,(uint8,uint8,uint8,uint8,uint8,uint16,uint16,uint16,uint16)[],uint256[4])",
-    ")"
-);
+/// Release-compiled selectors for the exact current Solidity `MleVerifier.MleProof` tuple. The
+/// schema-v2 JSON envelope fields (`protocolVersion`, `constituentWidth`) are validated metadata;
+/// they are deliberately not members of the Solidity tuple.
+pub const SUBMIT_CLOSE_SELECTOR: &str = "0xa49e2a57";
 pub const FINALIZE_CLOSE_GUARDED_SIGNATURE: &str = "finalizeCloseGuarded(bytes32,uint64)";
+pub const ATTEST_SIGNED_HEAD_BACKING_SELECTOR: &str = "0xc9831010";
+pub const MATERIALIZE_SIGNED_HEAD_SELECTOR: &str = "0x325f1b20";
 pub const CLOSE_SUBMITTED_EVENT: &str =
     "CloseSubmitted(bytes32,bytes32,uint64,uint64,uint64,uint256,uint64,uint64,bytes32)";
 pub const CLOSE_FINALIZED_EVENT: &str =
     "CloseFinalized(bytes32,bytes32,uint64,uint256,uint64,bytes32)";
+pub const SIGNED_HEAD_EXIT_MATERIALIZED_EVENT: &str =
+    "SignedHeadExitMaterialized(uint32,address,bytes32,uint8)";
+pub const SIGNED_HEAD_BACKING_ATTESTED_EVENT: &str =
+    "SignedHeadBackingAttested(uint32,address,bytes32,bytes32,uint64,bytes32)";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PublicClosePublisherError {
@@ -109,17 +121,35 @@ pub struct PublicClosePublication {
     pub chain_id: u64,
     pub rollup: String,
     pub manager: String,
+    pub materializer: String,
     pub channel_id: u32,
     pub close_intent_digest: String,
     pub artifact_hash: String,
+    pub attest_transaction_hash: String,
     pub submit_transaction_hash: Option<String>,
     pub finalize_transaction_hash: Option<String>,
+    pub materialize_transaction_hash: String,
     pub finalized_checkpoint: L1FinalizedCheckpoint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "phase")]
 pub enum PublicCloseProgress {
+    AttestBroadcast {
+        transaction_hash: String,
+    },
+    /// The exact backing proof was already attested permissionlessly and was adopted only after
+    /// finalized event/getter read-back.
+    AttestAdopted {
+        transaction_hash: String,
+    },
+    AwaitingAttestReceipt {
+        transaction_hash: String,
+    },
+    AwaitingAttestFinality {
+        transaction_hash: String,
+        receipt_block: u64,
+    },
     AwaitingCloseRequest,
     AwaitingGrace {
         eligible_at: u64,
@@ -151,6 +181,19 @@ pub enum PublicCloseProgress {
         transaction_hash: String,
     },
     AwaitingFinalizeFinality {
+        transaction_hash: String,
+        receipt_block: u64,
+    },
+    MaterializeBroadcast {
+        transaction_hash: String,
+    },
+    MaterializeAdopted {
+        transaction_hash: String,
+    },
+    AwaitingMaterializeReceipt {
+        transaction_hash: String,
+    },
+    AwaitingMaterializeFinality {
         transaction_hash: String,
         receipt_block: u64,
     },
@@ -187,12 +230,28 @@ struct PublicCloseManifest {
     balance_verifier_data_sha256: String,
     close_proof_file: String,
     close_proof_bytes: usize,
+    close_proof_sha256: String,
     close_mle_file: String,
     close_mle_bytes: usize,
+    close_mle_sha256: String,
+    backing_proof_file: String,
+    backing_proof_bytes: usize,
+    backing_proof_sha256: String,
+    backing_mle_file: String,
+    backing_mle_bytes: usize,
+    backing_mle_sha256: String,
+    backing_public_inputs_file: String,
+    backing_public_input_count: usize,
+    backing_public_inputs_sha256: String,
+    backing_finalized_extended_state_commitment: Bytes32,
+    backing_anchor_block_number: u64,
     close_intent_file: String,
+    close_intent_sha256: String,
     close_intent_full_file: String,
+    close_intent_full_sha256: String,
     close_public_inputs_file: String,
     close_public_input_count: usize,
+    close_public_inputs_sha256: String,
     key_material_consumed: bool,
     self_verified: bool,
 }
@@ -208,16 +267,22 @@ struct DeploymentManifest {
     /// Release-reviewed first block for bounded, complete semantic-event discovery.
     manager_deployment_block: u64,
     manager_runtime_code_hash: String,
+    close_funding_materializer: String,
+    close_funding_materializer_runtime_code_hash: String,
     settlement_verifier: String,
     settlement_verifier_runtime_code_hash: String,
     mle_verifier: String,
     mle_verifier_runtime_code_hash: String,
     balance_verifier_data_sha256: String,
     mle_proof_abi_version: u8,
+    attest_signed_head_backing_selector: String,
     submit_close_intent_selector: String,
     finalize_close_guarded_selector: String,
+    materialize_signed_head_selector: String,
     close_submitted_topic: String,
     close_finalized_topic: String,
+    signed_head_backing_attested_topic: String,
+    signed_head_exit_materialized_topic: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,8 +319,17 @@ struct PreparedClose {
     balance_vd_sha256: String,
     expected: ExpectedClose,
     submit_calldata: String,
+    backing_mle_proof: Value,
+    backing_public_inputs: CloseAssetBackingPublicInputs,
     artifact_hash: String,
     component_hashes: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackingAttestationIdentity {
+    statement_key: String,
+    proof_id: String,
+    anchor_plus_one: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +339,7 @@ struct PublicationBinding {
     chain_id: u64,
     rollup: String,
     manager: String,
+    materializer: String,
     channel_id: u32,
     /// Out-of-band authority supplied by the operator/delegate, not learned from the proof bundle.
     #[serde(default)]
@@ -273,7 +348,9 @@ struct PublicationBinding {
     artifact_hash: String,
     component_hashes: BTreeMap<String, String>,
     deployment_manifest_hash: String,
+    attest_calldata_hash: String,
     submit_calldata_hash: String,
+    materialize_calldata_hash: String,
     /// Canonical shared root prevents a restart from silently moving nonce coordination to a
     /// publisher-specific directory.
     signer_lock_root: String,
@@ -330,6 +407,9 @@ struct PublicationJournal {
     version: u32,
     binding: PublicationBinding,
     submitter: String,
+    attest: Option<TransactionStep>,
+    #[serde(default)]
+    attest_observation: Option<FinalizedReceipt>,
     submit: Option<TransactionStep>,
     #[serde(default)]
     submit_observation: Option<FinalizedReceipt>,
@@ -338,6 +418,9 @@ struct PublicationJournal {
     finalize: Option<TransactionStep>,
     #[serde(default)]
     finalize_observation: Option<FinalizedReceipt>,
+    materialize: Option<TransactionStep>,
+    #[serde(default)]
+    materialize_observation: Option<FinalizedReceipt>,
     completed: Option<PublicClosePublication>,
 }
 
@@ -353,10 +436,24 @@ pub struct BlockObservation {
 pub struct ObservedDeployment {
     pub rollup_runtime_code_hash: String,
     pub manager_runtime_code_hash: String,
+    pub close_funding_materializer_runtime_code_hash: String,
     pub settlement_verifier_runtime_code_hash: String,
     pub mle_verifier_runtime_code_hash: String,
     pub manager_registry: String,
     pub manager_verifier: String,
+    pub manager_close_funding_materializer: String,
+    pub materializer_rollup: String,
+    pub materializer_backing_mle_verifier: String,
+    pub materializer_manager_of_channel: String,
+    pub materializer_backing_vk_initialized: bool,
+    pub materializer_frozen_generation: u64,
+    pub materializer_last_posted_block: u64,
+    pub signed_head_backing_anchor_plus_one: u64,
+    pub exact_backing_proof_attested: bool,
+    pub signed_head_backing_current: bool,
+    pub materialized_channel_exit: String,
+    pub rollup_latest_finalized_block_number: u64,
+    pub backing_root_finalized: bool,
     pub verifier_close_mle_verifier: String,
     pub mle_allowed_chain_id: u64,
     pub manager_channel_id: u32,
@@ -442,6 +539,7 @@ trait ClosePublisherBackend {
     fn observe_deployment(
         &mut self,
         manifest: &DeploymentManifest,
+        prepared: &PreparedClose,
         block_number: u64,
     ) -> Result<ObservedDeployment>;
     fn observe_manager(&mut self, manager: &str, block_number: u64) -> Result<ManagerObservation>;
@@ -477,6 +575,8 @@ trait ClosePublisherBackend {
 
 #[derive(Clone, Debug)]
 enum AbiKind {
+    Address,
+    Bool,
     Uint(usize),
     FixedBytes(usize),
     Bytes,
@@ -509,6 +609,13 @@ fn uint_array(name: &'static str) -> AbiField {
     AbiField::new(name, AbiKind::DynamicArray(Box::new(AbiKind::Uint(256))))
 }
 
+fn ext3(name: &'static str) -> AbiField {
+    AbiField::new(
+        name,
+        AbiKind::Tuple(vec![uint("c0", 64), uint("c1", 64), uint("c2", 64)]),
+    )
+}
+
 fn sumcheck(name: &'static str) -> AbiField {
     AbiField::new(
         name,
@@ -535,8 +642,6 @@ fn gate_kind() -> AbiKind {
 
 fn mle_v2_fields() -> Vec<AbiField> {
     vec![
-        uint("protocolVersion", 256),
-        uint("constituentWidth", 256),
         uint_array("circuitDigest"),
         AbiField::new("whirTranscript", AbiKind::Bytes),
         AbiField::new("whirHints", AbiKind::Bytes),
@@ -559,12 +664,16 @@ fn mle_v2_fields() -> Vec<AbiField> {
         uint("beta", 256),
         uint("gamma", 256),
         uint("mu", 256),
+        ext3("preprocessedWhirEval"),
+        ext3("witnessWhirEval"),
+        ext3("auxWhirEval"),
         bytes32("inverseHelpersCommitmentRoot"),
         uint("inverseHelpersBatchR", 256),
         sumcheck("invSumcheckProof"),
         sumcheck("hSumcheckProof"),
         uint("lambdaInv", 256),
         uint("muInv", 256),
+        uint("lambdaH", 256),
         uint_array("witnessIndividualEvalsAtRInv"),
         uint_array("preprocessedIndividualEvalsAtRInv"),
         uint_array("inverseHelpersEvalsAtRInv"),
@@ -572,12 +681,25 @@ fn mle_v2_fields() -> Vec<AbiField> {
         uint("gSubEvalAtRInv", 256),
         uint("witnessEvalValueAtRInv", 256),
         uint("preprocessedEvalValueAtRInv", 256),
+        ext3("inverseHelpersWhirEvalAtRGate"),
+        ext3("preprocessedWhirEvalAtRInv"),
+        ext3("witnessWhirEvalAtRInv"),
+        ext3("auxWhirEvalAtRInv"),
+        ext3("inverseHelpersWhirEvalAtRInv"),
+        ext3("preprocessedWhirEvalAtRH"),
+        ext3("witnessWhirEvalAtRH"),
+        ext3("auxWhirEvalAtRH"),
+        ext3("inverseHelpersWhirEvalAtRH"),
         uint("extChallenge", 256),
         sumcheck("gateSumcheckProof"),
         uint_array("witnessIndividualEvalsAtRGateV2"),
         uint_array("preprocessedIndividualEvalsAtRGateV2"),
         uint("witnessEvalValueAtRGateV2", 256),
         uint("preprocessedEvalValueAtRGateV2", 256),
+        ext3("preprocessedWhirEvalAtRGateV2"),
+        ext3("witnessWhirEvalAtRGateV2"),
+        ext3("auxWhirEvalAtRGateV2"),
+        ext3("inverseHelpersWhirEvalAtRGateV2"),
         uint("quotientDegreeFactor", 256),
         uint("numSelectors", 256),
         uint("numGateConstraints", 256),
@@ -619,6 +741,8 @@ fn close_intent_fields() -> Vec<AbiField> {
 impl AbiKind {
     fn signature(&self) -> String {
         match self {
+            Self::Address => "address".into(),
+            Self::Bool => "bool".into(),
             Self::Uint(bits) => format!("uint{bits}"),
             Self::FixedBytes(size) => format!("bytes{size}"),
             Self::Bytes => "bytes".into(),
@@ -640,7 +764,7 @@ impl AbiKind {
             Self::Bytes | Self::DynamicArray(_) => true,
             Self::Tuple(fields) => fields.iter().any(|field| field.kind.is_dynamic()),
             Self::FixedArray(element, _) => element.is_dynamic(),
-            Self::Uint(_) | Self::FixedBytes(_) => false,
+            Self::Address | Self::Bool | Self::Uint(_) | Self::FixedBytes(_) => false,
         }
     }
 
@@ -649,7 +773,7 @@ impl AbiKind {
             return Err("dynamic ABI value has no static size".into());
         }
         match self {
-            Self::Uint(_) | Self::FixedBytes(_) => Ok(32),
+            Self::Address | Self::Bool | Self::Uint(_) | Self::FixedBytes(_) => Ok(32),
             Self::Tuple(fields) => fields.iter().try_fold(0usize, |total, field| {
                 total
                     .checked_add(field.kind.static_size()?)
@@ -798,6 +922,29 @@ fn encode_value_body(
     path: &str,
 ) -> std::result::Result<Vec<u8>, String> {
     match kind {
+        AbiKind::Address => {
+            let bytes = decode_hex(
+                value
+                    .as_str()
+                    .ok_or_else(|| format!("{path} must be a hex address"))?,
+                Some(20),
+                path,
+            )?;
+            if bytes.iter().all(|byte| *byte == 0) {
+                return Err(format!("{path} must be a nonzero address"));
+            }
+            let mut word = vec![0u8; 32];
+            word[12..].copy_from_slice(&bytes);
+            Ok(word)
+        }
+        AbiKind::Bool => {
+            let boolean = value
+                .as_bool()
+                .ok_or_else(|| format!("{path} must be a JSON boolean"))?;
+            let mut word = vec![0u8; 32];
+            word[31] = u8::from(boolean);
+            Ok(word)
+        }
         AbiKind::Uint(bits) => {
             let bytes = parse_uint_value(value, *bits, path)?.to_bytes_be();
             let mut word = vec![0u8; 32];
@@ -1144,6 +1291,55 @@ fn parse_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
         .collect()
 }
 
+/// The standalone backing PI payload is a strict JSON array of unsigned u64 numbers. It is not an
+/// alternate textual encoding surface: the prover writes `Vec<u64>`, and schema 2 binds those exact
+/// bytes. `CloseAssetBackingPublicInputs::from_u64_slice` subsequently enforces the narrower type
+/// of each of the 26 positions (25 u32 limbs followed by one U63 anchor).
+fn parse_backing_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| PublicClosePublisherError::Bundle(format!("{path} must be an array")))?;
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_u64().ok_or_else(|| {
+                PublicClosePublisherError::Bundle(format!(
+                    "{path}[{index}] must be a JSON u64 number"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn parse_backing_mle_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| PublicClosePublisherError::Bundle(format!("{path} must be an array")))?;
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let parsed = parse_uint_value(value, 64, &format!("{path}[{index}]"))
+                .map_err(PublicClosePublisherError::Bundle)?;
+            u64::try_from(parsed).map_err(|_| {
+                PublicClosePublisherError::Bundle(format!("{path}[{index}] does not fit u64"))
+            })
+        })
+        .collect()
+}
+
+fn require_component_sha256(bytes: &[u8], declared: &str, what: &str) -> Result<()> {
+    let declared = expect_hex(declared, 32, &format!("manifest.{what}Sha256"))?;
+    let actual = sha256_hex(bytes);
+    if declared != actual {
+        return Err(PublicClosePublisherError::Bundle(format!(
+            "{what} SHA-256 {actual} differs from manifest {declared}"
+        )));
+    }
+    Ok(())
+}
+
 fn compare_close_public_inputs(
     descriptor: &PublicCloseIntentDescriptor,
     full: &CloseIntent,
@@ -1414,6 +1610,127 @@ fn finalize_calldata(expected: &ExpectedClose, close_request_generation: u64) ->
     Ok(calldata)
 }
 
+fn materialize_calldata(manager: &str, backing_mle_proof: &Value) -> Result<String> {
+    let manager_kind = AbiKind::Address;
+    let proof_kind = AbiKind::Tuple(mle_v2_fields());
+    let signature = format!(
+        "materializeSignedHead({},{})",
+        manager_kind.signature(),
+        proof_kind.signature()
+    );
+    if selector(&signature) != MATERIALIZE_SIGNED_HEAD_SELECTOR {
+        return Err(PublicClosePublisherError::Bundle(
+            "typed signed-head materializer encoder diverged from the compiled release ABI".into(),
+        ));
+    }
+    let manager = Value::String(manager.to_string());
+    encode_function(
+        "materializeSignedHead",
+        &[
+            (&manager_kind, &manager, "manager"),
+            (&proof_kind, backing_mle_proof, "backingProof"),
+        ],
+    )
+    .map_err(|error| {
+        PublicClosePublisherError::Bundle(format!(
+            "encode signed-head materialization calldata: {error}"
+        ))
+    })
+}
+
+fn attest_calldata(manager: &str, backing_mle_proof: &Value) -> Result<String> {
+    let manager_kind = AbiKind::Address;
+    let proof_kind = AbiKind::Tuple(mle_v2_fields());
+    let signature = format!(
+        "attestSignedHeadBacking({},{})",
+        manager_kind.signature(),
+        proof_kind.signature()
+    );
+    if selector(&signature) != ATTEST_SIGNED_HEAD_BACKING_SELECTOR {
+        return Err(PublicClosePublisherError::Bundle(
+            "typed signed-head attestation encoder diverged from the compiled release ABI".into(),
+        ));
+    }
+    let manager = Value::String(manager.to_string());
+    encode_function(
+        "attestSignedHeadBacking",
+        &[
+            (&manager_kind, &manager, "manager"),
+            (&proof_kind, backing_mle_proof, "backingProof"),
+        ],
+    )
+    .map_err(|error| {
+        PublicClosePublisherError::Bundle(format!(
+            "encode signed-head attestation calldata: {error}"
+        ))
+    })
+}
+
+/// Reproduce the two domain-separated Solidity `abi.encode` identities exactly. The statement
+/// receipt is keyed by the complete signed economic state, while the proof receipt additionally
+/// binds the exact proof bytes that later `materializeSignedHead` must reuse.
+fn backing_attestation_identity(
+    prepared: &PreparedClose,
+    deployment: &DeploymentManifest,
+) -> Result<BackingAttestationIdentity> {
+    let domain_kind = AbiKind::FixedBytes(4);
+    let chain_kind = AbiKind::Uint(256);
+    let address_kind = AbiKind::Address;
+    let channel_kind = AbiKind::Uint(32);
+    let digest_kind = AbiKind::FixedBytes(32);
+    let proof_kind = AbiKind::Tuple(mle_v2_fields());
+    let statement_domain = Value::String("0x494d4241".into());
+    let proof_domain = Value::String("0x494d4250".into());
+    let chain_id = Value::String(prepared.chain_id.to_string());
+    let materializer = Value::String(deployment.close_funding_materializer.clone());
+    let rollup = Value::String(prepared.rollup.clone());
+    let manager = Value::String(deployment.manager.clone());
+    let channel_id = Value::String(prepared.channel_id.to_string());
+    let settled_chain = Value::String(prepared.expected.final_settled_tx_chain.clone());
+    let funds_digest = Value::String(prepared.expected.token_funds_digest.clone());
+    let statement = encode_sequence([
+        (&domain_kind, &statement_domain, "statement.domain".into()),
+        (&chain_kind, &chain_id, "statement.chainId".into()),
+        (&address_kind, &materializer, "statement.materializer".into()),
+        (&address_kind, &rollup, "statement.rollup".into()),
+        (&address_kind, &manager, "statement.manager".into()),
+        (&channel_kind, &channel_id, "statement.channelId".into()),
+        (&digest_kind, &settled_chain, "statement.settledTxChain".into()),
+        (&digest_kind, &funds_digest, "statement.tokenFundsDigest".into()),
+    ])
+    .map_err(|error| {
+        PublicClosePublisherError::Bundle(format!("encode backing statement identity: {error}"))
+    })?;
+    let proof = encode_sequence([
+        (&domain_kind, &proof_domain, "proof.domain".into()),
+        (&chain_kind, &chain_id, "proof.chainId".into()),
+        (&address_kind, &materializer, "proof.materializer".into()),
+        (&address_kind, &rollup, "proof.rollup".into()),
+        (&address_kind, &manager, "proof.manager".into()),
+        (
+            &proof_kind,
+            &prepared.backing_mle_proof,
+            "proof.backingProof".into(),
+        ),
+    ])
+    .map_err(|error| {
+        PublicClosePublisherError::Bundle(format!("encode backing proof identity: {error}"))
+    })?;
+    let anchor_plus_one = prepared
+        .backing_public_inputs
+        .anchor_block_number
+        .as_u64()
+        .checked_add(1)
+        .ok_or_else(|| {
+            PublicClosePublisherError::Bundle("backing anchor plus one overflowed u64".into())
+        })?;
+    Ok(BackingAttestationIdentity {
+        statement_key: keccak_hex(&statement),
+        proof_id: keccak_hex(&proof),
+        anchor_plus_one,
+    })
+}
+
 fn prepare_bundle(
     bundle_dir: &Path,
     trusted_final_channel_state_digest: &str,
@@ -1449,6 +1766,18 @@ fn prepare_bundle(
         &manifest.close_mle_file,
         "close_intent_mle.json",
     )?;
+    let backing_proof_path = fixed_bundle_path(
+        bundle_dir,
+        &manifest.backing_proof_file,
+        "backing_proof.bin",
+    )?;
+    let backing_mle_path =
+        fixed_bundle_path(bundle_dir, &manifest.backing_mle_file, "backing_mle.json")?;
+    let backing_inputs_path = fixed_bundle_path(
+        bundle_dir,
+        &manifest.backing_public_inputs_file,
+        "backing_public_inputs.json",
+    )?;
     let intent_path =
         fixed_bundle_path(bundle_dir, &manifest.close_intent_file, "close_intent.json")?;
     let full_path = fixed_bundle_path(
@@ -1464,15 +1793,106 @@ fn prepare_bundle(
 
     let proof = read_bounded(&proof_path, MAX_CLOSE_PROOF_BYTES, "close proof")?;
     let mle_bytes = read_bounded(&mle_path, MAX_MLE_BYTES, "close MLE proof")?;
+    let backing_proof = read_bounded(
+        &backing_proof_path,
+        MAX_BACKING_PROOF_BYTES,
+        "signed-head backing proof",
+    )?;
+    let backing_mle_bytes = read_bounded(
+        &backing_mle_path,
+        MAX_MLE_BYTES,
+        "signed-head backing MLE proof",
+    )?;
+    let backing_input_bytes = read_bounded(
+        &backing_inputs_path,
+        MAX_BACKING_PUBLIC_INPUT_BYTES,
+        "signed-head backing public inputs",
+    )?;
     let intent_bytes = read_bounded(&intent_path, MAX_INTENT_BYTES, "close descriptor")?;
     let full_bytes = read_bounded(&full_path, MAX_INTENT_BYTES, "full close intent")?;
     let input_bytes = read_bounded(&inputs_path, MAX_PUBLIC_INPUT_BYTES, "close public inputs")?;
     if proof.is_empty()
         || proof.len() != manifest.close_proof_bytes
         || mle_bytes.len() != manifest.close_mle_bytes
+        || backing_proof.is_empty()
+        || backing_proof.len() != manifest.backing_proof_bytes
+        || backing_mle_bytes.len() != manifest.backing_mle_bytes
     {
         return Err(PublicClosePublisherError::Bundle(
-            "proof/MLE file size differs from manifest or proof is empty".into(),
+            "close/backing proof or MLE size differs from manifest, or a proof is empty".into(),
+        ));
+    }
+    require_component_sha256(&proof, &manifest.close_proof_sha256, "closeProof")?;
+    require_component_sha256(&mle_bytes, &manifest.close_mle_sha256, "closeMle")?;
+    require_component_sha256(
+        &backing_proof,
+        &manifest.backing_proof_sha256,
+        "backingProof",
+    )?;
+    require_component_sha256(
+        &backing_mle_bytes,
+        &manifest.backing_mle_sha256,
+        "backingMle",
+    )?;
+    require_component_sha256(
+        &backing_input_bytes,
+        &manifest.backing_public_inputs_sha256,
+        "backingPublicInputs",
+    )?;
+    require_component_sha256(&intent_bytes, &manifest.close_intent_sha256, "closeIntent")?;
+    require_component_sha256(
+        &full_bytes,
+        &manifest.close_intent_full_sha256,
+        "closeIntentFull",
+    )?;
+    require_component_sha256(
+        &input_bytes,
+        &manifest.close_public_inputs_sha256,
+        "closePublicInputs",
+    )?;
+
+    let backing_inputs_value: Value =
+        parse_json(&backing_input_bytes, "signed-head backing public inputs")?;
+    let backing_inputs =
+        parse_backing_public_input_array(&backing_inputs_value, "backingPublicInputs")?;
+    if backing_inputs.len() != CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
+        || backing_inputs.len() != manifest.backing_public_input_count
+    {
+        return Err(PublicClosePublisherError::Bundle(format!(
+            "backing public input count {} != manifest {} / required {}",
+            backing_inputs.len(),
+            manifest.backing_public_input_count,
+            CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
+        )));
+    }
+    let parsed_backing =
+        CloseAssetBackingPublicInputs::from_u64_slice(&backing_inputs).map_err(|error| {
+            PublicClosePublisherError::Bundle(format!(
+                "parse signed-head backing public inputs: {error}"
+            ))
+        })?;
+    if parsed_backing.finalized_extended_state_commitment
+        != manifest.backing_finalized_extended_state_commitment
+    {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing public-input finalizedExtendedStateCommitment differs from manifest".into(),
+        ));
+    }
+    if parsed_backing.anchor_block_number.as_u64() != manifest.backing_anchor_block_number {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing public-input anchorBlockNumber differs from manifest".into(),
+        ));
+    }
+    let backing_mle_proof: Value = parse_json(&backing_mle_bytes, "signed-head backing MLE proof")?;
+    mle_constituent_width(&backing_mle_proof)?;
+    let backing_mle_inputs = backing_mle_proof.get("publicInputs").ok_or_else(|| {
+        PublicClosePublisherError::Bundle("backingMleProof.publicInputs is missing".into())
+    })?;
+    if parse_backing_mle_public_input_array(backing_mle_inputs, "backingMleProof.publicInputs")?
+        != backing_inputs
+    {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing MLE proof public inputs differ from backing_public_inputs.json".into(),
         ));
     }
     let descriptor: PublicCloseIntentDescriptor = parse_json(&intent_bytes, "close descriptor")?;
@@ -1500,6 +1920,28 @@ fn prepare_bundle(
         ));
     }
     let (expected, intent_json) = compare_close_public_inputs(&descriptor, &full, &raw_inputs)?;
+    if parsed_backing.channel_id.channel_id() != descriptor.channel_id {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing public-input channelId differs from the signed close state".into(),
+        ));
+    }
+    if !same_hex(
+        &parsed_backing.settled_tx_chain.to_string(),
+        &expected.final_settled_tx_chain,
+    ) {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing public-input settledTxChain differs from the signed close state".into(),
+        ));
+    }
+    if !same_hex(
+        &parsed_backing.token_funds_digest.to_string(),
+        &expected.token_funds_digest,
+    ) {
+        return Err(PublicClosePublisherError::Bundle(
+            "backing public-input tokenFundsDigest differs from the signed close state's complete asset vector"
+                .into(),
+        ));
+    }
     if !same_hex(
         &expected.final_channel_state_digest,
         &trusted_final_channel_state_digest,
@@ -1522,9 +1964,9 @@ fn prepare_bundle(
         intent_kind.signature(),
         proof_kind.signature()
     );
-    if computed_signature != SUBMIT_CLOSE_SIGNATURE {
+    if selector(&computed_signature) != SUBMIT_CLOSE_SELECTOR {
         return Err(PublicClosePublisherError::Bundle(format!(
-            "internal close ABI signature constant diverged from the typed encoder: compiled={SUBMIT_CLOSE_SIGNATURE}, typed={computed_signature}"
+            "typed close ABI selector diverged from the release-compiled selector {SUBMIT_CLOSE_SELECTOR}: {computed_signature}"
         )));
     }
     let submit_calldata = encode_function(
@@ -1541,6 +1983,9 @@ fn prepare_bundle(
         ("public_close_manifest.json", manifest_bytes.as_slice()),
         ("close_proof.bin", proof.as_slice()),
         ("close_intent_mle.json", mle_bytes.as_slice()),
+        ("backing_proof.bin", backing_proof.as_slice()),
+        ("backing_mle.json", backing_mle_bytes.as_slice()),
+        ("backing_public_inputs.json", backing_input_bytes.as_slice()),
         ("close_intent.json", intent_bytes.as_slice()),
         ("close_intent_full.json", full_bytes.as_slice()),
         ("close_public_inputs.json", input_bytes.as_slice()),
@@ -1550,7 +1995,7 @@ fn prepare_bundle(
         .map(|(name, bytes)| ((*name).to_string(), sha256_hex(bytes)))
         .collect::<BTreeMap<_, _>>();
     let artifact_description = serde_json::json!({
-        "domain": "intmax-public-close-bundle-v1",
+        "domain": "intmax-public-close-bundle-v2",
         "chainId": manifest.chain_id,
         "rollup": rollup,
         "channelId": manifest.channel_id.channel_id(),
@@ -1565,6 +2010,8 @@ fn prepare_bundle(
         balance_vd_sha256,
         expected,
         submit_calldata,
+        backing_mle_proof,
+        backing_public_inputs: parsed_backing,
         artifact_hash,
         component_hashes,
     })
@@ -1579,6 +2026,12 @@ fn load_deployment_manifest(
     let fail = |message: String| PublicClosePublisherError::Configuration(message);
     manifest.rollup = normalize_hex(&manifest.rollup, 20, "deployment.rollup").map_err(&fail)?;
     manifest.manager = normalize_hex(&manifest.manager, 20, "deployment.manager").map_err(&fail)?;
+    manifest.close_funding_materializer = normalize_hex(
+        &manifest.close_funding_materializer,
+        20,
+        "deployment.closeFundingMaterializer",
+    )
+    .map_err(&fail)?;
     manifest.settlement_verifier = normalize_hex(
         &manifest.settlement_verifier,
         20,
@@ -1597,6 +2050,12 @@ fn load_deployment_manifest(
         &manifest.manager_runtime_code_hash,
         32,
         "deployment.managerRuntimeCodeHash",
+    )
+    .map_err(&fail)?;
+    manifest.close_funding_materializer_runtime_code_hash = normalize_hex(
+        &manifest.close_funding_materializer_runtime_code_hash,
+        32,
+        "deployment.closeFundingMaterializerRuntimeCodeHash",
     )
     .map_err(&fail)?;
     manifest.settlement_verifier_runtime_code_hash = normalize_hex(
@@ -1619,6 +2078,11 @@ fn load_deployment_manifest(
     .map_err(&fail)?;
     for (value, path, size) in [
         (
+            &mut manifest.attest_signed_head_backing_selector,
+            "deployment.attestSignedHeadBackingSelector",
+            4,
+        ),
+        (
             &mut manifest.submit_close_intent_selector,
             "deployment.submitCloseIntentSelector",
             4,
@@ -1626,6 +2090,11 @@ fn load_deployment_manifest(
         (
             &mut manifest.finalize_close_guarded_selector,
             "deployment.finalizeCloseGuardedSelector",
+            4,
+        ),
+        (
+            &mut manifest.materialize_signed_head_selector,
+            "deployment.materializeSignedHeadSelector",
             4,
         ),
         (
@@ -1638,6 +2107,16 @@ fn load_deployment_manifest(
             "deployment.closeFinalizedTopic",
             32,
         ),
+        (
+            &mut manifest.signed_head_backing_attested_topic,
+            "deployment.signedHeadBackingAttestedTopic",
+            32,
+        ),
+        (
+            &mut manifest.signed_head_exit_materialized_topic,
+            "deployment.signedHeadExitMaterializedTopic",
+            32,
+        ),
     ] {
         *value = normalize_hex(value, size, path).map_err(&fail)?;
     }
@@ -1647,6 +2126,7 @@ fn load_deployment_manifest(
         || [
             &manifest.rollup,
             &manifest.manager,
+            &manifest.close_funding_materializer,
             &manifest.settlement_verifier,
             &manifest.mle_verifier,
         ]
@@ -1674,17 +2154,36 @@ fn load_deployment_manifest(
             manifest.mle_proof_abi_version
         )));
     }
-    let expected_submit = selector(SUBMIT_CLOSE_SIGNATURE);
+    let expected_submit = SUBMIT_CLOSE_SELECTOR.to_string();
     let expected_finalize = selector(FINALIZE_CLOSE_GUARDED_SIGNATURE);
+    let expected_attest = ATTEST_SIGNED_HEAD_BACKING_SELECTOR.to_string();
+    let expected_materialize = MATERIALIZE_SIGNED_HEAD_SELECTOR.to_string();
     let expected_submitted_topic = keccak_hex(CLOSE_SUBMITTED_EVENT.as_bytes());
     let expected_finalized_topic = keccak_hex(CLOSE_FINALIZED_EVENT.as_bytes());
-    if !same_hex(&manifest.submit_close_intent_selector, &expected_submit)
+    let expected_attested_topic = keccak_hex(SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes());
+    let expected_materialized_topic = keccak_hex(SIGNED_HEAD_EXIT_MATERIALIZED_EVENT.as_bytes());
+    if !same_hex(
+        &manifest.attest_signed_head_backing_selector,
+        &expected_attest,
+    ) || !same_hex(&manifest.submit_close_intent_selector, &expected_submit)
         || !same_hex(
             &manifest.finalize_close_guarded_selector,
             &expected_finalize,
         )
+        || !same_hex(
+            &manifest.materialize_signed_head_selector,
+            &expected_materialize,
+        )
         || !same_hex(&manifest.close_submitted_topic, &expected_submitted_topic)
         || !same_hex(&manifest.close_finalized_topic, &expected_finalized_topic)
+        || !same_hex(
+            &manifest.signed_head_backing_attested_topic,
+            &expected_attested_topic,
+        )
+        || !same_hex(
+            &manifest.signed_head_exit_materialized_topic,
+            &expected_materialized_topic,
+        )
     {
         return Err(fail(
             "deployment selector/event pins differ from the compiled release ABI".into(),
@@ -1705,6 +2204,9 @@ fn validate_deployment_observation(
         &observed.manager_runtime_code_hash,
         &manifest.manager_runtime_code_hash,
     ) || !same_hex(
+        &observed.close_funding_materializer_runtime_code_hash,
+        &manifest.close_funding_materializer_runtime_code_hash,
+    ) || !same_hex(
         &observed.settlement_verifier_runtime_code_hash,
         &manifest.settlement_verifier_runtime_code_hash,
     ) || !same_hex(
@@ -1718,15 +2220,58 @@ fn validate_deployment_observation(
     if !same_hex(&observed.manager_registry, &manifest.rollup)
         || !same_hex(&observed.manager_verifier, &manifest.settlement_verifier)
         || !same_hex(
+            &observed.manager_close_funding_materializer,
+            &manifest.close_funding_materializer,
+        )
+        || !same_hex(&observed.materializer_rollup, &manifest.rollup)
+        || !same_hex(
+            &observed.materializer_backing_mle_verifier,
+            &manifest.mle_verifier,
+        )
+        || !same_hex(&observed.materializer_manager_of_channel, &manifest.manager)
+        || !same_hex(
             &observed.verifier_close_mle_verifier,
             &manifest.mle_verifier,
         )
         || observed.mle_allowed_chain_id != manifest.chain_id
         || observed.manager_channel_id != prepared.channel_id
         || !observed.close_vk_initialized
+        || !observed.materializer_backing_vk_initialized
     {
         return Err(PublicClosePublisherError::Deployment(
-            "manager→rollup/verifier→MLE linkage, chain, channel, or close VK is invalid".into(),
+            "manager/materializer/rollup/verifier/MLE linkage, chain, channel, or VK initialization is invalid"
+                .into(),
+        ));
+    }
+    if observed.materializer_last_posted_block
+        > prepared.backing_public_inputs.anchor_block_number.as_u64()
+    {
+        return Err(PublicClosePublisherError::Conflict(format!(
+            "signed-head backing anchor {} is older than the channel's reorg-aware last posted block {}",
+            prepared.backing_public_inputs.anchor_block_number.as_u64(),
+            observed.materializer_last_posted_block
+        )));
+    }
+    if !observed.backing_root_finalized
+        || prepared.backing_public_inputs.anchor_block_number.as_u64()
+            > observed.rollup_latest_finalized_block_number
+    {
+        return Err(PublicClosePublisherError::Evidence(format!(
+            "backing root/anchor is not finalized: rootFinalized={}, anchor={}, latestFinalized={}",
+            observed.backing_root_finalized,
+            prepared.backing_public_inputs.anchor_block_number.as_u64(),
+            observed.rollup_latest_finalized_block_number
+        )));
+    }
+    let zero_digest = format!("0x{}", "00".repeat(32));
+    if !same_hex(&observed.materialized_channel_exit, &zero_digest)
+        && !same_hex(
+            &observed.materialized_channel_exit,
+            &prepared.expected.close_intent_digest,
+        )
+    {
+        return Err(PublicClosePublisherError::Conflict(
+            "channel was materialized for a different finalized close digest".into(),
         ));
     }
     if manifest.chain_id != ANVIL_CHAIN_ID
@@ -1749,6 +2294,38 @@ fn validate_deployment_observation(
         ));
     }
     Ok(())
+}
+
+fn backing_attestation_ready(
+    observed: &ObservedDeployment,
+    prepared: &PreparedClose,
+) -> Result<bool> {
+    let expected_anchor_plus_one = prepared
+        .backing_public_inputs
+        .anchor_block_number
+        .as_u64()
+        .checked_add(1)
+        .ok_or_else(|| {
+            PublicClosePublisherError::Evidence("backing anchor plus one overflowed u64".into())
+        })?;
+    if observed.signed_head_backing_current
+        && observed.signed_head_backing_anchor_plus_one == 0
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "materializer reports current signed-head backing without a statement anchor".into(),
+        ));
+    }
+    if observed.exact_backing_proof_attested
+        && observed.signed_head_backing_anchor_plus_one < expected_anchor_plus_one
+    {
+        return Err(PublicClosePublisherError::Evidence(format!(
+            "exact backing proof is attested but statement anchor {} is below its proof-bound anchor {}",
+            observed.signed_head_backing_anchor_plus_one, expected_anchor_plus_one
+        )));
+    }
+    Ok(observed.exact_backing_proof_attested
+        && observed.signed_head_backing_anchor_plus_one >= expected_anchor_plus_one
+        && observed.signed_head_backing_current)
 }
 
 fn checkpoint_advances(
@@ -1814,7 +2391,7 @@ fn read_stable_context<B: ClosePublisherBackend>(
     }
     let block = backend.block_at(before.block_number, before.source)?;
     validate_checkpoint_block(&before, &block)?;
-    let deployment = backend.observe_deployment(manifest, before.block_number)?;
+    let deployment = backend.observe_deployment(manifest, prepared, before.block_number)?;
     validate_deployment_observation(manifest, &deployment, prepared)?;
     let mut manager = backend.observe_manager(&manifest.manager, before.block_number)?;
     if manager.block_timestamp != block.timestamp {
@@ -2088,17 +2665,39 @@ fn load_or_create_journal(
         if journal.version != JOURNAL_VERSION
             || journal.binding != binding
             || !same_hex(&journal.submitter, signer)
+            || journal.attest.as_ref().is_some_and(|step| {
+                step.confirmation.is_some() && step.superseded_confirmation.is_some()
+            })
             || journal.submit.as_ref().is_some_and(|step| {
                 step.confirmation.is_some() && step.superseded_confirmation.is_some()
             })
             || journal.finalize.as_ref().is_some_and(|step| {
                 step.confirmation.is_some() && step.superseded_confirmation.is_some()
             })
+            || journal.materialize.as_ref().is_some_and(|step| {
+                step.confirmation.is_some() && step.superseded_confirmation.is_some()
+            })
+            || ((journal.submit.is_some()
+                || journal.submit_observation.is_some()
+                || journal.finalize_authorization.is_some()
+                || journal.finalize.is_some()
+                || journal.finalize_observation.is_some()
+                || journal.materialize.is_some()
+                || journal.materialize_observation.is_some()
+                || journal.completed.is_some())
+                && journal.attest_observation.is_none())
             || (journal.finalize_authorization.is_some() && journal.submit_observation.is_none())
             || ((journal.finalize.is_some()
                 || journal.finalize_observation.is_some()
+                || journal.materialize.is_some()
+                || journal.materialize_observation.is_some()
                 || journal.completed.is_some())
                 && journal.finalize_authorization.is_none())
+            || ((journal.materialize.is_some()
+                || journal.materialize_observation.is_some()
+                || journal.completed.is_some())
+                && journal.finalize_observation.is_none())
+            || (journal.completed.is_some() && journal.materialize_observation.is_none())
         {
             return Err(PublicClosePublisherError::Conflict(
                 "journal belongs to a sibling chain/deployment/artifact/signer".into(),
@@ -2110,11 +2709,15 @@ fn load_or_create_journal(
         version: JOURNAL_VERSION,
         binding,
         submitter: signer.to_ascii_lowercase(),
+        attest: None,
+        attest_observation: None,
         submit: None,
         submit_observation: None,
         finalize_authorization: None,
         finalize: None,
         finalize_observation: None,
+        materialize: None,
+        materialize_observation: None,
         completed: None,
     };
     write_journal(path, &journal)?;
@@ -2687,6 +3290,211 @@ fn validate_close_finalized_event(
     Ok(())
 }
 
+fn indexed_u32(value: u32) -> String {
+    let mut word = [0u8; 32];
+    word[28..].copy_from_slice(&value.to_be_bytes());
+    format!("0x{}", hex::encode(word))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttestedEventIdentity {
+    channel_id: u32,
+    manager: String,
+    statement_key: String,
+    backing_root: String,
+    anchor_block_number: u64,
+    proof_id: String,
+}
+
+fn decode_attested_log(log: &Value) -> Result<AttestedEventIdentity> {
+    if log_topics(log)
+        .map_err(PublicClosePublisherError::Evidence)?
+        .len()
+        != 4
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "SignedHeadBackingAttested has a non-canonical indexed-field count".into(),
+        ));
+    }
+    let channel = topic_u64(
+        log_topic(log, 1).map_err(PublicClosePublisherError::Evidence)?,
+        "SignedHeadBackingAttested.channelId",
+    )?;
+    let channel_id = u32::try_from(channel).map_err(|_| {
+        PublicClosePublisherError::Evidence(
+            "SignedHeadBackingAttested.channelId is not a canonical uint32".into(),
+        )
+    })?;
+    let manager_word = decode_hex(
+        log_topic(log, 2).map_err(PublicClosePublisherError::Evidence)?,
+        Some(32),
+        "SignedHeadBackingAttested.manager",
+    )
+    .map_err(PublicClosePublisherError::Evidence)?;
+    let manager = word_address(
+        &manager_word.try_into().expect("topic length checked"),
+        "SignedHeadBackingAttested.manager",
+    )?;
+    let statement_key = normalize_hex(
+        log_topic(log, 3).map_err(PublicClosePublisherError::Evidence)?,
+        32,
+        "SignedHeadBackingAttested.statementKey",
+    )
+    .map_err(PublicClosePublisherError::Evidence)?;
+    let data = decode_log_data(log, 3, "SignedHeadBackingAttested.data")?;
+    Ok(AttestedEventIdentity {
+        channel_id,
+        manager,
+        statement_key,
+        backing_root: format!("0x{}", hex::encode(&data[0..32])),
+        anchor_block_number: word_u64(
+            &data[32..64],
+            "SignedHeadBackingAttested.anchorBlockNumber",
+        )?,
+        proof_id: format!("0x{}", hex::encode(&data[64..96])),
+    })
+}
+
+fn exact_attested_event(
+    receipt: &Value,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+) -> Result<Option<AttestedEventIdentity>> {
+    let expected = backing_attestation_identity(prepared, deployment)?;
+    let topic0 = keccak_hex(SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes());
+    let matching = relevant_events(receipt, &deployment.close_funding_materializer, &topic0)?
+        .into_iter()
+        .map(decode_attested_log)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|event| {
+            event.channel_id == prepared.channel_id
+                && same_hex(&event.manager, &deployment.manager)
+                && same_hex(&event.statement_key, &expected.statement_key)
+                && same_hex(
+                    &event.backing_root,
+                    &prepared
+                        .backing_public_inputs
+                        .finalized_extended_state_commitment
+                        .to_string(),
+                )
+                && event.anchor_block_number
+                    == prepared.backing_public_inputs.anchor_block_number.as_u64()
+                && same_hex(&event.proof_id, &expected.proof_id)
+        })
+        .collect();
+    unique_exact_event(matching, "SignedHeadBackingAttested")
+}
+
+fn validate_attested_event(
+    receipt: &Value,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+) -> Result<()> {
+    exact_attested_event(receipt, deployment, prepared)?.ok_or_else(|| {
+        PublicClosePublisherError::Evidence(
+            "receipt has no SignedHeadBackingAttested event for the exact backing proof".into(),
+        )
+    })?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MaterializedEventIdentity {
+    channel_id: u32,
+    manager: String,
+    close_intent_digest: String,
+    token_count: u8,
+}
+
+fn decode_materialized_log(log: &Value) -> Result<MaterializedEventIdentity> {
+    if log_topics(log)
+        .map_err(PublicClosePublisherError::Evidence)?
+        .len()
+        != 4
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "SignedHeadExitMaterialized has a non-canonical indexed-field count".into(),
+        ));
+    }
+    let channel = topic_u64(
+        log_topic(log, 1).map_err(PublicClosePublisherError::Evidence)?,
+        "SignedHeadExitMaterialized.channelId",
+    )?;
+    let channel_id = u32::try_from(channel).map_err(|_| {
+        PublicClosePublisherError::Evidence(
+            "SignedHeadExitMaterialized.channelId is not a canonical uint32".into(),
+        )
+    })?;
+    let manager_word = decode_hex(
+        log_topic(log, 2).map_err(PublicClosePublisherError::Evidence)?,
+        Some(32),
+        "SignedHeadExitMaterialized.manager",
+    )
+    .map_err(PublicClosePublisherError::Evidence)?;
+    let manager = word_address(
+        &manager_word.try_into().expect("topic length checked"),
+        "SignedHeadExitMaterialized.manager",
+    )?;
+    let close_intent_digest = normalize_hex(
+        log_topic(log, 3).map_err(PublicClosePublisherError::Evidence)?,
+        32,
+        "SignedHeadExitMaterialized.closeIntentDigest",
+    )
+    .map_err(PublicClosePublisherError::Evidence)?;
+    let data = decode_log_data(log, 1, "SignedHeadExitMaterialized.data")?;
+    let token_count = u8::try_from(word_u64(&data, "SignedHeadExitMaterialized.tokenCount")?)
+        .map_err(|_| {
+            PublicClosePublisherError::Evidence(
+                "SignedHeadExitMaterialized.tokenCount is not a canonical uint8".into(),
+            )
+        })?;
+    Ok(MaterializedEventIdentity {
+        channel_id,
+        manager,
+        close_intent_digest,
+        token_count,
+    })
+}
+
+fn exact_materialized_event(
+    receipt: &Value,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+) -> Result<Option<MaterializedEventIdentity>> {
+    let topic0 = keccak_hex(SIGNED_HEAD_EXIT_MATERIALIZED_EVENT.as_bytes());
+    let matching = relevant_events(receipt, &deployment.close_funding_materializer, &topic0)?
+        .into_iter()
+        .map(decode_materialized_log)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|event| {
+            event.channel_id == prepared.channel_id
+                && same_hex(&event.manager, &deployment.manager)
+                && same_hex(
+                    &event.close_intent_digest,
+                    &prepared.expected.close_intent_digest,
+                )
+                && event.token_count == prepared.expected.token_count
+        })
+        .collect();
+    unique_exact_event(matching, "SignedHeadExitMaterialized")
+}
+
+fn validate_materialized_event(
+    receipt: &Value,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+) -> Result<()> {
+    exact_materialized_event(receipt, deployment, prepared)?.ok_or_else(|| {
+        PublicClosePublisherError::Evidence(
+            "receipt has no SignedHeadExitMaterialized event matching the complete exact close"
+                .into(),
+        )
+    })?;
+    Ok(())
+}
+
 fn validate_transaction_step<B: ClosePublisherBackend>(
     backend: &mut B,
     step: &TransactionStep,
@@ -2751,14 +3559,17 @@ enum SupersededReceiptState {
 
 /// A signed one-shot call may lose to a permissionless sibling after its raw bytes were fsynced.
 /// The semantic winner does not consume this signer's nonce. Keep the durable signer reservation,
-/// broadcast only the already-journaled loser, and require its canonical-finalized revert before
-/// permitting any later signature. This closes both the crash/restart and dropped-mempool races.
+/// broadcast only the already-journaled loser, and require its canonical-finalized receipt before
+/// permitting any later signature. One attestation race may be a successful idempotent no-op;
+/// one-shot submit/finalize/materialize races must revert. This closes both the crash/restart and
+/// dropped-mempool races.
 fn settle_superseded_transaction<B: ClosePublisherBackend>(
     backend: &mut B,
     step: &TransactionStep,
     signer: &str,
     chain_id: u64,
     allow_unfinalized_devnet: bool,
+    allow_successful_noop: bool,
 ) -> Result<SupersededReceiptState> {
     if step.confirmation.is_some() {
         return Err(PublicClosePublisherError::Conflict(
@@ -2798,7 +3609,7 @@ fn settle_superseded_transaction<B: ClosePublisherBackend>(
             receipt,
             confirmation,
         } => {
-            if receipt_status(&receipt)? {
+            if receipt_status(&receipt)? && !allow_successful_noop {
                 return Err(PublicClosePublisherError::Conflict(
                     "local and permissionless transactions both claim one-shot success".into(),
                 ));
@@ -2811,17 +3622,21 @@ fn settle_superseded_transaction<B: ClosePublisherBackend>(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ClosePhase {
+    Attest,
     Submit,
     Finalize,
+    Materialize,
 }
 
 impl ClosePhase {
     fn label(self) -> &'static str {
         match self {
+            Self::Attest => "attest",
             Self::Submit => "submit",
             Self::Finalize => "finalize",
+            Self::Materialize => "materialize",
         }
     }
 }
@@ -2837,8 +3652,10 @@ fn reconcile_semantic_winner<B: ClosePublisherBackend>(
     signer: &str,
 ) -> Result<Option<PublicCloseProgress>> {
     let mut step = match phase {
+        ClosePhase::Attest => journal.attest.clone(),
         ClosePhase::Submit => journal.submit.clone(),
         ClosePhase::Finalize => journal.finalize.clone(),
+        ClosePhase::Materialize => journal.materialize.clone(),
     };
     let Some(mut local) = step.take() else {
         // Also repairs a crash after intent reservation but before a raw transaction was written.
@@ -2859,8 +3676,10 @@ fn reconcile_semantic_winner<B: ClosePublisherBackend>(
         }
         local.confirmation = Some(winner.clone());
         match phase {
+            ClosePhase::Attest => journal.attest = Some(local),
             ClosePhase::Submit => journal.submit = Some(local),
             ClosePhase::Finalize => journal.finalize = Some(local),
+            ClosePhase::Materialize => journal.materialize = Some(local),
         }
         write_journal(&config.journal_path, journal)?;
         release_exact_signer_reservation(&config.signer_lock_root, reservation)?;
@@ -2877,6 +3696,7 @@ fn reconcile_semantic_winner<B: ClosePublisherBackend>(
         signer,
         journal.binding.chain_id,
         config.allow_unfinalized_devnet,
+        phase == ClosePhase::Attest,
     )? {
         SupersededReceiptState::AwaitingReceipt => {
             Ok(Some(PublicCloseProgress::AwaitingSupersededReceipt {
@@ -2894,8 +3714,10 @@ fn reconcile_semantic_winner<B: ClosePublisherBackend>(
         SupersededReceiptState::Finalized(confirmation) => {
             local.superseded_confirmation = Some(confirmation);
             match phase {
+                ClosePhase::Attest => journal.attest = Some(local),
                 ClosePhase::Submit => journal.submit = Some(local),
                 ClosePhase::Finalize => journal.finalize = Some(local),
+                ClosePhase::Materialize => journal.materialize = Some(local),
             }
             write_journal(&config.journal_path, journal)?;
             if needs_reservation {
@@ -3015,7 +3837,13 @@ fn make_binding(
     deployment_manifest_hash: String,
     signer_lock_root: &Path,
 ) -> Result<PublicationBinding> {
+    let attest = attest_calldata(&deployment.manager, &prepared.backing_mle_proof)?;
+    let attest_bytes = decode_hex(&attest, None, "attest calldata")
+        .map_err(PublicClosePublisherError::Bundle)?;
     let submit_bytes = decode_hex(&prepared.submit_calldata, None, "submit calldata")
+        .map_err(PublicClosePublisherError::Bundle)?;
+    let materialize = materialize_calldata(&deployment.manager, &prepared.backing_mle_proof)?;
+    let materialize_bytes = decode_hex(&materialize, None, "materialize calldata")
         .map_err(PublicClosePublisherError::Bundle)?;
     let signer_lock_root = ensure_private_directory(signer_lock_root)?;
     let signer_lock_root = signer_lock_root.to_str().ok_or_else(|| {
@@ -3028,13 +3856,16 @@ fn make_binding(
         chain_id: prepared.chain_id,
         rollup: prepared.rollup.clone(),
         manager: deployment.manager.clone(),
+        materializer: deployment.close_funding_materializer.clone(),
         channel_id: prepared.channel_id,
         expected_final_channel_state_digest: prepared.expected.final_channel_state_digest.clone(),
         close_intent_digest: prepared.expected.close_intent_digest.clone(),
         artifact_hash: prepared.artifact_hash.clone(),
         component_hashes: prepared.component_hashes.clone(),
         deployment_manifest_hash,
+        attest_calldata_hash: keccak_hex(&attest_bytes),
         submit_calldata_hash: keccak_hex(&submit_bytes),
+        materialize_calldata_hash: keccak_hex(&materialize_bytes),
         signer_lock_root: signer_lock_root.to_string(),
     })
 }
@@ -3064,6 +3895,13 @@ fn validate_manager_for_submit(
             "manager freeze nonce {} differs from proof nonce {}",
             manager.current_close_freeze_nonce, expected.close_freeze_nonce
         )));
+    }
+    if manager.close_request_generation == 0
+        || deployment.materializer_frozen_generation != manager.close_request_generation
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "materializer is not frozen for the Manager's exact close-request generation".into(),
+        ));
     }
     if let Some(pending) = &manager.pending {
         if pending_matches(pending, expected) {
@@ -3601,32 +4439,868 @@ fn revalidate_semantic_confirmation<B: ClosePublisherBackend>(
     Ok(current)
 }
 
-fn complete_from_semantic_confirmation(
+fn validate_materializer_ready(
+    manager: &ManagerObservation,
+    observed: &ObservedDeployment,
+    prepared: &PreparedClose,
+    require_materialized: bool,
+) -> Result<()> {
+    if manager.status != 2
+        || !manager
+            .finalized
+            .as_ref()
+            .is_some_and(|value| finalized_matches(value, &prepared.expected))
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "signed-head materialization requires the complete exact Closed manager state".into(),
+        ));
+    }
+    if manager.close_request_generation == 0
+        || observed.materializer_frozen_generation != manager.close_request_generation
+    {
+        return Err(PublicClosePublisherError::Evidence(
+            "materializer frozen generation differs from the exact finalized close era".into(),
+        ));
+    }
+    let materialized = same_hex(
+        &observed.materialized_channel_exit,
+        &prepared.expected.close_intent_digest,
+    );
+    if require_materialized && !materialized {
+        return Err(PublicClosePublisherError::Evidence(
+            "materializer did not persist the exact finalized close digest".into(),
+        ));
+    }
+    if !require_materialized
+        && !materialized
+        && !same_hex(
+            &observed.materialized_channel_exit,
+            &format!("0x{}", "00".repeat(32)),
+        )
+    {
+        return Err(PublicClosePublisherError::Conflict(
+            "materializer contains a sibling finalized close digest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn attestation_confirmation_by_hash<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    transaction_hash: &str,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let transaction_hash = normalize_hex(transaction_hash, 32, "attestation transaction hash")
+        .map_err(PublicClosePublisherError::Evidence)?;
+    let ReceiptState::Finalized {
+        receipt,
+        confirmation,
+    } = inspect_receipt_by_hash(
+        backend,
+        &transaction_hash,
+        None,
+        None,
+        prepared.chain_id,
+        allow_unfinalized_devnet,
+        true,
+    )?
+    else {
+        return Err(PublicClosePublisherError::Evidence(
+            "SignedHeadBackingAttested receipt is not covered by a durable head".into(),
+        ));
+    };
+    validate_attested_event(&receipt, deployment, prepared)?;
+    let observed = backend.observe_deployment(deployment, prepared, confirmation.block_number)?;
+    validate_deployment_observation(deployment, &observed, prepared)?;
+    if !backing_attestation_ready(&observed, prepared)? {
+        return Err(PublicClosePublisherError::Evidence(
+            "attestation receipt block does not expose the exact current backing receipt".into(),
+        ));
+    }
+    let stable_block = backend.block_at(
+        confirmation.block_number,
+        confirmation.finalized_checkpoint.source,
+    )?;
+    let expected_hash = confirmation
+        .block_hash
+        .parse::<Bytes32>()
+        .map_err(|error| {
+            PublicClosePublisherError::Evidence(format!(
+                "parse attestation confirmation block hash: {error}"
+            ))
+        })?;
+    if stable_block.hash != expected_hash || stable_block.number != confirmation.block_number {
+        return Err(PublicClosePublisherError::Evidence(
+            "attestation receipt block changed during pinned getter read-back".into(),
+        ));
+    }
+    Ok(confirmation)
+}
+
+fn discover_attestation_confirmation<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    checkpoint: &L1FinalizedCheckpoint,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let hashes = backend.event_transaction_hashes(
+        &deployment.close_funding_materializer,
+        &keccak_hex(SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes()),
+        &indexed_u32(prepared.channel_id),
+        deployment.manager_deployment_block,
+        checkpoint.block_number,
+    )?;
+    let mut matching = Vec::new();
+    for hash in hashes {
+        let ReceiptState::Finalized { receipt, .. } = inspect_receipt_by_hash(
+            backend,
+            &hash,
+            None,
+            None,
+            prepared.chain_id,
+            allow_unfinalized_devnet,
+            true,
+        )?
+        else {
+            return Err(PublicClosePublisherError::Evidence(
+                "attestation event search returned non-finalized provenance".into(),
+            ));
+        };
+        if exact_attested_event(&receipt, deployment, prepared)?.is_none() {
+            continue;
+        }
+        matching.push(attestation_confirmation_by_hash(
+            backend,
+            deployment,
+            prepared,
+            &hash,
+            allow_unfinalized_devnet,
+        )?);
+    }
+    if matching.len() != 1 {
+        return Err(PublicClosePublisherError::Conflict(format!(
+            "durable exact SignedHeadBackingAttested provenance count {} != 1",
+            matching.len()
+        )));
+    }
+    let confirmation = matching.pop().expect("one confirmation checked");
+    checkpoint_advances(checkpoint, &confirmation.finalized_checkpoint)
+        .map_err(PublicClosePublisherError::Evidence)?;
+    Ok(confirmation)
+}
+
+fn revalidate_attestation_confirmation<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    stored: &FinalizedReceipt,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let current = attestation_confirmation_by_hash(
+        backend,
+        deployment,
+        prepared,
+        &stored.transaction_hash,
+        allow_unfinalized_devnet,
+    )?;
+    validate_stored_confirmation(stored, &current)?;
+    Ok(current)
+}
+
+fn materialization_confirmation_by_hash<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    transaction_hash: &str,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let transaction_hash = normalize_hex(transaction_hash, 32, "materialization transaction hash")
+        .map_err(PublicClosePublisherError::Evidence)?;
+    let ReceiptState::Finalized {
+        receipt,
+        confirmation,
+    } = inspect_receipt_by_hash(
+        backend,
+        &transaction_hash,
+        None,
+        None,
+        prepared.chain_id,
+        allow_unfinalized_devnet,
+        true,
+    )?
+    else {
+        return Err(PublicClosePublisherError::Evidence(
+            "SignedHeadExitMaterialized receipt is not covered by a durable head".into(),
+        ));
+    };
+    validate_materialized_event(&receipt, deployment, prepared)?;
+    let manager = observation_at_receipt(backend, &deployment.manager, &confirmation)?;
+    let observed = backend.observe_deployment(deployment, prepared, confirmation.block_number)?;
+    validate_deployment_observation(deployment, &observed, prepared)?;
+    validate_materializer_ready(&manager, &observed, prepared, true)?;
+    let stable_block = backend.block_at(
+        confirmation.block_number,
+        confirmation.finalized_checkpoint.source,
+    )?;
+    let expected_hash = confirmation
+        .block_hash
+        .parse::<Bytes32>()
+        .map_err(|error| {
+            PublicClosePublisherError::Evidence(format!(
+                "parse materialization confirmation block hash: {error}"
+            ))
+        })?;
+    if stable_block.hash != expected_hash || stable_block.number != confirmation.block_number {
+        return Err(PublicClosePublisherError::Evidence(
+            "materialization receipt block changed during pinned getter read-back".into(),
+        ));
+    }
+    Ok(confirmation)
+}
+
+fn discover_materialization_confirmation<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    checkpoint: &L1FinalizedCheckpoint,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let hashes = backend.event_transaction_hashes(
+        &deployment.close_funding_materializer,
+        &keccak_hex(SIGNED_HEAD_EXIT_MATERIALIZED_EVENT.as_bytes()),
+        &indexed_u32(prepared.channel_id),
+        deployment.manager_deployment_block,
+        checkpoint.block_number,
+    )?;
+    let mut matching = Vec::new();
+    for hash in hashes {
+        let ReceiptState::Finalized { receipt, .. } = inspect_receipt_by_hash(
+            backend,
+            &hash,
+            None,
+            None,
+            prepared.chain_id,
+            allow_unfinalized_devnet,
+            true,
+        )?
+        else {
+            return Err(PublicClosePublisherError::Evidence(
+                "materialization event search returned non-finalized provenance".into(),
+            ));
+        };
+        if exact_materialized_event(&receipt, deployment, prepared)?.is_none() {
+            continue;
+        }
+        matching.push(materialization_confirmation_by_hash(
+            backend,
+            deployment,
+            prepared,
+            &hash,
+            allow_unfinalized_devnet,
+        )?);
+    }
+    if matching.len() != 1 {
+        return Err(PublicClosePublisherError::Conflict(format!(
+            "durable exact SignedHeadExitMaterialized provenance count {} != 1",
+            matching.len()
+        )));
+    }
+    let confirmation = matching.pop().expect("one confirmation checked");
+    checkpoint_advances(checkpoint, &confirmation.finalized_checkpoint)
+        .map_err(PublicClosePublisherError::Evidence)?;
+    Ok(confirmation)
+}
+
+fn revalidate_materialization_confirmation<B: ClosePublisherBackend>(
+    backend: &mut B,
+    deployment: &DeploymentManifest,
+    prepared: &PreparedClose,
+    stored: &FinalizedReceipt,
+    allow_unfinalized_devnet: bool,
+) -> Result<FinalizedReceipt> {
+    let current = materialization_confirmation_by_hash(
+        backend,
+        deployment,
+        prepared,
+        &stored.transaction_hash,
+        allow_unfinalized_devnet,
+    )?;
+    validate_stored_confirmation(stored, &current)?;
+    Ok(current)
+}
+
+fn complete_from_materialization_confirmation(
     config: &PublicClosePublisherConfig,
     prepared: &PreparedClose,
     deployment: &DeploymentManifest,
     journal: &mut PublicationJournal,
     confirmation: FinalizedReceipt,
 ) -> Result<PublicCloseProgress> {
-    journal.finalize_observation = Some(confirmation.clone());
+    if journal.attest_observation.is_none() || journal.finalize_observation.is_none() {
+        return Err(PublicClosePublisherError::Conflict(
+            "materialization cannot complete without durable attestation and guarded-finalize provenance"
+                .into(),
+        ));
+    }
+    journal.materialize_observation = Some(confirmation.clone());
+    let finalize_transaction_hash = journal
+        .finalize_observation
+        .as_ref()
+        .map(|value| value.transaction_hash.clone());
     let publication = PublicClosePublication {
-        schema_version: 1,
+        schema_version: PUBLICATION_VERSION,
         chain_id: prepared.chain_id,
         rollup: prepared.rollup.clone(),
         manager: deployment.manager.clone(),
+        materializer: deployment.close_funding_materializer.clone(),
         channel_id: prepared.channel_id,
         close_intent_digest: prepared.expected.close_intent_digest.clone(),
         artifact_hash: prepared.artifact_hash.clone(),
+        attest_transaction_hash: journal
+            .attest_observation
+            .as_ref()
+            .expect("checked above")
+            .transaction_hash
+            .clone(),
         submit_transaction_hash: journal
             .submit_observation
             .as_ref()
             .map(|value| value.transaction_hash.clone()),
-        finalize_transaction_hash: Some(confirmation.transaction_hash.clone()),
+        finalize_transaction_hash,
+        materialize_transaction_hash: confirmation.transaction_hash.clone(),
         finalized_checkpoint: confirmation.finalized_checkpoint,
     };
     journal.completed = Some(publication.clone());
     write_journal(&config.journal_path, journal)?;
     Ok(PublicCloseProgress::Complete { publication })
+}
+
+/// Make the exact whole-vector backing proof durably available on L1 before a close intent can
+/// become the Manager's high-water mark. The call is permissionless and idempotent, but the
+/// publisher still journals its exact signed bytes and reconciles the signer nonce when another
+/// participant wins the semantic race.
+#[allow(clippy::too_many_arguments)]
+fn advance_attestation<B: ClosePublisherBackend>(
+    config: &PublicClosePublisherConfig,
+    backend: &mut B,
+    prepared: &PreparedClose,
+    deployment: &DeploymentManifest,
+    journal: &mut PublicationJournal,
+    signer: &str,
+) -> Result<Option<PublicCloseProgress>> {
+    let calldata = attest_calldata(&deployment.manager, &prepared.backing_mle_proof)?;
+    let calldata_bytes = decode_hex(&calldata, None, "attest calldata")
+        .map_err(PublicClosePublisherError::Bundle)?;
+    if !same_hex(
+        &keccak_hex(&calldata_bytes),
+        &journal.binding.attest_calldata_hash,
+    ) {
+        return Err(PublicClosePublisherError::Conflict(
+            "attestation calldata differs from the durable artifact binding".into(),
+        ));
+    }
+    let reservation = close_signer_reservation(
+        prepared.chain_id,
+        signer,
+        &config.journal_path,
+        &journal.binding,
+        "attest",
+        &deployment.close_funding_materializer,
+        &journal.binding.attest_calldata_hash,
+        None,
+    )?;
+
+    let (_, observed, checkpoint) = read_stable_context(
+        backend,
+        deployment,
+        prepared,
+        config.allow_unfinalized_devnet,
+    )?;
+    if backing_attestation_ready(&observed, prepared)? {
+        let newly_adopted = journal.attest_observation.is_none();
+        let confirmation = match journal.attest_observation.as_ref() {
+            Some(stored) => revalidate_attestation_confirmation(
+                backend,
+                deployment,
+                prepared,
+                stored,
+                config.allow_unfinalized_devnet,
+            )?,
+            None => discover_attestation_confirmation(
+                backend,
+                deployment,
+                prepared,
+                &checkpoint,
+                config.allow_unfinalized_devnet,
+            )?,
+        };
+        journal.attest_observation = Some(confirmation.clone());
+        write_journal(&config.journal_path, journal)?;
+        if let Some(waiting) = reconcile_semantic_winner(
+            config,
+            backend,
+            journal,
+            ClosePhase::Attest,
+            &confirmation,
+            &reservation,
+            signer,
+        )? {
+            return Ok(Some(waiting));
+        }
+        if newly_adopted && journal.attest.is_none() {
+            return Ok(Some(PublicCloseProgress::AttestAdopted {
+                transaction_hash: confirmation.transaction_hash,
+            }));
+        }
+        return Ok(None);
+    }
+    if journal.attest_observation.is_some() {
+        return Err(PublicClosePublisherError::Evidence(
+            "stored backing attestation lost its exact current canonical state".into(),
+        ));
+    }
+
+    if let Some(mut step) = journal.attest.clone() {
+        if step.superseded_confirmation.is_some() {
+            return Err(PublicClosePublisherError::Conflict(
+                "superseded attestation has no adopted semantic observation".into(),
+            ));
+        }
+        let needs_reservation = step.confirmation.is_none();
+        if needs_reservation {
+            claim_signer_reservation(&config.signer_lock_root, &reservation)?;
+        }
+        validate_transaction_step(
+            backend,
+            &step,
+            prepared.chain_id,
+            signer,
+            &deployment.close_funding_materializer,
+            &calldata,
+        )?;
+        match step_receipt(
+            backend,
+            &step,
+            signer,
+            prepared.chain_id,
+            config.allow_unfinalized_devnet,
+        )? {
+            ReceiptState::Missing if step.confirmation.is_none() => {
+                let (_, fresh_observed, fresh_checkpoint) = read_stable_context(
+                    backend,
+                    deployment,
+                    prepared,
+                    config.allow_unfinalized_devnet,
+                )?;
+                if backing_attestation_ready(&fresh_observed, prepared)? {
+                    let confirmation = discover_attestation_confirmation(
+                        backend,
+                        deployment,
+                        prepared,
+                        &fresh_checkpoint,
+                        config.allow_unfinalized_devnet,
+                    )?;
+                    let hash = confirmation.transaction_hash.clone();
+                    journal.attest_observation = Some(confirmation.clone());
+                    write_journal(&config.journal_path, journal)?;
+                    if let Some(waiting) = reconcile_semantic_winner(
+                        config,
+                        backend,
+                        journal,
+                        ClosePhase::Attest,
+                        &confirmation,
+                        &reservation,
+                        signer,
+                    )? {
+                        return Ok(Some(waiting));
+                    }
+                    return Ok(Some(PublicCloseProgress::AttestAdopted {
+                        transaction_hash: hash,
+                    }));
+                }
+                let broadcast = publish_exact_raw(backend, signer, &step.transaction)?;
+                return Ok(Some(if broadcast {
+                    PublicCloseProgress::AttestBroadcast {
+                        transaction_hash: step.transaction.transaction_hash,
+                    }
+                } else {
+                    PublicCloseProgress::AwaitingAttestReceipt {
+                        transaction_hash: step.transaction.transaction_hash,
+                    }
+                }));
+            }
+            ReceiptState::Mined { block_number } if step.confirmation.is_none() => {
+                return Ok(Some(PublicCloseProgress::AwaitingAttestFinality {
+                    transaction_hash: step.transaction.transaction_hash,
+                    receipt_block: block_number,
+                }));
+            }
+            ReceiptState::Finalized { confirmation, .. } => {
+                let exact = attestation_confirmation_by_hash(
+                    backend,
+                    deployment,
+                    prepared,
+                    &confirmation.transaction_hash,
+                    config.allow_unfinalized_devnet,
+                )?;
+                validate_stored_confirmation(&confirmation, &exact)?;
+                step.confirmation = Some(exact.clone());
+                journal.attest = Some(step);
+                journal.attest_observation = Some(exact);
+                write_journal(&config.journal_path, journal)?;
+                if needs_reservation {
+                    release_signer_reservation(&config.signer_lock_root, &reservation)?;
+                } else {
+                    release_exact_signer_reservation(&config.signer_lock_root, &reservation)?;
+                }
+                return Ok(None);
+            }
+            ReceiptState::Missing | ReceiptState::Mined { .. } => {
+                return Err(PublicClosePublisherError::Evidence(
+                    "stored attestation confirmation lost canonical finality".into(),
+                ));
+            }
+        }
+    }
+
+    let transaction = sign_after_reservation(&config.signer_lock_root, &reservation, || {
+        backend.sign_transaction(
+            config.account.trim(),
+            prepared.chain_id,
+            signer,
+            &deployment.close_funding_materializer,
+            &calldata,
+        )
+    })?;
+    let inspected = backend.inspect_signed_transaction(
+        &transaction.raw_signed_transaction,
+        prepared.chain_id,
+        signer,
+        &deployment.close_funding_materializer,
+        &calldata,
+    )?;
+    if inspected != transaction {
+        return Err(PublicClosePublisherError::Evidence(
+            "attestation signer returned metadata inconsistent with raw bytes".into(),
+        ));
+    }
+    journal.attest = Some(TransactionStep {
+        transaction: transaction.clone(),
+        confirmation: None,
+        superseded_confirmation: None,
+    });
+    // Critical WAL boundary: exact raw attestation bytes are durable before publication.
+    write_journal(&config.journal_path, journal)?;
+
+    let (_, fresh_observed, fresh_checkpoint) = read_stable_context(
+        backend,
+        deployment,
+        prepared,
+        config.allow_unfinalized_devnet,
+    )?;
+    if backing_attestation_ready(&fresh_observed, prepared)? {
+        let confirmation = discover_attestation_confirmation(
+            backend,
+            deployment,
+            prepared,
+            &fresh_checkpoint,
+            config.allow_unfinalized_devnet,
+        )?;
+        let hash = confirmation.transaction_hash.clone();
+        journal.attest_observation = Some(confirmation.clone());
+        write_journal(&config.journal_path, journal)?;
+        if let Some(waiting) = reconcile_semantic_winner(
+            config,
+            backend,
+            journal,
+            ClosePhase::Attest,
+            &confirmation,
+            &reservation,
+            signer,
+        )? {
+            return Ok(Some(waiting));
+        }
+        return Ok(Some(PublicCloseProgress::AttestAdopted {
+            transaction_hash: hash,
+        }));
+    }
+    publish_exact_raw(backend, signer, &transaction)?;
+    Ok(Some(PublicCloseProgress::AttestBroadcast {
+        transaction_hash: transaction.transaction_hash,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_materialization<B: ClosePublisherBackend>(
+    config: &PublicClosePublisherConfig,
+    backend: &mut B,
+    prepared: &PreparedClose,
+    deployment: &DeploymentManifest,
+    journal: &mut PublicationJournal,
+    signer: &str,
+) -> Result<PublicCloseProgress> {
+    let calldata = materialize_calldata(&deployment.manager, &prepared.backing_mle_proof)?;
+    let calldata_bytes = decode_hex(&calldata, None, "materialize calldata")
+        .map_err(PublicClosePublisherError::Bundle)?;
+    if !same_hex(
+        &keccak_hex(&calldata_bytes),
+        &journal.binding.materialize_calldata_hash,
+    ) {
+        return Err(PublicClosePublisherError::Conflict(
+            "materialization calldata differs from the durable artifact binding".into(),
+        ));
+    }
+    let generation =
+        stored_finalize_authorization(journal, &prepared.expected)?.close_request_generation;
+    let reservation = close_signer_reservation(
+        prepared.chain_id,
+        signer,
+        &config.journal_path,
+        &journal.binding,
+        "materialize",
+        &deployment.close_funding_materializer,
+        &journal.binding.materialize_calldata_hash,
+        Some(generation),
+    )?;
+
+    let (manager, observed, checkpoint) = read_stable_context(
+        backend,
+        deployment,
+        prepared,
+        config.allow_unfinalized_devnet,
+    )?;
+    validate_materializer_ready(&manager, &observed, prepared, false)?;
+    if same_hex(
+        &observed.materialized_channel_exit,
+        &prepared.expected.close_intent_digest,
+    ) {
+        let confirmation = discover_materialization_confirmation(
+            backend,
+            deployment,
+            prepared,
+            &checkpoint,
+            config.allow_unfinalized_devnet,
+        )?;
+        journal.materialize_observation = Some(confirmation.clone());
+        write_journal(&config.journal_path, journal)?;
+        if let Some(waiting) = reconcile_semantic_winner(
+            config,
+            backend,
+            journal,
+            ClosePhase::Materialize,
+            &confirmation,
+            &reservation,
+            signer,
+        )? {
+            return Ok(waiting);
+        }
+        let hash = confirmation.transaction_hash.clone();
+        let progress = complete_from_materialization_confirmation(
+            config,
+            prepared,
+            deployment,
+            journal,
+            confirmation,
+        )?;
+        if journal.materialize.is_none() {
+            return Ok(PublicCloseProgress::MaterializeAdopted {
+                transaction_hash: hash,
+            });
+        }
+        return Ok(progress);
+    }
+    if journal.materialize_observation.is_some() {
+        return Err(PublicClosePublisherError::Evidence(
+            "stored materialization confirmation lost its exact canonical state".into(),
+        ));
+    }
+
+    if let Some(mut step) = journal.materialize.clone() {
+        if step.superseded_confirmation.is_some() {
+            return Err(PublicClosePublisherError::Conflict(
+                "superseded materialization has no adopted semantic observation".into(),
+            ));
+        }
+        let needs_reservation = step.confirmation.is_none();
+        if needs_reservation {
+            claim_signer_reservation(&config.signer_lock_root, &reservation)?;
+        }
+        validate_transaction_step(
+            backend,
+            &step,
+            prepared.chain_id,
+            signer,
+            &deployment.close_funding_materializer,
+            &calldata,
+        )?;
+        match step_receipt(
+            backend,
+            &step,
+            signer,
+            prepared.chain_id,
+            config.allow_unfinalized_devnet,
+        )? {
+            ReceiptState::Missing if step.confirmation.is_none() => {
+                let (fresh_manager, fresh_observed, fresh_checkpoint) = read_stable_context(
+                    backend,
+                    deployment,
+                    prepared,
+                    config.allow_unfinalized_devnet,
+                )?;
+                validate_materializer_ready(&fresh_manager, &fresh_observed, prepared, false)?;
+                if same_hex(
+                    &fresh_observed.materialized_channel_exit,
+                    &prepared.expected.close_intent_digest,
+                ) {
+                    let confirmation = discover_materialization_confirmation(
+                        backend,
+                        deployment,
+                        prepared,
+                        &fresh_checkpoint,
+                        config.allow_unfinalized_devnet,
+                    )?;
+                    journal.materialize_observation = Some(confirmation.clone());
+                    write_journal(&config.journal_path, journal)?;
+                    if let Some(waiting) = reconcile_semantic_winner(
+                        config,
+                        backend,
+                        journal,
+                        ClosePhase::Materialize,
+                        &confirmation,
+                        &reservation,
+                        signer,
+                    )? {
+                        return Ok(waiting);
+                    }
+                    return complete_from_materialization_confirmation(
+                        config,
+                        prepared,
+                        deployment,
+                        journal,
+                        confirmation,
+                    );
+                }
+                let broadcast = publish_exact_raw(backend, signer, &step.transaction)?;
+                return Ok(if broadcast {
+                    PublicCloseProgress::MaterializeBroadcast {
+                        transaction_hash: step.transaction.transaction_hash,
+                    }
+                } else {
+                    PublicCloseProgress::AwaitingMaterializeReceipt {
+                        transaction_hash: step.transaction.transaction_hash,
+                    }
+                });
+            }
+            ReceiptState::Mined { block_number } if step.confirmation.is_none() => {
+                return Ok(PublicCloseProgress::AwaitingMaterializeFinality {
+                    transaction_hash: step.transaction.transaction_hash,
+                    receipt_block: block_number,
+                });
+            }
+            ReceiptState::Finalized { confirmation, .. } => {
+                let exact = materialization_confirmation_by_hash(
+                    backend,
+                    deployment,
+                    prepared,
+                    &confirmation.transaction_hash,
+                    config.allow_unfinalized_devnet,
+                )?;
+                validate_stored_confirmation(&confirmation, &exact)?;
+                step.confirmation = Some(exact.clone());
+                journal.materialize = Some(step);
+                journal.materialize_observation = Some(exact.clone());
+                write_journal(&config.journal_path, journal)?;
+                if needs_reservation {
+                    release_signer_reservation(&config.signer_lock_root, &reservation)?;
+                } else {
+                    release_exact_signer_reservation(&config.signer_lock_root, &reservation)?;
+                }
+                return complete_from_materialization_confirmation(
+                    config, prepared, deployment, journal, exact,
+                );
+            }
+            ReceiptState::Missing | ReceiptState::Mined { .. } => {
+                return Err(PublicClosePublisherError::Evidence(
+                    "stored materialization confirmation lost canonical finality".into(),
+                ));
+            }
+        }
+    }
+
+    let transaction = sign_after_reservation(&config.signer_lock_root, &reservation, || {
+        backend.sign_transaction(
+            config.account.trim(),
+            prepared.chain_id,
+            signer,
+            &deployment.close_funding_materializer,
+            &calldata,
+        )
+    })?;
+    let inspected = backend.inspect_signed_transaction(
+        &transaction.raw_signed_transaction,
+        prepared.chain_id,
+        signer,
+        &deployment.close_funding_materializer,
+        &calldata,
+    )?;
+    if inspected != transaction {
+        return Err(PublicClosePublisherError::Evidence(
+            "materialization signer returned metadata inconsistent with raw bytes".into(),
+        ));
+    }
+    journal.materialize = Some(TransactionStep {
+        transaction: transaction.clone(),
+        confirmation: None,
+        superseded_confirmation: None,
+    });
+    // Critical WAL boundary: exact raw materialization bytes are durable before publication.
+    write_journal(&config.journal_path, journal)?;
+    let (fresh_manager, fresh_observed, fresh_checkpoint) = read_stable_context(
+        backend,
+        deployment,
+        prepared,
+        config.allow_unfinalized_devnet,
+    )?;
+    validate_materializer_ready(&fresh_manager, &fresh_observed, prepared, false)?;
+    if same_hex(
+        &fresh_observed.materialized_channel_exit,
+        &prepared.expected.close_intent_digest,
+    ) {
+        let confirmation = discover_materialization_confirmation(
+            backend,
+            deployment,
+            prepared,
+            &fresh_checkpoint,
+            config.allow_unfinalized_devnet,
+        )?;
+        journal.materialize_observation = Some(confirmation.clone());
+        write_journal(&config.journal_path, journal)?;
+        if let Some(waiting) = reconcile_semantic_winner(
+            config,
+            backend,
+            journal,
+            ClosePhase::Materialize,
+            &confirmation,
+            &reservation,
+            signer,
+        )? {
+            return Ok(waiting);
+        }
+        return complete_from_materialization_confirmation(
+            config,
+            prepared,
+            deployment,
+            journal,
+            confirmation,
+        );
+    }
+    publish_exact_raw(backend, signer, &transaction)?;
+    Ok(PublicCloseProgress::MaterializeBroadcast {
+        transaction_hash: transaction.transaction_hash,
+    })
 }
 
 fn advance_with_backend<B: ClosePublisherBackend>(
@@ -3667,6 +5341,19 @@ fn advance_with_backend<B: ClosePublisherBackend>(
         &config.signer_lock_root,
     )?;
     let mut journal = load_or_create_journal(&config.journal_path, binding, &signer)?;
+    // The Manager deliberately rejects a close proof until this exact whole-vector backing
+    // statement is already durably attested. Advance that permissionless WAL first; only a
+    // canonical finalized event plus pinned getter read-back permits the close state machine.
+    if let Some(progress) = advance_attestation(
+        config,
+        backend,
+        &prepared,
+        &deployment,
+        &mut journal,
+        &signer,
+    )? {
+        return Ok(progress);
+    }
     let submit_reservation = close_signer_reservation(
         prepared.chain_id,
         &signer,
@@ -3692,6 +5379,18 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             &finalize_authorization.calldata_hash,
             Some(finalize_authorization.close_request_generation),
         )?;
+        let materialize_calldata =
+            materialize_calldata(&deployment.manager, &prepared.backing_mle_proof)?;
+        let materialize_reservation = close_signer_reservation(
+            prepared.chain_id,
+            &signer,
+            &config.journal_path,
+            &journal.binding,
+            "materialize",
+            &deployment.close_funding_materializer,
+            &journal.binding.materialize_calldata_hash,
+            Some(finalize_authorization.close_request_generation),
+        )?;
         if let Some(submit) = journal.submit.as_ref() {
             validate_transaction_step(
                 backend,
@@ -3710,6 +5409,16 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 &signer,
                 &deployment.manager,
                 &finalize_authorization.calldata,
+            )?;
+        }
+        if let Some(materialize) = journal.materialize.as_ref() {
+            validate_transaction_step(
+                backend,
+                materialize,
+                prepared.chain_id,
+                &signer,
+                &deployment.close_funding_materializer,
+                &materialize_calldata,
             )?;
         }
         let stored_submit = journal.submit_observation.as_ref().ok_or_else(|| {
@@ -3740,10 +5449,26 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             prepared.chain_id,
             config.allow_unfinalized_devnet,
         )?;
-        if completed.schema_version != 1
+        let stored_materialize = journal.materialize_observation.as_ref().ok_or_else(|| {
+            PublicClosePublisherError::Conflict(
+                "completed journal has no exact semantic materialization confirmation".into(),
+            )
+        })?;
+        let materialize_confirmation = revalidate_materialization_confirmation(
+            backend,
+            &deployment,
+            &prepared,
+            stored_materialize,
+            config.allow_unfinalized_devnet,
+        )?;
+        if completed.schema_version != 2
             || completed.chain_id != prepared.chain_id
             || !same_hex(&completed.rollup, &prepared.rollup)
             || !same_hex(&completed.manager, &deployment.manager)
+            || !same_hex(
+                &completed.materializer,
+                &deployment.close_funding_materializer,
+            )
             || completed.channel_id != prepared.channel_id
             || !same_hex(
                 &completed.close_intent_digest,
@@ -3754,17 +5479,22 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 != Some(submit_confirmation.transaction_hash.as_str())
             || completed.finalize_transaction_hash.as_deref()
                 != Some(finalize_confirmation.transaction_hash.as_str())
+            || !same_hex(
+                &completed.materialize_transaction_hash,
+                &materialize_confirmation.transaction_hash,
+            )
         {
             return Err(PublicClosePublisherError::Conflict(
                 "completed publication fields differ from semantic confirmations or bundle".into(),
             ));
         }
-        let (current, _, checkpoint) = read_stable_context(
+        let (current, observed, checkpoint) = read_stable_context(
             backend,
             &deployment,
             &prepared,
             config.allow_unfinalized_devnet,
         )?;
+        validate_materializer_ready(&current, &observed, &prepared, true)?;
         if current.status != 2
             || !current
                 .finalized
@@ -3790,6 +5520,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             .map_err(PublicClosePublisherError::Evidence)?;
         release_exact_signer_reservation(&config.signer_lock_root, &submit_reservation)?;
         release_exact_signer_reservation(&config.signer_lock_root, &finalize_reservation)?;
+        release_exact_signer_reservation(&config.signer_lock_root, &materialize_reservation)?;
         return Ok(PublicCloseProgress::Complete {
             publication: completed,
         });
@@ -3924,12 +5655,13 @@ fn advance_with_backend<B: ClosePublisherBackend>(
         )? {
             return Ok(waiting);
         }
-        return complete_from_semantic_confirmation(
+        return advance_materialization(
             config,
+            backend,
             &prepared,
             &deployment,
             &mut journal,
-            final_confirmation,
+            &signer,
         );
     }
 
@@ -4301,12 +6033,13 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                     )? {
                         return Ok(waiting);
                     }
-                    return complete_from_semantic_confirmation(
+                    return advance_materialization(
                         config,
+                        backend,
                         &prepared,
                         &deployment,
                         &mut journal,
-                        confirmation,
+                        &signer,
                     );
                 }
                 revalidate_finalize_authorization(
@@ -4362,13 +6095,8 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 }
                 finalize.confirmation = Some(confirmation.clone());
                 journal.finalize = Some(finalize);
-                let progress = complete_from_semantic_confirmation(
-                    config,
-                    &prepared,
-                    &deployment,
-                    &mut journal,
-                    confirmation,
-                )?;
+                journal.finalize_observation = Some(confirmation);
+                write_journal(&config.journal_path, &journal)?;
                 if finalize_needs_reservation {
                     release_signer_reservation(&config.signer_lock_root, &finalize_reservation)?;
                 } else {
@@ -4377,7 +6105,14 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                         &finalize_reservation,
                     )?;
                 }
-                return Ok(progress);
+                return advance_materialization(
+                    config,
+                    backend,
+                    &prepared,
+                    &deployment,
+                    &mut journal,
+                    &signer,
+                );
             }
             ReceiptState::Missing | ReceiptState::Mined { .. } => {
                 return Err(PublicClosePublisherError::Evidence(
@@ -4444,12 +6179,13 @@ fn advance_with_backend<B: ClosePublisherBackend>(
         )? {
             return Ok(waiting);
         }
-        return complete_from_semantic_confirmation(
+        return advance_materialization(
             config,
+            backend,
             &prepared,
             &deployment,
             &mut journal,
-            confirmation,
+            &signer,
         );
     }
     if let Some(waiting) = validate_manager_for_finalize(
@@ -4569,12 +6305,13 @@ fn advance_with_backend<B: ClosePublisherBackend>(
         )? {
             return Ok(waiting);
         }
-        return complete_from_semantic_confirmation(
+        return advance_materialization(
             config,
+            backend,
             &prepared,
             &deployment,
             &mut journal,
-            confirmation,
+            &signer,
         );
     }
     revalidate_finalize_authorization(
@@ -4700,6 +6437,20 @@ impl CastCloseBackend {
         block_number: u64,
     ) -> Result<Vec<u8>> {
         let kind = AbiKind::Uint(bits);
+        let value = Value::String(value.to_string());
+        let calldata = encode_function(name, &[(&kind, &value, "argument")])
+            .map_err(PublicClosePublisherError::Evidence)?;
+        self.call_raw(target, &calldata, block_number)
+    }
+
+    fn one_bytes32(
+        &self,
+        target: &str,
+        name: &str,
+        value: &str,
+        block_number: u64,
+    ) -> Result<Vec<u8>> {
+        let kind = AbiKind::FixedBytes(32);
         let value = Value::String(value.to_string());
         let calldata = encode_function(name, &[(&kind, &value, "argument")])
             .map_err(PublicClosePublisherError::Evidence)?;
@@ -4945,8 +6696,10 @@ impl ClosePublisherBackend for CastCloseBackend {
     fn observe_deployment(
         &mut self,
         manifest: &DeploymentManifest,
+        prepared: &PreparedClose,
         block_number: u64,
     ) -> Result<ObservedDeployment> {
+        let attestation = backing_attestation_identity(prepared, manifest)?;
         let manager_registry = word_address(
             &self.one_word(&manifest.manager, "registry()", block_number)?,
             "manager.registry",
@@ -4954,6 +6707,51 @@ impl ClosePublisherBackend for CastCloseBackend {
         let manager_verifier = word_address(
             &self.one_word(&manifest.manager, "verifier()", block_number)?,
             "manager.verifier",
+        )?;
+        let manager_close_funding_materializer = word_address(
+            &self.one_word(
+                &manifest.manager,
+                "closeFundingMaterializer()",
+                block_number,
+            )?,
+            "manager.closeFundingMaterializer",
+        )?;
+        let materializer_rollup = word_address(
+            &self.one_word(
+                &manifest.close_funding_materializer,
+                "rollup()",
+                block_number,
+            )?,
+            "materializer.rollup",
+        )?;
+        let materializer_backing_mle_verifier = word_address(
+            &self.one_word(
+                &manifest.close_funding_materializer,
+                "backingMleVerifier()",
+                block_number,
+            )?,
+            "materializer.backingMleVerifier",
+        )?;
+        let channel_word = self.one_word(&manifest.manager, "channelId()", block_number)?;
+        if channel_word[4..] != [0u8; 28] {
+            return Err(PublicClosePublisherError::Evidence(
+                "manager.channelId is not canonical bytes4".into(),
+            ));
+        }
+        let channel_id = u32::from_be_bytes(channel_word[..4].try_into().expect("four bytes"));
+        let materializer_manager_of_channel = word_address(
+            &decode_words(
+                &self.one_uint(
+                    &manifest.close_funding_materializer,
+                    "managerOfChannel",
+                    32,
+                    u64::from(channel_id),
+                    block_number,
+                )?,
+                1,
+                "materializer.managerOfChannel",
+            )?[0],
+            "materializer.managerOfChannel",
         )?;
         let verifier_close_mle_verifier = word_address(
             &self.one_word(
@@ -4963,30 +6761,166 @@ impl ClosePublisherBackend for CastCloseBackend {
             )?,
             "settlementVerifier.closeMleVerifier",
         )?;
-        let channel_word = self.one_word(&manifest.manager, "channelId()", block_number)?;
-        if channel_word[4..] != [0u8; 28] {
-            return Err(PublicClosePublisherError::Evidence(
-                "manager.channelId is not canonical bytes4".into(),
-            ));
-        }
+        let signed_head_backing_anchor_plus_one = word_uint(
+            &decode_words(
+                &self.one_bytes32(
+                    &manifest.close_funding_materializer,
+                    "signedHeadBackingAnchorPlusOne",
+                    &attestation.statement_key,
+                    block_number,
+                )?,
+                1,
+                "materializer.signedHeadBackingAnchorPlusOne",
+            )?[0],
+            8,
+            "materializer.signedHeadBackingAnchorPlusOne",
+        )?;
+        let exact_backing_proof_attested = word_bool(
+            &decode_words(
+                &self.one_bytes32(
+                    &manifest.close_funding_materializer,
+                    "attestedBackingProof",
+                    &attestation.proof_id,
+                    block_number,
+                )?,
+                1,
+                "materializer.attestedBackingProof",
+            )?[0],
+            "materializer.attestedBackingProof",
+        )?;
+        let address_kind = AbiKind::Address;
+        let channel_kind = AbiKind::Uint(32);
+        let digest_kind = AbiKind::FixedBytes(32);
+        let bool_kind = AbiKind::Bool;
+        let manager_value = Value::String(manifest.manager.clone());
+        let channel_value = Value::String(prepared.channel_id.to_string());
+        let settled_value = Value::String(prepared.expected.final_settled_tx_chain.clone());
+        let funds_value = Value::String(prepared.expected.token_funds_digest.clone());
+        let require_current = Value::Bool(true);
+        let current_calldata = encode_function(
+            "hasSignedHeadBacking",
+            &[
+                (&address_kind, &manager_value, "manager"),
+                (&channel_kind, &channel_value, "channelId"),
+                (&digest_kind, &settled_value, "settledTxChain"),
+                (&digest_kind, &funds_value, "tokenFundsDigest"),
+                (&bool_kind, &require_current, "requireCurrent"),
+            ],
+        )
+        .map_err(PublicClosePublisherError::Evidence)?;
+        let signed_head_backing_current = word_bool(
+            &decode_words(
+                &self.call_raw(
+                    &manifest.close_funding_materializer,
+                    &current_calldata,
+                    block_number,
+                )?,
+                1,
+                "materializer.hasSignedHeadBacking",
+            )?[0],
+            "materializer.hasSignedHeadBacking",
+        )?;
         Ok(ObservedDeployment {
             rollup_runtime_code_hash: self.runtime_code_hash(&manifest.rollup, block_number)?,
             manager_runtime_code_hash: self.runtime_code_hash(&manifest.manager, block_number)?,
+            close_funding_materializer_runtime_code_hash: self
+                .runtime_code_hash(&manifest.close_funding_materializer, block_number)?,
             settlement_verifier_runtime_code_hash: self
                 .runtime_code_hash(&manifest.settlement_verifier, block_number)?,
             mle_verifier_runtime_code_hash: self
                 .runtime_code_hash(&manifest.mle_verifier, block_number)?,
             manager_registry,
             manager_verifier,
+            manager_close_funding_materializer,
+            materializer_rollup,
+            materializer_backing_mle_verifier,
+            materializer_manager_of_channel,
+            materializer_backing_vk_initialized: word_bool(
+                &self.one_word(
+                    &manifest.close_funding_materializer,
+                    "backingVkInitialized()",
+                    block_number,
+                )?,
+                "materializer.backingVkInitialized",
+            )?,
+            materializer_frozen_generation: word_uint(
+                &decode_words(
+                    &self.one_uint(
+                        &manifest.close_funding_materializer,
+                        "frozenGeneration",
+                        32,
+                        u64::from(channel_id),
+                        block_number,
+                    )?,
+                    1,
+                    "materializer.frozenGeneration",
+                )?[0],
+                8,
+                "materializer.frozenGeneration",
+            )?,
+            materializer_last_posted_block: word_uint(
+                &decode_words(
+                    &self.one_uint(
+                        &manifest.close_funding_materializer,
+                        "lastPostedBlock",
+                        32,
+                        u64::from(channel_id),
+                        block_number,
+                    )?,
+                    1,
+                    "materializer.lastPostedBlock",
+                )?[0],
+                8,
+                "materializer.lastPostedBlock",
+            )?,
+            signed_head_backing_anchor_plus_one,
+            exact_backing_proof_attested,
+            signed_head_backing_current,
+            materialized_channel_exit: word_bytes32(
+                &decode_words(
+                    &self.one_uint(
+                        &manifest.close_funding_materializer,
+                        "materializedChannelExit",
+                        32,
+                        u64::from(channel_id),
+                        block_number,
+                    )?,
+                    1,
+                    "materializer.materializedChannelExit",
+                )?[0],
+            ),
+            rollup_latest_finalized_block_number: word_uint(
+                &self.one_word(
+                    &manifest.rollup,
+                    "latestFinalizedBlockNumber()",
+                    block_number,
+                )?,
+                8,
+                "rollup.latestFinalizedBlockNumber",
+            )?,
+            backing_root_finalized: word_bool(
+                &decode_words(
+                    &self.one_bytes32(
+                        &manifest.rollup,
+                        "isFinalizedStateRoot",
+                        &prepared
+                            .backing_public_inputs
+                            .finalized_extended_state_commitment
+                            .to_string(),
+                        block_number,
+                    )?,
+                    1,
+                    "rollup.isFinalizedStateRoot",
+                )?[0],
+                "rollup.isFinalizedStateRoot",
+            )?,
             verifier_close_mle_verifier,
             mle_allowed_chain_id: word_uint(
                 &self.one_word(&manifest.mle_verifier, "allowedChainId()", block_number)?,
                 8,
                 "MLE allowedChainId",
             )?,
-            manager_channel_id: u32::from_be_bytes(
-                channel_word[..4].try_into().expect("four bytes"),
-            ),
+            manager_channel_id: channel_id,
             challenge_period: word_uint(
                 &self.one_word(&manifest.manager, "challengePeriod()", block_number)?,
                 8,
@@ -5483,7 +7417,7 @@ mod tests {
     use super::*;
     use std::collections::{BTreeSet, VecDeque};
 
-    use crate::common::channel::ChannelFund;
+    use crate::common::{channel::ChannelFund, u63::BlockNumber};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -5528,6 +7462,8 @@ mod tests {
 
     fn zero_abi_value(kind: &AbiKind) -> Value {
         match kind {
+            AbiKind::Address => Value::String(address(1)),
+            AbiKind::Bool => Value::Bool(false),
             AbiKind::Uint(_) => Value::String("0".into()),
             AbiKind::FixedBytes(bytes) => Value::String(format!("0x{}", "00".repeat(*bytes))),
             AbiKind::Bytes => Value::String("0x".into()),
@@ -5550,6 +7486,21 @@ mod tests {
             serde_json::to_vec_pretty(value).expect("serialize fixture"),
         )
         .expect("write fixture");
+    }
+
+    fn mutate_manifest(bundle_dir: &Path, mutate: impl FnOnce(&mut Value)) {
+        let path = bundle_dir.join("public_close_manifest.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).expect("read manifest"))
+            .expect("parse manifest");
+        mutate(&mut manifest);
+        write_json(&path, &manifest);
+    }
+
+    fn refresh_manifest_hash(bundle_dir: &Path, field: &str, file: &str) {
+        let hash = sha256_hex(&fs::read(bundle_dir.join(file)).expect("read bundle component"));
+        mutate_manifest(bundle_dir, |manifest| {
+            manifest[field] = Value::String(hash);
+        });
     }
 
     fn fixture(label: &str) -> Fixture {
@@ -5588,6 +7539,22 @@ mod tests {
         let member_set_commitment =
             close_member_set_commitment(&padded_members, member_hashes.len() as u8);
         let token_funds_digest = token_funds_digest(&token_registry, token_count, &amounts);
+        let backing_finalized_extended_state_commitment = word(0x08);
+        // Exercise the backing parser's U63 anchor position rather than accidentally retaining
+        // the close parser's u32-only behavior.
+        let backing_anchor_block_number = BlockNumber::new((1u64 << 40) + 9).expect("U63 anchor");
+        let backing_public_inputs = CloseAssetBackingPublicInputs {
+            channel_id,
+            settled_tx_chain: full.final_settled_tx_chain,
+            token_funds_digest,
+            finalized_extended_state_commitment: backing_finalized_extended_state_commitment,
+            anchor_block_number: backing_anchor_block_number,
+        }
+        .to_u64_vec();
+        assert_eq!(
+            backing_public_inputs.len(),
+            CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
+        );
         let accumulator_root = word(6);
         let public_inputs = ChannelClosePublicInputs {
             channel_id,
@@ -5658,11 +7625,47 @@ mod tests {
         );
         let proof = vec![0x51, 0x4b, 0x50];
         let mle_bytes = serde_json::to_vec_pretty(&mle).expect("serialize MLE");
+        let backing_proof = vec![0x42, 0x41, 0x43, 0x4b];
+        let mut backing_mle = zero_abi_value(&AbiKind::Tuple(mle_v2_fields()));
+        let backing_mle_object = backing_mle.as_object_mut().expect("backing MLE object");
+        backing_mle_object.insert("protocolVersion".into(), Value::String("1".into()));
+        backing_mle_object.insert("constituentWidth".into(), Value::String("2".into()));
+        backing_mle_object.insert(
+            "publicInputs".into(),
+            Value::Array(
+                backing_public_inputs
+                    .iter()
+                    .map(|value| Value::String(value.to_string()))
+                    .collect(),
+            ),
+        );
+        let backing_mle_bytes =
+            serde_json::to_vec_pretty(&backing_mle).expect("serialize backing MLE");
+        let backing_public_input_bytes =
+            serde_json::to_vec_pretty(&backing_public_inputs).expect("serialize backing PIs");
+        let intent_bytes = serde_json::to_vec_pretty(&descriptor).expect("serialize descriptor");
+        let full_bytes = serde_json::to_vec_pretty(&full).expect("serialize full intent");
+        let public_input_bytes =
+            serde_json::to_vec_pretty(&public_inputs).expect("serialize close PIs");
         fs::write(bundle_dir.join("close_proof.bin"), &proof).expect("write proof");
         fs::write(bundle_dir.join("close_intent_mle.json"), &mle_bytes).expect("write MLE");
-        write_json(&bundle_dir.join("close_intent.json"), &descriptor);
-        write_json(&bundle_dir.join("close_intent_full.json"), &full);
-        write_json(&bundle_dir.join("close_public_inputs.json"), &public_inputs);
+        fs::write(bundle_dir.join("backing_proof.bin"), &backing_proof)
+            .expect("write backing proof");
+        fs::write(bundle_dir.join("backing_mle.json"), &backing_mle_bytes)
+            .expect("write backing MLE");
+        fs::write(
+            bundle_dir.join("backing_public_inputs.json"),
+            &backing_public_input_bytes,
+        )
+        .expect("write backing PIs");
+        fs::write(bundle_dir.join("close_intent.json"), &intent_bytes).expect("write descriptor");
+        fs::write(bundle_dir.join("close_intent_full.json"), &full_bytes)
+            .expect("write full intent");
+        fs::write(
+            bundle_dir.join("close_public_inputs.json"),
+            &public_input_bytes,
+        )
+        .expect("write close PIs");
 
         let rollup = address(0x11);
         let balance_vd = repeated(0x77);
@@ -5676,12 +7679,28 @@ mod tests {
                 balance_verifier_data_sha256: balance_vd.clone(),
                 close_proof_file: "close_proof.bin".into(),
                 close_proof_bytes: proof.len(),
+                close_proof_sha256: sha256_hex(&proof),
                 close_mle_file: "close_intent_mle.json".into(),
                 close_mle_bytes: mle_bytes.len(),
+                close_mle_sha256: sha256_hex(&mle_bytes),
+                backing_proof_file: "backing_proof.bin".into(),
+                backing_proof_bytes: backing_proof.len(),
+                backing_proof_sha256: sha256_hex(&backing_proof),
+                backing_mle_file: "backing_mle.json".into(),
+                backing_mle_bytes: backing_mle_bytes.len(),
+                backing_mle_sha256: sha256_hex(&backing_mle_bytes),
+                backing_public_inputs_file: "backing_public_inputs.json".into(),
+                backing_public_input_count: backing_public_inputs.len(),
+                backing_public_inputs_sha256: sha256_hex(&backing_public_input_bytes),
+                backing_finalized_extended_state_commitment,
+                backing_anchor_block_number: backing_anchor_block_number.as_u64(),
                 close_intent_file: "close_intent.json".into(),
+                close_intent_sha256: sha256_hex(&intent_bytes),
                 close_intent_full_file: "close_intent_full.json".into(),
+                close_intent_full_sha256: sha256_hex(&full_bytes),
                 close_public_inputs_file: "close_public_inputs.json".into(),
                 close_public_input_count: public_inputs.len(),
+                close_public_inputs_sha256: sha256_hex(&public_input_bytes),
                 key_material_consumed: false,
                 self_verified: true,
             },
@@ -5698,16 +7717,26 @@ mod tests {
             manager: address(0x22),
             manager_deployment_block: 1,
             manager_runtime_code_hash: repeated(0x32),
+            close_funding_materializer: address(0x45),
+            close_funding_materializer_runtime_code_hash: repeated(0x36),
             settlement_verifier: address(0x33),
             settlement_verifier_runtime_code_hash: repeated(0x34),
             mle_verifier: address(0x44),
             mle_verifier_runtime_code_hash: repeated(0x35),
             balance_verifier_data_sha256: balance_vd,
             mle_proof_abi_version: MLE_PROOF_ABI_VERSION,
-            submit_close_intent_selector: selector(SUBMIT_CLOSE_SIGNATURE),
+            attest_signed_head_backing_selector: ATTEST_SIGNED_HEAD_BACKING_SELECTOR.into(),
+            submit_close_intent_selector: SUBMIT_CLOSE_SELECTOR.into(),
             finalize_close_guarded_selector: selector(FINALIZE_CLOSE_GUARDED_SIGNATURE),
+            materialize_signed_head_selector: MATERIALIZE_SIGNED_HEAD_SELECTOR.into(),
             close_submitted_topic: keccak_hex(CLOSE_SUBMITTED_EVENT.as_bytes()),
             close_finalized_topic: keccak_hex(CLOSE_FINALIZED_EVENT.as_bytes()),
+            signed_head_backing_attested_topic: keccak_hex(
+                SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes(),
+            ),
+            signed_head_exit_materialized_topic: keccak_hex(
+                SIGNED_HEAD_EXIT_MATERIALIZED_EVENT.as_bytes(),
+            ),
         };
         let deployment_manifest_path = directory.0.join("deployment.json");
         write_json(&deployment_manifest_path, &deployment);
@@ -5827,6 +7856,10 @@ mod tests {
         ObservedDeployment {
             rollup_runtime_code_hash: fixture.deployment.rollup_runtime_code_hash.clone(),
             manager_runtime_code_hash: fixture.deployment.manager_runtime_code_hash.clone(),
+            close_funding_materializer_runtime_code_hash: fixture
+                .deployment
+                .close_funding_materializer_runtime_code_hash
+                .clone(),
             settlement_verifier_runtime_code_hash: fixture
                 .deployment
                 .settlement_verifier_runtime_code_hash
@@ -5837,6 +7870,31 @@ mod tests {
                 .clone(),
             manager_registry: fixture.deployment.rollup.clone(),
             manager_verifier: fixture.deployment.settlement_verifier.clone(),
+            manager_close_funding_materializer: fixture
+                .deployment
+                .close_funding_materializer
+                .clone(),
+            materializer_rollup: fixture.deployment.rollup.clone(),
+            materializer_backing_mle_verifier: fixture.deployment.mle_verifier.clone(),
+            materializer_manager_of_channel: fixture.deployment.manager.clone(),
+            materializer_backing_vk_initialized: true,
+            materializer_frozen_generation: 1,
+            materializer_last_posted_block: 9,
+            signed_head_backing_anchor_plus_one: fixture
+                .prepared
+                .backing_public_inputs
+                .anchor_block_number
+                .as_u64()
+                + 1,
+            exact_backing_proof_attested: true,
+            signed_head_backing_current: true,
+            materialized_channel_exit: repeated(0),
+            rollup_latest_finalized_block_number: fixture
+                .prepared
+                .backing_public_inputs
+                .anchor_block_number
+                .as_u64(),
+            backing_root_finalized: true,
             verifier_close_mle_verifier: fixture.deployment.mle_verifier.clone(),
             mle_allowed_chain_id: ANVIL_CHAIN_ID,
             manager_channel_id: fixture.prepared.channel_id,
@@ -5911,6 +7969,64 @@ mod tests {
                 abi_word_u64(expected.final_state_version),
                 decode_hex(&expected.final_settled_tx_chain, Some(32), "settled chain").unwrap(),
             ])
+        })
+    }
+
+    fn indexed_address(value: &str) -> String {
+        let address = decode_hex(value, Some(20), "indexed address").unwrap();
+        let mut word = vec![0u8; 12];
+        word.extend(address);
+        format!("0x{}", hex::encode(word))
+    }
+
+    fn attestation_event(fixture: &Fixture) -> Value {
+        let identity = backing_attestation_identity(&fixture.prepared, &fixture.deployment)
+            .expect("attestation identity");
+        serde_json::json!({
+            "address": fixture.deployment.close_funding_materializer,
+            "removed": false,
+            "topics": [
+                keccak_hex(SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes()),
+                indexed_u32(fixture.prepared.channel_id),
+                indexed_address(&fixture.deployment.manager),
+                identity.statement_key,
+            ],
+            "data": event_data([
+                decode_hex(
+                    &fixture
+                        .prepared
+                        .backing_public_inputs
+                        .finalized_extended_state_commitment
+                        .to_string(),
+                    Some(32),
+                    "backing root",
+                )
+                .unwrap(),
+                abi_word_u64(
+                    fixture
+                        .prepared
+                        .backing_public_inputs
+                        .anchor_block_number
+                        .as_u64(),
+                ),
+                decode_hex(&identity.proof_id, Some(32), "proof id").unwrap(),
+            ]),
+        })
+    }
+
+    fn materialize_event(fixture: &Fixture) -> Value {
+        serde_json::json!({
+            "address": fixture.deployment.close_funding_materializer,
+            "removed": false,
+            "topics": [
+                keccak_hex(SIGNED_HEAD_EXIT_MATERIALIZED_EVENT.as_bytes()),
+                indexed_u32(fixture.prepared.channel_id),
+                indexed_address(&fixture.deployment.manager),
+                fixture.prepared.expected.close_intent_digest,
+            ],
+            "data": event_data([abi_word_u64(u64::from(
+                fixture.prepared.expected.token_count,
+            ))]),
         })
     }
 
@@ -6037,6 +8153,7 @@ mod tests {
         fn observe_deployment(
             &mut self,
             _manifest: &DeploymentManifest,
+            _prepared: &PreparedClose,
             _block_number: u64,
         ) -> Result<ObservedDeployment> {
             Ok(self.deployment.clone())
@@ -6230,6 +8347,35 @@ mod tests {
         backend.head = 12;
     }
 
+    fn confirm_finalize_and_begin_materialization(
+        fixture: &Fixture,
+        backend: &mut FakeBackend,
+    ) -> SignedTransaction {
+        let finalized_block = block(13, 1_102);
+        let finalize = backend.transaction(1);
+        backend.blocks.insert(13, finalized_block.clone());
+        backend.managers.insert(
+            13,
+            closed(&fixture.prepared.expected, finalized_block.timestamp),
+        );
+        backend.receipts.insert(
+            finalize.transaction_hash.clone(),
+            receipt(
+                &finalize,
+                &backend.signer,
+                &finalized_block,
+                finalize_event(&fixture.deployment.manager, &fixture.prepared.expected),
+            ),
+        );
+        backend.head = 13;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, backend)
+                .expect("confirm finalize and begin materialization"),
+            PublicCloseProgress::MaterializeBroadcast { .. }
+        ));
+        backend.transaction(2)
+    }
+
     #[test]
     fn guarded_finalize_calldata_binds_the_monotone_request_generation() {
         let fixture = fixture("finalize-generation-calldata");
@@ -6255,12 +8401,10 @@ mod tests {
             .unwrap()
         );
         assert_eq!(word_u64(&bytes[36..68], "generation").unwrap(), 1);
-        assert!(
-            finalize_calldata(&fixture.prepared.expected, 0)
-                .unwrap_err()
-                .to_string()
-                .contains("zero closeRequestGeneration")
-        );
+        assert!(finalize_calldata(&fixture.prepared.expected, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("zero closeRequestGeneration"));
     }
 
     #[test]
@@ -6399,6 +8543,8 @@ mod tests {
             version: JOURNAL_VERSION,
             binding,
             submitter: signer.clone(),
+            attest: None,
+            attest_observation: None,
             submit: Some(TransactionStep {
                 transaction: transaction.clone(),
                 confirmation: None,
@@ -6408,6 +8554,8 @@ mod tests {
             finalize_authorization: None,
             finalize: None,
             finalize_observation: None,
+            materialize: None,
+            materialize_observation: None,
             completed: None,
         };
         write_journal(&fixture.config.journal_path, &journal).expect("persist local raw first");
@@ -6453,19 +8601,17 @@ mod tests {
         backend
             .receipts
             .insert(transaction.transaction_hash.clone(), failed_receipt);
-        assert!(
-            reconcile_semantic_winner(
-                &fixture.config,
-                &mut backend,
-                &mut journal,
-                ClosePhase::Submit,
-                &winner,
-                &reservation,
-                &signer,
-            )
-            .expect("canonical-finalized loser revert")
-            .is_none()
-        );
+        assert!(reconcile_semantic_winner(
+            &fixture.config,
+            &mut backend,
+            &mut journal,
+            ClosePhase::Submit,
+            &winner,
+            &reservation,
+            &signer,
+        )
+        .expect("canonical-finalized loser revert")
+        .is_none());
         assert!(
             journal
                 .submit
@@ -6498,16 +8644,12 @@ mod tests {
             .finalize_authorization
             .expect("durable finalize authorization");
         assert_eq!(authorization.close_request_generation, 1);
-        assert!(
-            authorization
-                .calldata
-                .starts_with(&selector(FINALIZE_CLOSE_GUARDED_SIGNATURE))
-        );
-        assert!(
-            !authorization
-                .calldata
-                .starts_with(&selector("finalizeClose()"))
-        );
+        assert!(authorization
+            .calldata
+            .starts_with(&selector(FINALIZE_CLOSE_GUARDED_SIGNATURE)));
+        assert!(!authorization
+            .calldata
+            .starts_with(&selector("finalizeClose()")));
 
         let finalized_block = block(13, 1_102);
         let transaction = backend.transaction(1);
@@ -6527,13 +8669,192 @@ mod tests {
         );
         backend.head = 13;
         assert!(matches!(
-            advance_with_backend(&fixture.config, &mut backend).expect("complete close"),
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("confirm close and broadcast signed-head materialization"),
+            PublicCloseProgress::MaterializeBroadcast { .. }
+        ));
+        assert_eq!(backend.sign_count, 3);
+        assert_eq!(backend.publish_attempts, ["0x01", "0x02", "0x03"]);
+        let materialized_block = block(14, 1_103);
+        let materialize = backend.transaction(2);
+        backend.blocks.insert(14, materialized_block.clone());
+        backend.managers.insert(
+            14,
+            closed(&fixture.prepared.expected, materialized_block.timestamp),
+        );
+        backend.receipts.insert(
+            materialize.transaction_hash.clone(),
+            receipt(
+                &materialize,
+                &backend.signer,
+                &materialized_block,
+                materialize_event(&fixture),
+            ),
+        );
+        backend.deployment.materialized_channel_exit =
+            fixture.prepared.expected.close_intent_digest.clone();
+        backend.head = 14;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("complete materialization"),
             PublicCloseProgress::Complete { .. }
         ));
         assert!(matches!(
             advance_with_backend(&fixture.config, &mut backend).expect("revalidate completed WAL"),
             PublicCloseProgress::Complete { .. }
         ));
+    }
+
+    #[test]
+    fn materialize_broadcast_failure_restarts_with_exact_fsynced_raw_bytes() {
+        let fixture = fixture("materialize-restart");
+        let mut backend = FakeBackend::new(&fixture);
+        submit_and_confirm(&fixture, &mut backend);
+        make_finalize_eligible(&fixture, &mut backend);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("broadcast finalize"),
+            PublicCloseProgress::FinalizeBroadcast { .. }
+        ));
+        backend.fail_publish_attempts.insert(3);
+
+        let finalized_block = block(13, 1_102);
+        let finalize = backend.transaction(1);
+        backend.blocks.insert(13, finalized_block.clone());
+        backend.managers.insert(
+            13,
+            closed(&fixture.prepared.expected, finalized_block.timestamp),
+        );
+        backend.receipts.insert(
+            finalize.transaction_hash.clone(),
+            receipt(
+                &finalize,
+                &backend.signer,
+                &finalized_block,
+                finalize_event(&fixture.deployment.manager, &fixture.prepared.expected),
+            ),
+        );
+        backend.head = 13;
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(error.to_string().contains("injected post-WAL"));
+        assert_eq!(backend.sign_count, 3);
+        assert!(fs::read_to_string(&fixture.config.journal_path)
+            .unwrap()
+            .contains("0x03"));
+
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("replay exact materialization"),
+            PublicCloseProgress::MaterializeBroadcast { .. }
+        ));
+        assert_eq!(
+            backend.sign_count, 3,
+            "restart must not sign replacement bytes"
+        );
+        assert_eq!(backend.publish_attempts, ["0x01", "0x02", "0x03", "0x03"]);
+    }
+
+    #[test]
+    fn permissionless_materialization_is_adopted_without_local_signature() {
+        let fixture = fixture("adopt-materialize");
+        let mut backend = FakeBackend::new(&fixture);
+        submit_and_confirm(&fixture, &mut backend);
+        make_finalize_eligible(&fixture, &mut backend);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("broadcast finalize"),
+            PublicCloseProgress::FinalizeBroadcast { .. }
+        ));
+        let finalized_block = block(13, 1_102);
+        let finalize = backend.transaction(1);
+        backend.blocks.insert(13, finalized_block.clone());
+        backend.managers.insert(
+            13,
+            closed(&fixture.prepared.expected, finalized_block.timestamp),
+        );
+        backend.receipts.insert(
+            finalize.transaction_hash.clone(),
+            receipt(
+                &finalize,
+                &backend.signer,
+                &finalized_block,
+                finalize_event(&fixture.deployment.manager, &fixture.prepared.expected),
+            ),
+        );
+        let external = SignedTransaction {
+            target: fixture.deployment.close_funding_materializer.clone(),
+            calldata_hash: String::new(),
+            nonce: 77,
+            raw_signed_transaction: String::new(),
+            transaction_hash: repeated(0xe1),
+        };
+        backend.receipts.insert(
+            external.transaction_hash.clone(),
+            receipt(
+                &external,
+                &address(0x66),
+                &finalized_block,
+                materialize_event(&fixture),
+            ),
+        );
+        backend.deployment.materialized_channel_exit =
+            fixture.prepared.expected.close_intent_digest.clone();
+        backend.head = 13;
+
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("adopt exact permissionless materialization"),
+            PublicCloseProgress::MaterializeAdopted { .. }
+        ));
+        assert_eq!(
+            backend.sign_count, 2,
+            "no materialization signature may be created"
+        );
+        let PublicCloseProgress::Complete { publication } =
+            advance_with_backend(&fixture.config, &mut backend).expect("revalidate adoption")
+        else {
+            panic!("expected completed adopted materialization");
+        };
+        assert_eq!(
+            publication.materialize_transaction_hash,
+            external.transaction_hash
+        );
+    }
+
+    #[test]
+    fn completed_materialization_fails_closed_when_its_receipt_disappears() {
+        let fixture = fixture("materialize-reorg");
+        let mut backend = FakeBackend::new(&fixture);
+        submit_and_confirm(&fixture, &mut backend);
+        make_finalize_eligible(&fixture, &mut backend);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("broadcast finalize"),
+            PublicCloseProgress::FinalizeBroadcast { .. }
+        ));
+        let materialize = confirm_finalize_and_begin_materialization(&fixture, &mut backend);
+        let materialized_block = block(14, 1_103);
+        backend.blocks.insert(14, materialized_block.clone());
+        backend.managers.insert(
+            14,
+            closed(&fixture.prepared.expected, materialized_block.timestamp),
+        );
+        backend.receipts.insert(
+            materialize.transaction_hash.clone(),
+            receipt(
+                &materialize,
+                &backend.signer,
+                &materialized_block,
+                materialize_event(&fixture),
+            ),
+        );
+        backend.deployment.materialized_channel_exit =
+            fixture.prepared.expected.close_intent_digest.clone();
+        backend.head = 14;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("complete materialization"),
+            PublicCloseProgress::Complete { .. }
+        ));
+
+        backend.receipts.remove(&materialize.transaction_hash);
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(error.to_string().contains("not covered by a durable head"));
     }
 
     #[test]
@@ -6544,11 +8865,9 @@ mod tests {
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
         assert!(error.to_string().contains("injected post-WAL"));
         assert_eq!(backend.sign_count, 1);
-        assert!(
-            fs::read_to_string(&fixture.config.journal_path)
-                .unwrap()
-                .contains("0x01")
-        );
+        assert!(fs::read_to_string(&fixture.config.journal_path)
+            .unwrap()
+            .contains("0x01"));
         let journal: PublicationJournal =
             serde_json::from_slice(&fs::read(&fixture.config.journal_path).unwrap()).unwrap();
         assert_eq!(
@@ -6856,11 +9175,9 @@ mod tests {
         }
         backend.head = 11;
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("ambiguous latest transaction position")
-        );
+        assert!(error
+            .to_string()
+            .contains("ambiguous latest transaction position"));
         assert_eq!(backend.sign_count, 0);
     }
 
@@ -6897,15 +9214,46 @@ mod tests {
             ),
         );
         backend.head = 13;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("adopt exact finalize"),
+            PublicCloseProgress::MaterializeBroadcast { .. }
+        ));
+        assert_eq!(
+            backend.sign_count, 2,
+            "only submit and materialize may be signed"
+        );
+        let materialized_block = block(14, 1_103);
+        let materialize = backend.transaction(1);
+        backend.blocks.insert(14, materialized_block.clone());
+        backend.managers.insert(
+            14,
+            closed(&fixture.prepared.expected, materialized_block.timestamp),
+        );
+        backend.receipts.insert(
+            materialize.transaction_hash.clone(),
+            receipt(
+                &materialize,
+                &backend.signer,
+                &materialized_block,
+                materialize_event(&fixture),
+            ),
+        );
+        backend.deployment.materialized_channel_exit =
+            fixture.prepared.expected.close_intent_digest.clone();
+        backend.head = 14;
         let PublicCloseProgress::Complete { publication } =
-            advance_with_backend(&fixture.config, &mut backend).expect("adopt exact finalize")
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("complete exact materialization")
         else {
             panic!("expected complete publication");
         };
-        assert_eq!(backend.sign_count, 1, "no local finalize may be signed");
         assert_eq!(
             publication.finalize_transaction_hash,
             Some(external.transaction_hash)
+        );
+        assert_eq!(
+            publication.materialize_transaction_hash,
+            materialize.transaction_hash
         );
     }
 
@@ -7112,6 +9460,264 @@ mod tests {
     }
 
     #[test]
+    fn schema_v2_bundle_binds_every_backing_component() {
+        let fixture = fixture("schema-v2-components");
+        assert_eq!(fixture.prepared.component_hashes.len(), 9);
+        for name in [
+            "public_close_manifest.json",
+            "close_proof.bin",
+            "close_intent_mle.json",
+            "backing_proof.bin",
+            "backing_mle.json",
+            "backing_public_inputs.json",
+            "close_intent.json",
+            "close_intent_full.json",
+            "close_public_inputs.json",
+        ] {
+            let bytes = fs::read(fixture.config.bundle_dir.join(name)).expect("read component");
+            assert_eq!(
+                fixture.prepared.component_hashes.get(name),
+                Some(&sha256_hex(&bytes)),
+                "component {name} must be bound into the durable artifact hash"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_or_partial_backing_bundle_is_rejected_fail_closed() {
+        let legacy = fixture("legacy-schema");
+        mutate_manifest(&legacy.config.bundle_dir, |manifest| {
+            manifest["schemaVersion"] = serde_json::json!(1);
+        });
+        let error = prepare_bundle(
+            &legacy.config.bundle_dir,
+            &legacy.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("manifest version/context"));
+
+        for (label, missing) in [
+            ("missing-backing-proof", "backing_proof.bin"),
+            ("missing-backing-mle", "backing_mle.json"),
+            ("missing-backing-pis", "backing_public_inputs.json"),
+        ] {
+            let fixture = fixture(label);
+            fs::remove_file(fixture.config.bundle_dir.join(missing)).expect("remove component");
+            let error = prepare_bundle(
+                &fixture.config.bundle_dir,
+                &fixture.config.expected_final_channel_state_digest,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("inspect signed-head backing"),
+                "unexpected {missing} diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn backing_hash_size_root_and_anchor_are_manifest_pinned() {
+        let hash_fixture = fixture("backing-hash");
+        let path = hash_fixture.config.bundle_dir.join("backing_proof.bin");
+        let mut proof = fs::read(&path).expect("read backing proof");
+        proof[0] ^= 1;
+        fs::write(&path, proof).expect("same-length proof tamper");
+        let error = prepare_bundle(
+            &hash_fixture.config.bundle_dir,
+            &hash_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("backingProof SHA-256"));
+
+        let size_fixture = fixture("backing-size");
+        mutate_manifest(&size_fixture.config.bundle_dir, |manifest| {
+            manifest["backingProofBytes"] = serde_json::json!(999);
+        });
+        let error = prepare_bundle(
+            &size_fixture.config.bundle_dir,
+            &size_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("size differs from manifest"));
+
+        let root_fixture = fixture("backing-root");
+        mutate_manifest(&root_fixture.config.bundle_dir, |manifest| {
+            manifest["backingFinalizedExtendedStateCommitment"] = Value::String(repeated(0xee));
+        });
+        let error = prepare_bundle(
+            &root_fixture.config.bundle_dir,
+            &root_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("finalizedExtendedStateCommitment differs from manifest"));
+
+        let anchor_fixture = fixture("backing-anchor");
+        mutate_manifest(&anchor_fixture.config.bundle_dir, |manifest| {
+            manifest["backingAnchorBlockNumber"] = serde_json::json!(17);
+        });
+        let error = prepare_bundle(
+            &anchor_fixture.config.bundle_dir,
+            &anchor_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("anchorBlockNumber differs from manifest"));
+    }
+
+    #[test]
+    fn backing_public_inputs_require_exact_typed_26_limb_vector_and_mle_equality() {
+        let count_fixture = fixture("backing-pi-count");
+        let path = count_fixture
+            .config
+            .bundle_dir
+            .join("backing_public_inputs.json");
+        let mut inputs: Vec<u64> =
+            serde_json::from_slice(&fs::read(&path).expect("read backing PIs"))
+                .expect("parse backing PIs");
+        inputs.pop();
+        write_json(&path, &inputs);
+        refresh_manifest_hash(
+            &count_fixture.config.bundle_dir,
+            "backingPublicInputsSha256",
+            "backing_public_inputs.json",
+        );
+        let error = prepare_bundle(
+            &count_fixture.config.bundle_dir,
+            &count_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("required 26"));
+
+        let type_fixture = fixture("backing-pi-type");
+        let path = type_fixture
+            .config
+            .bundle_dir
+            .join("backing_public_inputs.json");
+        let mut inputs: Value = serde_json::from_slice(&fs::read(&path).expect("read backing PIs"))
+            .expect("parse backing PIs");
+        inputs[1] = serde_json::json!(u64::from(u32::MAX) + 1);
+        write_json(&path, &inputs);
+        refresh_manifest_hash(
+            &type_fixture.config.bundle_dir,
+            "backingPublicInputsSha256",
+            "backing_public_inputs.json",
+        );
+        let error = prepare_bundle(
+            &type_fixture.config.bundle_dir,
+            &type_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("parse signed-head backing public inputs"));
+
+        let json_type_fixture = fixture("backing-pi-json-type");
+        let path = json_type_fixture
+            .config
+            .bundle_dir
+            .join("backing_public_inputs.json");
+        let mut inputs: Value = serde_json::from_slice(&fs::read(&path).expect("read backing PIs"))
+            .expect("parse backing PIs");
+        inputs[0] = Value::String("7".into());
+        write_json(&path, &inputs);
+        refresh_manifest_hash(
+            &json_type_fixture.config.bundle_dir,
+            "backingPublicInputsSha256",
+            "backing_public_inputs.json",
+        );
+        let error = prepare_bundle(
+            &json_type_fixture.config.bundle_dir,
+            &json_type_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a JSON u64 number"));
+
+        let mle_fixture = fixture("backing-mle-pis");
+        let path = mle_fixture.config.bundle_dir.join("backing_mle.json");
+        let mut mle: Value = serde_json::from_slice(&fs::read(&path).expect("read backing MLE"))
+            .expect("parse backing MLE");
+        mle["publicInputs"][0] = Value::String("8".into());
+        write_json(&path, &mle);
+        refresh_manifest_hash(
+            &mle_fixture.config.bundle_dir,
+            "backingMleSha256",
+            "backing_mle.json",
+        );
+        let error = prepare_bundle(
+            &mle_fixture.config.bundle_dir,
+            &mle_fixture.config.expected_final_channel_state_digest,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("backing MLE proof public inputs differ"));
+    }
+
+    #[test]
+    fn backing_public_inputs_must_compose_with_the_complete_signed_close_vector() {
+        for (label, index, replacement, diagnostic) in [
+            ("backing-channel", 0usize, 8u64, "channelId differs"),
+            (
+                "backing-settled-chain",
+                1usize,
+                u64::from(0x0606_0606u32),
+                "settledTxChain differs",
+            ),
+            (
+                "backing-funds",
+                9usize,
+                u64::from(0x0707_0707u32),
+                "tokenFundsDigest differs",
+            ),
+        ] {
+            let case_fixture = fixture(label);
+            let inputs_path = case_fixture
+                .config
+                .bundle_dir
+                .join("backing_public_inputs.json");
+            let mut inputs: Vec<u64> =
+                serde_json::from_slice(&fs::read(&inputs_path).expect("read backing PIs"))
+                    .expect("parse backing PIs");
+            inputs[index] = replacement;
+            write_json(&inputs_path, &inputs);
+
+            let mle_path = case_fixture.config.bundle_dir.join("backing_mle.json");
+            let mut mle: Value =
+                serde_json::from_slice(&fs::read(&mle_path).expect("read backing MLE"))
+                    .expect("parse backing MLE");
+            mle["publicInputs"] = Value::Array(
+                inputs
+                    .iter()
+                    .map(|value| Value::String(value.to_string()))
+                    .collect(),
+            );
+            write_json(&mle_path, &mle);
+
+            let backing_mle_bytes = fs::read(&mle_path).expect("read rewritten backing MLE");
+            let backing_inputs_bytes = fs::read(&inputs_path).expect("read rewritten backing PIs");
+            mutate_manifest(&case_fixture.config.bundle_dir, |manifest| {
+                manifest["backingMleBytes"] = serde_json::json!(backing_mle_bytes.len());
+                manifest["backingMleSha256"] = Value::String(sha256_hex(&backing_mle_bytes));
+                manifest["backingPublicInputsSha256"] =
+                    Value::String(sha256_hex(&backing_inputs_bytes));
+            });
+
+            let error = prepare_bundle(
+                &case_fixture.config.bundle_dir,
+                &case_fixture.config.expected_final_channel_state_digest,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(diagnostic),
+                "unexpected {label} diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn bundle_cross_checks_member_set_legacy_amount_and_full_fund_channel() {
         for (label, mutate) in [
             (
@@ -7128,13 +9734,11 @@ mod tests {
             let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             descriptor[mutate.0] = mutate.1;
             write_json(&path, &descriptor);
-            assert!(
-                prepare_bundle(
-                    &fixture.config.bundle_dir,
-                    &fixture.config.expected_final_channel_state_digest,
-                )
-                .is_err()
-            );
+            assert!(prepare_bundle(
+                &fixture.config.bundle_dir,
+                &fixture.config.expected_final_channel_state_digest,
+            )
+            .is_err());
         }
 
         let fixture = fixture("fund-channel");
@@ -7142,13 +9746,72 @@ mod tests {
         let mut full: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         full["channelFundSnapshot"]["channelId"] = serde_json::json!(8);
         write_json(&path, &full);
-        assert!(
-            prepare_bundle(
-                &fixture.config.bundle_dir,
-                &fixture.config.expected_final_channel_state_digest,
-            )
-            .is_err()
+        assert!(prepare_bundle(
+            &fixture.config.bundle_dir,
+            &fixture.config.expected_final_channel_state_digest,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn attestation_abi_event_and_readback_identity_are_exact() {
+        let fixture = fixture("attestation-identity");
+        let calldata = attest_calldata(
+            &fixture.deployment.manager,
+            &fixture.prepared.backing_mle_proof,
+        )
+        .expect("attestation calldata");
+        assert!(calldata.starts_with(ATTEST_SIGNED_HEAD_BACKING_SELECTOR));
+        assert_eq!(
+            keccak_hex(SIGNED_HEAD_BACKING_ATTESTED_EVENT.as_bytes()),
+            "0x0d2bcc34a2ee92e5cbf5f9d10da1d0fdaf7684882364d237d6fca57f5a9f2091"
         );
+
+        let event = attestation_event(&fixture);
+        let transaction = SignedTransaction {
+            target: fixture.deployment.close_funding_materializer.clone(),
+            calldata_hash: keccak_hex(
+                &decode_hex(&calldata, None, "attestation calldata").unwrap(),
+            ),
+            nonce: 0,
+            raw_signed_transaction: "0x01".into(),
+            transaction_hash: repeated(0x71),
+        };
+        let attestation_receipt = receipt(
+            &transaction,
+            &address(0x55),
+            &block(9, 999),
+            event.clone(),
+        );
+        assert!(exact_attested_event(
+            &attestation_receipt,
+            &fixture.deployment,
+            &fixture.prepared,
+        )
+            .expect("decode exact attestation")
+            .is_some());
+
+        let mut crossed = event;
+        crossed["topics"][3] = Value::String(repeated(0xee));
+        let crossed_receipt = receipt(
+            &transaction,
+            &address(0x55),
+            &block(9, 999),
+            crossed,
+        );
+        assert!(exact_attested_event(
+            &crossed_receipt,
+            &fixture.deployment,
+            &fixture.prepared,
+        )
+        .expect("decode crossed attestation")
+        .is_none());
+
+        let ready = observed_deployment(&fixture);
+        assert!(backing_attestation_ready(&ready, &fixture.prepared).unwrap());
+        let mut impossible = ready;
+        impossible.signed_head_backing_anchor_plus_one = 0;
+        assert!(backing_attestation_ready(&impossible, &fixture.prepared).is_err());
     }
 
     #[test]
@@ -7157,11 +9820,9 @@ mod tests {
         let mut wrong_pin = fixture.config.clone();
         wrong_pin.deployment_manifest_sha256 = repeated(0xfe);
         let error = advance_with_backend(&wrong_pin, &mut FakeBackend::new(&fixture)).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("independently configured SHA-256")
-        );
+        assert!(error
+            .to_string()
+            .contains("independently configured SHA-256"));
 
         let mut deployment = fixture.deployment.clone();
         deployment.finalize_close_guarded_selector = selector("finalizeClose()");

@@ -1,5 +1,6 @@
 pub mod cancel_close_circuit;
 pub mod cancel_close_pis;
+pub mod close_asset_backing_circuit;
 pub mod close_circuit;
 pub mod close_pis;
 pub mod decryption_gadget;

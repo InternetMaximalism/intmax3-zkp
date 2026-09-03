@@ -467,7 +467,7 @@ fn execute_live_command(
             signed_snapshot,
         } => {
             let service = live.service(channel_id, producer)?;
-            service.bind_signed_snapshot(&signed_snapshot)?;
+            service.bind_signed_snapshot(producer, &signed_snapshot)?;
             let status = service.status()?;
             to_value(serde_json::to_value(status))
         }
@@ -506,49 +506,13 @@ fn execute_live_command(
             let head = live.service(channel_id, producer)?.base_head_artifact()?;
             to_value(serde_json::to_value(head))
         }
-        LiveCommand::LivePrepareCloseFunding {
-            channel_id,
-            chain_id,
-            rollup,
-            manager,
-        } => {
-            let rollup = rollup.parse::<Address>().map_err(|e| {
-                LiveBalanceServiceError::InvalidRequest(format!("parse rollup: {e}"))
-            })?;
-            let manager = manager.parse::<Address>().map_err(|e| {
-                LiveBalanceServiceError::InvalidRequest(format!("parse manager: {e}"))
-            })?;
-            let proposal = live
-                .service(channel_id, producer)?
-                .prepare_close_funding(chain_id, rollup, manager)?;
-            to_value(serde_json::to_value(proposal))
-        }
-        LiveCommand::LiveSettleCloseFunding {
-            channel_id,
-            producer_receipt,
-            signed_state,
-            plan,
-        } => {
-            let receipt = live.service(channel_id, producer)?.settle_close_funding(
-                producer,
-                &producer_receipt,
-                &signed_state,
-                &plan,
-            )?;
-            to_value(serde_json::to_value(receipt))
-        }
-        LiveCommand::LiveCloseFundingPayoutArtifacts {
-            channel_id,
-            producer_request_id,
-            withdrawal_prover,
-        } => {
-            let prover = withdrawal_prover.parse::<Address>().map_err(|e| {
-                LiveBalanceServiceError::InvalidRequest(format!("parse withdrawal_prover: {e}"))
-            })?;
-            let artifacts = live
-                .service(channel_id, producer)?
-                .close_funding_payout_artifacts(producer, &producer_request_id, prover)?;
-            to_value(serde_json::to_value(artifacts))
+        LiveCommand::LivePrepareCloseFunding { .. }
+        | LiveCommand::LiveSettleCloseFunding { .. }
+        | LiveCommand::LiveCloseFundingPayoutArtifacts { .. } => {
+            Err(LiveBalanceServiceError::InvalidRequest(
+                "cooperative terminal-child close funding is retired; close the existing N-of-N signed head with its signer-independent exit kit"
+                    .into(),
+            ))
         }
         LiveCommand::LiveBurnPayoutArtifacts {
             channel_id,
