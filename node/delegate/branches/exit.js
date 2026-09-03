@@ -932,6 +932,10 @@ async function onCloseCancelled(event, ctx) {
       : canonicalU64(a.revivedStateVersion, 'revived state version'),
     journalGap: false,
   });
+  // A cancelled era releases the publisher head pin: the next request targets the head current
+  // at that time, and the native journal (keyed by digest) decides what may be replayed.
+  setIfChanged(store, 'publicClosePublication', null);
+  setIfChanged(store, 'publicClosePublisherHeadPinnedLogged', false);
   setIfChanged(store, 'participantCloseJournalGapAlerted', false);
   setIfChanged(store, 'closeFinalizeJournalGapAlerted', false);
   store.set('awaitingClaim', false);
@@ -1491,6 +1495,8 @@ async function reconcileCloseLifecycle(ctx) {
       observedLogIndex: null,
       journalGap: false,
     });
+    setIfChanged(store, 'publicClosePublication', null);
+    setIfChanged(store, 'publicClosePublisherHeadPinnedLogged', false);
     const submission = store.get('participantCloseSubmission');
     if (!(submission && ctx.participantCloser
         && ctx.participantCloser.durableOutbox === true)) {
@@ -1728,6 +1734,7 @@ async function attemptCloseRequest(ctx) {
     CLOSE_PHASES.FINALIZED,
     CLOSE_PHASES.LEGACY_FROZEN,
   ].includes(startingLifecycle.phase) || store.get('channelFinalized')) return;
+  if (await refuseCloseBelowAuthorizedBurn(ctx, store.get('acceptedHead'), 'close request')) return;
   const proof = store.get('participantCloseProof');
   if (!participantCloser || !proof) {
     if (!store.get('unilateralCloseUnavailableAlerted')) {
@@ -2099,6 +2106,59 @@ async function onFundsPulled(event, ctx) {
   // As above, dependent payout submission is post-poll only.
 }
 
+// Local burn high-water mark (Round 2 §2): every partial-withdrawal burn records the exact head
+// it was authorized against. The Manager refuses any close older than an authorized burn
+// (`CloseOlderThanAuthorizedBurn`), so a close head below that mark can never settle; refusing it
+// here keeps the failure visible instead of stranding the channel behind a frozen stale request.
+function headPosition(head) {
+  if (!head || head.epoch == null || head.stateVersion == null) return null;
+  const epoch = Number(head.epoch);
+  const version = Number(head.stateVersion);
+  if (!Number.isFinite(epoch) || !Number.isFinite(version)) return null;
+  return { epoch, version };
+}
+
+function burnAboveHead(store, head) {
+  if (typeof store.listTickets !== 'function') return null;
+  const position = headPosition(head);
+  const burns = store.listTickets((ticket) => ticket && ticket.type === 'partial_withdrawal'
+    && ticket.params && ticket.params.burnHead);
+  for (const ticket of burns) {
+    const burn = headPosition(ticket.params.burnHead);
+    if (!burn) continue;
+    if (!position
+      || burn.epoch > position.epoch
+      || (burn.epoch === position.epoch && burn.version > position.version)) {
+      return { ticketId: ticket.id, burnHead: ticket.params.burnHead };
+    }
+  }
+  return null;
+}
+
+async function refuseCloseBelowAuthorizedBurn(ctx, head, stage) {
+  const { store, ch, alert } = ctx;
+  const above = burnAboveHead(store, head);
+  if (!above) return false;
+  if (!store.get('closeBelowAuthorizedBurnAlerted')) {
+    store.set('closeBelowAuthorizedBurnAlerted', true);
+    await alert.raise(
+      'fault',
+      ch.id,
+      'CLOSE_BELOW_AUTHORIZED_BURN',
+      `${stage}: the close head is older than a locally authorized partial-withdrawal burn`,
+      {
+        headDigest: head && head.digest ? String(head.digest).toLowerCase() : null,
+        headEpoch: head && head.epoch != null ? String(head.epoch) : null,
+        headStateVersion: head && head.stateVersion != null ? String(head.stateVersion) : null,
+        burnTicketId: above.ticketId,
+        burnHead: above.burnHead,
+        note: 'the Manager would refuse this close with CloseOlderThanAuthorizedBurn; import the post-burn head before closing',
+      },
+    );
+  }
+  return true;
+}
+
 async function attemptPublicClosePublication(ctx) {
   const { store, ch, publicClosePublisher, snapshotVault, backingVault, log, alert } = ctx;
   const acceptedHead = store.get('acceptedHead');
@@ -2128,17 +2188,41 @@ async function attemptPublicClosePublication(ctx) {
     }
     return null;
   }
+  // SIGNER-INDEPENDENT EXIT (Round 2 §1a): a close in flight was requested for ONE exact signed
+  // head, and its native WAL/journal and signer-lane reservation are keyed by that head's digest.
+  // acceptedHead can still advance while exiting (a chain-sourced deposit import is routed before
+  // the exit-mode intent drop), so retargeting the publisher to the newer head would open a
+  // second journal that can never claim the lane while the first is unfinished: the first close
+  // would never be advanced again. Pin the publisher to the head the in-flight close started
+  // with; the pin is cleared only when the close era is cancelled.
+  if (await refuseCloseBelowAuthorizedBurn(ctx, acceptedHead, 'public close publication')) return null;
+  const pinned = store.get('publicClosePublication');
+  let publisherHead = acceptedHead;
+  if (pinned && typeof pinned.acceptedHeadDigest === 'string'
+    && pinned.acceptedHeadDigest !== acceptedHead.digest.toLowerCase()) {
+    publisherHead = { ...acceptedHead, digest: pinned.acceptedHeadDigest };
+    if (!store.get('publicClosePublisherHeadPinnedLogged')) {
+      store.set('publicClosePublisherHeadPinnedLogged', true);
+      log.warn({
+        event: 'CLOSE_PROOF_PUBLISHER_HEAD_PINNED',
+        channel: ch.id,
+        pinnedHeadDigest: pinned.acceptedHeadDigest,
+        acceptedHeadDigest: acceptedHead.digest.toLowerCase(),
+        note: 'the in-flight close keeps its original exact head; the newer accepted head is not retargeted',
+      });
+    }
+  }
   try {
     // Only the WASM-authenticated head and the two immutable vault objects enter the handoff.
     // RPC, deployment, manager, signer selector, chain and lock root were fixed at daemon start.
     const progress = await publicClosePublisher.advance({
-      acceptedHead,
+      acceptedHead: publisherHead,
       snapshotVault,
       backingVault,
     });
     const publication = {
       schemaVersion: 1,
-      acceptedHeadDigest: acceptedHead.digest.toLowerCase(),
+      acceptedHeadDigest: publisherHead.digest.toLowerCase(),
       progress,
     };
     setIfChanged(store, 'publicClosePublication', publication);

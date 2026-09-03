@@ -146,6 +146,88 @@ test('requested close hands authenticated head and immutable vaults to durable p
   assert.ok(!ctx.logs.some((entry) => entry.event === 'CLOSE_PROOF_DEFERRED'));
 });
 
+test('an in-flight close stays pinned to the head it was requested for', async () => {
+  // Round 2 §1a: a chain-sourced deposit import can advance acceptedHead while exiting. The
+  // native journal and signer lane are keyed by the head the close started with, so retargeting
+  // the publisher would strand the first journal forever.
+  const h1 = { digest: `0x${'81'.repeat(32)}`, epoch: 4, stateVersion: 9 };
+  const h2 = { digest: `0x${'82'.repeat(32)}`, epoch: 4, stateVersion: 10 };
+  const store = fakeStore({
+    mode: 'exiting',
+    acceptedHead: h1,
+    closeLifecycle: { schemaVersion: 1, phase: exit.CLOSE_PHASES.REQUESTED },
+  });
+  const calls = [];
+  const ctx = context(store, {
+    snapshotVault: {},
+    backingVault: {},
+    publicClosePublisher: {
+      async advance(input) {
+        calls.push(input.acceptedHead.digest);
+        return { phase: 'awaitingChallengeDeadline' };
+      },
+    },
+  });
+  const tick = { source: 'timer', kind: 'recovery' };
+  await exit.onRecoveryTick(tick, ctx);
+  store.set('acceptedHead', h2);
+  await exit.onRecoveryTick(tick, ctx);
+  await exit.onRecoveryTick(tick, ctx);
+  assert.deepEqual(calls, [h1.digest, h1.digest, h1.digest]);
+  assert.equal(store.get('publicClosePublication').acceptedHeadDigest, h1.digest);
+  assert.equal(
+    ctx.logs.filter((entry) => entry.event === 'CLOSE_PROOF_PUBLISHER_HEAD_PINNED').length,
+    1,
+    'the pin is logged once, not on every tick',
+  );
+
+  // A cancelled era releases the pin; the next request targets the head current at that time.
+  await exit.onCloseCancelled(managerEvent('CloseCancelled', {
+    closeIntentDigest: `0x${'83'.repeat(32)}`,
+    revivedChannelStateDigest: h2.digest,
+    revivedStateVersion: '10',
+  }), ctx);
+  assert.equal(store.get('publicClosePublication'), null);
+  store.set('closeLifecycle', { schemaVersion: 1, phase: exit.CLOSE_PHASES.REQUESTED });
+  await exit.onRecoveryTick(tick, ctx);
+  assert.equal(calls[calls.length - 1], h2.digest);
+  assert.equal(store.get('publicClosePublication').acceptedHeadDigest, h2.digest);
+});
+
+test('a close head below a locally authorized burn is refused before the publisher runs', async () => {
+  const head = { digest: `0x${'84'.repeat(32)}`, epoch: 4, stateVersion: 9 };
+  const tickets = [
+    { id: 'pw_1', type: 'partial_withdrawal', status: 'burn_done',
+      params: { burnHead: { digest: `0x${'85'.repeat(32)}`, epoch: 4, stateVersion: 10 } } },
+  ];
+  const store = fakeStore({
+    mode: 'exiting',
+    acceptedHead: head,
+    closeLifecycle: { schemaVersion: 1, phase: exit.CLOSE_PHASES.REQUESTED },
+  });
+  store.listTickets = (predicate) => tickets.filter(predicate);
+  let calls = 0;
+  const ctx = context(store, {
+    snapshotVault: {},
+    backingVault: {},
+    publicClosePublisher: { async advance() { calls += 1; return { phase: 'submitBroadcast' }; } },
+  });
+  const tick = { source: 'timer', kind: 'recovery' };
+  await exit.onRecoveryTick(tick, ctx);
+  await exit.onRecoveryTick(tick, ctx);
+  assert.equal(calls, 0, 'a stale head never reaches the native publisher');
+  const alerts = ctx.alerts.filter((args) => args[2] === 'CLOSE_BELOW_AUTHORIZED_BURN');
+  assert.equal(alerts.length, 1, 'alerted once');
+  assert.equal(alerts[0][4].burnTicketId, 'pw_1');
+  assert.equal(store.get('publicClosePublication'), undefined);
+
+  // Once the post-burn head is adopted the same tick publishes it.
+  store.set('acceptedHead', { digest: `0x${'85'.repeat(32)}`, epoch: 4, stateVersion: 10 });
+  await exit.onRecoveryTick(tick, ctx);
+  assert.equal(calls, 1);
+  assert.equal(store.get('publicClosePublication').acceptedHeadDigest, `0x${'85'.repeat(32)}`);
+});
+
 test('publisher failure leaves requested phase unchanged and retries native WAL next tick', async () => {
   const store = fakeStore({
     mode: 'exiting',

@@ -153,16 +153,48 @@ async function doBurn(event, ctx) {
   let resp;
   try { resp = await api.pwBurn(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, amount: String(amount), recipient: l1Address, tokenIndex }); }
   catch (e) { return onWithholdingLike(e, ctx, 'burn'); }
-  const v = verifyCosignedStructural(null, resp, store.get('acceptedHead'));
+  // SIGNER-INDEPENDENT EXIT: the burn is authorized on-chain at the post-burn head (epoch,
+  // stateVersion). If that head is not imported (and its exact backing archived) before this
+  // delegate ever requests a close, the Manager refuses the close forever with
+  // `CloseOlderThanAuthorizedBurn`. So the response MUST carry the cosigned state nested under
+  // `state` (never the permissive top-level fallback) and the import is unconditional; any
+  // failure is a cosign fault, never a silent "burn done" with a stale acceptedHead.
+  if (!resp.state || typeof resp.state !== 'object') {
+    const reason = 'burn response carries no nested cosigned state';
+    store.set('cosignFault', { op: 'burn', reason, resp });
+    return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason });
+  }
+  const prevHead = store.get('acceptedHead');
+  const v = verifyCosignedStructural(null, { state: resp.state }, prevHead);
   if (!v.ok) {
     store.set('cosignFault', { op: 'burn', reason: v.reason, resp });
     return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason: v.reason });
   }
-  if (resp.state) {
-    await importPublishedState(resp.state, ctx);
+  await importPublishedState(resp.state, ctx);
+  const burnHead = store.get('acceptedHead');
+  if (!burnHead || (prevHead && burnHead.digest === prevHead.digest)) {
+    const reason = 'burn head was not adopted as the accepted head after import';
+    store.set('cosignFault', { op: 'burn', reason, resp });
+    return raiseSignal({ source: 'signal', kind: 'cosign_invalid', reason });
   }
   sm.signal(dsm.SIGNALS.COSIGN_OK);
-  store.upsertTicket({ id: 'pw_' + Date.now(), type: 'partial_withdrawal', status: 'burn_done', params: { amount: String(amount), recipient: l1Address, tokenIndex: tokenIndex === undefined ? '0' : String(tokenIndex) } });
+  // Record the exact head the burn was authorized against so a later close can be checked
+  // against this local high-water mark.
+  store.upsertTicket({
+    id: 'pw_' + Date.now(),
+    type: 'partial_withdrawal',
+    status: 'burn_done',
+    params: {
+      amount: String(amount),
+      recipient: l1Address,
+      tokenIndex: tokenIndex === undefined ? '0' : String(tokenIndex),
+      burnHead: {
+        digest: burnHead.digest,
+        epoch: burnHead.epoch === undefined ? null : Number(burnHead.epoch),
+        stateVersion: burnHead.stateVersion === undefined ? null : Number(burnHead.stateVersion),
+      },
+    },
+  });
   sm.signal(dsm.SIGNALS.SYNCED);
   log.info({ event: 'BURN_FINALIZED', channel: ch.id, amount: String(amount) });
 }

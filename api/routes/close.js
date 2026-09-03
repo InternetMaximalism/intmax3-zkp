@@ -1,10 +1,40 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, rollupOf, readJson } = require('../lib/cli');
+const { cli, wc, RPC, rollupOf, readJson, chainId, DEVNET_CHAIN_ID } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 
 const router = Router({ mergeParams: true });
+
+// SECURITY (signer-independent exit review, Round 2 §6): every route below forwards a
+// caller-supplied `manager` straight to the CLI argv under ONE shared bearer token. On a public
+// chain the close/settle/claim path is the native `public_close_publisher` driven by the delegate
+// from its fixed deployment manifest, never this coordinator route, so — like the legacy routes in
+// `full-withdrawal.js` — this whole router is devnet-only, and the manager must at least be a
+// well-formed address before it reaches argv.
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+function requireLegacyDevnet(res) {
+  if (chainId() !== DEVNET_CHAIN_ID) {
+    res.status(409).json({
+      error: 'legacy close CLI flow is disabled on public chains',
+      detail: 'Public-chain close, finalization and materialization run through the delegate\'s native public_close_publisher against its pinned deployment manifest.',
+    });
+    return false;
+  }
+  return true;
+}
+function requireManager(req, res, needs) {
+  const manager = req.body && req.body.manager;
+  if (!manager) {
+    res.status(400).json({ error: needs || 'needs { manager }' });
+    return null;
+  }
+  if (typeof manager !== 'string' || !ADDRESS_RE.test(manager)) {
+    res.status(400).json({ error: 'manager must be a 0x-prefixed 20-byte address' });
+    return null;
+  }
+  return manager;
+}
 
 // SECURITY (detached close signing — doc/tasks/close-detached-signing-design.md, Option A).
 // The four heavy routes below (`/submit-intent`, `/challenge`, `/cancel`, and
@@ -32,11 +62,9 @@ const router = Router({ mergeParams: true });
 router.post('/request', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const manager = req.body && req.body.manager;
-    if (!manager) {
-      res.status(400).json({ error: 'needs { manager }' });
-      return;
-    }
+    if (!requireLegacyDevnet(res)) return;
+    const manager = requireManager(req, res);
+    if (!manager) return;
     const env = { CLOSE_REQUEST_ONLY: '1' };
     if (req.body && req.body.advanceTime) env.CLOSE_ADVANCE_TIME = String(req.body.advanceTime);
     const out = cli(ch, ['close', manager, RPC], env);
@@ -53,12 +81,10 @@ router.post('/request', (req, res) => {
 router.post('/submit-intent', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const manager = req.body && req.body.manager;
+    if (!requireLegacyDevnet(res)) return;
+    const manager = requireManager(req, res);
+    if (!manager) return;
     const sv = (req.body && req.body.verifier) || '';
-    if (!manager) {
-      res.status(400).json({ error: 'needs { manager }' });
-      return;
-    }
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) {
       ticket.status = 'close_pending';
@@ -86,12 +112,10 @@ router.post('/submit-intent', (req, res) => {
 router.post('/challenge', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const manager = req.body && req.body.manager;
+    if (!requireLegacyDevnet(res)) return;
+    const manager = requireManager(req, res);
+    if (!manager) return;
     const sv = (req.body && req.body.verifier) || '';
-    if (!manager) {
-      res.status(400).json({ error: 'needs { manager }' });
-      return;
-    }
     const out = cli(ch, ['close', manager, RPC], { CLOSE_SV: sv, CLOSE_SKIP_REQUEST: '1' });
     res.json({ ok: true, log: out });
   }).catch(e => {
@@ -108,12 +132,10 @@ router.post('/challenge', (req, res) => {
 router.post('/cancel', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const manager = req.body && req.body.manager;
+    if (!requireLegacyDevnet(res)) return;
+    const manager = requireManager(req, res);
+    if (!manager) return;
     const sv = (req.body && req.body.verifier) || '';
-    if (!manager) {
-      res.status(400).json({ error: 'needs { manager }' });
-      return;
-    }
     const out = cli(ch, ['cancel-close', manager, RPC], sv ? { CANCEL_SV: sv } : {});
     res.json({ ok: true, log: out });
   }).catch(e => {
@@ -126,11 +148,9 @@ router.post('/cancel', (req, res) => {
 router.post('/finalize', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const manager = req.body && req.body.manager;
-    if (!manager) {
-      res.status(400).json({ error: 'needs { manager }' });
-      return;
-    }
+    if (!requireLegacyDevnet(res)) return;
+    const manager = requireManager(req, res);
+    if (!manager) return;
     const ticket = findActiveTicket(ch, 'full_withdrawal');
     if (ticket) {
       ticket.status = 'settle_pending';
@@ -157,8 +177,11 @@ router.post('/finalize', (req, res) => {
 router.post('/claim', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const { manager, slot, recipient, tokenSlot } = req.body || {};
-    if (!manager || slot === undefined || !recipient) {
+    if (!requireLegacyDevnet(res)) return;
+    const { slot, recipient, tokenSlot } = req.body || {};
+    const manager = requireManager(req, res, 'needs { manager, slot, recipient, tokenSlot? }');
+    if (!manager) return;
+    if (slot === undefined || !recipient) {
       res.status(400).json({ error: 'needs { manager, slot, recipient, tokenSlot? }' });
       return;
     }
@@ -191,8 +214,11 @@ router.post('/claim', (req, res) => {
 router.post('/pull-credit', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const { manager, recipient } = req.body || {};
-    if (!manager || !recipient) {
+    if (!requireLegacyDevnet(res)) return;
+    const { recipient } = req.body || {};
+    const manager = requireManager(req, res, 'needs { manager, recipient }');
+    if (!manager) return;
+    if (!recipient) {
       res.status(400).json({ error: 'needs { manager, recipient }' });
       return;
     }
@@ -212,8 +238,11 @@ router.post('/pull-credit', (req, res) => {
 router.post('/post-close-claim', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, () => {
-    const { manager, slot, recipient, incomingTxIndex, sourceTx } = req.body || {};
-    if (!manager || slot === undefined || !recipient || incomingTxIndex === undefined) {
+    if (!requireLegacyDevnet(res)) return;
+    const { slot, recipient, incomingTxIndex, sourceTx } = req.body || {};
+    const manager = requireManager(req, res, 'needs { manager, slot, recipient, incomingTxIndex }');
+    if (!manager) return;
+    if (slot === undefined || !recipient || incomingTxIndex === undefined) {
       res.status(400).json({ error: 'needs { manager, slot, recipient, incomingTxIndex }' });
       return;
     }

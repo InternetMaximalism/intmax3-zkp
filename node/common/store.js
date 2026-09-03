@@ -406,6 +406,10 @@ class Store {
     return this.state.tickets[ticket.id];
   }
 
+  listTickets(predicate) {
+    return Object.values(this.state.tickets).filter(predicate || (() => true));
+  }
+
   findTicket(predicate) {
     return Object.values(this.state.tickets).find(predicate);
   }
