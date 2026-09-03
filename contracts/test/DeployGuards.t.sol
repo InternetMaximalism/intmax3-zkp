@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {
@@ -822,5 +822,153 @@ contract DeployGuardsTest is Test {
             preimage = abi.encodePacked(preimage, i < cosigners.length ? cosigners[i] : bytes32(0));
         }
         return keccak256(preimage);
+    }
+}
+
+// ── (6) the set-once close satellite on the REAL Rollup ────────────────────────────────────────
+
+/// @dev Minimal stand-in for what `IntmaxRollup.registerSettlementManager` needs from the
+///      satellite it discovers through `closeFundingMaterializer()`: deployed code that answers
+///      `bindManager(address)`. It records the binding so a test can prove the call happened.
+contract SetOnceMockMaterializer {
+    address public lastBound;
+
+    function bindManager(address manager) external {
+        lastBound = manager;
+    }
+}
+
+/// @dev A Manager exposing only the immutable `closeFundingMaterializer()` getter the Rollup
+///      probes via staticcall (selector 0x492fbb9e). No other Manager surface is consulted.
+contract SetOnceMockManager {
+    address public immutable closeFundingMaterializer;
+
+    constructor(address materializer_) {
+        closeFundingMaterializer = materializer_;
+    }
+}
+
+/// @dev (6) The Rollup discovers a registering Manager's `closeFundingMaterializer()` by
+///      staticcall and binds the Manager to that set-once close satellite. A Yul evaluation-order
+///      defect (`and(staticcall(...), eq(returndatasize(), 32))` read `returndatasize()` BEFORE
+///      the call, so discovery always failed) was found by the signer-independent-exit review and
+///      fixed by sequencing the call first; these tests are its regression suite. Every earlier
+///      `requestClose` test drove a stub materializer, which is why the suite had stayed green.
+contract MaterializerSetOnceTest is Test {
+    /// `forge inspect IntmaxRollup storage-layout`: `_channelExitMaterializer` lives at slot 64.
+    /// `test_creditChannelExitIsMaterializerOnly` validates the slot: a wrong slot leaves the gate
+    /// closed to `m1` and fails the test loudly.
+    uint256 internal constant CHANNEL_EXIT_MATERIALIZER_SLOT = 64;
+
+    IntmaxRollup internal rollup;
+    SetOnceMockMaterializer internal m1;
+    SetOnceMockMaterializer internal m2;
+
+    function setUp() public {
+        IntmaxRollup.MleVk memory vk;
+        SpongefishWhirVerify.WhirParams memory whir;
+        uint256[] memory empty = new uint256[](0);
+        rollup = new IntmaxRollup(
+            makeAddr("setonce_fraudTreasury"),
+            vk,
+            whir,
+            "",
+            "",
+            empty,
+            empty,
+            new MleVerifier(block.chainid),
+            bytes32(0),
+            true
+        );
+        m1 = new SetOnceMockMaterializer();
+        m2 = new SetOnceMockMaterializer();
+    }
+
+    function _installedMaterializer() internal view returns (address) {
+        return address(uint160(uint256(vm.load(address(rollup), bytes32(CHANNEL_EXIT_MATERIALIZER_SLOT)))));
+    }
+
+    function test_materializerIsSetOnce() public {
+
+        SetOnceMockManager a = new SetOnceMockManager(address(m1));
+        rollup.registerSettlementManager(address(a));
+        assertTrue(rollup.isRegisteredSettlementManager(address(a)));
+        assertEq(m1.lastBound(), address(a));
+        assertEq(_installedMaterializer(), address(m1));
+
+        // A second Manager pointing at a different satellite is refused outright, and the
+        // `isRegisteredSettlementManager` write made before the check is unwound with it.
+        SetOnceMockManager b = new SetOnceMockManager(address(m2));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.registerSettlementManager(address(b));
+        assertFalse(rollup.isRegisteredSettlementManager(address(b)));
+        assertEq(m2.lastBound(), address(0));
+
+        // Same satellite again: fine, and bound through it.
+        SetOnceMockManager c = new SetOnceMockManager(address(m1));
+        rollup.registerSettlementManager(address(c));
+        assertTrue(rollup.isRegisteredSettlementManager(address(c)));
+        assertEq(m1.lastBound(), address(c));
+
+        // A Manager whose advertised satellite has no code is refused too.
+        SetOnceMockManager d = new SetOnceMockManager(makeAddr("setonce_codeless"));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.registerSettlementManager(address(d));
+        assertFalse(rollup.isRegisteredSettlementManager(address(d)));
+    }
+
+    /// INTENDED behaviour (skipped until the finding above is fixed): registration is the only
+    /// writer of the set-once slot and installs the satellite the gate then honours.
+    function test_registrationInstallsTheCreditGateMaterializer() public {
+
+        SetOnceMockManager a = new SetOnceMockManager(address(m1));
+        rollup.registerSettlementManager(address(a));
+        vm.prank(address(m1));
+        rollup.creditChannelExit(address(a), 0, 0);
+        vm.prank(address(m2));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+    }
+
+    /// The `creditChannelExit` gate itself, independent of how the satellite gets installed:
+    /// closed to everyone while the slot is empty, and afterwards open to exactly the installed
+    /// address. The satellite is installed directly into its storage slot here because
+    /// registration cannot do it (see the finding above).
+    function test_creditChannelExitIsMaterializerOnly() public {
+        SetOnceMockManager a = new SetOnceMockManager(address(m1));
+        address stranger = makeAddr("setonce_stranger");
+
+        // Empty slot: the gate compares against address(0), which no caller can be.
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+        vm.prank(address(m1));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+
+        vm.store(address(rollup), bytes32(CHANNEL_EXIT_MATERIALIZER_SLOT), bytes32(uint256(uint160(address(m1)))));
+        assertEq(_installedMaterializer(), address(m1));
+
+        // The deployer, a stranger, the Manager itself, and a rival satellite are all refused.
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+        vm.prank(stranger);
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+        vm.prank(address(a));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+        vm.prank(address(m2));
+        vm.expectRevert(IntmaxRollup.InvalidChannelExitManager.selector);
+        rollup.creditChannelExit(address(a), 0, 0);
+
+        // Only the installed satellite passes the gate (a zero credit is a no-op)...
+        vm.prank(address(m1));
+        rollup.creditChannelExit(address(a), 0, 0);
+        assertEq(rollup.pendingWithdrawals(address(a)), 0);
+        // ...and even it is bound by escrow: a credit exceeding escrow panics.
+        vm.prank(address(m1));
+        vm.expectRevert(stdError.arithmeticError);
+        rollup.creditChannelExit(address(a), 0, 1);
+        assertEq(rollup.pendingWithdrawals(address(a)), 0);
     }
 }

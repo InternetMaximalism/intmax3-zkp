@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
@@ -289,28 +289,337 @@ contract SignerIndependentExitTest is Test {
         assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
     }
 
+    // ── Attack-regression coverage ───────────────────────────────────────────────────────────
+    // Each test below pins a guard an adversarial review found exercised only implicitly. They
+    // document the contract as deployed; a change in the expected selector is a semantic change.
+
+    /// Mirror of `test_crossedTokenFundsDigestFailsClosed` for the other statement limb: a valid
+    /// receipt for a different settled-tx chain is not a receipt for the finalized H.
+    function test_crossedSettledTxChainFailsClosed() external {
+        bytes32 otherChain = keccak256("other chain");
+        MleVerifier.MleProof memory crossed = _proof(0, otherChain, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), crossed);
+        assertTrue(materializer.hasSignedHeadBacking(address(manager), CHANNEL, otherChain, TFD, true));
+        assertFalse(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
+        _closeTwoTokens(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.materializeSignedHead(_m(manager), crossed);
+
+        assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
+        assertEq(rollup.totalEscrowed(), 11);
+        assertEq(rollup.escrowedByToken(TOKEN), 29);
+    }
+
+    /// The attestation receipt is keyed by the hash of the WHOLE proof. Moving the anchor limb to
+    /// another finalized block (or touching any non-PI field) yields an unattested proof id, even
+    /// though the mutated proof still passes shape validation.
+    function test_mutatedAnchorAfterAttestationIsNotAttested() external {
+        rollup.setHead(2, 2);
+        MleVerifier.MleProof memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        _closeTwoTokens(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+
+        MleVerifier.MleProof memory mutatedAnchor = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        mutatedAnchor.publicInputs[25] = 0;
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.materializeSignedHead(_m(manager), mutatedAnchor);
+
+        MleVerifier.MleProof memory mutatedBody = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        mutatedBody.witnessRoot = keccak256("tampered witness root");
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.materializeSignedHead(_m(manager), mutatedBody);
+
+        assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
+        // The exact attested proof still completes the exit.
+        materializer.materializeSignedHead(_m(manager), proof);
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST);
+    }
+
+    /// A receipt earned for channel 7's Manager is scoped to that (manager, channel, proof). It
+    /// neither transfers to a second bound Manager nor lets channel 7's proof speak for channel 8.
+    function test_attestationForChannelXCannotMaterializeChannelY() external {
+        uint32 otherChannel = 8;
+        ExitManagerHarness manager2 = _bindExtraManager(otherChannel);
+
+        MleVerifier.MleProof memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof7);
+        assertTrue(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
+        assertFalse(materializer.hasSignedHeadBacking(address(manager2), otherChannel, SETTLED, TFD, true));
+
+        // Channel 8 closes with identical economics, so only receipt scoping stands in the way.
+        manager2.requestClose();
+        _finishTwoTokensOn(manager2, 11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+
+        // Channel 7's proof presented for manager2: the channel limb is checked against the
+        // supplied Manager BEFORE the receipt lookup, so this fails as a public-input mismatch.
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.materializeSignedHead(_m(manager2), proof7);
+        // ...and the same proof cannot be attested for manager2 either.
+        vm.expectRevert(CloseFundingMaterializer.BackingPublicInputsMismatch.selector);
+        materializer.attestSignedHeadBacking(_m(manager2), proof7);
+
+        // A well-formed channel-8 proof carrying the same statement limbs: manager1's attestation
+        // does not carry over, because the receipt binds the Manager address and the exact proof.
+        MleVerifier.MleProof memory proof8 = _proofFor(otherChannel, 0, SETTLED, TFD, BACKING_ROOT);
+        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        materializer.materializeSignedHead(_m(manager2), proof8);
+
+        assertEq(materializer.materializedChannelExit(otherChannel), bytes32(0));
+        assertEq(rollup.totalEscrowed(), 11);
+        assertEq(rollup.escrowedByToken(TOKEN), 29);
+    }
+
+    /// A Manager that never went through `IntmaxRollup.registerSettlementManager` (and so was
+    /// never bound) cannot attest, materialize, or freeze — whether it claims a fresh channel id
+    /// or impersonates the channel id of the bound Manager.
+    function test_unboundManagerCannotAttestOrMaterialize() external {
+        uint32 strayChannel = 9;
+        rollup.setRegisteredChannel(strayChannel);
+        ExitManagerHarness stray = new ExitManagerHarness(bytes4(strayChannel), address(rollup), address(materializer));
+        MleVerifier.MleProof memory strayProof = _proofFor(strayChannel, 0, SETTLED, TFD, BACKING_ROOT);
+
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        materializer.attestSignedHeadBacking(_m(stray), strayProof);
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        materializer.materializeSignedHead(_m(stray), strayProof);
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        stray.requestClose();
+        assertFalse(materializer.hasSignedHeadBacking(address(stray), strayChannel, SETTLED, TFD, false));
+
+        // Impersonating the bound channel's id does not help: binding is by Manager address.
+        ExitManagerHarness impostor = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
+        MleVerifier.MleProof memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof7);
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        materializer.attestSignedHeadBacking(_m(impostor), proof7);
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        materializer.materializeSignedHead(_m(impostor), proof7);
+        vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
+        impostor.requestClose();
+        assertFalse(materializer.hasSignedHeadBacking(address(impostor), CHANNEL, SETTLED, TFD, false));
+        assertEq(materializer.frozenGeneration(CHANNEL), 0);
+    }
+
+    /// A Manager that reaches Closed without ever freezing the channel journal (no requestClose)
+    /// cannot exit: posts were never fenced, so the attested anchor proves nothing about H.
+    function test_materializeBeforeFreezeFailsClosed() external {
+        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        _finishTwoTokens(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+        assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed));
+        assertEq(materializer.frozenGeneration(CHANNEL), 0);
+
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitNotFrozen.selector);
+        materializer.materializeSignedHead(_m(manager), proof);
+
+        assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
+        assertEq(rollup.totalEscrowed(), 11);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 0);
+    }
+
+    /// The finalized close must point at a signed channel-fund root the Rollup has finalized (and
+    /// a non-zero close digest). Both defects fail as ChannelExitStatementMismatch; once the root
+    /// finalizes, the same attested proof completes the exit.
+    function test_materializeRequiresFinalizedSignedRoot() external {
+        bytes32 unfinalizedRoot = keccak256("unfinalized root");
+        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        manager.requestClose();
+        (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+
+        manager.finishClose(CLOSE_DIGEST, unfinalizedRoot, SETTLED, TFD, tokens, amounts);
+        assertFalse(rollup.isFinalizedStateRoot(unfinalizedRoot));
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitStatementMismatch.selector);
+        materializer.materializeSignedHead(_m(manager), proof);
+
+        manager.finishClose(bytes32(0), SIGNED_ROOT, SETTLED, TFD, tokens, amounts);
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitStatementMismatch.selector);
+        materializer.materializeSignedHead(_m(manager), proof);
+
+        assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
+        assertEq(rollup.totalEscrowed(), 11);
+
+        rollup.setFinalizedRoot(unfinalizedRoot);
+        manager.finishClose(CLOSE_DIGEST, unfinalizedRoot, SETTLED, TFD, tokens, amounts);
+        materializer.materializeSignedHead(_m(manager), proof);
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 11);
+    }
+
+    /// Descending rollback of a range that interleaves two channels restores each channel's exact
+    /// pre-post pointer, block by block.
+    function test_rollbackRestoresPointersAcrossInterleavedChannels() external {
+        uint32 channelB = 8;
+        _bindExtraManager(channelB);
+        uint64 floorA = materializer.lastPostedBlock(CHANNEL);
+        uint64 floorB = materializer.lastPostedBlock(channelB);
+
+        rollup.post(materializer, CHANNEL, 1);
+        rollup.post(materializer, channelB, 2);
+        rollup.post(materializer, CHANNEL, 3);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 3);
+        assertEq(materializer.lastPostedBlock(channelB), 2);
+
+        rollup.rollback(materializer, 3, 2);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 1);
+        assertEq(materializer.lastPostedBlock(channelB), 2);
+
+        rollup.rollback(materializer, 2, 1);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 1);
+        assertEq(materializer.lastPostedBlock(channelB), floorB);
+
+        rollup.rollback(materializer, 1, 0);
+        assertEq(materializer.lastPostedBlock(CHANNEL), floorA);
+        assertEq(materializer.lastPostedBlock(channelB), floorB);
+    }
+
+    /// Rolling back a block that is no longer its channel's head (1 while 3 is still posted for
+    /// the same channel) is refused and leaves the journal untouched; the correct descending
+    /// order still works afterwards.
+    function test_rollbackOutOfOrderAcrossInterleavedChannelsFailsClosed() external {
+        uint32 channelB = 8;
+        _bindExtraManager(channelB);
+        rollup.post(materializer, CHANNEL, 1);
+        rollup.post(materializer, channelB, 2);
+        rollup.post(materializer, CHANNEL, 3);
+
+        vm.expectRevert(CloseFundingMaterializer.ChannelExitStatementMismatch.selector);
+        rollup.rollback(materializer, 1, 0);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 3);
+        assertEq(materializer.lastPostedBlock(channelB), 2);
+
+        rollup.rollback(materializer, 3, 2);
+        rollup.rollback(materializer, 2, 1);
+        rollup.rollback(materializer, 1, 0);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 0);
+        assertEq(materializer.lastPostedBlock(channelB), 0);
+        // The journal entries were consumed: a second rollback of the same block is a no-op.
+        rollup.rollback(materializer, 1, 0);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 0);
+    }
+
+    /// The exit latch is written before any credit and is never cleared by the post journal: a
+    /// reorg of the anchored range cannot reopen posting, unfreeze, or a second materialization.
+    function test_exitLatchSurvivesRollbackAndCannotRematerialize() external {
+        rollup.post(materializer, CHANNEL, 1);
+        rollup.setHead(1, 1);
+        MleVerifier.MleProof memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        _closeTwoTokens(11, 29);
+        rollup.seedEscrow(11, TOKEN, 29);
+        materializer.materializeSignedHead(_m(manager), proof);
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 11);
+
+        rollup.rollback(materializer, 1, 0);
+        assertEq(materializer.lastPostedBlock(CHANNEL), 0);
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST);
+
+        vm.expectRevert(CloseFundingMaterializer.ChannelAlreadyExited.selector);
+        rollup.post(materializer, CHANNEL, 1);
+        vm.expectRevert(CloseFundingMaterializer.ChannelAlreadyExited.selector);
+        manager.cancelClose(1);
+
+        rollup.seedEscrow(11, TOKEN, 29);
+        vm.expectRevert(CloseFundingMaterializer.ChannelAlreadyExited.selector);
+        materializer.materializeSignedHead(_m(manager), proof);
+        assertEq(rollup.totalEscrowed(), 11);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 11);
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN, address(manager)), 29);
+    }
+
+    /// Model an already-paid burn: escrow holds 4 units less than the exact H vector on one lane.
+    /// The Rollup's checked debit panics, and the panic unwinds the digest latch and the earlier
+    /// lane's credit — no partial exit is ever left behind. Shown for each lane.
+    function test_burnAlreadyPaidMakesExactVectorExitFailClosed() external {
+        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        materializer.attestSignedHeadBacking(_m(manager), proof);
+        _closeTwoTokens(11, 29);
+
+        rollup.seedEscrow(11, TOKEN, 25);
+        vm.expectRevert(stdError.arithmeticError);
+        materializer.materializeSignedHead(_m(manager), proof);
+        _assertNothingMaterialized(11, 25);
+
+        rollup.seedEscrow(7, TOKEN, 29);
+        vm.expectRevert(stdError.arithmeticError);
+        materializer.materializeSignedHead(_m(manager), proof);
+        _assertNothingMaterialized(7, 29);
+
+        // The channel stays frozen and exit-capable: topping escrow back up completes the exit.
+        assertEq(materializer.frozenGeneration(CHANNEL), 1);
+        rollup.seedEscrow(11, TOKEN, 29);
+        materializer.materializeSignedHead(_m(manager), proof);
+        assertEq(materializer.materializedChannelExit(CHANNEL), CLOSE_DIGEST);
+    }
+
+    function _assertNothingMaterialized(uint256 nativeEscrow, uint256 tokenEscrow) private view {
+        assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
+        assertEq(rollup.totalEscrowed(), nativeEscrow);
+        assertEq(rollup.escrowedByToken(TOKEN), tokenEscrow);
+        assertEq(rollup.pendingWithdrawals(address(manager)), 0);
+        assertEq(rollup.pendingTokenWithdrawals(TOKEN, address(manager)), 0);
+    }
+
+    function _bindExtraManager(uint32 channelId) private returns (ExitManagerHarness extra) {
+        extra = new ExitManagerHarness(bytes4(channelId), address(rollup), address(materializer));
+        rollup.setRegisteredChannel(channelId);
+        rollup.bind(materializer, address(extra));
+        assertEq(materializer.managerOfChannel(channelId), address(extra));
+    }
+
+    function _m(ExitManagerHarness h) private pure returns (ChannelSettlementManager) {
+        return ChannelSettlementManager(payable(address(h)));
+    }
+
     function _closeTwoTokens(uint256 nativeAmount, uint256 tokenAmount) private {
         manager.requestClose();
         _finishTwoTokens(nativeAmount, tokenAmount);
     }
 
     function _finishTwoTokens(uint256 nativeAmount, uint256 tokenAmount) private {
-        uint32[] memory tokens = new uint32[](2);
+        _finishTwoTokensOn(manager, nativeAmount, tokenAmount);
+    }
+
+    function _finishTwoTokensOn(ExitManagerHarness target, uint256 nativeAmount, uint256 tokenAmount) private {
+        (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(nativeAmount, tokenAmount);
+        target.finishClose(CLOSE_DIGEST, SIGNED_ROOT, SETTLED, TFD, tokens, amounts);
+    }
+
+    function _twoTokenVector(uint256 nativeAmount, uint256 tokenAmount)
+        private
+        pure
+        returns (uint32[] memory tokens, uint256[] memory amounts)
+    {
+        tokens = new uint32[](2);
         tokens[0] = 0;
         tokens[1] = TOKEN;
-        uint256[] memory amounts = new uint256[](2);
+        amounts = new uint256[](2);
         amounts[0] = nativeAmount;
         amounts[1] = tokenAmount;
-        manager.finishClose(CLOSE_DIGEST, SIGNED_ROOT, SETTLED, TFD, tokens, amounts);
     }
 
     function _proof(uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
         pure
+        returns (MleVerifier.MleProof memory)
+    {
+        return _proofFor(CHANNEL, anchor, settled, tfd, backingRoot);
+    }
+
+    function _proofFor(uint32 channelId, uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
+        private
+        pure
         returns (MleVerifier.MleProof memory proof)
     {
         proof.publicInputs = new uint256[](26);
-        proof.publicInputs[0] = CHANNEL;
+        proof.publicInputs[0] = channelId;
         _putBytes32(proof.publicInputs, 1, settled);
         _putBytes32(proof.publicInputs, 9, tfd);
         _putBytes32(proof.publicInputs, 17, backingRoot);

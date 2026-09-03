@@ -876,9 +876,10 @@ contract IntmaxRollup {
         assembly ("memory-safe") {
             let ptr := mload(0x40)
             mstore(ptr, shl(224, 0x492fbb9e)) // closeFundingMaterializer()
-            if and(staticcall(gas(), manager, ptr, 4, ptr, 32), eq(returndatasize(), 32)) {
-                materializer := mload(ptr)
-            }
+            // Yul evaluates call arguments right-to-left: `returndatasize()` must be read AFTER
+            // the staticcall, so the call result is bound first.
+            let ok := staticcall(gas(), manager, ptr, 4, ptr, 32)
+            if and(ok, eq(returndatasize(), 32)) { materializer := mload(ptr) }
         }
         if (materializer != address(0)) {
             if (materializer.code.length == 0) revert InvalidChannelExitManager();
