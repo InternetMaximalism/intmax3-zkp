@@ -2703,6 +2703,25 @@ fn load_or_create_journal(
                 "journal belongs to a sibling chain/deployment/artifact/signer".into(),
             ));
         }
+        if let Some(submitted) = journal.submit_observation.as_ref() {
+            require_after_attestation(&journal, submitted, "journaled CloseSubmitted")?;
+        }
+        if let Some(finalized) = journal.finalize_observation.as_ref() {
+            require_after_attestation(&journal, finalized, "journaled CloseFinalized")?;
+        }
+        if let Some(completed) = journal.completed.as_ref() {
+            if completed.schema_version != PUBLICATION_VERSION
+                || !same_hex(
+                    &completed.attest_transaction_hash,
+                    &attested_lower_bound(&journal)?.transaction_hash,
+                )
+            {
+                return Err(PublicClosePublisherError::Conflict(
+                    "journaled completed publication does not match its attestation provenance"
+                        .into(),
+                ));
+            }
+        }
         return Ok(journal);
     }
     let journal = PublicationJournal {
@@ -4300,6 +4319,37 @@ fn same_semantic_receipt(left: &FinalizedReceipt, right: &FinalizedReceipt) -> b
         && left.transaction_index == right.transaction_index
 }
 
+/// The durable attestation observation every later close-era event must be ordered after.
+fn attested_lower_bound(journal: &PublicationJournal) -> Result<FinalizedReceipt> {
+    journal.attest_observation.clone().ok_or_else(|| {
+        PublicClosePublisherError::Conflict(
+            "close state machine reached semantic adoption without a durable backing attestation observation"
+                .into(),
+        )
+    })
+}
+
+/// A `CloseSubmitted`/`CloseFinalized` confirmation is authority for this close era only when its
+/// canonical `(block, transaction index)` position is strictly after the exact backing attestation
+/// this era depends on. Same-block ordering is decided by the transaction index.
+fn require_after_attestation(
+    journal: &PublicationJournal,
+    confirmation: &FinalizedReceipt,
+    label: &str,
+) -> Result<()> {
+    let attested = attested_lower_bound(journal)?;
+    if semantic_position(confirmation) <= semantic_position(&attested) {
+        return Err(PublicClosePublisherError::Evidence(format!(
+            "{label} confirmation at block {} index {} is not ordered strictly after the backing attestation at block {} index {}",
+            confirmation.block_number,
+            confirmation.transaction_index,
+            attested.block_number,
+            attested.transaction_index
+        )));
+    }
+    Ok(())
+}
+
 fn discover_semantic_confirmation<B: ClosePublisherBackend>(
     backend: &mut B,
     deployment: &DeploymentManifest,
@@ -4307,6 +4357,7 @@ fn discover_semantic_confirmation<B: ClosePublisherBackend>(
     event: SemanticCloseEvent,
     current_pending: Option<&ObservedPendingClose>,
     strictly_before: Option<&FinalizedReceipt>,
+    strictly_after: Option<&FinalizedReceipt>,
     checkpoint: &L1FinalizedCheckpoint,
     allow_unfinalized_devnet: bool,
 ) -> Result<FinalizedReceipt> {
@@ -4365,6 +4416,17 @@ fn discover_semantic_confirmation<B: ClosePublisherBackend>(
         {
             return Err(PublicClosePublisherError::Evidence(format!(
                 "matching {} provenance is not ordered before guarded finalization",
+                event.label()
+            )));
+        }
+        if strictly_after
+            .is_some_and(|lower| semantic_position(&confirmation) <= semantic_position(lower))
+        {
+            // The Manager only accepts this exact close after its whole-vector backing statement
+            // is attested, so an exact-digest event at or before the attestation position is
+            // evidence of an inconsistent chain view (stale event, reorg, or substituted RPC).
+            return Err(PublicClosePublisherError::Evidence(format!(
+                "matching {} provenance is not ordered strictly after the durable backing attestation",
                 event.label()
             )));
         }
@@ -5461,7 +5523,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             stored_materialize,
             config.allow_unfinalized_devnet,
         )?;
-        if completed.schema_version != 2
+        if completed.schema_version != PUBLICATION_VERSION
             || completed.chain_id != prepared.chain_id
             || !same_hex(&completed.rollup, &prepared.rollup)
             || !same_hex(&completed.manager, &deployment.manager)
@@ -5483,11 +5545,19 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 &completed.materialize_transaction_hash,
                 &materialize_confirmation.transaction_hash,
             )
+            || !same_hex(
+                &completed.attest_transaction_hash,
+                &attested_lower_bound(&journal)?.transaction_hash,
+            )
         {
             return Err(PublicClosePublisherError::Conflict(
                 "completed publication fields differ from semantic confirmations or bundle".into(),
             ));
         }
+        // The attestation observation was revalidated on-chain by `advance_attestation` above;
+        // the completed close/finalize provenance must still sit strictly after it.
+        require_after_attestation(&journal, &submit_confirmation, "CloseSubmitted")?;
+        require_after_attestation(&journal, &finalize_confirmation, "CloseFinalized")?;
         let (current, observed, checkpoint) = read_stable_context(
             backend,
             &deployment,
@@ -5541,6 +5611,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             .as_ref()
             .is_some_and(|pending| pending_matches(pending, &prepared.expected))
     {
+        let attested = attested_lower_bound(&journal)?;
         let confirmation = discover_semantic_confirmation(
             backend,
             &deployment,
@@ -5548,6 +5619,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             SemanticCloseEvent::Submitted,
             semantic_manager.pending.as_ref(),
             None,
+            Some(&attested),
             &semantic_checkpoint,
             config.allow_unfinalized_devnet,
         )?;
@@ -5585,6 +5657,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 "manager is Closed with a finalized state different from the exact proof".into(),
             ));
         }
+        let attested = attested_lower_bound(&journal)?;
         let final_confirmation = discover_semantic_confirmation(
             backend,
             &deployment,
@@ -5592,9 +5665,11 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             SemanticCloseEvent::Finalized,
             None,
             None,
+            Some(&attested),
             &semantic_checkpoint,
             config.allow_unfinalized_devnet,
         )?;
+        let attested = attested_lower_bound(&journal)?;
         let current_submit = discover_semantic_confirmation(
             backend,
             &deployment,
@@ -5602,6 +5677,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             SemanticCloseEvent::Submitted,
             None,
             Some(&final_confirmation),
+            Some(&attested),
             &semantic_checkpoint,
             config.allow_unfinalized_devnet,
         )?;
@@ -5741,6 +5817,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                         .as_ref()
                         .is_some_and(|pending| pending_matches(pending, &prepared.expected))
                     {
+                        let attested = attested_lower_bound(&journal)?;
                         let confirmation = discover_semantic_confirmation(
                             backend,
                             &deployment,
@@ -5748,6 +5825,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                             SemanticCloseEvent::Submitted,
                             manager.pending.as_ref(),
                             None,
+                            Some(&attested),
                             &checkpoint,
                             config.allow_unfinalized_devnet,
                         )?;
@@ -5803,6 +5881,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                         ));
                     }
                     validate_close_submitted_event(&receipt, &deployment.manager, pending)?;
+                    require_after_attestation(&journal, &confirmation, "CloseSubmitted")?;
                     submit.confirmation = Some(confirmation.clone());
                     journal.submit = Some(submit);
                     journal.submit_observation = Some(confirmation);
@@ -5842,6 +5921,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             .as_ref()
             .is_some_and(|pending| pending_matches(pending, &prepared.expected))
         {
+            let attested = attested_lower_bound(&journal)?;
             let confirmation = discover_semantic_confirmation(
                 backend,
                 &deployment,
@@ -5849,6 +5929,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 SemanticCloseEvent::Submitted,
                 manager.pending.as_ref(),
                 None,
+                Some(&attested),
                 &manager_checkpoint,
                 config.allow_unfinalized_devnet,
             )?;
@@ -5915,6 +5996,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             .as_ref()
             .is_some_and(|pending| pending_matches(pending, &prepared.expected))
         {
+            let attested = attested_lower_bound(&journal)?;
             let confirmation = discover_semantic_confirmation(
                 backend,
                 &deployment,
@@ -5922,6 +6004,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 SemanticCloseEvent::Submitted,
                 fresh.pending.as_ref(),
                 None,
+                Some(&attested),
                 &fresh_checkpoint,
                 config.allow_unfinalized_devnet,
             )?;
@@ -6010,6 +6093,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                             "permissionless finalizer closed a different state".into(),
                         ));
                     }
+                    let attested = attested_lower_bound(&journal)?;
                     let confirmation = discover_semantic_confirmation(
                         backend,
                         &deployment,
@@ -6017,6 +6101,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                         SemanticCloseEvent::Finalized,
                         None,
                         None,
+                        Some(&attested),
                         &checkpoint,
                         config.allow_unfinalized_devnet,
                     )?;
@@ -6138,6 +6223,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 "permissionless finalizer closed a different state".into(),
             ));
         }
+        let attested = attested_lower_bound(&journal)?;
         let confirmation = discover_semantic_confirmation(
             backend,
             &deployment,
@@ -6145,6 +6231,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             SemanticCloseEvent::Finalized,
             None,
             None,
+            Some(&attested),
             &current_checkpoint,
             config.allow_unfinalized_devnet,
         )?;
@@ -6282,6 +6369,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
                 "permissionless finalizer raced with a different state".into(),
             ));
         }
+        let attested = attested_lower_bound(&journal)?;
         let confirmation = discover_semantic_confirmation(
             backend,
             &deployment,
@@ -6289,6 +6377,7 @@ fn advance_with_backend<B: ClosePublisherBackend>(
             SemanticCloseEvent::Finalized,
             None,
             None,
+            Some(&attested),
             &fresh_checkpoint,
             config.allow_unfinalized_devnet,
         )?;
@@ -8045,11 +8134,21 @@ mod tests {
         block: &BlockObservation,
         events: Vec<Value>,
     ) -> Value {
+        receipt_with_events_at(transaction, signer, block, 0, events)
+    }
+
+    fn receipt_with_events_at(
+        transaction: &SignedTransaction,
+        signer: &str,
+        block: &BlockObservation,
+        transaction_index: u64,
+        events: Vec<Value>,
+    ) -> Value {
         serde_json::json!({
             "transactionHash": transaction.transaction_hash,
             "blockHash": block.hash.to_string(),
             "blockNumber": format!("0x{:x}", block.number),
-            "transactionIndex": "0x0",
+            "transactionIndex": format!("0x{transaction_index:x}"),
             "status": "0x1",
             "from": signer,
             "to": transaction.target,
@@ -8081,7 +8180,7 @@ mod tests {
             blocks.insert(10, block(10, 1_000));
             let mut managers = BTreeMap::new();
             managers.insert(10, requested(&fixture.prepared.expected, 1_000));
-            Self {
+            let mut backend = Self {
                 signer: address(0x55),
                 deployment: observed_deployment(fixture),
                 head: 10,
@@ -8097,7 +8196,12 @@ mod tests {
                 publish_attempts: Vec::new(),
                 fail_publish_attempts: BTreeSet::new(),
                 journal_path: fixture.config.journal_path.clone(),
-            }
+            };
+            // The exact whole-vector backing statement is already attested by another watchtower
+            // in the head block, at a non-zero transaction index so that same-block ordering
+            // against later close events is meaningful.
+            install_attestation_receipt(fixture, &mut backend, 10, EXTERNAL_ATTESTATION_INDEX);
+            backend
         }
 
         fn checkpoint(&self) -> L1FinalizedCheckpoint {
@@ -8303,6 +8407,67 @@ mod tests {
             }
             Ok(hashes.into_iter().collect())
         }
+    }
+
+    const EXTERNAL_ATTESTATION_INDEX: u64 = 1;
+
+    fn external_attestation(fixture: &Fixture) -> SignedTransaction {
+        SignedTransaction {
+            target: fixture.deployment.close_funding_materializer.clone(),
+            calldata_hash: String::new(),
+            nonce: 0,
+            raw_signed_transaction: String::new(),
+            transaction_hash: repeated(0xbb),
+        }
+    }
+
+    fn install_attestation_receipt(
+        fixture: &Fixture,
+        backend: &mut FakeBackend,
+        block_number: u64,
+        transaction_index: u64,
+    ) {
+        let block = backend
+            .blocks
+            .get(&block_number)
+            .expect("attestation block")
+            .clone();
+        let external = external_attestation(fixture);
+        backend.receipts.insert(
+            external.transaction_hash.clone(),
+            receipt_with_events_at(
+                &external,
+                &address(0x77),
+                &block,
+                transaction_index,
+                vec![attestation_event(fixture)],
+            ),
+        );
+    }
+
+    /// A backend whose permissionless attestation has already been adopted into the journal, so
+    /// the next `advance_with_backend` call enters the close state machine.
+    fn attested_backend(fixture: &Fixture) -> FakeBackend {
+        let mut backend = FakeBackend::new(fixture);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("adopt permissionless attestation"),
+            PublicCloseProgress::AttestAdopted { .. }
+        ));
+        assert_eq!(backend.sign_count, 0);
+        let journal: PublicationJournal =
+            serde_json::from_slice(&fs::read(&fixture.config.journal_path).unwrap()).unwrap();
+        let attested = journal.attest_observation.expect("durable attestation observation");
+        assert_eq!(attested.transaction_hash, repeated(0xbb));
+        assert_eq!(
+            (attested.block_number, attested.transaction_index),
+            (10, EXTERNAL_ATTESTATION_INDEX)
+        );
+        backend
+    }
+
+    fn read_journal(fixture: &Fixture) -> PublicationJournal {
+        serde_json::from_slice(&fs::read(&fixture.config.journal_path).unwrap()).unwrap()
     }
 
     fn install_submit_receipt(fixture: &Fixture, backend: &mut FakeBackend, event: Value) {
@@ -8629,7 +8794,7 @@ mod tests {
     #[test]
     fn full_lifecycle_uses_guarded_finalize_and_revalidates_completion() {
         let fixture = fixture("lifecycle");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         assert!(matches!(
@@ -8707,7 +8872,7 @@ mod tests {
     #[test]
     fn materialize_broadcast_failure_restarts_with_exact_fsynced_raw_bytes() {
         let fixture = fixture("materialize-restart");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         assert!(matches!(
@@ -8755,7 +8920,7 @@ mod tests {
     #[test]
     fn permissionless_materialization_is_adopted_without_local_signature() {
         let fixture = fixture("adopt-materialize");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         assert!(matches!(
@@ -8821,7 +8986,7 @@ mod tests {
     #[test]
     fn completed_materialization_fails_closed_when_its_receipt_disappears() {
         let fixture = fixture("materialize-reorg");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         assert!(matches!(
@@ -8860,7 +9025,7 @@ mod tests {
     #[test]
     fn submit_broadcast_failure_restarts_with_exact_fsynced_raw_bytes() {
         let fixture = fixture("submit-restart");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         backend.fail_publish_attempts.insert(1);
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
         assert!(error.to_string().contains("injected post-WAL"));
@@ -8885,7 +9050,7 @@ mod tests {
     #[test]
     fn finalize_broadcast_failure_restarts_with_exact_guarded_transaction() {
         let fixture = fixture("finalize-restart");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         backend.fail_publish_attempts.insert(2);
@@ -8903,7 +9068,7 @@ mod tests {
     #[test]
     fn request_generation_change_after_durable_pin_aborts_before_finalize_signing() {
         let fixture = fixture("finalize-pre-sign-generation-race");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
 
@@ -8911,11 +9076,19 @@ mod tests {
         let mut second_era = first_era.clone();
         second_era.close_request_generation = 2;
         backend.managers.insert(12, second_era.clone());
+        // The first pinned read belongs to the attestation revalidation that precedes the close
+        // state machine on every invocation; the era rotates only at the pre-sign re-read.
         backend.manager_sequences.insert(
             12,
-            [first_era.clone(), first_era.clone(), first_era, second_era]
-                .into_iter()
-                .collect(),
+            [
+                first_era.clone(),
+                first_era.clone(),
+                first_era.clone(),
+                first_era,
+                second_era,
+            ]
+            .into_iter()
+            .collect(),
         );
 
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
@@ -8962,7 +9135,7 @@ mod tests {
     #[test]
     fn journaled_finalize_raw_is_never_replayed_into_a_later_same_digest_era() {
         let fixture = fixture("finalize-generation-replay");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         backend.fail_publish_attempts.insert(2);
@@ -9001,7 +9174,7 @@ mod tests {
     #[test]
     fn exact_permissionless_submit_is_adopted_without_local_signing() {
         let fixture = fixture("adopt-submit");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         let submitted_block = block(11, 1_001);
         let external = SignedTransaction {
             // The permissionless call may be routed through a watchtower/batch wrapper. Its outer
@@ -9052,7 +9225,7 @@ mod tests {
     #[test]
     fn cancelled_same_digest_history_adopts_only_latest_current_freeze_era() {
         let fixture = fixture("adopt-current-era");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         // `cancelClose` restores the freeze counter, so the next request can submit the byte-for-
         // byte same proof/digest/freeze nonce. The newly computed deadline and full receipt-block
         // pending vector are the remaining current-era discriminator.
@@ -9144,7 +9317,7 @@ mod tests {
     #[test]
     fn ambiguous_latest_current_era_position_fails_closed() {
         let fixture = fixture("ambiguous-current-era");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         let submitted_block = block(11, 1_001);
         backend.blocks.insert(11, submitted_block.clone());
         backend.managers.insert(
@@ -9184,7 +9357,7 @@ mod tests {
     #[test]
     fn exact_permissionless_finalize_is_adopted_without_local_finalizer() {
         let fixture = fixture("adopt-finalize");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         let finalized_block = block(13, 1_102);
         let external = SignedTransaction {
@@ -9258,6 +9431,386 @@ mod tests {
     }
 
     #[test]
+    fn permissionless_attestation_winner_is_adopted_and_local_raw_is_superseded() {
+        let fixture = fixture("attest-race");
+        let mut backend = FakeBackend::new(&fixture);
+        let external = external_attestation(&fixture);
+        backend.receipts.remove(&external.transaction_hash);
+        backend.deployment.exact_backing_proof_attested = false;
+        backend.deployment.signed_head_backing_current = false;
+        backend.deployment.signed_head_backing_anchor_plus_one = 0;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("broadcast the local attestation"),
+            PublicCloseProgress::AttestBroadcast { .. }
+        ));
+        assert_eq!(backend.sign_count, 1);
+        assert_eq!(backend.publish_attempts, ["0x01"]);
+        let local = backend.transaction(0);
+        let journal = read_journal(&fixture);
+        assert!(journal.attest.is_some(), "raw attestation bytes are durable");
+        assert!(journal.attest_observation.is_none());
+
+        // Another watchtower's attestation of the same exact statement is finalized first.
+        let winning_block = block(11, 1_001);
+        backend.blocks.insert(11, winning_block.clone());
+        backend
+            .managers
+            .insert(11, requested(&fixture.prepared.expected, 1_001));
+        backend.head = 11;
+        backend.deployment = observed_deployment(&fixture);
+        install_attestation_receipt(&fixture, &mut backend, 11, 0);
+        let progress = advance_with_backend(&fixture.config, &mut backend)
+            .expect("adopt the permissionless attestation winner");
+        assert!(
+            matches!(
+                progress,
+                PublicCloseProgress::AwaitingSupersededReceipt { .. }
+            ),
+            "the local loser must settle before its nonce lane is released: {progress:?}"
+        );
+        let journal = read_journal(&fixture);
+        assert_eq!(
+            journal
+                .attest_observation
+                .as_ref()
+                .expect("winner adopted")
+                .transaction_hash,
+            external.transaction_hash
+        );
+        assert_eq!(backend.sign_count, 1, "no second attestation is signed");
+
+        // The local loser finally reverts on-chain; only then does the close machine continue.
+        let losing_block = block(12, 1_002);
+        backend.blocks.insert(12, losing_block.clone());
+        backend
+            .managers
+            .insert(12, requested(&fixture.prepared.expected, 1_002));
+        let signer = backend.signer.clone();
+        let mut failed = receipt_with_events(&local, &signer, &losing_block, Vec::new());
+        failed["status"] = Value::String("0x0".into());
+        backend
+            .receipts
+            .insert(local.transaction_hash.clone(), failed);
+        backend.head = 12;
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("settle the loser and sign the close submission"),
+            PublicCloseProgress::SubmitBroadcast { .. }
+        ));
+        let journal = read_journal(&fixture);
+        assert!(journal
+            .attest
+            .as_ref()
+            .and_then(|step| step.superseded_confirmation.as_ref())
+            .is_some());
+        assert_eq!(backend.sign_count, 2);
+        assert_eq!(backend.publish_attempts, ["0x01", "0x02"]);
+    }
+
+    #[test]
+    fn close_submitted_in_the_attestation_block_must_follow_the_attestation_index() {
+        let fixture = fixture("attest-same-block-order");
+        let mut backend = attested_backend(&fixture);
+        let head_block = backend.blocks.get(&10).expect("head block").clone();
+        backend.managers.insert(
+            10,
+            pending(&fixture.prepared.expected, head_block.timestamp, 1_100),
+        );
+        let external = SignedTransaction {
+            target: fixture.deployment.manager.clone(),
+            calldata_hash: String::new(),
+            nonce: 77,
+            raw_signed_transaction: String::new(),
+            transaction_hash: repeated(0xd4),
+        };
+        // Same block as the attestation, but mined before it.
+        backend.receipts.insert(
+            external.transaction_hash.clone(),
+            receipt_with_events_at(
+                &external,
+                &address(0x69),
+                &head_block,
+                EXTERNAL_ATTESTATION_INDEX - 1,
+                vec![submit_event(
+                    &fixture.deployment.manager,
+                    &fixture.prepared.expected,
+                    1_100,
+                )],
+            ),
+        );
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not ordered strictly after the durable backing attestation"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.sign_count, 0);
+        assert!(read_journal(&fixture).submit_observation.is_none());
+
+        // Same block, strictly later transaction index: canonical.
+        backend
+            .receipts
+            .get_mut(&external.transaction_hash)
+            .unwrap()["transactionIndex"] =
+            Value::String(format!("0x{:x}", EXTERNAL_ATTESTATION_INDEX + 1));
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("adopt the later same-block submission"),
+            PublicCloseProgress::AwaitingChallengeDeadline { .. }
+        ));
+        let submitted = read_journal(&fixture)
+            .submit_observation
+            .expect("adopted submission");
+        assert_eq!(submitted.transaction_hash, external.transaction_hash);
+        assert_eq!(
+            (submitted.block_number, submitted.transaction_index),
+            (10, EXTERNAL_ATTESTATION_INDEX + 1)
+        );
+    }
+
+    #[test]
+    fn local_submit_receipt_ordered_before_the_attestation_is_rejected() {
+        let fixture = fixture("local-submit-before-attest");
+        let mut backend = attested_backend(&fixture);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("broadcast submit"),
+            PublicCloseProgress::SubmitBroadcast { .. }
+        ));
+        // A substituted RPC view claims our own submission landed before the attestation.
+        let head_block = backend.blocks.get(&10).expect("head block").clone();
+        backend.managers.insert(
+            10,
+            pending(&fixture.prepared.expected, head_block.timestamp, 1_100),
+        );
+        let transaction = backend.transaction(0);
+        let signer = backend.signer.clone();
+        backend.receipts.insert(
+            transaction.transaction_hash.clone(),
+            receipt_with_events_at(
+                &transaction,
+                &signer,
+                &head_block,
+                EXTERNAL_ATTESTATION_INDEX - 1,
+                vec![submit_event(
+                    &fixture.deployment.manager,
+                    &fixture.prepared.expected,
+                    1_100,
+                )],
+            ),
+        );
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error.to_string().contains("not ordered strictly after"),
+            "unexpected error: {error}"
+        );
+        assert!(read_journal(&fixture).submit_observation.is_none());
+        assert_eq!(backend.sign_count, 1);
+    }
+
+    #[test]
+    fn adopted_attestation_is_revalidated_and_fails_closed_after_reorg() {
+        let fixture = fixture("attest-reorg");
+        let mut backend = attested_backend(&fixture);
+        backend.blocks.get_mut(&10).unwrap().hash = word(0xec);
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error.to_string().contains("orphaned"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.sign_count, 0);
+    }
+
+    #[test]
+    fn foreign_attestation_events_are_filtered_and_duplicate_exact_attestations_fail_closed() {
+        let fixture = fixture("attest-foreign");
+        let mut backend = FakeBackend::new(&fixture);
+        let head_block = backend.blocks.get(&10).expect("head block").clone();
+        // Same channel topic, different statement key: not this exact backing statement.
+        let mut foreign = attestation_event(&fixture);
+        foreign["topics"][3] = Value::String(repeated(0xdf));
+        let stranger = SignedTransaction {
+            target: fixture.deployment.close_funding_materializer.clone(),
+            calldata_hash: String::new(),
+            nonce: 5,
+            raw_signed_transaction: String::new(),
+            transaction_hash: repeated(0xbc),
+        };
+        backend.receipts.insert(
+            stranger.transaction_hash.clone(),
+            receipt_with_events_at(&stranger, &address(0x78), &head_block, 0, vec![foreign]),
+        );
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("the exact attestation remains unique"),
+            PublicCloseProgress::AttestAdopted { .. }
+        ));
+        assert_eq!(
+            read_journal(&fixture)
+                .attest_observation
+                .expect("adopted")
+                .transaction_hash,
+            repeated(0xbb)
+        );
+
+        let fixture = self::fixture("attest-duplicate");
+        let mut backend = FakeBackend::new(&fixture);
+        let head_block = backend.blocks.get(&10).expect("head block").clone();
+        let duplicate = SignedTransaction {
+            target: fixture.deployment.close_funding_materializer.clone(),
+            calldata_hash: String::new(),
+            nonce: 6,
+            raw_signed_transaction: String::new(),
+            transaction_hash: repeated(0xbd),
+        };
+        backend.receipts.insert(
+            duplicate.transaction_hash.clone(),
+            receipt_with_events_at(
+                &duplicate,
+                &address(0x79),
+                &head_block,
+                2,
+                vec![attestation_event(&fixture)],
+            ),
+        );
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error.to_string().contains("provenance count 2 != 1"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.sign_count, 0);
+    }
+
+    #[test]
+    fn completed_publication_attestation_provenance_and_schema_are_revalidated() {
+        let fixture = fixture("completed-attest-provenance");
+        let mut backend = attested_backend(&fixture);
+        submit_and_confirm(&fixture, &mut backend);
+        make_finalize_eligible(&fixture, &mut backend);
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend).expect("broadcast finalize"),
+            PublicCloseProgress::FinalizeBroadcast { .. }
+        ));
+        let materialize = confirm_finalize_and_begin_materialization(&fixture, &mut backend);
+        let materialized_block = block(14, 1_103);
+        backend.blocks.insert(14, materialized_block.clone());
+        backend.managers.insert(
+            14,
+            closed(&fixture.prepared.expected, materialized_block.timestamp),
+        );
+        let signer = backend.signer.clone();
+        backend.receipts.insert(
+            materialize.transaction_hash.clone(),
+            receipt(
+                &materialize,
+                &signer,
+                &materialized_block,
+                materialize_event(&fixture),
+            ),
+        );
+        backend.deployment.materialized_channel_exit =
+            fixture.prepared.expected.close_intent_digest.clone();
+        backend.head = 14;
+        let PublicCloseProgress::Complete { publication } =
+            advance_with_backend(&fixture.config, &mut backend).expect("complete materialization")
+        else {
+            panic!("expected complete publication");
+        };
+        assert_eq!(publication.schema_version, PUBLICATION_VERSION);
+        assert_eq!(publication.attest_transaction_hash, repeated(0xbb));
+
+        let path = &fixture.config.journal_path;
+        let original = fs::read(path).unwrap();
+        let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+        tampered["completed"]["attestTransactionHash"] = Value::String(repeated(0xcc));
+        fs::write(path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error.to_string().contains("attestation provenance"),
+            "unexpected error: {error}"
+        );
+
+        let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+        tampered["completed"]["schemaVersion"] = Value::from(PUBLICATION_VERSION - 1);
+        fs::write(path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
+        assert!(
+            error.to_string().contains("attestation provenance"),
+            "unexpected error: {error}"
+        );
+
+        fs::write(path, &original).unwrap();
+        assert!(matches!(
+            advance_with_backend(&fixture.config, &mut backend)
+                .expect("the exact completed journal revalidates"),
+            PublicCloseProgress::Complete { .. }
+        ));
+        assert_eq!(backend.sign_count, 3);
+    }
+
+    #[test]
+    fn journal_load_rejects_close_provenance_at_or_before_the_attestation() {
+        let fixture = fixture("journal-attest-order");
+        ensure_private_directory(
+            fixture
+                .config
+                .journal_path
+                .parent()
+                .expect("journal parent"),
+        )
+        .expect("private journal parent");
+        let backend = FakeBackend::new(&fixture);
+        let signer = backend.signer.clone();
+        let binding = make_binding(
+            &fixture.prepared,
+            &fixture.deployment,
+            fixture.config.deployment_manifest_sha256.clone(),
+            &fixture.config.signer_lock_root,
+        )
+        .expect("publication binding");
+        let head_block = backend.blocks.get(&10).expect("head block").clone();
+        let attested = FinalizedReceipt {
+            transaction_hash: repeated(0xbb),
+            block_hash: head_block.hash.to_string(),
+            block_number: head_block.number,
+            transaction_index: EXTERNAL_ATTESTATION_INDEX,
+            finalized_checkpoint: backend.checkpoint(),
+        };
+        let mut submitted = attested.clone();
+        submitted.transaction_hash = repeated(0xd5);
+        let mut journal = PublicationJournal {
+            version: JOURNAL_VERSION,
+            binding: binding.clone(),
+            submitter: signer.clone(),
+            attest: None,
+            attest_observation: Some(attested),
+            submit: None,
+            submit_observation: Some(submitted.clone()),
+            finalize_authorization: None,
+            finalize: None,
+            finalize_observation: None,
+            materialize: None,
+            materialize_observation: None,
+            completed: None,
+        };
+        write_journal(&fixture.config.journal_path, &journal).expect("persist journal");
+        let error =
+            load_or_create_journal(&fixture.config.journal_path, binding.clone(), &signer)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("not ordered strictly after"),
+            "unexpected error: {error}"
+        );
+
+        submitted.transaction_index = EXTERNAL_ATTESTATION_INDEX + 1;
+        journal.submit_observation = Some(submitted);
+        write_journal(&fixture.config.journal_path, &journal).expect("persist journal");
+        load_or_create_journal(&fixture.config.journal_path, binding, &signer)
+            .expect("a strictly later same-block submission loads");
+    }
+
+    #[test]
     fn duplicate_fully_matching_manager_events_are_ambiguous() {
         let fixture = fixture("duplicate-exact-events");
         let block = block(11, 1_001);
@@ -9306,7 +9859,7 @@ mod tests {
     #[test]
     fn adopted_submit_is_revalidated_and_fails_closed_after_reorg() {
         let fixture = fixture("adopt-reorg");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         let submitted_block = block(11, 1_001);
         let external = SignedTransaction {
             target: fixture.deployment.manager.clone(),
@@ -9337,13 +9890,24 @@ mod tests {
         advance_with_backend(&fixture.config, &mut backend).expect("adopt submit");
         backend.blocks.get_mut(&11).unwrap().hash = word(0xed);
         let error = advance_with_backend(&fixture.config, &mut backend).unwrap_err();
-        assert!(error.to_string().contains("receipt is orphaned"));
+        // The reorg is detected either by the attestation revalidation (the durable checkpoint it
+        // was confirmed under was replaced at the same height) or by the orphaned submit receipt;
+        // both stop the publisher before any further signing.
+        assert!(
+            error.to_string().contains("receipt is orphaned")
+                || error
+                    .to_string()
+                    .contains("replaced at the same height"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.sign_count, 0);
+        assert!(read_journal(&fixture).finalize_authorization.is_none());
     }
 
     #[test]
     fn orphaned_submit_receipt_is_rejected() {
         let fixture = fixture("orphan");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         advance_with_backend(&fixture.config, &mut backend).expect("submit");
         let event = submit_event(
             &fixture.deployment.manager,
@@ -9363,7 +9927,7 @@ mod tests {
     #[test]
     fn wrong_submit_event_and_wrong_receipt_block_getter_are_rejected() {
         let event_fixture = fixture("event-getter");
-        let mut backend = FakeBackend::new(&event_fixture);
+        let mut backend = attested_backend(&event_fixture);
         advance_with_backend(&event_fixture.config, &mut backend).expect("submit");
         let mut event = submit_event(
             &event_fixture.deployment.manager,
@@ -9376,7 +9940,7 @@ mod tests {
         assert!(error.to_string().contains("provenance is missing"));
 
         let fixture = fixture("getter");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         advance_with_backend(&fixture.config, &mut backend).expect("submit");
         install_submit_receipt(
             &fixture,
@@ -9402,7 +9966,7 @@ mod tests {
     #[test]
     fn finalized_per_token_payout_cap_mismatch_is_rejected() {
         let fixture = fixture("payout-cap");
-        let mut backend = FakeBackend::new(&fixture);
+        let mut backend = attested_backend(&fixture);
         submit_and_confirm(&fixture, &mut backend);
         make_finalize_eligible(&fixture, &mut backend);
         advance_with_backend(&fixture.config, &mut backend).expect("finalize");
