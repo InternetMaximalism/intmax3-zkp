@@ -4,9 +4,11 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 /// @title `reclaimStake` — recover a POST_BLOCK_STAKE bond once its submission is finalized history.
 /// @notice Fixes the stranded-stake fund loss: one aggregate validity proof finalizes many posted
@@ -16,38 +18,50 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 ///         check sound. Drives the real c2c lifecycle (5 postBlocks + 1 aggregate finalize) so the
 ///         stranding is reproduced exactly. Self-skips if c2c fixtures are absent.
 contract ReclaimStakeTest is Test {
-    MleVerifier internal verifier;
     IntmaxRollup internal rollup;
     address internal fraudTreasury = makeAddr("fraudTreasury");
     address internal poster = makeAddr("poster");
 
     string internal lc;
-    string internal validityMleJson;
     bool internal ready;
 
     uint256 internal constant STAKE = 1 ether; // POST_BLOCK_STAKE
 
     function setUp() public {
         string memory root = string.concat(vm.projectRoot(), "/test/data/");
+        string memory validityConfigJson;
         try vm.readFile(string.concat(root, "c2c_lifecycle.json")) returns (string memory j) {
             lc = j;
-            validityMleJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle.json"));
+            validityConfigJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle_config.json"));
+            if (!vm.exists(string.concat(root, "c2c_lifecycle_validity_mle.json"))) {
+                ready = false;
+                return;
+            }
             ready = true;
         } catch {
             ready = false;
             return;
         }
-        verifier = new MleVerifier(block.chainid);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(validityMleJson, verifier);
+        if (!vm.keyExistsJson(validityConfigJson, ".schemaVersion")) {
+            ready = false;
+            return;
+        }
+        // Deploy from the proof-free config. Keeping the ~1.3 MB proof JSON in test-contract
+        // storage exhausts the setup gas cap; each proof-using test reads it transiently instead.
+        (, PinnedMleVerifierV2 validityAdapter) = FixtureLib.deployPinnedMleV2(validityConfigJson);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
         rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury,
+            IPinnedMleVerifierV2(address(validityAdapter)),
+            new MockPinnedMleVerifierV2(31337),
+            genesis
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
+    }
+
+    function _validityMleJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_lifecycle_validity_mle.json"));
     }
 
     // ── Main fix: every stranded postBlock bond is recoverable after the aggregate finalize. ──
@@ -153,7 +167,7 @@ contract ReclaimStakeTest is Test {
         _postAllRoundsNoFinalize();
         // Finalize the aggregate proof via sub4, then reclaim a stranded sibling (sub0).
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
-        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(validityMleJson);
+        bytes memory vproof = FixtureLib.parseCompactProofV2(_validityMleJson());
         bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
         assertTrue(rollup.finalize(4, finalRoot, vpis, vproof), "finalize");
         rollup.reclaimStake(0);
@@ -205,7 +219,7 @@ contract ReclaimStakeTest is Test {
     function _lifecycleThroughFinalize() internal returns (uint256 finalSubId) {
         finalSubId = _postAllRoundsNoFinalize();
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
-        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(validityMleJson);
+        bytes memory vproof = FixtureLib.parseCompactProofV2(_validityMleJson());
         bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
         assertTrue(rollup.finalize(finalSubId, finalRoot, vpis, vproof), "finalize failed");
     }

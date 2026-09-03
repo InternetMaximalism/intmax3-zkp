@@ -2,14 +2,14 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title PrepareProofDa
 /// @notice Produces the canonical validity-proof byte stream consumed by Foundry's EIP-4844
 ///         `SidecarBuilder<SimpleCoder>` when `cast send --blob --path ...` is used.
 ///
-/// @dev The file is deliberately the raw `abi.encode(MleProof)` stream. Foundry 1.5.1's
+/// @dev The file is deliberately the fixture's exact canonical `compactProof.bytes` stream.
+///      Foundry 1.5.1's
 ///      `SimpleCoder` adds one field-element header
 ///      (`0x00 || uint64_be(length) || 23 zero bytes`), packs 31 payload bytes into each subsequent
 ///      BLS scalar field element (`0x00 || payload chunk`), zero pads the final word, and
@@ -40,14 +40,13 @@ contract PrepareProofDa is Script {
         return uint8(count);
     }
 
-    function canonicalProofBytes(MleVerifier.MleProof memory proof) public pure returns (bytes memory) {
-        return abi.encode(proof);
+    function canonicalProofBytes(bytes memory compactProof) public pure returns (bytes memory) {
+        return compactProof;
     }
 
     function run() external {
         string memory json = vm.readFile(string.concat(vm.projectRoot(), "/", INPUT));
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        bytes memory payload = canonicalProofBytes(proof);
+        bytes memory payload = canonicalProofBytes(FixtureLib.parseCompactProofV2(json));
         uint8 blobCount = blobCountForLength(payload.length);
         bytes32 proofHash = keccak256(payload);
 

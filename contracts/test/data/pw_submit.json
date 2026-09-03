@@ -1,5 +1,5 @@
 {
-  "burn_tx_hash": "0xfccd4084c4e83e54843a0985d7cd69214893831be870d6eaf24e0d2b494343f9",
+  "burn_tx_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "burn_tx_leaf": "0xc3de30056117cadeb0ad72d0370851ea5d1c07a2bca38d1857b2cef4a15ff535",
   "channel_fund_amounts": [
     "85",
@@ -13,20 +13,20 @@
     "0",
     "0"
   ],
-  "channel_fund_intmax_state_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "channel_fund_intmax_state_root": "0x65fab2e06add194475e8e31c05e3765d286956d7297ab88e008e9c223391c70e",
   "close_freeze_nonce": 1,
   "close_nonce": 1,
-  "close_withdrawal_digest": "0xde0ffeb6d6dfb15be5bcf923b40ae6b183087ea2a905251a995432afc475a16e",
+  "close_withdrawal_digest": "0x0afc5eda7d280d12199d448beb17fe6ca4a57d7276ed4725ffcf98144636d07d",
   "final_balance_state_h1": "0xd5452189684c69f82a0578fb34233d93caedb5e58f3e322a0983db991927ca00",
-  "final_channel_state_digest": "0x2e294e4a07ed23dfa38418c68c39d7bb94cc980392a6a1444a4fcf2d6b4f749c",
+  "final_channel_state_digest": "0xa1466641be5549bb6ecffabb0c1f1448db72d13d60e01ce0ddb846b5df19ac5f",
   "final_epoch": 2,
   "final_settled_tx_acc_root": "0x04a4114537b3c42abd891a9577237d3f2764b33ffb03ded157bb879c6b642818",
   "final_settled_tx_chain": "0x08731cdfd4654e608fa3590fa3ae800de244222267859a56498cf7779bfaa8e6",
   "final_small_block_number": 1,
   "final_state_version": 1,
-  "manager": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+  "manager": "0x09635F643e140090A9A8Dcd712eD6285858ceBef",
   "prev_settled_tx_chain": "0x4a7b9beebcd9186596fa81a5d613f6a85c5661cc2a76c2576ebc0bf8990a7830",
-  "snapshot_medium_block_number": 1,
+  "snapshot_medium_block_number": 0,
   "token_count": 1,
   "token_registry": [
     0,
@@ -40,7 +40,7 @@
     0,
     0
   ],
-  "verifier": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+  "verifier": "0xa85233C63b9Ee964Add6F2cffe00Fd84eb32338f",
   "withdrawal_amount": 5,
   "withdrawal_aux_data": "0x6fbed83393e99628a0766e931957d2341fc3ca2c762387ec70692e4cd3eabd5c",
   "withdrawal_base_nonce": 1,

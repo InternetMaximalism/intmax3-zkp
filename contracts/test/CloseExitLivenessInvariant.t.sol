@@ -4,7 +4,6 @@ pragma solidity ^0.8.29;
 import {Vm} from "forge-std/Vm.sol";
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
 /// @dev The proof/intent builders the handler needs. They live on the test contract (which extends
@@ -16,9 +15,9 @@ interface ICloseExitOracle {
     function oBuildBurnIntent(uint64 stateVersion, uint64 freezeNonce)
         external view returns (ChannelSettlementManager.CloseIntent memory);
     function oCloseProof(ChannelSettlementManager.CloseIntent calldata intent)
-        external view returns (MleVerifier.MleProof memory);
+        external view returns (bytes memory);
     function oCancelProof(bytes32 closeIntentDigest, uint64 revivedStateVersion)
-        external view returns (MleVerifier.MleProof memory);
+        external view returns (bytes memory);
     function oWithdrawal()
         external view returns (ChannelSettlementManager.AuthorizedWithdrawal memory);
     function oPrevChain() external pure returns (bytes32);
@@ -272,7 +271,7 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     }
 
     function oCloseProof(ChannelSettlementManager.CloseIntent calldata intent)
-        external view returns (MleVerifier.MleProof memory)
+        external view returns (bytes memory)
     {
         return this._closeProofCd(
             intent,
@@ -283,13 +282,13 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
     }
 
     function oCancelProof(bytes32 closeIntentDigest, uint64 revivedStateVersion)
-        external view returns (MleVerifier.MleProof memory)
+        external view returns (bytes memory)
     {
         return _cancelProofFor(closeIntentDigest, revivedStateVersion);
     }
 
     function _cancelProofFor(bytes32 closeIntentDigest, uint64 revivedStateVersion)
-        internal view returns (MleVerifier.MleProof memory)
+        internal view returns (bytes memory)
     {
         ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         return CloseTestLib.proofWithLimbs(

@@ -7,7 +7,6 @@ import {IERC20} from "../src/SafeERC20.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 
 /// @title Terminal close-funding authorization and mixed-ledger pull tests.
 /// @notice Exercises only the Manager side of the existing proof-backed Rollup IPW2 lane. The
@@ -400,7 +399,7 @@ contract AtomicCloseFundingMaterializerTest is CloseFundingAuthorizationTest {
         bytes32 auxData = _expectedAux(intent);
         IntmaxRollup.Withdrawal[] memory withdrawals = new IntmaxRollup.Withdrawal[](1);
         withdrawals[0] = _withdrawal(0, 75, keccak256("competitor-nullifier"), auxData);
-        MleVerifier.MleProof memory proof;
+        bytes memory proof;
 
         vm.expectEmit(true, true, true, true, address(materializer));
         emit CloseFundingMaterialized(address(manager), 0, auxData, keccak256(abi.encode(withdrawals)));
@@ -428,7 +427,7 @@ contract AtomicCloseFundingMaterializerTest is CloseFundingAuthorizationTest {
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
         bytes32 auxData = _expectedAux(intent);
-        MleVerifier.MleProof memory proof;
+        bytes memory proof;
 
         IntmaxRollup.Withdrawal[] memory partialLane = new IntmaxRollup.Withdrawal[](1);
         partialLane[0] = _withdrawal(TOKEN_A, 40, keccak256("partial-a"), auxData);
@@ -453,7 +452,7 @@ contract AtomicCloseFundingMaterializerTest is CloseFundingAuthorizationTest {
         bytes32 auxData = _expectedAux(intent);
         IntmaxRollup.Withdrawal[] memory withdrawals = new IntmaxRollup.Withdrawal[](1);
         withdrawals[0] = _withdrawal(0, 75, keccak256("retryable-nullifier"), auxData);
-        MleVerifier.MleProof memory proof;
+        bytes memory proof;
 
         registry.setRejectAtomicWithdrawal(true);
         vm.expectRevert(bytes("atomic withdrawal rejected"));

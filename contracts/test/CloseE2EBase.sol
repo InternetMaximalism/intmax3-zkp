@@ -3,97 +3,156 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {
+    ChannelSettlementManager,
+    IChannelSettlementVerifier,
+    IChannelRegistry
+} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 
-/// @title Shared CREATE2 deploy + address-prediction logic for the close-lifecycle e2e.
-/// @notice The channel close pays its native ETH to the `ChannelSettlementManager`, so the manager's
-///         address must be baked (as the L1 withdrawal recipient) into the close withdrawal PROOF
-///         before that proof is generated. To make the address knowable ahead of time, all five
-///         contracts are deployed through the canonical CREATE2 factory with fixed salts; the
-///         factory is the CREATE2 deployer, so `computeCreate2Address` is identical whether called
-///         by the address-printing entry point or the lifecycle test in `CloseLifecycleE2E.t.sol`.
-///         Both use this base so the salts and initcodes — and therefore the computed addresses —
-///         cannot diverge.
+/// @title Shared deterministic deploy + address-prediction logic for the close-lifecycle e2e.
+/// @notice The channel close pays native ETH to the `ChannelSettlementManager`, so the manager's
+///         address must be baked into the withdrawal proof before that proof is generated. Six
+///         proof-free V2 configuration artifacts let this harness constructor-pin every circuit
+///         adapter first. The four parent contracts then use fixed CREATE2 salts and initcodes.
 ///
-/// SECURITY: this is test/deploy plumbing only; it does not affect on-chain verification logic.
+/// @dev Adapter cores are ordinary CREATE deployments. The address-printer and lifecycle test live
+///      in the same test contract and deploy the six adapters in the same order from a fresh test
+///      state, so their adapter addresses and all dependent CREATE2 initcodes are identical. Once
+///      full proof fixtures exist, the printer simply reports the manager deployed by `setUp`.
+///
+/// SECURITY: test/deploy plumbing only; production verification remains constructor-pinned.
 abstract contract CloseE2EBase is Test {
-    error FixtureGenerationMismatch(address candidateManager, address closeFixtureManager);
-
     // Canonical deterministic-deployment CREATE2 factory (present on anvil / Foundry).
     address internal constant FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
-    // Fixed salts (any distinct constants; pinned so script + test agree).
-    bytes32 internal constant SALT_MV = keccak256("intmax-close-e2e/MleVerifier/v2-chain-pinned");
-    bytes32 internal constant SALT_ROLLUP = keccak256("intmax-close-e2e/IntmaxRollup/v1");
-    bytes32 internal constant SALT_SV = keccak256("intmax-close-e2e/SettlementVerifier/v1");
-    bytes32 internal constant SALT_MATERIALIZER = keccak256("intmax-close-e2e/CloseFundingMaterializer/v1");
-    bytes32 internal constant SALT_MANAGER = keccak256("intmax-close-e2e/SettlementManager/v1");
+    bytes32 internal constant SALT_ROLLUP = keccak256("intmax-close-e2e/IntmaxRollup/v2-pinned");
+    bytes32 internal constant SALT_SV = keccak256("intmax-close-e2e/SettlementVerifier/v2-pinned");
+    bytes32 internal constant SALT_MATERIALIZER = keccak256("intmax-close-e2e/CloseFundingMaterializer/v2");
+    bytes32 internal constant SALT_MANAGER = keccak256("intmax-close-e2e/SettlementManager/v2");
 
-    // Fixed constructor constants (must match between address computation and actual deploy).
+    bytes32 internal constant V2_CONFIG_SCHEMA_HASH = keccak256("plonky2-mle-v3-solidity-config");
+    bytes32 internal constant V2_FULL_SCHEMA_HASH = keccak256("plonky2-mle-v3-solidity");
+
     address internal constant FRAUD_TREASURY = address(0xFEED);
     uint64 internal constant CHALLENGE_PERIOD = 1 days;
     uint256 internal constant SPECIAL_CLOSE_PENALTY = 0;
     uint256 internal constant INITIAL_BP_BOND = 0;
 
-    // ── Fixture file names (the close set; see generate_withdrawal_fixture WD_OUT_PREFIX=close_) ──
+    struct PinnedAdapters {
+        IPinnedMleVerifierV2 validity;
+        IPinnedMleVerifierV2 withdrawal;
+        IPinnedMleVerifierV2 close;
+        IPinnedMleVerifierV2 withdrawalClaim;
+        IPinnedMleVerifierV2 postCloseClaim;
+        IPinnedMleVerifierV2 cancelClose;
+    }
+
+    function _dataPath(string memory fileName) internal view returns (string memory) {
+        return string.concat(vm.projectRoot(), "/test/data/", fileName);
+    }
+
+    function _readData(string memory fileName) internal view returns (string memory) {
+        return vm.readFile(_dataPath(fileName));
+    }
+
     function _validityJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_lifecycle_validity_mle.json"));
+        return _readData("close_lifecycle_validity_mle.json");
     }
+
     function _withdrawalJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_withdrawal_mle.json"));
+        return _readData("close_withdrawal_mle.json");
     }
+
     function _lifecycleJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_lifecycle.json"));
+        return _readData("close_lifecycle.json");
     }
+
     function _payoutJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_withdrawal_payout.json"));
+        return _readData("close_withdrawal_payout.json");
     }
 
-    // ── initcodes ──
-
-    function _mleVerifierInitcode(uint256 allowedChainId) internal pure returns (bytes memory) {
-        return abi.encodePacked(type(MleVerifier).creationCode, abi.encode(allowedChainId));
+    function _validityConfigJson() internal view returns (string memory) {
+        return _readData("close_lifecycle_validity_mle_config.json");
     }
 
-    function _settlementVerifierInitcode() internal pure returns (bytes memory) {
-        return type(ChannelSettlementVerifier).creationCode;
+    function _withdrawalConfigJson() internal view returns (string memory) {
+        return _readData("close_withdrawal_mle_config.json");
+    }
+
+    function _closeConfigJson() internal view returns (string memory) {
+        return _readData("close_intent_mle_config.json");
+    }
+
+    function _withdrawalClaimConfigJson() internal view returns (string memory) {
+        return _readData("withdrawal_claim_mle_config.json");
+    }
+
+    function _postCloseClaimConfigJson() internal view returns (string memory) {
+        return _readData("post_close_claim_mle_config.json");
+    }
+
+    function _cancelCloseConfigJson() internal view returns (string memory) {
+        return _readData("cancel_close_mle_config.json");
+    }
+
+    function _isSchemaFile(string memory fileName, bytes32 expectedSchemaHash) internal view returns (bool) {
+        string memory path = _dataPath(fileName);
+        if (!vm.exists(path)) return false;
+        string memory json = vm.readFile(path);
+        return vm.keyExistsJson(json, ".schemaVersion")
+            && keccak256(bytes(vm.parseJsonString(json, ".schema"))) == expectedSchemaHash;
+    }
+
+    function _v2DeploymentConfigsReady() internal view returns (bool) {
+        return _isSchemaFile("close_lifecycle_validity_mle_config.json", V2_CONFIG_SCHEMA_HASH)
+            && _isSchemaFile("close_withdrawal_mle_config.json", V2_CONFIG_SCHEMA_HASH)
+            && _isSchemaFile("close_intent_mle_config.json", V2_CONFIG_SCHEMA_HASH)
+            && _isSchemaFile("withdrawal_claim_mle_config.json", V2_CONFIG_SCHEMA_HASH)
+            && _isSchemaFile("post_close_claim_mle_config.json", V2_CONFIG_SCHEMA_HASH)
+            && _isSchemaFile("cancel_close_mle_config.json", V2_CONFIG_SCHEMA_HASH);
+    }
+
+    function _deployPinnedAdapters() private returns (PinnedAdapters memory adapters) {
+        (, PinnedMleVerifierV2 validity) = FixtureLib.deployPinnedMleV2(_validityConfigJson());
+        (, PinnedMleVerifierV2 withdrawal) = FixtureLib.deployPinnedMleV2(_withdrawalConfigJson());
+        (, PinnedMleVerifierV2 close) = FixtureLib.deployPinnedMleV2(_closeConfigJson());
+        (, PinnedMleVerifierV2 withdrawalClaim) = FixtureLib.deployPinnedMleV2(_withdrawalClaimConfigJson());
+        (, PinnedMleVerifierV2 postCloseClaim) = FixtureLib.deployPinnedMleV2(_postCloseClaimConfigJson());
+        (, PinnedMleVerifierV2 cancelClose) = FixtureLib.deployPinnedMleV2(_cancelCloseConfigJson());
+
+        adapters = PinnedAdapters({
+            validity: IPinnedMleVerifierV2(address(validity)),
+            withdrawal: IPinnedMleVerifierV2(address(withdrawal)),
+            close: IPinnedMleVerifierV2(address(close)),
+            withdrawalClaim: IPinnedMleVerifierV2(address(withdrawalClaim)),
+            postCloseClaim: IPinnedMleVerifierV2(address(postCloseClaim)),
+            cancelClose: IPinnedMleVerifierV2(address(cancelClose))
+        });
+    }
+
+    function _rollupInitcode(bytes32 genesis, PinnedAdapters memory adapters) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            type(IntmaxRollup).creationCode, abi.encode(FRAUD_TREASURY, adapters.validity, adapters.withdrawal, genesis)
+        );
+    }
+
+    function _settlementVerifierInitcode(PinnedAdapters memory adapters) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            type(ChannelSettlementVerifier).creationCode,
+            abi.encode(adapters.close, adapters.withdrawalClaim, adapters.postCloseClaim, adapters.cancelClose)
+        );
     }
 
     function _materializerInitcode(address rollupAddr) internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            type(CloseFundingMaterializer).creationCode,
-            abi.encode(IntmaxRollup(payable(rollupAddr)))
-        );
+        return
+            abi.encodePacked(type(CloseFundingMaterializer).creationCode, abi.encode(IntmaxRollup(payable(rollupAddr))));
     }
 
-    /// IntmaxRollup initcode. `verifierForGatesDigest` only computes the (address-independent)
-    /// gatesDigest; the rollup is bound to `mleVerifierAddr` (the CREATE2 MleVerifier).
-    function _rollupInitcode(
-        string memory vkJson,
-        bytes32 genesis,
-        address mleVerifierAddr,
-        MleVerifier verifierForGatesDigest
-    ) internal view returns (bytes memory) {
-        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(vkJson);
-        IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(vkJson, verifierForGatesDigest);
-        return abi.encodePacked(
-            type(IntmaxRollup).creationCode,
-            abi.encode(
-                FRAUD_TREASURY, vk, dd.whirParams, dd.protocolId, dd.sessionId,
-                dd.kIs, dd.subgroupGenPowers, MleVerifier(mleVerifierAddr), genesis,
-                // SECURITY (A-2): production-faithful — the close lifecycle uses a REAL validity VK
-                // (degreeBits=13), so MLE verification stays ENABLED (allowMleDisabled=false).
-                false
-            )
-        );
-    }
-
-    /// ChannelSettlementManager initcode, with member bindings + bp read from the registration.
     function _managerInitcode(
         string memory lifecycleJson,
         address settlementVerifierAddr,
@@ -105,18 +164,25 @@ abstract contract CloseE2EBase is Test {
         address[] memory recipients = vm.parseJsonAddressArray(lifecycleJson, ".registration.recipients");
         ChannelSettlementManager.MemberBinding[] memory bindings =
             new ChannelSettlementManager.MemberBinding[](hashes.length);
-        for (uint256 i = 0; i < hashes.length; i++) {
+        for (uint256 i = 0; i < hashes.length; ++i) {
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: hashes[i], recipient: recipients[i]});
         }
         bytes4 channelId = bytes4(uint32(vm.parseJsonUint(lifecycleJson, ".registration.channel_id")));
         return abi.encodePacked(
             type(ChannelSettlementManager).creationCode,
-            // Delegate account: `delegateCount_ = 0` (no delegates in this lifecycle fixture), placed
-            // 4th to match the constructor (channelId, bpSlot, bpPkG, delegateCount, ...).
             abi.encode(
-                channelId, bpSlot, hashes[bpSlot], uint16(0), bytes32(0), CHALLENGE_PERIOD, SPECIAL_CLOSE_PENALTY,
-                INITIAL_BP_BOND, IChannelSettlementVerifier(settlementVerifierAddr),
-                IChannelRegistry(rollupAddr), materializerAddr, bindings
+                channelId,
+                bpSlot,
+                hashes[bpSlot],
+                uint16(0),
+                bytes32(0),
+                CHALLENGE_PERIOD,
+                SPECIAL_CLOSE_PENALTY,
+                INITIAL_BP_BOND,
+                IChannelSettlementVerifier(settlementVerifierAddr),
+                IChannelRegistry(rollupAddr),
+                materializerAddr,
+                bindings
             )
         );
     }
@@ -125,94 +191,56 @@ abstract contract CloseE2EBase is Test {
         return vm.computeCreate2Address(salt, keccak256(initcode), FACTORY);
     }
 
-    /// Predict the manager address (the close withdrawal recipient) from a (validity-VK, lifecycle)
-    /// fixture pair, WITHOUT deploying anything except a throwaway MleVerifier used only to derive
-    /// the gatesDigest.
-    /// @dev Before the close fixtures exist, the printer uses the plain P2 fixtures. Once both
-    ///      close fixture inputs exist, this function requires both pairs to derive the same exact
-    ///      Manager address. This turns a mixed circuit/VK generation into a hard failure instead
-    ///      of printing an address that would be baked into an unusable payout proof.
-    function predictManagerAddressFrom(string memory vkJson, string memory lcJson)
-        public returns (address managerAddr)
-    {
-        managerAddr = _predictManagerAddressUnchecked(vkJson, lcJson);
-
-        string memory closeVkPath =
-            string.concat(vm.projectRoot(), "/test/data/close_lifecycle_validity_mle.json");
-        string memory closeLifecyclePath = string.concat(vm.projectRoot(), "/test/data/close_lifecycle.json");
-        try vm.readFile(closeVkPath) returns (string memory closeVkJson) {
-            try vm.readFile(closeLifecyclePath) returns (string memory closeLifecycleJson) {
-                address closeFixtureManager =
-                    _predictManagerAddressUnchecked(closeVkJson, closeLifecycleJson);
-                if (managerAddr != closeFixtureManager) {
-                    revert FixtureGenerationMismatch(managerAddr, closeFixtureManager);
-                }
-            } catch {}
-        } catch {}
-    }
-
-    function _predictManagerAddressUnchecked(string memory vkJson, string memory lcJson)
-        private returns (address managerAddr)
-    {
-        MleVerifier tmp = new MleVerifier(block.chainid);
-        bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        address mvAddr = _predict(SALT_MV, _mleVerifierInitcode(block.chainid));
-        address rollupAddr = _predict(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, mvAddr, tmp));
-        address svAddr = _predict(SALT_SV, _settlementVerifierInitcode());
+    /// @notice Deploy the six proof-free adapters in canonical order and predict the manager whose
+    ///         address can then be embedded in witness-specific close withdrawal data.
+    function predictManagerAddressFrom(string memory lifecycleJson) public returns (address managerAddr) {
+        require(_v2DeploymentConfigsReady(), "close v2 config fixtures unavailable");
+        PinnedAdapters memory adapters = _deployPinnedAdapters();
+        bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
+        address rollupAddr = _predict(SALT_ROLLUP, _rollupInitcode(genesis, adapters));
+        address svAddr = _predict(SALT_SV, _settlementVerifierInitcode(adapters));
         address materializerAddr = _predict(SALT_MATERIALIZER, _materializerInitcode(rollupAddr));
-        managerAddr = _predict(SALT_MANAGER, _managerInitcode(lcJson, svAddr, rollupAddr, materializerAddr));
+        managerAddr = _predict(SALT_MANAGER, _managerInitcode(lifecycleJson, svAddr, rollupAddr, materializerAddr));
     }
 
-    // ── factory deploy ──
-
-    function _deploy(bytes32 salt, bytes memory initcode) internal returns (address a) {
+    function _deploy(bytes32 salt, bytes memory initcode) internal returns (address deployed) {
         (bool ok, bytes memory ret) = FACTORY.call(abi.encodePacked(salt, initcode));
         require(ok, "CREATE2 factory deploy failed");
-        a = address(bytes20(ret));
-        require(a.code.length > 0, "no code deployed");
+        deployed = address(bytes20(ret));
+        require(deployed.code.length > 0, "no code deployed");
     }
 
-    /// Deploy MleVerifier → IntmaxRollup → ChannelSettlementVerifier → materializer →
-    /// registerChannel → manager,
-    /// all via the canonical CREATE2 factory with the fixed salts. SHARED by the address-printing
-    /// script and the lifecycle test so they land at identical addresses (the factory is the CREATE2
-    /// deployer, so the result depends only on salt + initcode, both fixed by the given fixtures).
-    /// The manager address is the L1 recipient that must be baked into the close withdrawal proof.
-    function _deployAll(string memory vkJson, string memory lcJson)
+    /// @notice Constructor-pin all six circuit adapters, then atomically create the two parents,
+    ///         materializer and manager using the same initcodes as the address printer.
+    function _deployAll(string memory lifecycleJson)
         internal
         returns (
-            MleVerifier verifier_,
-            IntmaxRollup rollup_,
-            ChannelSettlementVerifier sv_,
-            ChannelSettlementManager manager_
+            IntmaxRollup rollup,
+            ChannelSettlementVerifier settlementVerifier,
+            CloseFundingMaterializer materializer,
+            ChannelSettlementManager manager
         )
     {
-        bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        verifier_ = MleVerifier(_deploy(SALT_MV, _mleVerifierInitcode(block.chainid)));
-        rollup_ = IntmaxRollup(payable(_deploy(SALT_ROLLUP, _rollupInitcode(vkJson, genesis, address(verifier_), verifier_))));
-        sv_ = ChannelSettlementVerifier(_deploy(SALT_SV, _settlementVerifierInitcode()));
-        address materializerAddr = _deploy(SALT_MATERIALIZER, _materializerInitcode(address(rollup_)));
+        PinnedAdapters memory adapters = _deployPinnedAdapters();
+        bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
+        rollup = IntmaxRollup(payable(_deploy(SALT_ROLLUP, _rollupInitcode(genesis, adapters))));
+        settlementVerifier = ChannelSettlementVerifier(_deploy(SALT_SV, _settlementVerifierInitcode(adapters)));
+        materializer = CloseFundingMaterializer(_deploy(SALT_MATERIALIZER, _materializerInitcode(address(rollup))));
 
-        // registerChannel BEFORE the manager deploy (manager constructor binds to it, Finding E).
-        {
-            uint32 channelId = uint32(vm.parseJsonUint(lcJson, ".registration.channel_id"));
-            uint8 bpSlot = uint8(vm.parseJsonUint(lcJson, ".registration.bp_member_slot"));
-            bytes32[] memory sphincs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs");
-            bytes32[] memory pkBs = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_bs");
-            bytes32[] memory regev = vm.parseJsonBytes32Array(lcJson, ".registration.regev_pk_digests");
-            address[] memory recipients = vm.parseJsonAddressArray(lcJson, ".registration.recipients");
-            // The canonical CREATE2 factory is the immutable rollup deployer in this local path.
-            vm.prank(FACTORY);
-            rollup_.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
-        }
+        uint32 channelId = uint32(vm.parseJsonUint(lifecycleJson, ".registration.channel_id"));
+        uint8 bpSlot = uint8(vm.parseJsonUint(lifecycleJson, ".registration.bp_member_slot"));
+        bytes32[] memory sphincs = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_gs");
+        bytes32[] memory pkBs = vm.parseJsonBytes32Array(lifecycleJson, ".registration.member_pk_bs");
+        bytes32[] memory regev = vm.parseJsonBytes32Array(lifecycleJson, ".registration.regev_pk_digests");
+        address[] memory recipients = vm.parseJsonAddressArray(lifecycleJson, ".registration.recipients");
+        vm.prank(FACTORY);
+        rollup.registerChannel(channelId, bpSlot, 0, sphincs, pkBs, regev, recipients);
 
-        manager_ = ChannelSettlementManager(
-            payable(
-                _deploy(
+        manager = ChannelSettlementManager(
+            payable(_deploy(
                     SALT_MANAGER,
-                    _managerInitcode(lcJson, address(sv_), address(rollup_), materializerAddr)
-                )
-            )
+                    _managerInitcode(lifecycleJson, address(settlementVerifier), address(rollup), address(materializer))
+                ))
         );
     }
 }

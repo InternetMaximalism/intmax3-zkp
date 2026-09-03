@@ -1,13 +1,13 @@
 {
-  "genesis_state_root": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
-  "final_state_root": "0x39de5af25d7865128aff0440619984c40c412ab66d8bd56d31092d245a2c4c2e",
+  "genesis_state_root": "0x65fab2e06add194475e8e31c05e3765d286956d7297ab88e008e9c223391c70e",
+  "final_state_root": "0xbd1f662f3a034a071b7b5979c7f48ac614cf1e8d5c98956bbd97adf30d8a38fc",
   "registration": {
     "channel_id": 1,
     "bp_member_slot": 0,
     "member_pk_gs": [
-      "0xd56ccfa4ffe7b4d6c8db3e7aa8f537c90db8c0a5d03c2eee440507a1b460f900",
-      "0xb0ba5230b637124caa105aee7fd38fb072097791402b680a77f843fc196c645f",
-      "0x4ee9cd3df61b052b623e15a04d1888a94a00da202a8c15151744822566fe3c55"
+      "0x67e1c986a577e81db61a1a6aedaddd519996ee5f72208aac4dee9e7138df62f3",
+      "0xb1ad52347638a9c4d6b4f880894f4421d98c472447d8f42d814ea450189e07cc",
+      "0x9974000438b05a40e306da3185c36bd3325566f3e1a9fbc2f7c1a726d307a67a"
     ],
     "member_pk_bs": [
       "0x02bf3df43eee067a5534ccd95953e41a45fc27d9671cc53752ac7aeb5e2ca5e8",
@@ -67,12 +67,12 @@
   "vpis": {
     "initial_block_number": 0,
     "initial_block_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
-    "initial_ext_commitment": "0x464864c822ae13e306bb41d549535412b182545fab0dbdf6c82cf103eda2103d",
+    "initial_ext_commitment": "0x65fab2e06add194475e8e31c05e3765d286956d7297ab88e008e9c223391c70e",
     "final_block_number": 3,
-    "final_block_chain": "0x8aafbbb705a507ec3a96bdcddb4a1803693cb03f239ba1d53df16373176dc4e4",
-    "final_ext_commitment": "0x39de5af25d7865128aff0440619984c40c412ab66d8bd56d31092d245a2c4c2e",
+    "final_block_chain": "0xcf51d8ead5951eb5bbae574a1bb87fc4c1c03ce7c20cc848141ec61116f9a966",
+    "final_ext_commitment": "0xbd1f662f3a034a071b7b5979c7f48ac614cf1e8d5c98956bbd97adf30d8a38fc",
     "prover": "0x0000000000000000000000000000000000000000"
   },
-  "proof_hash": "0x000000000000000000000000000000000000000000000000c059b18278f9af52",
-  "proof_length": 207476
+  "proof_hash": "0xa96a30fd9b9c26ca7ee72ca46dec77b7360d4d49a66c8ea801add7979b221cac",
+  "proof_length": 196524
 }

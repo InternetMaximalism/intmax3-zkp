@@ -1,18 +1,26 @@
-# Sepolia smoke-deploy runbook — IntmaxRollup
+# Archived pre-V2 Sepolia smoke transcript — IntmaxRollup
 
-> **BLOCKED on non-local chains (2026-08-19).** Do not run the posting commands below on
-> Sepolia. The current fixture's `abi.encode(MleProof)` is 131,264 bytes, which exceeds one
-> 131,072-byte blob by 192 bytes. The current KZG adapter also clears the top three bits of every
-> 32-byte chunk, so the zero/demo blob is not a lossless data-availability encoding of the proof.
-> `channel_member withdraw` now refuses every chain id except local devnet `31337`. This runbook is
-> retained as a local rehearsal reference until the proof-DA commitment is redesigned (for example,
-> a lossless multi-blob format) and covered by a real fraud-proof E2E.
+> **NO-GO / DO NOT EXECUTE (2026-09-03).** Every command, selector, proof size, gas estimate,
+> runtime size and address below belongs to a retired V1 rehearsal. The MLE/WHIR V2 implementation
+> uses strict `plonky2-mle-v3-solidity` schema/protocol version 3, WHIR PoW 22 artifacts and one
+> exact `MLEWHIR3` `.compactProof.bytes` stream for calldata,
+> proof DA, attestation, finalization and fraud classification. Publication must go through
+> `public_validity_publisher` with deployment-manifest schema 2 and immutable adapter/core pins;
+> manual tuple-proof `cast send` is not supported.
 >
-> **SUPERSEDED ABI NOTICE (2026-09-02).** The manual `cast send` examples below intentionally
-> preserve an old rehearsal transcript and use retired posting selectors. They are not release
-> instructions. Current publication must go through `public_validity_publisher` and its reviewed
-> deployment manifest, using `postBlockAndSubmitGuarded` with the exact pending-chain checkpoint
-> and predecessor block number/hash chain; see `doc/docs/public-validity-publisher.md`.
+> Public execution is still forbidden for a different, stronger reason:
+> `IntmaxRollup.releaseRuntime` remains restricted to chain `31337` until an independent
+> cryptographic reviewer approves the V2 transcript/commitment/malicious-prover argument and the
+> complete acceptance matrix, and all separate final-audit NO-GO items are closed. A Sepolia
+> constructor deployment or historical successful receipt is not release authorization. Old
+> pending submissions and bonds must be resolved under the old contracts, never migrated by
+> interpreting V1 bytes as V2.
+
+For the current local V2 procedure use `doc/tasks/regen-and-redeploy-runbook.md`; for the publisher
+contract and manifest use `doc/docs/public-validity-publisher.md`.
+
+<details>
+<summary>Historical V1 transcript (incident/reference only)</summary>
 
 End-to-end smoke of the **real** on-chain validity path on Sepolia:
 
@@ -294,3 +302,5 @@ fee). `finalize` was broadcast with `--with-gas-price 25gwei
 deployer balance (forge's default estimate reserved 18M × ~47 gwei ≈ 0.85 ETH).
 The whole smoke (deploy + 1 ETH postBlock stake + finalize) fit in ~1.95 ETH
 with the stake recoverable; budget more headroom or run at low gas next time.
+
+</details>

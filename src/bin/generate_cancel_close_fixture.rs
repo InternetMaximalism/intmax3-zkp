@@ -2,8 +2,10 @@
 //!
 //! Phase C1 (tasks/phase-c-challenge-stubs-threat-model.md, "CORRECTED cancelClose statement"):
 //! `ChannelSettlementVerifier.verifyCancelClose` is turned into a REAL on-chain verification of the
-//! plonky2 `CancelCloseCircuit` via the shared `@mle/MleVerifier.sol` rail. Produces:
+//! plonky2 `CancelCloseCircuit` via its circuit-specific pinned compact-v2 MLE/WHIR adapter.
+//! Produces:
 //!
+//!   - contracts/test/data/cancel_close_mle_config.json — strict proof-free V2 configuration.
 //!   - contracts/test/data/cancel_close_mle.json — the wrapped MLE proof + VK params.
 //!   - contracts/test/data/cancel_close.json — a descriptor with every PI field value (channelId,
 //!     closeIntentDigest, memberSetCommitment, closeFinalStateVersion, revivedStateVersion,
@@ -27,7 +29,11 @@ use intmax3_zkp::{
     },
     utils::{
         conversion::ToU64,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{
+            export_mle_v2_config_json, export_mle_v2_json, mle_v2_config_only_requested,
+            persist_or_validate_mle_v2_config_json, prove_with_mle_v2, setup_mle_vk_v2,
+            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
+        },
         wrapper::WrapperCircuit,
     },
 };
@@ -59,6 +65,19 @@ struct CancelCloseDescriptor {
 fn main() -> anyhow::Result<()> {
     eprintln!("[cancel] Step 0: build cancel-close circuit");
     let circuit = test_fixture::circuit();
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
+    let mle_config_json = export_mle_v2_config_json(&wrapper.data)?;
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("cancel_close_mle_config.json"),
+        &mle_config_json,
+    )?;
+    eprintln!("[cancel] wrote contracts/test/data/cancel_close_mle_config.json");
+    if mle_v2_config_only_requested() {
+        eprintln!("[cancel] config-only mode: no witness or proof was constructed");
+        return Ok(());
+    }
 
     eprintln!("[cancel] Step 1: build witness + prove");
     let witness = test_fixture::build_full_witness();
@@ -74,20 +93,20 @@ fn main() -> anyhow::Result<()> {
     let pis = CancelClosePublicInputs::from_u64_slice(&pi_limbs).map_err(|e| anyhow::anyhow!(e))?;
 
     eprintln!("[cancel] Step 2: wrap + MLE");
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
     let wrapped = wrapper.prove(&proof)?;
     wrapper.data.verify(wrapped.clone())?;
-    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
     let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof);
-    let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
-    verify_mle_proof(&wrapper.data, &vk, &mle.proof)?;
-    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common)?;
+    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof)?;
+    let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)?;
+    verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)?;
+    let mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)?;
+    validate_mle_v2_full_against_config_json(&mle_json, &mle_config_json)?;
 
     {
         let parsed: serde_json::Value = serde_json::from_str(&mle_json)?;
         let mle_pis = parsed
-            .get("publicInputs")
+            .pointer("/proof/publicInputs")
             .and_then(|v| v.as_array())
             .expect("MLE json must carry publicInputs");
         assert_eq!(mle_pis.len(), CANCEL_CLOSE_PUBLIC_INPUTS_LEN);
@@ -104,8 +123,6 @@ fn main() -> anyhow::Result<()> {
         eprintln!("[cancel] MLE publicInputs == 29 raw limbs (sanity OK)");
     }
 
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("cancel_close_mle.json"), &mle_json)?;
     eprintln!("[cancel] wrote contracts/test/data/cancel_close_mle.json");
 

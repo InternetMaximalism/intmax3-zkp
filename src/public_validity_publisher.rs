@@ -25,6 +25,22 @@ use std::os::{
 };
 
 use num_bigint::BigUint;
+use plonky2::field::goldilocks_field::GoldilocksField;
+use plonky2_mle::{
+    compact_v2::{decode_compact_v2, encode_compact_v2},
+    fixture_v2::{
+        MLE_VERIFIER_FIXTURE_SCHEMA_V2, MleProofV2Fixture, MleVerifierV2Fixture,
+        SOLIDITY_MLE_PROOF_ENCODING_V2, SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2,
+        derive_whir_deployment_profile_v2, proof_encoding_size_upper_bound_v2,
+        solidity_abi_encode_mle_proof_v2, solidity_abi_encode_verification_config_v2,
+    },
+    protocol_schema_v2::{
+        CIRCUIT_DIGEST_LENGTH_V2, COMPACT_LAYOUT_HASH_V2, COMPACT_MAGIC_V2,
+        MAX_COMPACT_PROOF_BYTES_V2, MAX_WHIR_HINT_BYTES_V2, MAX_WHIR_NARG_BYTES_V2,
+        MLE_PROOF_ABI_SIGNATURE_V2, MLE_PROOF_LAYOUT_HASH_V2, MLE_PROTOCOL_VERSION_CURRENT,
+        SCHEMA_VERSION_CURRENT,
+    },
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -39,7 +55,9 @@ use crate::{
     },
 };
 
-const JOURNAL_VERSION: u32 = 1;
+// V2 binds the strict full-fixture/compact-proof identity and the adapter/core deployment pins.
+// Refuse to reinterpret a pending legacy tuple-proof journal under those stronger invariants.
+const JOURNAL_VERSION: u32 = 2;
 const ENVELOPE_SCHEMA_VERSION: u32 = 2;
 const POST_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
 const MAX_ENVELOPE_BYTES: u64 = 64 * 1024 * 1024;
@@ -49,6 +67,10 @@ const MAX_RPC_JSON_BYTES: usize = 16 * 1024 * 1024;
 const EVENT_LOG_BLOCK_SPAN: u64 = 10_000;
 const POST_SIGNATURE: &str = "postBlockAndSubmitGuarded((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32,uint64,bytes32)";
 const ATTEST_SIGNATURE: &str = "attestProofData(uint256,bytes,bytes)";
+const FINALIZE_SIGNATURE: &str =
+    "finalize(uint256,bytes32,(uint64,bytes32,bytes32,uint64,bytes32,bytes32,address),bytes)";
+const FRAUD_PROOF_SIGNATURE: &str =
+    "fraudProof(uint256,bytes32,(uint64,bytes32,bytes32,uint64,bytes32,bytes32,address),bytes)";
 const ANVIL_PUBLIC_DEV_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 static PRIVATE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -162,8 +184,12 @@ struct PreparedEnvelope {
     initial_block_chain: String,
     initial_ext_commitment: String,
     final_block_number: u64,
-    proof_abi_version: u8,
     proof_payload: Vec<u8>,
+    verification_config_digest: String,
+    circuit_config_digest: String,
+    whir_parameters_digest: String,
+    whir_protocol_id: String,
+    whir_session_id: String,
     proof_hash: String,
     proof_length: u32,
     post_calldata: String,
@@ -171,8 +197,17 @@ struct PreparedEnvelope {
     final_state_root: String,
     expected_pending_chains: String,
     vpis: Value,
-    mle_proof: Value,
     binding_digest: String,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedMleV2Artifact {
+    compact_proof: Vec<u8>,
+    verification_config_digest: String,
+    circuit_config_digest: String,
+    whir_parameters_digest: String,
+    whir_protocol_id: String,
+    whir_session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,11 +226,23 @@ struct CandidateBinding {
     artifact_hash: String,
     deployment_manifest_hash: String,
     rollup_runtime_code_hash: String,
-    mle_verifier: String,
-    mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier: String,
+    validity_mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier_core: String,
+    validity_mle_verifier_core_runtime_code_hash: String,
+    validity_mle_verification_config_digest: String,
+    validity_mle_circuit_config_digest: String,
+    validity_mle_whir_parameters_digest: String,
+    validity_mle_whir_protocol_id: String,
+    validity_mle_whir_session_id: String,
     kzg_verifier: String,
     kzg_verifier_runtime_code_hash: String,
-    proof_abi_version: u8,
+    mle_fixture_schema: String,
+    mle_protocol_version: u64,
+    mle_proof_abi_signature: String,
+    mle_proof_layout_hash: String,
+    mle_compact_layout_hash: String,
+    mle_compact_proof_encoding: String,
     proof_hash: String,
     proof_length: u32,
     final_state_root: String,
@@ -212,16 +259,29 @@ struct DeploymentManifest {
     chain_id: u64,
     rollup: String,
     rollup_runtime_code_hash: String,
-    mle_verifier: String,
-    mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier: String,
+    validity_mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier_core: String,
+    validity_mle_verifier_core_runtime_code_hash: String,
+    validity_mle_verification_config_digest: String,
+    validity_mle_circuit_config_digest: String,
+    validity_mle_whir_parameters_digest: String,
+    validity_mle_whir_protocol_id: String,
+    validity_mle_whir_session_id: String,
     /// Release-reviewed proof-DA satellite selected by `IntmaxRollup.kzgVerifier()`.
     /// This pins deployment identity only; the KZG ceremony remains an explicit trust assumption.
     kzg_verifier: String,
     kzg_verifier_runtime_code_hash: String,
-    mle_proof_abi_version: u8,
+    mle_fixture_schema: String,
+    mle_protocol_version: u64,
+    mle_proof_abi_signature: String,
+    mle_proof_layout_hash: String,
+    mle_compact_layout_hash: String,
+    mle_compact_proof_encoding: String,
     post_block_and_submit_guarded_selector: String,
     attest_proof_data_selector: String,
     finalize_selector: String,
+    fraud_proof_selector: String,
 }
 
 #[derive(Clone, Debug)]
@@ -233,8 +293,15 @@ struct CheckedDeployment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ObservedDeploymentIdentity {
     rollup_runtime_code_hash: String,
-    mle_verifier: String,
-    mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier: String,
+    validity_mle_verifier_runtime_code_hash: String,
+    validity_mle_verifier_core: String,
+    validity_mle_verifier_core_runtime_code_hash: String,
+    validity_mle_verification_config_digest: String,
+    validity_mle_circuit_config_digest: String,
+    validity_mle_whir_parameters_digest: String,
+    validity_mle_whir_protocol_id: String,
+    validity_mle_whir_session_id: String,
     kzg_verifier: String,
     kzg_verifier_runtime_code_hash: String,
 }
@@ -307,7 +374,6 @@ enum AbiKind {
     Bytes,
     Tuple(Vec<AbiField>),
     DynamicArray(Box<AbiKind>),
-    FixedArray(Box<AbiKind>, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -328,144 +394,6 @@ fn uint(name: &'static str, bits: usize) -> AbiField {
 
 fn bytes32(name: &'static str) -> AbiField {
     AbiField::new(name, AbiKind::FixedBytes(32))
-}
-
-fn uint_array(name: &'static str) -> AbiField {
-    AbiField::new(name, AbiKind::DynamicArray(Box::new(AbiKind::Uint(256))))
-}
-
-fn ext3(name: &'static str) -> AbiField {
-    AbiField::new(
-        name,
-        AbiKind::Tuple(vec![uint("c0", 64), uint("c1", 64), uint("c2", 64)]),
-    )
-}
-
-fn sumcheck(name: &'static str) -> AbiField {
-    AbiField::new(
-        name,
-        AbiKind::Tuple(vec![AbiField::new(
-            "roundPolys",
-            AbiKind::DynamicArray(Box::new(AbiKind::Tuple(vec![uint_array("evals")]))),
-        )]),
-    )
-}
-
-fn gate_kind() -> AbiKind {
-    AbiKind::Tuple(vec![
-        uint("gateId", 8),
-        uint("selectorIndex", 8),
-        uint("groupStart", 8),
-        uint("groupEnd", 8),
-        uint("gateRowIndex", 8),
-        uint("numConstraints", 16),
-        uint("numOrConsts", 16),
-        uint("param2", 16),
-        uint("param3", 16),
-    ])
-}
-
-fn mle_v1_fields() -> Vec<AbiField> {
-    vec![
-        uint_array("circuitDigest"),
-        AbiField::new("whirTranscript", AbiKind::Bytes),
-        AbiField::new("whirHints", AbiKind::Bytes),
-        bytes32("preprocessedRoot"),
-        bytes32("witnessRoot"),
-        bytes32("auxCommitmentRoot"),
-        uint("preprocessedEvalValue", 256),
-        uint("preprocessedBatchR", 256),
-        uint_array("preprocessedIndividualEvals"),
-        uint("witnessEvalValue", 256),
-        uint("witnessBatchR", 256),
-        uint_array("witnessIndividualEvals"),
-        uint("auxBatchR", 256),
-        uint("auxConstraintEval", 256),
-        uint("auxPermEval", 256),
-        uint("auxEvalValue", 256),
-        sumcheck("combinedProof"),
-        uint_array("publicInputs"),
-        uint("alpha", 256),
-        uint("beta", 256),
-        uint("gamma", 256),
-        uint("mu", 256),
-        ext3("preprocessedWhirEval"),
-        ext3("witnessWhirEval"),
-        ext3("auxWhirEval"),
-        bytes32("inverseHelpersCommitmentRoot"),
-        uint("inverseHelpersBatchR", 256),
-        sumcheck("invSumcheckProof"),
-        sumcheck("hSumcheckProof"),
-        uint("lambdaInv", 256),
-        uint("muInv", 256),
-        uint("lambdaH", 256),
-        uint_array("witnessIndividualEvalsAtRInv"),
-        uint_array("preprocessedIndividualEvalsAtRInv"),
-        uint_array("inverseHelpersEvalsAtRInv"),
-        uint_array("inverseHelpersEvalsAtRH"),
-        uint("gSubEvalAtRInv", 256),
-        uint("witnessEvalValueAtRInv", 256),
-        uint("preprocessedEvalValueAtRInv", 256),
-        ext3("inverseHelpersWhirEvalAtRGate"),
-        ext3("preprocessedWhirEvalAtRInv"),
-        ext3("witnessWhirEvalAtRInv"),
-        ext3("auxWhirEvalAtRInv"),
-        ext3("inverseHelpersWhirEvalAtRInv"),
-        ext3("preprocessedWhirEvalAtRH"),
-        ext3("witnessWhirEvalAtRH"),
-        ext3("auxWhirEvalAtRH"),
-        ext3("inverseHelpersWhirEvalAtRH"),
-        uint("extChallenge", 256),
-        sumcheck("gateSumcheckProof"),
-        uint_array("witnessIndividualEvalsAtRGateV2"),
-        uint_array("preprocessedIndividualEvalsAtRGateV2"),
-        uint("witnessEvalValueAtRGateV2", 256),
-        uint("preprocessedEvalValueAtRGateV2", 256),
-        ext3("preprocessedWhirEvalAtRGateV2"),
-        ext3("witnessWhirEvalAtRGateV2"),
-        ext3("auxWhirEvalAtRGateV2"),
-        ext3("inverseHelpersWhirEvalAtRGateV2"),
-        uint("quotientDegreeFactor", 256),
-        uint("numSelectors", 256),
-        uint("numGateConstraints", 256),
-        AbiField::new("gates", AbiKind::DynamicArray(Box::new(gate_kind()))),
-        AbiField::new(
-            "publicInputsHash",
-            AbiKind::FixedArray(Box::new(AbiKind::Uint(256)), 4),
-        ),
-    ]
-}
-
-fn mle_fields(version: u8) -> Vec<AbiField> {
-    let v1 = mle_v1_fields();
-    if version == 1 {
-        return v1;
-    }
-    const REMOVED: &[&str] = &[
-        "preprocessedWhirEval",
-        "witnessWhirEval",
-        "auxWhirEval",
-        "lambdaH",
-        "inverseHelpersWhirEvalAtRGate",
-        "preprocessedWhirEvalAtRInv",
-        "witnessWhirEvalAtRInv",
-        "auxWhirEvalAtRInv",
-        "inverseHelpersWhirEvalAtRInv",
-        "preprocessedWhirEvalAtRH",
-        "witnessWhirEvalAtRH",
-        "auxWhirEvalAtRH",
-        "inverseHelpersWhirEvalAtRH",
-        "preprocessedWhirEvalAtRGateV2",
-        "witnessWhirEvalAtRGateV2",
-        "auxWhirEvalAtRGateV2",
-        "inverseHelpersWhirEvalAtRGateV2",
-    ];
-    let mut fields = vec![uint("protocolVersion", 256), uint("constituentWidth", 256)];
-    fields.extend(
-        v1.into_iter()
-            .filter(|field| !REMOVED.contains(&field.name)),
-    );
-    fields
 }
 
 fn vpis_fields() -> Vec<AbiField> {
@@ -505,7 +433,6 @@ impl AbiKind {
                     .join(",")
             ),
             Self::DynamicArray(element) => format!("{}[]", element.signature()),
-            Self::FixedArray(element, length) => format!("{}[{length}]", element.signature()),
         }
     }
 
@@ -513,7 +440,6 @@ impl AbiKind {
         match self {
             Self::Bytes | Self::DynamicArray(_) => true,
             Self::Tuple(fields) => fields.iter().any(|field| field.kind.is_dynamic()),
-            Self::FixedArray(element, _) => element.is_dynamic(),
             Self::Uint(_) | Self::Address | Self::FixedBytes(_) => false,
         }
     }
@@ -529,10 +455,6 @@ impl AbiKind {
                     .checked_add(field.kind.static_size()?)
                     .ok_or_else(|| "ABI static tuple size overflow".to_string())
             }),
-            Self::FixedArray(element, length) => element
-                .static_size()?
-                .checked_mul(*length)
-                .ok_or_else(|| "ABI fixed-array size overflow".into()),
             Self::Bytes | Self::DynamicArray(_) => unreachable!("checked dynamic above"),
         }
     }
@@ -543,11 +465,8 @@ fn json_member<'a>(
     field: &AbiField,
     path: &str,
 ) -> std::result::Result<&'a Value, String> {
-    // The Rust exporter names these two roots after their commitments. Solidity's struct uses the
-    // shorter names. Validity public inputs are separately serialized in snake_case.
+    // Validity public inputs are serialized in snake_case by the Rust producer.
     let alias = match field.name {
-        "preprocessedRoot" => Some("preprocessedCommitmentRoot"),
-        "witnessRoot" => Some("witnessCommitmentRoot"),
         "initialBlockNumber" => Some("initial_block_number"),
         "initialBlockChain" => Some("initial_block_chain"),
         "initialExtCommitment" => Some("initial_ext_commitment"),
@@ -730,23 +649,6 @@ fn encode_value_body(
             ))?);
             Ok(encoded)
         }
-        AbiKind::FixedArray(element, expected) => {
-            let array = value
-                .as_array()
-                .ok_or_else(|| format!("{path} must be an array"))?;
-            if array.len() != *expected {
-                return Err(format!(
-                    "{path} has {} elements; expected exactly {expected}",
-                    array.len()
-                ));
-            }
-            encode_sequence(
-                array
-                    .iter()
-                    .enumerate()
-                    .map(|(index, value)| (element.as_ref(), value, format!("{path}[{index}]"))),
-            )
-        }
     }
 }
 
@@ -768,6 +670,13 @@ fn encode_function(
             (*kind, *value, (*path).to_string())
         }))?);
     Ok(format!("0x{}", hex::encode(calldata)))
+}
+
+fn function_selector(signature: &str) -> String {
+    format!(
+        "0x{}",
+        hex::encode(&keccak_hash::keccak(signature.as_bytes()).0[..4])
+    )
 }
 
 fn canonical_json(value: &Value) -> String {
@@ -944,67 +853,6 @@ fn validate_account_name(account: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn validate_v2_constituent_width(proof: &Value) -> std::result::Result<(), String> {
-    if parse_uint_value(
-        object_field(proof, "protocolVersion", "mleProof")?,
-        256,
-        "mleProof.protocolVersion",
-    )? != BigUint::from(1u8)
-    {
-        return Err("mleProof.protocolVersion must equal the supported PCS version 1".into());
-    }
-    let mut width = 2usize;
-    for field in [
-        "preprocessedIndividualEvals",
-        "witnessIndividualEvals",
-        "inverseHelpersEvalsAtRInv",
-        "inverseHelpersEvalsAtRH",
-        "preprocessedIndividualEvalsAtRGateV2",
-        "witnessIndividualEvalsAtRGateV2",
-    ] {
-        width = width.max(
-            object_field(proof, field, "mleProof")?
-                .as_array()
-                .ok_or_else(|| format!("mleProof.{field} must be an array"))?
-                .len(),
-        );
-    }
-    let declared = parse_uint_value(
-        object_field(proof, "constituentWidth", "mleProof")?,
-        256,
-        "mleProof.constituentWidth",
-    )?;
-    if declared != BigUint::from(width) {
-        return Err(format!(
-            "mleProof.constituentWidth {declared} != canonical constituent vector width {width}"
-        ));
-    }
-    Ok(())
-}
-
-fn proof_abi_version(proof: &Value, chain_id: u64) -> std::result::Result<u8, String> {
-    let object = proof
-        .as_object()
-        .ok_or_else(|| "validityMleJson must decode to an object".to_string())?;
-    let has_protocol = object.contains_key("protocolVersion");
-    let has_width = object.contains_key("constituentWidth");
-    if has_protocol != has_width {
-        return Err(
-            "MLE proof must carry both protocolVersion and constituentWidth or neither".into(),
-        );
-    }
-    if !has_protocol {
-        if chain_id != ANVIL_CHAIN_ID {
-            return Err(format!(
-                "legacy MLE ABI v1 is restricted to local chain {ANVIL_CHAIN_ID}"
-            ));
-        }
-        return Ok(1);
-    }
-    validate_v2_constituent_width(proof)?;
-    Ok(2)
-}
-
 fn packed_validity_public_inputs(vpis: &Value) -> std::result::Result<Vec<u8>, String> {
     // IntmaxRollup._computeValidityPIHash uses abi.encodePacked with these exact Solidity widths;
     // this is deliberately *not* the standard-ABI tuple encoding used by finalize calldata.
@@ -1038,19 +886,34 @@ fn packed_validity_public_inputs(vpis: &Value) -> std::result::Result<Vec<u8>, S
     Ok(encoded)
 }
 
-fn validate_public_inputs_hash(proof: &Value, vpis: &Value) -> std::result::Result<(), String> {
+fn validate_public_inputs_hash(
+    public_inputs: &[String],
+    vpis: &Value,
+) -> std::result::Result<(), String> {
     let expected = keccak_hash::keccak(packed_validity_public_inputs(vpis)?).0;
-    let public_inputs = object_field(proof, "publicInputs", "mleProof")?
-        .as_array()
-        .ok_or_else(|| "mleProof.publicInputs must be an array".to_string())?;
     if public_inputs.len() != 8 {
         return Err("mleProof.publicInputs must contain exactly eight VPI-hash limbs".into());
     }
     let mut actual = [0u8; 32];
     for (index, value) in public_inputs[..8].iter().enumerate() {
-        let limb = parse_uint_value(value, 32, &format!("mleProof.publicInputs[{index}]"))?;
-        let bytes = limb.to_bytes_be();
-        actual[index * 4 + (4 - bytes.len())..index * 4 + 4].copy_from_slice(&bytes);
+        let digits = value.strip_prefix("0x").ok_or_else(|| {
+            format!("mleProof.publicInputs[{index}] must have a lowercase 0x prefix")
+        })?;
+        if digits.len() != 16
+            || !digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!(
+                "mleProof.publicInputs[{index}] must be a canonical 64-bit Goldilocks limb"
+            ));
+        }
+        let limb = u64::from_str_radix(digits, 16)
+            .map_err(|error| format!("decode mleProof.publicInputs[{index}]: {error}"))?;
+        let limb = u32::try_from(limb).map_err(|_| {
+            format!("mleProof.publicInputs[{index}] does not fit the VPI-hash uint32 limb")
+        })?;
+        actual[index * 4..index * 4 + 4].copy_from_slice(&limb.to_be_bytes());
     }
     if actual != expected {
         return Err(
@@ -1058,6 +921,168 @@ fn validate_public_inputs_hash(proof: &Value, vpis: &Value) -> std::result::Resu
         );
     }
     Ok(())
+}
+
+fn generated_hex(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+/// Parse the only production MLE artifact and authenticate every redundant byte view that can be
+/// checked without rebuilding the circuit. The publisher deliberately consumes only the compact
+/// record after this point: the JSON proof and Solidity-ABI record are consistency witnesses, not
+/// alternate calldata or DA representations.
+fn validated_compact_mle_v2_fixture(
+    json: &str,
+    vpis: &Value,
+) -> std::result::Result<ValidatedMleV2Artifact, String> {
+    let fixture = MleVerifierV2Fixture::from_canonical_json(json)
+        .map_err(|error| format!("strict canonical MLE/WHIR v2 fixture: {error}"))?;
+    fixture
+        .config_fixture()
+        .validate_self_consistency()
+        .map_err(|error| format!("self-consistent MLE/WHIR deployment config: {error}"))?;
+    if fixture.schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
+        || fixture.schema_version != SCHEMA_VERSION_CURRENT
+        || fixture.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
+        || fixture.proof.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
+        || fixture.verification_key.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
+        || fixture.proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
+        || fixture.proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
+    {
+        return Err("MLE/WHIR v2 fixture schema/protocol/proof-layout identity mismatch".into());
+    }
+
+    let proof = &fixture.proof;
+    let vk = &fixture.verification_key;
+    let config = &fixture.verification_config;
+    let pinned = &fixture.pinned_verifier;
+    let shape = fixture.compact_shape.decode();
+    let expected_gate_round_degree = config
+        .circuit
+        .quotient_degree_factor
+        .checked_add(2)
+        .ok_or_else(|| "MLE/WHIR v2 gate round degree overflow".to_string())?;
+    if shape.circuit_digest_len != CIRCUIT_DIGEST_LENGTH_V2
+        || shape.max_whir_narg_bytes != MAX_WHIR_NARG_BYTES_V2
+        || shape.max_whir_hint_bytes != MAX_WHIR_HINT_BYTES_V2
+        || shape.max_encoded_bytes != MAX_COMPACT_PROOF_BYTES_V2
+        || shape.constituent_width != proof.constituent_width
+        || shape.constituent_width != vk.constituent_width
+        || shape.public_inputs_len != proof.public_inputs.len()
+        || shape.degree_bits != config.circuit.degree_bits
+        || shape.public_inputs_len != config.circuit.num_public_inputs
+        || shape.num_constants != config.circuit.num_constants
+        || shape.num_routed_wires != config.circuit.num_routed_wires
+        || shape.num_wires != config.circuit.num_wires
+        || shape.gate_round_degree != expected_gate_round_degree
+        || config.circuit.num_constants != vk.num_constants
+        || config.circuit.num_routed_wires != vk.num_routed_wires
+        || config.circuit.num_wires != vk.num_wires
+        || config.circuit.num_selectors != vk.num_selectors
+        || config.circuit.num_gate_constraints != vk.num_gate_constraints
+        || config.circuit.quotient_degree_factor != vk.quotient_degree_factor
+        || config.public_input_wire_map != vk.public_input_wire_map
+        || config.k_is != vk.k_is
+        || config.subgroup_gen_powers != vk.subgroup_gen_powers
+        || config.gates != vk.gates
+    {
+        return Err("MLE/WHIR v2 fixture proof/VK/config/compact shape mismatch".into());
+    }
+    if proof.circuit_digest.len() != CIRCUIT_DIGEST_LENGTH_V2
+        || proof.circuit_digest != vk.circuit_digest
+        || pinned.circuit_digest.as_slice() != vk.circuit_digest.as_slice()
+        || proof.preprocessed_root != vk.preprocessed_commitment_root
+        || pinned.preprocessed_commitment_root != vk.preprocessed_commitment_root
+        || pinned.circuit_config_digest != vk.circuit_config_digest
+        || pinned.whir_protocol_id != vk.whir_protocol_id
+        || pinned.whir_session_id != vk.whir_session_id
+    {
+        return Err("MLE/WHIR v2 fixture proof/VK/pinned views disagree".into());
+    }
+    vk.try_decode::<GoldilocksField>()
+        .map_err(|error| format!("canonical MLE/WHIR v2 verification key: {error}"))?;
+
+    let recorded_solidity_abi = fixture
+        .solidity_abi_proof
+        .decode_and_validate(SOLIDITY_MLE_PROOF_ENCODING_V2)
+        .map_err(|error| format!("MLE/WHIR v2 Solidity proof record: {error}"))?;
+    let expected_solidity_abi = solidity_abi_encode_mle_proof_v2(proof)
+        .map_err(|error| format!("canonical MLE/WHIR v2 Solidity proof: {error}"))?;
+    if recorded_solidity_abi != expected_solidity_abi {
+        return Err("MLE/WHIR v2 Solidity proof bytes disagree with the proof object".into());
+    }
+
+    let recorded_config_abi = fixture
+        .solidity_abi_verification_config
+        .decode_and_validate(SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2)
+        .map_err(|error| format!("MLE/WHIR v2 Solidity config record: {error}"))?;
+    let expected_config_abi = solidity_abi_encode_verification_config_v2(config)
+        .map_err(|error| format!("canonical MLE/WHIR v2 Solidity config: {error}"))?;
+    if recorded_config_abi != expected_config_abi
+        || pinned.verification_config_digest != fixture.solidity_abi_verification_config.keccak256
+    {
+        return Err("MLE/WHIR v2 Solidity config bytes/digest disagree with pinned views".into());
+    }
+
+    let compact_encoding = std::str::from_utf8(&COMPACT_MAGIC_V2)
+        .map_err(|error| format!("generated compact-v2 encoding is not UTF-8: {error}"))?;
+    let compact = fixture
+        .compact_proof
+        .decode_and_validate(compact_encoding)
+        .map_err(|error| format!("MLE/WHIR v2 compact proof record: {error}"))?;
+    if compact.is_empty() || compact.len() > MAX_COMPACT_PROOF_BYTES_V2 {
+        return Err(format!(
+            "MLE/WHIR v2 compact proof length {} is outside 1..={MAX_COMPACT_PROOF_BYTES_V2}",
+            compact.len()
+        ));
+    }
+    let decoded = decode_compact_v2::<GoldilocksField>(&compact, &shape)
+        .map_err(|error| format!("strict MLE/WHIR v2 compact decode: {error}"))?;
+    if MleProofV2Fixture::encode(&decoded) != *proof {
+        return Err("MLE/WHIR v2 compact bytes disagree with the proof object".into());
+    }
+    let reencoded = encode_compact_v2(&decoded, &shape)
+        .map_err(|error| format!("canonical MLE/WHIR v2 compact encode: {error}"))?;
+    if reencoded != compact {
+        return Err("MLE/WHIR v2 compact proof is not canonically encoded".into());
+    }
+
+    let profile = derive_whir_deployment_profile_v2(shape.degree_bits, shape.constituent_width)
+        .map_err(|error| format!("canonical MLE/WHIR v2 profile: {error}"))?;
+    if config.whir != profile.params
+        || vk.whir_protocol_id != generated_hex(&profile.protocol_id)
+        || vk.whir_session_id != generated_hex(&profile.session_id)
+        || pinned.whir_parameters_digest != generated_hex(&profile.parameters_digest)
+    {
+        return Err("MLE/WHIR v2 native WHIR profile or pinned identifiers drifted".into());
+    }
+    let upper_bound = proof_encoding_size_upper_bound_v2(&shape)
+        .map_err(|error| format!("MLE/WHIR v2 size upper bound: {error}"))?;
+    if fixture.size_upper_bound != upper_bound
+        || !upper_bound.fits_whir_blob_caps
+        || !upper_bound.fits_compact_cap
+        || compact.len() > upper_bound.max_compact_bytes
+        || recorded_solidity_abi.len() > upper_bound.max_solidity_abi_bytes
+        || decoded.whir_eval_proof.narg_string.len() != upper_bound.max_whir_transcript_bytes
+        || decoded.whir_eval_proof.hints.len() > upper_bound.max_whir_hint_bytes
+        || fixture.stats.solidity_abi_bytes != recorded_solidity_abi.len()
+        || fixture.stats.solidity_abi_verification_config_bytes != recorded_config_abi.len()
+        || fixture.stats.compact_bytes != compact.len()
+        || fixture.stats.whir_transcript_bytes != decoded.whir_eval_proof.narg_string.len()
+        || fixture.stats.whir_hint_bytes != decoded.whir_eval_proof.hints.len()
+    {
+        return Err("MLE/WHIR v2 proof statistics or resource envelope mismatch".into());
+    }
+
+    validate_public_inputs_hash(&proof.public_inputs, vpis)?;
+    Ok(ValidatedMleV2Artifact {
+        compact_proof: compact,
+        verification_config_digest: pinned.verification_config_digest.clone(),
+        circuit_config_digest: pinned.circuit_config_digest.clone(),
+        whir_parameters_digest: pinned.whir_parameters_digest.clone(),
+        whir_protocol_id: pinned.whir_protocol_id.clone(),
+        whir_session_id: pinned.whir_session_id.clone(),
+    })
 }
 
 fn posted_block_hash(
@@ -1331,17 +1356,14 @@ fn prepare_envelope(bytes: &[u8]) -> Result<PreparedEnvelope> {
     let vpis_kind = AbiKind::Tuple(vpis_fields());
     encode_sequence([(&vpis_kind, &vpis, "validityPIs".to_string())]).map_err(&fail)?;
 
-    let mle_proof: Value = serde_json::from_str(&envelope.finalize_artifact.validity_mle_json)
-        .map_err(|error| fail(format!("parse validityMleJson: {error}")))?;
-    let proof_abi_version = proof_abi_version(&mle_proof, envelope.chain_id).map_err(&fail)?;
-    validate_public_inputs_hash(&mle_proof, &vpis).map_err(&fail)?;
-    let proof_kind = AbiKind::Tuple(mle_fields(proof_abi_version));
-    let proof_payload = encode_sequence([(&proof_kind, &mle_proof, "mleProof".to_string())])
-        .map_err(|error| fail(format!("canonical abi.encode(MleProof): {error}")))?;
+    let mle_artifact =
+        validated_compact_mle_v2_fixture(&envelope.finalize_artifact.validity_mle_json, &vpis)
+            .map_err(&fail)?;
+    let proof_payload = mle_artifact.compact_proof;
     crate::proof_da::encode_simple_coder_blobs(&proof_payload)
         .map_err(|error| fail(format!("proof DA payload: {error}")))?;
     let proof_length = u32::try_from(proof_payload.len())
-        .map_err(|_| fail("canonical proof payload exceeds uint32".into()))?;
+        .map_err(|_| fail("canonical compact proof payload exceeds uint32".into()))?;
     let proof_hash = keccak_hex(&proof_payload);
 
     let sub_blocks_value = serde_json::to_value(&envelope.posting_artifact.sub_blocks)
@@ -1416,7 +1438,12 @@ fn prepare_envelope(bytes: &[u8]) -> Result<PreparedEnvelope> {
         "candidateRequestId": envelope.candidate_request_id,
         "candidateId": candidate_id,
         "artifactHash": envelope.artifact_hash,
-        "proofAbiVersion": proof_abi_version,
+        "mleFixtureSchema": MLE_VERIFIER_FIXTURE_SCHEMA_V2,
+        "mleProtocolVersion": MLE_PROTOCOL_VERSION_CURRENT,
+        "mleProofAbiSignature": MLE_PROOF_ABI_SIGNATURE_V2,
+        "mleProofLayoutHash": generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
+        "mleCompactLayoutHash": generated_hex(&COMPACT_LAYOUT_HASH_V2),
+        "mleCompactProofEncoding": std::str::from_utf8(&COMPACT_MAGIC_V2).expect("generated compact-v2 magic is ASCII"),
         "proofHash": proof_hash,
         "proofLength": proof_length,
         "finalStateRoot": final_state_root,
@@ -1433,8 +1460,12 @@ fn prepare_envelope(bytes: &[u8]) -> Result<PreparedEnvelope> {
         initial_block_chain,
         initial_ext_commitment,
         final_block_number,
-        proof_abi_version,
         proof_payload,
+        verification_config_digest: mle_artifact.verification_config_digest,
+        circuit_config_digest: mle_artifact.circuit_config_digest,
+        whir_parameters_digest: mle_artifact.whir_parameters_digest,
+        whir_protocol_id: mle_artifact.whir_protocol_id,
+        whir_session_id: mle_artifact.whir_session_id,
         proof_hash,
         proof_length,
         post_calldata,
@@ -1442,7 +1473,6 @@ fn prepare_envelope(bytes: &[u8]) -> Result<PreparedEnvelope> {
         final_state_root,
         expected_pending_chains,
         vpis,
-        mle_proof,
         binding_digest,
     })
 }
@@ -1465,17 +1495,34 @@ impl PreparedEnvelope {
             artifact_hash: self.envelope.artifact_hash.clone(),
             deployment_manifest_hash: deployment.manifest_hash.clone(),
             rollup_runtime_code_hash: deployment.manifest.rollup_runtime_code_hash.clone(),
-            mle_verifier: deployment.manifest.mle_verifier.clone(),
-            mle_verifier_runtime_code_hash: deployment
+            validity_mle_verifier: deployment.manifest.validity_mle_verifier.clone(),
+            validity_mle_verifier_runtime_code_hash: deployment
                 .manifest
-                .mle_verifier_runtime_code_hash
+                .validity_mle_verifier_runtime_code_hash
                 .clone(),
+            validity_mle_verifier_core: deployment.manifest.validity_mle_verifier_core.clone(),
+            validity_mle_verifier_core_runtime_code_hash: deployment
+                .manifest
+                .validity_mle_verifier_core_runtime_code_hash
+                .clone(),
+            validity_mle_verification_config_digest: self.verification_config_digest.clone(),
+            validity_mle_circuit_config_digest: self.circuit_config_digest.clone(),
+            validity_mle_whir_parameters_digest: self.whir_parameters_digest.clone(),
+            validity_mle_whir_protocol_id: self.whir_protocol_id.clone(),
+            validity_mle_whir_session_id: self.whir_session_id.clone(),
             kzg_verifier: deployment.manifest.kzg_verifier.clone(),
             kzg_verifier_runtime_code_hash: deployment
                 .manifest
                 .kzg_verifier_runtime_code_hash
                 .clone(),
-            proof_abi_version: self.proof_abi_version,
+            mle_fixture_schema: MLE_VERIFIER_FIXTURE_SCHEMA_V2.to_string(),
+            mle_protocol_version: MLE_PROTOCOL_VERSION_CURRENT,
+            mle_proof_abi_signature: MLE_PROOF_ABI_SIGNATURE_V2.to_string(),
+            mle_proof_layout_hash: generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
+            mle_compact_layout_hash: generated_hex(&COMPACT_LAYOUT_HASH_V2),
+            mle_compact_proof_encoding: std::str::from_utf8(&COMPACT_MAGIC_V2)
+                .expect("generated compact-v2 magic is ASCII")
+                .to_string(),
             proof_hash: self.proof_hash.clone(),
             proof_length: self.proof_length,
             final_state_root: self.final_state_root.clone(),
@@ -1490,19 +1537,32 @@ impl PreparedEnvelope {
     }
 
     fn finalize_calldata(&self, submission_id: &str) -> std::result::Result<String, String> {
+        self.proof_action_calldata("finalize", submission_id)
+    }
+
+    fn fraud_calldata(&self, submission_id: &str) -> std::result::Result<String, String> {
+        self.proof_action_calldata("fraudProof", submission_id)
+    }
+
+    fn proof_action_calldata(
+        &self,
+        function: &str,
+        submission_id: &str,
+    ) -> std::result::Result<String, String> {
         let id = Value::String(quantity_to_decimal(submission_id, "submission id")?.to_string());
         let root = Value::String(self.final_state_root.clone());
         let id_kind = AbiKind::Uint(256);
         let root_kind = AbiKind::FixedBytes(32);
         let vpis_kind = AbiKind::Tuple(vpis_fields());
-        let proof_kind = AbiKind::Tuple(mle_fields(self.proof_abi_version));
+        let compact_proof = Value::String(format!("0x{}", hex::encode(&self.proof_payload)));
+        let proof_kind = AbiKind::Bytes;
         encode_function(
-            "finalize",
+            function,
             &[
                 (&id_kind, &id, "submissionId"),
                 (&root_kind, &root, "stateRoot"),
                 (&vpis_kind, &self.vpis, "validityPIs"),
-                (&proof_kind, &self.mle_proof, "mleProof"),
+                (&proof_kind, &compact_proof, "compactProof"),
             ],
         )
     }
@@ -3237,19 +3297,72 @@ fn validate_deployment_identity(
             observed.rollup_runtime_code_hash
         )));
     }
-    if !same_hex(&observed.mle_verifier, &manifest.mle_verifier) {
+    if !same_hex(
+        &observed.validity_mle_verifier,
+        &manifest.validity_mle_verifier,
+    ) {
         return Err(PublicValidityPublisherError::Evidence(
-            "rollup.mleVerifier differs from release manifest".into(),
+            "rollup.validityMleVerifier differs from release manifest".into(),
         ));
     }
     if !same_hex(
-        &observed.mle_verifier_runtime_code_hash,
-        &manifest.mle_verifier_runtime_code_hash,
+        &observed.validity_mle_verifier_runtime_code_hash,
+        &manifest.validity_mle_verifier_runtime_code_hash,
     ) {
         return Err(PublicValidityPublisherError::Evidence(format!(
-            "MLE verifier runtime code hash {} differs from release manifest",
-            observed.mle_verifier_runtime_code_hash
+            "validity MLE verifier runtime code hash {} differs from release manifest",
+            observed.validity_mle_verifier_runtime_code_hash
         )));
+    }
+    if !same_hex(
+        &observed.validity_mle_verifier_core,
+        &manifest.validity_mle_verifier_core,
+    ) {
+        return Err(PublicValidityPublisherError::Evidence(
+            "validity MLE adapter.core differs from release manifest".into(),
+        ));
+    }
+    if !same_hex(
+        &observed.validity_mle_verifier_core_runtime_code_hash,
+        &manifest.validity_mle_verifier_core_runtime_code_hash,
+    ) {
+        return Err(PublicValidityPublisherError::Evidence(format!(
+            "validity MLE core runtime code hash {} differs from release manifest",
+            observed.validity_mle_verifier_core_runtime_code_hash
+        )));
+    }
+    for (observed, expected, label) in [
+        (
+            &observed.validity_mle_verification_config_digest,
+            &manifest.validity_mle_verification_config_digest,
+            "validity MLE verification config digest",
+        ),
+        (
+            &observed.validity_mle_circuit_config_digest,
+            &manifest.validity_mle_circuit_config_digest,
+            "validity MLE circuit config digest",
+        ),
+        (
+            &observed.validity_mle_whir_parameters_digest,
+            &manifest.validity_mle_whir_parameters_digest,
+            "validity MLE WHIR parameters digest",
+        ),
+        (
+            &observed.validity_mle_whir_protocol_id,
+            &manifest.validity_mle_whir_protocol_id,
+            "validity MLE WHIR protocol id",
+        ),
+        (
+            &observed.validity_mle_whir_session_id,
+            &manifest.validity_mle_whir_session_id,
+            "validity MLE WHIR session id",
+        ),
+    ] {
+        if !same_hex(observed, expected) {
+            return Err(PublicValidityPublisherError::Evidence(format!(
+                "{label} {observed} differs from release manifest"
+            )));
+        }
     }
     if !same_hex(&observed.kzg_verifier, &manifest.kzg_verifier) {
         return Err(PublicValidityPublisherError::Evidence(
@@ -3273,7 +3386,11 @@ fn validate_deployment_manifest_identity_pins(
 ) -> std::result::Result<(), String> {
     for (value, bytes, label) in [
         (&manifest.rollup, 20, "manifest rollup"),
-        (&manifest.mle_verifier, 20, "manifest MLE verifier"),
+        (
+            &manifest.validity_mle_verifier,
+            20,
+            "manifest validity MLE verifier",
+        ),
         (&manifest.kzg_verifier, 20, "manifest KZG verifier"),
         (
             &manifest.rollup_runtime_code_hash,
@@ -3281,9 +3398,44 @@ fn validate_deployment_manifest_identity_pins(
             "manifest rollup runtime code hash",
         ),
         (
-            &manifest.mle_verifier_runtime_code_hash,
+            &manifest.validity_mle_verifier_runtime_code_hash,
             32,
-            "manifest MLE verifier runtime code hash",
+            "manifest validity MLE verifier runtime code hash",
+        ),
+        (
+            &manifest.validity_mle_verifier_core,
+            20,
+            "manifest validity MLE verifier core",
+        ),
+        (
+            &manifest.validity_mle_verifier_core_runtime_code_hash,
+            32,
+            "manifest validity MLE verifier core runtime code hash",
+        ),
+        (
+            &manifest.validity_mle_verification_config_digest,
+            32,
+            "manifest validity MLE verification config digest",
+        ),
+        (
+            &manifest.validity_mle_circuit_config_digest,
+            32,
+            "manifest validity MLE circuit config digest",
+        ),
+        (
+            &manifest.validity_mle_whir_parameters_digest,
+            32,
+            "manifest validity MLE WHIR parameters digest",
+        ),
+        (
+            &manifest.validity_mle_whir_protocol_id,
+            64,
+            "manifest validity MLE WHIR protocol id",
+        ),
+        (
+            &manifest.validity_mle_whir_session_id,
+            32,
+            "manifest validity MLE WHIR session id",
         ),
         (
             &manifest.kzg_verifier_runtime_code_hash,
@@ -3292,6 +3444,12 @@ fn validate_deployment_manifest_identity_pins(
         ),
     ] {
         validate_nonzero_hex(value, bytes, label)?;
+    }
+    if same_hex(
+        &manifest.validity_mle_verifier,
+        &manifest.validity_mle_verifier_core,
+    ) {
+        return Err("manifest validity MLE adapter and core must be distinct addresses".into());
     }
     Ok(())
 }
@@ -3325,18 +3483,49 @@ fn load_and_validate_deployment_manifest(
             path.display()
         ))
     })?;
-    if manifest.schema_version != 1
+    if manifest.schema_version != 2
         || manifest.chain_id != prepared.envelope.chain_id
         || !same_hex(&manifest.rollup, &prepared.envelope.rollup)
-        || manifest.mle_proof_abi_version != prepared.proof_abi_version
+        || manifest.mle_fixture_schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
+        || manifest.mle_protocol_version != MLE_PROTOCOL_VERSION_CURRENT
+        || manifest.mle_proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
+        || manifest.mle_proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
+        || manifest.mle_compact_layout_hash != generated_hex(&COMPACT_LAYOUT_HASH_V2)
+        || manifest.mle_compact_proof_encoding
+            != std::str::from_utf8(&COMPACT_MAGIC_V2).expect("generated compact-v2 magic is ASCII")
+        || !same_hex(
+            &manifest.validity_mle_verification_config_digest,
+            &prepared.verification_config_digest,
+        )
+        || !same_hex(
+            &manifest.validity_mle_circuit_config_digest,
+            &prepared.circuit_config_digest,
+        )
+        || !same_hex(
+            &manifest.validity_mle_whir_parameters_digest,
+            &prepared.whir_parameters_digest,
+        )
+        || !same_hex(
+            &manifest.validity_mle_whir_protocol_id,
+            &prepared.whir_protocol_id,
+        )
+        || !same_hex(
+            &manifest.validity_mle_whir_session_id,
+            &prepared.whir_session_id,
+        )
     {
         return Err(PublicValidityPublisherError::Configuration(
-            "deployment manifest schema/chain/rollup/MLE ABI differs from envelope".into(),
+            "deployment manifest schema/chain/rollup/MLE v2 identity differs from the publisher"
+                .into(),
         ));
     }
     for (value, bytes, label) in [
         (&manifest.rollup, 20, "manifest rollup"),
-        (&manifest.mle_verifier, 20, "manifest MLE verifier"),
+        (
+            &manifest.validity_mle_verifier,
+            20,
+            "manifest validity MLE verifier",
+        ),
         (&manifest.kzg_verifier, 20, "manifest KZG verifier"),
         (
             &manifest.rollup_runtime_code_hash,
@@ -3344,9 +3533,44 @@ fn load_and_validate_deployment_manifest(
             "manifest rollup runtime code hash",
         ),
         (
-            &manifest.mle_verifier_runtime_code_hash,
+            &manifest.validity_mle_verifier_runtime_code_hash,
             32,
-            "manifest MLE verifier runtime code hash",
+            "manifest validity MLE verifier runtime code hash",
+        ),
+        (
+            &manifest.validity_mle_verifier_core,
+            20,
+            "manifest validity MLE verifier core",
+        ),
+        (
+            &manifest.validity_mle_verifier_core_runtime_code_hash,
+            32,
+            "manifest validity MLE verifier core runtime code hash",
+        ),
+        (
+            &manifest.validity_mle_verification_config_digest,
+            32,
+            "manifest validity MLE verification config digest",
+        ),
+        (
+            &manifest.validity_mle_circuit_config_digest,
+            32,
+            "manifest validity MLE circuit config digest",
+        ),
+        (
+            &manifest.validity_mle_whir_parameters_digest,
+            32,
+            "manifest validity MLE WHIR parameters digest",
+        ),
+        (
+            &manifest.validity_mle_whir_protocol_id,
+            64,
+            "manifest validity MLE WHIR protocol id",
+        ),
+        (
+            &manifest.validity_mle_whir_session_id,
+            32,
+            "manifest validity MLE WHIR session id",
         ),
         (
             &manifest.kzg_verifier_runtime_code_hash,
@@ -3364,28 +3588,44 @@ fn load_and_validate_deployment_manifest(
             "manifest attest selector",
         ),
         (&manifest.finalize_selector, 4, "manifest finalize selector"),
+        (
+            &manifest.fraud_proof_selector,
+            4,
+            "manifest fraud-proof selector",
+        ),
     ] {
         normalize_hex(value, bytes, label).map_err(PublicValidityPublisherError::Configuration)?;
     }
     validate_deployment_manifest_identity_pins(&manifest)
         .map_err(PublicValidityPublisherError::Configuration)?;
     let post_selector = &prepared.post_calldata[..10];
-    let attest_selector = format!(
-        "0x{}",
-        hex::encode(&keccak_hash::keccak(ATTEST_SIGNATURE.as_bytes()).0[..4])
-    );
+    let attest_selector = function_selector(ATTEST_SIGNATURE);
     let finalize_selector = prepared
         .finalize_calldata("0")
         .map_err(PublicValidityPublisherError::Configuration)?[..10]
         .to_string();
+    let fraud_selector = prepared
+        .fraud_calldata("0")
+        .map_err(PublicValidityPublisherError::Configuration)?[..10]
+        .to_string();
+    let expected_finalize_selector = function_selector(FINALIZE_SIGNATURE);
+    let expected_fraud_selector = function_selector(FRAUD_PROOF_SIGNATURE);
+    if !same_hex(&finalize_selector, &expected_finalize_selector)
+        || !same_hex(&fraud_selector, &expected_fraud_selector)
+    {
+        return Err(PublicValidityPublisherError::Configuration(
+            "internal compact-proof calldata encoder drifted from the reviewed Rollup ABI".into(),
+        ));
+    }
     if !same_hex(
         &manifest.post_block_and_submit_guarded_selector,
         post_selector,
     ) || !same_hex(&manifest.attest_proof_data_selector, &attest_selector)
         || !same_hex(&manifest.finalize_selector, &finalize_selector)
+        || !same_hex(&manifest.fraud_proof_selector, &fraud_selector)
     {
         return Err(PublicValidityPublisherError::Configuration(format!(
-            "deployment ABI selector mismatch: expected post={post_selector}, attest={attest_selector}, finalize={finalize_selector}"
+            "deployment ABI selector mismatch: expected post={post_selector}, attest={attest_selector}, finalize={finalize_selector}, fraud={fraud_selector}"
         )));
     }
     Ok(CheckedDeployment {
@@ -3408,10 +3648,61 @@ fn validate_deployment_on_l1(
     let actual_mle = view_address_at(
         rpc,
         &prepared.envelope.rollup,
-        "mleVerifier()(address)",
+        "validityMleVerifier()(address)",
         checkpoint.block_number,
     )?;
     let actual_mle_hash = runtime_code_hash_at(rpc, &actual_mle, checkpoint.block_number)?;
+    let actual_mle_core =
+        view_address_at(rpc, &actual_mle, "core()(address)", checkpoint.block_number)?;
+    let actual_mle_core_hash =
+        runtime_code_hash_at(rpc, &actual_mle_core, checkpoint.block_number)?;
+    let actual_verification_config_digest = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "verificationConfigDigest()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
+    let actual_circuit_config_digest = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "circuitConfigDigest()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
+    let actual_whir_parameters_digest = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "whirParametersDigest()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
+    let actual_whir_protocol_id_first = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "whirProtocolIdFirst()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
+    let actual_whir_protocol_id_second = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "whirProtocolIdSecond()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
+    let actual_whir_protocol_id = format!(
+        "0x{}{}",
+        actual_whir_protocol_id_first.trim_start_matches("0x"),
+        actual_whir_protocol_id_second.trim_start_matches("0x")
+    );
+    let actual_whir_session_id = view_bytes32_at(
+        rpc,
+        &actual_mle_core,
+        "whirSessionId()(bytes32)",
+        &[],
+        checkpoint.block_number,
+    )?;
     let actual_kzg = view_address_at(
         rpc,
         &prepared.envelope.rollup,
@@ -3423,8 +3714,15 @@ fn validate_deployment_on_l1(
         &deployment.manifest,
         &ObservedDeploymentIdentity {
             rollup_runtime_code_hash: actual_rollup_hash,
-            mle_verifier: actual_mle.clone(),
-            mle_verifier_runtime_code_hash: actual_mle_hash,
+            validity_mle_verifier: actual_mle.clone(),
+            validity_mle_verifier_runtime_code_hash: actual_mle_hash,
+            validity_mle_verifier_core: actual_mle_core.clone(),
+            validity_mle_verifier_core_runtime_code_hash: actual_mle_core_hash,
+            validity_mle_verification_config_digest: actual_verification_config_digest,
+            validity_mle_circuit_config_digest: actual_circuit_config_digest,
+            validity_mle_whir_parameters_digest: actual_whir_parameters_digest,
+            validity_mle_whir_protocol_id: actual_whir_protocol_id,
+            validity_mle_whir_session_id: actual_whir_session_id,
             kzg_verifier: actual_kzg,
             kzg_verifier_runtime_code_hash: actual_kzg_hash,
         },
@@ -3444,6 +3742,22 @@ fn validate_deployment_on_l1(
         return Err(PublicValidityPublisherError::Evidence(format!(
             "MLE verifier allowedChainId {allowed_chain} != envelope chain {}",
             prepared.envelope.chain_id
+        )));
+    }
+    let core_allowed = call_view_at(
+        rpc,
+        &actual_mle_core,
+        "allowedChainId()(uint256)",
+        &[],
+        None,
+        checkpoint.block_number,
+    )?;
+    let core_allowed_word = decode_abi_word(&core_allowed, "core.allowedChainId")
+        .map_err(PublicValidityPublisherError::Evidence)?;
+    let core_allowed_chain = BigUint::from_bytes_be(&core_allowed_word);
+    if core_allowed_chain != allowed_chain {
+        return Err(PublicValidityPublisherError::Evidence(format!(
+            "MLE adapter/core allowedChainId mismatch: adapter={allowed_chain}, core={core_allowed_chain}"
         )));
     }
 
@@ -4868,6 +5182,16 @@ pub fn publish_public_validity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plonky2::{
+        field::types::Field as _,
+        iop::witness::{PartialWitness, WitnessWrite as _},
+        plonk::{
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+            config::PoseidonGoldilocksConfig,
+        },
+        util::timing::TimingTree,
+    };
+    use plonky2_mle::fixture_v2::try_prove_and_export_mle_v2;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -4940,11 +5264,23 @@ mod tests {
             artifact_hash: format!("close-funding-validity-artifact:{}", "55".repeat(32)),
             deployment_manifest_hash: word(0x56),
             rollup_runtime_code_hash: word(0x57),
-            mle_verifier: address(0x58),
-            mle_verifier_runtime_code_hash: word(0x59),
+            validity_mle_verifier: address(0x58),
+            validity_mle_verifier_runtime_code_hash: word(0x59),
+            validity_mle_verifier_core: address(0x5c),
+            validity_mle_verifier_core_runtime_code_hash: word(0x5d),
+            validity_mle_verification_config_digest: word(0x5e),
+            validity_mle_circuit_config_digest: word(0x5f),
+            validity_mle_whir_parameters_digest: word(0x60),
+            validity_mle_whir_protocol_id: format!("0x{}", "61".repeat(64)),
+            validity_mle_whir_session_id: word(0x62),
             kzg_verifier: address(0x5a),
             kzg_verifier_runtime_code_hash: word(0x5b),
-            proof_abi_version: 2,
+            mle_fixture_schema: MLE_VERIFIER_FIXTURE_SCHEMA_V2.into(),
+            mle_protocol_version: MLE_PROTOCOL_VERSION_CURRENT,
+            mle_proof_abi_signature: MLE_PROOF_ABI_SIGNATURE_V2.into(),
+            mle_proof_layout_hash: generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
+            mle_compact_layout_hash: generated_hex(&COMPACT_LAYOUT_HASH_V2),
+            mle_compact_proof_encoding: String::from_utf8(COMPACT_MAGIC_V2.to_vec()).unwrap(),
             proof_hash: word(0x66),
             proof_length: 1234,
             final_state_root: word(0x77),
@@ -4957,26 +5293,54 @@ mod tests {
 
     fn sample_deployment_manifest() -> DeploymentManifest {
         DeploymentManifest {
-            schema_version: 1,
+            schema_version: 2,
             chain_id: 1,
             rollup: address(0x11),
             rollup_runtime_code_hash: word(0x21),
-            mle_verifier: address(0x12),
-            mle_verifier_runtime_code_hash: word(0x22),
+            validity_mle_verifier: address(0x12),
+            validity_mle_verifier_runtime_code_hash: word(0x22),
+            validity_mle_verifier_core: address(0x14),
+            validity_mle_verifier_core_runtime_code_hash: word(0x24),
+            validity_mle_verification_config_digest: word(0x25),
+            validity_mle_circuit_config_digest: word(0x26),
+            validity_mle_whir_parameters_digest: word(0x27),
+            validity_mle_whir_protocol_id: format!("0x{}", "28".repeat(64)),
+            validity_mle_whir_session_id: word(0x29),
             kzg_verifier: address(0x13),
             kzg_verifier_runtime_code_hash: word(0x23),
-            mle_proof_abi_version: 2,
+            mle_fixture_schema: MLE_VERIFIER_FIXTURE_SCHEMA_V2.into(),
+            mle_protocol_version: MLE_PROTOCOL_VERSION_CURRENT,
+            mle_proof_abi_signature: MLE_PROOF_ABI_SIGNATURE_V2.into(),
+            mle_proof_layout_hash: generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
+            mle_compact_layout_hash: generated_hex(&COMPACT_LAYOUT_HASH_V2),
+            mle_compact_proof_encoding: String::from_utf8(COMPACT_MAGIC_V2.to_vec()).unwrap(),
             post_block_and_submit_guarded_selector: "0x01020304".into(),
             attest_proof_data_selector: "0x05060708".into(),
             finalize_selector: "0x090a0b0c".into(),
+            fraud_proof_selector: "0x0d0e0f10".into(),
         }
     }
 
     fn matching_deployment_identity(manifest: &DeploymentManifest) -> ObservedDeploymentIdentity {
         ObservedDeploymentIdentity {
             rollup_runtime_code_hash: manifest.rollup_runtime_code_hash.clone(),
-            mle_verifier: manifest.mle_verifier.clone(),
-            mle_verifier_runtime_code_hash: manifest.mle_verifier_runtime_code_hash.clone(),
+            validity_mle_verifier: manifest.validity_mle_verifier.clone(),
+            validity_mle_verifier_runtime_code_hash: manifest
+                .validity_mle_verifier_runtime_code_hash
+                .clone(),
+            validity_mle_verifier_core: manifest.validity_mle_verifier_core.clone(),
+            validity_mle_verifier_core_runtime_code_hash: manifest
+                .validity_mle_verifier_core_runtime_code_hash
+                .clone(),
+            validity_mle_verification_config_digest: manifest
+                .validity_mle_verification_config_digest
+                .clone(),
+            validity_mle_circuit_config_digest: manifest.validity_mle_circuit_config_digest.clone(),
+            validity_mle_whir_parameters_digest: manifest
+                .validity_mle_whir_parameters_digest
+                .clone(),
+            validity_mle_whir_protocol_id: manifest.validity_mle_whir_protocol_id.clone(),
+            validity_mle_whir_session_id: manifest.validity_mle_whir_session_id.clone(),
             kzg_verifier: manifest.kzg_verifier.clone(),
             kzg_verifier_runtime_code_hash: manifest.kzg_verifier_runtime_code_hash.clone(),
         }
@@ -4995,68 +5359,6 @@ mod tests {
         }
     }
 
-    fn synthetic_abi_value(
-        kind: &AbiKind,
-        counter: &mut u8,
-        large_transcript: bool,
-        field_name: &str,
-    ) -> Value {
-        *counter = counter.wrapping_add(1).max(1);
-        match kind {
-            AbiKind::Uint(_) => Value::String(u64::from((*counter % 7) + 1).to_string()),
-            AbiKind::Address => Value::String(address(*counter)),
-            AbiKind::FixedBytes(size) => {
-                Value::String(format!("0x{}", format!("{:02x}", *counter).repeat(*size)))
-            }
-            AbiKind::Bytes => {
-                if large_transcript && field_name == "whirTranscript" {
-                    Value::String(format!("0x{}", "ab".repeat(127_000)))
-                } else {
-                    Value::String(format!("0x{:02x}{:02x}{:02x}", *counter, 2, 3))
-                }
-            }
-            AbiKind::Tuple(fields) => Value::Object(
-                fields
-                    .iter()
-                    .map(|field| {
-                        (
-                            field.name.to_string(),
-                            synthetic_abi_value(&field.kind, counter, large_transcript, field.name),
-                        )
-                    })
-                    .collect(),
-            ),
-            AbiKind::DynamicArray(element) => Value::Array(
-                (0..2)
-                    .map(|_| synthetic_abi_value(element, counter, large_transcript, field_name))
-                    .collect(),
-            ),
-            AbiKind::FixedArray(element, length) => Value::Array(
-                (0..*length)
-                    .map(|_| synthetic_abi_value(element, counter, large_transcript, field_name))
-                    .collect(),
-            ),
-        }
-    }
-
-    fn synthetic_mle_proof(version: u8, large_transcript: bool) -> Value {
-        let mut counter = 0u8;
-        let mut proof: serde_json::Map<String, Value> = mle_fields(version)
-            .iter()
-            .map(|field| {
-                (
-                    field.name.to_string(),
-                    synthetic_abi_value(&field.kind, &mut counter, large_transcript, field.name),
-                )
-            })
-            .collect();
-        if version == 2 {
-            proof.insert("protocolVersion".into(), Value::String("1".into()));
-            proof.insert("constituentWidth".into(), Value::String("2".into()));
-        }
-        Value::Object(proof)
-    }
-
     fn synthetic_vpis() -> Value {
         serde_json::json!({
             "initialBlockNumber": "3",
@@ -5069,77 +5371,51 @@ mod tests {
         })
     }
 
-    fn node_mle_reference(version: u8, proof: &Value, vpis: &Value) -> (Vec<u8>, String) {
-        const SCRIPT: &str = r#"
-const fs = require('fs');
-const { AbiCoder, Interface } = require('./node/node_modules/ethers');
-const settlement = require('./node/delegate/claim-settlement');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-const components = input.version === 1
-  ? settlement.MLE_PROOF_V1_COMPONENTS
-  : settlement.MLE_PROOF_V2_COMPONENTS;
-const proof = settlement.normalizeMleProof(input.proof, { allowLegacyMle: true });
-const vpisComponents = [
-  { name: 'initialBlockNumber', type: 'uint64' },
-  { name: 'initialBlockChain', type: 'bytes32' },
-  { name: 'initialExtCommitment', type: 'bytes32' },
-  { name: 'finalBlockNumber', type: 'uint64' },
-  { name: 'finalBlockChain', type: 'bytes32' },
-  { name: 'finalExtCommitment', type: 'bytes32' },
-  { name: 'prover', type: 'address' },
-];
-const proofBytes = AbiCoder.defaultAbiCoder().encode(
-  [{ name: 'proof', type: 'tuple', components }],
-  [proof],
-);
-const finalize = new Interface([{
-  type: 'function',
-  name: 'finalize',
-  stateMutability: 'nonpayable',
-  inputs: [
-    { name: 'submissionId', type: 'uint256' },
-    { name: 'stateRoot', type: 'bytes32' },
-    { name: 'vpis', type: 'tuple', components: vpisComponents },
-    { name: 'mleProof', type: 'tuple', components },
-  ],
-  outputs: [{ name: '', type: 'bool' }],
-}]).encodeFunctionData('finalize', [input.submissionId, input.stateRoot, input.vpis, proof]);
-process.stdout.write(JSON.stringify({ proofBytes, finalize }));
-"#;
-        let input = serde_json::to_vec(&serde_json::json!({
-            "version": version,
-            "proof": proof,
-            "submissionId": "7",
-            "stateRoot": word(0x41),
-            "vpis": vpis,
-        }))
-        .unwrap();
-        let mut child = Command::new("node")
-            .arg("-e")
-            .arg(SCRIPT)
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("Node.js is required for the independent ABI differential test");
-        child.stdin.take().unwrap().write_all(&input).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "independent ethers ABI encoder failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let output: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let proof_bytes = hex::decode(
-            output["proofBytes"]
-                .as_str()
-                .unwrap()
-                .trim_start_matches("0x"),
-        )
-        .unwrap();
-        let finalize = output["finalize"].as_str().unwrap().to_string();
-        (proof_bytes, finalize)
+    fn sample_prepared_with_proof(proof_payload: Vec<u8>, vpis: Value) -> PreparedEnvelope {
+        PreparedEnvelope {
+            envelope: ValidityEnvelope {
+                schema_version: ENVELOPE_SCHEMA_VERSION,
+                channel_id: 7,
+                chain_id: ANVIL_CHAIN_ID,
+                rollup: address(0x11),
+                manager: address(0x12),
+                verifier: address(0x13),
+                proposal_hash: word(0x14),
+                producer_request_id: "producer:test".into(),
+                candidate_request_id: "candidate:test".into(),
+                candidate_receipt: Value::Null,
+                posting_artifact: PostingArtifact {
+                    receipt: Value::Null,
+                    sub_blocks: Vec::new(),
+                    expected_pending_chains: word(0x15),
+                },
+                finalize_artifact: FinalizeArtifact {
+                    final_state_root: word(0x34),
+                    vpis_json: String::new(),
+                    validity_mle_json: String::new(),
+                },
+                artifact_hash: "test".into(),
+            },
+            candidate_id: word(0x16),
+            initial_block_number: 3,
+            initial_block_chain: word(0x31),
+            initial_ext_commitment: word(0x32),
+            final_block_number: 4,
+            proof_payload,
+            verification_config_digest: word(0x25),
+            circuit_config_digest: word(0x26),
+            whir_parameters_digest: word(0x27),
+            whir_protocol_id: format!("0x{}", "28".repeat(64)),
+            whir_session_id: word(0x29),
+            proof_hash: word(0x17),
+            proof_length: 4,
+            post_calldata: "0x01020304".into(),
+            post_cast_sub_blocks: "[]".into(),
+            final_state_root: word(0x34),
+            expected_pending_chains: word(0x15),
+            vpis,
+            binding_digest: word(0x18),
+        }
     }
 
     fn node_guarded_post_reference(input: &Value) -> String {
@@ -5294,134 +5570,114 @@ process.stdout.write(calldata);
     }
 
     #[test]
-    fn full_mle_v1_and_v2_abi_and_finalize_match_independent_ethers_encoder() {
+    fn compact_proof_actions_have_reviewed_selectors_and_identical_argument_bytes() {
+        let proof = vec![
+            0x4d, 0x4c, 0x45, 0x57, 0x48, 0x49, 0x52, 0x32, 0xde, 0xad, 0xbe, 0xef,
+        ];
+        let prepared = sample_prepared_with_proof(proof.clone(), synthetic_vpis());
+        let finalize = prepared.finalize_calldata("7").unwrap();
+        let fraud = prepared.fraud_calldata("7").unwrap();
+        assert_eq!(&finalize[..10], function_selector(FINALIZE_SIGNATURE));
+        assert_eq!(&fraud[..10], function_selector(FRAUD_PROOF_SIGNATURE));
+        assert_eq!(&finalize[10..], &fraud[10..]);
+
+        let proof_hex = hex::encode(&proof);
+        assert!(finalize.contains(&proof_hex));
+        let attest = prepared.attest_calldata("7", "0x0102").unwrap();
+        assert_eq!(&attest[..10], function_selector(ATTEST_SIGNATURE));
+        assert!(attest.contains(&proof_hex));
+    }
+
+    #[test]
+    fn strict_full_v2_fixture_is_the_only_proof_payload() {
         let vpis = synthetic_vpis();
-        for version in [1u8, 2u8] {
-            let proof = synthetic_mle_proof(version, false);
-            let proof_kind = AbiKind::Tuple(mle_fields(version));
-            let rust_proof = encode_sequence([(&proof_kind, &proof, "mleProof".into())]).unwrap();
-            let id_kind = AbiKind::Uint(256);
-            let root_kind = AbiKind::FixedBytes(32);
-            let vpis_kind = AbiKind::Tuple(vpis_fields());
-            let id = Value::String("7".into());
-            let root = Value::String(word(0x41));
-            let rust_finalize = encode_function(
-                "finalize",
-                &[
-                    (&id_kind, &id, "submissionId"),
-                    (&root_kind, &root, "stateRoot"),
-                    (&vpis_kind, &vpis, "validityPIs"),
-                    (&proof_kind, &proof, "mleProof"),
-                ],
-            )
-            .unwrap();
-            let (ethers_proof, ethers_finalize) = node_mle_reference(version, &proof, &vpis);
-            assert_eq!(rust_proof, ethers_proof, "MLE ABI v{version}");
-            assert_eq!(rust_finalize, ethers_finalize, "finalize ABI v{version}");
-            let (golden_length, golden_proof_hash, golden_finalize_hash) = match version {
-                1 => (
-                    6_400,
-                    "0xb3ff456226c76f6ce0b41bf512173b1079479eb3ea1d23d30be118ec31ec99cb",
-                    "0xe7febb7cf02f4f309323bac7928f62b1b9e0d193c9de8939762e32813f4e31ac",
-                ),
-                2 => (
-                    4_896,
-                    "0xa887d0f3926acd5462ce366e1e8d0b7dc5e92ab2c683a5ce75128a548a87de10",
-                    "0x516a981f5e782e2b09a6267316f316066fa7228987997ff27cc6ac7333492663",
-                ),
-                _ => unreachable!(),
-            };
-            assert_eq!(rust_proof.len(), golden_length);
-            assert_eq!(keccak_hex(&rust_proof), golden_proof_hash);
-            assert_eq!(
-                keccak_hex(&hex::decode(rust_finalize.trim_start_matches("0x")).unwrap()),
-                golden_finalize_hash
-            );
+        let hash = keccak_hash::keccak(packed_validity_public_inputs(&vpis).unwrap()).0;
+        let limbs = hash
+            .chunks_exact(4)
+            .map(|limb| u32::from_be_bytes(limb.try_into().unwrap()))
+            .collect::<Vec<_>>();
+
+        let mut builder =
+            CircuitBuilder::<GoldilocksField, 2>::new(CircuitConfig::standard_recursion_config());
+        let targets = (0..limbs.len())
+            .map(|_| {
+                let target = builder.add_virtual_target();
+                builder.register_public_input(target);
+                target
+            })
+            .collect::<Vec<_>>();
+        let circuit = builder.build::<PoseidonGoldilocksConfig>();
+        let mut witness = PartialWitness::new();
+        for (target, limb) in targets.iter().zip(&limbs) {
+            witness
+                .set_target(*target, GoldilocksField::from_canonical_u32(*limb))
+                .unwrap();
         }
-    }
-
-    #[test]
-    fn full_mle_payload_hash_length_and_two_blob_boundary_match_ethers() {
-        let version = 2u8;
-        let proof = synthetic_mle_proof(version, true);
-        let proof_kind = AbiKind::Tuple(mle_fields(version));
-        let rust_proof = encode_sequence([(&proof_kind, &proof, "mleProof".into())]).unwrap();
-        let (ethers_proof, ethers_finalize) =
-            node_mle_reference(version, &proof, &synthetic_vpis());
-        assert_eq!(rust_proof, ethers_proof);
-        assert_eq!(rust_proof.len(), 131_872);
+        let fixture = try_prove_and_export_mle_v2(&circuit, witness, &mut TimingTree::default())
+            .unwrap()
+            .fixture;
+        let canonical = fixture.to_canonical_json().unwrap();
+        let validated = validated_compact_mle_v2_fixture(&canonical, &vpis).unwrap();
+        let expected = fixture
+            .compact_proof
+            .decode_and_validate(std::str::from_utf8(&COMPACT_MAGIC_V2).unwrap())
+            .unwrap();
+        assert_eq!(validated.compact_proof, expected);
         assert_eq!(
-            keccak_hex(&rust_proof),
-            "0x6b68738d1001c7ba077b074293d284bb00e02933e6b84cb36b2e8b2646109cd6"
+            validated.verification_config_digest,
+            fixture.pinned_verifier.verification_config_digest
         );
-        assert_eq!(
-            keccak_hex(&hex::decode(ethers_finalize.trim_start_matches("0x")).unwrap()),
-            "0xa5a306b8a5eb12e50b5c1e3493e43e128f5a77df69ca54321724eaf4e28a3264"
-        );
-        assert!(rust_proof.len() > crate::proof_da::ONE_BLOB_CAPACITY);
-        assert!(rust_proof.len() <= crate::proof_da::TWO_BLOB_CAPACITY);
-        assert_eq!(
-            crate::proof_da::encode_simple_coder_blobs(&rust_proof)
+        assert!(
+            !crate::proof_da::encode_simple_coder_blobs(&expected)
                 .unwrap()
-                .len(),
-            2
+                .is_empty()
         );
-        let proof_length = u32::try_from(rust_proof.len()).unwrap();
-        assert_eq!(usize::try_from(proof_length).unwrap(), rust_proof.len());
-        assert_eq!(keccak_hex(&rust_proof), keccak_hex(&ethers_proof));
-        // The independent finalize encoding includes the exact same large proof bytes rather than
-        // a hash-only surrogate; a truncation or alternate tuple layout changes this calldata.
-        assert!(ethers_finalize.len() > 2 * rust_proof.len());
 
-        assert_eq!(
-            crate::proof_da::encode_simple_coder_blobs(&vec![
-                0u8;
-                crate::proof_da::ONE_BLOB_CAPACITY
-            ])
-            .unwrap()
-            .len(),
-            1
+        let legacy_proof_only = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&fixture.proof).unwrap()
         );
-        assert_eq!(
-            crate::proof_da::encode_simple_coder_blobs(&vec![
-                0u8;
-                crate::proof_da::ONE_BLOB_CAPACITY + 1
-            ])
-            .unwrap()
-            .len(),
-            2
-        );
-    }
+        assert!(validated_compact_mle_v2_fixture(&legacy_proof_only, &vpis).is_err());
+        assert!(validated_compact_mle_v2_fixture(canonical.trim_end(), &vpis).is_err());
 
-    #[test]
-    fn mle_schema_never_silently_switches_and_v1_is_dev_only() {
-        assert_eq!(
-            proof_abi_version(&serde_json::json!({}), ANVIL_CHAIN_ID).unwrap(),
-            1
-        );
+        let mut wrong_layout = fixture.clone();
+        wrong_layout.proof_layout_hash = word(0x99);
         assert!(
-            proof_abi_version(&serde_json::json!({}), 1)
-                .unwrap_err()
-                .contains("restricted")
+            validated_compact_mle_v2_fixture(&wrong_layout.to_canonical_json().unwrap(), &vpis)
+                .is_err()
         );
+        let mut wrong_compact_hash = fixture.clone();
+        wrong_compact_hash.compact_proof.keccak256 = word(0x98);
         assert!(
-            proof_abi_version(&serde_json::json!({"protocolVersion": 1}), ANVIL_CHAIN_ID)
-                .unwrap_err()
-                .contains("both")
+            validated_compact_mle_v2_fixture(
+                &wrong_compact_hash.to_canonical_json().unwrap(),
+                &vpis,
+            )
+            .is_err()
         );
-        let mut v2 = serde_json::json!({
-            "protocolVersion": 1,
-            "constituentWidth": 3,
-            "preprocessedIndividualEvals": ["1", "2", "3"],
-            "witnessIndividualEvals": [],
-            "inverseHelpersEvalsAtRInv": [],
-            "inverseHelpersEvalsAtRH": [],
-            "preprocessedIndividualEvalsAtRGateV2": [],
-            "witnessIndividualEvalsAtRGateV2": [],
-        });
-        assert_eq!(proof_abi_version(&v2, 1).unwrap(), 2);
-        v2["constituentWidth"] = Value::from(4);
-        assert!(proof_abi_version(&v2, 1).unwrap_err().contains("canonical"));
+        let mut wrong_config_map = fixture.clone();
+        let mut map = hex::decode(
+            wrong_config_map
+                .verification_config
+                .public_input_wire_map
+                .strip_prefix("0x")
+                .unwrap(),
+        )
+        .unwrap();
+        map[0] ^= 1;
+        wrong_config_map.verification_config.public_input_wire_map =
+            format!("0x{}", hex::encode(map));
+        assert!(
+            validated_compact_mle_v2_fixture(
+                &wrong_config_map.to_canonical_json().unwrap(),
+                &vpis,
+            )
+            .is_err(),
+            "publisher must bind the Solidity config PI map to the VK PI map"
+        );
+        let mut wrong_vpis = vpis;
+        wrong_vpis["prover"] = Value::String(address(0xff));
+        assert!(validated_compact_mle_v2_fixture(&canonical, &wrong_vpis).is_err());
     }
 
     #[test]
@@ -5436,15 +5692,11 @@ process.stdout.write(calldata);
         );
         let public_inputs = hash
             .chunks_exact(4)
-            .map(|limb| Value::String(u32::from_be_bytes(limb.try_into().unwrap()).to_string()))
+            .map(|limb| format!("0x{:016x}", u32::from_be_bytes(limb.try_into().unwrap())))
             .collect::<Vec<_>>();
-        let proof = serde_json::json!({ "publicInputs": public_inputs });
-        validate_public_inputs_hash(&proof, &vpis).unwrap();
-        let mut extra_limb = proof;
-        extra_limb["publicInputs"]
-            .as_array_mut()
-            .unwrap()
-            .push(Value::String("0".into()));
+        validate_public_inputs_hash(&public_inputs, &vpis).unwrap();
+        let mut extra_limb = public_inputs;
+        extra_limb.push("0".into());
         assert!(validate_public_inputs_hash(&extra_limb, &vpis).is_err());
 
         let block = PostingSubBlock {
@@ -5621,7 +5873,7 @@ process.stdout.write(calldata);
     }
 
     #[test]
-    fn deployment_manifest_requires_nonzero_kzg_address_and_runtime_hash() {
+    fn deployment_manifest_requires_nonzero_adapter_core_config_and_kzg_pins() {
         let manifest = sample_deployment_manifest();
         validate_deployment_manifest_identity_pins(&manifest).unwrap();
 
@@ -5650,6 +5902,29 @@ process.stdout.write(calldata);
                 .unwrap_err()
                 .contains("KZG verifier runtime code hash must be nonzero")
         );
+
+        let mut zero_core = sample_deployment_manifest();
+        zero_core.validity_mle_verifier_core = format!("0x{}", "00".repeat(20));
+        assert!(
+            validate_deployment_manifest_identity_pins(&zero_core)
+                .unwrap_err()
+                .contains("verifier core must be nonzero")
+        );
+        let mut zero_config = sample_deployment_manifest();
+        zero_config.validity_mle_verification_config_digest = format!("0x{}", "00".repeat(32));
+        assert!(
+            validate_deployment_manifest_identity_pins(&zero_config)
+                .unwrap_err()
+                .contains("verification config digest must be nonzero")
+        );
+
+        let mut old_manifest = serde_json::to_value(sample_deployment_manifest()).unwrap();
+        old_manifest["schemaVersion"] = Value::from(1);
+        old_manifest
+            .as_object_mut()
+            .unwrap()
+            .insert("mleProofAbiVersion".into(), Value::from(2));
+        assert!(serde_json::from_value::<DeploymentManifest>(old_manifest).is_err());
     }
 
     #[test]
@@ -5700,6 +5975,24 @@ process.stdout.write(calldata);
                 .unwrap_err()
                 .to_string()
                 .contains("KZG verifier runtime code hash")
+        );
+
+        let exact = matching_deployment_identity(&manifest);
+        let mut wrong_core = exact.clone();
+        wrong_core.validity_mle_verifier_core = address(0x99);
+        assert!(
+            validate_deployment_identity(&manifest, &wrong_core)
+                .unwrap_err()
+                .to_string()
+                .contains("adapter.core")
+        );
+        let mut wrong_config = exact;
+        wrong_config.validity_mle_verification_config_digest = word(0x99);
+        assert!(
+            validate_deployment_identity(&manifest, &wrong_config)
+                .unwrap_err()
+                .to_string()
+                .contains("verification config digest")
         );
     }
 

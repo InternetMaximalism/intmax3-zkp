@@ -2,30 +2,12 @@
 pragma solidity ^0.8.24;
 
 import {IChannelSettlementVerifier, CloseProofFields} from "./ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
+import {IPinnedMleVerifierV2} from "./IPinnedMleVerifierV2.sol";
 
-/// @dev Stub proof verifier: each `verify*` recomputes the expected public-input hash and
-/// matches it against the supplied "proof" bytes. The `*PIHash` preimages are byte-exact
-/// mirrors of the Rust public-input limb vectors (`to_u64_vec()`, big-endian u32 words) in
-/// `src/circuits/channel/*_pis.rs`, with the protocol domain word prepended.
-///
-/// SECURITY — TRUST BOUNDARY (P3/P4, accepted-stub scope):
-///   These verify* checks are INTRA-CHANNEL consensus stubs (2-party signed close intent + a
-///   challenge/replace window), NOT a real ZK verification of the close state transition. They are
-///   accepted-stubs by design: the protocol-critical invariant is CROSS-CHANNEL isolation, and that
-///   is enforced elsewhere by REAL cryptography, not here:
-///     • The channel's aggregate native settlement is paid by `IntmaxRollup.withdrawNative`, which
-///       verifies a real MLE/WHIR withdrawal proof bound to a finalized state root (recipient = the
-///       channel's `ChannelSettlementManager`).
-///     • `ChannelSettlementManager` then caps ALL member payouts at `receivedChannelFunds` — the
-///       real ETH it actually pulled from the rollup — so Σ paid ≤ Σ received. A channel can never
-///       pay out (and thus never steal) more ETH than its own verified withdrawal delivered,
-///       regardless of what these stubs accept. Intra-channel mis-allocation among a channel's own
-///       members is the accepted residual risk of these stubs.
-///   Replacing these with real close-circuit ZK proofs is tracked as future work; doing so would
-///   harden intra-channel correctness but is NOT required for cross-channel safety.
+/// @dev The four value-authorizing circuit statements (close, withdrawal claim, cancel close and
+/// post-close claim) use distinct immutable compact-v2 adapters and strictly rebind every returned
+/// public-input limb. The legacy `verifySpecialClose` and `verifyLateOutgoingDebit` digest stubs
+/// remain only for ABI compatibility; their manager entry points remain disabled.
 ///
 /// F7 (one SPHINCS+ key per member): member identity is the SPHINCS+ pubkey hash (bytes32, 8
 /// limbs); the legacy `bytes8 userId` (2 limbs) is removed from the withdrawal / post-close
@@ -60,7 +42,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     /// Number of RAW Goldilocks public-input limbs the close circuit registers (mirrors Rust
     /// `CHANNEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/close_pis.rs). The close
-    /// `WrapperCircuit` re-registers them VERBATIM, so a close `MleProof.publicInputs` is this
+    /// `WrapperCircuit` re-registers them VERBATIM, so the adapter-authenticated public input is this
     /// raw 103-limb vector — NOT an 8-limb keccak like validity/withdrawal. Stage 3 inserted
     /// `finalSettledTxAccumulatorRoot` (8 limbs) after `finalSettledTxChain`, shifting the tail +8;
     /// multi-token (§N-6, TM-11) appended `tokenFundsDigest` (8 limbs) at the very end (95..103).
@@ -73,7 +55,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     uint256 internal constant MAX_CHANNEL_TOKENS = 10;
     /// Phase B-D: RAW Goldilocks PI limb counts for the two new binding circuits (mirror Rust
     /// `WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN` / `POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN`). Their
-    /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` are these
+    /// `WrapperCircuit` re-registers the limbs VERBATIM, so the authenticated public inputs are these
     /// raw vectors (NOT a keccak). Stage 3 appended `finalBalanceStateH1` (8 limbs) and
     /// `finalSettledTxAccumulatorRoot` (8 limbs) to the post-close claim, 40 -> 56.
     /// Multi-token (§N-6): 48 → 50 — `token_slot` (limb 48) and the resolved BASE `token_index`
@@ -85,7 +67,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     uint256 internal constant POST_CLOSE_CLAIM_PI_LEN = 57;
     /// Phase C1: RAW Goldilocks PI limb count for the CORRECTED cancel-close circuit (mirror Rust
     /// `CANCEL_CLOSE_PUBLIC_INPUTS_LEN`, src/circuits/channel/cancel_close_pis.rs). Its
-    /// `WrapperCircuit` re-registers the limbs VERBATIM, so the `MleProof.publicInputs` is this raw
+    /// `WrapperCircuit` re-registers the limbs VERBATIM, so the authenticated public input is this raw
     /// 29-limb vector. Layout: channelId(1) | closeIntentDigest/closeStateId(8) |
     /// memberSetCommitment(8) | closeFinalStateVersion(2 hi,lo) |
     /// revivedStateVersion(2 hi,lo) | revivedChannelStateDigest(8).
@@ -93,114 +75,99 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// 2**32 — every close PI limb is a u32 word, so a canonical limb is strictly below this.
     uint256 internal constant LIMB_BOUND = 0x1_0000_0000;
 
-    // -----------------------------------------------------------------------
-    // Phase A — REAL on-chain close verification VK (close-verifier-a1-plan.md)
-    //
-    // SECURITY: the close VK is its OWN complete, independent MLE/WHIR verification key (its own
-    // degreeBits / preprocessedRoot / gatesDigest / numConstants / numRoutedWires / kIs /
-    // subgroupGenPowers / WHIR params / protocolId / sessionId). It is NOT shared with the
-    // validity/withdrawal VK storage in IntmaxRollup, and it carries the REAL close-circuit digests,
-    // so a validity/withdrawal MLE proof replayed as a close proof is rejected by MleVerifier's
-    // circuitDigest absorb + preprocessedRoot VK-binding + gatesDigest check.
-    //
-    // It is set EXACTLY ONCE by the deployer via `initializeCloseVk` (set-once latch +
-    // `degreeBits > 0` guard), mirroring `IntmaxRollup.initializeWithdrawalVk`. `verifyCloseIntent`
-    // REVERTS until it is set — there is deliberately NO `degreeBits == 0 => return true` disable
-    // seam on this value-bearing path.
-    // -----------------------------------------------------------------------
-
-    /// @notice Scalar VK params (mirror of `IntmaxRollup.MleVk`). Dynamic arrays live in dedicated
-    ///         storage variables below.
-    struct CloseVk {
-        uint256 degreeBits;
-        bytes32 preprocessedRoot;
-        uint256 numConstants;
-        uint256 numRoutedWires;
-        bytes32 gatesDigest;
-    }
-
-    error CloseVkNotSet();
-    error CloseVkDegreeBitsZero();
+    error InvalidPinnedMleVerifier(address verifier);
+    error PinnedMleVerifierChainMismatch(address verifier, uint256 expected, uint256 actual);
+    error DuplicatePinnedMleVerifier();
     /// Multi-token (§N-6, review MINOR 2): `tokenFundsDigest` rejects a token count outside the
     /// in-circuit-enforced 1..=MAX_CHANNEL_TOKENS range, making the Verifier self-contained
     /// defense-in-depth (not reliant on the Manager's structural check + the transitive TFD bind).
     error TokenCountOutOfRange();
-    /// B-2 (doc/tasks/b2-delegate-close-threat-model.md §4d): the close proof's `delegateCount` limb
-    /// (94) is outside the accepted one-sided range — either BELOW the channel's registered floor
-    /// (`fields.minDelegateCount`, i.e. the close claims FEWER delegates than were registered here)
-    /// or ABOVE the structural capacity (`memberCount + delegateCount > 1024`, a state the claim
-    /// circuits could not serve anyway). DELIBERATELY distinct from the generic
-    /// `"close limb mismatch"` revert so this one predicate is diagnosable on its own.
+    /// B-2: the close proof's `delegateCount` limb (94) differs from the immutable live-snapshot
+    /// count (`fields.minDelegateCount`; legacy field name) or exceeds the structural capacity when
+    /// added to `memberCount`. Settlement activation freezes joins and the complete participant
+    /// root/count, so both shrinking and widening this boundary describe a different unsupported
+    /// snapshot. DELIBERATELY distinct from the generic `"close limb mismatch"` revert so this
+    /// snapshot predicate is diagnosable on its own.
     ///
-    /// SECURITY (scope of the floor — review finding 6): this is a CARDINALITY bound, NOT an
-    /// identity bound. L1 never binds any delegate to a slot INDEX (`delegateBindings` carries
-    /// `(pkG, recipient)` pairs, and nothing ties entry `i` to balance slot `activeMemberCount + i`
-    /// in the proof), so the floor cannot deliver "no delegate registered here may be EXCLUDED": a
-    /// close carrying a large enough count while a DIFFERENT delegate occupies the region passes it.
-    /// What it does deliver is that the active region cannot be SHRUNK below the registered
-    /// cardinality — enough to stop a blanket freeze-out of the registered delegate population, not
-    /// enough to protect any named delegate. The old strict equality had exactly the same property;
-    /// this is a wording correction, not a regression. Per-delegate protection comes from the
-    /// leaf-bound recipient / pk_digest / amount bindings inside the claim circuits.
+    /// SECURITY SCOPE: limb 94 binds cardinality, not delegate identities. Identity/slot/recipient
+    /// protection is supplied separately by the Manager's immutable participant root and the
+    /// leaf-bound claim circuits. Exact count equality must not be described as identity binding.
     error CloseDelegateCountOutOfRange();
 
-    event CloseVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
+    /// @notice One immutable compact-v2 adapter per independent statement circuit.
+    IPinnedMleVerifierV2 public immutable override closeMleVerifier;
+    IPinnedMleVerifierV2 public immutable withdrawalClaimMleVerifier;
+    IPinnedMleVerifierV2 public immutable postCloseClaimMleVerifier;
+    IPinnedMleVerifierV2 public immutable cancelCloseMleVerifier;
 
-    /// @notice The only address allowed to set the close VK (once). Set to the constructor caller.
-    address public immutable deployer;
+    constructor(
+        IPinnedMleVerifierV2 closeMleVerifier_,
+        IPinnedMleVerifierV2 withdrawalClaimMleVerifier_,
+        IPinnedMleVerifierV2 postCloseClaimMleVerifier_,
+        IPinnedMleVerifierV2 cancelCloseMleVerifier_
+    ) {
+        address closeAddress = address(closeMleVerifier_);
+        address withdrawalClaimAddress = address(withdrawalClaimMleVerifier_);
+        address postCloseClaimAddress = address(postCloseClaimMleVerifier_);
+        address cancelCloseAddress = address(cancelCloseMleVerifier_);
+        if (
+            closeAddress == withdrawalClaimAddress || closeAddress == postCloseClaimAddress
+                || closeAddress == cancelCloseAddress || withdrawalClaimAddress == postCloseClaimAddress
+                || withdrawalClaimAddress == cancelCloseAddress || postCloseClaimAddress == cancelCloseAddress
+        ) revert DuplicatePinnedMleVerifier();
 
-    /// @notice The shared MLE verifier contract used to verify the close proof. Set once, together
-    ///         with the close VK, by the deployer (pinned atomically so the verifier the close VK
-    ///         was sized for cannot be swapped afterwards).
-    MleVerifier public closeMleVerifier;
-
-    /// @notice Close-circuit MLE verification key. `degreeBits == 0` ⇒ unset (reverts on verify).
-    CloseVk public closeVk;
-
-    /// @notice True once `initializeCloseVk` has run. Set-once latch.
-    bool public closeVkInitialized;
-
-    SpongefishWhirVerify.WhirParams internal _closeWhirParams;
-    bytes public closeWhirProtocolId;
-    bytes public closeWhirSplitSessionId;
-    uint256[] internal _closeKIs;
-    uint256[] internal _closeSubgroupGenPowers;
-
-    constructor() {
-        deployer = msg.sender;
+        address[4] memory adapters = [closeAddress, withdrawalClaimAddress, postCloseClaimAddress, cancelCloseAddress];
+        address[4] memory cores = [
+            _requirePinnedVerifier(closeMleVerifier_),
+            _requirePinnedVerifier(withdrawalClaimMleVerifier_),
+            _requirePinnedVerifier(postCloseClaimMleVerifier_),
+            _requirePinnedVerifier(cancelCloseMleVerifier_)
+        ];
+        // Enforce one adapter/core identity per statement domain in the contract itself, not only
+        // in the off-chain release manifest. Same-pair adapter==core is retained for explicit test
+        // stubs, but no address may cross from one statement slot into another slot's pair.
+        for (uint256 i = 0; i < 4; ++i) {
+            for (uint256 j = 0; j < 4; ++j) {
+                if (i != j && (cores[i] == cores[j] || adapters[i] == cores[j])) {
+                    revert DuplicatePinnedMleVerifier();
+                }
+            }
+        }
+        closeMleVerifier = closeMleVerifier_;
+        withdrawalClaimMleVerifier = withdrawalClaimMleVerifier_;
+        postCloseClaimMleVerifier = postCloseClaimMleVerifier_;
+        cancelCloseMleVerifier = cancelCloseMleVerifier_;
     }
 
-    /// @notice Set the close-circuit MLE verification key + the MLE verifier contract. Deployer-only,
-    ///         set EXACTLY ONCE.
-    /// @dev SECURITY: governs which Plonky2 circuit `verifyCloseIntent` accepts. Fixed by the
-    ///      deployer immediately after deploy and never changed (`closeVkInitialized` latch).
-    ///      `degreeBits` MUST be > 0 — the close path never runs with verification disabled. Mirrors
-    ///      `IntmaxRollup.initializeWithdrawalVk` (deployer + `!initialized` latch + degreeBits>0).
-    function initializeCloseVk(
-        MleVerifier verifier_,
-        CloseVk memory _vk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _protocolId,
-        bytes memory _sessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers
-    ) external {
-        require(msg.sender == deployer, "only deployer");
-        require(!closeVkInitialized, "close vk already set");
-        if (_vk.degreeBits == 0) revert CloseVkDegreeBitsZero();
-        closeVkInitialized = true;
-        closeMleVerifier = verifier_;
-        closeVk = _vk;
-        _copyWhirParams(_closeWhirParams, whirParams_);
-        closeWhirProtocolId = _protocolId;
-        closeWhirSplitSessionId = _sessionId;
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _closeKIs.push(_kIs[i]);
+    function _requirePinnedVerifier(IPinnedMleVerifierV2 verifier) private view returns (address verifierCore) {
+        address verifierAddress = address(verifier);
+        if (verifierAddress.code.length == 0) revert InvalidPinnedMleVerifier(verifierAddress);
+
+        uint256 verifierChainId;
+        try verifier.allowedChainId() returns (uint256 chainId) {
+            verifierChainId = chainId;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierAddress);
         }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _closeSubgroupGenPowers.push(_subgroupGenPowers[i]);
+        if (verifierChainId != block.chainid) {
+            revert PinnedMleVerifierChainMismatch(verifierAddress, block.chainid, verifierChainId);
         }
-        emit CloseVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+        try verifier.core() returns (address coreAddress) {
+            verifierCore = coreAddress;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierAddress);
+        }
+        if (verifierCore.code.length == 0) revert InvalidPinnedMleVerifier(verifierAddress);
+
+        uint256 coreChainId;
+        try IPinnedMleVerifierV2(verifierCore).allowedChainId() returns (uint256 chainId) {
+            coreChainId = chainId;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierCore);
+        }
+        if (coreChainId != block.chainid) {
+            revert PinnedMleVerifierChainMismatch(verifierCore, block.chainid, coreChainId);
+        }
     }
 
     /// @notice REAL on-chain verification of the channel-close-intent proof (Phase A).
@@ -215,32 +182,47 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///           free. The tokenFundsDigest limbs are a RECOMPUTE over the supplied
     ///           (tokenRegistry, tokenCount, channelFundAmounts) — see `_expectedCloseLimbs` — so
     ///           the per-token settlement vectors the Manager stores are proof-bound (TM-11).
-    ///        2. `MleVerifier.verify` re-checks the proof against the close VK (circuitDigest absorb,
-    ///           preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
-    ///      Reverts (`CloseVkNotSet`) until the VK is set: no verification-disabled window.
+    ///        2. The dedicated pinned v2 adapter verifies the compact proof against the close
+    ///           circuit's immutable VK/configuration, blocking cross-circuit replay.
+    ///      The adapter is fixed in the constructor: there is no verification-disabled window.
     ///
-    ///      B-2 (doc/tasks/b2-delegate-close-threat-model.md, option (d)): limb 94 (`delegateCount`)
-    ///      is the ONE limb whose expected value is not an L1-rooted constant. It is a decommitment
-    ///      of a field of the cosigner-signed H1 (limbs 17..24): the close circuit `connect`s the
-    ///      recomputed H1 to that PI (close_circuit.rs:609-620), so a prover cannot move limb 94
-    ///      without a Poseidon collision or the N-of-N Falcon signatures. The Manager's
-    ///      `activeDelegateCount`, by contrast, is a deployer-asserted constructor argument
-    ///      cross-checked against nothing (Option B made L1 registration cosigners-only, so L1 has
-    ///      NO independent record of the delegate population — ChannelSettlementManager.sol:771).
-    ///      Binding a cosigner-authenticated value with strict equality to a weaker deployer
-    ///      assertion bought no soundness and produced only false negatives (every channel whose
-    ///      delegate count moved after manager deployment could neither close nor partially
-    ///      withdraw). It is therefore replaced by an explicit ONE-SIDED RANGE predicate, evaluated
-    ///      BEFORE the strict loop, and the validated value is then written into the expected vector
-    ///      so the loop still accounts for all 103 limbs (NONE are left free — that structural
-    ///      invariant is load-bearing for auditability).
-    function verifyCloseIntent(CloseProofFields calldata fields, MleVerifier.MleProof calldata mleProof)
+    ///      B-2: limb 94 (`delegateCount`) is a decommitment of the cosigner-signed H1 (limbs
+    ///      17..24): the close circuit `connect`s the recomputed H1 to that PI
+    ///      (close_circuit.rs:609-620), so a prover cannot move it without a Poseidon collision or
+    ///      the N-of-N Falcon signatures. Settlement activation also freezes the authenticated live
+    ///      participant root/count and disables later joins. The Manager supplies that immutable
+    ///      snapshot count in `fields.minDelegateCount` (legacy ABI name), and this verifier requires
+    ///      EXACT equality before writing the value into the expected vector. Thus all 103 limbs
+    ///      remain accounted for and neither a narrower nor wider post-activation boundary passes.
+    function verifyCloseIntent(CloseProofFields calldata fields, bytes calldata compactProof)
         external
         view
         returns (bool)
     {
-        if (!closeVkInitialized) revert CloseVkNotSet();
-        uint256[] calldata pi = mleProof.publicInputs;
+        uint256[] memory pi = closeMleVerifier.verifyCompactPublicInputs(compactProof);
+        return _bindCloseIntentPublicInputs(fields, pi);
+    }
+
+    /// @notice Strictly bind an already-authenticated close PI vector to application fields.
+    /// @dev SECURITY / AUTHORITY BOUNDARY: this function is deliberately stateless and confers no
+    ///      authorization. It can be called by anyone and merely answers whether one 103-limb
+    ///      vector matches `fields`. `ChannelSettlementManager` is the value-bearing caller: it
+    ///      constructor-pins this contract's `closeMleVerifier`, calls that adapter itself, and only
+    ///      then supplies the authenticated result here. Keeping proof verification mandatory in
+    ///      the Manager removes one ~195 KiB ABI relay without weakening any limb binding.
+    function bindCloseIntentPublicInputs(CloseProofFields calldata fields, uint256[] calldata publicInputs)
+        external
+        pure
+        returns (bool)
+    {
+        return _bindCloseIntentPublicInputs(fields, publicInputs);
+    }
+
+    function _bindCloseIntentPublicInputs(CloseProofFields calldata fields, uint256[] memory pi)
+        internal
+        pure
+        returns (bool)
+    {
         // SECURITY (B-2 A-4): the length check is HOISTED out of `_bindCloseLimbsStrict` because the
         // delegate-count predicate below indexes `pi[94]` BEFORE the strict loop runs. Reading limb
         // 94 of a shorter array would be an out-of-bounds calldata read. Same revert string as the
@@ -253,19 +235,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // `_bindCloseLimbsStrict` re-checks this limb (and all others) — the duplication is
         // deliberate: the loop stays a self-contained, inspectable "every limb is canonical" pass.
         require(delegateCount < LIMB_BOUND, "close limb range");
-        // SECURITY (B-2 §4d, floor): `delegate_count` only ever INCREASES — `join_delegate`
-        // (src/bin/channel_member.rs) increments and there is no leave path — so L1 can still
-        // insist that the active region `[0, member_count + delegate_count)` is at least as WIDE as
-        // the delegate population registered at manager-deployment time. A deflated count shrinks
-        // that region and makes the claims of whoever occupies its tail unprovable (threat model
-        // §3.3).
-        // SCOPE (review finding 6): this is a CARDINALITY bound, not an identity one — L1 binds no
-        // delegate to a slot INDEX, so it cannot single out a NAMED delegate as excluded. See the
-        // `CloseDelegateCountOutOfRange` doc comment.
-        // Settlement creation freezes the authenticated live participant root/count and the CLI
-        // durably refuses later joins.  The close must therefore open the SAME delegate boundary,
-        // not merely a superset: accepting a larger count would let a proof name active slots that
-        // are absent from the immutable identity snapshot.
+        // SECURITY (B-2, immutable snapshot): settlement activation freezes the authenticated live
+        // participant root/count and durably disables later joins. The close must therefore open
+        // the SAME delegate boundary. A smaller value excludes frozen tail slots; a larger value
+        // names slots absent from the immutable identity snapshot. `minDelegateCount` is retained
+        // only as a legacy ABI field name; this predicate is exact equality, not a lower bound.
         if (delegateCount != fields.minDelegateCount) revert CloseDelegateCountOutOfRange();
         // SECURITY (B-2 §4d, ceiling): mirror of the IN-CIRCUIT bound the claim circuits enforce on
         // `active = member_count + delegate_count` (`active <= MAX_CHANNEL_MEMBERS = 1024`,
@@ -282,14 +256,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // smaller `member_count` would close under fewer than N signatures (the close circuit gates
         // its signature loop on `i < member_count`, close_circuit.rs:498-528).
         _bindCloseLimbsStrict(pi, _expectedCloseLimbs(fields, delegateCount));
-        return _verifyCloseMle(mleProof);
+        return true;
     }
 
     /// @dev Bind the proof's public-input limbs to the expected close vector. `pi` MUST be exactly
     ///      `CLOSE_PI_LEN` (103) limbs; each limb MUST equal the expected limb (strict equality, no
     ///      masking) AND be a canonical u32 (`< 2**32`). Reverts on any violation — there is no
     ///      partial / masked match.
-    function _bindCloseLimbsStrict(uint256[] calldata pi, uint256[] memory expected) internal pure {
+    function _bindCloseLimbsStrict(uint256[] memory pi, uint256[] memory expected) internal pure {
         require(pi.length == CLOSE_PI_LEN, "close pi len");
         require(expected.length == CLOSE_PI_LEN, "close expected len");
         for (uint256 i = 0; i < CLOSE_PI_LEN; i++) {
@@ -302,112 +276,15 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         }
     }
 
-    /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into storage. The
-    ///      destination arrays are assumed empty (the close VK slot is written exactly once). Mirrors
-    ///      `IntmaxRollup._copyWhirParams`.
-    function _copyWhirParams(SpongefishWhirVerify.WhirParams storage dst, SpongefishWhirVerify.WhirParams memory src)
-        private
-    {
-        dst.numVariables = src.numVariables;
-        dst.foldingFactor = src.foldingFactor;
-        dst.numVectors = src.numVectors;
-        dst.numCommitments = src.numCommitments;
-        dst.outDomainSamples = src.outDomainSamples;
-        dst.inDomainSamples = src.inDomainSamples;
-        dst.initialSumcheckRounds = src.initialSumcheckRounds;
-        dst.numRounds = src.numRounds;
-        dst.finalSumcheckRounds = src.finalSumcheckRounds;
-        dst.finalSize = src.finalSize;
-        dst.initialCodewordLength = src.initialCodewordLength;
-        dst.initialMerkleDepth = src.initialMerkleDepth;
-        dst.initialDomainGenerator = src.initialDomainGenerator;
-        dst.initialInterleavingDepth = src.initialInterleavingDepth;
-        dst.initialNumVariables = src.initialNumVariables;
-        dst.initialCosetSize = src.initialCosetSize;
-        dst.initialNumCosets = src.initialNumCosets;
-        for (uint256 i = 0; i < src.rounds.length; i++) {
-            dst.rounds.push(src.rounds[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint.length; i++) {
-            dst.evaluationPoint.push(src.evaluationPoint[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint2.length; i++) {
-            dst.evaluationPoint2.push(src.evaluationPoint2[i]);
-        }
-    }
-
-    /// @dev Load the close WhirParams from storage into memory, then call `MleVerifier.verify` with
-    ///      the close VK. Extracted into its own (external-callable would be nicer for try/catch, but
-    ///      the manager already wraps the result) view function to keep `verifyCloseIntent`'s stack
-    ///      small. The MLE verifier reverts on a failed check; a successful return is `true`.
-    function _verifyCloseMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_closeWhirParams);
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: closeVk.degreeBits,
-            preprocessedCommitmentRoot: closeVk.preprocessedRoot,
-            numConstants: closeVk.numConstants,
-            numRoutedWires: closeVk.numRoutedWires,
-            protocolId: closeWhirProtocolId,
-            sessionId: closeWhirSplitSessionId,
-            kIs: _closeKIs,
-            subgroupGenPowers: _closeSubgroupGenPowers
-        });
-        return closeMleVerifier.verify(mleProof, vp, whirParams, closeVk.gatesDigest);
-    }
-
-    /// @dev Load a WhirParams from the given storage slot into memory (mirror of
-    ///      `IntmaxRollup._loadWhirParamsFrom`). Shared across the close / withdrawal-claim /
-    ///      post-close-claim VKs (each has its OWN storage slot — see Phase B-D below).
-    function _loadWhirParams(SpongefishWhirVerify.WhirParams storage s)
-        private
-        view
-        returns (SpongefishWhirVerify.WhirParams memory p)
-    {
-        p.numVariables = s.numVariables;
-        p.foldingFactor = s.foldingFactor;
-        p.numVectors = s.numVectors;
-        p.numCommitments = s.numCommitments;
-        p.outDomainSamples = s.outDomainSamples;
-        p.inDomainSamples = s.inDomainSamples;
-        p.initialSumcheckRounds = s.initialSumcheckRounds;
-        p.numRounds = s.numRounds;
-        p.finalSumcheckRounds = s.finalSumcheckRounds;
-        p.finalSize = s.finalSize;
-        p.initialCodewordLength = s.initialCodewordLength;
-        p.initialMerkleDepth = s.initialMerkleDepth;
-        p.initialDomainGenerator = s.initialDomainGenerator;
-        p.initialInterleavingDepth = s.initialInterleavingDepth;
-        p.initialNumVariables = s.initialNumVariables;
-        p.initialCosetSize = s.initialCosetSize;
-        p.initialNumCosets = s.initialNumCosets;
-        uint256 rLen = s.rounds.length;
-        p.rounds = new SpongefishWhirVerify.RoundParams[](rLen);
-        for (uint256 i = 0; i < rLen; i++) {
-            p.rounds[i] = s.rounds[i];
-        }
-        uint256 epLen = s.evaluationPoint.length;
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](epLen);
-        for (uint256 i = 0; i < epLen; i++) {
-            p.evaluationPoint[i] = s.evaluationPoint[i];
-        }
-        uint256 ep2Len = s.evaluationPoint2.length;
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](ep2Len);
-        for (uint256 i = 0; i < ep2Len; i++) {
-            p.evaluationPoint2[i] = s.evaluationPoint2[i];
-        }
-    }
-
     /// @notice TEST-INTROSPECTION HELPER: public view passthrough exposing the EXPECTED 103-limb
     ///         close public-input vector for `fields`. Lets the manager-lifecycle tests build a
-    ///         close `MleVerifier.MleProof` whose `publicInputs` equal exactly what
+    ///         authenticated close public-input vector whose limbs equal exactly what
     ///         `verifyCloseIntent`'s `_bindCloseLimbsStrict` will require. It is a pure view of the
     ///         same `_expectedCloseLimbs` the binding uses (no security impact — it reveals nothing
     ///         a caller cannot already recompute from `fields`).
-    /// @param delegateCount B-2: the limb-94 value to lay out. `verifyCloseIntent` takes this from
-    ///        the PROOF (after the range predicate); this helper takes it from the caller so a test
-    ///        can build a vector for ANY delegate count, including ones the predicate rejects. It
-    ///        deliberately does NOT apply the range predicate — it is a pure layout view, not a
-    ///        verification entry point.
+    /// @param delegateCount B-2: the limb-94 value to lay out. Verification takes this from the
+    ///        proof after exact snapshot equality and capacity checks; this pure layout helper takes
+    ///        it from the caller so tests can also construct vectors the predicate rejects.
     function expectedCloseLimbs(CloseProofFields calldata fields, uint32 delegateCount)
         external
         pure
@@ -484,14 +361,10 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///                 see `delegateCount` below)
     ///        [95..102] tokenFundsDigest              (multi-token §N-6, RECOMPUTED, appended)
     ///
-    /// @param delegateCount B-2 (threat model §4d step 3): the ALREADY-RANGE-CHECKED limb-94 value.
-    ///        SECURITY: this is the one expected limb that is NOT an L1-rooted constant — it comes
-    ///        from the proof itself. It is passed as an explicit argument, never read from `pi`
-    ///        inside this function, precisely so that the only place it can enter the expected
-    ///        vector is a call site that has already run the floor/ceiling predicate
-    ///        (`verifyCloseIntent`). Its authority is the N-of-N cosigner signature over the H1 that
-    ///        the close circuit forces limb 94 to decommit (threat model §5); L1 adds only
-    ///        monotonicity + capacity on top.
+    /// @param delegateCount B-2: the already-validated limb-94 value. The binding path first
+    ///        requires it to equal the Manager's immutable snapshot count and satisfy capacity,
+    ///        then passes it explicitly here. Its proof-side authority is the N-of-N cosigner
+    ///        signature over the H1 that the close circuit forces limb 94 to decommit.
     function _expectedCloseLimbs(CloseProofFields calldata fields, uint256 delegateCount)
         internal
         pure
@@ -524,7 +397,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         // hashed into `memberSetCommitment`, limbs 85..92, which the constructor cross-checks
         // against the rollup registry). Never give it the limb-94 pass-through treatment.
         limbs[c++] = uint256(fields.memberCount);
-        // B-2: the validated, proof-derived delegate count (floor+ceiling checked by the caller).
+        // B-2: proof-derived count after exact immutable-snapshot equality + capacity checks.
         limbs[c++] = delegateCount;
         // Multi-token (§N-6, TM-11): RECOMPUTED over the supplied settlement vectors, appended at
         // the very end. The strict bind then forces the proof's member-signed in-circuit TFD to
@@ -568,7 +441,8 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     // =======================================================================
     // Phase B-D (tasks/phase-b-claims-threat-model.md) — REAL on-chain verification of the
-    // withdrawal-claim and post-close-claim BINDING circuits, on the SAME @mle rail as close.
+    // withdrawal-claim and post-close-claim BINDING circuits, each through its own pinned v2
+    // adapter fixed atomically in this contract's constructor.
     //
     // SCOPE = Option D: these prove EVERYTHING EXCEPT the Regev decryption of the claimed
     // ciphertext. SECURITY (RESIDUAL, documented loudly): the `amount` limb is NOT bound to the
@@ -576,148 +450,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     // `totalWithdrawn <= finalizedChannelFundAmount` cap + the authoritative `receivedChannelFunds`
     // ETH ceiling. The decryption binding is a deferred sub-phase.
     //
-    // Each statement gets its OWN complete, independent VK (own degreeBits / preprocessedRoot /
-    // gatesDigest / numConstants / numRoutedWires / kIs / subgroupGenPowers / WHIR params /
-    // protocolId / sessionId), set EXACTLY ONCE by the deployer (set-once latch + degreeBits>0
-    // guard). The verify path REVERTS until its VK is set — no verification-disabled seam. Mirrors
-    // the Phase A close VK machinery exactly.
+    // Each statement gets its OWN complete, independent VK/configuration inside an immutable
+    // pinned adapter. There is no post-deployment initializer and no verification-disabled seam.
     // =======================================================================
-
-    /// @notice Generic scalar VK params (same shape as `CloseVk`), reused for the two Phase B-D
-    ///         statements. Dynamic arrays live in dedicated storage variables below.
-    struct StatementVk {
-        uint256 degreeBits;
-        bytes32 preprocessedRoot;
-        uint256 numConstants;
-        uint256 numRoutedWires;
-        bytes32 gatesDigest;
-    }
-
-    error WithdrawalClaimVkNotSet();
-    error PostCloseClaimVkNotSet();
-    error CancelCloseVkNotSet();
-    error StatementVkDegreeBitsZero();
-
-    event WithdrawalClaimVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
-    event PostCloseClaimVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
-    event CancelCloseVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
-
-    // ── withdrawal-claim VK storage ──
-    MleVerifier public withdrawalClaimMleVerifier;
-    StatementVk public withdrawalClaimVk;
-    bool public withdrawalClaimVkInitialized;
-    SpongefishWhirVerify.WhirParams internal _withdrawalClaimWhirParams;
-    bytes public withdrawalClaimWhirProtocolId;
-    bytes public withdrawalClaimWhirSplitSessionId;
-    uint256[] internal _withdrawalClaimKIs;
-    uint256[] internal _withdrawalClaimSubgroupGenPowers;
-
-    // ── post-close-claim VK storage ──
-    MleVerifier public postCloseClaimMleVerifier;
-    StatementVk public postCloseClaimVk;
-    bool public postCloseClaimVkInitialized;
-    SpongefishWhirVerify.WhirParams internal _postCloseClaimWhirParams;
-    bytes public postCloseClaimWhirProtocolId;
-    bytes public postCloseClaimWhirSplitSessionId;
-    uint256[] internal _postCloseClaimKIs;
-    uint256[] internal _postCloseClaimSubgroupGenPowers;
-
-    // ── cancel-close VK storage (Phase C1) ──
-    MleVerifier public cancelCloseMleVerifier;
-    StatementVk public cancelCloseVk;
-    bool public cancelCloseVkInitialized;
-    SpongefishWhirVerify.WhirParams internal _cancelCloseWhirParams;
-    bytes public cancelCloseWhirProtocolId;
-    bytes public cancelCloseWhirSplitSessionId;
-    uint256[] internal _cancelCloseKIs;
-    uint256[] internal _cancelCloseSubgroupGenPowers;
-
-    /// @notice Set the withdrawal-claim MLE VK + verifier. Deployer-only, set EXACTLY ONCE,
-    ///         degreeBits>0. Mirrors `initializeCloseVk`.
-    function initializeWithdrawalClaimVk(
-        MleVerifier verifier_,
-        StatementVk memory _vk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _protocolId,
-        bytes memory _sessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers
-    ) external {
-        require(msg.sender == deployer, "only deployer");
-        require(!withdrawalClaimVkInitialized, "withdrawal claim vk already set");
-        if (_vk.degreeBits == 0) revert StatementVkDegreeBitsZero();
-        withdrawalClaimVkInitialized = true;
-        withdrawalClaimMleVerifier = verifier_;
-        withdrawalClaimVk = _vk;
-        _copyWhirParams(_withdrawalClaimWhirParams, whirParams_);
-        withdrawalClaimWhirProtocolId = _protocolId;
-        withdrawalClaimWhirSplitSessionId = _sessionId;
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _withdrawalClaimKIs.push(_kIs[i]);
-        }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _withdrawalClaimSubgroupGenPowers.push(_subgroupGenPowers[i]);
-        }
-        emit WithdrawalClaimVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
-    }
-
-    /// @notice Set the post-close-claim MLE VK + verifier. Deployer-only, set EXACTLY ONCE,
-    ///         degreeBits>0. Mirrors `initializeCloseVk`.
-    function initializePostCloseClaimVk(
-        MleVerifier verifier_,
-        StatementVk memory _vk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _protocolId,
-        bytes memory _sessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers
-    ) external {
-        require(msg.sender == deployer, "only deployer");
-        require(!postCloseClaimVkInitialized, "post close claim vk already set");
-        if (_vk.degreeBits == 0) revert StatementVkDegreeBitsZero();
-        postCloseClaimVkInitialized = true;
-        postCloseClaimMleVerifier = verifier_;
-        postCloseClaimVk = _vk;
-        _copyWhirParams(_postCloseClaimWhirParams, whirParams_);
-        postCloseClaimWhirProtocolId = _protocolId;
-        postCloseClaimWhirSplitSessionId = _sessionId;
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _postCloseClaimKIs.push(_kIs[i]);
-        }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _postCloseClaimSubgroupGenPowers.push(_subgroupGenPowers[i]);
-        }
-        emit PostCloseClaimVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
-    }
-
-    /// @notice Set the cancel-close MLE VK + verifier (Phase C1). Deployer-only, set EXACTLY ONCE,
-    ///         degreeBits>0. Mirrors `initializeCloseVk` / `initializeWithdrawalClaimVk`.
-    function initializeCancelCloseVk(
-        MleVerifier verifier_,
-        StatementVk memory _vk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _protocolId,
-        bytes memory _sessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers
-    ) external {
-        require(msg.sender == deployer, "only deployer");
-        require(!cancelCloseVkInitialized, "cancel close vk already set");
-        if (_vk.degreeBits == 0) revert StatementVkDegreeBitsZero();
-        cancelCloseVkInitialized = true;
-        cancelCloseMleVerifier = verifier_;
-        cancelCloseVk = _vk;
-        _copyWhirParams(_cancelCloseWhirParams, whirParams_);
-        cancelCloseWhirProtocolId = _protocolId;
-        cancelCloseWhirSplitSessionId = _sessionId;
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _cancelCloseKIs.push(_kIs[i]);
-        }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _cancelCloseSubgroupGenPowers.push(_subgroupGenPowers[i]);
-        }
-        emit CancelCloseVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
-    }
 
     /// @dev Build the EXPECTED 29-limb cancel-close PI vector, in the EXACT order of the Rust
     ///      `CancelClosePublicInputs::to_u64_vec()` (pinned by the Rust↔Solidity golden vector
@@ -751,21 +486,6 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         c = _putU64(limbs, c, revivedStateVersion);
         c = _putBytes32(limbs, c, revivedChannelStateDigest);
         require(c == CANCEL_CLOSE_PI_LEN, "cancel limb count");
-    }
-
-    function _verifyCancelCloseMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_cancelCloseWhirParams);
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: cancelCloseVk.degreeBits,
-            preprocessedCommitmentRoot: cancelCloseVk.preprocessedRoot,
-            numConstants: cancelCloseVk.numConstants,
-            numRoutedWires: cancelCloseVk.numRoutedWires,
-            protocolId: cancelCloseWhirProtocolId,
-            sessionId: cancelCloseWhirSplitSessionId,
-            kIs: _cancelCloseKIs,
-            subgroupGenPowers: _cancelCloseSubgroupGenPowers
-        });
-        return cancelCloseMleVerifier.verify(mleProof, vp, whirParams, cancelCloseVk.gatesDigest);
     }
 
     /// @dev Build the EXPECTED 50-limb withdrawal-claim PI vector, in the EXACT order of the Rust
@@ -870,43 +590,13 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     /// @dev Strict limb bind for an arbitrary-length raw-limb PI vector (length, exact eq, <2**32,
     ///      no mask). Shared by the two Phase B-D verify paths (the close path keeps its own
     ///      `_bindCloseLimbsStrict` to preserve the Phase A audited error strings).
-    function _bindLimbsStrict(uint256[] calldata pi, uint256[] memory expected) internal pure {
+    function _bindLimbsStrict(uint256[] memory pi, uint256[] memory expected) internal pure {
         require(pi.length == expected.length, "claim pi len");
         for (uint256 i = 0; i < expected.length; i++) {
             uint256 limb = pi[i];
             require(limb < LIMB_BOUND, "claim limb range");
             require(limb == expected[i], "claim limb mismatch");
         }
-    }
-
-    function _verifyWithdrawalClaimMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_withdrawalClaimWhirParams);
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: withdrawalClaimVk.degreeBits,
-            preprocessedCommitmentRoot: withdrawalClaimVk.preprocessedRoot,
-            numConstants: withdrawalClaimVk.numConstants,
-            numRoutedWires: withdrawalClaimVk.numRoutedWires,
-            protocolId: withdrawalClaimWhirProtocolId,
-            sessionId: withdrawalClaimWhirSplitSessionId,
-            kIs: _withdrawalClaimKIs,
-            subgroupGenPowers: _withdrawalClaimSubgroupGenPowers
-        });
-        return withdrawalClaimMleVerifier.verify(mleProof, vp, whirParams, withdrawalClaimVk.gatesDigest);
-    }
-
-    function _verifyPostCloseClaimMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        SpongefishWhirVerify.WhirParams memory whirParams = _loadWhirParams(_postCloseClaimWhirParams);
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: postCloseClaimVk.degreeBits,
-            preprocessedCommitmentRoot: postCloseClaimVk.preprocessedRoot,
-            numConstants: postCloseClaimVk.numConstants,
-            numRoutedWires: postCloseClaimVk.numRoutedWires,
-            protocolId: postCloseClaimWhirProtocolId,
-            sessionId: postCloseClaimWhirSplitSessionId,
-            kIs: _postCloseClaimKIs,
-            subgroupGenPowers: _postCloseClaimSubgroupGenPowers
-        });
-        return postCloseClaimMleVerifier.verify(mleProof, vp, whirParams, postCloseClaimVk.gatesDigest);
     }
 
     function verifySpecialClose(
@@ -934,11 +624,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     }
 
     /// @notice REAL on-chain verification of the withdrawal-claim binding proof (Phase B-D).
-    /// @dev SECURITY: replaces the former tautological `withdrawalClaimPIHash`+`_matches` stub. Two
-    ///      mandatory checks: (1) `_bindLimbsStrict` binds ALL 50 raw Goldilocks limbs limb-by-limb
-    ///      (strict eq, <2**32, no mask) to the expected vector; (2) `MleVerifier.verify` re-checks
-    ///      the proof against the withdrawal-claim VK (circuitDigest/preprocessedRoot/gatesDigest →
-    ///      cross-circuit replay blocked). Reverts until the VK is set.
+    /// @dev SECURITY: the pinned adapter first verifies the canonical compact v2 proof against the
+    ///      withdrawal-claim circuit's immutable VK/configuration and returns its authenticated
+    ///      public inputs. `_bindLimbsStrict` then binds all 50 limbs exactly and canonically.
     ///      `amount` is bound as a PI limb AND, in-circuit, to the slot ciphertext plaintext: the
     ///      withdrawal claim circuit's `decryption_core(expose_amount = true)` recomputes
     ///      `v = c2 - c1*s` under the leaf-bound Regev key and `connect`s the decoded 64-bit amount to
@@ -960,11 +648,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         uint8 tokenSlot,
         uint32 tokenIndex,
         bytes32 withdrawalNullifier,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool) {
-        if (!withdrawalClaimVkInitialized) revert WithdrawalClaimVkNotSet();
+        uint256[] memory publicInputs = withdrawalClaimMleVerifier.verifyCompactPublicInputs(compactProof);
         _bindLimbsStrict(
-            mleProof.publicInputs,
+            publicInputs,
             _expectedWithdrawalClaimLimbs(
                 channelId,
                 closeIntentDigest,
@@ -978,7 +666,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 tokenIndex
             )
         );
-        return _verifyWithdrawalClaimMle(mleProof);
+        return true;
     }
 
     /// @notice REAL on-chain verification of the CORRECTED cancelClose proof (Phase C1).
@@ -993,14 +681,14 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     ///           constraints prove `revivedStateVersion > closeFinalStateVersion` and the era
     ///           fence against the canonical close state whose legacy ABI key is
     ///           `closeIntentDigest`.
-    ///        2. `MleVerifier.verify` re-checks the proof against the cancel-close VK (circuitDigest
-    ///           absorb, preprocessedRoot VK-binding, gatesDigest), blocking cross-circuit replay.
+    ///        2. The dedicated pinned v2 adapter re-checks the proof against the cancel-close
+    ///           circuit's immutable VK/configuration, blocking cross-circuit replay.
     ///      FINDING D FIX: `memberSetCommitment` is the channel's REGISTERED member-set commitment,
     ///      passed by `ChannelSettlementManager.cancelClose` from `registeredMemberSetCommitment()`
     ///      (NOT a caller request field). The strict bind forces the proof's in-circuit member-set
     ///      commitment to equal it, so the verified signing keys are the channel's registered
     ///      members — a third party cannot forge a cancel with their own keys.
-    ///      Reverts (`CancelCloseVkNotSet`) until the VK is set: no verification-disabled window.
+    ///      The adapter is fixed in the constructor: there is no verification-disabled window.
     function verifyCancelClose(
         bytes4 channelId,
         bytes32 closeIntentDigest,
@@ -1008,11 +696,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool) {
-        if (!cancelCloseVkInitialized) revert CancelCloseVkNotSet();
+        uint256[] memory publicInputs = cancelCloseMleVerifier.verifyCompactPublicInputs(compactProof);
         _bindLimbsStrict(
-            mleProof.publicInputs,
+            publicInputs,
             _expectedCancelCloseLimbs(
                 channelId,
                 closeIntentDigest,
@@ -1022,11 +710,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 revivedChannelStateDigest
             )
         );
-        return _verifyCancelCloseMle(mleProof);
+        return true;
     }
 
     /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 29-limb cancel-close PI vector
-    ///         (lets tests build an `MleProof` whose `publicInputs` match the strict bind). No
+    ///         (lets tests compare fixture public inputs with the strict bind). No
     ///         security impact (reveals nothing a caller cannot recompute).
     function expectedCancelCloseLimbs(
         bytes4 channelId,
@@ -1048,8 +736,9 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
 
     /// @notice REAL on-chain verification of the post-close-claim binding proof (Phase B-D +
     ///         Stage 3).
-    /// @dev SECURITY: (1) `_bindLimbsStrict` binds ALL 56 raw Goldilocks limbs; (2)
-    ///      `MleVerifier.verify` against the post-close-claim VK. Reverts until the VK is set.
+    /// @dev SECURITY: the dedicated pinned v2 adapter verifies the canonical compact proof against
+    ///      the post-close-claim circuit's immutable VK/configuration, then `_bindLimbsStrict`
+    ///      binds all 57 authenticated public-input limbs.
     ///      HAZARD #8: `sharedNativeNullifier` is DERIVED in-circuit from
     ///      keccak(IMCK, closeIntentDigest, incomingTxHash, receiverPkG); the manager passes the
     ///      RECOMPUTED value here (not an opaque claim field), so the binding rejects a
@@ -1072,11 +761,11 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
         bytes32 finalBalanceStateH1,
         bytes32 finalSettledTxAccumulatorRoot,
         uint32 tokenIndex,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool) {
-        if (!postCloseClaimVkInitialized) revert PostCloseClaimVkNotSet();
+        uint256[] memory publicInputs = postCloseClaimMleVerifier.verifyCompactPublicInputs(compactProof);
         _bindLimbsStrict(
-            mleProof.publicInputs,
+            publicInputs,
             _expectedPostCloseClaimLimbs(
                 channelId,
                 closeIntentDigest,
@@ -1090,7 +779,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
                 tokenIndex
             )
         );
-        return _verifyPostCloseClaimMle(mleProof);
+        return true;
     }
 
     function verifyLateOutgoingDebit(
@@ -1180,7 +869,7 @@ contract ChannelSettlementVerifier is IChannelSettlementVerifier {
     }
 
     /// @notice TEST-INTROSPECTION HELPER: public view of the EXPECTED 50-limb withdrawal-claim PI
-    ///         vector (lets tests build an `MleProof` whose `publicInputs` match the strict bind).
+    ///         vector (lets tests compare fixture public inputs with the strict bind).
     ///         No security impact (reveals nothing a caller cannot recompute).
     function expectedWithdrawalClaimLimbs(
         bytes4 channelId,

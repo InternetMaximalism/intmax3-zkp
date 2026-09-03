@@ -5,11 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 /// @title M-8 — `finalize()` must not fail silently.
 ///
@@ -31,7 +28,6 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 /// submission is still NOT finalized. Naming the cause must never let a rejected proof through.
 contract RollupFinalizeDiagnosticsTest is Test {
     IntmaxRollup internal rollup;
-    MleVerifier internal mleVerifier;
 
     address internal fraudTreasury = makeAddr("fraudTreasury");
     address internal poster = makeAddr("poster");
@@ -44,35 +40,18 @@ contract RollupFinalizeDiagnosticsTest is Test {
     // -----------------------------------------------------------------------
 
     function setUp() public {
-        mleVerifier = new MleVerifier(block.chainid);
-        rollup = _newRollup(0); // degreeBits = 0 → MLE verification skipped (test opt-in)
+        rollup = _newRollup(false);
         vm.deal(poster, 100 ether);
     }
 
-    function _newRollup(uint256 degreeBits) internal returns (IntmaxRollup r) {
-        IntmaxRollup.MleVk memory vk = IntmaxRollup.MleVk({
-            degreeBits: degreeBits,
-            preprocessedRoot: bytes32(0),
-            numConstants: 0,
-            numRoutedWires: 0,
-            gatesDigest: bytes32(0)
-        });
-        SpongefishWhirVerify.WhirParams memory p;
-        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-
+    function _newRollup(bool rejectProof) internal returns (IntmaxRollup r) {
+        MockPinnedMleVerifierV2 validityMle = new MockPinnedMleVerifierV2(31337);
+        if (rejectProof) validityMle.setVerificationVerdict(false);
         r = new IntmaxRollup(
             fraudTreasury,
-            vk,
-            p,
-            "",
-            "",
-            new uint256[](0),
-            new uint256[](0),
-            mleVerifier,
-            bytes32(0),
-            true // A-2 test opt-in; irrelevant once degreeBits > 0
+            validityMle,
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(poster, true);
@@ -82,20 +61,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
     // Fixtures
     // -----------------------------------------------------------------------
 
-    function _emptyProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.publicInputs = new uint256[](0);
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
+    function _emptyProof() internal pure returns (bytes memory) {
+        return abi.encode(new uint256[](0));
     }
 
     function _piHash(IntmaxRollup.ValidityPublicInputs memory pis) internal pure returns (bytes32) {
@@ -171,7 +138,7 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 submissionId,
         bytes32 stateRoot,
         IntmaxRollup.ValidityPublicInputs memory pis,
-        MleVerifier.MleProof memory proof
+        bytes memory proof
     ) internal returns (bytes4 reason) {
         vm.recordLogs();
         bool ok = r.finalize(submissionId, stateRoot, pis, proof);
@@ -206,8 +173,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         bytes32 root = keccak256("root_af");
         uint256 id = _post(rollup, 1, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         assertTrue(rollup.finalize(id, root, pis, proof), "first finalize must succeed");
         assertTrue(rollup.isFinalized(id));
@@ -234,8 +201,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 id = _post(rollup, 2, root);
         bytes32 foreign = keccak256("some_other_root");
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, foreign);
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         assertEq(
             _rejectReason(rollup, id, foreign, pis, proof),
@@ -261,14 +228,14 @@ contract RollupFinalizeDiagnosticsTest is Test {
         bytes32 rootB = keccak256("root_hr_b");
         uint256 idB = _post(rollup, 4, rootB);
         IntmaxRollup.ValidityPublicInputs memory pisB = _honestPIs(rollup, rootB);
-        MleVerifier.MleProof memory proofB = _emptyProof();
-        proofB.publicInputs = _limbs(_piHash(pisB));
+        bytes memory proofB = _emptyProof();
+        proofB = abi.encode(_limbs(_piHash(pisB)));
 
         bytes32 rootA = keccak256("root_hr_a");
         uint256 idA = _post(rollup, 3, rootA);
         IntmaxRollup.ValidityPublicInputs memory pisA = _honestPIs(rollup, rootA);
-        MleVerifier.MleProof memory proofA = _emptyProof();
-        proofA.publicInputs = _limbs(_piHash(pisA));
+        bytes memory proofA = _emptyProof();
+        proofA = abi.encode(_limbs(_piHash(pisA)));
         assertTrue(rollup.finalize(idA, rootA, pisA, proofA), "seed finalize must succeed");
         assertGt(rollup.latestFinalizedBlockNumber(), pisB.finalBlockNumber, "floor must exceed B");
 
@@ -284,8 +251,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 id = _post(rollup, 5, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
         pis.initialExtCommitment = keccak256("not_the_finalized_root");
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         assertEq(
             _rejectReason(rollup, id, root, pis, proof),
@@ -299,8 +266,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 id = _post(rollup, 6, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
         pis.initialBlockChain = keccak256("wrong_initial_chain");
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         assertEq(
             _rejectReason(rollup, id, root, pis, proof),
@@ -315,8 +282,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 id = _post(rollup, 7, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
         pis.finalBlockChain = keccak256("wrong_final_chain");
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         bytes4 reason = _rejectReason(rollup, id, root, pis, proof);
         assertEq(reason, IntmaxRollup.FinalBlockChainMismatch.selector);
@@ -332,8 +299,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         uint256 id = _post(rollup, 8, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
         pis.finalExtCommitment = keccak256("closes_somewhere_else");
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         bytes4 reason = _rejectReason(rollup, id, root, pis, proof);
         assertEq(reason, IntmaxRollup.FinalExtCommitmentMismatch.selector);
@@ -350,7 +317,7 @@ contract RollupFinalizeDiagnosticsTest is Test {
         bytes32 root = keccak256("root_pi");
         uint256 id = _post(rollup, 9, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
-        MleVerifier.MleProof memory proof = _emptyProof(); // publicInputs left empty → unbound
+        bytes memory proof = _emptyProof(); // publicInputs left empty → unbound
 
         bytes4 reason = _rejectReason(rollup, id, root, pis, proof);
         assertEq(reason, IntmaxRollup.ValidityPublicInputsMismatch.selector);
@@ -363,13 +330,12 @@ contract RollupFinalizeDiagnosticsTest is Test {
     /// @dev Check 7 — MLE/WHIR verification of the proof itself failed. Needs a rollup with the VK
     ///      ENABLED, otherwise `_verifyMle` short-circuits to true under the test opt-in.
     function test_reason_mleVerificationFailed() public {
-        IntmaxRollup r = _newRollup(13);
+        IntmaxRollup r = _newRollup(true);
         bytes32 root = keccak256("root_mle");
         uint256 id = _post(r, 10, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(r, root);
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
-        proof.whirTranscript = hex"DEADBEEF"; // makes WHIR verification fail
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         assertEq(
             _rejectReason(r, id, root, pis, proof),
@@ -390,8 +356,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         bytes32 root = keccak256("root_un");
         uint256 id = _post(rollup, 11, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         vm.mockCallRevert(
             address(rollup),
@@ -446,8 +412,8 @@ contract RollupFinalizeDiagnosticsTest is Test {
         bytes32 root = keccak256("root_ok");
         uint256 id = _post(rollup, 12, root);
         IntmaxRollup.ValidityPublicInputs memory pis = _honestPIs(rollup, root);
-        MleVerifier.MleProof memory proof = _emptyProof();
-        proof.publicInputs = _limbs(_piHash(pis));
+        bytes memory proof = _emptyProof();
+        proof = abi.encode(_limbs(_piHash(pis)));
 
         vm.recordLogs();
         assertTrue(rollup.finalize(id, root, pis, proof), "honest finalize must still succeed");

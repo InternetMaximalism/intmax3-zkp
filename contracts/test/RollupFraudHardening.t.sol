@@ -5,73 +5,51 @@ import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {KZGProof, TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {InvalidMleProof} from "@mle/MleProofErrors.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
-/// @dev SECURITY (C-1/B-4): emits the production verifier's proof-dependent negative verdict.
-contract RejectingMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert InvalidMleProof();
+abstract contract PinnedVerifierV2Stub is IPinnedMleVerifierV2 {
+    uint256 public constant override allowedChainId = 31337;
+
+    function core() external view override returns (address) {
+        return address(this);
     }
 
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+    function verifyCompactPublicInputs(bytes calldata compactProof)
+        external
+        view
+        virtual
+        override
+        returns (uint256[] memory)
+    {
+        return abi.decode(compactProof, (uint256[]));
+    }
+}
+
+/// @dev SECURITY (C-1/B-4): emits the production verifier's proof-dependent negative verdict.
+contract RejectingMleVerifier is PinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         return 0;
     }
 }
 
 /// @dev A legacy/mismatched verifier returning false did not authenticate why it rejected.
-contract FalseReturningMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        return false;
-    }
-
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+contract FalseReturningMleVerifier is PinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         return 2;
     }
 }
 
-contract EmptyRevertMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        assembly { revert(0, 0) }
-    }
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+contract EmptyRevertMleVerifier is PinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         assembly { revert(0, 0) }
     }
 }
 
-contract UnknownErrorMleVerifier {
+contract UnknownErrorMleVerifier is PinnedVerifierV2Stub {
     error InternalVerifierFailure();
 
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert InternalVerifierFailure();
-    }
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         revert InternalVerifierFailure();
     }
 }
@@ -80,17 +58,8 @@ contract UnknownErrorMleVerifier {
 ///      `Plonky2GateEvaluator.sol` does on a gate the deployed evaluator cannot handle
 ///      (`revert("unsupported gate with non-zero filter")`). The proof is honest; the evaluator
 ///      simply cannot evaluate it. This must NOT be convictable.
-contract UnsupportedGateMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert("unsupported gate with non-zero filter");
-    }
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+contract UnsupportedGateMleVerifier is PinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         revert("unsupported gate with non-zero filter");
     }
 }
@@ -99,20 +68,21 @@ contract UnsupportedGateMleVerifier {
 ///      of gas first - the shape of the real verifier, measured at 11,019,291 gas on the repo's
 ///      own fixture (`MleE2E::test_mleVerify_gas`). Used to show the transaction gas limit can no
 ///      longer steer the fraud verdict.
-contract GasHungryMleVerifier {
+contract GasHungryMleVerifier is PinnedVerifierV2Stub {
     uint256 public immutable rounds;
     constructor(uint256 rounds_) { rounds = rounds_; }
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external view returns (bool) {
+
+    function verifyCompactPublicInputs(bytes calldata compactProof)
+        external
+        view
+        override
+        returns (uint256[] memory)
+    {
         _burn();
-        return true;
+        return abi.decode(compactProof, (uint256[]));
     }
 
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external view returns (uint8) {
+    function fraudVerdictCompact(bytes calldata, bytes32) external view override returns (uint8) {
         _burn();
         return 1;
     }
@@ -139,20 +109,11 @@ contract RollupFraudHardeningTest is Test {
         0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
 
     function setUp() public {
-        // degreeBits = 0 → `_verifyMle` short-circuits to TRUE, i.e. every committed proof is
-        // treated as VALID. That is exactly the setting the C-1 test needs: an honest submission
-        // whose proof genuinely verifies must not be convictable.
         rollup = new IntmaxRollup(
             fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            new MleVerifier(block.chainid),
-            bytes32(0),
-            true
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);
@@ -175,8 +136,8 @@ contract RollupFraudHardeningTest is Test {
 
         // Honest submission: PIs match on-chain state, proof carries the matching PI limbs.
         IntmaxRollup.ValidityPublicInputs memory honestPis = _pisFor(stateRoot, address(0));
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(honestPis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(honestPis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -213,12 +174,12 @@ contract RollupFraudHardeningTest is Test {
     ///      is precisely the route that also convicted honest submitters. It now runs against a
     ///      verifier that emits the authenticated proof-rejection selector.
     function test_C1_genuinelyInvalidProofIsStillConvictable() public {
-        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), true);
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()));
 
         bytes32 stateRoot = keccak256("bad_state");
         IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0));
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 2;
@@ -235,22 +196,15 @@ contract RollupFraudHardeningTest is Test {
 
     /// @dev Deploy an MLE-ENABLED rollup (non-zero validity VK, so the degreeBits==0 bypass is
     ///      dead) on an arbitrary verifier satellite.
-    function _mleEnabledRollupOn(address verifierAddr, bool allowMleDisabled_)
-        internal returns (IntmaxRollup r)
-    {
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0),
-            numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
+    function _mleEnabledRollupOn(address verifierAddr) internal returns (IntmaxRollup r) {
         r = new IntmaxRollup(
-            fraudTreasury, enabledVk, _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), MleVerifier(verifierAddr), bytes32(0),
-            allowMleDisabled_
+            fraudTreasury,
+            IPinnedMleVerifierV2(verifierAddr),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         r.setBlockProducer(submitter, true);
-        if (allowMleDisabled_) {
-            r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
-        }
+        r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
     }
 
     // =======================================================================
@@ -364,15 +318,13 @@ contract RollupFraudHardeningTest is Test {
     ///      degreeBits==0 bypass disabled. This suite isolates the verdict state machine with the
     ///      test Proof-DA satellite; ProofDaRollup covers the same route with canonical proof bytes.
     function test_B3_honestProverConvictsInvalidBatchOnProductionShapedDeployment() public {
-        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()), false);
-        assertFalse(r.allowMleDisabled(), "no test bypass on a production-shaped rollup");
-        r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
+        IntmaxRollup r = _mleEnabledRollupOn(address(new RejectingMleVerifier()));
         vm.deal(submitter, 10 ether);
 
         bytes32 stateRoot = keccak256("genuinely_bad_state");
         IntmaxRollup.ValidityPublicInputs memory pis = _pisForOn(r, stateRoot, address(0xBEEF));
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -394,8 +346,7 @@ contract RollupFraudHardeningTest is Test {
     function _honestSubmissionOn(address verifierAddr)
         internal returns (IntmaxRollup r, bytes memory payload)
     {
-        r = _mleEnabledRollupOn(verifierAddr, false);
-        r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
+        r = _mleEnabledRollupOn(verifierAddr);
         vm.deal(submitter, 10 ether);
         vm.deal(attacker, 10 ether);
 
@@ -406,8 +357,8 @@ contract RollupFraudHardeningTest is Test {
         IntmaxRollup.ValidityPublicInputs memory pis =
             _pisForBatch(r, batch, stateRoot, address(0xBEEF));
 
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = mleProof;
         _postWithKZGOn(r, batch, proofBytes, stateRoot, submitter);
 
         payload = abi.encodeCall(
@@ -428,8 +379,8 @@ contract RollupFraudHardeningTest is Test {
 
         // Submission A (id 0): a real, verifiable proof for rootA.
         IntmaxRollup.ValidityPublicInputs memory pisA = _pisFor(rootA, address(0));
-        MleVerifier.MleProof memory proofA = _mleProofWithPI(_computePIHash(pisA));
-        bytes memory bytesA = abi.encode(proofA);
+        bytes memory proofA = _mleProofWithPI(_computePIHash(pisA));
+        bytes memory bytesA = proofA;
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
         _postWithKZG(_batch(1, ids, 100, bytes32(uint256(0x111))), bytesA, rootA, submitter);
@@ -461,9 +412,9 @@ contract RollupFraudHardeningTest is Test {
 
         // B-5: the PIs must name the batch's own end height (see `_pisForBatch`).
         IntmaxRollup.ValidityPublicInputs memory pis = _pisForBatch(rollup, batch, root, address(0));
-        MleVerifier.MleProof memory proof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proof = _mleProofWithPI(_computePIHash(pis));
 
-        _postWithKZG(batch, abi.encode(proof), root, submitter);
+        _postWithKZG(batch, proof, root, submitter);
 
         assertTrue(rollup.finalize(0, root, pis, proof), "honest finalize must still succeed");
         assertTrue(rollup.isFinalized(0), "submission finalized");
@@ -657,37 +608,8 @@ contract RollupFraudHardeningTest is Test {
         }
     }
 
-    function _mleProofWithPI(bytes32 piHash) internal pure returns (MleVerifier.MleProof memory p) {
-        p = _defaultMleProof();
-        p.publicInputs = _piLimbs(piHash);
-    }
-
-    function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.publicInputs = new uint256[](0);
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
-    }
-
-    function _emptyMleVk() internal pure returns (IntmaxRollup.MleVk memory vk) {}
-
-    function _emptyWhirParams() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
-        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-    }
-
-    function _emptyMleArrays() internal pure returns (uint256[] memory) {
-        return new uint256[](0);
+    function _mleProofWithPI(bytes32 piHash) internal pure returns (bytes memory) {
+        return abi.encode(_piLimbs(piHash));
     }
 
     function _batch(uint32 aggId, uint32[] memory ids, uint64 ts, bytes32 txRoot)

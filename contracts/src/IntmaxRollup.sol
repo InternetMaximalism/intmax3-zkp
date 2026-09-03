@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
 import {BlobKZGVerifierExt} from "./BlobKZGVerifier.sol";
+import {IPinnedMleVerifierV2} from "./IPinnedMleVerifierV2.sol";
 import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 
 /// @title IntmaxRollup
@@ -32,18 +29,18 @@ import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
 ///       on-chain block_hash_chain snapshots and accept the new state root.
 ///
 ///  Blob format (both finalize and fraudProof):
-///    blob = abi.encode(MleVerifier.MleProof)
+///    blob = the unique canonical `MLEWHIR3` compact byte stream
 ///
 ///  On-chain verification is MLE/WHIR-only (Groth16 removed). The validity public inputs are
-///  bound to the proof through the MLE proof's own `publicInputs` field: the wrapped Plonky2
-///  validity circuit registers keccak256(ValidityPublicInputs) as its 8 public-input limbs, which
-///  flow into `mleProof.publicInputs` and are absorbed into the WHIR Fiat-Shamir transcript.
+///  bound to the proof through the compact proof's authenticated `publicInputs` field. Wire v3
+///  constrains those raw values directly to canonical committed routed-witness cells; the wrapped
+///  validity circuit additionally registers keccak256(ValidityPublicInputs) as its 8 PI limbs.
 ///
 ///  Verification checks (finalize — all must pass):
 ///    a) Blob commitment (KZG multi-point opening)
 ///    b) ValidityPublicInputs match on-chain state
 ///    c) Proof params binding (blob bytes == abi.encode(mleProof))
-///    d) mleProof.publicInputs[0..7] == keccak256(ValidityPublicInputs) as 8 big-endian u32 limbs
+///    d) authenticated publicInputs[0..7] == keccak256(ValidityPublicInputs) as 8 BE u32 limbs
 ///       (SECURITY: binds the verified MLE proof to the claimed validity PIs)
 ///    e) MLE proof verification
 ///
@@ -90,7 +87,7 @@ contract IntmaxRollup {
     error FinalBlockChainMismatch();
     /// @dev `fullVerify` 5: the proof's `finalExtCommitment` is not the `stateRoot` being finalized.
     error FinalExtCommitmentMismatch();
-    /// @dev `fullVerify` 6: `mleProof.publicInputs` do not encode keccak256(ValidityPublicInputs),
+    /// @dev `fullVerify` 6: authenticated proof public inputs do not encode the PI preimage hash,
     ///      i.e. the claimed `validityPIs` are UNBOUND to the proof that step 7 verifies.
     error ValidityPublicInputsMismatch();
     /// @dev `fullVerify` 7: MLE/WHIR verification of the proof itself returned false.
@@ -98,9 +95,11 @@ contract IntmaxRollup {
     ///      verification has been MLE/WHIR-only since Groth16 was removed, so it was an exact
     ///      synonym of this error and a second name for one cause is not diagnosability.
     error MleVerificationFailed();
+    error InvalidPinnedMleVerifier(address verifier);
+    error PinnedMleVerifierChainMismatch(address verifier, uint256 expected, uint256 actual);
+    error DuplicatePinnedMleVerifier();
     // EIP-170 size relief: former string requires, converted to custom errors (semantics identical).
     error OnlyDeployer();
-    error WithdrawalVkAlreadySet();
     // `EthTransferFailed` removed with `claimAuthorizedWithdrawal` (2026-07-28) — it was that
     // function's transfer-failure case and had no other use. It was the only native payout that
     // PUSHED to a caller-named third-party address; every remaining native payout is pull-payment
@@ -147,14 +146,6 @@ contract IntmaxRollup {
     error MemberPubkeyHashZeroReserved();
     error RegevPkDigestZeroReserved();
     error RecipientZeroReserved();
-    error WithdrawalVkDegreeBitsZero();
-    // SECURITY (A-2): a validity MLE VK with degreeBits == 0 disables on-chain proof verification
-    // (`_verifyMle` short-circuits to true). Reject such a VK at deploy time unless the deployer
-    // explicitly opts in via `allowMleDisabled` (test-only). Mirrors the withdrawal VK guard above.
-    error ValidityVkDegreeBitsZero();
-    /// @dev The validity-verification bypass exists solely for local unit and
-    ///      integration tests. Allowing it on a public chain would bypass the
-    ///      MleVerifier's fail-closed release guard entirely.
     // registerChannel validation (custom errors instead of require-strings — keeps IntmaxRollup
     // under the EIP-170 24,576-byte runtime limit after the delegate-account additions).
     error ChannelAlreadyRegistered();
@@ -163,9 +154,9 @@ contract IntmaxRollup {
     error MemberPubkeyHashesNotDistinct();
     error ReleaseRuntimeUnavailable();
 
-    /// @dev The currently unreleased MLE engine makes the rollup local-only.
-    ///      Repeating this at the value boundary covers code/state migration
-    ///      that does not execute either constructor.
+    /// @dev Release containment remains local-devnet-only until the independent cryptographic
+    ///      review is recorded. Repeating the guard at value boundaries also covers copied
+    ///      code/state that did not execute this deployment's constructor.
     modifier releaseRuntime() {
         _requireReleaseRuntime();
         _;
@@ -236,9 +227,6 @@ contract IntmaxRollup {
 
     event WithdrawalCredited(address indexed recipient, uint256 amount);
 
-    /// @notice Emitted once when the deployer fixes the withdrawal-circuit MLE VK.
-    event WithdrawalVkInitialized(uint256 degreeBits, bytes32 preprocessedRoot);
-
     /// @notice Emitted per `Withdrawal` leaf paid out by `withdrawNative`.
     event PartialWithdrawalAuthorized(bytes32 indexed authDigest, address indexed manager);
     event SettlementManagerRegistered(address indexed manager);
@@ -247,7 +235,6 @@ contract IntmaxRollup {
 
     event NativeWithdrawn(address indexed recipient, uint256 amount, bytes32 indexed nullifier, uint64 blockNumber);
 
-    error WithdrawalVkNotSet();
     error WithdrawalExtCommitmentMismatch();
     error WithdrawalPublicInputsMismatch();
     error WithdrawalProofInvalid();
@@ -361,21 +348,6 @@ contract IntmaxRollup {
         uint256 packedCounts;
     }
 
-    /// @notice MLE verification key parameters — fixed per circuit, set at deploy time.
-    ///         SECURITY: These bind the on-chain verifier to a specific Plonky2 circuit.
-    ///         Without them, an attacker could substitute a different circuit's proof.
-    /// @dev Scalar VK params only; dynamic arrays (`kIs`, `subgroupGenPowers`)
-    ///      are kept in dedicated storage variables (`_mleKIs` /
-    ///      `_mleSubgroupGenPowers`) because Solidity's auto-generated public
-    ///      getters cannot return structs containing dynamic arrays cleanly.
-    struct MleVk {
-        uint256 degreeBits; // log2 of circuit degree
-        bytes32 preprocessedRoot; // WHIR Merkle root for preprocessed polynomial (VK binding)
-        uint256 numConstants; // number of constant columns
-        uint256 numRoutedWires; // number of routed wire columns
-        bytes32 gatesDigest; // v2 R2-#1: keccak hash pinning gate metadata
-    }
-
     /// @notice Mirrors the Rust `ValidityPublicInputs` struct.
     ///         All fields are u32-packed, matching the Rust keccak256 input layout.
     ///         initial_block_number (2 u32), initial_block_chain (8 u32),
@@ -396,74 +368,16 @@ contract IntmaxRollup {
     // State
     // -----------------------------------------------------------------------
 
-    /// @notice External MLE verifier contract.
-    MleVerifier public immutable mleVerifier;
+    /// @notice Per-circuit adapters. Each adapter owns one complete immutable v2 VK/configuration
+    ///         and accepts only the canonical compact proof encoding.
+    IPinnedMleVerifierV2 public immutable validityMleVerifier;
+    IPinnedMleVerifierV2 public immutable withdrawalMleVerifier;
 
-    /// @notice MLE verification key — binds the contract to a specific Plonky2 circuit.
-    ///         SECURITY: When mleVk.degreeBits == 0, MLE verification is disabled. This is only
-    ///         reachable when `allowMleDisabled` is true (a test-only opt-in); production deploys
-    ///         pass `allowMleDisabled == false`, so the constructor rejects a zero validity VK
-    ///         (`ValidityVkDegreeBitsZero`) and `_verifyMle` never short-circuits.
-    MleVk public mleVk;
+    /// @notice Chain on which this exact rollup deployment was constructed.
+    uint256 public immutable deploymentChainId;
 
-    /// @notice SECURITY (A-2): explicit, immutable opt-in that allows deploying with a disabled
-    ///         validity MLE VK (degreeBits == 0). MUST be false in production; only Solidity tests
-    ///         that exercise the PI-binding path without real proofs set it true. The constructor
-    ///         enforces a non-zero validity VK whenever this is false, and `_verifyMle` only honors
-    ///         the degreeBits==0 bypass when this is true — a two-layer guard against the footgun.
-    bool public immutable allowMleDisabled;
-
-    /// @notice WHIR protocol parameters — fixed per circuit, set at deploy time.
-    ///         Stored in storage because WhirParams contains dynamic arrays (rounds[]).
-    SpongefishWhirVerify.WhirParams internal _whirParams;
-
-    /// @notice WHIR protocol ID (64 bytes) — domain separation for the WHIR PCS.
-    bytes public whirProtocolId;
-
-    /// @notice WHIR session ID for split-commit mode (32 bytes).
-    bytes public whirSplitSessionId;
-
-    /// @notice v2 logUp permutation k_i values (length = numRoutedWires).
-    ///         VK-bound: pinned to the specific Plonky2 circuit at deploy time.
-    ///         SECURITY: these determine id_col(b) = k_is[col] · subgroup[b],
-    ///         which the verifier checks against h̃(r) in the linear sumcheck.
-    uint256[] internal _mleKIs;
-
-    /// @notice v2 subgroup generator powers [g, g^2, g^4, ..., g^{2^(n-1)}].
-    ///         Length = mleVk.degreeBits. Together with `_mleKIs` they
-    ///         determine the identity-permutation MLE evaluation that closes
-    ///         the logUp h̃(r) binding gap (R2-#2).
-    uint256[] internal _mleSubgroupGenPowers;
-
-    // -----------------------------------------------------------------------
-    // Withdrawal payout VK (Phase 2) — a SECOND, independent MLE verification
-    // key for the on-chain native-ETH withdrawal proof. It verifies the wrapped
-    // `WithdrawalCircuit` proof, which is a DIFFERENT Plonky2 circuit than the
-    // validity proof, so it needs its own preprocessedRoot / gatesDigest / kIs /
-    // subgroupGenPowers / WhirParams. The MleVerifier CONTRACT is shared (one
-    // deploy) — only the VK parameters differ — keeping us under EIP-170.
-    //
-    // SECURITY: set EXACTLY ONCE by the deployer via `initializeWithdrawalVk`,
-    // after which it is immutable. `withdrawNative` reverts until it is set with
-    // `degreeBits > 0`, so there is no window in which the payout path runs with
-    // MLE verification disabled (unlike the validity path's degreeBits==0
-    // test-disable seam, which the money path deliberately does NOT inherit).
-    // -----------------------------------------------------------------------
-
-    /// @notice Deployer — the only address allowed to set the withdrawal VK (once).
+    /// @notice Deployment administrator for the remaining set-once operational dependencies.
     address public immutable deployer;
-
-    /// @notice Withdrawal-circuit MLE verification key. degreeBits == 0 ⇒ unset.
-    MleVk public withdrawalMleVk;
-
-    /// @notice True once `initializeWithdrawalVk` has run. Set-once latch.
-    bool public withdrawalVkInitialized;
-
-    SpongefishWhirVerify.WhirParams internal _whirParamsW;
-    bytes public whirProtocolIdW;
-    bytes public whirSplitSessionIdW;
-    uint256[] internal _mleKIsW;
-    uint256[] internal _mleSubgroupGenPowersW;
 
     /// @notice Spent withdrawal nullifiers (rollup-level, native payout path).
     /// SECURITY: each verified `Withdrawal.nullifier` (= Poseidon over the
@@ -712,11 +626,11 @@ contract IntmaxRollup {
     uint8 private constant MLE_STARVED = 3; // verification was gas-starved
     uint8 private constant MLE_PI_MISMATCH = 4; // fraud prover supplied the wrong PI preimage
 
-    /// @dev SECURITY (C-1/B-4): floor on `gasleft()` before entering MLE verification. The repo's
-    ///      own measurement of the real verifier on a real fixture is 11,019,291 gas
-    ///      (`MleE2E::test_mleVerify_gas`); this leaves headroom above it while staying well
-    ///      inside a 30M mainnet block. Below the floor the verdict is MLE_STARVED, never fraud.
-    uint256 private constant MIN_MLE_VERIFY_GAS = 12_000_000;
+    /// @dev SECURITY: the PoW-22 compact classifier must be remeasured below this conservative
+    ///      entry floor after every verifier/profile change. A caller below the floor is
+    ///      classified STARVED, never fraudulent. The parent full-transaction resource gate must
+    ///      be rerun whenever the circuit envelope or verifier bytecode changes.
+    uint256 private constant MIN_MLE_VERIFY_GAS = 25_000_000;
 
     uint256 private constant FINALIZE_DEADLINE_BLOCKS = 5 * 60 * 12;
     address public immutable fraudTreasury;
@@ -735,41 +649,31 @@ contract IntmaxRollup {
     // -----------------------------------------------------------------------
     constructor(
         address _fraudTreasury,
-        MleVk memory _mleVk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _whirProtocolId,
-        bytes memory _whirSplitSessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers,
-        MleVerifier _mleVerifier,
-        bytes32 _genesisStateRoot,
-        bool _allowMleDisabled
+        IPinnedMleVerifierV2 _validityMleVerifier,
+        IPinnedMleVerifierV2 _withdrawalMleVerifier,
+        bytes32 _genesisStateRoot
     ) {
-        // SECURITY: the zero-degree bypass never reaches MleVerifier.verify, so
-        // the verifier's own public-chain guard cannot protect this branch.
-        // Constrain the opt-in itself to the one local development chain.
-        if (_allowMleDisabled && block.chainid != 31337) {
-            revert MleProofEngineUnavailable(block.chainid);
+        address validityAdapter = address(_validityMleVerifier);
+        address withdrawalAdapter = address(_withdrawalMleVerifier);
+        if (validityAdapter == withdrawalAdapter) {
+            revert DuplicatePinnedMleVerifier();
         }
-        // SECURITY (A-2): reject a validity VK that disables MLE verification unless the deployer
-        // explicitly opts in (test-only). Symmetric with `initializeWithdrawalVk`'s guard.
-        if (!_allowMleDisabled && _mleVk.degreeBits == 0) revert ValidityVkDegreeBitsZero();
-        allowMleDisabled = _allowMleDisabled;
+        address validityCore = _requirePinnedVerifier(_validityMleVerifier);
+        address withdrawalCore = _requirePinnedVerifier(_withdrawalMleVerifier);
+        // A statement domain owns one adapter/core pair. Distinct adapter addresses are not
+        // sufficient: two adapters can otherwise report the same core, or one statement can use
+        // the other statement's adapter as its core. That defeats the deployment invariant the
+        // release manifests enforce and makes a poisoned/mis-ordered deployment look initialized.
+        // Same-pair adapter==core remains accepted for explicit test stubs; no identity may cross
+        // the validity/withdrawal boundary.
+        if (validityCore == withdrawalCore || validityCore == withdrawalAdapter || withdrawalCore == validityAdapter) {
+            revert DuplicatePinnedMleVerifier();
+        }
         fraudTreasury = _fraudTreasury;
         deployer = msg.sender;
-        mleVk = _mleVk;
-        // Deep-copy WhirParams to storage (scalar fields + dynamic arrays).
-        _copyWhirParams(_whirParams, whirParams_);
-        whirProtocolId = _whirProtocolId;
-        whirSplitSessionId = _whirSplitSessionId;
-        // v2 VK-bound permutation context (R2-#2 logUp soundness fix)
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _mleKIs.push(_kIs[i]);
-        }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _mleSubgroupGenPowers.push(_subgroupGenPowers[i]);
-        }
-        mleVerifier = _mleVerifier;
+        deploymentChainId = block.chainid;
+        validityMleVerifier = _validityMleVerifier;
+        withdrawalMleVerifier = _withdrawalMleVerifier;
         latestFinalizedStateRoot = _genesisStateRoot;
         // A non-zero genesis snapshot is already finalized by construction and must participate
         // in the same permanent membership relation as later finalized roots. Keep zero out of the
@@ -781,70 +685,38 @@ contract IntmaxRollup {
         _recordPendingChainsCheckpoint();
     }
 
-    /// @dev Deep-copy a WhirParams (scalar fields + dynamic arrays) from memory into a storage
-    ///      slot. Used by the constructor (validity VK) and `initializeWithdrawalVk` (withdrawal
-    ///      VK). The destination arrays are assumed empty (each VK slot is written exactly once).
-    function _copyWhirParams(SpongefishWhirVerify.WhirParams storage dst, SpongefishWhirVerify.WhirParams memory src)
-        private
-    {
-        dst.numVariables = src.numVariables;
-        dst.foldingFactor = src.foldingFactor;
-        dst.numVectors = src.numVectors;
-        dst.numCommitments = src.numCommitments;
-        dst.outDomainSamples = src.outDomainSamples;
-        dst.inDomainSamples = src.inDomainSamples;
-        dst.initialSumcheckRounds = src.initialSumcheckRounds;
-        dst.numRounds = src.numRounds;
-        dst.finalSumcheckRounds = src.finalSumcheckRounds;
-        dst.finalSize = src.finalSize;
-        dst.initialCodewordLength = src.initialCodewordLength;
-        dst.initialMerkleDepth = src.initialMerkleDepth;
-        dst.initialDomainGenerator = src.initialDomainGenerator;
-        dst.initialInterleavingDepth = src.initialInterleavingDepth;
-        dst.initialNumVariables = src.initialNumVariables;
-        dst.initialCosetSize = src.initialCosetSize;
-        dst.initialNumCosets = src.initialNumCosets;
-        for (uint256 i = 0; i < src.rounds.length; i++) {
-            dst.rounds.push(src.rounds[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint.length; i++) {
-            dst.evaluationPoint.push(src.evaluationPoint[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint2.length; i++) {
-            dst.evaluationPoint2.push(src.evaluationPoint2[i]);
-        }
-    }
+    function _requirePinnedVerifier(IPinnedMleVerifierV2 verifier) private view returns (address verifierCore) {
+        address verifierAddress = address(verifier);
+        if (verifierAddress.code.length == 0) revert InvalidPinnedMleVerifier(verifierAddress);
 
-    /// @notice Set the withdrawal-circuit MLE verification key. Deployer-only, set EXACTLY ONCE.
-    /// @dev SECURITY: the withdrawal VK governs which Plonky2 circuit `withdrawNative` accepts. It
-    ///      is fixed by the deployer immediately after deploy (same trust as the constructor's
-    ///      validity VK) and can never be changed (`withdrawalVkInitialized` latch). `degreeBits`
-    ///      must be > 0 — the payout path never runs with verification disabled. Splitting this out
-    ///      of the constructor avoids re-plumbing 9 existing deploy sites; the set-once + deployer
-    ///      guard make it behaviorally immutable, and `withdrawNative` reverts until it is set.
-    function initializeWithdrawalVk(
-        MleVk memory _vk,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory _protocolId,
-        bytes memory _sessionId,
-        uint256[] memory _kIs,
-        uint256[] memory _subgroupGenPowers
-    ) external {
-        _requireDeployer();
-        if (withdrawalVkInitialized) revert WithdrawalVkAlreadySet();
-        if (_vk.degreeBits == 0) revert WithdrawalVkDegreeBitsZero();
-        withdrawalVkInitialized = true;
-        withdrawalMleVk = _vk;
-        _copyWhirParams(_whirParamsW, whirParams_);
-        whirProtocolIdW = _protocolId;
-        whirSplitSessionIdW = _sessionId;
-        for (uint256 i = 0; i < _kIs.length; i++) {
-            _mleKIsW.push(_kIs[i]);
+        uint256 verifierChainId;
+        try verifier.allowedChainId() returns (uint256 chainId) {
+            verifierChainId = chainId;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierAddress);
         }
-        for (uint256 i = 0; i < _subgroupGenPowers.length; i++) {
-            _mleSubgroupGenPowersW.push(_subgroupGenPowers[i]);
+        if (verifierChainId != block.chainid) {
+            revert PinnedMleVerifierChainMismatch(verifierAddress, block.chainid, verifierChainId);
         }
-        emit WithdrawalVkInitialized(_vk.degreeBits, _vk.preprocessedRoot);
+        try verifier.core() returns (address coreAddress) {
+            verifierCore = coreAddress;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierAddress);
+        }
+        if (verifierCore.code.length == 0) revert InvalidPinnedMleVerifier(verifierAddress);
+
+        // Do not trust the adapter's reported chain on behalf of a different core. The concrete
+        // pinned-v2 adapter enforces equality itself, but the parent constructor accepts an ABI
+        // interface and must fail closed for substituted implementations too.
+        uint256 coreChainId;
+        try IPinnedMleVerifierV2(verifierCore).allowedChainId() returns (uint256 chainId) {
+            coreChainId = chainId;
+        } catch {
+            revert InvalidPinnedMleVerifier(verifierCore);
+        }
+        if (coreChainId != block.chainid) {
+            revert PinnedMleVerifierChainMismatch(verifierCore, block.chainid, coreChainId);
+        }
     }
 
     /// @notice Register a channel settlement manager that may authorize partial withdrawals.
@@ -884,8 +756,8 @@ contract IntmaxRollup {
     }
 
     /// @notice The pinned KZG blob-binding satellite used by `fraudProof` (EIP-170 relief: the
-    ///         large EIP-2537 verification bytecode lives in its own contract, mirroring the
-    ///         `MleVerifier` pattern). Deployer-only, set EXACTLY ONCE — behaviorally immutable.
+    ///         large EIP-2537 verification bytecode lives in its own contract). Deployer-only,
+    ///         set EXACTLY ONCE — behaviorally immutable.
     BlobKZGVerifierExt public kzgVerifier;
 
     /// @notice Pin the KZG blob-binding satellite. Deployer-only, set EXACTLY ONCE.
@@ -893,7 +765,7 @@ contract IntmaxRollup {
     ///      vacuously, which would turn the fraud path's KZG binding check into a no-op and allow
     ///      false fraud confirmations (rollback griefing). Until set, the KZG-binding branch of
     ///      `fraudProof` FAILS CLOSED (no fraud confirmation; the no-ZKP timeout-removal branch is
-    ///      unaffected) — same deploy-then-initialize trust as `initializeWithdrawalVk`.
+    ///      unaffected). This remaining satellite is pinned set-once after deployment.
     function setKzgVerifier(BlobKZGVerifierExt v) external {
         _requireDeployer();
         if (address(kzgVerifier) != address(0)) revert KzgVerifierAlreadySet();
@@ -1486,7 +1358,7 @@ contract IntmaxRollup {
         uint256 submissionId,
         bytes32 stateRoot,
         ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external nonReentrant returns (bool) {
         Submission storage sub = _submissions[submissionId];
         // SECURITY (M-8: `finalize` failed silently). Each rejecting exit below reports WHY through
@@ -1532,12 +1404,11 @@ contract IntmaxRollup {
             return _rejectFinalize(submissionId, ValidityPublicInputsMismatch.selector);
         }
 
-        // KZG work is journaled in a separate transaction so a two-blob opening (~22M gas) and
-        // real MLE verification (~11M gas) never need to fit in one Ethereum block.  Bind the
-        // typed proof to the exact raw bytes authenticated by `attestProofData`.
-        bytes memory canonicalProof = abi.encode(mleProof);
+        // KZG work is journaled in a separate transaction. The canonical compact byte stream is
+        // simultaneously the blob payload and the verifier input; no decode/re-encode bridge may
+        // create a second representation at this boundary.
         if (!kzgVerifier.isProofDataAttested(
-                submissionId, sub.commitment, keccak256(canonicalProof), canonicalProof.length
+                submissionId, sub.commitment, keccak256(compactProof), compactProof.length
             )) {
             return _rejectFinalize(submissionId, CommitmentMismatch.selector);
         }
@@ -1549,7 +1420,7 @@ contract IntmaxRollup {
         // fail-CLOSED-but-non-reverting (a rejected proof can never mark `sub.finalized`).
         bool valid;
         bytes4 reason;
-        try this.fullVerify(stateRoot, validityPIs, mleProof) returns (bool v) {
+        try this.fullVerify(stateRoot, validityPIs, compactProof) returns (bool v) {
             valid = v;
         } catch {
             assembly ("memory-safe") {
@@ -1599,9 +1470,9 @@ contract IntmaxRollup {
     ///
     ///   The fraud prover supplies the exact raw proof bytes that were committed,
     ///   plus the standard EIP-4844 sidecar evidence for that SimpleCoder blob stream.
-    ///   The pinned MLE satellite decodes those authenticated bytes and rejects
-    ///   malformed or non-canonical ABI encodings as proof-invalid.
-    ///   Fraud is confirmed when binding checks pass and the proof fails.
+    ///   The pinned adapter classifies those authenticated canonical compact bytes. Fraud is
+    ///   confirmed only for its proof-dependent INVALID verdict; wrong PI preimages, malformed
+    ///   envelopes, unavailable/configuration failures and gas starvation never convict.
     function fraudProof(
         uint256 submissionId,
         bytes32 stateRoot,
@@ -1747,7 +1618,7 @@ contract IntmaxRollup {
     ///
     /// @param ws               The withdrawal leaves, in chain order. Re-folded and bound to the proof.
     /// @param withdrawalProver The `withdrawal_prover` address committed in the proof's pis_hash.
-    /// @param mleProof         The wrapped WithdrawalCircuit MLE/WHIR proof.
+    /// @param compactProof     The canonical compact WithdrawalCircuit MLE/WHIR proof bytes.
     ///
     /// SECURITY:
     ///   • MLE/WHIR verify the wrapped WithdrawalCircuit proof under the withdrawal VK (real, not a stub).
@@ -1759,11 +1630,11 @@ contract IntmaxRollup {
     ///     GLOBAL solvency ceiling: Σ payouts ≤ Σ real ETH escrowed; underflow reverts the whole
     ///     call → cross-channel theft impossible) + pull-payment credit. v1 pays ETH token only.
     ///   • No external call here (pull-payment via `withdraw(amount)`); `nonReentrant` is belt-and-braces.
-    function withdrawNative(Withdrawal[] calldata ws, address withdrawalProver, MleVerifier.MleProof calldata mleProof)
+    function withdrawNative(Withdrawal[] calldata ws, address withdrawalProver, bytes calldata compactProof)
         external
         nonReentrant
     {
-        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
+        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, compactProof);
 
         // 4. Pay out each leaf (CEI: all checks/effects precede any value movement; pull-payment).
         for (uint256 i = 0; i < ws.length; i++) {
@@ -1797,11 +1668,11 @@ contract IntmaxRollup {
     ///   • Pull-payment (CEI): credits `pendingTokenWithdrawals[t][recipient]`; NO token code runs
     ///     inside this loop. Recipients pull via `withdrawToken`, where `nonReentrant` guards the
     ///     single external token call.
-    function withdrawERC20(Withdrawal[] calldata ws, address withdrawalProver, MleVerifier.MleProof calldata mleProof)
+    function withdrawERC20(Withdrawal[] calldata ws, address withdrawalProver, bytes calldata compactProof)
         external
         nonReentrant
     {
-        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, mleProof);
+        uint64 wdBlockNumber = _verifyWithdrawalSet(ws, withdrawalProver, compactProof);
 
         for (uint256 i = 0; i < ws.length; i++) {
             Withdrawal calldata w = ws[i];
@@ -1892,23 +1763,29 @@ contract IntmaxRollup {
     ///      chain re-fold binding `ws` to the proof's pis_hash. Returns the proof's block number.
     ///      SECURITY: identical checks for both asset paths — factoring shares (never weakens)
     ///      the audited `withdrawNative` pipeline.
-    function _verifyWithdrawalSet(
-        Withdrawal[] calldata ws,
-        address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
-    ) internal view returns (uint64 wdBlockNumber) {
-        if (!withdrawalVkInitialized) revert WithdrawalVkNotSet();
+    function _verifyWithdrawalSet(Withdrawal[] calldata ws, address withdrawalProver, bytes calldata compactProof)
+        internal
+        view
+        returns (uint64 wdBlockNumber)
+    {
         if (ws.length == 0) revert WithdrawalEmptySet();
 
-        // 1. Verify the wrapped WithdrawalCircuit proof (real MLE/WHIR under the withdrawal VK).
-        if (!_verifyMleWithdrawal(mleProof)) revert WithdrawalProofInvalid();
+        // 1. Verify the exact compact bytes under the constructor-pinned withdrawal circuit and
+        //    only then consume the public inputs returned from that same decoded proof.
+        uint256[] memory pi;
+        try withdrawalMleVerifier.verifyCompactPublicInputs(compactProof) returns (
+            uint256[] memory authenticatedPublicInputs
+        ) {
+            pi = authenticatedPublicInputs;
+        } catch {
+            revert WithdrawalProofInvalid();
+        }
 
         // 2. The wrapped WithdrawalCircuit registers 17 PI limbs:
         //      [ pis_hash(8) || ext_commitment(8) || block_number(1) ]  (withdrawal_circuit.rs:206-208)
         //    NOTE: `block_number` is a u63 that fits in ONE Goldilocks field element, so its
         //    REGISTERED form is a single limb (`BlockNumberTarget::to_vec()`), even though the
         //    pis_hash keccak PREIMAGE splits it into 2 big-endian u32 words (`to_u32_vec`).
-        uint256[] memory pi = mleProof.publicInputs;
         if (pi.length != 17) revert WithdrawalPublicInputsMismatch();
 
         // 2a. ext_commitment PI must be a state root this rollup has finalized (anchors the
@@ -1986,7 +1863,7 @@ contract IntmaxRollup {
 
     /// @dev Reconstruct a bytes32 from 8 big-endian u32 limbs starting at `off` (Bytes32::to_u32_vec
     ///      order: limb[0] = most-significant 4 bytes). Limbs are masked to u32; after a successful
-    ///      `_verifyMleWithdrawal` the proof's publicInputs ARE the circuit's registered u32 PI wires.
+    ///      the adapter-returned public inputs ARE the circuit's authenticated u32 PI wires.
     function _limbsToBytes32(uint256[] memory limbs, uint256 off) private pure returns (bytes32) {
         uint256 v = 0;
         for (uint256 i = 0; i < 8; i++) {
@@ -2006,39 +1883,21 @@ contract IntmaxRollup {
         return true;
     }
 
-    /// @dev Verify the wrapped WithdrawalCircuit proof under the withdrawal VK.
-    ///      SECURITY: NO `degreeBits == 0` disable seam — `withdrawNative` already requires
-    ///      `withdrawalVkInitialized`, and `initializeWithdrawalVk` enforces `degreeBits > 0`, so the
-    ///      payout path ALWAYS runs real MLE/WHIR verification (unlike the validity test-disable path).
-    ///      SECURITY (B-4): this try/catch stays FAIL-CLOSED and must NOT be given `_mleVerdict`'s
-    ///      tri-state treatment. Here a caught revert blocks a PAYOUT, which is the safe direction;
-    ///      in `_verifyFraud` the same shape used to CONFIRM FRAUD, which is why only that call
-    ///      site had to change. Same reasoning for `finalize`'s `fullVerify` try/catch.
-    function _verifyMleWithdrawal(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        try this._verifyMleWithVk(mleProof, true) returns (bool v) {
-            return v;
-        } catch {
-            return false;
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Internal — Full verification pipeline
     // -----------------------------------------------------------------------
 
-    /// @dev Full verification pipeline for finalize() — all checks must pass.
-    ///      No KZG/blob binding: validity proofs are verified directly from calldata.
-    ///      KZG binding is only needed for fraud proofs (proving committed blob is invalid).
+    /// @dev Full verification pipeline for finalize() — all checks must pass. `finalize` performs
+    ///      the exact compact-byte KZG-attestation lookup before entering this helper.
     /// @dev External entry point so _fullVerify runs in a fresh EVM call context.
     ///      This avoids via_ir + optimizer code generation issues with large memory structs.
     /// @return Always `true` — every failure REVERTS with a cause-specific error (M-8). Callers that
-    ///         need a boolean should try/catch, as `finalize` does; the `bool` return is kept so the
-    ///         external ABI shape is unchanged for anything already calling this off-chain.
-    function fullVerify(
-        bytes32 stateRoot,
-        ValidityPublicInputs calldata validityPIs,
-        MleVerifier.MleProof calldata mleProof
-    ) external view returns (bool) {
+    ///         need a boolean should try/catch, as `finalize` does.
+    function fullVerify(bytes32 stateRoot, ValidityPublicInputs calldata validityPIs, bytes calldata compactProof)
+        external
+        view
+        returns (bool)
+    {
         // 1. PI binding to on-chain state
         // SECURITY (defense-in-depth for INV-A / reclaimStake): finalization must only ADVANCE the
         // finalized height. The initialExtCommitment check below already forces forward chaining, but
@@ -2046,14 +1905,9 @@ contract IntmaxRollup {
         // `finalBlockNumber >= initialBlockNumber` — and `latestFinalizedBlockNumber` is the height
         // `reclaimStake` compares against, so a backward move must never be accepted.
         //
-        // SECURITY (M-8: indistinguishable silent exits). All seven checks in this function used to
-        // `return false`, so `finalize` could not tell a height regression from a broken proof and
-        // reported every one of them as a bare `false`. Each now reverts with its own error. This is
-        // a pure REFINEMENT of the existing fail-closed behaviour: the conditions are byte-identical,
-        // only the exit changed, and a revert is at least as closed as `return false` — `finalize`
-        // catches it and still returns false, so no proof that was previously rejected is now
-        // accepted. `_verifyMle` and `_verifyMleWithdrawal` are UNTOUCHED, so the fraud path
-        // (`_verifyFraud`, which does not call `fullVerify` at all) is unaffected by this change.
+        // SECURITY (M-8): each application-state mismatch reverts with its own error. `finalize`
+        // catches it and remains fail-closed/non-reverting; `_verifyFraud` uses its separate
+        // non-convicting classifier path and never calls this helper.
         if (validityPIs.finalBlockNumber < latestFinalizedBlockNumber) revert FinalizedHeightRegression();
         if (validityPIs.initialExtCommitment != latestFinalizedStateRoot) revert InitialStateMismatch();
         if (validityPIs.initialBlockChain != blockHashChainAt[validityPIs.initialBlockNumber]) {
@@ -2064,19 +1918,21 @@ contract IntmaxRollup {
         }
         if (validityPIs.finalExtCommitment != stateRoot) revert FinalExtCommitmentMismatch();
 
-        // 2. piHash binding (SECURITY, replaces the removed Groth16 PI binding): the MLE proof's
-        //    own public inputs must encode keccak256(ValidityPublicInputs) as 8 big-endian u32
-        //    limbs. Without this, removing Groth16 would leave validityPIs UNBOUND to the verified
-        //    proof — an attacker could finalize arbitrary validityPIs (and thus an arbitrary state
-        //    root) against any valid MLE proof. `mleProof.publicInputs` is the wrapped Plonky2
-        //    validity circuit's public inputs (= keccak256(ValidityPublicInputs)), absorbed into
-        //    the WHIR Fiat-Shamir transcript inside `_verifyMle`, so binding them here ties the
-        //    claimed validityPIs to the proof that step 3 verifies.
-        bytes32 piHash = _computeValidityPIHash(validityPIs);
-        if (!_mlePublicInputsMatch(mleProof.publicInputs, piHash)) revert ValidityPublicInputsMismatch();
+        // 2. Verify the canonical compact proof and retrieve public inputs only after the pinned
+        //    v2 core accepts that exact byte stream. There is no separately decoded proof object
+        //    and therefore no representation that can diverge from proof DA.
+        uint256[] memory publicInputs;
+        try validityMleVerifier.verifyCompactPublicInputs(compactProof) returns (
+            uint256[] memory authenticatedPublicInputs
+        ) {
+            publicInputs = authenticatedPublicInputs;
+        } catch {
+            revert MleVerificationFailed();
+        }
 
-        // 3. MLE proof verification
-        if (!_verifyMle(mleProof)) revert MleVerificationFailed();
+        // 3. Bind those authenticated public inputs to the caller's explicit VPI preimage.
+        bytes32 piHash = _computeValidityPIHash(validityPIs);
+        if (!_mlePublicInputsMatch(publicInputs, piHash)) revert ValidityPublicInputsMismatch();
 
         return true;
     }
@@ -2086,7 +1942,7 @@ contract IntmaxRollup {
     ///   Pre-conditions (must pass — proves fraud prover supplied the real blob data):
     ///     1. Canonical proof bytes + standard blob KZG evidence open the submission commitment
     ///     2. PI binding to on-chain state
-    ///     3. PI preimage binding: mleProof.publicInputs encode keccak256(ValidityPublicInputs)
+    ///     3. PI preimage binding: authenticated public inputs encode keccak256(ValidityPublicInputs)
     ///
     ///   Fraud confirmed if:
     ///     MLE/WHIR verification of the committed proof fails
@@ -2128,8 +1984,8 @@ contract IntmaxRollup {
         //    the chain back, once per posting round.
         //
         //    As a PRECONDITION it is exactly the right check: precondition 1 pins `proofBytes` to
-        //    the submitted blobs.  The pinned satellite decodes those exact bytes, checks their
-        //    canonical ABI representation, and compares the decoded public inputs to `piHash`.
+        //    the submitted blobs. The pinned adapter decodes that canonical compact stream and
+        //    compares its authenticated public inputs to `piHash` during classification.
         //    A mismatch proves only that the fraud prover supplied the wrong preimage — never that
         //    the submission is fraudulent.
         bytes32 piHash = _computeValidityPIHash(validityPIs);
@@ -2162,116 +2018,21 @@ contract IntmaxRollup {
         return verdict == MLE_INVALID;
     }
 
-    /// @dev Classify the exact raw bytes authenticated by `_verifyFraud` using the pinned MLE
-    /// satellite.  The satellite owns ABI decoding/canonicalization so malformed encodings can be
-    /// convicted without ever entering this contract's typed ABI decoder.  Both layers use an
-    /// explicit budget and retained-gas threshold: OOG/decoder starvation can never masquerade as
-    /// the satellite's INVALID verdict, while unknown return values/selectors remain unevaluable.
+    /// @dev Classify the exact compact bytes authenticated by `_verifyFraud`. Both layers retain
+    /// gas so decoder/core starvation cannot masquerade as INVALID; unknown returns remain
+    /// unevaluable and only the adapter's exact proof-dependent INVALID code can convict.
     function _encodedMleVerdict(bytes calldata proofBytes, bytes32 piHash) private view returns (uint8) {
         if (gasleft() < MIN_MLE_VERIFY_GAS) return MLE_STARVED;
 
         uint256 reserve = gasleft() / 64;
         uint256 budget = gasleft() - reserve;
-        try mleVerifier.fraudVerdictEncoded{gas: budget}(
-            proofBytes, piHash, this._verifyMleWithVk.selector, _mleBypassEnabled()
-        ) returns (
-            uint8 verdict
-        ) {
+        try validityMleVerifier.fraudVerdictCompact{gas: budget}(proofBytes, piHash) returns (uint8 verdict) {
             // `_verifyFraud` treats every value above VALID (except the explicit PI-mismatch and
             // starvation codes) as unevaluable, so unknown future values are already fail-safe.
             return verdict;
         } catch {
             if (gasleft() < reserve + budget / 8) return MLE_STARVED;
             return MLE_UNEVALUABLE;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal — MLE verification helpers
-    // -----------------------------------------------------------------------
-
-    /// @dev Verify MLE proof using the MleVerifier library.
-    ///      SECURITY (A-2): the degreeBits==0 bypass is honored ONLY when `allowMleDisabled` is
-    ///      true on chain id 31337. Both construction and runtime are checked because state/code can
-    ///      be migrated to a different chain without running this contract's initcode. In production
-    ///      `allowMleDisabled` is false and the constructor already rejects a zero validity VK, so
-    ///      every finalize runs real MLE/WHIR verification.
-    function _verifyMle(MleVerifier.MleProof calldata mleProof) internal view returns (bool) {
-        if (_mleBypassEnabled()) return true;
-        try this._verifyMleWithVk(mleProof, false) returns (bool v) {
-            return v;
-        } catch {
-            // Finalization/standalone verification is fail-closed: unlike fraud, no caught
-            // failure can slash or roll back state, so it does not need a tri-state classifier.
-            return false;
-        }
-    }
-
-    function _mleBypassEnabled() private view returns (bool) {
-        return allowMleDisabled && mleVk.degreeBits == 0 && block.chainid == ROLLUP_LOCAL_DEVNET_CHAIN_ID;
-    }
-
-    /// @dev External helper so `_verifyMle`/`_verifyMleWithdrawal` can try/catch on MLE verification.
-    ///      `isWithdrawal` selects which VK storage to use: the validity VK (`mleVk`/`_whirParams`/…)
-    ///      or the withdrawal VK (`withdrawalMleVk`/`_whirParamsW`/…). Shared to stay under EIP-170.
-    ///      v2: the WHIR ext3 evaluations are embedded inside `mleProof` itself (Issues #3 + #7), so
-    ///      an attacker cannot mix-and-match them.
-    function _verifyMleWithVk(MleVerifier.MleProof calldata mleProof, bool isWithdrawal) external view returns (bool) {
-        MleVk storage vk = isWithdrawal ? withdrawalMleVk : mleVk;
-        SpongefishWhirVerify.WhirParams memory whirParams =
-            _loadWhirParamsFrom(isWithdrawal ? _whirParamsW : _whirParams);
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: vk.degreeBits,
-            preprocessedCommitmentRoot: vk.preprocessedRoot,
-            numConstants: vk.numConstants,
-            numRoutedWires: vk.numRoutedWires,
-            protocolId: isWithdrawal ? whirProtocolIdW : whirProtocolId,
-            sessionId: isWithdrawal ? whirSplitSessionIdW : whirSplitSessionId,
-            kIs: isWithdrawal ? _mleKIsW : _mleKIs,
-            subgroupGenPowers: isWithdrawal ? _mleSubgroupGenPowersW : _mleSubgroupGenPowers
-        });
-        return mleVerifier.verify(mleProof, vp, whirParams, vk.gatesDigest);
-    }
-
-    /// @dev Load a WhirParams from the given storage slot into memory. Shared by the validity
-    ///      (`_whirParams`) and withdrawal (`_whirParamsW`) verification paths to avoid duplicating
-    ///      this (bytecode-heavy) field-by-field copy twice (EIP-170 budget).
-    function _loadWhirParamsFrom(SpongefishWhirVerify.WhirParams storage s)
-        private
-        view
-        returns (SpongefishWhirVerify.WhirParams memory p)
-    {
-        p.numVariables = s.numVariables;
-        p.foldingFactor = s.foldingFactor;
-        p.numVectors = s.numVectors;
-        p.numCommitments = s.numCommitments;
-        p.outDomainSamples = s.outDomainSamples;
-        p.inDomainSamples = s.inDomainSamples;
-        p.initialSumcheckRounds = s.initialSumcheckRounds;
-        p.numRounds = s.numRounds;
-        p.finalSumcheckRounds = s.finalSumcheckRounds;
-        p.finalSize = s.finalSize;
-        p.initialCodewordLength = s.initialCodewordLength;
-        p.initialMerkleDepth = s.initialMerkleDepth;
-        p.initialDomainGenerator = s.initialDomainGenerator;
-        p.initialInterleavingDepth = s.initialInterleavingDepth;
-        p.initialNumVariables = s.initialNumVariables;
-        p.initialCosetSize = s.initialCosetSize;
-        p.initialNumCosets = s.initialNumCosets;
-        uint256 rLen = s.rounds.length;
-        p.rounds = new SpongefishWhirVerify.RoundParams[](rLen);
-        for (uint256 i = 0; i < rLen; i++) {
-            p.rounds[i] = s.rounds[i];
-        }
-        uint256 epLen = s.evaluationPoint.length;
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](epLen);
-        for (uint256 i = 0; i < epLen; i++) {
-            p.evaluationPoint[i] = s.evaluationPoint[i];
-        }
-        uint256 ep2Len = s.evaluationPoint2.length;
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](ep2Len);
-        for (uint256 i = 0; i < ep2Len; i++) {
-            p.evaluationPoint2[i] = s.evaluationPoint2[i];
         }
     }
 
@@ -2410,8 +2171,8 @@ contract IntmaxRollup {
     /// The Plonky2 validity circuit registers keccak256(ValidityPublicInputs) as its public
     /// inputs by calling Bytes32::to_u32_vec() — 8 u32 values in big-endian byte order. The
     /// WrapperCircuit re-registers exactly those 8 limbs as its own public inputs, which become
-    /// `MleProof.publicInputs` and are absorbed into the WHIR Fiat-Shamir transcript inside
-    /// `verify()`. So `publicInputs` must have exactly 8 elements, each equal to the corresponding
+    /// the adapter's returned public inputs after being absorbed into the WHIR Fiat-Shamir
+    /// transcript. So `publicInputs` must have exactly 8 elements, each equal to the corresponding
     /// u32 limb of keccak256(ValidityPublicInputs). This ties the verified proof to the claimed
     /// validityPIs (and therefore to the accepted state root) with no separately-trusted argument.
     function _mlePublicInputsMatch(uint256[] memory publicInputs, bytes32 piHash) internal pure returns (bool) {

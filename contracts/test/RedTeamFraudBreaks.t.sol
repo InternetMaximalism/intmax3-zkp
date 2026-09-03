@@ -5,35 +5,50 @@ import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {KZGProof, TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {InvalidMleProof} from "@mle/MleProofErrors.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
+
+abstract contract RedTeamPinnedVerifierV2Stub is IPinnedMleVerifierV2 {
+    uint256 public constant override allowedChainId = 31337;
+
+    function core() external view override returns (address) {
+        return address(this);
+    }
+
+    function verifyCompactPublicInputs(bytes calldata compactProof)
+        external
+        view
+        virtual
+        override
+        returns (uint256[] memory)
+    {
+        return abi.decode(compactProof, (uint256[]));
+    }
+}
 
 /// @dev A stand-in for `MleVerifier` with the IDENTICAL external signature. It ACCEPTS every
 ///      proof (returns true) but consumes a fixed, large amount of gas first — exactly the shape
 ///      of the real verifier, which was measured at 11,019,291 gas for the repo's own real
 ///      fixture (`MleE2E::test_mleVerify_gas`). The burn is scaled down here only so the test
 ///      runs fast; the attack does not depend on the amount.
-contract GasHungryMleVerifier {
+contract GasHungryMleVerifier is RedTeamPinnedVerifierV2Stub {
     uint256 public immutable rounds;
 
     constructor(uint256 rounds_) {
         rounds = rounds_;
     }
 
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external view returns (bool) {
+    function verifyCompactPublicInputs(bytes calldata compactProof)
+        external
+        view
+        override
+        returns (uint256[] memory)
+    {
         _burn();
-        return true;
+        return abi.decode(compactProof, (uint256[]));
     }
 
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external view returns (uint8) {
+    function fraudVerdictCompact(bytes calldata, bytes32) external view override returns (uint8) {
         _burn();
         return 1;
     }
@@ -53,33 +68,15 @@ contract GasHungryMleVerifier {
 ///      the deployed evaluator cannot handle
 ///      (`Plonky2GateEvaluator.sol:235  revert("unsupported gate with non-zero filter")`).
 ///      The proof itself is perfectly honest; the deployed evaluator simply cannot evaluate it.
-contract UnsupportedGateMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert("unsupported gate with non-zero filter");
-    }
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+contract UnsupportedGateMleVerifier is RedTeamPinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         revert("unsupported gate with non-zero filter");
     }
 }
 
 /// @dev A stand-in that emits the production verifier's proof-dependent negative verdict.
-contract RejectingMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert InvalidMleProof();
-    }
-
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+contract RejectingMleVerifier is RedTeamPinnedVerifierV2Stub {
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         return 0;
     }
 }
@@ -110,7 +107,7 @@ contract RedTeamFraudBreaksTest is Test {
 
     /// `IntmaxRollup.MIN_MLE_VERIFY_GAS`, mirrored (it is `private constant` there). R3-4: the RT-1
     /// sweep must be able to say which side of this floor each iteration is on.
-    uint256 internal constant MIN_MLE_VERIFY_GAS_MIRROR = 12_000_000;
+    uint256 internal constant MIN_MLE_VERIFY_GAS_MIRROR = 25_000_000;
 
     // =======================================================================
     // FINDING RT-1 (C-1 NOT CLOSED) — gas starvation turns `!_verifyMle` into
@@ -138,7 +135,7 @@ contract RedTeamFraudBreaksTest is Test {
     ///  TEST-INTEGRITY FIX (R3-4, round 3). As originally written the sweep ran
     ///  `[honestCost/4, honestCost + 4*step]` with `step = honestCost/200 + 1`, i.e. a band capped
     ///  at ~1.02 * honestCost. With this harness's scaled-down verifier `honestCost` is ~4.89M, so
-    ///  EVERY iteration was below `MIN_MLE_VERIFY_GAS` (12,000,000) and was refused by the FLOOR
+    ///  EVERY iteration was below `MIN_MLE_VERIFY_GAS` (now 25,000,000) and was refused by the FLOOR
     ///  before the try/catch was ever entered. "No gas limit may convict the honest submission" was
     ///  therefore proven only for limits under the floor, and the 63/64 branch this test's own
     ///  doc-comment names was never executed — the same "assertion reads stronger than what it
@@ -189,7 +186,11 @@ contract RedTeamFraudBreaksTest is Test {
         // Band B — R3-4: ABOVE the floor, where the call actually enters the try/catch and the
         // OOG-classification branch is exercised. The band starts just over MIN_MLE_VERIFY_GAS and
         // runs past the point where the whole verification comfortably fits.
-        for (uint256 g = MIN_MLE_VERIFY_GAS_MIRROR + 1; g <= 24_000_000; g += 500_000) {
+        for (
+            uint256 g = MIN_MLE_VERIFY_GAS_MIRROR + 500_000;
+            g <= MIN_MLE_VERIFY_GAS_MIRROR + 6_000_000;
+            g += 500_000
+        ) {
             vm.prank(attacker);
             (bool ok, bytes memory ret) = address(r).call{gas: g}(payload);
             aboveFloor += 1;
@@ -265,8 +266,10 @@ contract RedTeamFraudBreaksTest is Test {
 
         // A rollup whose genesis root is R (i.e. the state has not moved).
         IntmaxRollup r = new IntmaxRollup(
-            fraudTreasury, _emptyMleVk(), _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(block.chainid), R, true
+            fraudTreasury,
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            R
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -295,7 +298,7 @@ contract RedTeamFraudBreaksTest is Test {
             finalExtCommitment: R,
             prover: address(0xBEEF)
         });
-        MleVerifier.MleProof memory proofA = _mleProofWithPI(_computePIHash(pisA));
+        bytes memory proofA = _mleProofWithPI(_computePIHash(pisA));
 
         // Round B (submission 1): a DIFFERENT batch of blocks, but the declared root is the same R.
         // Nothing in `_submit` constrains the declared root, and on an idle chain this is also
@@ -351,8 +354,10 @@ contract RedTeamFraudBreaksTest is Test {
         bytes32 R1 = keccak256("honest_next_root");
 
         IntmaxRollup r = new IntmaxRollup(
-            fraudTreasury, _emptyMleVk(), _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), new MleVerifier(block.chainid), R0, true
+            fraudTreasury,
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            R0
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -378,7 +383,7 @@ contract RedTeamFraudBreaksTest is Test {
             finalExtCommitment: R1,
             prover: address(0xBEEF)
         });
-        MleVerifier.MleProof memory proofA = _mleProofWithPI(_computePIHash(pisA));
+        bytes memory proofA = _mleProofWithPI(_computePIHash(pisA));
 
         // Rogue round (submission 1): arbitrary blocks, but it DECLARES the honest root R1.
         uint32[] memory ids2 = new uint32[](1);
@@ -504,16 +509,13 @@ contract RedTeamFraudBreaksTest is Test {
     // =======================================================================
 
     function test_RT6_productionKzgConfigNowAdmitsFraudProofs() public {
-        IntmaxRollup.MleVk memory vk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0),
-            numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
         // B-4: fraud is confirmed only by the dedicated proof-rejection selector. Unknown reverts
         // are "could not evaluate", so this batch is modelled by the authenticated selector.
         IntmaxRollup r = new IntmaxRollup(
-            fraudTreasury, vk, _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(),
-            MleVerifier(address(new RejectingMleVerifier())), bytes32(0), false
+            fraudTreasury,
+            new RejectingMleVerifier(),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         // This regression isolates the MLE verdict; ProofDaRollup exercises the production DA
         // satellite with the same pre-timeout conviction route.
@@ -531,8 +533,8 @@ contract RedTeamFraudBreaksTest is Test {
             finalExtCommitment: stateRoot,
             prover: address(0xBEEF)
         });
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = mleProof;
 
         bytes32[] memory hs = new bytes32[](1);
         hs[0] = keccak256("rt6_blob");
@@ -566,14 +568,11 @@ contract RedTeamFraudBreaksTest is Test {
         internal
         returns (IntmaxRollup r, bytes memory payload)
     {
-        IntmaxRollup.MleVk memory vk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0),
-            numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
-        // allowMleDisabled = false: a PRODUCTION-shaped deployment. MLE verification is ON.
         r = new IntmaxRollup(
-            fraudTreasury, vk, _emptyWhirParams(), "", "",
-            _emptyMleArrays(), _emptyMleArrays(), MleVerifier(verifierAddr), bytes32(0), false
+            fraudTreasury,
+            IPinnedMleVerifierV2(verifierAddr),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(submitter, true);
@@ -599,8 +598,8 @@ contract RedTeamFraudBreaksTest is Test {
         IntmaxRollup.SubBlock[] memory batch = _batch(1, ids, 100, bytes32(uint256(0xabc)));
         pis.finalBlockChain = _predictChain(r, batch);
 
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(pis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(pis));
+        bytes memory proofBytes = mleProof;
 
         (KZGProof memory kzg, bytes32 blobHash) = _computeKZGProof(proofBytes);
         bytes32[] memory hs = new bytes32[](1);
@@ -744,37 +743,8 @@ contract RedTeamFraudBreaksTest is Test {
         }
     }
 
-    function _mleProofWithPI(bytes32 piHash) internal pure returns (MleVerifier.MleProof memory p) {
-        p = _defaultMleProof();
-        p.publicInputs = _piLimbs(piHash);
-    }
-
-    function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.publicInputs = new uint256[](0);
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
-    }
-
-    function _emptyMleVk() internal pure returns (IntmaxRollup.MleVk memory vk) {}
-
-    function _emptyWhirParams() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
-        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-    }
-
-    function _emptyMleArrays() internal pure returns (uint256[] memory) {
-        return new uint256[](0);
+    function _mleProofWithPI(bytes32 piHash) internal pure returns (bytes memory) {
+        return abi.encode(_piLimbs(piHash));
     }
 
     function _batch(uint32 aggId, uint32[] memory ids, uint64 ts, bytes32 txRoot)

@@ -913,7 +913,7 @@ function normalizeBrowserClaimContext(value, expectedChannel) {
       || !isPlainObject(value.durable)) throw new Error('malformed browser claim context');
   const authority = value.authority;
   const finalized = value.finalized;
-  for (const field of ['manager', 'rollup', 'verifier']) {
+  for (const field of ['manager', 'rollup', 'verifier', 'closeFundingMaterializer']) {
     if (!HEX20_RE.test(String(authority[field])) || String(authority[field]).toLowerCase() === ZERO_ADDRESS_20) {
       throw new Error('malformed browser claim ' + field);
     }
@@ -949,13 +949,243 @@ function claimCalldataWord(data, index) {
   return word.toLowerCase();
 }
 
-const SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR = '0x70f89118';
-const SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR = '0x6d3e503a';
+const SUBMIT_WITHDRAWAL_CLAIM_SELECTOR = '0x0b0f2d14';
+const MLE_FIXTURE_SCHEMA_V2 = 'plonky2-mle-v3-solidity';
+const MLE_PROOF_LAYOUT_HASH_V2 = '0x16225f001cde3a7df14ac924f2792ff5eba9b9827796b26e1cc46d5081d5cee3';
+const MLE_PROOF_ABI_SIGNATURE_V2 = '(uint256,uint256,uint256[],uint256[],bytes32,bytes32,bytes32,bytes,bytes,(((uint64,uint64,uint64)[])[]),(uint64,uint64,uint64)[],(uint64,uint64,uint64)[],(uint64,uint64,uint64)[],(((uint64,uint64,uint64)[])[]),(uint64,uint64,uint64)[],(uint64,uint64,uint64)[])';
+const MAX_COMPACT_PROOF_BYTES_V2 = 253921;
+const GOLDILOCKS_MODULUS_V2 = 0xffffffff00000001n;
+const MAX_WHIR_NARG_BYTES_V2 = 2032;
+const MAX_WHIR_HINT_BYTES_V2 = 180408;
 
-function validateBrowserSubmitCalldata(data, claim, expectedSelector) {
-  const raw = String(data || '').toLowerCase();
-  if (!/^0x[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0
-      || ![SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR, SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR].includes(expectedSelector)
+function requireExactBrowserKeys(value, expected, label) {
+  if (!isPlainObject(value)) throw new Error(label + ' must be an object');
+  const actual = Object.keys(value).sort();
+  const wanted = expected.slice().sort();
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+    throw new Error(label + ' keys do not match the canonical MLE/WHIR v2 schema');
+  }
+}
+
+function browserFixtureInteger(value, label, max) {
+  if (!Number.isSafeInteger(value) || value < 0 || (max !== undefined && value > max)) {
+    throw new Error(label + ' must be a canonical JSON unsigned integer');
+  }
+  return value;
+}
+
+function browserU32Le(value, label) {
+  const number = browserFixtureInteger(value, label, 0xffffffff);
+  return [0, 8, 16, 24].map((shift) => ((number >>> shift) & 0xff)
+    .toString(16).padStart(2, '0')).join('');
+}
+
+function browserU64Le(value, label) {
+  let number;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) number = BigInt(value);
+  else if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) number = BigInt(value);
+  else throw new Error(label + ' must be a canonical unsigned integer');
+  if (number > 0xffffffffffffffffn) throw new Error(label + ' exceeds uint64');
+  let encoded = '';
+  for (let i = 0n; i < 8n; i++) encoded += ((number >> (8n * i)) & 0xffn).toString(16).padStart(2, '0');
+  return encoded;
+}
+
+function browserFieldLe(value, label) {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{16}$/.test(value)
+      || BigInt(value) >= GOLDILOCKS_MODULUS_V2) {
+    throw new Error(label + ' must be a canonical Goldilocks limb');
+  }
+  return value.slice(2).match(/../g).reverse().join('');
+}
+
+function browserRootBytes(value, label) {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/.test(value)) {
+    throw new Error(label + ' must be canonical 32-byte hex');
+  }
+  return value.slice(2);
+}
+
+function browserBlobBytes(value, label, maxBytes) {
+  if (typeof value !== 'string' || !/^0x(?:[0-9a-f]{2})*$/.test(value)) {
+    throw new Error(label + ' must be canonical lowercase byte hex');
+  }
+  const length = (value.length - 2) / 2;
+  if (length > maxBytes) throw new Error(label + ' exceeds its v2 resource cap');
+  return browserU32Le(length, label + '.length') + value.slice(2);
+}
+
+function browserExt3Bytes(value, label) {
+  requireExactBrowserKeys(value, ['c0', 'c1', 'c2'], label);
+  return browserFieldLe(value.c0, label + '.c0')
+    + browserFieldLe(value.c1, label + '.c1')
+    + browserFieldLe(value.c2, label + '.c2');
+}
+
+function browserExt3ArrayBytes(value, expectedLength, label) {
+  if (!Array.isArray(value) || value.length !== expectedLength) {
+    throw new Error(label + ' has the wrong canonical v2 length');
+  }
+  return value.map((entry, index) => browserExt3Bytes(entry, label + '[' + index + ']')).join('');
+}
+
+function browserSumcheckBytes(value, rounds, degree, label) {
+  requireExactBrowserKeys(value, ['rounds'], label);
+  if (!Array.isArray(value.rounds) || value.rounds.length !== rounds) {
+    throw new Error(label + '.rounds has the wrong canonical v2 length');
+  }
+  return value.rounds.map((round, index) => {
+    const roundLabel = label + '.rounds[' + index + ']';
+    requireExactBrowserKeys(round, ['nonConstant'], roundLabel);
+    return browserExt3ArrayBytes(round.nonConstant, degree, roundLabel + '.nonConstant');
+  }).join('');
+}
+
+function browserCompactShape(value) {
+  requireExactBrowserKeys(value, [
+    'degreeBits', 'constituentWidth', 'circuitDigestLen', 'publicInputsLen',
+    'numConstants', 'numRoutedWires', 'numWires', 'gateRoundDegree',
+    'maxWhirNargBytes', 'maxWhirHintBytes', 'maxEncodedBytes',
+  ], 'wallet WASM compact shape');
+  const shape = {
+    degreeBits: browserFixtureInteger(value.degreeBits, 'compactShape.degreeBits', 13),
+    constituentWidth: browserFixtureInteger(value.constituentWidth, 'compactShape.constituentWidth', 160),
+    circuitDigestLen: browserFixtureInteger(value.circuitDigestLen, 'compactShape.circuitDigestLen', 4),
+    publicInputsLen: browserFixtureInteger(value.publicInputsLen, 'compactShape.publicInputsLen', 50),
+    numConstants: browserFixtureInteger(value.numConstants, 'compactShape.numConstants', 160),
+    numRoutedWires: browserFixtureInteger(value.numRoutedWires, 'compactShape.numRoutedWires', 80),
+    numWires: browserFixtureInteger(value.numWires, 'compactShape.numWires', 160),
+    gateRoundDegree: browserFixtureInteger(value.gateRoundDegree, 'compactShape.gateRoundDegree', 10),
+    maxWhirNargBytes: browserFixtureInteger(value.maxWhirNargBytes, 'compactShape.maxWhirNargBytes'),
+    maxWhirHintBytes: browserFixtureInteger(value.maxWhirHintBytes, 'compactShape.maxWhirHintBytes'),
+    maxEncodedBytes: browserFixtureInteger(value.maxEncodedBytes, 'compactShape.maxEncodedBytes'),
+  };
+  const expectedWidth = Math.max(
+    shape.numConstants + shape.numRoutedWires,
+    shape.numWires,
+    2 * shape.numRoutedWires,
+  );
+  if (shape.degreeBits !== 13 || shape.constituentWidth !== 160
+      || shape.circuitDigestLen !== 4 || shape.publicInputsLen !== 50
+      || shape.gateRoundDegree < 3 || shape.maxWhirNargBytes !== MAX_WHIR_NARG_BYTES_V2
+      || shape.maxWhirHintBytes !== MAX_WHIR_HINT_BYTES_V2
+      || shape.maxEncodedBytes !== MAX_COMPACT_PROOF_BYTES_V2
+      || expectedWidth !== shape.constituentWidth) {
+    throw new Error('wallet WASM compact shape differs from the release-reviewed withdrawal envelope');
+  }
+  return shape;
+}
+
+function serializeBrowserCompactProof(proof, shape) {
+  const preprocessedLength = shape.numConstants + shape.numRoutedWires;
+  return '0x4d4c455748495233'
+    + browserU64Le(proof.protocolVersion, 'proof.protocolVersion')
+    + browserU32Le(proof.constituentWidth, 'proof.constituentWidth')
+    + proof.circuitDigest.map((value, index) => browserFieldLe(value, 'proof.circuitDigest[' + index + ']')).join('')
+    + proof.publicInputs.map((value, index) => browserFieldLe(value, 'proof.publicInputs[' + index + ']')).join('')
+    + browserRootBytes(proof.preprocessedRoot, 'proof.preprocessedRoot')
+    + browserRootBytes(proof.witnessRoot, 'proof.witnessRoot')
+    + browserRootBytes(proof.normInverseRoot, 'proof.normInverseRoot')
+    + browserBlobBytes(proof.whirTranscript, 'proof.whirTranscript', shape.maxWhirNargBytes)
+    + browserBlobBytes(proof.whirHints, 'proof.whirHints', shape.maxWhirHintBytes)
+    + browserSumcheckBytes(proof.logProof, shape.degreeBits, 5, 'proof.logProof')
+    + browserExt3ArrayBytes(proof.logPreprocessed, preprocessedLength, 'proof.logPreprocessed')
+    + browserExt3ArrayBytes(proof.logWitness, shape.numWires, 'proof.logWitness')
+    + browserExt3ArrayBytes(proof.logNormInverse, 2 * shape.numRoutedWires, 'proof.logNormInverse')
+    + browserSumcheckBytes(proof.gateProof, shape.degreeBits, shape.gateRoundDegree, 'proof.gateProof')
+    + browserExt3ArrayBytes(proof.gatePreprocessed, preprocessedLength, 'proof.gatePreprocessed')
+    + browserExt3ArrayBytes(proof.gateWitness, shape.numWires, 'proof.gateWitness');
+}
+
+function canonicalBrowserCompactProof(wasmProof) {
+  requireExactBrowserKeys(wasmProof, [
+    'schema', 'schemaVersion', 'protocolVersion', 'proofAbiSignature', 'proofLayoutHash',
+    'proof', 'verificationKey', 'verificationConfig', 'pinnedVerifier', 'solidityAbiProof',
+    'solidityAbiVerificationConfig', 'compactShape', 'compactProof', 'stats', 'sizeUpperBound',
+  ], 'wallet WASM MLE fixture');
+  requireExactBrowserKeys(wasmProof.proof, [
+    'protocolVersion', 'constituentWidth', 'circuitDigest', 'publicInputs', 'preprocessedRoot',
+    'witnessRoot', 'normInverseRoot', 'whirTranscript', 'whirHints', 'logProof',
+    'logPreprocessed', 'logWitness', 'logNormInverse', 'gateProof', 'gatePreprocessed',
+    'gateWitness',
+  ], 'wallet WASM MLE proof');
+  requireExactBrowserKeys(
+    wasmProof.compactProof,
+    ['encoding', 'byteLength', 'keccak256', 'bytes'],
+    'wallet WASM compact proof',
+  );
+  const shape = browserCompactShape(wasmProof.compactShape);
+  if (wasmProof.schema !== MLE_FIXTURE_SCHEMA_V2
+      || wasmProof.schemaVersion !== 3
+      || wasmProof.protocolVersion !== 3
+      || wasmProof.proof.protocolVersion !== 3
+      || wasmProof.proof.constituentWidth !== shape.constituentWidth
+      || wasmProof.proofAbiSignature !== MLE_PROOF_ABI_SIGNATURE_V2
+      || wasmProof.proofLayoutHash !== MLE_PROOF_LAYOUT_HASH_V2
+      || !Array.isArray(wasmProof.proof.circuitDigest)
+      || wasmProof.proof.circuitDigest.length !== shape.circuitDigestLen
+      || !Array.isArray(wasmProof.proof.publicInputs)
+      || wasmProof.proof.publicInputs.length !== shape.publicInputsLen
+      || wasmProof.proof.publicInputs.some((limb) => (
+        !/^0x[0-9a-f]{16}$/.test(String(limb)) || BigInt(limb) > 0xffffffffn
+      ))
+      || wasmProof.compactProof.encoding !== 'MLEWHIR3') {
+    throw new Error('wallet WASM returned a non-canonical MLE/WHIR wire-v3 withdrawal fixture');
+  }
+  const compact = wasmProof.compactProof.bytes;
+  const byteLength = wasmProof.compactProof.byteLength;
+  if (typeof compact !== 'string' || !/^0x(?:[0-9a-f]{2})+$/.test(compact)
+      || !Number.isSafeInteger(byteLength) || byteLength <= 0
+      || byteLength > MAX_COMPACT_PROOF_BYTES_V2
+      || (compact.length - 2) / 2 !== byteLength
+      || !compact.startsWith('0x4d4c4557484952330300000000000000a0000000')
+      || !/^0x[0-9a-f]{64}$/.test(String(wasmProof.compactProof.keccak256))) {
+    throw new Error('wallet WASM returned malformed compact MLE/WHIR wire-v3 bytes');
+  }
+  if (serializeBrowserCompactProof(wasmProof.proof, shape) !== compact) {
+    throw new Error('wallet WASM full proof disagrees with its exact compact MLE/WHIR wire-v3 bytes');
+  }
+  return compact;
+}
+
+function browserPiLimbsHex(publicInputs, start, count, label) {
+  return '0x' + publicInputs.slice(start, start + count).map((limb, index) => {
+    if (typeof limb !== 'string' || !/^0x[0-9a-f]{16}$/.test(limb)
+        || BigInt(limb) > 0xffffffffn) {
+      throw new Error(label + '[' + index + '] is not a canonical u32 limb');
+    }
+    return BigInt(limb).toString(16).padStart(8, '0');
+  }).join('');
+}
+
+function validateBrowserWithdrawalPublicInputs(publicInputs, claim, context) {
+  if (!Array.isArray(publicInputs) || publicInputs.length !== 50) {
+    throw new Error('wallet WASM withdrawal proof does not have exactly 50 public inputs');
+  }
+  const amount = ((BigInt(publicInputs[46]) << 32n) | BigInt(publicInputs[47])).toString();
+  const expected = [
+    [browserPiLimbsHex(publicInputs, 0, 8, 'close digest PI'), claim.closeIntentDigest, 'close digest'],
+    [BigInt(publicInputs[8]).toString(), String(context.finalized.channelId), 'channel id'],
+    [browserPiLimbsHex(publicInputs, 9, 8, 'balance H1 PI'), context.finalized.finalBalanceStateH1, 'balance H1'],
+    [browserPiLimbsHex(publicInputs, 17, 8, 'member key PI'), claim.memberPkG, 'member key'],
+    [browserPiLimbsHex(publicInputs, 25, 5, 'recipient PI'), claim.recipient, 'recipient'],
+    [browserPiLimbsHex(publicInputs, 30, 8, 'amount digest PI'), claim.userAmountDigest, 'amount digest'],
+    [browserPiLimbsHex(publicInputs, 38, 8, 'nullifier PI'), claim.withdrawalNullifier, 'nullifier'],
+    [amount, String(claim.amount), 'amount'],
+    [BigInt(publicInputs[48]).toString(), String(claim.tokenSlot), 'token slot'],
+    [BigInt(publicInputs[49]).toString(), String(claim.tokenIndex), 'token index'],
+  ];
+  for (const [got, wanted, label] of expected) {
+    if (String(got).toLowerCase() !== String(wanted).toLowerCase()) {
+      throw new Error('wallet WASM withdrawal proof changed ' + label);
+    }
+  }
+}
+
+function validateBrowserSubmitCalldata(data, claim, expectedSelector, compactProof) {
+  const raw = String(data || '');
+  if (!/^0x(?:[0-9a-f]{2})+$/.test(raw)
+      || expectedSelector !== SUBMIT_WITHDRAWAL_CLAIM_SELECTOR
       || !raw.startsWith(expectedSelector)) {
     throw new Error('browser claim calldata is not submitWithdrawalClaim');
   }
@@ -975,10 +1205,20 @@ function validateBrowserSubmitCalldata(data, claim, expectedSelector) {
   for (const [index, wanted, label] of expected) {
     if (claimCalldataWord(raw, index) !== wanted) throw new Error('browser claim calldata changed ' + label);
   }
+  const proofBytes = String(compactProof).slice(2);
+  const proofLength = proofBytes.length / 2;
+  const dynamicTail = proofLength.toString(16).padStart(64, '0')
+    + proofBytes.padEnd(Math.ceil(proofLength / 32) * 64, '0');
+  const staticHexLength = 10 + 9 * 64;
+  if (raw.slice(staticHexLength) !== dynamicTail) {
+    throw new Error('browser claim calldata changed the exact local compact proof bytes');
+  }
   return true;
 }
 
-const BROWSER_CLAIM_AUTHORITY_FIELDS = ['chainId', 'channelId', 'manager', 'rollup', 'verifier', 'startBlock'];
+const BROWSER_CLAIM_AUTHORITY_FIELDS = [
+  'chainId', 'channelId', 'manager', 'rollup', 'verifier', 'closeFundingMaterializer', 'startBlock',
+];
 const BROWSER_CLAIM_FIELDS = [
   'closeIntentDigest', 'memberPkG', 'recipient', 'userAmountDigest', 'amount',
   'tokenSlot', 'tokenIndex', 'withdrawalNullifier',
@@ -1053,19 +1293,30 @@ function validateBrowserClaimPrepared(value, context, artifact, tokenSlot, accou
   const wasmProof = artifact && artifact.mleProof;
   if (!isPlainObject(wasmClaim)) throw new Error('wallet WASM returned no claim tuple');
   if (!isPlainObject(wasmProof)) throw new Error('wallet WASM returned no MLE proof');
-  const hasProtocolVersion = Object.prototype.hasOwnProperty.call(wasmProof, 'protocolVersion');
-  const hasConstituentWidth = Object.prototype.hasOwnProperty.call(wasmProof, 'constituentWidth');
-  if (hasProtocolVersion !== hasConstituentWidth) {
-    throw new Error('wallet WASM returned a partially versioned MLE proof');
+  requireExactBrowserKeys(wasmClaim, BROWSER_CLAIM_FIELDS, 'wallet WASM claim');
+  if (!/^0x[0-9a-f]{64}$/.test(wasmClaim.closeIntentDigest)
+      || !/^0x[0-9a-f]{64}$/.test(wasmClaim.memberPkG)
+      || !/^0x[0-9a-f]{40}$/.test(wasmClaim.recipient)
+      || /^0x0{40}$/.test(wasmClaim.recipient)
+      || !/^0x[0-9a-f]{64}$/.test(wasmClaim.userAmountDigest)
+      || !/^0x[0-9a-f]{64}$/.test(wasmClaim.withdrawalNullifier)
+      || typeof wasmClaim.amount !== 'string'
+      || !/^(0|[1-9][0-9]*)$/.test(wasmClaim.amount)
+      || wasmClaim.amount.length > 20
+      || BigInt(wasmClaim.amount) > 0xffffffffffffffffn
+      || typeof wasmClaim.tokenSlot !== 'number'
+      || !Number.isSafeInteger(wasmClaim.tokenSlot)
+      || wasmClaim.tokenSlot < 0 || wasmClaim.tokenSlot > 9
+      || typeof wasmClaim.tokenIndex !== 'number'
+      || !Number.isSafeInteger(wasmClaim.tokenIndex)
+      || wasmClaim.tokenIndex < 0 || wasmClaim.tokenIndex > 0xffffffff) {
+    throw new Error('wallet WASM returned a non-canonical withdrawal claim tuple');
   }
-  const expectedMleAbiVersion = hasProtocolVersion ? 2 : 1;
-  const expectedSelector = expectedMleAbiVersion === 2
-    ? SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR : SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR;
-  if (expectedMleAbiVersion === 1 && context.authority.chainId !== 31337) {
-    throw new Error('legacy MLE proof ABI is disabled on public chains');
-  }
-  if (Number(value.mleAbiVersion) !== expectedMleAbiVersion
-      || String(value.submitWithdrawalClaimSelector).toLowerCase() !== expectedSelector) {
+  const compactProof = canonicalBrowserCompactProof(wasmProof);
+  validateBrowserWithdrawalPublicInputs(wasmProof.proof.publicInputs, wasmClaim, context);
+  const expectedSelector = SUBMIT_WITHDRAWAL_CLAIM_SELECTOR;
+  if (Number(value.mleAbiVersion) !== 2
+      || value.submitWithdrawalClaimSelector !== expectedSelector) {
     throw new Error('prepared browser claim changed the explicit MLE proof ABI version');
   }
   for (const field of BROWSER_CLAIM_FIELDS) {
@@ -1094,7 +1345,7 @@ function validateBrowserClaimPrepared(value, context, artifact, tokenSlot, accou
         || String(value.transaction.to).toLowerCase() !== String(context.authority.manager).toLowerCase()
         || !/^0x[0-9a-fA-F]+$/.test(String(value.transaction.data))
         || value.transaction.value !== '0x0') throw new Error('malformed prepared claim transaction');
-    validateBrowserSubmitCalldata(value.transaction.data, claim, expectedSelector);
+    validateBrowserSubmitCalldata(value.transaction.data, claim, expectedSelector, compactProof);
   } else if (!['accepted', 'paid'].includes(value.status)) {
     throw new Error('unexpected prepared browser claim status');
   }
@@ -2914,9 +3165,19 @@ async function sendExactBrowserClaimTransaction(transaction, recipient, network,
       || transaction.value !== '0x0') throw new Error('relay returned a malformed claim transaction');
   await refreshClaimWalletAccount(recipient, network);
   log('  ' + label + ': manager ' + transaction.to + ', value 0 (verify in wallet)', 'zk');
+  const exactRequest = {
+    from: walletAccount,
+    to: transaction.to,
+    value: '0x0',
+    data: transaction.data,
+  };
+  // A relay's claimed eth_call result is not authority. Simulate the exact bytes through the
+  // connected wallet provider immediately before signing so every deterministic verifier/schema/
+  // state revert fails closed without exposing the user to a pointless signature or gas loss.
+  await walletProvider.request({ method: 'eth_call', params: [exactRequest, 'latest'] });
   const txHash = await walletProvider.request({
     method: 'eth_sendTransaction',
-    params: [{ from: walletAccount, to: transaction.to, value: '0x0', data: transaction.data }],
+    params: [exactRequest],
   });
   if (!HEX32_RE.test(String(txHash))) throw new Error(label + ' wallet returned a malformed transaction hash');
   return String(txHash).toLowerCase();

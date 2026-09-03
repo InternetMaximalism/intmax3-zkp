@@ -7,25 +7,23 @@ import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {KZGProof, TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {InvalidMleProof, MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MockPinnedMleVerifierV2, MockPinnedMleVerifierV2WithCore} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 /// @dev SECURITY (C-1/B-4): a stand-in that emits the production verifier's authenticated
 ///      proof-dependent negative verdict. Unknown reverts and false returns are never fraud.
-contract RejectingMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert InvalidMleProof();
+contract RejectingMleVerifier is IPinnedMleVerifierV2 {
+    uint256 public constant override allowedChainId = 31337;
+
+    function core() external view override returns (address) {
+        return address(this);
     }
 
-    function fraudVerdictEncoded(bytes calldata, bytes32, bytes4, bool) external pure returns (uint8) {
+    function verifyCompactPublicInputs(bytes calldata compactProof) external pure override returns (uint256[] memory) {
+        return abi.decode(compactProof, (uint256[]));
+    }
+
+    function fraudVerdictCompact(bytes calldata, bytes32) external pure override returns (uint8) {
         return 0;
     }
 }
@@ -246,59 +244,8 @@ contract IntmaxRollupTest is Test {
     // MLE proof helper — structurally valid but dummy (for non-E2E tests)
     // -----------------------------------------------------------------------
 
-    /// @dev Return an empty MleVk (degreeBits=0 → MLE verification disabled).
-    function _emptyMleVk() internal pure returns (IntmaxRollup.MleVk memory vk) {
-        // All fields default to zero. degreeBits=0 skips MLE verification.
-    }
-
-    /// @dev Return empty WHIR params (for non-MLE deployments).
-    function _emptyWhirParams() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
-        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-    }
-
-    /// @dev Empty `kIs` / `subgroupGenPowers` arrays for non-E2E deployments
-    ///      (`mleVk.degreeBits == 0` short-circuits MLE verification so the
-    ///      arrays' contents are never read).
-    function _emptyMleArrays() internal pure returns (uint256[] memory) {
-        return new uint256[](0);
-    }
-
-    /// @dev Return empty WHIR evals (for non-MLE deployments with degreeBits=0).
-    function _emptyWhirEvals() internal pure returns (GoldilocksExt3.Ext3[] memory) {
-        return new GoldilocksExt3.Ext3[](0);
-    }
-
-    /// @dev Return a default MleProof with empty/zero values.
-    ///      Non-E2E tests deploy the rollup with mleVk.degreeBits=0, so MLE
-    ///      verification is effectively a no-op.  This proof only needs to
-    ///      be structurally valid for abi.encode().
-    /// @dev v2 MleProof: `tau` and `tauPerm` are no longer prover-supplied
-    ///      (re-derived from transcript inside verify()), and several new
-    ///      dynamic-array / Ext3 fields were added for the R2-#1 (Φ_gate
-    ///      gate binding) and R2-#2 (logUp inverse helpers) soundness fixes.
-    ///      We just zero-initialise the dynamic arrays here; the scalar /
-    ///      Ext3 fields default to zero already.
-    function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        // Existing fields (dynamic arrays must be explicitly initialised)
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.publicInputs = new uint256[](0);
-
-        // v2 R2-#2 logUp arrays (length = numWires / numRoutedWires + numConstants etc.)
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-
-        // v2 R2-#1 gate-binding arrays
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
+    function _defaultMleProof() internal pure returns (bytes memory) {
+        return abi.encode(new uint256[](0));
     }
 
     function _u(string memory json, string memory path) internal pure returns (uint256) {
@@ -317,9 +264,8 @@ contract IntmaxRollupTest is Test {
     ///      big-endian u32 limbs the contract's `_mlePublicInputsMatch` requires. This is the new
     ///      PI binding (replaces the old Groth16 pubInputs). For deployments with degreeBits=0 the
     ///      MLE verification itself is skipped, so this proof exercises the binding path only.
-    function _mleProofWithPI(bytes32 piHash) internal pure returns (MleVerifier.MleProof memory proof) {
-        proof = _defaultMleProof();
-        proof.publicInputs = _piLimbs(piHash);
+    function _mleProofWithPI(bytes32 piHash) internal pure returns (bytes memory) {
+        return abi.encode(_piLimbs(piHash));
     }
 
     /// @dev SECURITY (H-5/B-5): `finalize` now pins `validityPIs.finalBlockNumber` to the
@@ -375,22 +321,8 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function setUp() public {
-        MleVerifier mleVerifierContract = new MleVerifier(block.chainid);
-
-        // Non-E2E rollup: mleVk.degreeBits = 0 to skip MLE verification
-        // (non-E2E tests exercise the MLE PI binding + KZG/fraud paths with a synthetic dummy
-        // proof whose `publicInputs` are set to the expected piHash limbs).
         rollup = new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(), // degreeBits = 0 → skip MLE verification
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            bytes32(0),
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief) so the fraud path's binding check runs.
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
@@ -522,18 +454,8 @@ contract IntmaxRollupTest is Test {
     /// @dev Deploy a FRESH rollup (so `_pendingChannelRegHashChain == bytes32(0)`), call
     ///      `registerChannel`, and return the emitted `newChannelRegHashChain`.
     function _registerChannelDiff(uint256 memberCount) internal returns (bytes32) {
-        MleVerifier mleVerifierContract = new MleVerifier(block.chainid);
         IntmaxRollup fresh = new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            bytes32(0),
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
         );
 
         (bytes32[] memory sphincs, bytes32[] memory pkBs, bytes32[] memory regev, address[] memory recipients) =
@@ -563,16 +485,7 @@ contract IntmaxRollupTest is Test {
     /// @dev Deploy a FRESH rollup with an empty config (registration-only tests).
     function _freshRollup() internal returns (IntmaxRollup) {
         return new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            new MleVerifier(block.chainid),
-            bytes32(0),
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
         );
     }
 
@@ -582,7 +495,12 @@ contract IntmaxRollupTest is Test {
     /// diverge, the close-path `ChannelSettlementManager` could bind a different signer set than the
     /// validity-path registration.
     function test_channelMemberSetCommitmentMatchesVerifier() public {
-        ChannelSettlementVerifier verifier = new ChannelSettlementVerifier();
+        ChannelSettlementVerifier verifier = new ChannelSettlementVerifier(
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337)
+        );
         uint32[3] memory counts = [uint32(2), 5, 8];
         for (uint256 c = 0; c < counts.length; c++) {
             uint256 memberCount = counts[c];
@@ -707,16 +625,7 @@ contract IntmaxRollupTest is Test {
     /// longer matches what the validity proof commits — DO NOT update blindly.
     function test_blockHashChannelRegDifferential() public {
         BlockHashHarness harness = new BlockHashHarness(
-            fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            new MleVerifier(block.chainid),
-            bytes32(0),
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury, new MockPinnedMleVerifierV2(31337), new MockPinnedMleVerifierV2(31337), bytes32(0)
         );
 
         // Fields IDENTICAL to the Rust test: prev=0x0a*, txRoot=0x0b*, deposit=0x0c*, reg=0x0d*,
@@ -1102,69 +1011,64 @@ contract IntmaxRollupTest is Test {
     // with MLE DISABLED (degreeBits=0) to isolate the finalize SIGNATURE + MLE PI binding
     // (mleProof.publicInputs) from the crypto verification — it is NOT a proof-soundness test.
 
-    /// @notice SECURITY (A-2): a production deploy (allowMleDisabled=false) MUST reject a validity
-    ///         VK with degreeBits == 0, mirroring the withdrawal VK guard
-    ///         (`initializeWithdrawalVk` → WithdrawalVkDegreeBitsZero). Without this, a zero VK
-    ///         silently disables every finalize-path MLE/WHIR check and any state root could be
-    ///         finalized with a garbage proof.
-    function test_constructor_rejectsZeroValidityVk_inProductionMode() public {
-        // Hoist the MleVerifier creation OUT of the args: with `vm.expectRevert`, the next external
-        // call/creation must be the one that reverts — an inline `new MleVerifier(block.chainid)` arg would be
-        // consumed by expectRevert instead of the IntmaxRollup creation.
-        MleVerifier v = new MleVerifier(block.chainid);
-        vm.expectRevert(IntmaxRollup.ValidityVkDegreeBitsZero.selector);
-        new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(), // degreeBits == 0
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            v,
-            bytes32(0),
-            false // production mode — no opt-in
-        );
+    function test_constructor_rejectsDuplicatePinnedAdapters() public {
+        MockPinnedMleVerifierV2 adapter = new MockPinnedMleVerifierV2(31337);
+        vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
+        new IntmaxRollup(fraudTreasury, adapter, adapter, bytes32(0));
     }
 
-    /// @notice The zero validity VK is accepted only behind the explicit test opt-in
-    ///         on local chain id 31337.
-    function test_constructor_allowsZeroValidityVk_withExplicitOptIn() public {
-        IntmaxRollup r = new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            new MleVerifier(block.chainid),
-            bytes32(0),
-            true // explicit test opt-in
-        );
-        assertTrue(r.allowMleDisabled(), "opt-in flag must be recorded");
-        (uint256 db,,,,) = r.mleVk();
-        assertEq(db, 0, "VK stays disabled under the test opt-in");
+    function test_constructor_rejectsCrossStatementCoreReuse() public {
+        MockPinnedMleVerifierV2 sharedCore = new MockPinnedMleVerifierV2(31337);
+        MockPinnedMleVerifierV2WithCore validity = new MockPinnedMleVerifierV2WithCore(31337, address(sharedCore));
+        MockPinnedMleVerifierV2WithCore withdrawal = new MockPinnedMleVerifierV2WithCore(31337, address(sharedCore));
+
+        vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
     }
 
-    function test_constructor_rejectsMleDisabledOptIn_onPublicChain() public {
-        // Deploy the verifier while still on the local chain so the expected
-        // revert is specifically IntmaxRollup's independent bypass guard.
-        MleVerifier v = new MleVerifier(block.chainid);
-        vm.chainId(1);
-        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, uint256(1)));
-        new IntmaxRollup(
-            fraudTreasury,
-            _emptyMleVk(),
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            v,
-            bytes32(0),
-            true
+    function test_constructor_rejectsCrossStatementAdapterCoreAlias() public {
+        MockPinnedMleVerifierV2 withdrawalCore = new MockPinnedMleVerifierV2(31337);
+        MockPinnedMleVerifierV2WithCore withdrawal = new MockPinnedMleVerifierV2WithCore(31337, address(withdrawalCore));
+        MockPinnedMleVerifierV2WithCore validity = new MockPinnedMleVerifierV2WithCore(31337, address(withdrawal));
+
+        vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+    }
+
+    function test_constructor_rejectsCoreChainMismatch() public {
+        MockPinnedMleVerifierV2 wrongChainCore = new MockPinnedMleVerifierV2(31338);
+        MockPinnedMleVerifierV2WithCore validity = new MockPinnedMleVerifierV2WithCore(31337, address(wrongChainCore));
+        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IntmaxRollup.PinnedMleVerifierChainMismatch.selector,
+                address(wrongChainCore),
+                uint256(31337),
+                uint256(31338)
+            )
         );
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+    }
+
+    function test_constructor_rejectsPinnedAdapterWithoutCode() public {
+        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
+        vm.expectRevert(abi.encodeWithSelector(IntmaxRollup.InvalidPinnedMleVerifier.selector, address(0xBEEF)));
+        new IntmaxRollup(fraudTreasury, IPinnedMleVerifierV2(address(0xBEEF)), withdrawal, bytes32(0));
+    }
+
+    function test_constructor_rejectsWrongChainPinnedAdapter() public {
+        MockPinnedMleVerifierV2 wrongChain = new MockPinnedMleVerifierV2(31338);
+        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(31337);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IntmaxRollup.PinnedMleVerifierChainMismatch.selector,
+                address(wrongChain),
+                uint256(31337),
+                uint256(31338)
+            )
+        );
+        new IntmaxRollup(fraudTreasury, wrongChain, withdrawal, bytes32(0));
     }
 
     /// @notice A local-only verification bypass must not survive a chain-id
@@ -1172,7 +1076,7 @@ contract IntmaxRollupTest is Test {
     function test_mleDisabledBypass_runtimeGuardFailsClosedAfterChainIdChange() public {
         bytes32 stateRoot = keccak256("runtime_chain_guard");
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
 
         vm.chainId(1);
         vm.expectRevert(IntmaxRollup.MleVerificationFailed.selector);
@@ -1199,7 +1103,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_finalize_success() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("finalized_state");
 
@@ -1211,9 +1115,9 @@ contract IntmaxRollupTest is Test {
         // replay of THIS batch rather than from the pre-posting genesis zeros.
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         uint256 stakeBalanceBefore = submitter.balance;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
@@ -1236,7 +1140,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_finalize_alreadyFinalized() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("finalized_state");
 
@@ -1247,9 +1151,9 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
@@ -1260,7 +1164,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_finalize_initialStateMismatch() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("state");
 
@@ -1268,9 +1172,9 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         vpis.initialExtCommitment = bytes32(uint256(0xbad));
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 9;
@@ -1288,14 +1192,14 @@ contract IntmaxRollupTest is Test {
     /// root) could be finalized against any valid proof. Here the default mleProof carries EMPTY
     /// publicInputs, so `_mlePublicInputsMatch` rejects it.
     function test_finalize_unboundMlePublicInputs() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("state_mismatch");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         // mleProof.publicInputs is empty (length 0 != 8) → PI binding check fails.
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 11;
@@ -1311,14 +1215,14 @@ contract IntmaxRollupTest is Test {
     /// PIs cannot be replayed to finalize a DIFFERENT (tampered) set. The proof's publicInputs are
     /// pinned to the original piHash, so finalizing tampered vpis is rejected by the binding.
     function test_finalize_tamperedValidityPIs_rejected() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
         bytes32 stateRoot = keccak256("bound_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
         // Bind the proof to the HONEST vpis.
-        mleProof.publicInputs = _piLimbs(_computePIHash(vpis));
+        mleProof = abi.encode(_piLimbs(_computePIHash(vpis)));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
         uint32[] memory ids = new uint32[](1);
         ids[0] = 12;
         IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(4, ids, 401, bytes32(uint256(0x778)));
@@ -1332,7 +1236,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_finalize_notFound() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
 
@@ -1354,23 +1258,7 @@ contract IntmaxRollupTest is Test {
     /// supply a proof that (a) carries the CORRECT PI limbs, so the preimage pre-condition passes,
     /// and (b) fails WHIR verification, so fraud is confirmed for the right reason.
     function _newMleEnabledRollup() internal returns (IntmaxRollup r) {
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0), numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
-        r = new IntmaxRollup(
-            fraudTreasury,
-            enabledVk,
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            // B-4: the authenticated proof-rejection selector is the only fraud verdict. A generic
-            // revert no longer models a convictable submission. See RejectingMleVerifier.
-            MleVerifier(address(new RejectingMleVerifier())),
-            bytes32(0),
-            true
-        );
+        r = new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
         r.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         r.setBlockProducer(address(this), true);
         r.setBlockProducer(submitter, true);
@@ -1403,9 +1291,8 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("bad_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsFor(r, stateRoot);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        mleProof.whirTranscript = hex"DEADBEEF"; // makes WHIR verification fail
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 21;
@@ -1421,8 +1308,8 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_fraudProof_validProof_noFraud() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _defaultMleProof();
+        bytes memory proofBytes = mleProof;
         bytes32 stateRoot = keccak256("valid_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -1434,27 +1321,26 @@ contract IntmaxRollupTest is Test {
         IntmaxRollup.ValidityPublicInputs memory vpis = _defaultValidityPIs(stateRoot);
 
         // Modify MLE proof AFTER proofBytes was created, so params binding fails
-        mleProof.whirTranscript = hex"DEAD";
+        mleProof = abi.encode(new uint256[](1));
 
         // Fraud NOT confirmed: proof params binding fails (mleProof was modified after creating
-        // proofBytes), so keccak256(abi.encode(mleProof)) != keccak256(proofBytes).
+        // proofBytes), so keccak256(mleProof) != keccak256(proofBytes).
         // Valid proofs cannot be falsely accused.
-        bool fraudConfirmed = rollup.fraudProof(0, stateRoot, vpis, abi.encode(mleProof));
+        bool fraudConfirmed = rollup.fraudProof(0, stateRoot, vpis, mleProof);
         assertFalse(fraudConfirmed, "No fraud for valid proof");
     }
 
-    /// @notice The fraud classifier must not retain the local zero-VK skip
-    ///         after a chain-id change. The unreleased verifier is unevaluable,
+    /// @notice After a chain-id change the unreleased verifier is unevaluable,
     ///         never VALID, INVALID, or slashable on a public chain.
-    function test_fraudProof_mleDisabledBypass_runtimeGuardIsUnevaluableAfterChainIdChange() public {
+    function test_fraudProof_runtimeGuardIsUnevaluableAfterChainIdChange() public {
         bytes32 stateRoot = keccak256("runtime_fraud_guard");
         uint32[] memory ids = new uint32[](1);
         ids[0] = 31337;
         IntmaxRollup.SubBlock[] memory batch = _singleBlockBatch(31337, ids, 31337, bytes32(uint256(0x31337)));
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
         _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
         vm.chainId(1);
@@ -1463,8 +1349,8 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_fraudProof_bindingFails_rejected() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _defaultMleProof();
+        bytes memory proofBytes = mleProof;
         bytes32 stateRoot = keccak256("state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis;
@@ -1505,9 +1391,8 @@ contract IntmaxRollupTest is Test {
 
         bytes32 stateRoot = keccak256("fraud_state_with_inputs");
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsFor(r, stateRoot);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        mleProof.whirTranscript = hex"DEADBEEF"; // WHIR verification fails → genuine fraud
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory idsBad = new uint32[](1);
         idsBad[0] = 9;
@@ -1534,9 +1419,8 @@ contract IntmaxRollupTest is Test {
         bytes32 badState = keccak256("fraud_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsFor(r, badState);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        mleProof.whirTranscript = hex"DEADBEEF"; // WHIR verification fails → genuine fraud
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory idsBad = new uint32[](1);
         idsBad[0] = 77;
@@ -1588,31 +1472,14 @@ contract IntmaxRollupTest is Test {
     ///         vpis computed BEFORE posting so finalBlockNumber=0 and
     ///         blockHashChainAt[0]=0 always match.
     function test_fraudProof_e2e_corruptedMleCommitment() public {
-        // Deploy a rollup with MLE enabled (degreeBits > 0)
-        // to test that corrupted MLE proofs trigger fraud detection.
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0), numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
-        // B-4: fraud is confirmed only by the authenticated InvalidMleProof selector.
-        MleVerifier mleVerifierContract = MleVerifier(address(new RejectingMleVerifier()));
-        IntmaxRollup mleRollup = new IntmaxRollup(
-            fraudTreasury,
-            enabledVk,
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            bytes32(0),
-            true // A-2: test opt-in (this test uses a real enabled VK anyway)
-        );
+        // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
+        IntmaxRollup mleRollup =
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         // Corrupt commitmentRoot
-        mleProof.whirTranscript = hex"DEADDEADDEADDEAD";
 
         // Compute vpis BEFORE posting (initial state: everything zero).
         // blockHashChainAt[0] stays 0 forever, so PI binding will pass.
@@ -1622,10 +1489,10 @@ contract IntmaxRollupTest is Test {
         // Use correct piHash so Groth16 pubInputs condition (b) passes.
         // MLE rejects corrupted proof (condition c).
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
         // Encode corrupted MLE proof INTO proofBytes so params binding passes
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 50;
@@ -1646,32 +1513,15 @@ contract IntmaxRollupTest is Test {
     /// @notice E2E fraud proof: corrupted MLE pcsEvaluations and evalValue.
     ///         The MLE verifier rejects them, confirming fraud (condition c).
     function test_fraudProof_e2e_corruptedMleEvals() public {
-        // Deploy a rollup with MLE enabled (degreeBits > 0)
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0), numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
-        // B-4: fraud is confirmed only by the authenticated InvalidMleProof selector.
-        MleVerifier mleVerifierContract = MleVerifier(address(new RejectingMleVerifier()));
-        IntmaxRollup mleRollup = new IntmaxRollup(
-            fraudTreasury,
-            enabledVk,
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
-            mleVerifierContract,
-            bytes32(0),
-            true // A-2: test opt-in (this test uses a real enabled VK anyway)
-        );
+        // B-4: fraud is confirmed only by the pinned classifier's authenticated INVALID verdict.
+        IntmaxRollup mleRollup =
+            new IntmaxRollup(fraudTreasury, new RejectingMleVerifier(), new MockPinnedMleVerifierV2(31337), bytes32(0));
         mleRollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         // Corrupt WHIR transcript with random data
-        mleProof.whirTranscript = hex"DEADBEEFCAFEBABE123456789ABCDEF0";
         // Also corrupt evalValue
-        mleProof.witnessEvalValue = 0xBADBADBAD;
 
         // Compute vpis BEFORE posting (initial zero state)
         bytes32 stateRoot = keccak256("random_bytes_fraud");
@@ -1680,10 +1530,10 @@ contract IntmaxRollupTest is Test {
         // Use correct piHash so Groth16 pubInputs condition (b) passes.
         // MLE rejects corrupted proof data (condition c).
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
         // Encode corrupted MLE proof INTO proofBytes
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 60;
@@ -1702,7 +1552,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_fraudProof_revertsWhenFinalized() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("finalized_state");
 
@@ -1713,9 +1563,9 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
@@ -1733,7 +1583,7 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_finalize_updatesLatestFinalizedBlockNumber() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("finalized_state");
         uint32[] memory ids = new uint32[](1);
@@ -1743,7 +1593,7 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
         _mockBlob();
         bytes32 pin = rollup.pendingChainsPin();
@@ -1767,13 +1617,13 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_fraudProof_revertsBeforeFinalizedBlock() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         // --- Post and finalize submission 0 ---
         bytes32 stateRoot1 = keccak256("state1");
         IntmaxRollup.ValidityPublicInputs memory vpis1 = _defaultValidityPIs(stateRoot1);
         bytes32 piHash1 = _computePIHash(vpis1);
-        mleProof.publicInputs = _piLimbs(piHash1);
+        mleProof = abi.encode(_piLimbs(piHash1));
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -1791,7 +1641,7 @@ contract IntmaxRollupTest is Test {
         // We need to manipulate _batchMetadata to test this guard.
         // Instead, post a second submission normally (startBlockNumber = 2, which is > 1).
         bytes32 stateRoot2 = keccak256("state2");
-        bytes memory proofBytes2 = abi.encode(mleProof);
+        bytes memory proofBytes2 = mleProof;
 
         ids[0] = 2;
         IntmaxRollup.SubBlock[] memory batch2 = _singleBlockBatch(1, ids, 200, bytes32(uint256(0x22)));
@@ -1813,8 +1663,8 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_fraudProof_timeoutRemoval() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _defaultMleProof();
+        bytes memory proofBytes = mleProof;
         bytes32 stateRoot = keccak256("timeout_state");
 
         uint32[] memory ids = new uint32[](1);
@@ -1844,9 +1694,8 @@ contract IntmaxRollupTest is Test {
         bytes32 stateRoot = keccak256("no_timeout_state");
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsFor(r, stateRoot);
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        mleProof.whirTranscript = hex"DEADBEEF"; // WHIR verification fails → genuine fraud
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
 
         uint32[] memory ids = new uint32[](1);
         ids[0] = 60;
@@ -1926,7 +1775,7 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_gas_finalize() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
 
         bytes32 stateRoot = keccak256("finalized_state");
 
@@ -1937,9 +1786,9 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory proofBytes = mleProof;
 
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
@@ -1954,7 +1803,7 @@ contract IntmaxRollupTest is Test {
     // -----------------------------------------------------------------------
 
     function test_withdraw_afterFinalize() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
         bytes32 stateRoot = keccak256("finalized_state");
         uint32[] memory ids = new uint32[](1);
         ids[0] = 1;
@@ -1962,8 +1811,8 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
-        bytes memory proofBytes = abi.encode(mleProof);
+        mleProof = abi.encode(_piLimbs(piHash));
+        bytes memory proofBytes = mleProof;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, submitter);
 
         assertTrue(rollup.finalize(0, stateRoot, vpis, mleProof), "finalize must succeed");
@@ -1980,7 +1829,7 @@ contract IntmaxRollupTest is Test {
     }
 
     function test_finalize_succeedsEvenIfSubmitterReverts() public {
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
         bytes32 stateRoot = keccak256("finalized_state");
 
         // Submitter is a reverting contract
@@ -1993,8 +1842,8 @@ contract IntmaxRollupTest is Test {
         // B-5: PIs derived from a snapshot replay of THIS batch (see `_validityPIsForBatch`).
         IntmaxRollup.ValidityPublicInputs memory vpis = _validityPIsForBatch(rollup, batch, stateRoot);
         bytes32 piHash = _computePIHash(vpis);
-        mleProof.publicInputs = _piLimbs(piHash);
-        bytes memory proofBytes = abi.encode(mleProof);
+        mleProof = abi.encode(_piLimbs(piHash));
+        bytes memory proofBytes = mleProof;
         (KZGProof memory kzg, bytes32 blobHash) = _postWithKZG(batch, proofBytes, stateRoot, address(revSub));
 
         // Under old push-payment, this would revert because revSub rejects ETH.
@@ -2009,21 +1858,12 @@ contract IntmaxRollupTest is Test {
         // C-1: MLE verification must be ENABLED — fraud is confirmed only by a failing proof now,
         // so a degreeBits=0 deployment could never confirm fraud through the normal path.
         RevertingReceiver revTreasury = new RevertingReceiver();
-        IntmaxRollup.MleVk memory enabledVk = IntmaxRollup.MleVk({
-            degreeBits: 13, preprocessedRoot: bytes32(0), numConstants: 0, numRoutedWires: 0, gatesDigest: bytes32(0)
-        });
         IntmaxRollup rollup2 = new IntmaxRollup(
             address(revTreasury),
-            enabledVk,
-            _emptyWhirParams(),
-            "",
-            "",
-            _emptyMleArrays(),
-            _emptyMleArrays(),
             // B-4: fraud is confirmed only by the authenticated InvalidMleProof selector.
-            MleVerifier(address(new RejectingMleVerifier())),
-            bytes32(0),
-            true // A-2: test opt-in (this test uses a real enabled VK anyway)
+            new RejectingMleVerifier(),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0)
         );
         rollup2.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
 
@@ -2044,9 +1884,8 @@ contract IntmaxRollupTest is Test {
         });
 
         // Correct PI limbs (so the preimage pre-condition passes) + a transcript that fails WHIR.
-        MleVerifier.MleProof memory mleProof = _mleProofWithPI(_computePIHash(vpis));
-        mleProof.whirTranscript = hex"DEADBEEF";
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _mleProofWithPI(_computePIHash(vpis));
+        bytes memory proofBytes = mleProof;
         uint32[] memory ids = new uint32[](1);
         ids[0] = 21;
 
@@ -2085,8 +1924,8 @@ contract IntmaxRollupTest is Test {
             rollup.deposit{value: amount}(bytes32(uint256(i + 1)), 0, amount, bytes32(uint256(i)));
         }
 
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
-        bytes memory proofBytes = abi.encode(mleProof);
+        bytes memory mleProof = _defaultMleProof();
+        bytes memory proofBytes = mleProof;
         bytes32 stateRoot = keccak256("bad_state");
         uint32[] memory ids = new uint32[](1);
         ids[0] = 21;
@@ -2121,29 +1960,10 @@ contract RevertingReceiver {
 contract BlockHashHarness is IntmaxRollup {
     constructor(
         address fraudTreasury_,
-        MleVk memory mleVk_,
-        SpongefishWhirVerify.WhirParams memory whirParams_,
-        bytes memory whirProtocolId_,
-        bytes memory whirSplitSessionId_,
-        uint256[] memory mleKIs_,
-        uint256[] memory mleSubgroupGenPowers_,
-        MleVerifier mleVerifier_,
-        bytes32 genesisStateRoot_,
-        bool allowMleDisabled_
-    )
-        IntmaxRollup(
-            fraudTreasury_,
-            mleVk_,
-            whirParams_,
-            whirProtocolId_,
-            whirSplitSessionId_,
-            mleKIs_,
-            mleSubgroupGenPowers_,
-            mleVerifier_,
-            genesisStateRoot_,
-            allowMleDisabled_
-        )
-    {}
+        IPinnedMleVerifierV2 validityVerifier_,
+        IPinnedMleVerifierV2 withdrawalVerifier_,
+        bytes32 genesisStateRoot_
+    ) IntmaxRollup(fraudTreasury_, validityVerifier_, withdrawalVerifier_, genesisStateRoot_) {}
 
     function computeBlockHashForTest(
         bytes32 prevHash,

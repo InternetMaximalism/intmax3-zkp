@@ -1,5 +1,12 @@
 # Browser-owned public claim and backing recovery
 
+> **RELEASE STATUS (2026-09-03): NO-GO.** The browser/delegate path now consumes only strict
+> MLE/WHIR V2 compact proofs, but independent cryptographic review, public-chain acceptance, and
+> the separate final-audit blockers are not complete. `IntmaxRollup.releaseRuntime` remains
+> chain-31337-only. Do not describe a local browser claim as approval for public value movement.
+> Old claim operations, journals, pending closes and V1 artifacts require clean retirement; none
+> may be reinterpreted as V2.
+
 This path lets a participant claim a finalized channel balance without giving the relay either
 its Regev witness or its L1 signing key. It replaces the retired relay-owned `/api/claim` route.
 
@@ -26,16 +33,30 @@ and transaction hash when reconciling. Supplying `manager`, `rollup`, `recipient
 close context, calldata, or another authority field is rejected.
 
 The browser independently compares the relay response with its WASM artifact, connected recipient
-account, finalized registry, and a locally reconstructed ABI prefix before asking the wallet to
-sign. It similarly reconstructs funding calldata and the exact payout calldata.
+account, finalized registry, and the complete locally held compact-proof bytes before asking the
+wallet to sign. It reconstructs the complete `submitWithdrawalClaim` calldata, including the
+dynamic-byte length and zero padding, rather than checking only its tuple prefix. It similarly
+reconstructs funding calldata and the exact payout calldata. For the proof submission it also
+serializes every human-readable proof field back into the compact wire grammar, requires byte-for-
+byte equality, and binds all 50 decoded public-input limbs to the claim tuple and finalized
+context. Immediately before every signature request, the connected wallet provider executes an
+`eth_call` over the exact sender/target/value/calldata; a deterministic verifier, schema, or state
+revert therefore never reaches `eth_sendTransaction`.
 
-The MLE proof ABI is selected explicitly and is part of the durable operation pin. The checked-in
-v1 artifact has selector `0x70f89118`; it is accepted only on chain `31337`. A forward-compatible
-v2 artifact is selected only when both `protocolVersion` and `constituentWidth` are present and
-valid, and must encode to selector `0x6d3e503a`. Supplying only one version field, silently treating
-a v2 artifact as v1, or using v1 on a public chain is fail-closed. This compatibility boundary does
-not assert that the currently pinned `polygon-plonky2` submodule already produces v2 artifacts;
-public deployment remains gated on the separately reviewed v2 verifier/Manager deployment.
+The claim path accepts exactly the full `plonky2-mle-v3-solidity` schema/protocol version 3,
+WHIR PoW 22 artifact and the compact `MLEWHIR3` encoding. Its sole Manager selector is `0x0b0f2d14` for
+`submitWithdrawalClaim(WithdrawalClaim,bytes)`. V1, partially versioned, flattened, unknown-field,
+non-canonical-hex, over-cap, mismatched full/compact, and mixed-schema artifacts are rejected before
+calldata preparation. The Node decoder reconstructs the entire 16-field proof from the compact
+bytes and requires equality with the human-readable proof, re-encodes both Solidity proof/config
+ABI views, recomputes their Keccak and circuit/WHIR configuration digests, and checks every
+proof/VK/config/pinned-verifier dimension and duplicate view. There is no devnet V1 exception.
+
+Before any claim operation, the trusted settlement binding must identify the exact Rollup,
+Manager, settlement verifier, close-funding materializer, and withdrawal-claim adapter/core. Its
+finalized activation evidence and local config pins must agree with runtime code, adapter `core()`,
+chain IDs, verification/circuit/WHIR digests, 64-byte protocol ID, and session ID. A proof whose
+embedded identities disagree is rejected before transaction preparation.
 
 ## Transaction and replay protocol
 
@@ -151,13 +172,15 @@ Run the focused suite with:
 
 ```sh
 node --test \
+  node/test/mle-v2-artifact-binding.test.js \
   node/test/browser-public-claim.test.js \
   node/test/delegate-backing-vault.test.js \
   node/test/delegate-sendability.test.js
 ```
 
-The tests cover caller authority substitution, browser-only claim generation wiring, exact
-calldata/signer/receipt/event reconciliation, permissionless submit/payout front-runs through
+The tests cover full/compact/ABI/config/pinned-view mutations, old/new schema mixing, malformed and
+oversized compact encodings, caller authority substitution, browser-only claim generation wiring,
+exact compact-proof calldata/signer/receipt/event reconciliation, permissionless submit/payout front-runs through
 wrappers, unrelated and duplicate events, receipt/head/getter read stitching, aggregate-credit
 races, journal idempotency, backing size and verifier-data pins, native verify-only argument binding, receipt/backing mismatch,
 non-overwrite behavior, invalid/withheld backing, no-publication failure behavior, crash-safe

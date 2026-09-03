@@ -72,6 +72,13 @@ use crate::{
     },
 };
 
+/// Native-token amount used by the checked-in close lifecycle fixture cohort.
+///
+/// The close-intent witness and its independently generated withdrawal/lifecycle companion must
+/// commit to the same amount. Keep this value in the close circuit module so both generators use
+/// one reviewed source instead of duplicating a release-critical literal.
+pub const CLOSE_FIXTURE_NATIVE_FUND_AMOUNT: u64 = 77;
+
 const CHANNEL_STATE_DOMAIN: u32 = 0x494d4348;
 const CLOSE_TX_DOMAIN: u32 = 0x494d434c;
 const CLOSE_STATE_ID_DOMAIN: u32 = 0x494d4353; // "IMCS"
@@ -1109,7 +1116,8 @@ pub mod test_fixture {
     use plonky2::plonk::proof::ProofWithPublicInputs;
 
     use super::{
-        ChannelCloseCircuit, ChannelCloseFullWitness, ChannelCloseWitness, MemberCloseAuth,
+        CLOSE_FIXTURE_NATIVE_FUND_AMOUNT, ChannelCloseCircuit, ChannelCloseFullWitness,
+        ChannelCloseWitness, MemberCloseAuth,
     };
     use crate::{
         circuits::balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
@@ -1290,7 +1298,9 @@ pub mod test_fixture {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: id,
-                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
+                amounts: ChannelFund::single_token_amounts(U256::from(
+                    CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
+                )),
                 intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
             },
             balance_state: BalanceState {
@@ -1396,7 +1406,8 @@ pub mod test_fixture {
             .collect();
         let mut token_registry = BalanceState::single_token_registry(0);
         token_registry[1] = registry1;
-        let mut amounts = ChannelFund::single_token_amounts(U256::from(77u32));
+        let mut amounts =
+            ChannelFund::single_token_amounts(U256::from(CLOSE_FIXTURE_NATIVE_FUND_AMOUNT));
         amounts[1] = amount1;
         let state = ChannelState {
             channel_id: id,
@@ -1528,7 +1539,9 @@ mod tests {
             close_freeze_nonce: 0,
             channel_fund: ChannelFund {
                 channel_id: id,
-                amounts: ChannelFund::single_token_amounts(U256::from(77u32)),
+                amounts: ChannelFund::single_token_amounts(U256::from(
+                    CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
+                )),
                 intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
             },
             balance_state: BalanceState {

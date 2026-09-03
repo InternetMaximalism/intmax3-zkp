@@ -4,12 +4,14 @@
 //! (the single source of truth, shared with the `channel_member withdraw` CLI). It builds the
 //! self-contained 3-block chain — registration → deposit → withdrawal-tx — and writes the 4
 //! artifacts the Solidity tests / the live pipeline consume:
+//!   - contracts/test/data/{prefix}withdrawal_mle_config.json   (proof-free deployment config)
+//!   - contracts/test/data/{prefix}lifecycle_validity_mle_config.json (proof-free deploy config)
 //!   - contracts/test/data/{prefix}withdrawal_mle.json          (withdrawal proof + VK)
 //!   - contracts/test/data/{prefix}lifecycle_validity_mle.json  (validity proof + VK, for finalize)
 //!   - contracts/test/data/{prefix}lifecycle.json               (registration/deposit/blocks/vpis)
 //!   - contracts/test/data/{prefix}withdrawal_payout.json       (committed Withdrawal + prover)
 //!
-//! Usage:  cargo run --bin generate_withdrawal_fixture --release
+//! Usage:  cargo run --bin generate_withdrawal_fixture --release [-- --mle-config-only]
 //!
 //! Env overrides (all optional):
 //!   - WD_DEPOSITOR=0x<20 bytes>  — pin the depositor (the on-chain `deposit()` msg.sender).
@@ -26,9 +28,30 @@
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
+    circuits::channel::close_circuit::CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
     ethereum_types::{address::Address, u32limb_trait::U32LimbTrait},
-    wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
+    utils::mle_prover::{mle_v2_config_only_requested, persist_or_validate_mle_v2_config_json},
+    wallet_core::{
+        ChannelWithdrawalParams, build_channel_withdrawal, build_channel_withdrawal_mle_v2_configs,
+    },
 };
+
+const DEFAULT_DEPOSIT_AMOUNT: u64 = 10;
+const DEFAULT_WITHDRAWAL_AMOUNT: u64 = 3;
+
+/// The exact `close_` cohort represents a full native-fund close, so its independently generated
+/// payout must equal the amount committed by the close-intent proof. Other fixture families retain
+/// the ordinary partial-withdrawal scenario.
+fn fixture_amounts(prefix: &str) -> (u64, u64) {
+    if prefix == "close_" {
+        (
+            CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
+            CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
+        )
+    } else {
+        (DEFAULT_DEPOSIT_AMOUNT, DEFAULT_WITHDRAWAL_AMOUNT)
+    }
+}
 
 /// Parse a 20-byte hex address ("0x..." or bare) into an `Address` (5 big-endian u32 limbs).
 fn parse_address_hex(hex: &str) -> Address {
@@ -51,11 +74,39 @@ fn parse_address_hex(hex: &str) -> Address {
 }
 
 fn main() -> anyhow::Result<()> {
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_default();
+    let name = |base: &str| format!("{prefix}{base}");
+
+    if mle_v2_config_only_requested() {
+        let configs = build_channel_withdrawal_mle_v2_configs()?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join(name("withdrawal_mle_config.json")),
+            &configs.withdrawal_mle_config_json,
+        )?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join(name("lifecycle_validity_mle_config.json")),
+            &configs.validity_mle_config_json,
+        )?;
+        eprintln!(
+            "[wd] config-only mode: wrote {} and {}; no witness or proof was constructed",
+            name("withdrawal_mle_config.json"),
+            name("lifecycle_validity_mle_config.json")
+        );
+        return Ok(());
+    }
+
     eprintln!("[wd] building channel withdrawal artifacts (HEAVY proving)…");
+    let (deposit_amount, withdrawal_amount) = fixture_amounts(&prefix);
+    eprintln!(
+        "[wd] fixture amounts for prefix {:?}: deposit={}, withdrawal={}",
+        prefix, deposit_amount, withdrawal_amount
+    );
     let params = ChannelWithdrawalParams {
         channel_id: 1,
-        deposit_amount: 10,
-        withdrawal_amount: 3,
+        deposit_amount,
+        withdrawal_amount,
         depositor: std::env::var("WD_DEPOSITOR")
             .ok()
             .map(|h| parse_address_hex(&h)),
@@ -75,10 +126,14 @@ fn main() -> anyhow::Result<()> {
 
     let artifacts = build_channel_withdrawal(&params, None)?;
 
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_default();
-    let name = |base: &str| format!("{prefix}{base}");
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("withdrawal_mle_config.json")),
+        &artifacts.withdrawal_mle_config_json,
+    )?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("lifecycle_validity_mle_config.json")),
+        &artifacts.validity_mle_config_json,
+    )?;
 
     fs::write(
         out_dir.join(name("withdrawal_mle.json")),
@@ -98,6 +153,8 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     for f in [
+        "withdrawal_mle_config.json",
+        "lifecycle_validity_mle_config.json",
         "withdrawal_mle.json",
         "lifecycle_validity_mle.json",
         "lifecycle.json",
@@ -107,4 +164,27 @@ fn main() -> anyhow::Result<()> {
     }
     eprintln!("[wd] Done!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_close_prefix_selects_full_native_fund_payout() {
+        assert_eq!(
+            fixture_amounts("close_"),
+            (
+                CLOSE_FIXTURE_NATIVE_FUND_AMOUNT,
+                CLOSE_FIXTURE_NATIVE_FUND_AMOUNT
+            )
+        );
+        for prefix in ["", "sepolia_", "c2c_", "close", "close_extra_"] {
+            assert_eq!(
+                fixture_amounts(prefix),
+                (DEFAULT_DEPOSIT_AMOUNT, DEFAULT_WITHDRAWAL_AMOUNT),
+                "unexpected close amount selection for prefix {prefix:?}"
+            );
+        }
+    }
 }

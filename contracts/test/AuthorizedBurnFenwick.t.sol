@@ -2,7 +2,6 @@
 pragma solidity ^0.8.29;
 
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 
 /// @notice R3-5 regressions for the newest proof-bound POST-burn fund snapshot. The historical
@@ -75,7 +74,7 @@ contract AuthorizedBurnSnapshotTest is CloseSettlementBase {
         bytes32 prevChain,
         ChannelSettlementManager.AuthorizedWithdrawal memory w
     ) internal {
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, prevChain, w);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizePartialWithdrawal();

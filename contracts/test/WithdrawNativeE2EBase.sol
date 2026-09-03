@@ -4,8 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
@@ -29,14 +29,11 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 ///      If the fixtures are absent (heavy proving not yet run), `fixturesReady` is false and every
 ///      inheriting test self-skips.
 abstract contract WithdrawNativeE2EBase is Test {
-    MleVerifier public verifier;
     IntmaxRollup public rollup;
     address public fraudTreasury = makeAddr("fraudTreasury");
     address public poster = makeAddr("poster");
 
     string internal lifecycleJson;
-    string internal validityMleJson;
-    string internal withdrawalMleJson;
     string internal payoutJson;
     bool internal fixturesReady;
 
@@ -53,36 +50,65 @@ abstract contract WithdrawNativeE2EBase is Test {
     function setUp() public virtual {
         // Load fixtures; if any is missing the heavy proving step hasn't run yet — self-skip.
         string memory root = string.concat(vm.projectRoot(), "/test/data/", _fixturePrefix());
+        string memory validityConfigJson;
+        string memory withdrawalConfigJson;
         try vm.readFile(string.concat(root, "withdrawal_payout.json")) returns (string memory p) {
             payoutJson = p;
             lifecycleJson = vm.readFile(string.concat(root, "lifecycle.json"));
-            validityMleJson = vm.readFile(string.concat(root, "lifecycle_validity_mle.json"));
-            withdrawalMleJson = vm.readFile(string.concat(root, "withdrawal_mle.json"));
+            validityConfigJson = vm.readFile(string.concat(root, "lifecycle_validity_mle_config.json"));
+            withdrawalConfigJson = vm.readFile(string.concat(root, "withdrawal_mle_config.json"));
+            if (
+                !vm.exists(string.concat(root, "lifecycle_validity_mle.json"))
+                    || !vm.exists(string.concat(root, "withdrawal_mle.json"))
+            ) {
+                fixturesReady = false;
+                return;
+            }
             fixturesReady = true;
         } catch {
             fixturesReady = false;
             return;
         }
 
-        verifier = new MleVerifier(block.chainid);
+        // Historical fixture sets are V1 ABI objects. They must not be silently fed to the V2
+        // adapters as arbitrary bytes; self-skip until their generators emit the strict V2 schema.
+        if (
+            !vm.keyExistsJson(validityConfigJson, ".schemaVersion")
+                || !vm.keyExistsJson(withdrawalConfigJson, ".schemaVersion")
+        ) {
+            fixturesReady = false;
+            return;
+        }
 
-        // Deploy with the VALIDITY VK (degreeBits > 0) + genesis state root.
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(validityMleJson, verifier);
+        // Deploy from the proof-free artifacts. A compact WHIR proof is ~1.3 MB as JSON; assigning
+        // it to contract storage in setUp performs tens of thousands of SSTOREs and can exhaust the
+        // Forge setup gas cap. Tests read the full proof transiently only when they verify it.
+        (, PinnedMleVerifierV2 validityAdapter) = FixtureLib.deployPinnedMleV2(validityConfigJson);
+        (, PinnedMleVerifierV2 withdrawalAdapter) = FixtureLib.deployPinnedMleV2(withdrawalConfigJson);
         bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
         // msg.sender at construction (this test contract) becomes `deployer`.
         rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury,
+            IPinnedMleVerifierV2(address(validityAdapter)),
+            IPinnedMleVerifierV2(address(withdrawalAdapter)),
+            genesis
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
+    }
 
-        // Set the WITHDRAWAL VK (deployer-only, set-once). deployer == this test contract.
-        FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);
-        IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(withdrawalMleJson, verifier);
-        rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
+    function _fixtureJson(string memory filename) internal view returns (string memory) {
+        return vm.readFile(
+            string.concat(vm.projectRoot(), "/test/data/", _fixturePrefix(), filename)
+        );
+    }
+
+    function _validityMleJson() internal view returns (string memory) {
+        return _fixtureJson("lifecycle_validity_mle.json");
+    }
+
+    function _withdrawalMleJson() internal view returns (string memory) {
+        return _fixtureJson("withdrawal_mle.json");
     }
     // ───────────────────────────────────────────────────────────────────────
     //  Lifecycle driver
@@ -115,7 +141,7 @@ abstract contract WithdrawNativeE2EBase is Test {
 
         // 4. Finalize the full 3-block chain with the real validity MLE proof.
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
-        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(validityMleJson);
+        bytes memory vproof = FixtureLib.parseCompactProofV2(_validityMleJson());
         bool ok = rollup.finalize(finalSubId, finalStateRoot, vpis, vproof);
         assertTrue(ok, "finalize failed (real validity MLE)");
         assertEq(rollup.latestFinalizedStateRoot(), finalStateRoot, "finalized state root mismatch");

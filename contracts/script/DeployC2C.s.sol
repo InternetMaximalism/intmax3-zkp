@@ -4,7 +4,8 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Deploy the channel-to-channel demo stack to Sepolia (manager-free, direct-to-EOA exit).
@@ -17,11 +18,13 @@ import {FixtureLib} from "./FixtureLib.sol";
 ///         ChannelSettlementManager, no close machinery (those were proven on the single-channel run).
 contract DeployC2C is Script {
     function _vJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_lifecycle_validity_mle.json"));
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_lifecycle_validity_mle_config.json"));
     }
+
     function _wJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_withdrawal_mle.json"));
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_withdrawal_mle_config.json"));
     }
+
     function _lcJson() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_lifecycle.json"));
     }
@@ -39,35 +42,31 @@ contract DeployC2C is Script {
 
         vm.startBroadcast();
 
-        MleVerifier verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
+        (, PinnedMleVerifierV2 validityVerifier) = FixtureLib.deployPinnedMleV2(vkJson);
+        (, PinnedMleVerifierV2 withdrawalVerifier) = FixtureLib.deployPinnedMleV2(_wJson());
         IntmaxRollup rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
+            fraudTreasury,
+            IPinnedMleVerifierV2(address(validityVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalVerifier)),
+            genesis
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
-        {
-            string memory wJson = _wJson();
-            FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(wJson);
-            IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(wJson, verifier);
-            rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
-        }
-
         vm.stopBroadcast();
 
         console2.log("=== c2c deploy (manager-free, direct-to-EOA) ===");
-        console2.log("MleVerifier :", address(verifier));
+        console2.log("Validity MLE v2 adapter:", address(validityVerifier));
+        console2.log("Withdrawal MLE v2 adapter:", address(withdrawalVerifier));
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("baked withdrawal recipient (c2c_withdrawal_payout.json):");
-        console2.logAddress(vm.parseJsonAddress(
-            vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_withdrawal_payout.json")),
-            ".withdrawals[0].recipient"
-        ));
+        console2.logAddress(
+            vm.parseJsonAddress(
+                vm.readFile(string.concat(vm.projectRoot(), "/test/data/c2c_withdrawal_payout.json")),
+                ".withdrawals[0].recipient"
+            )
+        );
     }
 }

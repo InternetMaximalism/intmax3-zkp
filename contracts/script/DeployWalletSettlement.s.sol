@@ -10,30 +10,16 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {DeployConfig} from "./DeployConfig.sol";
+import {FixtureLib} from "./FixtureLib.sol";
 import {RegRecordLib} from "./RegRecordLib.sol";
 
-contract WalletMockMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external view returns (bool) {
-        // The script entrypoint is also local-only, but deployed code/state can
-        // be migrated without re-running it. Keep the mock itself fail-closed.
-        if (block.chainid != 31337) revert MleProofEngineUnavailable(block.chainid);
-        return true;
-    }
-}
-
 /// @title Deploy settlement infrastructure for the wallet demo (anvil).
-/// @notice Reads an EXISTING IntmaxRollup from env ROLLUP, deploys MockMleVerifier +
-///         ChannelSettlementVerifier + ChannelSettlementManager, registers the channel +
-///         settlement manager. Member data from `test/data/pw_reg.json`.
+/// @notice Reads an EXISTING IntmaxRollup from env ROLLUP, deploys four circuit-specific pinned
+///         v2 adapters plus ChannelSettlementVerifier/Manager, and registers the channel and
+///         settlement manager. Member data comes from `test/data/pw_reg.json`.
 contract DeployWalletSettlement is Script {
     // SECURITY (challenge-period floor): sourced from `DeployConfig` rather than hardcoded, so if
     // the `block.chainid == 31337` guard below is ever loosened, the challenge period hardens
@@ -54,49 +40,33 @@ contract DeployWalletSettlement is Script {
         external
         returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
     {
-        // SECURITY: this script wires an ALWAYS-TRUE mock MLE verifier and a 1-second challenge
-        // period. Anything deployed with it has a VACUOUS `_checkCloseProof`, so it must never
-        // reach a public chain — and it is reachable from relay tooling pointed at Sepolia.
-        // The other deploy scripts already carry a chain-id guard; this one lacked it.
-        require(block.chainid == 31337, "local-devnet only: this script deploys mock verifiers");
+        // This wallet-demo deployer remains deliberately local-only. It now uses the real compact
+        // v2 verification boundary, but its surrounding workflow and short challenge window are
+        // still anvil-specific and are not a reviewed release manifest.
+        require(block.chainid == 31337, "local-devnet only: wallet settlement demo");
         RegRecordLib.Record memory r = RegRecordLib.parse(_read("pw_reg.json"));
+        string memory closeJson = _read("close_intent_mle_config.json");
+        string memory withdrawalClaimJson = _read("withdrawal_claim_mle_config.json");
+        string memory postCloseClaimJson = _read("post_close_claim_mle_config.json");
+        string memory cancelCloseJson = _read("cancel_close_mle_config.json");
         address rollupAddr = vm.envAddress("ROLLUP");
         rollup = IntmaxRollup(payable(rollupAddr));
 
         vm.startBroadcast();
 
-        // 1. Mock MLE verifier (always returns true — local testing only).
-        WalletMockMleVerifier mockMle = new WalletMockMleVerifier();
-
-        // 2. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
-        sv = new ChannelSettlementVerifier();
+        // Each adapter owns one complete immutable circuit VK/configuration. All four exist before
+        // the ChannelSettlementVerifier constructor runs, so there is no uninitialized interval.
+        (, PinnedMleVerifierV2 closeVerifier) = FixtureLib.deployPinnedMleV2(closeJson);
+        (, PinnedMleVerifierV2 withdrawalClaimVerifier) = FixtureLib.deployPinnedMleV2(withdrawalClaimJson);
+        (, PinnedMleVerifierV2 postCloseClaimVerifier) = FixtureLib.deployPinnedMleV2(postCloseClaimJson);
+        (, PinnedMleVerifierV2 cancelCloseVerifier) = FixtureLib.deployPinnedMleV2(cancelCloseJson);
+        sv = new ChannelSettlementVerifier(
+            IPinnedMleVerifierV2(address(closeVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalClaimVerifier)),
+            IPinnedMleVerifierV2(address(postCloseClaimVerifier)),
+            IPinnedMleVerifierV2(address(cancelCloseVerifier))
+        );
         CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
-        {
-            ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeCloseVk(
-                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
-        {
-            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeCancelCloseVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
 
         // 3. Register the channel on the rollup — COSIGNERS ONLY.
         //
@@ -161,41 +131,12 @@ contract DeployWalletSettlement is Script {
         // 5. Register settlement manager on rollup.
         rollup.registerSettlementManager(address(manager));
 
-        // 6. The remaining two settlement VK latches.
-        //
-        // SECURITY / LIVENESS: `ChannelSettlementVerifier` gates each statement on its OWN latch —
-        // `verifyWithdrawalClaim` reverts `WithdrawalClaimVkNotSet()` and `verifyPostCloseClaim`
-        // reverts `PostCloseClaimVkNotSet()`. This script keyed only close + cancelClose, so the
-        // `claim` step of the wallet demo's own `full_withdrawal` ticket
-        // (`{deploy, close, settle, withdraw, claim}`) could never succeed on a stack it deployed:
-        // members could close the channel and then not collect. Same defect class as audit622 A-M4.
-        // Deliberately placed AFTER the manager CREATE so it adds no CREATE and cannot move any
-        // deployed address (the drivers read `MANAGER:` from the log and fixtures bake it).
-        //
-        // The values are placeholders because the verifier wired above is `WalletMockMleVerifier`,
-        // which returns true unconditionally — this whole script is already hard-gated to chain id
-        // 31337 for exactly that reason. No fail-closed check is weakened: the latches still gate,
-        // and the SOUNDNESS of these statements on this stack rests on the devnet gate, not on the
-        // VK contents.
-        {
-            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeWithdrawalClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-            sv.initializePostCloseClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
-
         vm.stopBroadcast();
 
+        console2.log("CLOSE_MLE_V2_ADAPTER:", address(closeVerifier));
+        console2.log("WITHDRAWAL_CLAIM_MLE_V2_ADAPTER:", address(withdrawalClaimVerifier));
+        console2.log("POST_CLOSE_CLAIM_MLE_V2_ADAPTER:", address(postCloseClaimVerifier));
+        console2.log("CANCEL_CLOSE_MLE_V2_ADAPTER:", address(cancelCloseVerifier));
         console2.log("VERIFIER:", address(sv));
         console2.log("CLOSE_FUNDING_MATERIALIZER:", address(materializer));
         console2.log("MANAGER:", address(manager));

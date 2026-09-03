@@ -12,7 +12,8 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
 
@@ -23,18 +24,16 @@ import {DeployConfig} from "./DeployConfig.sol";
 ///             address the broadcast will deploy THIS SCRIPT's manager to. Bake THAT into the close
 ///             withdrawal proof: WD_RECIPIENT=<manager> WD_OUT_PREFIX=close_ cargo run --release
 ///             --bin generate_withdrawal_fixture.
-///           - `rollup.deployer == EOA`, so `initializeWithdrawalVk` is called by the EOA directly
-///             (no factory-deployer issue, unlike the local CREATE2 test).
+///           - all six circuit adapters are deployed and constructor-pinned before either parent
+///             value boundary is created; there is no post-deploy VK initializer.
 ///
 /// @dev Reads the sepolia_* fixtures. The 10-min GRACE_BEFORE_PROCESS_SECS is a fixed contract
 ///      constant and is unavoidable between requestClose and submitCloseIntent.
 ///
 /// ⚠️ NOT A PRODUCTION DEPLOYER — and, since 2026-08-13, that is ENFORCED by the
 /// `block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID` guard at the top of `run()`, not asserted by
-/// this comment. See the SECURITY note on that guard for the three independent reasons a deployment
-/// from this script cannot work on a public chain, and why option (a) — "just key the four
-/// settlement VKs here too" — could not have made it work. Use `DeployCloseCli.s.sol` for any
-/// deployment that must actually settle.
+/// this comment. Although all six v2 adapters are now pinned atomically, these demo fixture paths
+/// are not a reviewed release manifest. Use `DeployCloseCli.s.sol` for an operational deployment.
 contract DeployClose is Script {
     // SECURITY (challenge-period floor): was a hardcoded 1 second labelled "demo", on a script
     // whose own header aims it at Sepolia. Guarded finalization is permissionless at the deadline, so
@@ -47,50 +46,53 @@ contract DeployClose is Script {
     // Sepolia fixture set: recipient baked = the nonce-based CREATE manager address from the dry-run
     // (separate from the local CREATE2 `close_*` set used by CloseLifecycleE2E.t.sol).
     function _vJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle.json"));
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle_config.json"));
     }
+
     function _wJson() internal view returns (string memory) {
-        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_mle.json"));
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_mle_config.json"));
     }
+
     function _lcJson() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle.json"));
+    }
+
+    function _closeJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_intent_mle_config.json"));
+    }
+
+    function _withdrawalClaimJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/withdrawal_claim_mle_config.json"));
+    }
+
+    function _postCloseClaimJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/post_close_claim_mle_config.json"));
+    }
+
+    function _cancelCloseJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), "/test/data/cancel_close_mle_config.json"));
     }
 
     /// @return rollup  the deployed IntmaxRollup
     /// @return manager the deployed ChannelSettlementManager (returned so tests can assert on the
     ///         challenge period this script actually shipped, per chain)
     function run() external returns (IntmaxRollup rollup, ChannelSettlementManager manager) {
-        // SECURITY (fund freeze): this script constructs a REAL `ChannelSettlementVerifier` and a
-        // REAL `ChannelSettlementManager` and keys NONE of the four settlement VKs, so a channel it
-        // deploys can be FROZEN by a member's guarded close request (which flips
-        // `isNativeSendAllowed = false`) and then never closed — `submitCloseIntent` reverts
-        // `CloseVkNotSet()` — and never un-frozen — `cancelClose` reverts `CancelCloseVkNotSet()`.
-        // `initializeCloseVk` is deployer-only-and-set-once on a verifier this script does not
-        // return, and `ChannelSettlementManager.verifier` is immutable, so the channel cannot be
-        // repaired after the fact. Its members' funds are stranded.
+        // SECURITY: this remains a local-only demo because its sepolia-prefixed state fixtures are
+        // not a reviewed release manifest. Unlike the legacy deploy, however, it atomically pins
+        // every circuit adapter and cannot create an uninitialized settlement verifier.
         //
-        // WHY A HARD CHAIN-ID GATE AND NOT "KEY THE VKs HERE TOO" (the alternative fix):
-        //   1. Keying the four settlement VKs would NOT make a real-chain deployment work. This
-        //      script takes its validity VK, withdrawal VK and genesis root from the four
-        //      `sepolia_*` fixtures, which are one circuit generation STALE (pre-Falcon; regenerated
-        //      at 89cd044 while everything else was regenerated at 2e418f6 — see
-        //      doc/tasks/falcon-sig-phase5-notes.md "STOP 1"). A rollup born with those is a rollup
-        //      no current proof verifies against. Fixing that is a Rust fixture regeneration, not an
-        //      edit to this file, so no change confined to `contracts/` can make this script produce
-        //      a working public-chain deployment.
-        //   2. Nothing legitimately needs it on a public chain. `DeployCloseCli.s.sol` is the
+        // WHY THE HARD CHAIN-ID GATE REMAINS:
+        //   1. This script takes validity state and genesis data from `sepolia_*` demo fixtures,
+        //      not a generator-produced, reviewed deployment manifest. The strict v2 parser now
+        //      rejects stale/V1 material, but successful parsing alone is not release authorization.
+        //   2. Nothing legitimately needs this helper on a public chain. `DeployCloseCli.s.sol` is the
         //      real-network settlement deployer (doc/docs/deploy-runbook.md, and it is what
         //      `tests/close_lifecycle_cli_e2e.rs` / `tests/two_token_cli_e2e.rs` drive); the only
         //      recorded uses of THIS script (doc/tasks/a3-p4-withdraw-plan.md,
         //      doc/tasks/a3-p5-plus-plan.md) are anvil runs, and its Sepolia driver
         //      `RunClose.s.sol` reads `sepolia_close_intent*.json`, which do not exist in the repo.
-        //   3. The "predict the manager address by dry-running against Sepolia" rationale in the
-        //      header does not transfer to the production deployer. A nonce-based CREATE address is
-        //      a function of the EOA's nonce, and `DeployCloseCli` issues 12 broadcast transactions
-        //      before its manager CREATE against this script's 7 (it also keys five VKs), so the
-        //      address this script predicts is not the one the production deploy uses. The
-        //      prediction is only ever about THIS script's own demo manager — which is now, by this
-        //      guard, a devnet object.
+        //   3. The nonce-based manager prediction applies only to this exact script and deployment
+        //      order; it is not transferable to the production deployer's different transaction set.
         //
         // The chain id is compared against the same `SETTLEMENT_LOCAL_DEVNET_CHAIN_ID` the manager's
         // constructor uses, so "local" cannot mean two different things in this repo. This matches
@@ -99,9 +101,14 @@ contract DeployClose is Script {
         // `FRAUD_TREASURY` fallback check below, which only fires when the env var is unset.
         require(
             block.chainid == SETTLEMENT_LOCAL_DEVNET_CHAIN_ID,
-            "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+            "local-devnet only: demo fixtures are not a release manifest -- use DeployCloseCli.s.sol"
         );
         string memory vkJson = _vJson();
+        string memory withdrawalJson = _wJson();
+        string memory closeJson = _closeJson();
+        string memory withdrawalClaimJson = _withdrawalClaimJson();
+        string memory postCloseClaimJson = _postCloseClaimJson();
+        string memory cancelCloseJson = _cancelCloseJson();
         string memory lcJson = _lcJson();
         bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
         // SECURITY (#6): require FRAUD_TREASURY on real chains; anvil (31337) may default it.
@@ -113,20 +120,29 @@ contract DeployClose is Script {
 
         vm.startBroadcast();
 
-        MleVerifier verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
+        (, PinnedMleVerifierV2 validityVerifier) = FixtureLib.deployPinnedMleV2(vkJson);
+        (, PinnedMleVerifierV2 withdrawalVerifier) = FixtureLib.deployPinnedMleV2(withdrawalJson);
         rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            false // SECURITY (A-2): production — reject a disabled (degreeBits==0) validity VK
+            fraudTreasury,
+            IPinnedMleVerifierV2(address(validityVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalVerifier)),
+            genesis
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
-        ChannelSettlementVerifier sv = new ChannelSettlementVerifier();
+        (, PinnedMleVerifierV2 closeVerifier) = FixtureLib.deployPinnedMleV2(closeJson);
+        (, PinnedMleVerifierV2 withdrawalClaimVerifier) = FixtureLib.deployPinnedMleV2(withdrawalClaimJson);
+        (, PinnedMleVerifierV2 postCloseClaimVerifier) = FixtureLib.deployPinnedMleV2(postCloseClaimJson);
+        (, PinnedMleVerifierV2 cancelCloseVerifier) = FixtureLib.deployPinnedMleV2(cancelCloseJson);
+        ChannelSettlementVerifier sv = new ChannelSettlementVerifier(
+            IPinnedMleVerifierV2(address(closeVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalClaimVerifier)),
+            IPinnedMleVerifierV2(address(postCloseClaimVerifier)),
+            IPinnedMleVerifierV2(address(cancelCloseVerifier))
+        );
         CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
 
         // registerChannel BEFORE the manager deploy (Finding E).
@@ -151,31 +167,39 @@ contract DeployClose is Script {
             bindings[i] = ChannelSettlementManager.MemberBinding({pkG: sphincs[i], recipient: r});
         }
         manager = new ChannelSettlementManager(
-            bytes4(channelId), bpSlot, sphincs[bpSlot], 0, bytes32(0), DeployConfig.challengePeriodSecs(), SPECIAL_CLOSE_PENALTY,
-            INITIAL_BP_BOND, IChannelSettlementVerifier(address(sv)), IChannelRegistry(address(rollup)),
-            address(materializer), bindings
+            bytes4(channelId),
+            bpSlot,
+            sphincs[bpSlot],
+            0,
+            bytes32(0),
+            DeployConfig.challengePeriodSecs(),
+            SPECIAL_CLOSE_PENALTY,
+            INITIAL_BP_BOND,
+            IChannelSettlementVerifier(address(sv)),
+            IChannelRegistry(address(rollup)),
+            address(materializer),
+            bindings
         );
-
-        // Withdrawal VK (deployer == EOA == msg.sender here, so the deployer-only guard passes).
-        {
-            string memory wJson = _wJson();
-            FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(wJson);
-            IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(wJson, verifier);
-            rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
-        }
 
         vm.stopBroadcast();
 
         console2.log("=== close-lifecycle deploy ===");
-        console2.log("MleVerifier :", address(verifier));
+        console2.log("Validity MLE v2 adapter:", address(validityVerifier));
+        console2.log("Withdrawal MLE v2 adapter:", address(withdrawalVerifier));
+        console2.log("Close MLE v2 adapter:", address(closeVerifier));
+        console2.log("Withdrawal-claim MLE v2 adapter:", address(withdrawalClaimVerifier));
+        console2.log("Post-close-claim MLE v2 adapter:", address(postCloseClaimVerifier));
+        console2.log("Cancel-close MLE v2 adapter:", address(cancelCloseVerifier));
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("SettlementVerifier:", address(sv));
         console2.log("CloseFundingMaterializer:", address(materializer));
         console2.log("CLOSE_MANAGER_ADDRESS:", address(manager));
         console2.log("baked recipient (sepolia_withdrawal_payout.json):");
-        console2.logAddress(vm.parseJsonAddress(
-            vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_payout.json")),
-            ".withdrawals[0].recipient"
-        ));
+        console2.logAddress(
+            vm.parseJsonAddress(
+                vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_withdrawal_payout.json")),
+                ".withdrawals[0].recipient"
+            )
+        );
     }
 }

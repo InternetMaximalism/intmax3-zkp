@@ -2,13 +2,14 @@
 //!
 //! Phase A (tasks/close-verifier-a1-plan.md): `ChannelSettlementVerifier.verifyCloseIntent` is
 //! being turned into a REAL on-chain verification of the plonky2 `ChannelCloseCircuit` via the
-//! shared `@mle/MleVerifier.sol` rail (the SAME rail proven by validity/withdrawal). This binary
-//! produces the two artifacts the Solidity close tests consume:
+//! shared pinned compact-v2 MLE/WHIR rail (the SAME rail proven by validity/withdrawal). This
+//! binary produces the proof-free deployment config and two artifacts the Solidity close tests
+//! consume:
 //!
-//!   - contracts/test/data/close_intent_mle.json — the wrapped-close MLE proof + its VK params
-//!     (degreeBits / preprocessedCommitmentRoot / gatesDigest / kIs / subgroupGenPowers /
-//!     whirParams / protocolId / sessionId), in the SAME JSON schema `FixtureLib.parseProof` /
-//!     `FixtureLib.parseDeployData` already consume for the validity/withdrawal fixtures.
+//!   - contracts/test/data/close_intent_mle_config.json — strict proof-free V2 configuration.
+//!   - contracts/test/data/close_intent_mle.json — the wrapped-close compact-v2 proof plus its
+//!     pinned verification configuration, in the exact schema consumed by
+//!     `FixtureLib.parseCompactProofV2` / `FixtureLib.deployPinnedMleV2`.
 //!   - contracts/test/data/close_intent.json — a descriptor with EVERY `CloseProofFields` value the
 //!     Solidity test needs (channelId, all digests, finalStateVersion, finalSettledTxChain,
 //!     memberSetCommitment, memberCount, delegateCount, …) plus the close-intent fields the
@@ -19,14 +20,15 @@
 //! inputs (`ChannelClosePublicInputs::from_u64_slice` over the CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
 //! (103) raw Goldilocks limbs the close circuit registers — `WrapperCircuit` re-registers them
 //! verbatim). Nothing is hardcoded. The 103-limb public-input vector is what the on-chain
-//! `_bindCloseLimbsStrict` will re-bind limb-by-limb, and `MleVerifier.verify` then re-checks the
-//! proof against the close VK.
+//! `_bindCloseLimbsStrict` will re-bind limb-by-limb, and the circuit-specific pinned v2 adapter
+//! then re-checks the proof against the close verification configuration.
 //!
 //! Usage:  cargo run --release --features close-fixture-bin --bin generate_close_fixture
 //!
 //! HEAVY COMPUTE: this runs a full close-circuit proof + a WrapperCircuit recursion + the MLE/WHIR
 //! commit-and-open (degree 2^19+, minutes, multi-GB). It must be run explicitly by the user; the
-//! Solidity close tests skip gracefully until `close_intent_mle.json` exists.
+//! Developer-facing Solidity close tests may skip while `close_intent_mle.json` is absent; the
+//! non-skipping V2 fixture release manifest makes absence or a stale schema a release failure.
 
 use std::{fs, path::Path};
 
@@ -38,7 +40,11 @@ use intmax3_zkp::{
     ethereum_types::u256::U256,
     utils::{
         conversion::ToU64,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{
+            export_mle_v2_config_json, export_mle_v2_json, mle_v2_config_only_requested,
+            persist_or_validate_mle_v2_config_json, prove_with_mle_v2, setup_mle_vk_v2,
+            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
+        },
         wrapper::WrapperCircuit,
     },
 };
@@ -111,18 +117,29 @@ struct CloseIntentDescriptor {
 fn main() -> anyhow::Result<()> {
     eprintln!("[close] Step 0: build close circuit fixture (balance + list + close circuits)");
     let fx = test_fixture::fixture();
+    let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
+    let close_mle_config_json = export_mle_v2_config_json(&close_wrapper.data)?;
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("close_intent_mle_config.json"),
+        &close_mle_config_json,
+    )?;
+    eprintln!("[close] wrote contracts/test/data/close_intent_mle_config.json");
+    if mle_v2_config_only_requested() {
+        eprintln!("[close] config-only mode: no witness or proof was constructed");
+        return Ok(());
+    }
 
     // -----------------------------------------------------------------------
     // Step 1: build a REAL self-consistent close witness and prove the close circuit.
     //
-    // Multitoken Phase 5b (CO-GENERATION) / falcon-sig Phase 2 SEAM: the witness is built by
+    // Multitoken Phase 5b (CO-GENERATION): the witness is built by
     // `test_fixture::build_close_full_witness_two_token` over
-    //   - channel 1, signed by `test_fixture::deterministic_falcon_keys(1, N)`. NOTE (Phase-2/-4
-    //     seam, documented on that helper): `generate_withdrawal_fixture` still registers the
-    //     GOLDILOCKS `ChannelMemberKeys::deterministic(1)` pk_g values, so a fixture generated NOW
-    //     will NOT match the registered member set — do not regenerate the checked-in
-    //     close/withdrawal fixture pair until Phase 4 moves registration to the Falcon pk_g and
-    //     Phase 5 co-regenerates both;
+    //   - channel 1, signed by `test_fixture::deterministic_falcon_keys(1, N)`. The withdrawal
+    //     generator uses the same deterministic Falcon identities for channel registration, so the
+    //     close and `close_` withdrawal families must be regenerated together and are checked for
+    //     exact member-set equality by the lifecycle E2E;
     //   - a TWO-token final state (registry [ETH, 7], amounts [77, 55]) so the fixture exercises
     //     the per-token settlement path (nonzero non-genesis fund), not just genesis.
     // -----------------------------------------------------------------------
@@ -131,11 +148,7 @@ fn main() -> anyhow::Result<()> {
     let member_count = test_fixture::TEST_ACTIVE_MEMBERS;
     let member_keys =
         test_fixture::deterministic_falcon_keys(CLOSE_FIXTURE_CHANNEL_ID, member_count);
-    eprintln!(
-        "[close] WARNING (falcon-sig Phase 2 seam): this fixture is signed with Falcon keys \
-         while the withdrawal fixture still registers Goldilocks pk_g values — the pair is \
-         inconsistent until Phase 4/5 co-regenerates both. Do not commit a lone regeneration."
-    );
+    eprintln!("[close] deterministic Falcon member set matches the co-generated withdrawal family");
     eprintln!(
         "[close] Step 1: build two-token close witness (channel {CLOSE_FIXTURE_CHANNEL_ID}, \
          member_count = {member_count}, registry [0, {NON_GENESIS_TOKEN_INDEX}]) + prove"
@@ -173,15 +186,15 @@ fn main() -> anyhow::Result<()> {
     // verbatim, so the wrapped proof's MLE `publicInputs` equal the 103 close limbs above.
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 3: wrap + MLE (close proof)");
-    let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
     let close_wrapped = close_wrapper.prove(&close_proof)?;
     close_wrapper.data.verify(close_wrapped.clone())?;
-    let close_vk = setup_mle_vk::<F, C, D>(&close_wrapper.data);
+    let close_vk = setup_mle_vk_v2::<F, C, D>(&close_wrapper.data);
     let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&close_wrapper.wrap_proof, &close_proof);
-    let close_mle = prove_with_mle::<F, C, D>(&close_wrapper.data, pw)?;
-    verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
-    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common)?;
+    pw.set_proof_with_pis_target(&close_wrapper.wrap_proof, &close_proof)?;
+    let close_mle = prove_with_mle_v2::<F, C, D>(&close_wrapper.data, pw)?;
+    verify_mle_proof_v2(&close_wrapper.data, &close_vk, &close_mle.proof)?;
+    let close_mle_json = export_mle_v2_json(&close_mle.proof, &close_vk, &close_wrapper.data)?;
+    validate_mle_v2_full_against_config_json(&close_mle_json, &close_mle_config_json)?;
 
     // SANITY: the MLE proof's exported publicInputs must equal the 103 raw close limbs (this is the
     // exact vector the on-chain `_bindCloseLimbsStrict` rebinds). A mismatch here means the
@@ -189,7 +202,7 @@ fn main() -> anyhow::Result<()> {
     {
         let parsed: serde_json::Value = serde_json::from_str(&close_mle_json)?;
         let mle_pis = parsed
-            .get("publicInputs")
+            .pointer("/proof/publicInputs")
             .and_then(|v| v.as_array())
             .expect("close MLE json must carry publicInputs");
         assert_eq!(
@@ -215,9 +228,6 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 4: write outputs.
     // -----------------------------------------------------------------------
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-
     fs::write(out_dir.join("close_intent_mle.json"), &close_mle_json)?;
     eprintln!("[close] wrote contracts/test/data/close_intent_mle.json");
 

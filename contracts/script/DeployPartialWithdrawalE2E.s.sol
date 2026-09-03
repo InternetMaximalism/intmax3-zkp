@@ -11,33 +11,16 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
 import {RegRecordLib} from "./RegRecordLib.sol";
 
-/// @dev Drop-in mock for MleVerifier — always returns true. Identical to test/CloseTestLib.sol's
-///      MockMleVerifier but inlined here to avoid cross-directory imports.
-contract E2EMockMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external view returns (bool) {
-        // The script entrypoint is also local-only, but deployed code/state can
-        // be migrated without re-running it. Keep the mock itself fail-closed.
-        if (block.chainid != 31337) revert MleProofEngineUnavailable(block.chainid);
-        return true;
-    }
-}
-
 /// @title Deploy the full partial-withdrawal E2E stack on anvil.
-/// @notice Deploys IntmaxRollup (real MLE VK for deposits) + MockMleVerifier (settlement side) +
-///         ChannelSettlementVerifier + ChannelSettlementManager. Reads member registration from
-///         `test/data/pw_reg.json` (written by the Rust E2E driver).
+/// @notice Deploys IntmaxRollup plus six circuit-specific pinned v2 adapters,
+///         ChannelSettlementVerifier and ChannelSettlementManager. Reads member registration
+///         from `test/data/pw_reg.json` (written by the Rust E2E driver).
 contract DeployPartialWithdrawalE2E is Script {
     // SECURITY (challenge-period floor): sourced from `DeployConfig` rather than hardcoded, so if
     // the `block.chainid == 31337` guard below is ever loosened, the challenge period hardens
@@ -59,12 +42,15 @@ contract DeployPartialWithdrawalE2E is Script {
         external
         returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
     {
-        // SECURITY: this script wires an ALWAYS-TRUE mock MLE verifier and a 1-second challenge
-        // period. Anything deployed with it has a VACUOUS `_checkCloseProof`, so it must never
-        // reach a public chain — and it is reachable from relay tooling pointed at Sepolia.
-        // The other deploy scripts already carry a chain-id guard; this one lacked it.
-        require(block.chainid == 31337, "local-devnet only: this script deploys mock verifiers");
-        string memory mleJson = _read("mle_fixture.json");
+        // The surrounding E2E workflow and short challenge window remain anvil-specific even
+        // though every proof boundary below now uses a real pinned compact-v2 verifier.
+        require(block.chainid == 31337, "local-devnet only: partial-withdrawal E2E");
+        string memory mleJson = _read("mle_fixture_config.json");
+        string memory withdrawalJson = _read("withdrawal_mle_config.json");
+        string memory closeJson = _read("close_intent_mle_config.json");
+        string memory withdrawalClaimJson = _read("withdrawal_claim_mle_config.json");
+        string memory postCloseClaimJson = _read("post_close_claim_mle_config.json");
+        string memory cancelCloseJson = _read("cancel_close_mle_config.json");
         string memory blockJson = _read("block_fixture.json");
         RegRecordLib.Record memory r = RegRecordLib.parse(_read("pw_reg.json"));
         bytes32 genesis = vm.parseJsonBytes32(blockJson, ".genesis_state_root");
@@ -72,59 +58,33 @@ contract DeployPartialWithdrawalE2E is Script {
 
         vm.startBroadcast();
 
-        // 1. IntmaxRollup with real validity VK (needed for deposit()).
-        MleVerifier realVerifier = new MleVerifier(FixtureLib.mleVerifierChainId());
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(mleJson, realVerifier);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(mleJson);
+        // 1. IntmaxRollup with validity and withdrawal circuits pinned atomically.
+        (, PinnedMleVerifierV2 validityVerifier) = FixtureLib.deployPinnedMleV2(mleJson);
+        (, PinnedMleVerifierV2 withdrawalVerifier) = FixtureLib.deployPinnedMleV2(withdrawalJson);
         rollup = new IntmaxRollup(
             fraudTreasury,
-            vvk,
-            vdd.whirParams,
-            vdd.protocolId,
-            vdd.sessionId,
-            vdd.kIs,
-            vdd.subgroupGenPowers,
-            realVerifier,
-            genesis,
-            false
+            IPinnedMleVerifierV2(address(validityVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalVerifier)),
+            genesis
         );
         // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
         rollup.setKzgVerifier(new BlobKZGVerifierExt());
         // Authorize the block producer (posting is permissioned; the whitelist is empty until set).
         rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
 
-        // 2. Mock MLE verifier for the settlement side (always returns true).
-        E2EMockMleVerifier mockMle = new E2EMockMleVerifier();
-
-        // 3. ChannelSettlementVerifier with dummy VKs (mock verifier ignores them).
-        sv = new ChannelSettlementVerifier();
+        // 2. Four independent channel-statement adapters, all present before the atomic verifier
+        // constructor. No dummy VK, set-once latch or verification bypass remains.
+        (, PinnedMleVerifierV2 closeVerifier) = FixtureLib.deployPinnedMleV2(closeJson);
+        (, PinnedMleVerifierV2 withdrawalClaimVerifier) = FixtureLib.deployPinnedMleV2(withdrawalClaimJson);
+        (, PinnedMleVerifierV2 postCloseClaimVerifier) = FixtureLib.deployPinnedMleV2(postCloseClaimJson);
+        (, PinnedMleVerifierV2 cancelCloseVerifier) = FixtureLib.deployPinnedMleV2(cancelCloseJson);
+        sv = new ChannelSettlementVerifier(
+            IPinnedMleVerifierV2(address(closeVerifier)),
+            IPinnedMleVerifierV2(address(withdrawalClaimVerifier)),
+            IPinnedMleVerifierV2(address(postCloseClaimVerifier)),
+            IPinnedMleVerifierV2(address(cancelCloseVerifier))
+        );
         CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
-        {
-            ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeCloseVk(
-                MleVerifier(address(mockMle)), cvk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
-        {
-            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeCancelCloseVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
 
         // 4. Register channel on rollup — COSIGNERS ONLY (Option B). See the long note in
         //    `RegRecordLib`: the registration record's delegate count is a CONSTANT zero, because
@@ -174,31 +134,14 @@ contract DeployPartialWithdrawalE2E is Script {
         // 6. Register settlement manager on rollup (critical for authorizePartialWithdrawal).
         rollup.registerSettlementManager(address(manager));
 
-        // 7. The remaining two settlement VK latches — see the identical note in
-        //    `DeployWalletSettlement.s.sol`. `verifyWithdrawalClaim` / `verifyPostCloseClaim` each
-        //    gate on their own latch, so a stack keyed with only close + cancelClose can close but
-        //    cannot pay out claims. Appended AFTER the manager CREATE so no deployed address moves.
-        //    Placeholder values: the wired verifier is `E2EMockMleVerifier` and this script is
-        //    hard-gated to chain id 31337.
-        {
-            ChannelSettlementVerifier.StatementVk memory svk = ChannelSettlementVerifier.StatementVk({
-                degreeBits: 1,
-                preprocessedRoot: bytes32(uint256(1)),
-                numConstants: 1,
-                numRoutedWires: 1,
-                gatesDigest: bytes32(uint256(2))
-            });
-            SpongefishWhirVerify.WhirParams memory whir;
-            sv.initializeWithdrawalClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-            sv.initializePostCloseClaimVk(
-                MleVerifier(address(mockMle)), svk, whir, hex"", hex"", new uint256[](0), new uint256[](0)
-            );
-        }
-
         vm.stopBroadcast();
 
+        console2.log("Validity MLE v2 adapter:", address(validityVerifier));
+        console2.log("Withdrawal MLE v2 adapter:", address(withdrawalVerifier));
+        console2.log("Close MLE v2 adapter:", address(closeVerifier));
+        console2.log("Withdrawal-claim MLE v2 adapter:", address(withdrawalClaimVerifier));
+        console2.log("Post-close-claim MLE v2 adapter:", address(postCloseClaimVerifier));
+        console2.log("Cancel-close MLE v2 adapter:", address(cancelCloseVerifier));
         console2.log("IntmaxRollup:", address(rollup));
         console2.log("SettlementVerifier:", address(sv));
         console2.log("CloseFundingMaterializer:", address(materializer));

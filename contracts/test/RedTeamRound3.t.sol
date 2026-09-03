@@ -2,7 +2,6 @@
 pragma solidity ^0.8.29;
 
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
@@ -23,7 +22,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
     // ── helpers (mirrored from CloseLifecycleRedTeam.t.sol) ──────────────────
 
     function _cancelProof(ChannelSettlementManager.CancelCloseRequest memory request)
-        internal view returns (MleVerifier.MleProof memory)
+        internal view returns (bytes memory)
     {
         ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
@@ -192,13 +191,13 @@ contract RedTeamRound3Test is CloseSettlementBase {
         // ── the three OTHER latches remain exactly as armed as when the attack landed. ──────
         // (b) A1 still refuses the cancel with the newest material that exists.
         ChannelSettlementManager.CancelCloseRequest memory rescue = _cancelRequest(d2, 30);
-        MleVerifier.MleProof memory rescueProof = _cancelProof(rescue);
+        bytes memory rescueProof = _cancelProof(rescue);
         vm.expectRevert(ChannelSettlementManager.CancelCloseReplay.selector);
         manager.cancelClose(rescue, rescueProof);
 
         // (c) the replacement lane is shut past the fixed response-tail end -- even with the head.
         ChannelSettlementManager.CloseIntent memory head = _intentAt(9, 30);
-        MleVerifier.MleProof memory headProof = _closeProof(head);
+        bytes memory headProof = _closeProof(head);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(head, headProof);
 
@@ -439,7 +438,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         // Only after the fixed end is every further rung refused.
         vm.warp(uint256(deadline) + 1);
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, nextVersion + 1);
-        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        bytes memory tooLateProof = _closeProof(tooLate);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
 
@@ -470,7 +469,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         vm.warp(uint256(horizon) + 1);
         bytes32 d2 = manager.getPendingClose().closeIntentDigest;
         ChannelSettlementManager.CancelCloseRequest memory spent = _cancelRequest(d2, 30);
-        MleVerifier.MleProof memory spentProof = _cancelProof(spent);
+        bytes memory spentProof = _cancelProof(spent);
         vm.expectRevert(ChannelSettlementManager.CancelCloseReplay.selector);
         manager.cancelClose(spent, spentProof);
 
@@ -481,7 +480,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
 
         vm.warp(uint256(absoluteEnd) + 1);
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, 31);
-        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        bytes memory tooLateProof = _closeProof(tooLate);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(tooLate, tooLateProof);
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
@@ -600,7 +599,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
 
         // The honest side still has nothing newer than v30 right now, and A4 still refuses.
         ChannelSettlementManager.CancelCloseRequest memory veto2 = _cancelRequest(pwDigest, 30);
-        MleVerifier.MleProof memory veto2Proof = _cancelProof(veto2);
+        bytes memory veto2Proof = _cancelProof(veto2);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCancelReplay.selector);
         manager.cancelPartialWithdrawal(veto2, veto2Proof);
 
@@ -683,7 +682,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         bytes32 d = manager.computeCloseIntentDigest(intent);
 
         ChannelSettlementManager.CancelCloseRequest memory lie = _cancelRequest(d, 9999);
-        MleVerifier.MleProof memory wrongProof = _cancelProof(_cancelRequest(d, 31));
+        bytes memory wrongProof = _cancelProof(_cancelRequest(d, 31));
         vm.expectRevert();
         manager.cancelClose(lie, wrongProof);
         assertEq(manager.highestCancelledRevivedStateVersion(), 0, "floor unmoved");
@@ -716,7 +715,7 @@ contract RedTeamRound3Test is CloseSettlementBase {
         manager.cancelPartialWithdrawal(v, _cancelProof(v));
 
         _submitPw(9, 20);
-        MleVerifier.MleProof memory p = _cancelProof(v);
+        bytes memory p = _cancelProof(v);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalCancelReplay.selector);
         manager.cancelPartialWithdrawal(v, p);
     }

@@ -1,10 +1,23 @@
 # Deploy runbook — INTMAX3 channel wallet demo (Sepolia + AWS EC2)
 
-How to (re)deploy and operate the two-channel payment-channel demo. Procedure only — the live
-identifiers (EC2 IP, instance id, domain/URL, on-chain addresses, key paths) are in the **gitignored**
-`.claude/deploy-record.md` (per "keep server records out of git"). Set the shell vars below from there.
+> **RELEASE STATUS (2026-09-03): NO-GO FOR PUBLIC VALUE.** MLE/WHIR V2 is integrated, but the
+> independent cryptographic review and the other blockers in
+> `doc/audit/audit30-08-2026-final-security-closure.md` are not closed. The Rollup's
+> `releaseRuntime` guard remains chain-31337-only. Do not open deposits, post/finalize, withdraw,
+> close, claim, or fund a channel on Sepolia/mainnet. Public-chain configuration may be used only
+> in a non-broadcast simulation to inspect constructor/runtime identity. A local demo,
+> test pass, or explicit `MLE_VERIFIER_CHAIN_ID` does not lift this containment.
+>
+> **Clean V2 cutover:** retire or resolve every V1 pending submission, bond, close, claim,
+> deployment manifest and publisher journal under its original contracts. Never attach a V2
+> adapter to old pending state or decode old tuple proof bytes as V2 compact bytes.
 
-## Architecture (EC2-only, single small box)
+How to build and locally rehearse the two-channel payment-channel demo, plus historical
+infrastructure notes. Live identifiers (EC2 IP, instance id, domain/URL, old on-chain addresses,
+key paths) are in the **gitignored** `.claude/deploy-record.md`. Those records are not V2 release
+authority and must not be copied into a new manifest.
+
+## Architecture (historical EC2 topology; public funding blocked)
 - ONE small EC2 (t4g.medium, arm64, eu-north-1) serves BOTH the static frontend AND the `/api`
   co-signing from a single origin over **HTTPS**, with **COEP/COOP** headers so the multi-threaded
   wasm proving works (SharedArrayBuffer needs a secure context + cross-origin isolation).
@@ -12,8 +25,8 @@ identifiers (EC2 IP, instance id, domain/URL, on-chain addresses, key paths) are
 - TLS: a **nip.io** domain + **Let's Encrypt** (trusted cert, no warning). No CloudFront (the IAM user
   has S3+EC2 only; S3 alone cannot set COEP/COOP, and the wasm is a shared-memory build → S3 hosting
   is impossible. That's why everything is served from EC2.)
-- Two channels (**7 & 8**), each backed by its OWN real Sepolia deposit (its own IntmaxRollup, so each
-  deposit is first on its chain → prev hash 0).
+- The historical channels (**7 & 8**) each used a distinct Sepolia Rollup/deposit. They predate the
+  V2 clean cutover and are not candidates for attachment or renewed funding.
 - The heavy `setup-backing` (deposit + ~4GB balance proof) runs LOCALLY; only the cached backing
   artifacts ship to EC2, which only co-signs (light: a real init co-sign ≈ 2-8s, ~210MB).
 - The `channel_member` signer binary is built locally for **linux/arm64 via Docker** (native on Apple
@@ -121,7 +134,59 @@ chmod 600 .claude/cosigner.key                    # the CLI REFUSES any group/wo
   spawners deliberately do not set it themselves, so a copy of the dev command pasted onto a real
   host fails loudly instead of silently creating a worthless channel.
 
-## Sepolia (one-time, when rollups/backing must be rebuilt)
+## MLE/WHIR V2 deployment order (chain 31337 acceptance only)
+
+The deployment boundary is configuration-first. Generate the proof-free V2 artifacts before any
+Manager-dependent witness:
+
+```bash
+cargo run --release --locked --bin generate_e2e_fixture -- --mle-config-only
+cargo run --release --locked --bin generate_withdrawal_fixture -- --mle-config-only
+WD_OUT_PREFIX=close_ cargo run --release --locked --bin generate_withdrawal_fixture -- --mle-config-only
+cargo run --release --locked --features close-fixture-bin \
+  --bin generate_close_fixture -- --mle-config-only
+cargo run --release --locked --features withdrawal-claim-fixture-bin \
+  --bin generate_withdrawal_claim_fixture -- --mle-config-only
+cargo run --release --locked --features post-close-claim-fixture-bin \
+  --bin generate_post_close_claim_fixture -- --mle-config-only
+cargo run --release --locked --features cancel-close-fixture-bin \
+  --bin generate_cancel_close_fixture -- --mle-config-only
+```
+
+Deploy/predict six distinct circuit pairs—validity, withdrawal, close, withdrawal claim,
+post-close claim and cancel close—where each pair is one `MleVerifierV2` core plus one immutable
+`PinnedMleVerifierV2` adapter. `IntmaxRollup` constructor-pins the first two;
+`ChannelSettlementVerifier` constructor-pins the ordered remaining four. There are no
+`initialize*Vk` calls or initialized-latch read-backs. The production existing-Rollup attach reads
+only the six config files plus authenticated `cli_reg_record.json`; it must not depend on
+`close_lifecycle.json` or another proof fixture.
+
+After obtaining the exact Manager address from the validated transaction plan/finalized read-back,
+regenerate every full proof fixture in one batch with
+`WD_RECIPIENT=<manager> WD_OUT_PREFIX=close_`. The only proof calldata and proof-DA representation
+is the exact strict `.compactProof.bytes` stream (`MLEWHIR3`); no caller may encode the redundant
+Solidity proof tuple. Full commands and acceptance gates are in
+`doc/tasks/regen-and-redeploy-runbook.md`.
+
+For an existing-Rollup settlement attach, the accepted post-library core sequence is exactly 13
+transactions: materializer; four ordered `(core, adapter)` pairs; settlement verifier;
+`registerChannel`; Manager; `registerSettlementManager`. The driver validates sender, chain,
+contiguous nonce/order, raw constructor suffixes, all distinct addresses, finalized code hashes,
+adapter/core chain pins and every config/circuit/WHIR/protocol/session digest before publishing
+`settlement.json`.
+
+No production operator may advance beyond local acceptance while `releaseRuntime` is confined to
+31337. Removing that guard is a separate reviewed change after the independent cryptographic
+review, full Rust/Solidity/DA/gas/size matrix, real public-chain acceptance, and closure of all
+other final-audit NO-GO items.
+
+<details>
+<summary>Historical pre-V2 Sepolia procedure (reference only; do not execute)</summary>
+
+Everything in this collapsed section describes the retired mutable-VK/tuple-proof deployment. It
+is preserved only as incident and infrastructure history.
+
+## Historical Sepolia procedure
 
 **Which script, for what — read this before running anything.**
 
@@ -281,6 +346,8 @@ FAUCET_COOLDOWN_MS=5000
 - $ITX lives at `contracts/test/tokens/IntmaxTestTokenITX.sol` — deliberately under `test/`,
   TESTNET-ONLY, 6 decimals, fixed supply, **no mint entry point at all** (asserted over the
   compiled ABI). Never reference it from `contracts/src/`.
+
+</details>
 
 ## AWS infra (how it was provisioned — eu-north-1, account in deploy-record)
 ```bash

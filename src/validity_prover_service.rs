@@ -50,7 +50,7 @@ use crate::{
     },
     l1_finality::{ANVIL_CHAIN_ID, L1FinalitySource, L1FinalizedCheckpoint},
     utils::{
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{export_mle_v2_json, prove_with_mle_v2, setup_mle_vk_v2, verify_mle_proof_v2},
         poseidon_hash_out::PoseidonHashOut,
         wrapper::WrapperCircuit,
     },
@@ -1020,7 +1020,7 @@ impl ValidityProverService {
         wrapper.data.verify(wrapped).map_err(|e| {
             ValidityProverServiceError::Proving(format!("verify wrapped validity: {e}"))
         })?;
-        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
         let mut pw = plonky2::iop::witness::PartialWitness::new();
         plonky2::iop::witness::WitnessWrite::set_proof_with_pis_target(
             &mut pw,
@@ -1028,11 +1028,11 @@ impl ValidityProverService {
             &validity_proof,
         )
         .map_err(|e| ValidityProverServiceError::Proving(format!("mle witness: {e}")))?;
-        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+        let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)
             .map_err(|e| ValidityProverServiceError::Proving(format!("mle prove: {e}")))?;
-        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+        verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)
             .map_err(|e| ValidityProverServiceError::Proving(format!("mle verify: {e}")))?;
-        let validity_mle_json = export_mle_json(&mle.proof, &wrapper.data.common)
+        let validity_mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)
             .map_err(|e| ValidityProverServiceError::Proving(format!("mle export: {e}")))?;
 
         let vpis_json = serde_json::to_string_pretty(&serde_json::json!({

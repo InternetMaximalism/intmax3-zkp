@@ -5,7 +5,6 @@ import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {IERC20} from "../src/SafeERC20.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 import {SimpleERC20, ReentrantHookERC20, SenderFeeERC20} from "./tokens/TestTokens.sol";
 
@@ -131,7 +130,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
     function test_close_tamperedTokenVectors_rejected() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory intent = _twoTokenIntent(75, 40);
-        MleVerifier.MleProof memory proof = _closeProof(intent); // proof for the REAL vectors
+        bytes memory proof = _closeProof(intent); // proof for the REAL vectors
 
         // Inflate the token-A fund after the proof is built → TFD recompute changes → limb mismatch.
         intent.channelFundAmounts[1] = 40_000;
@@ -159,7 +158,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
     function test_close_tokenCountOutOfRange_rejected() external {
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory intent = _twoTokenIntent(75, 40);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         intent.tokenCount = 0;
         vm.expectRevert(ChannelSettlementManager.TokenCountOutOfRange.selector);
@@ -203,7 +202,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 0); // token-A fund = 0
         ChannelSettlementManager.WithdrawalClaim memory c =
             _withdrawalClaimToken(d, USER_A, alice, 1, 1, TOKEN_A);
-        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        bytes memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(c, proof);
     }
@@ -218,7 +217,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         // Next token-A claim (1 wei-equivalent) exceeds the exhausted budget.
         ChannelSettlementManager.WithdrawalClaim memory over =
             _withdrawalClaimToken(d, USER_B, bob, 1, 1, TOKEN_A);
-        MleVerifier.MleProof memory overProof = _withdrawalClaimProof(over);
+        bytes memory overProof = _withdrawalClaimProof(over);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(over, overProof);
 
@@ -233,7 +232,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.WithdrawalClaim memory c =
             _withdrawalClaimToken(d, USER_A, alice, 1, 2, TOKEN_A); // slot 2 >= count 2
-        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        bytes memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.TokenSlotOutOfRange.selector);
         manager.submitWithdrawalClaim(c, proof);
     }
@@ -244,7 +243,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.WithdrawalClaim memory c =
             _withdrawalClaimToken(d, USER_A, alice, 5, 1, 66); // slot 1 resolves to 55, not 66
-        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        bytes memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.TokenRegistryMismatch.selector);
         manager.submitWithdrawalClaim(c, proof);
     }
@@ -270,7 +269,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
             TOKEN_A, // tokenIndex 55 != the claim's 0 — ONLY limb 49 differs
             ethClaim.withdrawalNullifier
         );
-        MleVerifier.MleProof memory forged = CloseTestLib.proofWithLimbs(limbs);
+        bytes memory forged = CloseTestLib.proofWithLimbs(limbs);
         vm.expectRevert(bytes("claim limb mismatch"));
         manager.submitWithdrawalClaim(ethClaim, forged);
 
@@ -278,7 +277,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         //     (limbs 38..46 nullifier AND 48/49 token pair differ) is also rejected.
         ChannelSettlementManager.WithdrawalClaim memory tokClaim =
             _withdrawalClaimToken(d, USER_A, alice, 5, 1, TOKEN_A);
-        MleVerifier.MleProof memory tokProof = _withdrawalClaimProof(tokClaim);
+        bytes memory tokProof = _withdrawalClaimProof(tokClaim);
         vm.expectRevert(bytes("claim limb mismatch"));
         manager.submitWithdrawalClaim(ethClaim, tokProof);
     }
@@ -294,7 +293,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
-        MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
+        bytes memory proof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof);
         assertEq(manager.withdrawalCredits(TOKEN_A, bob), 0, "no credit in ANY token lane");
@@ -312,7 +311,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         ChannelSettlementManager.PostCloseClaim memory genesisVariant =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, 0);
         // Proof limbs built for tokenIndex 0; the submitted claim says TOKEN_A.
-        MleVerifier.MleProof memory proofToken0 = _postCloseClaimProof(genesisVariant);
+        bytes memory proofToken0 = _postCloseClaimProof(genesisVariant);
         ChannelSettlementManager.PostCloseClaim memory claimTokenA =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, TOKEN_A);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
@@ -325,7 +324,7 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 10, 999);
-        MleVerifier.MleProof memory proof = _postCloseClaimProof(pc);
+        bytes memory proof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, proof);
     }
@@ -338,13 +337,13 @@ contract MultiTokenSettlementTest is CloseSettlementBase {
         bytes32 d = _finalizeTwoToken(75, 40);
         ChannelSettlementManager.PostCloseClaim memory over =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 41, TOKEN_A);
-        MleVerifier.MleProof memory overProof = _postCloseClaimProof(over);
+        bytes memory overProof = _postCloseClaimProof(over);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(over, overProof);
 
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 40, TOKEN_A);
-        MleVerifier.MleProof memory pcProof = _postCloseClaimProof(pc);
+        bytes memory pcProof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, pcProof);
 

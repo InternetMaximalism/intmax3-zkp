@@ -5,11 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
 import {IERC20, SafeERC20Lib} from "../src/SafeERC20.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {MockMleVerifier} from "./CloseTestLib.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 import {
     SimpleERC20,
@@ -32,7 +28,8 @@ import {
 ///      degreeBits=0 test bypass (allowMleDisabled=true) purely to mint a finalized state root.
 contract MultiTokenEscrowTest is Test {
     IntmaxRollup internal rollup;
-    MockMleVerifier internal mockMle;
+    MockPinnedMleVerifierV2 internal validityMle;
+    MockPinnedMleVerifierV2 internal withdrawalMle;
     address internal fraudTreasury = makeAddr("fraudTreasury");
     address internal recipient1 = makeAddr("recipient1");
     address internal recipient2 = makeAddr("recipient2");
@@ -47,26 +44,8 @@ contract MultiTokenEscrowTest is Test {
 
     // ── deploy + finalize plumbing (mirrors IntmaxRollup.t.sol's helpers) ──
 
-    function _emptyWhirParams() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
-        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-    }
-
-    function _defaultMleProof() internal pure returns (MleVerifier.MleProof memory proof) {
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.publicInputs = new uint256[](0);
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
+    function _defaultMleProof() internal pure returns (bytes memory) {
+        return abi.encode(new uint256[](0));
     }
 
     function _piLimbs(bytes32 piHash) internal pure returns (uint256[] memory limbs) {
@@ -78,27 +57,15 @@ contract MultiTokenEscrowTest is Test {
     }
 
     function setUp() public {
-        mockMle = new MockMleVerifier();
-        IntmaxRollup.MleVk memory zeroVk; // degreeBits = 0 → validity MLE bypass (test opt-in)
+        validityMle = new MockPinnedMleVerifierV2(31337);
+        withdrawalMle = new MockPinnedMleVerifierV2(31337);
         rollup = new IntmaxRollup(
             fraudTreasury,
-            zeroVk,
-            _emptyWhirParams(),
-            "",
-            "",
-            new uint256[](0),
-            new uint256[](0),
-            MleVerifier(address(mockMle)),
-            bytes32(0),
-            true // A-2 test opt-in for the degreeBits==0 validity bypass
+            validityMle,
+            withdrawalMle,
+            bytes32(0)
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
-        // Withdrawal VK: degreeBits = 1 (never disabled) — the mock verifier supplies the verdict.
-        IntmaxRollup.MleVk memory wVk;
-        wVk.degreeBits = 1;
-        rollup.initializeWithdrawalVk(
-            wVk, _emptyWhirParams(), "", "", new uint256[](0), new uint256[](0)
-        );
 
         tokenA = new SimpleERC20("TokenA");
         tokenB = new SimpleERC20("TokenB");
@@ -113,7 +80,7 @@ contract MultiTokenEscrowTest is Test {
     function _finalizeARoot() internal {
         rollup.setBlockProducerAdmin(address(this));
 
-        MleVerifier.MleProof memory mleProof = _defaultMleProof();
+        bytes memory mleProof = _defaultMleProof();
         finalizedRoot = keccak256("mt_finalized_state");
 
         uint32[] memory ids0 = new uint32[](1);
@@ -163,7 +130,7 @@ contract MultiTokenEscrowTest is Test {
                 vpis.prover
             )
         );
-        mleProof.publicInputs = _piLimbs(piHash);
+        mleProof = abi.encode(_piLimbs(piHash));
 
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = keccak256("mt_blob");
@@ -187,7 +154,7 @@ contract MultiTokenEscrowTest is Test {
 
     /// Build a 17-limb withdrawal MLE proof binding `ws` to `finalizedRoot` (blockNumber = 5).
     function _withdrawalProof(IntmaxRollup.Withdrawal[] memory ws)
-        internal view returns (MleVerifier.MleProof memory proof)
+        internal view returns (bytes memory proof)
     {
         uint64 blockNumber = 5;
         bytes32 wdHash = bytes32(0);
@@ -199,7 +166,6 @@ contract MultiTokenEscrowTest is Test {
         );
         pisHash = bytes32(uint256(pisHash) & ((uint256(1) << 253) - 1));
 
-        proof = _defaultMleProof();
         uint256[] memory pi = new uint256[](17);
         uint256 h = uint256(pisHash);
         for (uint256 i = 0; i < 8; i++) {
@@ -210,7 +176,7 @@ contract MultiTokenEscrowTest is Test {
             pi[8 + i] = (e >> (224 - i * 32)) & 0xFFFFFFFF;
         }
         pi[16] = blockNumber;
-        proof.publicInputs = pi;
+        proof = abi.encode(pi);
     }
 
     function _leaf(address recipient, uint32 tokenIndex, uint256 amount, bytes32 nullifier)
@@ -393,7 +359,7 @@ contract MultiTokenEscrowTest is Test {
         assertEq(rollup.pendingTokenWithdrawals(TOKEN_A, recipient1), 0, "credit cleared");
 
         // Double-pay via the same nullifier is rejected.
-        MleVerifier.MleProof memory proof = _withdrawalProof(ws);
+        bytes memory proof = _withdrawalProof(ws);
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
         rollup.withdrawERC20(ws, wdProver, proof);
     }
@@ -408,7 +374,7 @@ contract MultiTokenEscrowTest is Test {
         bytes32 authDigest = _authDigest(ws[0]);
         rollup.authorizePartialWithdrawal(authDigest);
 
-        MleVerifier.MleProof memory proof = _withdrawalProof(ws);
+        bytes memory proof = _withdrawalProof(ws);
         rollup.withdrawERC20(ws, wdProver, proof);
         assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 token authorization consumed");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "token nullifier consumed");
@@ -430,19 +396,19 @@ contract MultiTokenEscrowTest is Test {
 
         IntmaxRollup.Withdrawal[] memory erc20Ws = new IntmaxRollup.Withdrawal[](1);
         erc20Ws[0] = _leaf(recipient1, TOKEN_A, 50, keccak256("nF1"));
-        MleVerifier.MleProof memory erc20Proof = _withdrawalProof(erc20Ws);
+        bytes memory erc20Proof = _withdrawalProof(erc20Ws);
         vm.expectRevert(IntmaxRollup.WithdrawalNotEthToken.selector);
         rollup.withdrawNative(erc20Ws, wdProver, erc20Proof);
 
         IntmaxRollup.Withdrawal[] memory ethWs = new IntmaxRollup.Withdrawal[](1);
         ethWs[0] = _leaf(recipient1, 0, 50, keccak256("nF2"));
-        MleVerifier.MleProof memory ethProof = _withdrawalProof(ethWs);
+        bytes memory ethProof = _withdrawalProof(ethWs);
         vm.expectRevert(IntmaxRollup.WithdrawalNotErc20Token.selector);
         rollup.withdrawERC20(ethWs, wdProver, ethProof);
 
         IntmaxRollup.Withdrawal[] memory unregWs = new IntmaxRollup.Withdrawal[](1);
         unregWs[0] = _leaf(recipient1, 999, 50, keccak256("nF3"));
-        MleVerifier.MleProof memory unregProof = _withdrawalProof(unregWs);
+        bytes memory unregProof = _withdrawalProof(unregWs);
         vm.expectRevert(IntmaxRollup.TokenIndexNotRegistered.selector);
         rollup.withdrawERC20(unregWs, wdProver, unregProof);
     }
@@ -465,7 +431,7 @@ contract MultiTokenEscrowTest is Test {
         // Second: 50 > remaining 40 → the whole call reverts (underflow ceiling).
         IntmaxRollup.Withdrawal[] memory ws2 = new IntmaxRollup.Withdrawal[](1);
         ws2[0] = _leaf(recipient2, TOKEN_A, 50, keccak256("nD2"));
-        MleVerifier.MleProof memory p2 = _withdrawalProof(ws2);
+        bytes memory p2 = _withdrawalProof(ws2);
         vm.expectRevert(); // arithmetic underflow (Solidity 0.8 checked math)
         rollup.withdrawERC20(ws2, wdProver, p2);
 
@@ -485,7 +451,7 @@ contract MultiTokenEscrowTest is Test {
         // 50 token-A against 30 token-A escrow reverts even though 130 total escrow exists.
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
         ws[0] = _leaf(recipient1, TOKEN_A, 50, keccak256("nX1"));
-        MleVerifier.MleProof memory p = _withdrawalProof(ws);
+        bytes memory p = _withdrawalProof(ws);
         vm.expectRevert();
         rollup.withdrawERC20(ws, wdProver, p);
         assertEq(rollup.escrowedByToken(TOKEN_B), 100, "token-B escrow untouched");
@@ -573,7 +539,7 @@ contract MultiTokenEscrowTest is Test {
         bytes32 authDigest = _authDigest(ws[0]);
         rollup.authorizePartialWithdrawal(authDigest);
 
-        MleVerifier.MleProof memory proof = _withdrawalProof(ws);
+        bytes memory proof = _withdrawalProof(ws);
         rollup.withdrawNative(ws, wdProver, proof);
         assertFalse(rollup.partialWithdrawalAuthorized(authDigest), "IPW2 native authorization consumed");
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "native nullifier consumed");

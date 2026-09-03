@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {ChannelSettlementManager} from "./ChannelSettlementManager.sol";
 import {IntmaxRollup} from "./IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 
 /// @title Atomic terminal close-funding materializer
 /// @notice Installs every authorization for one terminal asset lane and consumes them with the
@@ -55,13 +54,13 @@ contract CloseFundingMaterializer {
         ChannelSettlementManager manager,
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external {
         bytes32 auxData = _validateCompleteLane(manager, withdrawals, true);
         for (uint256 i = 0; i < withdrawals.length; ++i) {
             manager.authorizeCloseFunding(withdrawals[i].tokenIndex, withdrawals[i].auxData);
         }
-        rollup.withdrawNative(withdrawals, withdrawalProver, mleProof);
+        rollup.withdrawNative(withdrawals, withdrawalProver, compactProof);
         emit CloseFundingMaterialized(address(manager), 0, auxData, keccak256(abi.encode(withdrawals)));
     }
 
@@ -69,13 +68,13 @@ contract CloseFundingMaterializer {
         ChannelSettlementManager manager,
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external {
         bytes32 auxData = _validateCompleteLane(manager, withdrawals, false);
         for (uint256 i = 0; i < withdrawals.length; ++i) {
             manager.authorizeCloseFunding(withdrawals[i].tokenIndex, withdrawals[i].auxData);
         }
-        rollup.withdrawERC20(withdrawals, withdrawalProver, mleProof);
+        rollup.withdrawERC20(withdrawals, withdrawalProver, compactProof);
         emit CloseFundingMaterialized(address(manager), 1, auxData, keccak256(abi.encode(withdrawals)));
     }
 

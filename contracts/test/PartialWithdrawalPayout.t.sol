@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 
@@ -97,7 +96,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
         //    proven chain, so the pis_hash re-fold rejects it.
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
         ws[0] = w;
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         (, address prover) = _parsePayout();
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
@@ -124,7 +123,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
 
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
         ws[0] = w;
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         (, address prover) = _parsePayout();
         // Fails on the proof binding, exactly as the ETH path now does.
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
@@ -154,7 +153,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
         assertEq(ws[0].auxData, bytes32(0), "fixture leaf is a normal (non-burn) withdrawal");
 
         uint256 escrowBefore = rollup.totalEscrowed();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         rollup.withdrawNative(ws, prover, wproof);
 
         assertEq(rollup.pendingWithdrawals(ws[0].recipient), ws[0].amount, "proven leaf paid");
@@ -180,7 +179,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
         vm.prank(settlementManager);
         rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
 
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
@@ -201,7 +200,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
 
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
         ws[0] = _forgedBurnLeaf(1);
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         (, address prover) = _parsePayout();
 
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
@@ -221,7 +220,7 @@ contract PartialWithdrawalPayoutTest is WithdrawNativeE2EBase {
         _runLifecycleThroughFinalize();
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
         rollup.withdrawNative(ws, prover, wproof);
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");

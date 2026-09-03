@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 
@@ -77,7 +76,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         _authorize(ws[0]);
 
         uint256 escrowBefore = rollup.totalEscrowed();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         rollup.withdrawNative(ws, prover, wproof);
 
         assertEq(rollup.pendingWithdrawals(ws[0].recipient), ws[0].amount, "burn leaf paid");
@@ -104,7 +103,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         assertTrue(ws[0].auxData != bytes32(0), "precondition: burn leaf");
         assertFalse(rollup.partialWithdrawalAuthorized(_authDigest(ws[0])), "precondition: not authorized");
 
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.PartialWithdrawalNotAuthorized.selector);
         rollup.withdrawNative(ws, prover, wproof);
 
@@ -119,7 +118,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         _runLifecycleThroughFinalize();
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         _authorize(ws[0]); // even authorized, the wrong asset path must refuse it
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalNotErc20Token.selector);
         rollup.withdrawERC20(ws, prover, wproof);
     }
@@ -142,7 +141,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         vm.prank(settlementManager);
         rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
 
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
         assertEq(rollup.totalEscrowed() > 0, true, "escrow untouched");
@@ -157,7 +156,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
         _registerManager();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
         // (a) aux -> 0 (demote to normal). Even so, the binding rejects it.
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
@@ -198,7 +197,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
         vm.prank(settlementManager);
         rollup.authorizePartialWithdrawal(_authDigest(ws[0]));
 
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
@@ -215,7 +214,7 @@ contract PartialWithdrawalBurnPayoutTest is WithdrawNativeE2EBase {
 
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         _authorize(ws[0]);
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
         rollup.withdrawNative(ws, prover, wproof);
         assertTrue(rollup.withdrawalNullifierUsed(ws[0].nullifier), "nullifier consumed");
