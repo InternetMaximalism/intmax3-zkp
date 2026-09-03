@@ -1084,6 +1084,66 @@ pub fn sign_state_if_backed(
     sign_state(keys, slot, state)
 }
 
+/// Signer-independent-exit gate for a co-signer releasing a signature over `next` from the
+/// durable head `prev`: the successor must be an ordinary H2=0 in-channel transition that keeps
+/// the complete L1-backed statement `(channel_id, small block, channel_fund, settled chain,
+/// accumulator, nullifier root, import cursor, close era)` byte-identical, so the exit kit that
+/// already backs `prev` (a balance proof plus the whole-vector backing proof the delegate
+/// archived before accepting `prev`) still backs `next` and no cosigner signature is ever needed
+/// after `next` to exit. Any asset- or composition-moving successor is refused here, mirroring
+/// `channel_member`'s `requires_prepared_exit_kit` refusal and the live-balance service's
+/// linear-advancement check, because the browser has no pre-sign kit receipt to consult.
+pub fn verify_exit_kit_preserving_successor(
+    prev: &ChannelState,
+    next: &ChannelState,
+) -> WResult<()> {
+    if next.prev_digest != prev.digest {
+        return bail("SIGNER-INDEPENDENT EXIT: successor does not extend the durable signed head");
+    }
+    if next.channel_id != prev.channel_id {
+        return bail("SIGNER-INDEPENDENT EXIT: successor changes the channel identity");
+    }
+    if next.h2_tag != Bytes32::default() {
+        return bail(
+            "SIGNER-INDEPENDENT EXIT: refusing to co-sign an H2!=0 (base-moving) successor without a durable pre-sign exit kit",
+        );
+    }
+    let expected_epoch = prev
+        .epoch
+        .checked_add(1)
+        .ok_or_else(|| WalletError("channel epoch overflow".into()))?;
+    let expected_version = prev
+        .balance_state
+        .state_version
+        .checked_add(1)
+        .ok_or_else(|| WalletError("balance-state version overflow".into()))?;
+    if next.epoch != expected_epoch || next.balance_state.state_version != expected_version {
+        return bail("SIGNER-INDEPENDENT EXIT: successor skips, forks, or rolls back the signed head");
+    }
+    if next.close_freeze_nonce != prev.close_freeze_nonce {
+        return bail("SIGNER-INDEPENDENT EXIT: successor changes the close era");
+    }
+    // Ordinary in-channel transitions never post a base small block and never rewrite the
+    // base-backed fund/root/nullifier/import cursors or the settled intmax history; each of these
+    // would change the exact backing statement the archived exit kit binds.
+    if next.small_block_number != prev.small_block_number
+        || next.channel_fund != prev.channel_fund
+        || next.shared_native_nullifier_root != prev.shared_native_nullifier_root
+        || next.unallocated_confirmed_incoming != prev.unallocated_confirmed_incoming
+        || next.balance_state.settled_tx_chain != prev.balance_state.settled_tx_chain
+        || next.balance_state.settled_tx_accumulator_root
+            != prev.balance_state.settled_tx_accumulator_root
+        || next.balance_state.token_registry != prev.balance_state.token_registry
+        || next.balance_state.member_count != prev.balance_state.member_count
+        || next.balance_state.delegate_count != prev.balance_state.delegate_count
+    {
+        return bail(
+            "SIGNER-INDEPENDENT EXIT: refusing to co-sign an asset/composition-moving successor; its exact (channel_id, settled_tx_chain, token_funds_digest) exit kit is not durable before signature release",
+        );
+    }
+    Ok(())
+}
+
 /// Insert/replace a member signature in slot order.
 pub fn add_signature(state: &mut ChannelState, sig: MemberSignature) {
     state
@@ -7591,6 +7651,78 @@ mod delegate_send_tests {
     /// PROVES: the widened `check_slot` (active region) + `member_pubkeys_root` (members +
     /// delegates) admit a delegate sender; a delegate sends with the IDENTICAL mechanism as a
     /// member.
+    /// Signer-independent exit at the browser seam: a co-signer may release a signature only over
+    /// an H2=0 successor whose exact backing statement equals the durable head's, because the
+    /// wasm wallet has no pre-sign exit-kit receipt. Every asset/composition-moving mutation of an
+    /// otherwise valid in-channel send must be refused before signing.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    fn cosign_gate_refuses_every_asset_or_composition_moving_successor() {
+        let mut rng = StdRng::seed_from_u64(0xE1);
+        let (record, keys, members, genesis, witnesses) =
+            setup_delegate_channel(&mut rng, 12, [40, 30, 20]);
+        let snapshot = ChannelSnapshot {
+            record: record.clone(),
+            state: genesis,
+            members,
+            settled_tx_accumulator: default_settled_tx_accumulator(),
+        };
+        let BuiltSend { payload, .. } = build_send(
+            &keys[0],
+            &snapshot,
+            0,
+            1,
+            5,
+            40,
+            &witnesses[0],
+            Bytes32::default(),
+            LEVEL,
+            &mut rng,
+        )
+        .expect("build_send");
+        let good = payload.proposed_next_state.clone();
+        verify_exit_kit_preserving_successor(&snapshot.state, &good)
+            .expect("an ordinary in-channel send preserves the exit kit statement");
+
+        let refused = |label: &str, mutate: &dyn Fn(&mut ChannelState)| {
+            let mut next = good.clone();
+            mutate(&mut next);
+            let error = verify_exit_kit_preserving_successor(&snapshot.state, &next)
+                .expect_err(label)
+                .0;
+            assert!(
+                error.contains("SIGNER-INDEPENDENT EXIT"),
+                "{label}: unexpected error {error}"
+            );
+        };
+        refused("fork", &|n| n.prev_digest = Bytes32::from_bytes_be(&[9u8; 32]).unwrap());
+        refused("skip epoch", &|n| n.epoch += 1);
+        refused("rollback version", &|n| n.balance_state.state_version -= 1);
+        refused("base-moving h2", &|n| n.h2_tag = Bytes32::from_bytes_be(&[1u8; 32]).unwrap());
+        refused("close era", &|n| n.close_freeze_nonce += 1);
+        refused("small block", &|n| n.small_block_number += 1);
+        refused("channel fund", &|n| {
+            n.channel_fund.amounts[0] = n.channel_fund.amounts[0] + U256::from(1u64)
+        });
+        refused("intmax root", &|n| {
+            n.channel_fund.intmax_state_root = Bytes32::from_bytes_be(&[2u8; 32]).unwrap()
+        });
+        refused("nullifier root", &|n| {
+            n.shared_native_nullifier_root = Bytes32::from_bytes_be(&[3u8; 32]).unwrap()
+        });
+        refused("import cursor", &|n| {
+            n.unallocated_confirmed_incoming = U256::from(1u64)
+        });
+        refused("settled chain", &|n| {
+            n.balance_state.settled_tx_chain = Bytes32::from_bytes_be(&[4u8; 32]).unwrap()
+        });
+        refused("accumulator", &|n| {
+            n.balance_state.settled_tx_accumulator_root = Bytes32::from_bytes_be(&[5u8; 32]).unwrap()
+        });
+        refused("token registry", &|n| n.balance_state.token_registry[1] = 77);
+        refused("member set", &|n| n.balance_state.member_count += 1);
+    }
+
     #[test]
     fn da_send_happy_delegate_sends_to_member() {
         let mut rng = StdRng::seed_from_u64(0xDADADA);

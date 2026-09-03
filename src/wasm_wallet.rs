@@ -28,7 +28,7 @@ use crate::{
     wallet_core::{
         BuiltSend, ChannelSnapshot, MemberKeys, SendPayload, WithdrawalClaimProver, add_signature,
         build_refresh, build_send_token, decrypt_balance_token, resolve_local_token_slot,
-        sign_state, verify_send_transition, verify_snapshot,
+        sign_state, verify_exit_kit_preserving_successor, verify_send_transition, verify_snapshot,
     },
 };
 
@@ -947,6 +947,10 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
                 "slot {slot} is a delegate (member_count {mc}); delegates do not co-sign state"
             )));
         }
+        // Signer-independent exit: the browser holds no pre-sign exit-kit receipt, so it may only
+        // release a signature over an H2=0 successor whose exact backing statement equals the
+        // durable head's. This is the same refusal the CLI applies at its signing primitive.
+        verify_exit_kit_preserving_successor(&snapshot.state, &next).map_err(js_err)?;
         let sig = sign_state(&session.keys, slot as u8, &next).map_err(js_err)?;
         add_signature(&mut next, sig);
         serde_json::to_string(&next).map_err(js_err)
