@@ -2,16 +2,22 @@
 pragma solidity ^0.8.24;
 
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
-import {ChannelSettlementManager, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {IERC20} from "../src/SafeERC20.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {MleVerifier} from "@mle/MleVerifier.sol";
 
-/// @title Terminal close-funding authorization and mixed-ledger pull tests.
-/// @notice Exercises only the Manager side of the existing proof-backed Rollup IPW2 lane. The
-///         Rollup's withdrawal-proof binding and one-shot consumption have their own payout suites.
+/// @title Close-funding tombstones and mixed-ledger pull tests.
+/// @notice The cooperative terminal-child/IPW2 route (`authorizeCloseFunding`,
+///         `materializeNative`, `materializeERC20`) was retired in commit 8f70b73. Its selectors
+///         are ABI-retained fail-closed tombstones that revert `CooperativeCloseFundingDeprecated`
+///         before reading any argument. A close is funded only by the signer-independent exit
+///         (`attestSignedHeadBacking` + `materializeSignedHead`, covered by
+///         `SignerIndependentExit.t.sol`); this suite simulates that receipt through
+///         `CloseSettlementBase._materializeCloseFundingAuthorization` and exercises the Manager's
+///         exact-cap pull and per-nullifier claim accounting on top of it.
 contract CloseFundingAuthorizationTest is CloseSettlementBase {
     event WithdrawalClaimed(
         bytes32 indexed withdrawalNullifier,
@@ -54,6 +60,7 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
     }
 
+    /// @dev Historical IPW2 shape. Only used to prove the retired route installs NO rollup flag.
     function _ipw2(uint32 tokenIndex, uint256 amount, bytes32 auxData) internal view returns (bytes32) {
         return keccak256(abi.encodePacked(bytes4(0x49505732), address(manager), tokenIndex, amount, auxData));
     }
@@ -79,6 +86,8 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         );
     }
 
+    /// @dev The aux the retired route used to require. Handed to the tombstones so they are shown
+    ///      to reject even a well-formed request.
     function _expectedAux(ChannelSettlementManager.CloseIntent memory intent) internal view returns (bytes32) {
         bytes32 fundsDigest =
             verifier.tokenFundsDigest(intent.tokenRegistry, intent.tokenCount, intent.channelFundAmounts);
@@ -104,86 +113,162 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         assertEq(got, bytes32(0x44bf64ff1965bdc482a566498e4f33854d01d3ba814e8f8a2e6b19a2823f5fc0));
     }
 
-    function test_authorizeCloseFunding_rejectsEveryImcfBindingSubstitution() external {
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
-        bytes32 fundsDigest =
-            verifier.tokenFundsDigest(intent.tokenRegistry, intent.tokenCount, intent.channelFundAmounts);
-        bytes32 expected = _expectedAux(intent);
+    // ── retired cooperative route: ABI-retained fail-closed tombstones ──
 
-        bytes32[6] memory substituted = [
-            _imcf(block.chainid + 1, address(registry), address(manager), CHANNEL_ID, 1, fundsDigest),
-            _imcf(block.chainid, address(0x1234), address(manager), CHANNEL_ID, 1, fundsDigest),
-            _imcf(block.chainid, address(registry), address(0x5678), CHANNEL_ID, 1, fundsDigest),
-            _imcf(block.chainid, address(registry), address(manager), bytes4(uint32(CHANNEL_ID) + 1), 1, fundsDigest),
-            _imcf(block.chainid, address(registry), address(manager), CHANNEL_ID, 2, fundsDigest),
-            _imcf(block.chainid, address(registry), address(manager), CHANNEL_ID, 1, bytes32(uint256(fundsDigest) ^ 1))
-        ];
-        for (uint256 i = 0; i < substituted.length; ++i) {
-            vm.expectRevert(ChannelSettlementManager.CloseFundingAuxMismatch.selector);
-            manager.authorizeCloseFunding(0, substituted[i]);
-        }
-        assertEq(manager.authorizeCloseFunding(0, expected), _ipw2(0, 75, expected), "all bindings preserved");
-    }
-
-    function test_authorizeCloseFunding_recomputesImcfAndExactIpw2() external {
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
-        bytes32 expectedAux = _expectedAux(intent);
-        vm.expectRevert(ChannelSettlementManager.CloseFundingAuxMismatch.selector);
-        manager.authorizeCloseFunding(0, bytes32(uint256(expectedAux) ^ 1));
-
-        bytes32 expectedNativeAuth = _ipw2(0, 75, expectedAux);
-        assertEq(manager.authorizeCloseFunding(0, expectedAux), expectedNativeAuth, "exact native IPW2");
-        assertTrue(registry.partialWithdrawalAuthorized(expectedNativeAuth), "Rollup flag installed");
-        assertEq(registry.partialWithdrawalAuthorizationCalls(expectedNativeAuth), 1, "authorized once");
-
-        bytes32 expectedTokenAuth = _ipw2(TOKEN_A, 40, expectedAux);
-        assertEq(manager.authorizeCloseFunding(TOKEN_A, expectedAux), expectedTokenAuth, "exact token IPW2");
-        assertTrue(registry.partialWithdrawalAuthorized(expectedTokenAuth), "token flag installed");
-
-        // Any proof-side substitution derives a different IPW2 and therefore remains unauthorized.
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 74, expectedAux)), "wrong amount");
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, bytes32(uint256(expectedAux) ^ 1))), "wrong aux");
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 75, expectedAux)), "wrong token");
-    }
-
-    function test_authorizeCloseFunding_failClosedBeforeCloseInvalidZeroAndReplay() external {
-        vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
+    /// The Manager's retired selector reverts `CooperativeCloseFundingDeprecated` in every lifecycle
+    /// state, for every token index and aux — including the exact aux it once accepted — and the
+    /// revert carries the typed error (the selector is retained, not removed).
+    function test_authorizeCloseFunding_isTombstoneInEveryStateTokenAndAux() external {
+        // Active: the old CloseNotActive gate is unreachable; the tombstone fires first.
+        vm.expectRevert(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector);
         manager.authorizeCloseFunding(0, bytes32(0));
 
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 0);
-        bytes32 expectedAux = _expectedAux(intent);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.ChannelFundsAlreadyReceived.selector, 999));
-        manager.authorizeCloseFunding(999, expectedAux);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.ChannelFundsAlreadyReceived.selector, TOKEN_A));
-        manager.authorizeCloseFunding(TOKEN_A, expectedAux);
+        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
+        bytes32 aux = _expectedAux(intent);
+        uint32[4] memory tokens = [uint32(0), TOKEN_A, 999, type(uint32).max];
+        bytes32[3] memory auxes = [aux, bytes32(uint256(aux) ^ 1), bytes32(0)];
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            for (uint256 j = 0; j < auxes.length; ++j) {
+                vm.expectRevert(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector);
+                manager.authorizeCloseFunding(tokens[i], auxes[j]);
+            }
+        }
 
-        manager.authorizeCloseFunding(0, expectedAux);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.CloseFundingAlreadyAuthorized.selector, 0));
-        manager.authorizeCloseFunding(0, expectedAux);
-    }
-
-    function test_authorizeCloseFunding_rollupRevertRollsBackLifetimeLatch() external {
-        _finalizeWithFund(75);
-        bytes32 expectedAux = _expectedAux(_intentWithFund(1, 9, 22, 1, 75));
-        bytes32 authDigest = _ipw2(0, 75, expectedAux);
-        vm.mockCallRevert(
-            address(registry),
-            abi.encodeCall(IChannelRegistry.authorizePartialWithdrawal, (authDigest)),
-            bytes("rollup authorization failed")
+        (bool ok, bytes memory revertData) = address(manager).call(
+            abi.encodeWithSelector(manager.authorizeCloseFunding.selector, uint32(0), aux)
         );
-        vm.expectRevert(bytes("rollup authorization failed"));
-        manager.authorizeCloseFunding(0, expectedAux);
-        vm.clearMockedCalls();
-        assertEq(manager.authorizeCloseFunding(0, expectedAux), authDigest, "revert rolled bitmap back");
+        assertFalse(ok, "retired authorizeCloseFunding unexpectedly succeeded");
+        assertEq(
+            revertData,
+            abi.encodeWithSelector(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector),
+            "retired selector must fail with the explicit typed error"
+        );
+
+        // No historical IPW2 flag was installed and the channel is not materialized.
+        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "native IPW2 not installed");
+        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 40, aux)), "token IPW2 not installed");
+        assertEq(registry.partialWithdrawalAuthorizationCalls(_ipw2(0, 75, aux)), 0, "rollup never called");
+        assertEq(materializedChannelExit[uint32(CHANNEL_ID)], bytes32(0), "retired call did not materialize");
     }
+
+    /// The immutable materializer's retired terminal-child entry points are tombstones that revert
+    /// before validating the manager, the withdrawal vector, or the proof.
+    function test_materializerTerminalChildRoutesAreTombstones() external {
+        CloseFundingMaterializer materializer =
+            new CloseFundingMaterializer(IntmaxRollup(payable(address(registry))));
+        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
+        bytes32 aux = _expectedAux(intent);
+        MleVerifier.MleProof memory proof;
+
+        IntmaxRollup.Withdrawal[] memory native = new IntmaxRollup.Withdrawal[](1);
+        native[0] = IntmaxRollup.Withdrawal({
+            recipient: address(manager),
+            tokenIndex: 0,
+            amount: 75,
+            nullifier: keccak256("retired-native-nullifier"),
+            auxData: aux
+        });
+        IntmaxRollup.Withdrawal[] memory erc20 = new IntmaxRollup.Withdrawal[](1);
+        erc20[0] = IntmaxRollup.Withdrawal({
+            recipient: address(manager),
+            tokenIndex: TOKEN_A,
+            amount: 40,
+            nullifier: keccak256("retired-erc20-nullifier"),
+            auxData: aux
+        });
+
+        // Well-formed complete lanes against the finalized manager.
+        vm.expectRevert(CloseFundingMaterializer.CooperativeCloseFundingDeprecated.selector);
+        materializer.materializeNative(manager, native, address(0xBEEF), proof);
+        vm.expectRevert(CloseFundingMaterializer.CooperativeCloseFundingDeprecated.selector);
+        materializer.materializeERC20(manager, erc20, address(0xBEEF), proof);
+
+        // Degenerate inputs: the tombstone fires ahead of NotBoundManager / lane-shape checks.
+        IntmaxRollup.Withdrawal[] memory empty = new IntmaxRollup.Withdrawal[](0);
+        ChannelSettlementManager unbound = ChannelSettlementManager(payable(address(0)));
+        vm.expectRevert(CloseFundingMaterializer.CooperativeCloseFundingDeprecated.selector);
+        materializer.materializeNative(unbound, empty, address(0), proof);
+        vm.expectRevert(CloseFundingMaterializer.CooperativeCloseFundingDeprecated.selector);
+        materializer.materializeERC20(unbound, empty, address(0), proof);
+
+        (bool ok, bytes memory revertData) = address(materializer).call(
+            abi.encodeWithSelector(materializer.materializeNative.selector, manager, native, address(0xBEEF), proof)
+        );
+        assertFalse(ok, "retired materializeNative unexpectedly succeeded");
+        assertEq(
+            revertData,
+            abi.encodeWithSelector(CloseFundingMaterializer.CooperativeCloseFundingDeprecated.selector),
+            "retired selector must fail with the explicit typed error"
+        );
+
+        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "native IPW2 not installed");
+        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 40, aux)), "token IPW2 not installed");
+        assertEq(registry.pendingWithdrawals(address(manager)), 0, "no native credit");
+        assertEq(registry.pendingTokenWithdrawals(TOKEN_A, address(manager)), 0, "no token credit");
+        assertEq(materializer.materializedChannelExit(uint32(CHANNEL_ID)), bytes32(0), "no exit recorded");
+    }
+
+    /// Generic recipient-wide credit plus the retired route can neither move value nor make the
+    /// Manager pull-ready. Only the signed-head materialization receipt unlocks the exact cap.
+    function test_retiredRouteCannotMoveValueOrSubstituteForSignedHeadMaterialization() external {
+        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
+        bytes32 aux = _expectedAux(intent);
+
+        vm.deal(address(this), address(this).balance + 75);
+        registry.creditWithdrawal{value: 75}(address(manager));
+        tokenA.mint(address(registry), 40);
+        registry.creditTokenWithdrawal(TOKEN_A, address(manager), 40);
+
+        // Generic credit alone is not channel authority.
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlementManager.CloseFundingProofNotMaterialized.selector, 0)
+        );
+        manager.pullChannelFunds();
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlementManager.CloseFundingProofNotMaterialized.selector, TOKEN_A)
+        );
+        manager.pullChannelTokenFunds(TOKEN_A);
+
+        uint256 rollupBalanceBefore = address(registry).balance;
+        uint256 rollupTokenBefore = tokenA.balanceOf(address(registry));
+        vm.expectRevert(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector);
+        manager.authorizeCloseFunding(0, aux);
+        vm.expectRevert(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector);
+        manager.authorizeCloseFunding(TOKEN_A, aux);
+
+        assertEq(registry.pendingWithdrawals(address(manager)), 75, "native ledger untouched");
+        assertEq(registry.pendingTokenWithdrawals(TOKEN_A, address(manager)), 40, "token ledger untouched");
+        assertEq(address(registry).balance, rollupBalanceBefore, "no ETH left the rollup");
+        assertEq(tokenA.balanceOf(address(registry)), rollupTokenBefore, "no tokens left the rollup");
+        assertEq(address(manager).balance, 0, "manager received no ETH");
+        assertEq(tokenA.balanceOf(address(manager)), 0, "manager received no tokens");
+        assertEq(manager.receivedChannelFunds(0), 0, "no native channel credit");
+        assertEq(manager.receivedChannelFunds(TOKEN_A), 0, "no token channel credit");
+        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, aux)), "no IPW2 issued");
+
+        // The retired call left the pull gate closed.
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlementManager.CloseFundingProofNotMaterialized.selector, 0)
+        );
+        manager.pullChannelFunds();
+
+        // Only the live signed-head receipt unlocks the exact cap.
+        _materializeCloseFundingAuthorization(registry, manager, 0);
+        assertEq(manager.pullChannelFunds(), 75, "signed-head materialization unlocks native pull");
+        assertEq(manager.pullChannelTokenFunds(TOKEN_A), 40, "signed-head materialization unlocks token pull");
+        assertEq(manager.receivedChannelFunds(0), 75);
+        assertEq(manager.receivedChannelFunds(TOKEN_A), 40);
+    }
+
+    // ── live exact-cap pull and per-nullifier claim accounting ──
 
     function test_pullNative_transfersExactCapAndLeavesSurplusOnRollup() external {
         bytes32 digest = _finalizeWithFund(75);
         ChannelSettlementManager.WithdrawalClaim memory claim = _withdrawalClaim(digest, USER_A, alice, 75);
         manager.submitWithdrawalClaim(claim, _withdrawalClaimProof(claim));
 
-        // Five units are unrelated recipient-wide credit. The exact terminal proof authorization
-        // is issued+consumed independently, then its 75-unit payout joins the same Rollup ledger.
+        // Five units are unrelated recipient-wide credit. The signed-head materialization receipt
+        // is recorded independently, then its 75-unit payout joins the same Rollup ledger.
         vm.deal(address(this), address(this).balance + 80);
         registry.creditWithdrawal{value: 5}(address(manager));
         _materializeCloseFundingAuthorization(registry, manager, 0);
@@ -200,8 +285,15 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         assertEq(registry.pendingWithdrawals(address(manager)), 5, "third-party credit was not swept");
         assertEq(manager.totalCreditedOut(0), 75);
 
-        bytes32 expectedAux = _expectedAux(_intentWithFund(1, 9, 22, 1, 75));
+        // The cap is one-shot: a second pull fails closed and the surplus stays on the rollup.
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlementManager.ChannelFundsAlreadyReceived.selector, 0));
+        manager.pullChannelFunds();
+        assertEq(registry.pendingWithdrawals(address(manager)), 5, "surplus still not swept");
+        assertEq(manager.receivedChannelFunds(0), 75);
+
+        // The retired route cannot re-open the lane either.
+        bytes32 expectedAux = _expectedAux(_intentWithFund(1, 9, 22, 1, 75));
+        vm.expectRevert(ChannelSettlementManager.CooperativeCloseFundingDeprecated.selector);
         manager.authorizeCloseFunding(0, expectedAux);
     }
 
@@ -332,137 +424,11 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
         assertEq(manager.withdrawalCredits(TOKEN_A, alice), 0);
         assertEq(manager.totalCreditedOut(TOKEN_A), 40);
     }
-
-    function test_genericManagerCreditCannotSubstituteForTerminalProofMaterialization() external {
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
-        bytes32 auxData = _expectedAux(intent);
-
-        vm.deal(address(this), address(this).balance + 75);
-        registry.creditWithdrawal{value: 75}(address(manager));
-        vm.expectRevert(
-            abi.encodeWithSelector(ChannelSettlementManager.CloseFundingProofNotMaterialized.selector, 0)
-        );
-        manager.pullChannelFunds();
-
-        bytes32 authDigest = manager.authorizeCloseFunding(0, auxData);
-        assertTrue(registry.partialWithdrawalAuthorized(authDigest), "terminal authorization issued");
-        vm.expectRevert(
-            abi.encodeWithSelector(ChannelSettlementManager.CloseFundingProofNotMaterialized.selector, 0)
-        );
-        manager.pullChannelFunds();
-
-        // Test-only image of the exact Rollup proof consuming IPW2. Only now may the exact cap be
-        // pulled; a real execution also credits this same amount in the consumption transaction.
-        registry.consumePartialWithdrawalAuthorization(authDigest);
-        assertEq(manager.pullChannelFunds(), 75, "issued+consumed terminal authorization unlocks pull");
-    }
 }
 
-/// @notice Regression tests for the release R3 fix: terminal authorization and proof consumption
-///         are one all-or-nothing operation over a COMPLETE asset lane.
-contract AtomicCloseFundingMaterializerTest is CloseFundingAuthorizationTest {
-    uint32 internal constant TOKEN_B = 56;
-    CloseFundingMaterializer internal materializer;
-
-    event CloseFundingMaterialized(
-        address indexed manager,
-        uint8 indexed lane,
-        bytes32 indexed fundingAuxData,
-        bytes32 withdrawalSetDigest
-    );
-
-    function setUp() public override {
-        super.setUp();
-        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(registry))));
-    }
-
-    function _activateAtomicManager() private {
-        manager = _deployManagerWithMaterializer(registry, alice, bob, carol, address(materializer));
-    }
-
-    function _withdrawal(uint32 tokenIndex, uint256 amount, bytes32 nullifier, bytes32 auxData)
-        private
-        view
-        returns (IntmaxRollup.Withdrawal memory)
-    {
-        return IntmaxRollup.Withdrawal({
-            recipient: address(manager),
-            tokenIndex: tokenIndex,
-            amount: amount,
-            nullifier: nullifier,
-            auxData: auxData
-        });
-    }
-
-    function test_atomicNative_authorizeAndConsumeHasNoExposedIntermediateState() external {
-        _activateAtomicManager();
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
-        bytes32 auxData = _expectedAux(intent);
-        IntmaxRollup.Withdrawal[] memory withdrawals = new IntmaxRollup.Withdrawal[](1);
-        withdrawals[0] = _withdrawal(0, 75, keccak256("competitor-nullifier"), auxData);
-        MleVerifier.MleProof memory proof;
-
-        vm.expectEmit(true, true, true, true, address(materializer));
-        emit CloseFundingMaterialized(address(manager), 0, auxData, keccak256(abi.encode(withdrawals)));
-        materializer.materializeNative(manager, withdrawals, address(0xBEEF), proof);
-
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, auxData)), "IPW2 consumed atomically");
-        assertEq(registry.pendingWithdrawals(address(manager)), 75, "complete native lane credited");
-        vm.expectRevert(ChannelSettlementManager.OnlyCloseFundingMaterializer.selector);
-        manager.authorizeCloseFunding(TOKEN_A, auxData);
-    }
-
-    function test_atomicErc20_rejectsPartialLaneBeforeAnyAuthorization() external {
-        _activateAtomicManager();
-        uint256[10] memory amounts;
-        amounts[0] = 10;
-        amounts[1] = 40;
-        amounts[2] = 30;
-        uint32[10] memory tokenRegistry;
-        tokenRegistry[0] = 0;
-        tokenRegistry[1] = TOKEN_A;
-        tokenRegistry[2] = TOKEN_B;
-        _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory intent = _intentWithTokens(1, 9, 22, 1, amounts, tokenRegistry, 3);
-        manager.submitCloseIntent(intent, _closeProof(intent));
-        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-        bytes32 auxData = _expectedAux(intent);
-        MleVerifier.MleProof memory proof;
-
-        IntmaxRollup.Withdrawal[] memory partialLane = new IntmaxRollup.Withdrawal[](1);
-        partialLane[0] = _withdrawal(TOKEN_A, 40, keccak256("partial-a"), auxData);
-        vm.expectRevert(
-            abi.encodeWithSelector(CloseFundingMaterializer.FundingLaneLengthMismatch.selector, 2, 1)
-        );
-        materializer.materializeERC20(manager, partialLane, address(0xBEEF), proof);
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_A, 40, auxData)));
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(TOKEN_B, 30, auxData)));
-
-        IntmaxRollup.Withdrawal[] memory complete = new IntmaxRollup.Withdrawal[](2);
-        complete[0] = _withdrawal(TOKEN_A, 40, keccak256("complete-a"), auxData);
-        complete[1] = _withdrawal(TOKEN_B, 30, keccak256("complete-b"), auxData);
-        materializer.materializeERC20(manager, complete, address(0xBEEF), proof);
-        assertEq(registry.pendingTokenWithdrawals(TOKEN_A, address(manager)), 40);
-        assertEq(registry.pendingTokenWithdrawals(TOKEN_B, address(manager)), 30);
-    }
-
-    function test_atomicWithdrawalRevert_rollsBackEveryManagerLatch() external {
-        _activateAtomicManager();
-        ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
-        bytes32 auxData = _expectedAux(intent);
-        IntmaxRollup.Withdrawal[] memory withdrawals = new IntmaxRollup.Withdrawal[](1);
-        withdrawals[0] = _withdrawal(0, 75, keccak256("retryable-nullifier"), auxData);
-        MleVerifier.MleProof memory proof;
-
-        registry.setRejectAtomicWithdrawal(true);
-        vm.expectRevert(bytes("atomic withdrawal rejected"));
-        materializer.materializeNative(manager, withdrawals, address(0xBEEF), proof);
-        assertFalse(registry.partialWithdrawalAuthorized(_ipw2(0, 75, auxData)));
-        assertEq(registry.pendingWithdrawals(address(manager)), 0);
-
-        registry.setRejectAtomicWithdrawal(false);
-        materializer.materializeNative(manager, withdrawals, address(0xBEEF), proof);
-        assertEq(registry.pendingWithdrawals(address(manager)), 75, "same intent remains retryable");
-    }
-}
+// `AtomicCloseFundingMaterializerTest` (release R3 IPW2 atomicity regressions) was removed with
+// the terminal-child route: `materializeNative` / `materializeERC20` are tombstones, and the mock
+// registry in `CloseSettlementBase` has no `bindManager` / `creditChannelExit` surface to bind a
+// real materializer. Atomicity, single-use, and partial-lane rollback of the LIVE route
+// (`attestSignedHeadBacking` + `materializeSignedHead`) are covered by
+// `test/SignerIndependentExit.t.sol` against a bound `CloseFundingMaterializer`.

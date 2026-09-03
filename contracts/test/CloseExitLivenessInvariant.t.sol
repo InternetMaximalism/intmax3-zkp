@@ -69,6 +69,27 @@ contract CloseExitHandler {
         return uint64(1 + (seed % uint256(supplyTop)));
     }
 
+    /// The ordering floor every close must clear: the newest burn state this manager has
+    /// authenticated — the finalized high-water or the still-pending candidate — or 0 if none.
+    /// A close strictly below it fails closed at admission (`CloseOlderThanAuthorizedBurn`); a
+    /// close AT it must be the burn state itself (`CloseForksAuthorizedBurn` otherwise).
+    function burnFloor() public view returns (uint64 floor) {
+        if (manager.authorizedBurnSnapshotActive()) floor = manager.authorizedBurnStateVersion();
+        if (manager.partialWithdrawalPending() && manager.pendingPartialWithdrawalStateVersion() > floor) {
+            floor = manager.pendingPartialWithdrawalStateVersion();
+        }
+    }
+
+    /// The close intent the world can produce at `version`: at the burn floor it is the burn state
+    /// itself — the ONE whole authenticated vector — and elsewhere an ordinary signed state.
+    function closeIntentAt(uint64 version)
+        public view returns (ChannelSettlementManager.CloseIntent memory)
+    {
+        uint64 freezeNonce = manager.currentCloseFreezeNonce();
+        if (version != 0 && version == burnFloor()) return oracle.oBuildBurnIntent(version, freezeNonce);
+        return oracle.oBuildIntent(version, freezeNonce);
+    }
+
     function noteState() external {
         if (
             manager.channelStatus() == ChannelSettlementManager.ChannelLifecycleStatus.ClosePending &&
@@ -104,8 +125,15 @@ contract CloseExitHandler {
     }
 
     function submitClose(uint256 seed) external {
-        ChannelSettlementManager.CloseIntent memory intent =
-            oracle.oBuildIntent(_version(seed), manager.currentCloseFreezeNonce());
+        // Closes below the burn floor fail closed BY DESIGN, so a member who wants out closes at
+        // or above the state they already burned from — the only material that can be admitted.
+        // Lifting stays within the supply model: every burn version is <= supplyTop, so is this.
+        uint64 version = _version(seed);
+        uint64 floor = burnFloor();
+        if (version < floor) {
+            version = floor + uint64((seed >> 64) % uint256(supplyTop - floor + 1));
+        }
+        ChannelSettlementManager.CloseIntent memory intent = closeIntentAt(version);
         try manager.submitCloseIntent(intent, oracle.oCloseProof(intent)) {
             succeededSubmit += 1;
         } catch {}
@@ -347,10 +375,10 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
         vm.revertToState(snap);
         vm.warp(clock);
 
-        // (c) challenge-replacement with the newest state that EXISTS.
+        // (c) challenge-replacement with the newest state that EXISTS (the burn state itself when
+        //     the newest burn sits at the top — that is the one whole vector admissible there).
         snap = vm.snapshotState();
-        ChannelSettlementManager.CloseIntent memory head =
-            this.oBuildIntent(top, manager.currentCloseFreezeNonce());
+        ChannelSettlementManager.CloseIntent memory head = handler.closeIntentAt(top);
         try manager.submitCloseIntent(head, this.oCloseProof(head)) {
             viaReplace = true;
         } catch {}
@@ -360,11 +388,13 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
 
     /// THE INVARIANT. Whenever the machine is in `ClosePending`, at least one exit is satisfiable.
     ///
-    /// NOT VACUOUS, and the proof is not an argument but a run: reverting the R3-1 fix (restoring
-    /// A3's `CloseOlderThanAuthorizedBurn` refusal in `finalizeClose`) makes
+    /// NOT VACUOUS, and the proof is not an argument but a run: moving the
+    /// `CloseOlderThanAuthorizedBurn` refusal from ADMISSION (`submitCloseIntent`, where nothing is
+    /// installed yet) back into `finalizeClose` makes
     /// `test_exitInvariant_isNotVacuous_theR31ScenarioTripsIt` below fail with all three exits
     /// false — which is the round-3 lock, detected. That test drives the exact PoC sequence, so the
-    /// property is pinned deterministically as well as fuzzed.
+    /// property is pinned deterministically as well as fuzzed. A version-dependent refusal is
+    /// allowed exactly once, BEFORE a close is installed; `finalizeClose` keeps none.
     function invariant_closePendingAlwaysHasAReachableExit() external {
         if (manager.channelStatus() != ChannelSettlementManager.ChannelLifecycleStatus.ClosePending) {
             return;
@@ -401,28 +431,25 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
 
     // ── DETERMINISTIC NON-VACUITY PIN ────────────────────────────────────────────────────────
 
-    /// The R3-1 scenario, driven exactly as `RedTeamRound3.t.sol` drives it, then handed to the SAME
+    /// The R3-1 scenario, driven as `RedTeamRound3.t.sol` drives it, then handed to the SAME
     /// `_probeExits` machinery the invariant uses.
     ///
-    /// AGAINST THE PRE-FIX CONTRACT this fails: `finalizeClose` reverts `CloseOlderThanAuthorizedBurn`
-    /// (A3), `cancelClose` reverts `CancelCloseReplay` (A1's spent floor), `submitCloseIntent`
-    /// reverts `ChallengeWindowClosed` (H-3/R3-4's fixed response-tail end) — all three probes false,
-    /// the assertion fires, and the lock is reported. AGAINST THE FIXED CONTRACT `finalizeClose` settles.
+    /// AGAINST THE ROUND-2 CONTRACT the stale close was INSTALLED and every exit then closed:
+    /// `finalizeClose` reverted `CloseOlderThanAuthorizedBurn` (A3), `cancelClose` reverted
+    /// `CancelCloseReplay` (A1's spent floor), `submitCloseIntent` reverted `ChallengeWindowClosed`
+    /// (H-3/R3-4's fixed response-tail end) — all three probes false, the lock reported. Round 3
+    /// installed it and adjusted its cap at finalize. THE EXACT-VECTOR EXIT never installs it:
+    /// `submitCloseIntent` refuses the stale close, so the latch that made `ClosePending` terminal
+    /// cannot be armed, while the material the world holds AT the supply top — the burn state
+    /// itself — is admissible. Parked past the response-tail end with the other two exits genuinely
+    /// shut, `finalizeClose` is the exit that stays reachable.
     ///
     /// This is how the round-3 invariant avoids the round-2 mistake of asserting a liveness floor
     /// that no run could ever violate: the RED case is exhibited, not argued.
     function test_exitInvariant_isNotVacuous_theR31ScenarioTripsIt() external {
-        // 1. authorize a burn at the head v30 while Active -> A3's mark lands at the supply top.
-        ChannelSettlementManager.CloseIntent memory burn =
-            this.oBuildBurnIntent(30, manager.currentCloseFreezeNonce() + 1);
-        manager.submitPartialWithdrawalIntent(
-            burn, this.oCloseProof(burn), PREV_CHAIN, this.oWithdrawal()
-        );
-        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizePartialWithdrawal();
-        assertEq(manager.authorizedBurnStateVersion(), 30, "A3 mark at the head");
-
-        // 2. a stale close at v28, cancelled with the head v30 -> A1's floor spends the supply top.
+        // 1. A1's floor spends the supply top: a stale close at v28 is cancelled by the honest
+        //    holder of the head v30. This must come BEFORE the burn exists — afterwards a v28 close
+        //    could not even be installed to be cancelled.
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory stale1 =
             this.oBuildIntent(28, manager.currentCloseFreezeNonce());
@@ -438,17 +465,42 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
         );
         assertEq(manager.highestCancelledRevivedStateVersion(), 30, "A1 floor at the supply top");
 
-        // 3. the same stale close again; run the horizon out.
+        // 2. authorize a burn at the head v30 while Active -> A3's mark lands at the supply top.
+        ChannelSettlementManager.CloseIntent memory burn =
+            this.oBuildBurnIntent(30, manager.currentCloseFreezeNonce() + 1);
+        manager.submitPartialWithdrawalIntent(
+            burn, this.oCloseProof(burn), PREV_CHAIN, this.oWithdrawal()
+        );
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizePartialWithdrawal();
+        assertEq(manager.authorizedBurnStateVersion(), 30, "A3 mark at the head");
+        assertEq(handler.burnFloor(), 30, "the handler sees the same floor");
+
+        // 3. the same stale close again: REFUSED at admission. The era is open with nothing
+        //    installed — the invariant has nothing to probe there, correctly: no close, no lock.
         _requestCloseAndElapseGrace();
         ChannelSettlementManager.CloseIntent memory stale2 =
             this.oBuildIntent(28, manager.currentCloseFreezeNonce());
-        manager.submitCloseIntent(stale2, this.oCloseProof(stale2));
+        MleVerifier.MleProof memory stale2Proof = this.oCloseProof(stale2);
+        vm.expectRevert(ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+        manager.submitCloseIntent(stale2, stale2Proof);
+        assertFalse(manager.getPendingClose().active, "the stale close is never installed");
+        assertEq(
+            uint8(manager.channelStatus()),
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
+            "era open, nothing to latch on"
+        );
+
+        // 4. the newest material at the top is the burn state itself. It is admitted, then parked
+        //    past the fixed response-tail end.
+        ChannelSettlementManager.CloseIntent memory head = handler.closeIntentAt(30);
+        manager.submitCloseIntent(head, this.oCloseProof(head));
+        assertEq(manager.getPendingClose().finalStateVersion, 30, "the burn state is the pending close");
         vm.warp(
             uint256(manager.closeChallengeHorizon())
                 + manager.MIN_CLOSE_RESPONSE_SECS()
                 + 1
         );
-
         assertEq(
             uint8(manager.channelStatus()),
             uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
@@ -463,10 +515,11 @@ contract CloseExitLivenessInvariantTest is CloseSettlementBase, ICloseExitOracle
             f || c || r,
             "EXIT LIVENESS (R3-1): every exit from ClosePending is closed -- total permanent fund lock"
         );
-        // Which exit carries it, pinned: the R3-1 fix makes it `finalizeClose`. The other two are
-        // genuinely shut here, which is exactly why this scenario is the non-vacuity witness.
-        assertTrue(f, "R3-1: finalizeClose is the exit that stays reachable");
-        assertFalse(c, "A1's spent floor really does refuse the cancel");
+        // Which exit carries it, pinned: `finalizeClose`. The other two are genuinely shut here —
+        // v30 is not newer than the pending v30 for a cancel, and the replacement window is over —
+        // which is exactly why this scenario is the non-vacuity witness.
+        assertTrue(f, "finalizeClose is the exit that stays reachable");
+        assertFalse(c, "the newest existing state really cannot cancel the close at that same state");
         assertFalse(r, "H-3/R3-4's fixed absolute end really does refuse the replacement");
     }
 }

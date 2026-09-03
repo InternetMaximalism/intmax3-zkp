@@ -168,6 +168,22 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
     }
 
+    /// A close that is not the whole authenticated burn state (or strictly newer) is refused at
+    /// `submitCloseIntent` with `selector`, and the refusal leaves nothing behind: the era stays
+    /// open with no intent installed, the burn is untouched, nothing settled.
+    function _expectCloseRefused(ChannelSettlementManager.CloseIntent memory intent, bytes4 selector) internal {
+        uint8 statusBefore = uint8(manager.channelStatus());
+        bool closePendingBefore = manager.getPendingClose().active;
+        bool burnPendingBefore = manager.partialWithdrawalPending();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        vm.expectRevert(selector);
+        manager.submitCloseIntent(intent, proof);
+        assertEq(uint8(manager.channelStatus()), statusBefore, "status unchanged by the refusal");
+        assertEq(manager.getPendingClose().active, closePendingBefore, "no close intent installed");
+        assertEq(manager.partialWithdrawalPending(), burnPendingBefore, "the burn is untouched");
+        assertEq(manager.finalizedChannelFundAmount(TOKEN_INDEX), 0, "nothing settled");
+    }
+
     /// A public finalizer must never sign an argument-free capability that can be redirected to a
     /// replacement close between preflight and mining. The guarded digest loses no lifecycle state
     /// when the pending close moves, while the exact replacement remains permissionlessly
@@ -619,37 +635,80 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
 
     /// THE H-6 fence, soundness half — the property the era fence was really protecting, kept.
     ///
-    /// A close settling at a state BEFORE the burn still carries the burned amount inside
+    /// A close settling at a state BEFORE the burn would still carry the burned amount inside
     /// `channelFundAmounts`, which is drawn from the rollup escrow and distributed through
-    /// withdrawal claims. Authorizing the burn payout as well would draw that same value a SECOND
-    /// time. The refusal must survive the H-6 relaxation.
+    /// withdrawal claims; authorizing the burn payout as well would draw that same value a SECOND
+    /// time. Since the exact-vector exit this is closed at the EARLIEST gate: a close below the
+    /// (pending or finalized) burn state is never INSTALLED — `submitCloseIntent` refuses it with
+    /// `CloseOlderThanAuthorizedBurn` — so no pre-burn vector can ever settle and the burn is
+    /// neither double-drawn nor stranded. The finalize-time `settledBeforeBurn ->
+    /// PartialWithdrawalSupersededByClose` branch remains as defence in depth behind this admission
+    /// gate (a burn can only be submitted while Active, so no settled close can be older than it).
     ///
-    /// PINS: the `settledBeforeBurn -> PartialWithdrawalSupersededByClose` branch. Delete it (e.g.
-    /// by relaxing the gate to a bare `channelStatus == Closed` allow) and this test authorizes a
-    /// double draw.
-    function test_H6_burnIsRefusedWhenTheSettledCloseIsOlderThanIt() external {
+    /// PINS: the `belowPendingBurn` refusal in `submitCloseIntent`. Delete it and the stale close is
+    /// installed and settles at v12 — the double-draw, or (with the finalize-time gate) a stranded
+    /// burn. Either way the burn state's own close below then fails to be the exit it is here.
+    function test_H6_staleCloseBelowThePendingBurnIsRefusedAtAdmission() external {
         _submitPwAndElapse(9, 30); // the burn lives at state version 30
-        _closeAt(9, 12);           // but the channel settled at 12 — pre-burn fund vector
+        _requestCloseAndElapseGrace();
 
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalSupersededByClose.selector);
-        manager.finalizePartialWithdrawal();
+        // A close at 12 carries the pre-burn fund vector. It is refused before it can be installed.
+        _expectCloseRefused(_intentAt(9, 12), ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+        assertEq(
+            uint8(manager.channelStatus()),
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
+            "the era stays open with nothing installed"
+        );
         assertFalse(
             registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
             "no second draw of the same value out of the rollup escrow"
         );
+
+        // The burn's own whole state is the close that exits this era. It settles, and the burn is
+        // then payable exactly once: its amount is already excluded from that vector.
+        ChannelSettlementManager.CloseIntent memory burnState = _pwIntent(9, 30);
+        manager.submitCloseIntent(burnState, _closeProof(burnState));
+        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
+        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
+        assertEq(manager.finalizedStateVersion(), 30, "the burn state settled");
+        manager.finalizePartialWithdrawal();
+        assertTrue(
+            registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
+            "the burn is paid once, against the vector that already excludes it"
+        );
     }
 
-    /// The epoch is the senior key of the ordering, exactly as in `_isNewer`: a close settling in an
-    /// EARLIER epoch is pre-burn no matter how large its state version happens to be.
+    /// The epoch is the senior key of the ordering, exactly as in `_isNewer`, and the admission
+    /// gate applies it in both directions. Against a burn at (9, 5):
+    ///   (8, 999)              -> strictly older (earlier epoch, however large the version): refused;
+    ///   (9, 4)                -> strictly older (same epoch, lower version): refused;
+    ///   (9, 5), other digest  -> same position, different identity: an equivocated fork: refused;
+    ///   (9, 6)                -> strictly newer: admitted;
+    ///   (10, 1)               -> strictly newer under the senior key, however small the version:
+    ///                            admitted as the challenge-replacement of (9, 6).
     ///
-    /// PINS: the `pendingEpoch > finalizedEpoch` disjunct of the same branch. Comparing state
-    /// versions alone would authorize the double draw here.
+    /// PINS: the `finalEpoch < pendingPartialWithdrawalEpoch` disjunct of `belowPendingBurn` and the
+    /// equal-position digest check. Comparing state versions alone would admit (8, 999).
     function test_H6_orderingIsLexicographicOnEpochThenVersion() external {
         _submitPwAndElapse(9, 5); // burn: epoch 9, low version
-        _closeAt(8, 999);         // settled: EARLIER epoch, huge version
+        _requestCloseAndElapseGrace();
 
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalSupersededByClose.selector);
-        manager.finalizePartialWithdrawal();
+        _expectCloseRefused(_intentAt(8, 999), ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+        _expectCloseRefused(_intentAt(9, 4), ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+
+        ChannelSettlementManager.CloseIntent memory fork = _intentAt(9, 5);
+        fork.finalChannelStateDigest = keccak256(abi.encodePacked("forked_state", uint64(9), uint64(5)));
+        _expectCloseRefused(fork, ChannelSettlementManager.CloseForksAuthorizedBurn.selector);
+
+        ChannelSettlementManager.CloseIntent memory newer = _intentAt(9, 6);
+        manager.submitCloseIntent(newer, _closeProof(newer));
+        assertTrue(manager.getPendingClose().active, "strictly newer version admitted");
+        assertEq(manager.getPendingClose().finalStateVersion, 6);
+
+        ChannelSettlementManager.CloseIntent memory laterEpoch = _intentAt(10, 1);
+        manager.submitCloseIntent(laterEpoch, _closeProof(laterEpoch));
+        assertEq(manager.getPendingClose().finalEpoch, 10, "later epoch is senior to the version");
+        assertEq(manager.getPendingClose().finalStateVersion, 1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

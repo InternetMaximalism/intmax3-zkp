@@ -146,6 +146,21 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
     }
 
+    /// Fail-closed admission: `submitCloseIntent` refuses `intent` with `selector` and leaves
+    /// nothing behind — no intent installed, status unchanged, the burn untouched, nothing settled.
+    function _expectCloseRefused(ChannelSettlementManager.CloseIntent memory intent, bytes4 selector) internal {
+        uint8 statusBefore = uint8(manager.channelStatus());
+        bool closePendingBefore = manager.getPendingClose().active;
+        bool burnPendingBefore = manager.partialWithdrawalPending();
+        MleVerifier.MleProof memory proof = _closeProof(intent);
+        vm.expectRevert(selector);
+        manager.submitCloseIntent(intent, proof);
+        assertEq(uint8(manager.channelStatus()), statusBefore, "status unchanged by the refusal");
+        assertEq(manager.getPendingClose().active, closePendingBefore, "no close intent installed");
+        assertEq(manager.partialWithdrawalPending(), burnPendingBefore, "the burn is untouched");
+        assertEq(manager.finalizedChannelFundAmount(TOKEN_INDEX), 0, "nothing settled");
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     // ATTACK 1 — C-3 x H-3: the cancel/re-close cycle is unbounded, the cancel
     //            proof is replayable, and the H-3 horizon does not bound it.
@@ -427,27 +442,28 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // ATTACK 3 — H-6: the double-draw the gate names as its purpose is still
-    //            reachable by reversing the ORDER of the two operations.
+    // ATTACK 3 — H-6: the double-draw the gate names as its purpose, reached by
+    //            reversing the ORDER of the two operations.  *** BLOCKED ***
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// EXPLOIT (passes = attack works). `finalizePartialWithdrawal`'s H-6 gate is evaluated ONCE,
-    /// at burn-authorization time. It compares against whatever has settled BY THEN. Nothing
-    /// re-checks in the other direction: after the burn is authorized, a close may still settle at
-    /// a PRE-burn state, whose `channelFundAmounts` still contains the burned amount. The escrow
-    /// then pays the burn (already authorized on the rollup) AND the same value again through
-    /// withdrawal claims against `finalizedChannelFundAmount`.
+    /// BLOCKED (passes = the attack no longer works). `finalizePartialWithdrawal`'s H-6 gate is
+    /// evaluated ONCE, at burn-authorization time, against whatever has settled BY THEN. The
+    /// reverse order — authorize the burn, THEN settle a close at a PRE-burn state whose
+    /// `channelFundAmounts` still contains the burned amount — used to reach the identical
+    /// double-draw (round 1: unfixed residual; round 2: refused at finalize, which bricked the
+    /// channel; round 3: admitted and cap-adjusted at finalize).
     ///
-    /// Compare `test_H6_burnIsRefusedWhenTheSettledCloseIsOlderThanIt` in
-    /// CloseLifecycleHardening.t.sol: identical facts (burn at v30, settlement at v12), opposite
-    /// order — and the opposite outcome.
+    /// Since the exact-vector exit the stale close is never INSTALLED: `submitCloseIntent` refuses
+    /// anything below the authorized burn state with `CloseOlderThanAuthorizedBurn`, so no accrual
+    /// cap carrying the burn is ever created, and the only closes that can settle are the whole
+    /// burn state itself or a strictly newer whole state — vectors that already exclude the burn.
+    /// No finalize-time cap arithmetic remains; nothing is blended across two state generations.
     ///
-    /// NOTE: this ordering was equally reachable under the OLD era fence (it too was evaluated only
-    /// at finalize time), so it is an UNFIXED residual rather than a regression. But the H-6 block
-    /// asserts "THE REPLACEMENT keeps the protection exactly", and the protection it names is not
-    /// actually complete in either direction.
-    function test_ATTACK_H6_gateIsOrderDependent_burnThenStaleCloseStillDoubleDraws() external {
-        // 1. The burn at state version 30 is authorized while the channel is Active.
+    /// Compare `test_H6_staleCloseBelowThePendingBurnIsRefusedAtAdmission` in
+    /// CloseLifecycleHardening.t.sol: identical facts, the burn still pending. Both orders are
+    /// refused by the same admission rule.
+    function test_BLOCKED_H6_burnThenStaleCloseIsRefusedAtAdmission() external {
+        // 1. The burn at state version 30 is authorized while the channel is Active (draw #1).
         _submitPwAndElapse(9, 30);
         manager.finalizePartialWithdrawal();
         assertTrue(
@@ -455,46 +471,36 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
             "burn authorized on L1 (draw #1)"
         );
 
-        // 2. A close then settles at v12 — BEFORE the burn. Its fund vector still carries the
-        //    burned amount, and nothing revisits the authorization.
-        //
-        //    ROUND 2 (A3): `finalizeClose` REFUSED it, and the round-2 comment called that refusal
-        //    "a deferral, not a brick".
-        //
-        //    ROUND 3 (R3-1): that was false — the refusal was the last of four latches that made
-        //    `ClosePending` terminal, a total permanent fund lock (RedTeamRound3.t.sol). The guard
-        //    now ADJUSTS THE AMOUNT instead of refusing the transition: the close SETTLES, and the
-        //    already-authorized burn is deducted from the accrual cap it creates. The property the
-        //    guard owes — "draw #2 does not include the burned value" — is preserved exactly, and
-        //    `finalizeClose` no longer has any version-dependent revert.
+        // 2. A close at v12 — BEFORE the burn — is refused before it can be installed. Its fund
+        //    vector (still carrying the burned amount) never becomes an accrual cap.
         _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 12);
-        manager.submitCloseIntent(stale, _closeProof(stale));
+        _expectCloseRefused(_intentAt(9, 12), ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+        assertEq(
+            uint8(manager.channelStatus()),
+            uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending),
+            "the era is open with nothing installed; ClosePending is not a latch here"
+        );
+        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
+
+        // 3. The exit is the burn state itself (or anything strictly newer). Draw #2 is exactly its
+        //    proof-bound post-burn vector — the burned value is not drawn twice.
+        ChannelSettlementManager.CloseIntent memory burnState = _pwIntent(9, 30);
+        manager.submitCloseIntent(burnState, _closeProof(burnState));
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-
         assertEq(
             uint8(manager.channelStatus()),
             uint8(ChannelSettlementManager.ChannelLifecycleStatus.Closed),
-            "R3-1: the settlement is no longer refused; ClosePending is not terminal"
+            "the whole burn state settles"
         );
-        // The cap the stale close declared is DEFAULT_FUND_AMOUNT (it still carries the burn);
-        // the accrual cap it actually creates is that MINUS the burn already paid on L1.
         assertEq(
             manager.finalizedChannelFundAmount(TOKEN_INDEX),
             DEFAULT_FUND_AMOUNT - PW_AMOUNT,
-            "BLOCKED: draw #2 is capped at fund - burn, so the burned value is not drawn twice"
+            "BLOCKED: draw #2 is the post-burn vector of the ONE authenticated state"
         );
-        // Mutation pin: without the deduction this would be DEFAULT_FUND_AMOUNT, i.e. the H-6
-        // double-draw. Assert the strict inequality too so a no-op deduction fails loudly.
-        assertLt(
-            manager.finalizedChannelFundAmount(TOKEN_INDEX),
-            DEFAULT_FUND_AMOUNT,
-            "the deduction actually ran"
-        );
-        // Gross burn telemetry is retained; settlement is driven by the proof-bound post-state
-        // snapshot, not by consuming/subtracting this counter.
-        assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), PW_AMOUNT, "gross telemetry retained");
+        // Mutation pin: a settled pre-burn vector would read DEFAULT_FUND_AMOUNT, i.e. the H-6
+        // double-draw. Assert the strict inequality too so a silently admitted stale close fails.
+        assertLt(manager.finalizedChannelFundAmount(TOKEN_INDEX), DEFAULT_FUND_AMOUNT, "no pre-burn cap settled");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -651,18 +657,19 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     /// comonotone by construction and `epoch - state_version` is a per-channel invariant. A
     /// (higher epoch, lower version) close — the input that would make `settledBeforeBurn` false
     /// while the fund vector still carried the burn — is unsignable. The remaining, signable
-    /// direction is refused.
+    /// direction is refused, now at close admission rather than at burn finalization.
     function test_REFUTED_H6_lexicographicOrderRefusesTheSignableDivergence() external {
         _submitPwAndElapse(9, 30);
-        // The only divergence a real signature set can express: same epoch, lower version.
+        // The only divergence a real signature set can express: same epoch, lower version. It is
+        // refused at ADMISSION — before any vector could settle — so the finalize-time
+        // `PartialWithdrawalSupersededByClose` branch is defence in depth behind this gate.
         _requestCloseAndElapseGrace();
-        ChannelSettlementManager.CloseIntent memory stale = _intentAt(9, 29);
-        manager.submitCloseIntent(stale, _closeProof(stale));
-        vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
-        manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
-
-        vm.expectRevert(ChannelSettlementManager.PartialWithdrawalSupersededByClose.selector);
-        manager.finalizePartialWithdrawal();
+        _expectCloseRefused(_intentAt(9, 29), ChannelSettlementManager.CloseOlderThanAuthorizedBurn.selector);
+        assertTrue(manager.partialWithdrawalPending(), "the burn is neither stranded nor superseded");
+        assertFalse(
+            registry.partialWithdrawalAuthorized(_expectedAuthDigest()),
+            "and nothing was authorized by the refusal"
+        );
     }
 
     /// REFUTED (fix holds). H-6's ClosePending refusal really is retryable under C-3's counter
