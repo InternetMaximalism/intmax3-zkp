@@ -24,22 +24,6 @@ use std::{
 use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _, unix::fs::PermissionsExt as _};
 
 use num_bigint::BigUint;
-use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2_mle::{
-    compact_v2::{decode_compact_v2, encode_compact_v2},
-    fixture_v2::{
-        MLE_VERIFIER_FIXTURE_SCHEMA_V2, MleProofV2Fixture, MleVerifierV2Fixture,
-        SOLIDITY_MLE_PROOF_ENCODING_V2, SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2,
-        derive_whir_deployment_profile_v2, proof_encoding_size_upper_bound_v2,
-        solidity_abi_encode_mle_proof_v2, solidity_abi_encode_verification_config_v2,
-    },
-    protocol_schema_v2::{
-        CIRCUIT_DIGEST_LENGTH_V2, COMPACT_LAYOUT_HASH_V2, COMPACT_MAGIC_V2,
-        MAX_COMPACT_PROOF_BYTES_V2, MAX_WHIR_HINT_BYTES_V2, MAX_WHIR_NARG_BYTES_V2,
-        MLE_PROOF_ABI_SIGNATURE_V2, MLE_PROOF_LAYOUT_HASH_V2, MLE_PROTOCOL_VERSION_CURRENT,
-        SCHEMA_VERSION_CURRENT,
-    },
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -61,12 +45,9 @@ use crate::{
     wallet_core::partial_withdrawal_auth_digest,
 };
 
-// V4 refuses to resume a journal created for the retired tuple-proof/V1 deployment identity.
-const JOURNAL_VERSION: u32 = 4;
+const JOURNAL_VERSION: u32 = 3;
 const ENVELOPE_SCHEMA_VERSION: u32 = 2;
-// V3 replaces the ambiguous single `mleVerifier` pin with the exact withdrawal adapter, its
-// verifier core, all three constructor digests, and the generated proof/compact schema identity.
-const MANIFEST_SCHEMA_VERSION: u32 = 3;
+const MANIFEST_SCHEMA_VERSION: u32 = 2;
 const MAX_ENVELOPE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ACK_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -82,15 +63,11 @@ const PULL_NATIVE_SIGNATURE: &str = "pullChannelFunds()";
 const PULL_ERC20_SIGNATURE: &str = "pullChannelTokenFunds(uint32)";
 const ROLLUP_PULL_NATIVE_SIGNATURE: &str = "withdraw(uint256)";
 const ROLLUP_PULL_ERC20_SIGNATURE: &str = "withdrawToken(uint32,uint256)";
-const MATERIALIZE_NATIVE_SIGNATURE: &str =
-    "materializeNative(address,(address,uint32,uint256,bytes32,bytes32)[],address,bytes)";
-const MATERIALIZE_ERC20_SIGNATURE: &str =
-    "materializeERC20(address,(address,uint32,uint256,bytes32,bytes32)[],address,bytes)";
-// Release compact-MLE-v2 selectors from `forge inspect CloseFundingMaterializer methodIdentifiers`.
+// Release MLE-proof-v2 selectors from `forge inspect CloseFundingMaterializer methodIdentifiers`.
 // Keeping these in the binary makes both lanes manifest-authoritative even when an artifact uses
 // only one lane; the generated calldata is checked against the same values below.
-const MATERIALIZE_NATIVE_SELECTOR: &str = "0x8be4451f";
-const MATERIALIZE_ERC20_SELECTOR: &str = "0x45982c06";
+const MATERIALIZE_NATIVE_SELECTOR: &str = "0x1361d7b3";
+const MATERIALIZE_ERC20_SELECTOR: &str = "0x70718fa0";
 const MATERIALIZED_EVENT_SIGNATURE: &str =
     "CloseFundingMaterialized(address,uint8,bytes32,bytes32)";
 static PRIVATE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -272,21 +249,11 @@ struct DeploymentManifest {
     materializer_runtime_code_hash: String,
     verifier: String,
     verifier_runtime_code_hash: String,
-    withdrawal_mle_verifier: String,
-    withdrawal_mle_verifier_runtime_code_hash: String,
-    withdrawal_mle_verifier_core: String,
-    withdrawal_mle_verifier_core_runtime_code_hash: String,
-    withdrawal_mle_verification_config_digest: String,
-    withdrawal_mle_circuit_config_digest: String,
-    withdrawal_mle_whir_parameters_digest: String,
-    withdrawal_mle_whir_protocol_id: String,
-    withdrawal_mle_whir_session_id: String,
-    mle_fixture_schema: String,
-    mle_protocol_version: u64,
-    mle_proof_abi_signature: String,
-    mle_proof_layout_hash: String,
-    mle_compact_layout_hash: String,
-    mle_compact_proof_encoding: String,
+    mle_verifier: String,
+    mle_verifier_runtime_code_hash: String,
+    mle_proof_abi_version: u8,
+    mle_protocol_version: u32,
+    mle_constituent_width: u32,
     materialize_native_selector: String,
     materialize_erc20_selector: String,
     pull_channel_funds_selector: String,
@@ -343,13 +310,7 @@ struct PublicationBinding {
     manager: String,
     materializer: String,
     verifier: String,
-    withdrawal_mle_verifier: String,
-    withdrawal_mle_verifier_core: String,
-    withdrawal_mle_verification_config_digest: String,
-    withdrawal_mle_circuit_config_digest: String,
-    withdrawal_mle_whir_parameters_digest: String,
-    withdrawal_mle_whir_protocol_id: String,
-    withdrawal_mle_whir_session_id: String,
+    mle_verifier: String,
     withdrawal_prover: String,
     proposal_hash: String,
     producer_request_id: String,
@@ -363,10 +324,6 @@ struct PublicationBinding {
     native_calldata_hash: Option<String>,
     erc20_calldata_hash: Option<String>,
     binding_digest: String,
-}
-
-fn generated_hex(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }
 
 fn normalize_hex(
@@ -534,16 +491,6 @@ fn exact_object_keys(value: &Value, keys: &[&str], what: &str) -> std::result::R
 }
 
 fn checked_manifest(bytes: &[u8], envelope: &PayoutEnvelope) -> Result<CheckedManifest> {
-    let expected_materialize_native_selector = selector(MATERIALIZE_NATIVE_SIGNATURE);
-    let expected_materialize_erc20_selector = selector(MATERIALIZE_ERC20_SIGNATURE);
-    if expected_materialize_native_selector != MATERIALIZE_NATIVE_SELECTOR
-        || expected_materialize_erc20_selector != MATERIALIZE_ERC20_SELECTOR
-    {
-        return Err(CloseFundingPublisherError::Configuration(
-            "internal CloseFundingMaterializer ABI selector constants do not match their exact signatures"
-                .into(),
-        ));
-    }
     let raw: Value = serde_json::from_slice(bytes).map_err(|error| {
         CloseFundingPublisherError::Configuration(format!("parse deployment manifest: {error}"))
     })?;
@@ -564,17 +511,16 @@ fn checked_manifest(bytes: &[u8], envelope: &PayoutEnvelope) -> Result<CheckedMa
                 .into(),
         ));
     }
-    if manifest.mle_fixture_schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
-        || manifest.mle_protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || manifest.mle_proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
-        || manifest.mle_proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
-        || manifest.mle_compact_layout_hash != generated_hex(&COMPACT_LAYOUT_HASH_V2)
-        || manifest.mle_compact_proof_encoding
-            != std::str::from_utf8(&COMPACT_MAGIC_V2).expect("generated compact-v2 magic is ASCII")
-    {
+    // The current FixtureLib/MleVerifier tuple is the release v2 ABI. Accepting an operator label
+    // for another layout while compiling calldata against v2 would make the manifest meaningless.
+    if manifest.mle_proof_abi_version != 2 {
         return Err(CloseFundingPublisherError::Configuration(
-            "close-funding deployment manifest does not pin the generated MLE/WHIR v2 schema"
-                .into(),
+            "close-funding publisher supports only the current MLE proof ABI version 2".into(),
+        ));
+    }
+    if manifest.mle_protocol_version == 0 || manifest.mle_constituent_width == 0 {
+        return Err(CloseFundingPublisherError::Configuration(
+            "MLE protocol version and constituent width must be nonzero".into(),
         ));
     }
 
@@ -583,16 +529,7 @@ fn checked_manifest(bytes: &[u8], envelope: &PayoutEnvelope) -> Result<CheckedMa
         (&mut manifest.manager, 20, "manifest manager"),
         (&mut manifest.materializer, 20, "manifest materializer"),
         (&mut manifest.verifier, 20, "manifest verifier"),
-        (
-            &mut manifest.withdrawal_mle_verifier,
-            20,
-            "manifest withdrawal MLE verifier adapter",
-        ),
-        (
-            &mut manifest.withdrawal_mle_verifier_core,
-            20,
-            "manifest withdrawal MLE verifier core",
-        ),
+        (&mut manifest.mle_verifier, 20, "manifest MLE verifier"),
         (
             &mut manifest.rollup_runtime_code_hash,
             32,
@@ -614,39 +551,9 @@ fn checked_manifest(bytes: &[u8], envelope: &PayoutEnvelope) -> Result<CheckedMa
             "verifier runtime code hash",
         ),
         (
-            &mut manifest.withdrawal_mle_verifier_runtime_code_hash,
+            &mut manifest.mle_verifier_runtime_code_hash,
             32,
-            "withdrawal MLE verifier adapter runtime code hash",
-        ),
-        (
-            &mut manifest.withdrawal_mle_verifier_core_runtime_code_hash,
-            32,
-            "withdrawal MLE verifier core runtime code hash",
-        ),
-        (
-            &mut manifest.withdrawal_mle_verification_config_digest,
-            32,
-            "withdrawal MLE verification config digest",
-        ),
-        (
-            &mut manifest.withdrawal_mle_circuit_config_digest,
-            32,
-            "withdrawal MLE circuit config digest",
-        ),
-        (
-            &mut manifest.withdrawal_mle_whir_parameters_digest,
-            32,
-            "withdrawal MLE WHIR parameters digest",
-        ),
-        (
-            &mut manifest.withdrawal_mle_whir_protocol_id,
-            64,
-            "withdrawal MLE WHIR protocol id",
-        ),
-        (
-            &mut manifest.withdrawal_mle_whir_session_id,
-            32,
-            "withdrawal MLE WHIR session id",
+            "MLE verifier runtime code hash",
         ),
         (
             &mut manifest.materialize_native_selector,
@@ -687,25 +594,25 @@ fn checked_manifest(bytes: &[u8], envelope: &PayoutEnvelope) -> Result<CheckedMa
         &manifest.manager,
         &manifest.materializer,
         &manifest.verifier,
-        &manifest.withdrawal_mle_verifier,
-        &manifest.withdrawal_mle_verifier_core,
+        &manifest.mle_verifier,
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
-    if deployment_addresses.len() != 6 {
+    if deployment_addresses.len() != 5 {
         return Err(CloseFundingPublisherError::Configuration(
-            "rollup, manager, materializer, settlement verifier, withdrawal adapter, and verifier core addresses must be distinct".into(),
+            "rollup, manager, materializer, verifier, and MLE verifier addresses must be distinct"
+                .into(),
         ));
     }
     for (actual, expected, label) in [
         (
             &manifest.materialize_native_selector,
-            expected_materialize_native_selector,
+            MATERIALIZE_NATIVE_SELECTOR.to_owned(),
             "materializeNative(MleProof-v2)",
         ),
         (
             &manifest.materialize_erc20_selector,
-            expected_materialize_erc20_selector,
+            MATERIALIZE_ERC20_SELECTOR.to_owned(),
             "materializeERC20(MleProof-v2)",
         ),
         (
@@ -807,10 +714,31 @@ fn strict_anchor_from_value(
     normalized_anchor(anchor, what)
 }
 
-fn validate_withdrawal_public_inputs(
-    inputs: &[String],
+fn parse_mle_public_inputs(
+    mle_json: &str,
+    manifest: &DeploymentManifest,
     expected: &WithdrawalProofPublicInputs,
 ) -> std::result::Result<(), String> {
+    let mle: Value = serde_json::from_str(mle_json)
+        .map_err(|error| format!("withdrawal MLE JSON is invalid: {error}"))?;
+    let object = mle
+        .as_object()
+        .ok_or_else(|| "withdrawal MLE JSON must be an object".to_string())?;
+    let protocol = object
+        .get("protocolVersion")
+        .ok_or_else(|| "withdrawal MLE JSON lacks protocolVersion".to_string())?;
+    let width = object
+        .get("constituentWidth")
+        .ok_or_else(|| "withdrawal MLE JSON lacks constituentWidth".to_string())?;
+    if value_u64(protocol, "MLE protocolVersion")? != u64::from(manifest.mle_protocol_version)
+        || value_u64(width, "MLE constituentWidth")? != u64::from(manifest.mle_constituent_width)
+    {
+        return Err("withdrawal MLE protocol/constituent schema differs from manifest".into());
+    }
+    let inputs = object
+        .get("publicInputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "withdrawal MLE JSON lacks publicInputs array".to_string())?;
     if inputs.len() != 17 {
         return Err(format!(
             "withdrawal MLE publicInputs length is {}, expected 17",
@@ -832,198 +760,13 @@ fn validate_withdrawal_public_inputs(
     );
     expected_values.push(expected.block_number.as_u64());
     for (index, (actual, expected)) in inputs.iter().zip(expected_values).enumerate() {
-        let digits = actual.strip_prefix("0x").ok_or_else(|| {
-            format!("withdrawal MLE publicInputs[{index}] lacks lowercase 0x prefix")
-        })?;
-        if digits.len() != 16
-            || !digits
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(format!(
-                "withdrawal MLE publicInputs[{index}] is not canonical fixed-width lowercase u64 hex"
-            ));
-        }
-        let actual = u64::from_str_radix(digits, 16)
-            .map_err(|error| format!("decode withdrawal MLE publicInputs[{index}]: {error}"))?;
-        if actual != expected {
+        if value_u64(actual, &format!("MLE publicInputs[{index}]"))? != expected {
             return Err(format!(
                 "withdrawal MLE publicInputs[{index}] differs from payout leaf/anchor binding"
             ));
         }
     }
     Ok(())
-}
-
-/// Authenticate every redundant representation in the sole production MLE/WHIR v2 fixture.
-/// The Solidity materializer independently parses the same object, but validating it before WAL
-/// creation or signing prevents a malformed/old artifact from reaching an operational boundary.
-fn validate_withdrawal_mle_v2_fixture(
-    json: &str,
-    manifest: &DeploymentManifest,
-    expected: &WithdrawalProofPublicInputs,
-) -> std::result::Result<(), String> {
-    let fixture = MleVerifierV2Fixture::from_canonical_json(json)
-        .map_err(|error| format!("strict canonical withdrawal MLE/WHIR v2 fixture: {error}"))?;
-    fixture
-        .config_fixture()
-        .validate_self_consistency()
-        .map_err(|error| format!("self-consistent withdrawal MLE/WHIR config: {error}"))?;
-    if fixture.schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
-        || fixture.schema_version != SCHEMA_VERSION_CURRENT
-        || fixture.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.proof.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.verification_key.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
-        || fixture.proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
-    {
-        return Err("withdrawal MLE/WHIR v2 fixture schema/protocol/layout mismatch".into());
-    }
-
-    let proof = &fixture.proof;
-    let vk = &fixture.verification_key;
-    let config = &fixture.verification_config;
-    let pinned = &fixture.pinned_verifier;
-    let shape = fixture.compact_shape.decode();
-    let expected_gate_round_degree = config
-        .circuit
-        .quotient_degree_factor
-        .checked_add(2)
-        .ok_or_else(|| "withdrawal MLE/WHIR v2 gate round degree overflow".to_string())?;
-    if shape.circuit_digest_len != CIRCUIT_DIGEST_LENGTH_V2
-        || shape.max_whir_narg_bytes != MAX_WHIR_NARG_BYTES_V2
-        || shape.max_whir_hint_bytes != MAX_WHIR_HINT_BYTES_V2
-        || shape.max_encoded_bytes != MAX_COMPACT_PROOF_BYTES_V2
-        || shape.constituent_width != proof.constituent_width
-        || shape.constituent_width != vk.constituent_width
-        || shape.public_inputs_len != proof.public_inputs.len()
-        || shape.degree_bits != config.circuit.degree_bits
-        || shape.public_inputs_len != config.circuit.num_public_inputs
-        || shape.num_constants != config.circuit.num_constants
-        || shape.num_routed_wires != config.circuit.num_routed_wires
-        || shape.num_wires != config.circuit.num_wires
-        || shape.gate_round_degree != expected_gate_round_degree
-        || config.circuit.num_constants != vk.num_constants
-        || config.circuit.num_routed_wires != vk.num_routed_wires
-        || config.circuit.num_wires != vk.num_wires
-        || config.circuit.num_selectors != vk.num_selectors
-        || config.circuit.num_gate_constraints != vk.num_gate_constraints
-        || config.circuit.quotient_degree_factor != vk.quotient_degree_factor
-        || config.public_input_wire_map != vk.public_input_wire_map
-        || config.k_is != vk.k_is
-        || config.subgroup_gen_powers != vk.subgroup_gen_powers
-        || config.gates != vk.gates
-    {
-        return Err("withdrawal MLE/WHIR v2 proof/VK/config/compact shape mismatch".into());
-    }
-    if proof.circuit_digest.len() != CIRCUIT_DIGEST_LENGTH_V2
-        || proof.circuit_digest != vk.circuit_digest
-        || pinned.circuit_digest.as_slice() != vk.circuit_digest.as_slice()
-        || proof.preprocessed_root != vk.preprocessed_commitment_root
-        || pinned.preprocessed_commitment_root != vk.preprocessed_commitment_root
-        || pinned.circuit_config_digest != vk.circuit_config_digest
-        || pinned.whir_protocol_id != vk.whir_protocol_id
-        || pinned.whir_session_id != vk.whir_session_id
-    {
-        return Err("withdrawal MLE/WHIR v2 proof/VK/pinned views disagree".into());
-    }
-    vk.try_decode::<GoldilocksField>()
-        .map_err(|error| format!("canonical withdrawal MLE/WHIR v2 verification key: {error}"))?;
-
-    let recorded_proof_abi = fixture
-        .solidity_abi_proof
-        .decode_and_validate(SOLIDITY_MLE_PROOF_ENCODING_V2)
-        .map_err(|error| format!("withdrawal MLE/WHIR v2 Solidity proof record: {error}"))?;
-    let expected_proof_abi = solidity_abi_encode_mle_proof_v2(proof)
-        .map_err(|error| format!("canonical withdrawal MLE/WHIR v2 Solidity proof: {error}"))?;
-    if recorded_proof_abi != expected_proof_abi {
-        return Err(
-            "withdrawal MLE/WHIR v2 Solidity proof bytes disagree with proof object".into(),
-        );
-    }
-
-    let recorded_config_abi = fixture
-        .solidity_abi_verification_config
-        .decode_and_validate(SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2)
-        .map_err(|error| format!("withdrawal MLE/WHIR v2 Solidity config record: {error}"))?;
-    let expected_config_abi = solidity_abi_encode_verification_config_v2(config)
-        .map_err(|error| format!("canonical withdrawal MLE/WHIR v2 Solidity config: {error}"))?;
-    if recorded_config_abi != expected_config_abi
-        || pinned.verification_config_digest != fixture.solidity_abi_verification_config.keccak256
-    {
-        return Err("withdrawal MLE/WHIR v2 Solidity config bytes/digest disagree".into());
-    }
-
-    let compact_encoding = std::str::from_utf8(&COMPACT_MAGIC_V2)
-        .map_err(|error| format!("generated compact-v2 encoding is not UTF-8: {error}"))?;
-    let compact = fixture
-        .compact_proof
-        .decode_and_validate(compact_encoding)
-        .map_err(|error| format!("withdrawal MLE/WHIR v2 compact proof record: {error}"))?;
-    if compact.is_empty() || compact.len() > MAX_COMPACT_PROOF_BYTES_V2 {
-        return Err(format!(
-            "withdrawal MLE/WHIR v2 compact proof length {} is outside 1..={MAX_COMPACT_PROOF_BYTES_V2}",
-            compact.len()
-        ));
-    }
-    let decoded = decode_compact_v2::<GoldilocksField>(&compact, &shape)
-        .map_err(|error| format!("strict withdrawal MLE/WHIR v2 compact decode: {error}"))?;
-    if MleProofV2Fixture::encode(&decoded) != *proof {
-        return Err("withdrawal MLE/WHIR v2 compact bytes disagree with proof object".into());
-    }
-    let reencoded = encode_compact_v2(&decoded, &shape)
-        .map_err(|error| format!("canonical withdrawal MLE/WHIR v2 compact encode: {error}"))?;
-    if reencoded != compact {
-        return Err("withdrawal MLE/WHIR v2 compact proof is not canonical".into());
-    }
-
-    let profile = derive_whir_deployment_profile_v2(shape.degree_bits, shape.constituent_width)
-        .map_err(|error| format!("canonical withdrawal MLE/WHIR v2 profile: {error}"))?;
-    if config.whir != profile.params
-        || vk.whir_protocol_id != generated_hex(&profile.protocol_id)
-        || vk.whir_session_id != generated_hex(&profile.session_id)
-        || pinned.whir_parameters_digest != generated_hex(&profile.parameters_digest)
-    {
-        return Err("withdrawal MLE/WHIR v2 native WHIR profile or identifiers drifted".into());
-    }
-    let upper_bound = proof_encoding_size_upper_bound_v2(&shape)
-        .map_err(|error| format!("withdrawal MLE/WHIR v2 size upper bound: {error}"))?;
-    if fixture.size_upper_bound != upper_bound
-        || !upper_bound.fits_whir_blob_caps
-        || !upper_bound.fits_compact_cap
-        || compact.len() > upper_bound.max_compact_bytes
-        || recorded_proof_abi.len() > upper_bound.max_solidity_abi_bytes
-        || decoded.whir_eval_proof.narg_string.len() != upper_bound.max_whir_transcript_bytes
-        || decoded.whir_eval_proof.hints.len() > upper_bound.max_whir_hint_bytes
-        || fixture.stats.solidity_abi_bytes != recorded_proof_abi.len()
-        || fixture.stats.solidity_abi_verification_config_bytes != recorded_config_abi.len()
-        || fixture.stats.compact_bytes != compact.len()
-        || fixture.stats.whir_transcript_bytes != decoded.whir_eval_proof.narg_string.len()
-        || fixture.stats.whir_hint_bytes != decoded.whir_eval_proof.hints.len()
-    {
-        return Err("withdrawal MLE/WHIR v2 proof statistics or resource envelope mismatch".into());
-    }
-    if !same_hex(
-        &pinned.verification_config_digest,
-        &manifest.withdrawal_mle_verification_config_digest,
-    ) || !same_hex(
-        &pinned.circuit_config_digest,
-        &manifest.withdrawal_mle_circuit_config_digest,
-    ) || !same_hex(
-        &pinned.whir_parameters_digest,
-        &manifest.withdrawal_mle_whir_parameters_digest,
-    ) || !same_hex(
-        &pinned.whir_protocol_id,
-        &manifest.withdrawal_mle_whir_protocol_id,
-    ) || !same_hex(
-        &pinned.whir_session_id,
-        &manifest.withdrawal_mle_whir_session_id,
-    ) {
-        return Err(
-            "withdrawal MLE/WHIR v2 fixture identity differs from deployment manifest".into(),
-        );
-    }
-    validate_withdrawal_public_inputs(&proof.public_inputs, expected)
 }
 
 fn parse_and_validate_payout(
@@ -1268,12 +1011,8 @@ fn parse_and_validate_payout(
                 ))
             })?,
         };
-        validate_withdrawal_mle_v2_fixture(
-            &lane.withdrawal_mle_json,
-            &manifest.value,
-            &expected_pis,
-        )
-        .map_err(CloseFundingPublisherError::Artifact)?;
+        parse_mle_public_inputs(&lane.withdrawal_mle_json, &manifest.value, &expected_pis)
+            .map_err(CloseFundingPublisherError::Artifact)?;
         validated_lanes.push((lane.lane, withdrawals));
     }
     if token_plans.is_empty() || token_plans.len() > MAX_CHANNEL_TOKENS {
@@ -1819,7 +1558,6 @@ fn materialize_lane_calldata(
         .args([
             "script",
             "script/MaterializeCloseFundingPayout.s.sol:MaterializeCloseFundingPayout",
-            "--offline",
             "--sig",
             "run()",
             "--silent",
@@ -1925,29 +1663,14 @@ fn prepare_payout(config: &CloseFundingPublisherConfig) -> Result<PreparedPayout
         .find(|lane| lane.lane == PartialWithdrawalLane::Erc20)
         .map(|lane| lane.calldata_hash.clone());
     let mut binding = PublicationBinding {
-        schema_version: 3,
+        schema_version: 2,
         chain_id: envelope.chain_id,
         channel_id: envelope.channel_id,
         rollup: envelope.rollup.clone(),
         manager: envelope.manager.clone(),
         materializer: manifest.value.materializer.clone(),
         verifier: envelope.verifier.clone(),
-        withdrawal_mle_verifier: manifest.value.withdrawal_mle_verifier.clone(),
-        withdrawal_mle_verifier_core: manifest.value.withdrawal_mle_verifier_core.clone(),
-        withdrawal_mle_verification_config_digest: manifest
-            .value
-            .withdrawal_mle_verification_config_digest
-            .clone(),
-        withdrawal_mle_circuit_config_digest: manifest
-            .value
-            .withdrawal_mle_circuit_config_digest
-            .clone(),
-        withdrawal_mle_whir_parameters_digest: manifest
-            .value
-            .withdrawal_mle_whir_parameters_digest
-            .clone(),
-        withdrawal_mle_whir_protocol_id: manifest.value.withdrawal_mle_whir_protocol_id.clone(),
-        withdrawal_mle_whir_session_id: manifest.value.withdrawal_mle_whir_session_id.clone(),
+        mle_verifier: manifest.value.mle_verifier.clone(),
         withdrawal_prover: envelope.withdrawal_prover.clone(),
         proposal_hash: envelope.proposal_hash.clone(),
         producer_request_id: envelope.producer_request_id.clone(),
@@ -1966,7 +1689,7 @@ fn prepare_payout(config: &CloseFundingPublisherConfig) -> Result<PreparedPayout
         CloseFundingPublisherError::Artifact(format!("serialize payout binding: {error}"))
     })?;
     binding.binding_digest =
-        stable_request_id("close-funding-publication-binding-v3", &binding_value);
+        stable_request_id("close-funding-publication-binding-v2", &binding_value);
     Ok(PreparedPayout {
         envelope,
         anchor,
@@ -2605,19 +2328,6 @@ fn view_u256_at(
     )?))
 }
 
-fn view_bytes32_at(
-    rpc: &str,
-    target: &str,
-    signature: &str,
-    args: &[&str],
-    block_number: u64,
-) -> Result<String> {
-    Ok(format!(
-        "0x{}",
-        hex::encode(view_word_at(rpc, target, signature, args, block_number)?)
-    ))
-}
-
 fn view_channel_id_at(rpc: &str, target: &str, block_number: u64) -> Result<u32> {
     let word = view_word_at(rpc, target, "channelId()(bytes4)", &[], block_number)?;
     if word[4..] != [0u8; 28] {
@@ -2830,14 +2540,9 @@ fn validate_deployment_at(
             "settlement verifier",
         ),
         (
-            &manifest.withdrawal_mle_verifier,
-            &manifest.withdrawal_mle_verifier_runtime_code_hash,
-            "withdrawal MLE verifier adapter",
-        ),
-        (
-            &manifest.withdrawal_mle_verifier_core,
-            &manifest.withdrawal_mle_verifier_core_runtime_code_hash,
-            "withdrawal MLE verifier core",
+            &manifest.mle_verifier,
+            &manifest.mle_verifier_runtime_code_hash,
+            "MLE verifier",
         ),
     ] {
         let actual = runtime_code_hash_at(rpc, address, block)?;
@@ -2871,78 +2576,35 @@ fn validate_deployment_at(
             &manifest.rollup,
         )
         || !same_hex(
-            &view_address_at(
-                rpc,
-                &manifest.rollup,
-                "withdrawalMleVerifier()(address)",
-                &[],
-                block,
-            )?,
-            &manifest.withdrawal_mle_verifier,
-        )
-        || !same_hex(
-            &view_address_at(
-                rpc,
-                &manifest.withdrawal_mle_verifier,
-                "core()(address)",
-                &[],
-                block,
-            )?,
-            &manifest.withdrawal_mle_verifier_core,
+            &view_address_at(rpc, &manifest.rollup, "mleVerifier()(address)", &[], block)?,
+            &manifest.mle_verifier,
         )
     {
         return Err(CloseFundingPublisherError::Evidence(
-            "deployed channel/registry/materializer/verifier/withdrawal-MLE immutable binding differs from artifact/manifest"
+            "deployed channel/registry/materializer/verifier/MLE immutable binding differs from artifact/manifest"
                 .into(),
         ));
     }
-    let adapter_allowed_chain = view_u256_at(
+    let allowed_chain = view_u256_at(
         rpc,
-        &manifest.withdrawal_mle_verifier,
+        &manifest.mle_verifier,
         "allowedChainId()(uint256)",
         &[],
         block,
     )?;
-    let core_allowed_chain = view_u256_at(
-        rpc,
-        &manifest.withdrawal_mle_verifier_core,
-        "allowedChainId()(uint256)",
-        &[],
-        block,
-    )?;
-    if adapter_allowed_chain != BigUint::from(manifest.chain_id)
-        || core_allowed_chain != adapter_allowed_chain
-    {
+    if allowed_chain != BigUint::from(manifest.chain_id) {
         return Err(CloseFundingPublisherError::Evidence(format!(
-            "withdrawal MLE adapter/core allowedChainId mismatch: adapter={adapter_allowed_chain}, core={core_allowed_chain}, manifest={}",
-            manifest.chain_id,
+            "MLE verifier allowedChainId {allowed_chain} differs from {}",
+            manifest.chain_id
         )));
     }
-    let core = &manifest.withdrawal_mle_verifier_core;
-    let protocol_first = view_bytes32_at(rpc, core, "whirProtocolIdFirst()(bytes32)", &[], block)?;
-    let protocol_second =
-        view_bytes32_at(rpc, core, "whirProtocolIdSecond()(bytes32)", &[], block)?;
-    let protocol_id = format!("{}{}", protocol_first, &protocol_second[2..]);
-    if !same_hex(
-        &view_bytes32_at(rpc, core, "verificationConfigDigest()(bytes32)", &[], block)?,
-        &manifest.withdrawal_mle_verification_config_digest,
-    ) || !same_hex(
-        &view_bytes32_at(rpc, core, "circuitConfigDigest()(bytes32)", &[], block)?,
-        &manifest.withdrawal_mle_circuit_config_digest,
-    ) || !same_hex(
-        &view_bytes32_at(rpc, core, "whirParametersDigest()(bytes32)", &[], block)?,
-        &manifest.withdrawal_mle_whir_parameters_digest,
-    ) || !same_hex(&protocol_id, &manifest.withdrawal_mle_whir_protocol_id)
-        || !same_hex(
-            &view_bytes32_at(rpc, core, "whirSessionId()(bytes32)", &[], block)?,
-            &manifest.withdrawal_mle_whir_session_id,
-        )
-    {
-        return Err(CloseFundingPublisherError::Evidence(
-            "withdrawal MLE verifier core identity differs from the release manifest".into(),
-        ));
-    }
     if !view_bool_at(
+        rpc,
+        &manifest.rollup,
+        "withdrawalVkInitialized()(bool)",
+        &[],
+        block,
+    )? || !view_bool_at(
         rpc,
         &manifest.rollup,
         "isRegisteredSettlementManager(address)(bool)",
@@ -2950,7 +2612,7 @@ fn validate_deployment_at(
         block,
     )? {
         return Err(CloseFundingPublisherError::Evidence(
-            "Manager is not registered on the pinned Rollup".into(),
+            "withdrawal VK is unset or Manager is not registered on the pinned Rollup".into(),
         ));
     }
     if !view_bool_at(
@@ -5141,19 +4803,6 @@ pub fn publish_close_funding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plonky2::{
-        field::types::Field as _,
-        iop::witness::{PartialWitness, WitnessWrite as _},
-        plonk::{
-            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
-            config::PoseidonGoldilocksConfig,
-        },
-        util::timing::TimingTree,
-    };
-    use plonky2_mle::fixture_v2::try_prove_and_export_mle_v2;
-    use std::sync::{Mutex, OnceLock};
-
-    static TEST_MLE_FIXTURES: OnceLock<Mutex<BTreeMap<Vec<u64>, String>>> = OnceLock::new();
 
     fn hex_word(tag: u8) -> String {
         format!("0x{}", hex::encode([tag; 32]))
@@ -5189,47 +4838,22 @@ mod tests {
             .hash()
             .to_u32_vec()
             .into_iter()
-            .map(u64::from)
+            .map(|value| value.to_string())
             .collect::<Vec<_>>();
         public_inputs.extend(
             inputs
                 .ext_public_state_commitment
                 .to_u32_vec()
                 .into_iter()
-                .map(u64::from),
+                .map(|value| value.to_string()),
         );
-        public_inputs.push(inputs.block_number.as_u64());
-
-        let mut fixtures = TEST_MLE_FIXTURES
-            .get_or_init(|| Mutex::new(BTreeMap::new()))
-            .lock()
-            .unwrap();
-        if let Some(cached) = fixtures.get(&public_inputs).cloned() {
-            return cached;
-        }
-        let mut builder =
-            CircuitBuilder::<GoldilocksField, 2>::new(CircuitConfig::standard_recursion_config());
-        let targets = (0..public_inputs.len())
-            .map(|_| {
-                let target = builder.add_virtual_target();
-                builder.register_public_input(target);
-                target
-            })
-            .collect::<Vec<_>>();
-        let circuit = builder.build::<PoseidonGoldilocksConfig>();
-        let mut witness = PartialWitness::new();
-        for (target, value) in targets.iter().zip(&public_inputs) {
-            witness
-                .set_target(*target, GoldilocksField::from_canonical_u64(*value))
-                .unwrap();
-        }
-        let fixture = try_prove_and_export_mle_v2(&circuit, witness, &mut TimingTree::default())
-            .unwrap()
-            .fixture
-            .to_canonical_json()
-            .unwrap();
-        fixtures.insert(public_inputs, fixture.clone());
-        fixture
+        public_inputs.push(inputs.block_number.as_u64().to_string());
+        serde_json::json!({
+            "protocolVersion": 1,
+            "constituentWidth": 160,
+            "publicInputs": public_inputs,
+        })
+        .to_string()
     }
 
     fn lane_value(
@@ -5290,15 +4914,9 @@ mod tests {
         })
     }
 
-    fn manifest_value(
-        chain_id: u64,
-        rollup: &str,
-        manager: &str,
-        verifier: &str,
-        fixture: &MleVerifierV2Fixture,
-    ) -> Value {
+    fn manifest_value(chain_id: u64, rollup: &str, manager: &str, verifier: &str) -> Value {
         serde_json::json!({
-            "schemaVersion": MANIFEST_SCHEMA_VERSION,
+            "schemaVersion": 2,
             "chainId": chain_id,
             "rollup": rollup,
             "rollupRuntimeCodeHash": hex_word(0x31),
@@ -5309,21 +4927,11 @@ mod tests {
             "materializerRuntimeCodeHash": hex_word(0x36),
             "verifier": verifier,
             "verifierRuntimeCodeHash": hex_word(0x33),
-            "withdrawalMleVerifier": hex_address(0x44),
-            "withdrawalMleVerifierRuntimeCodeHash": hex_word(0x34),
-            "withdrawalMleVerifierCore": hex_address(0x45),
-            "withdrawalMleVerifierCoreRuntimeCodeHash": hex_word(0x35),
-            "withdrawalMleVerificationConfigDigest": fixture.pinned_verifier.verification_config_digest,
-            "withdrawalMleCircuitConfigDigest": fixture.pinned_verifier.circuit_config_digest,
-            "withdrawalMleWhirParametersDigest": fixture.pinned_verifier.whir_parameters_digest,
-            "withdrawalMleWhirProtocolId": fixture.pinned_verifier.whir_protocol_id,
-            "withdrawalMleWhirSessionId": fixture.pinned_verifier.whir_session_id,
-            "mleFixtureSchema": MLE_VERIFIER_FIXTURE_SCHEMA_V2,
-            "mleProtocolVersion": MLE_PROTOCOL_VERSION_CURRENT,
-            "mleProofAbiSignature": MLE_PROOF_ABI_SIGNATURE_V2,
-            "mleProofLayoutHash": generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
-            "mleCompactLayoutHash": generated_hex(&COMPACT_LAYOUT_HASH_V2),
-            "mleCompactProofEncoding": std::str::from_utf8(&COMPACT_MAGIC_V2).unwrap(),
+            "mleVerifier": hex_address(0x44),
+            "mleVerifierRuntimeCodeHash": hex_word(0x34),
+            "mleProofAbiVersion": 2,
+            "mleProtocolVersion": 1,
+            "mleConstituentWidth": 160,
             "materializeNativeSelector": MATERIALIZE_NATIVE_SELECTOR,
             "materializeErc20Selector": MATERIALIZE_ERC20_SELECTOR,
             "pullChannelFundsSelector": selector(PULL_NATIVE_SIGNATURE),
@@ -5353,38 +4961,12 @@ mod tests {
             extended_state_commitment: hex_word(0x92),
             bp_sig_chain: hex_word(0x93),
         };
-        let native_lane = lane_value(
-            PartialWithdrawalLane::Native,
-            0,
-            30,
-            0xb0,
-            &manager,
-            &prover,
-            &aux,
-            &anchor,
-        );
-        let erc20_lane = lane_value(
-            PartialWithdrawalLane::Erc20,
-            7,
-            40,
-            0xb7,
-            &manager,
-            &prover,
-            &aux,
-            &anchor,
-        );
-        let fixture = MleVerifierV2Fixture::from_canonical_json(
-            native_lane["withdrawalMleJson"]
-                .as_str()
-                .expect("test lane contains its canonical fixture"),
-        )
-        .unwrap();
         let artifacts = serde_json::json!({
             "planDigest": hex_word(0xa2),
             "fundingAuxData": aux,
             "lanes": [
-                native_lane,
-                erc20_lane,
+                lane_value(PartialWithdrawalLane::Native, 0, 30, 0xb0, &manager, &prover, &aux, &anchor),
+                lane_value(PartialWithdrawalLane::Erc20, 7, 40, 0xb7, &manager, &prover, &aux, &anchor),
             ],
         });
         let artifact_hash = stable_request_id("close-funding-payout", &artifacts);
@@ -5404,7 +4986,7 @@ mod tests {
         });
         (
             envelope,
-            manifest_value(chain_id, &rollup, &manager, &verifier, &fixture),
+            manifest_value(chain_id, &rollup, &manager, &verifier),
         )
     }
 
@@ -5525,29 +5107,14 @@ mod tests {
             .find(|lane| lane.lane == PartialWithdrawalLane::Erc20)
             .map(|lane| lane.calldata_hash.clone());
         let mut binding = PublicationBinding {
-            schema_version: 3,
+            schema_version: 2,
             chain_id: envelope.chain_id,
             channel_id: envelope.channel_id,
             rollup: envelope.rollup.clone(),
             manager: envelope.manager.clone(),
             materializer: manifest.value.materializer.clone(),
             verifier: envelope.verifier.clone(),
-            withdrawal_mle_verifier: manifest.value.withdrawal_mle_verifier.clone(),
-            withdrawal_mle_verifier_core: manifest.value.withdrawal_mle_verifier_core.clone(),
-            withdrawal_mle_verification_config_digest: manifest
-                .value
-                .withdrawal_mle_verification_config_digest
-                .clone(),
-            withdrawal_mle_circuit_config_digest: manifest
-                .value
-                .withdrawal_mle_circuit_config_digest
-                .clone(),
-            withdrawal_mle_whir_parameters_digest: manifest
-                .value
-                .withdrawal_mle_whir_parameters_digest
-                .clone(),
-            withdrawal_mle_whir_protocol_id: manifest.value.withdrawal_mle_whir_protocol_id.clone(),
-            withdrawal_mle_whir_session_id: manifest.value.withdrawal_mle_whir_session_id.clone(),
+            mle_verifier: manifest.value.mle_verifier.clone(),
             withdrawal_prover: envelope.withdrawal_prover.clone(),
             proposal_hash: envelope.proposal_hash.clone(),
             producer_request_id: envelope.producer_request_id.clone(),
@@ -5563,7 +5130,7 @@ mod tests {
             binding_digest: String::new(),
         };
         binding.binding_digest = stable_request_id(
-            "close-funding-publication-binding-v3",
+            "close-funding-publication-binding-v2",
             &serde_json::to_value(&binding).unwrap(),
         );
         PreparedPayout {
@@ -5675,118 +5242,6 @@ mod tests {
         .unwrap();
         assert_eq!(tokens.keys().copied().collect::<Vec<_>>(), vec![0, 7]);
         assert_eq!(lanes.len(), 2);
-        assert_eq!(
-            selector(MATERIALIZE_NATIVE_SIGNATURE),
-            MATERIALIZE_NATIVE_SELECTOR
-        );
-        assert_eq!(
-            selector(MATERIALIZE_ERC20_SIGNATURE),
-            MATERIALIZE_ERC20_SELECTOR
-        );
-    }
-
-    #[test]
-    fn retired_or_cross_view_mle_artifacts_and_manifest_identities_fail_closed() {
-        let (artifact, manifest) = artifact_value();
-
-        let mut legacy = artifact.clone();
-        let legacy_json = serde_json::json!({
-            "protocolVersion": 1,
-            "constituentWidth": 160,
-            "publicInputs": vec!["0"; 17],
-        })
-        .to_string();
-        legacy["artifacts"]["lanes"][0]["withdrawalMleJson"] = Value::String(legacy_json.clone());
-        legacy["artifacts"]["lanes"][0]["metrics"]["mleJsonBytes"] = Value::from(legacy_json.len());
-        rehash_artifact(&mut legacy);
-        assert!(
-            parse_and_validate_payout(
-                serde_json::to_string(&legacy).unwrap().as_bytes(),
-                serde_json::to_string(&manifest).unwrap().as_bytes(),
-            )
-            .is_err()
-        );
-
-        let mut cross_view = artifact.clone();
-        let mut fixture = MleVerifierV2Fixture::from_canonical_json(
-            cross_view["artifacts"]["lanes"][0]["withdrawalMleJson"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        fixture.compact_proof.keccak256 = hex_word(0xee);
-        let mutated_fixture = fixture.to_canonical_json().unwrap();
-        cross_view["artifacts"]["lanes"][0]["withdrawalMleJson"] =
-            Value::String(mutated_fixture.clone());
-        cross_view["artifacts"]["lanes"][0]["metrics"]["mleJsonBytes"] =
-            Value::from(mutated_fixture.len());
-        rehash_artifact(&mut cross_view);
-        assert!(
-            parse_and_validate_payout(
-                serde_json::to_string(&cross_view).unwrap().as_bytes(),
-                serde_json::to_string(&manifest).unwrap().as_bytes(),
-            )
-            .is_err()
-        );
-
-        let mut split_pi_map = artifact.clone();
-        let mut fixture = MleVerifierV2Fixture::from_canonical_json(
-            split_pi_map["artifacts"]["lanes"][0]["withdrawalMleJson"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        let mut map = hex::decode(
-            fixture
-                .verification_config
-                .public_input_wire_map
-                .strip_prefix("0x")
-                .unwrap(),
-        )
-        .unwrap();
-        map[0] ^= 1;
-        fixture.verification_config.public_input_wire_map =
-            format!("0x{}", hex::encode(map));
-        let mutated_fixture = fixture.to_canonical_json().unwrap();
-        split_pi_map["artifacts"]["lanes"][0]["withdrawalMleJson"] =
-            Value::String(mutated_fixture.clone());
-        split_pi_map["artifacts"]["lanes"][0]["metrics"]["mleJsonBytes"] =
-            Value::from(mutated_fixture.len());
-        rehash_artifact(&mut split_pi_map);
-        assert!(
-            parse_and_validate_payout(
-                serde_json::to_string(&split_pi_map).unwrap().as_bytes(),
-                serde_json::to_string(&manifest).unwrap().as_bytes(),
-            )
-            .is_err(),
-            "funding publisher must bind the Solidity config PI map to the VK PI map"
-        );
-
-        for field in [
-            "withdrawalMleVerificationConfigDigest",
-            "withdrawalMleCircuitConfigDigest",
-            "withdrawalMleWhirParametersDigest",
-            "withdrawalMleWhirProtocolId",
-            "withdrawalMleWhirSessionId",
-            "mleProofLayoutHash",
-            "mleCompactLayoutHash",
-        ] {
-            let mut wrong_manifest = manifest.clone();
-            let bytes = if field == "withdrawalMleWhirProtocolId" {
-                64
-            } else {
-                32
-            };
-            wrong_manifest[field] = Value::String(format!("0x{}", "99".repeat(bytes)));
-            assert!(
-                parse_and_validate_payout(
-                    serde_json::to_string(&artifact).unwrap().as_bytes(),
-                    serde_json::to_string(&wrong_manifest).unwrap().as_bytes(),
-                )
-                .is_err(),
-                "mutated manifest {field} was accepted"
-            );
-        }
     }
 
     #[test]
@@ -5821,11 +5276,6 @@ mod tests {
         for (field, zero) in [
             ("materializer", format!("0x{}", "00".repeat(20))),
             ("materializerRuntimeCodeHash", hex_word(0)),
-            ("withdrawalMleVerifier", format!("0x{}", "00".repeat(20))),
-            (
-                "withdrawalMleVerifierCore",
-                format!("0x{}", "00".repeat(20)),
-            ),
             ("materializeNativeSelector", "0x00000000".into()),
             ("materializeErc20Selector", "0x00000000".into()),
         ] {

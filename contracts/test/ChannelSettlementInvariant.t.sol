@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
 /// @title SettlementHandler

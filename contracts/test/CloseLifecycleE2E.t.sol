@@ -4,9 +4,9 @@ pragma solidity ^0.8.24;
 import {CloseE2EBase} from "./CloseE2EBase.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
+import {ChannelSettlementManager, IChannelSettlementVerifier, IChannelRegistry} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
-import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
@@ -25,9 +25,9 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 ///      (co-generated: both derive the channel-1 member set from ChannelMemberKeys::deterministic).
 ///      Self-skips ONLY if the close_* fixtures are absent; stale fixtures are hard failures.
 contract CloseLifecycleE2ETest is CloseE2EBase {
+    MleVerifier internal verifier;
     IntmaxRollup internal rollup;
     ChannelSettlementVerifier internal settlementVerifier;
-    CloseFundingMaterializer internal materializer;
     ChannelSettlementManager internal manager;
     address internal poster = makeAddr("poster");
     bool internal ready;
@@ -43,25 +43,35 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     function _closeMleJson() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_intent_mle.json"));
     }
-
     function _closeIntentJson() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_intent.json"));
     }
 
     function setUp() public {
-        // Historical V1 proof files are never reinterpreted as V2. The deterministic address
-        // printer below needs only the six config artifacts; the value-path test additionally
-        // requires all three witness-specific proof fixtures plus their descriptor/payout data.
-        ready = _v2DeploymentConfigsReady() && _isSchemaFile("close_lifecycle_validity_mle.json", V2_FULL_SCHEMA_HASH)
-            && _isSchemaFile("close_withdrawal_mle.json", V2_FULL_SCHEMA_HASH)
-            && _isSchemaFile("close_intent_mle.json", V2_FULL_SCHEMA_HASH)
-            && vm.exists(_dataPath("close_lifecycle.json")) && vm.exists(_dataPath("close_withdrawal_payout.json"))
-            && vm.exists(_dataPath("close_intent.json"));
-        if (!ready) return;
+        // Self-skip until ALL close fixtures exist (heavy proving runs). The lifecycle path needs the
+        // validity/withdrawal/payout fixtures; the REAL close-intent submission additionally needs
+        // the wrapped-close MLE proof (`close_intent_mle.json`) + its descriptor (`close_intent.json`,
+        // produced by `cargo run --release --features close-fixture-bin --bin generate_close_fixture`).
+        try vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_withdrawal_payout.json")) {
+            try vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_intent_mle.json")) {
+                try vm.readFile(string.concat(vm.projectRoot(), "/test/data/close_intent.json")) {
+                    ready = true;
+                } catch {
+                    ready = false;
+                    return;
+                }
+            } catch {
+                ready = false;
+                return;
+            }
+        } catch {
+            ready = false;
+            return;
+        }
 
-        // Constructor-pin six distinct V2 adapters and deploy/register the lifecycle stack through
-        // the same deterministic path used by the address printer.
-        (rollup, settlementVerifier, materializer, manager) = _deployAll(_lifecycleJson());
+        // 1-2. Deploy all four contracts (+ registerChannel) via the shared CREATE2 path — IDENTICAL
+        //      to ComputeCloseManager.s.sol so the manager lands at the baked address.
+        (verifier, rollup, settlementVerifier, manager) = _deployAll(_validityJson(), _lifecycleJson());
         TestProofDaVerifier testDa = new TestProofDaVerifier();
         vm.prank(FACTORY);
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(testDa)));
@@ -75,51 +85,75 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         emit log_named_address("manager(actual)", address(manager));
         bakedRecipient = vm.parseJsonAddress(_payoutJson(), ".withdrawals[0].recipient");
 
-        // Permissioned posting: authorize the poster. The CREATE2 factory is the rollup deployer.
+        // 4. Set the withdrawal VK. deployer == the CREATE2 factory (msg.sender at construction), so
+        //    prank the factory. (Production P7 uses a normal deploy where deployer = the EOA.)
+        FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(_withdrawalJson());
+        IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(_withdrawalJson(), verifier);
+        vm.prank(FACTORY);
+        rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
+        // Permissioned posting: authorize the poster. deployer == FACTORY (CREATE2), so prank it.
         vm.prank(FACTORY);
         rollup.setBlockProducer(poster, true);
 
-        // CO-GENERATION (multitoken Phase 5b): the close fixture is generated over the SAME
+        // 5. Set the REAL close VK on the settlement verifier from the close fixture. deployer ==
+        //    FACTORY (CREATE2), so prank the factory. The close VK is the close circuit's OWN
+        //    MLE/WHIR verification key (degreeBits / preprocessedRoot / gatesDigest / kIs /
+        //    subgroupGenPowers / whirParams / protocolId / sessionId), pulled from the proved
+        //    `close_intent_mle.json` exactly as the rollup's withdrawal VK is built from its fixture.
+        _initRealCloseVk();
+
+        // 6. CO-GENERATION (multitoken Phase 5b): the close fixture is now generated over the SAME
         //    deterministic channel-1 member keys the lifecycle fixture registers
         //    (`ChannelMemberKeys::deterministic(1)` is the single derivation shared by
         //    `generate_close_fixture` and `generate_withdrawal_fixture`), so the close proof's
         //    `member_set_commitment` MUST equal the registered one. A mismatch means the fixture
         //    pair was not co-generated (stale / mixed-run fixtures) — HARD failure, no longer a
         //    self-skip.
-        closeFixtureMatchesRegistration = manager.registeredMemberSetCommitment()
-            == vm.parseJsonBytes32(_closeIntentJson(), ".member_set_commitment");
+        closeFixtureMatchesRegistration =
+            manager.registeredMemberSetCommitment()
+                == vm.parseJsonBytes32(_closeIntentJson(), ".member_set_commitment");
     }
 
-    /// Print the close-manager CREATE2 address for the fixture-regeneration flow. The six V2
-    /// config-only artifacts exist before witness-specific proofs, which breaks the former cycle
-    /// between a baked payout recipient and the verifier parents' constructor arguments. Then:
+    /// @dev Build the close `CloseVk` from the proved `close_intent_mle.json` (same field layout the
+    /// rollup's withdrawal VK uses) and set it on the settlement verifier (deployer == FACTORY).
+    function _initRealCloseVk() internal {
+        string memory cj = _closeMleJson();
+        FixtureLib.DeployData memory cdd = FixtureLib.parseDeployData(cj);
+        MleVerifier.MleProof memory cproof = FixtureLib.parseProof(cj);
+        bytes32 gatesDigest = verifier.computeGatesDigest(
+            cproof.gates,
+            cproof.witnessIndividualEvalsAtRGateV2.length,
+            cproof.numSelectors,
+            cproof.numGateConstraints,
+            cproof.quotientDegreeFactor
+        );
+        ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
+            degreeBits: cdd.degreeBits,
+            preprocessedRoot: cdd.preCommitRoot,
+            numConstants: cdd.numConstants,
+            numRoutedWires: cdd.numRoutedWires,
+            gatesDigest: gatesDigest
+        });
+        vm.prank(FACTORY);
+        settlementVerifier.initializeCloseVk(
+            verifier, cvk, cdd.whirParams, cdd.protocolId, cdd.sessionId, cdd.kIs, cdd.subgroupGenPowers
+        );
+    }
+
+    /// Print the close-manager CREATE2 address for the fixture-regeneration flow (moved here from
+    /// CloseManagerAddr.t.sol — the address depends on THIS test contract's library-linking
+    /// context, see that file). Reads the PLAIN (unprefixed) lifecycle fixtures, whose
+    /// registration / VK / genesis are identical to the close set, so it works BEFORE the close
+    /// fixtures are (re)generated. Then:
     ///   WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture
     function test_printCloseManagerAddress() external {
-        if (ready) {
-            emit log_named_address("CLOSE_MANAGER_ADDRESS", address(manager));
-            emit log_named_address("CLOSE_ROLLUP_ADDRESS", address(rollup));
-            return;
-        }
-        if (!_v2DeploymentConfigsReady() || !vm.exists(_dataPath("close_lifecycle.json"))) {
-            vm.skip(true);
-            return;
-        }
-        // Deploy from configuration artifacts alone. This both prints the pre-witness address and
-        // executes the exact constructor/CREATE2 path, so an initcode/prediction drift cannot hide
-        // behind a pure address calculation.
-        // The Rollup address is also printed: the `close_` withdrawal generator binds the
-        // close-funding aux data (`close_funding_aux_data`) to `(chainid, rollup, manager, ...)`
-        // and the Manager rejects a payout whose aux was baked against any other pair.
-        (IntmaxRollup configOnlyRollup,,, ChannelSettlementManager configOnlyManager) = _deployAll(_lifecycleJson());
-        emit log_named_address("CLOSE_MANAGER_ADDRESS", address(configOnlyManager));
-        emit log_named_address("CLOSE_ROLLUP_ADDRESS", address(configOnlyRollup));
+        string memory vkJson = vm.readFile(string.concat(vm.projectRoot(), "/test/data/lifecycle_validity_mle.json"));
+        string memory lcJson = vm.readFile(string.concat(vm.projectRoot(), "/test/data/lifecycle.json"));
+        emit log_named_address("CLOSE_MANAGER_ADDRESS", predictManagerAddressFrom(vkJson, lcJson));
     }
 
     function test_closeLifecycle_endToEnd() public {
-        if (!ready) {
-            vm.skip(true);
-            return;
-        }
+        if (!ready) { vm.skip(true); return; }
 
         // Multitoken Phase 5b: stale fixtures are a HARD failure (no self-skip) — the manager the
         // close set was baked against must be the manager this test just deployed.
@@ -154,6 +188,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
 
         string memory lcJson = _lifecycleJson();
         address member0 = vm.parseJsonAddress(lcJson, ".registration.recipients[0]");
+        bytes32 member0Hash = vm.parseJsonBytes32Array(lcJson, ".registration.member_pk_gs")[0];
 
         uint64 freezeNonce = manager.currentCloseFreezeNonce();
         uint64 cancellationFloor = manager.highestCancelledRevivedStateVersion();
@@ -161,13 +196,15 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         manager.requestClose(freezeNonce, cancellationFloor);
         vm.warp(block.timestamp + 600); // grace
 
-        // REAL close intent (every field is a proved public input) + canonical compact V2 proof.
+        // REAL close intent (every field is the proved close public input) + REAL wrapped-close proof
+        // (publicInputs = the 103 raw close limbs the manager's `_runCloseVerify` rebinds, then
+        // re-checked by the settlement verifier's MleVerifier.verify against the real close VK).
         ChannelSettlementManager.CloseIntent memory intent = _closeIntentFromDescriptor(cij);
-        bytes memory closeProof = FixtureLib.parseCompactProofV2(_closeMleJson());
+        MleVerifier.MleProof memory closeProof = FixtureLib.parseProof(_closeMleJson());
         // Multitoken Phase 5b: the regenerated close fixture carries the 103-limb multi-token PI
         // vector (tokenFundsDigest at limbs 95..103, §N-6) — anything else is a stale fixture.
         assertEq(
-            vm.parseJsonStringArray(_closeMleJson(), ".proof.publicInputs").length,
+            closeProof.publicInputs.length,
             103,
             "close fixture must carry the 103-limb multi-token close PI vector (stale fixture -- regenerate)"
         );
@@ -187,8 +224,16 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             uint32 t1 = uint32(registryU[1]);
             assertTrue(t1 != 0, "non-genesis registry slot must map to a non-ETH base token");
             assertTrue(amounts[0] != 0 && amounts[1] != 0, "both per-token fund amounts must be nonzero");
-            assertEq(manager.finalizedChannelFundAmount(0), amounts[0], "ETH lane accrual != signed amounts[0]");
-            assertEq(manager.finalizedChannelFundAmount(t1), amounts[1], "token-t1 lane accrual != signed amounts[1]");
+            assertEq(
+                manager.finalizedChannelFundAmount(0),
+                amounts[0],
+                "ETH lane accrual != signed amounts[0]"
+            );
+            assertEq(
+                manager.finalizedChannelFundAmount(t1),
+                amounts[1],
+                "token-t1 lane accrual != signed amounts[1]"
+            );
         }
 
         // ── D. Only after challenge finality, pay the exact proof-bound channel amount to the
@@ -202,8 +247,8 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             manager.finalizedChannelFundAmount(0),
             "live withdrawal must drain the exact finalized ETH cap"
         );
-        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalJson());
-        materializer.materializeNative(manager, ws, prover, wproof);
+        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(_withdrawalJson());
+        rollup.withdrawNative(ws, prover, wproof);
         assertEq(rollup.pendingWithdrawals(address(manager)), channelAmount, "manager credited at rollup");
 
         // ── E. The Manager accepts only the exact atomic delta for this closed channel.
@@ -222,7 +267,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // `MockMleVerifier`, which returns true unconditionally, so it covers binding ONLY and says
         // nothing about proof acceptance. Proof ACCEPTANCE by the real verifier is covered
         // separately and decoupled from the co-generation gap by `ClaimMleVerify.t.sol`, which runs
-        // the REAL pinned V2 verifier over `withdrawal_claim_mle.json`,
+        // the REAL `MleVerifier.verify` over `withdrawal_claim_mle.json`,
         // `post_close_claim_mle.json` and `cancel_close_mle.json`. (Before that test existed, the
         // sentence above read as full coverage while the mock stubbed out exactly the thing that
         // was broken by gate id 8 — see `doc/audit/why-gate8-was-missed.md` §6.)
@@ -236,9 +281,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     /// verbatim (the verifier's on-chain tokenFundsDigest recompute binds them to the
     /// member-signed PI limbs 95..103 — a tampered vector fails `submitCloseIntent`).
     function _closeIntentFromDescriptor(string memory j)
-        internal
-        pure
-        returns (ChannelSettlementManager.CloseIntent memory intent)
+        internal pure returns (ChannelSettlementManager.CloseIntent memory intent)
     {
         intent = ChannelSettlementManager.CloseIntent({
             closeNonce: uint64(vm.parseJsonUint(j, ".close_nonce")),
@@ -256,7 +299,9 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             snapshotMediumBlockNumber: uint64(vm.parseJsonUint(j, ".snapshot_medium_block_number")),
             finalStateVersion: uint64(vm.parseJsonUint(j, ".final_state_version")),
             finalSettledTxChain: vm.parseJsonBytes32(j, ".final_settled_tx_chain"),
-            finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(j, ".final_settled_tx_accumulator_root")
+            finalSettledTxAccumulatorRoot: vm.parseJsonBytes32(
+                j, ".final_settled_tx_accumulator_root"
+            )
         });
     }
 
@@ -267,24 +312,18 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         string[] memory raw = vm.parseJsonStringArray(j, ".channel_fund_amounts");
         require(raw.length == 10, "channel_fund_amounts must have 10 entries");
         a = new uint256[](10);
-        for (uint256 i = 0; i < 10; i++) {
-            a[i] = vm.parseUint(raw[i]);
-        }
+        for (uint256 i = 0; i < 10; i++) a[i] = vm.parseUint(raw[i]);
     }
 
     function _parseAmounts(string memory j) internal pure returns (uint256[10] memory a) {
         uint256[] memory v = _parseAmountsArray(j);
-        for (uint256 i = 0; i < 10; i++) {
-            a[i] = v[i];
-        }
+        for (uint256 i = 0; i < 10; i++) a[i] = v[i];
     }
 
     function _parseRegistry(string memory j) internal pure returns (uint32[10] memory r) {
         uint256[] memory raw = vm.parseJsonUintArray(j, ".token_registry");
         require(raw.length == 10, "token_registry must have 10 entries");
-        for (uint256 i = 0; i < 10; i++) {
-            r[i] = uint32(raw[i]);
-        }
+        for (uint256 i = 0; i < 10; i++) r[i] = uint32(raw[i]);
     }
 
     function _registerChannel(string memory lcJson) internal {
@@ -305,9 +344,8 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
 
         string memory lcJson = _lifecycleJson();
         bytes32 finalRoot = vm.parseJsonBytes32(lcJson, ".final_state_root");
-        bytes memory validityProof = FixtureLib.parseCompactProofV2(_validityJson());
-        bytes32 proofHash = keccak256(validityProof);
-        uint32 proofLength = uint32(validityProof.length);
+        bytes32 proofHash = vm.parseJsonBytes32(lcJson, ".proof_hash");
+        uint32 proofLength = uint32(vm.parseJsonUint(lcJson, ".proof_length"));
 
         _register0(); // block 1 (already registered in setUp; here we only post the block)
         _postRound(0, proofHash, proofLength, finalRoot);
@@ -318,7 +356,8 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         uint256 finalSubId = _postRound(2, proofHash, proofLength, finalRoot);
 
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis(lcJson);
-        bool ok = rollup.finalize(finalSubId, finalRoot, vpis, validityProof);
+        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(_validityJson());
+        bool ok = rollup.finalize(finalSubId, finalRoot, vpis, vproof);
         assertTrue(ok, "finalize failed");
         assertEq(rollup.latestFinalizedStateRoot(), finalRoot, "finalized root mismatch");
     }
@@ -339,16 +378,13 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     }
 
     function _postRound(uint256 i, bytes32 proofHash, uint32 proofLength, bytes32 stateRoot)
-        internal
-        returns (uint256 subId)
+        internal returns (uint256 subId)
     {
         string memory lcJson = _lifecycleJson();
         string memory base = string.concat(".blocks[", vm.toString(i), "]");
         uint256[] memory keyIdsU = FixtureLib.parseUintArray(lcJson, string.concat(base, ".key_ids"));
         uint32[] memory keyIds = new uint32[](keyIdsU.length);
-        for (uint256 j = 0; j < keyIdsU.length; j++) {
-            keyIds[j] = uint32(keyIdsU[j]);
-        }
+        for (uint256 j = 0; j < keyIdsU.length; j++) keyIds[j] = uint32(keyIdsU[j]);
         IntmaxRollup.SubBlock[] memory subBlocks = new IntmaxRollup.SubBlock[](1);
         subBlocks[0] = IntmaxRollup.SubBlock({
             channelId: uint32(vm.parseJsonUint(lcJson, string.concat(base, ".channel_id"))),
@@ -362,7 +398,9 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // test contract, tripping the production block-producer authorization gate.
         bytes32 pendingChains = rollup.pendingChainsPin();
         vm.prank(poster);
-        rollup.postBlockAndSubmit{value: STAKE}(subBlocks, proofHash, proofLength, stateRoot, pendingChains);
+        rollup.postBlockAndSubmit{value: STAKE}(
+            subBlocks, proofHash, proofLength, stateRoot, pendingChains
+        );
     }
 
     function _parseVpis(string memory lcJson) internal pure returns (IntmaxRollup.ValidityPublicInputs memory v) {
@@ -386,5 +424,12 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
             nullifier: vm.parseJsonBytes32(j, ".withdrawals[0].nullifier"),
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
+    }
+
+    /// Stub-proof bytes for the OTHER (non-close) accepted-stub verifier paths (e.g.
+    /// withdrawalClaimPIHash): `abi.encode(piHash)`. The close path no longer uses this — it submits
+    /// a real `MleVerifier.MleProof`.
+    function _proofFor(bytes32 piHash) internal pure returns (bytes memory) {
+        return abi.encode(piHash);
     }
 }

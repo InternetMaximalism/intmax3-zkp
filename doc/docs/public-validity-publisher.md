@@ -1,22 +1,17 @@
 # Public validity publisher
 
-> **RELEASE STATUS (2026-09-03): NO-GO.** The commit-before-challenge MLE/WHIR V2 path is
-> integrated here, but its mandatory independent cryptographic review and public-chain acceptance
-> run are not complete. `IntmaxRollup.releaseRuntime` therefore remains restricted to chain
-> `31337`. This publisher cannot authorize a public deposit/post/finalize/value transition, and a
-> successful local run is not release evidence. Preserve every separate NO-GO disposition in
-> `doc/audit/audit30-08-2026-final-security-closure.md`.
->
-> V2 is a clean protocol cutover. Journal version 2, deployment-manifest schema 2, and envelope
-> schema 2 intentionally reject legacy tuple-proof journals/manifests/envelopes. Resolve or retire
-> old pending submissions and bonds under their original deployment; never relabel or deserialize
-> them as compact V2 state.
+> **Integration precondition:** the parent Rollup currently keeps every value-bearing production
+> transition fail-closed outside chain 31337 while the separately tracked MLE/WHIR PCS soundness
+> repair is unfinished. This publisher is the audited public-chain transport path, but it cannot
+> make the current containment deployment releasable. After the PCS repair, remove the parent
+> containment gate only through the checklist in
+> `doc/audit/mle-whir-pcs-repair-handoff.md`, then rerun this publisher's public-chain acceptance
+> test against the resulting deployment.
 
 `public_validity_publisher` is the operator-owned bridge between the keyless HTTP/API process and
 the public L1. It consumes the exact `postingArtifact` + `finalizeArtifact` envelope emitted by the
-resident validity prover. It does not prove again. The only proof representation sent to the
-Rollup, KZG proof-DA satellite, finalizer, or fraud classifier is the same canonical
-`.compactProof.bytes` stream.
+resident validity prover. It does not prove again and does not change the circuit, verifier key,
+proof size, or proving time.
 
 ## Invocation
 
@@ -51,12 +46,9 @@ journal rather than crossing back into the keyless API.
    one prepared terminal sub-block, historical pending-chain checkpoint, validity public inputs,
    final root, predicted on-chain block hash chain, and the exact eight MLE public-input limbs must
    all agree. The VPI hash uses the contract's exact 164-byte `abi.encodePacked` layout.
-2. `validityMleJson` must be the exact canonical full fixture schema
-   `plonky2-mle-v3-solidity`, schema/protocol version 3 and WHIR PoW 22. The publisher cross-checks the proof,
-   verification key, immutable adapter view, Solidity ABI redundancy, encoded configuration,
-   compact shape, resource statistics and generated upper bound. It strictly decodes and
-   canonically re-encodes `.compactProof.bytes`, requires `MLEWHIR3`, and then discards every
-   alternate representation. V1 and partially versioned artifacts are rejected even on 31337.
+2. `validityMleJson` is converted to the canonical Solidity `abi.encode(MleProof)` byte stream.
+   Legacy ABI v1 is accepted only on chain 31337. Repaired ABI v2 requires both
+   `protocolVersion == 1` and the exact computed `constituentWidth`; partial metadata is rejected.
 3. Foundry signs an EIP-4844 type-3 `postBlockAndSubmitGuarded` transaction. Before broadcast, the
    command independently decodes it and checks chain, signer, rollup, one-ether stake, calldata,
    exact Alloy `SimpleCoder` blob bytes, commitments, KZG proofs, and versioned hashes. The guarded
@@ -68,9 +60,7 @@ journal rather than crossing back into the keyless API.
 5. `attestProofData` and `finalize` are likewise signed raw transactions and fsynced before their
    first broadcast. Attestation requires the exact event plus receipt-block read-back from the
    release-pinned KZG satellite; its address and runtime-code hash are rechecked at that finalized
-   receipt block. Posting sidecars, attestation, finalization and fraud classification are all
-   bound to the same exact compact byte stream and its length/hash; no lossy or proof-tuple DA
-   reconstruction is permitted.
+   receipt block.
 6. Because `finalize` is permissionless, the publisher scans from the finalized posting receipt to
    the durable head before signing and on every recovery. It may adopt a relayer or batch-wrapper
    transaction only when that transaction has one unique exact `Finalized(submissionId,stateRoot)`
@@ -87,50 +77,29 @@ The deployment manifest is mandatory and has this closed schema:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 1,
   "chainId": 11155111,
   "rollup": "0x...",
   "rollupRuntimeCodeHash": "0x...",
-  "validityMleVerifier": "0x<adapter>",
-  "validityMleVerifierRuntimeCodeHash": "0x...",
-  "validityMleVerifierCore": "0x<core>",
-  "validityMleVerifierCoreRuntimeCodeHash": "0x...",
-  "validityMleVerificationConfigDigest": "0x...",
-  "validityMleCircuitConfigDigest": "0x...",
-  "validityMleWhirParametersDigest": "0x...",
-  "validityMleWhirProtocolId": "0x<64-bytes>",
-  "validityMleWhirSessionId": "0x...",
+  "mleVerifier": "0x...",
+  "mleVerifierRuntimeCodeHash": "0x...",
   "kzgVerifier": "0x...",
   "kzgVerifierRuntimeCodeHash": "0x...",
-  "mleFixtureSchema": "plonky2-mle-v3-solidity",
-  "mleProtocolVersion": 3,
-  "mleProofAbiSignature": "<generated MLE_PROOF_ABI_SIGNATURE_V2>",
-  "mleProofLayoutHash": "0x...",
-  "mleCompactLayoutHash": "0x...",
-  "mleCompactProofEncoding": "MLEWHIR3",
+  "mleProofAbiVersion": 2,
   "postBlockAndSubmitGuardedSelector": "0x...",
   "attestProofDataSelector": "0x...",
-  "finalizeSelector": "0x...",
-  "fraudProofSelector": "0x..."
+  "finalizeSelector": "0x..."
 }
 ```
 
 Before risking the posting stake, the publisher first authenticates the manifest's exact raw bytes
 against the independently supplied SHA-256 pin. It then hashes deployed runtime code at a durable L1
-checkpoint, follows `rollup.validityMleVerifier()`, that adapter's `core()`, and
-`rollup.kzgVerifier()`. It checks distinct nonzero adapter/core addresses, both runtime-code hashes,
-both `allowedChainId()` values, and the core's verification-config, circuit-config,
-WHIR-parameters, protocol and session identities against both the manifest and the full proof
-artifact. It also recomputes all four selectors from the compiled ABI. Every address and
-runtime-code hash pin must be nonzero. After the historical reads, the exact checkpoint block and
-the durable head are re-read; a replacement, regression, chain/source change, or loss of coverage
-fails closed. This prevents a V2 envelope from reaching an older, cross-circuit, or substituted
-adapter/core or an unintended proof-DA satellite.
-
-The compiled selector signatures are `postBlockAndSubmitGuarded(...,bytes32,uint64,bytes32)`,
-`attestProofData(uint256,bytes,bytes)`, `finalize(...,bytes)`, and `fraudProof(...,bytes)`. A
-deployment record containing a retired tuple-proof selector is invalid; do not hand-edit it to
-match an old contract.
+checkpoint, follows both `rollup.mleVerifier()` and `rollup.kzgVerifier()`, checks the MLE
+`allowedChainId()`, and compares all three actual calldata selectors with this reviewed manifest.
+Every address and runtime-code hash pin must be nonzero. After the historical reads, the exact
+checkpoint block and the durable head are re-read; a replacement, regression, chain/source change,
+or loss of coverage fails closed. This prevents a v2 envelope from posting and attesting against an
+older or substituted deployment only to fail—or consult an unintended satellite—later.
 
 The journal path is a single-candidate capability. Reusing it for another chain, rollup, candidate,
 artifact, proof schema, or signer fails closed. `--lock-root` is mandatory, is canonicalized, and is

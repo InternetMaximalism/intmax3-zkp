@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {RedTeamFraudBreaksTest, GasHungryMleVerifier} from "./RedTeamFraudBreaks.t.sol";
 
 // ── a minimal reproduction of the PRODUCTION call topology inside `_mleVerdict` ──────────────
@@ -55,14 +56,14 @@ contract Outer {
 ///         duplicating a 200-line rollup fixture).
 contract RedTeamRound3FraudTest is RedTeamFraudBreaksTest {
     /// The floor, mirrored (it is `private constant` in IntmaxRollup).
-    uint256 internal constant MIN_MLE_VERIFY_GAS = 25_000_000;
+    uint256 internal constant MIN_MLE_VERIFY_GAS = 12_000_000;
 
     // ═════════════════════════════════════════════════════════════════════════
     // BREAK — B-4 part 2 (`gasleft() <= gasBefore/64`) is DEAD CODE under the
     //         production call topology.  *** FIXED (R3-4) ***
     //
     //   THE FINDING. The round-2 signature can never fire at the depth that
-    //   actually ships, so the ENTIRE gas-starvation defence was the gas floor
+    //   actually ships, so the ENTIRE gas-starvation defence was the 12M floor
     //   and nothing else, and a genuine starvation was reported to the caller as
     //   `MleProofUnevaluable` -- "the deployed evaluator cannot evaluate this
     //   proof" -- which is the opposite diagnosis. SOUNDNESS was never affected:
@@ -117,13 +118,12 @@ contract RedTeamRound3FraudTest is RedTeamFraudBreaksTest {
 
     /// BLOCKED (passes = the misclassification is gone). Body preserved VERBATIM through the sweep;
     /// only the verdict changed. A verifier heavy enough to OOG the forwarded frame, called with
-    /// transaction gas limits well ABOVE the 25M floor: every one of them is a genuine gas
+    /// transaction gas limits well ABOVE the 12M floor: every one of them is a genuine gas
     /// starvation, and every one of them is now classified `FraudProofGasStarved`.
     function test_R3_BREAK_B4_starvationIsReportedAsUnevaluable() public {
-        // Sized so the verifier's own cost lands above the 63/64 share of the first calls in the
-        // sweep even after the production floor was raised to 25M.
+        // Sized so the verifier's own cost lands above the 63/64 share of a ~19M frame.
         (IntmaxRollup r, bytes memory payload) =
-            _honestSubmissionOn(address(new GasHungryMleVerifier(45_000)));
+            _honestSubmissionOn(address(new GasHungryMleVerifier(26_000)));
 
         // Control: with plenty of gas the verifier finishes and returns TRUE -> not fraud.
         uint256 gc = gasleft();
@@ -135,7 +135,7 @@ contract RedTeamRound3FraudTest is RedTeamFraudBreaksTest {
         bool fraud;
         uint256 sawStarved;
         uint256 sawUnevaluable;
-        for (uint256 g = MIN_MLE_VERIFY_GAS + 500_000; g <= 38_000_000; g += 500_000) {
+        for (uint256 g = 12_500_000; g <= 21_000_000; g += 500_000) {
             vm.prank(attacker);
             (bool ok, bytes memory ret) = address(r).call{gas: g}(payload);
             if (ok && ret.length == 32 && abi.decode(ret, (bool))) {

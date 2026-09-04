@@ -3,7 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
+import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
+import {MockMleVerifier} from "./CloseTestLib.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {RegisterTokens} from "../script/RegisterTokens.s.sol";
 import {SubmitPartialWithdrawal} from "../script/SubmitPartialWithdrawal.s.sol";
@@ -62,6 +65,12 @@ contract RegisterTokensTest is Test {
 
     address internal fraudTreasury = makeAddr("fraudTreasury");
 
+    function _emptyWhirParams() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
+        p.rounds = new SpongefishWhirVerify.RoundParams[](0);
+        p.evaluationPoint = new GoldilocksExt3.Ext3[](0);
+        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+    }
+
     function setUp() public {
         script = new RegisterTokens();
         tokenA = new SimpleERC20("TokenA");
@@ -69,17 +78,23 @@ contract RegisterTokensTest is Test {
 
         // NOTE: the mock is deployed BEFORE the prank — a CREATE inside the constructor argument
         // list would otherwise consume it and the rollup's `deployer` would be this test contract.
-        MockPinnedMleVerifierV2 validityMle = new MockPinnedMleVerifierV2(31337);
-        MockPinnedMleVerifierV2 withdrawalMle = new MockPinnedMleVerifierV2(31337);
+        MleVerifier mockMle = MleVerifier(address(new MockMleVerifier()));
 
         // `registerToken` is deployer-only, and `registerAll` is invoked externally by these tests,
         // so the script contract must BE the deployer (in production the broadcaster is).
+        IntmaxRollup.MleVk memory zeroVk;
         vm.prank(address(script));
         rollup = new IntmaxRollup(
             fraudTreasury,
-            validityMle,
-            withdrawalMle,
-            bytes32(0)
+            zeroVk,
+            _emptyWhirParams(),
+            "",
+            "",
+            new uint256[](0),
+            new uint256[](0),
+            mockMle,
+            bytes32(0),
+            true // degreeBits == 0 validity bypass (test opt-in)
         );
         assertEq(rollup.deployer(), address(script), "the script must be the rollup deployer");
     }

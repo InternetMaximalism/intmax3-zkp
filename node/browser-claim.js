@@ -25,7 +25,8 @@ const {
 
 const {
   MANAGER_CLAIM_ABI,
-  SUBMIT_WITHDRAWAL_CLAIM_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR,
   validateClaimArtifact,
 } = require('./delegate/claim-settlement');
 
@@ -535,6 +536,7 @@ class BrowserClaimCoordinator {
       context.finalized,
       claimedRecipient,
       slot,
+      { allowLegacyMle: this.authority.chainId === DEVNET_CHAIN_ID },
     );
     if (canonicalAddress(claim.recipient, 'claim recipient') === ZeroAddress) throw new Error('claim recipient is zero');
     const record = claimPublicRecord(
@@ -781,7 +783,8 @@ module.exports = {
   BrowserClaimCoordinator,
   NULLIFIER_PAYOUT_EVENT,
   NULLIFIER_PAYOUT_FUNCTION,
-  SUBMIT_WITHDRAWAL_CLAIM_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR,
   browserClaimOperationId,
   canonicalAddress,
   canonicalTokenSlot,

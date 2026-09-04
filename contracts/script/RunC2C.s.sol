@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MAX_COMPACT_PROOF_BYTES_V2} from "@mle/generated/MleWhirV2.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Drive the channel-to-channel Sepolia lifecycle (manager-free, direct-to-EOA exit).
@@ -57,12 +57,12 @@ contract RunC2C is Script {
     /// Authenticate the exact blob-backed proof bytes in a separate transaction so the standard
     /// two-blob KZG check and the MLE verifier never have to fit in the same L1 block.
     function attestProofDataStep() external {
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
         uint256 subId = vm.envOr("SUB_ID", uint256(4));
 
         vm.startBroadcast();
-        bytes32 digest = _rollup().attestProofData(subId, compactProof, blobSidecars);
+        bytes32 digest = _rollup().attestProofData(subId, abi.encode(proof), blobSidecars);
         vm.stopBroadcast();
         console2.log("proof DA attested:");
         console2.logBytes32(digest);
@@ -80,11 +80,11 @@ contract RunC2C is Script {
         vpis.finalExtCommitment = vm.parseJsonBytes32(lc, ".vpis.final_ext_commitment");
         vpis.prover = vm.parseJsonAddress(lc, ".vpis.prover");
         bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         uint256 subId = vm.envOr("SUB_ID", uint256(4));
 
         vm.startBroadcast();
-        bool ok = _rollup().finalize(subId, finalRoot, vpis, compactProof);
+        bool ok = _rollup().finalize(subId, finalRoot, vpis, proof);
         vm.stopBroadcast();
         require(ok, "finalize returned false");
         console2.log("finalize OK; latestFinalizedStateRoot:");
@@ -103,17 +103,17 @@ contract RunC2C is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_wmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wmle());
 
         vm.startBroadcast();
-        _rollup().withdrawNative(ws, prover, compactProof);
+        _rollup().withdrawNative(ws, prover, proof);
         vm.stopBroadcast();
         console2.log("withdrawNative OK; pendingWithdrawals[recipient]:", _rollup().pendingWithdrawals(ws[0].recipient));
     }
 
-    /// Local-only: ABI-encode the compact-v2 withdrawal call and log its exact calldata byte length.
-    /// The parser already enforces the generated protocol cap; final release gating must use
-    /// execution plus EIP-2028 intrinsic gas, not the obsolete 128-KiB V1 transport assumption.
+    /// Local-only: ABI-encode the withdrawNative call and log its calldata byte length, so we can
+    /// confirm a freshly re-rolled withdrawal proof fits under Ethereum's 128 KiB (131072-byte) tx
+    /// limit BEFORE broadcasting. No RPC / no broadcast needed (run with just --sig "sizeStep()").
     function sizeStep() external view {
         string memory j = _payout();
         IntmaxRollup.Withdrawal[] memory ws = new IntmaxRollup.Withdrawal[](1);
@@ -125,10 +125,10 @@ contract RunC2C is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_wmle());
-        bytes memory cd = abi.encodeCall(IntmaxRollup.withdrawNative, (ws, prover, compactProof));
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wmle());
+        bytes memory cd = abi.encodeCall(IntmaxRollup.withdrawNative, (ws, prover, proof));
         console2.log("withdrawNative calldata bytes:", cd.length);
-        console2.log("compact proof within generated cap?:", compactProof.length <= MAX_COMPACT_PROOF_BYTES_V2);
+        console2.log("under 130950 (raw tx < 131072)?:", cd.length <= 130950);
     }
 
     /// EOA pulls its pendingWithdrawals balance as real ETH (the receiver's channel-to-channel exit).

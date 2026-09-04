@@ -30,9 +30,7 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, u32limb_trait::U32LimbTrait as _},
     utils::{
-        mle_prover::deprecated_v1::{
-            export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof,
-        },
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
         wrapper::WrapperCircuit,
     },
     wallet_core::{

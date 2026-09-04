@@ -5,6 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Keyless close-funding payout calldata materializer
@@ -36,7 +37,7 @@ contract MaterializeCloseFundingPayout is Script {
 
         address prover = vm.parseJsonAddress(payout, ".withdrawal_prover");
         ChannelSettlementManager manager = ChannelSettlementManager(payable(vm.envAddress("CF_MANAGER")));
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(mle);
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(mle);
         string memory lane = vm.envString("CF_LANE");
         bytes memory callData;
         if (keccak256(bytes(lane)) == keccak256("native")) {
@@ -44,7 +45,7 @@ contract MaterializeCloseFundingPayout is Script {
                 require(withdrawals[i].tokenIndex == 0, "native lane contains ERC-20");
             }
             callData = abi.encodeCall(
-                CloseFundingMaterializer.materializeNative, (manager, withdrawals, prover, compactProof)
+                CloseFundingMaterializer.materializeNative, (manager, withdrawals, prover, proof)
             );
         } else {
             require(keccak256(bytes(lane)) == keccak256("erc20"), "unknown close-funding lane");
@@ -52,7 +53,7 @@ contract MaterializeCloseFundingPayout is Script {
                 require(withdrawals[i].tokenIndex != 0, "ERC-20 lane contains native token");
             }
             callData = abi.encodeCall(
-                CloseFundingMaterializer.materializeERC20, (manager, withdrawals, prover, compactProof)
+                CloseFundingMaterializer.materializeERC20, (manager, withdrawals, prover, proof)
             );
         }
         vm.writeFile(vm.envString("CF_CALLDATA_OUT"), vm.toString(callData));

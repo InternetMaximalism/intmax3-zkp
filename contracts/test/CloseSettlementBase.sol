@@ -9,8 +9,9 @@ import {
     CloseProofFields
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
-import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
-import {CloseTestLib} from "./CloseTestLib.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
+import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 import {IERC20} from "../src/SafeERC20.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 
@@ -80,7 +81,7 @@ contract MockRollupRegistry is IChannelRegistry {
     function withdrawNative(
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address,
-        bytes calldata
+        MleVerifier.MleProof calldata
     ) external {
         if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
         for (uint256 i = 0; i < withdrawals.length; ++i) {
@@ -93,7 +94,7 @@ contract MockRollupRegistry is IChannelRegistry {
     function withdrawERC20(
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address,
-        bytes calldata
+        MleVerifier.MleProof calldata
     ) external {
         if (rejectAtomicWithdrawal) revert("atomic withdrawal rejected");
         for (uint256 i = 0; i < withdrawals.length; ++i) {
@@ -152,10 +153,7 @@ contract MockRollupRegistry is IChannelRegistry {
 ///         existing suite is not re-run when these new suites compile.
 abstract contract CloseSettlementBase is Test {
     ChannelSettlementVerifier internal verifier;
-    MockPinnedMleVerifierV2 internal mockMle;
-    MockPinnedMleVerifierV2 internal withdrawalClaimMle;
-    MockPinnedMleVerifierV2 internal postCloseClaimMle;
-    MockPinnedMleVerifierV2 internal cancelCloseMle;
+    MockMleVerifier internal mockMle;
     MockRollupRegistry internal registry;
     ChannelSettlementManager internal manager;
 
@@ -179,11 +177,12 @@ abstract contract CloseSettlementBase is Test {
     uint64 internal constant DEFAULT_FUND_AMOUNT = 75;
 
     function setUp() public virtual {
-        mockMle = new MockPinnedMleVerifierV2(block.chainid);
-        withdrawalClaimMle = new MockPinnedMleVerifierV2(block.chainid);
-        postCloseClaimMle = new MockPinnedMleVerifierV2(block.chainid);
-        cancelCloseMle = new MockPinnedMleVerifierV2(block.chainid);
-        verifier = new ChannelSettlementVerifier(mockMle, withdrawalClaimMle, postCloseClaimMle, cancelCloseMle);
+        verifier = new ChannelSettlementVerifier();
+        mockMle = new MockMleVerifier();
+        _initCloseVk(verifier);
+        _initWithdrawalClaimVk(verifier);
+        _initPostCloseClaimVk(verifier);
+        _initCancelCloseVk(verifier);
         registry = new MockRollupRegistry(IChannelSettlementVerifier(address(verifier)));
 
         bytes32[] memory activeHashes = new bytes32[](3);
@@ -228,6 +227,62 @@ abstract contract CloseSettlementBase is Test {
             IChannelRegistry(address(reg)),
             materializer,
             bindings
+        );
+    }
+
+    // ── VK init ──
+
+    function _initCloseVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.CloseVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyVkArgs();
+        v.initializeCloseVk(MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers);
+    }
+
+    function _initWithdrawalClaimVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializeWithdrawalClaimVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    function _initPostCloseClaimVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializePostCloseClaimVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
+        );
+    }
+
+    function _initCancelCloseVk(ChannelSettlementVerifier v) internal {
+        (
+            ChannelSettlementVerifier.StatementVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyStatementVkArgs();
+        v.initializeCancelCloseVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
         );
     }
 
@@ -306,7 +361,7 @@ abstract contract CloseSettlementBase is Test {
     function _closeProof(ChannelSettlementManager.CloseIntent memory intent)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         return this._closeProofCd(
             intent,
@@ -323,7 +378,7 @@ abstract contract CloseSettlementBase is Test {
     function _closeProofWithDelegateCount(ChannelSettlementManager.CloseIntent memory intent, uint32 delegateCount)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         return
             this._closeProofCd(
@@ -334,7 +389,7 @@ abstract contract CloseSettlementBase is Test {
     function _closeProofFor(ChannelSettlementManager m, ChannelSettlementManager.CloseIntent memory intent)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         return this._closeProofCd(
             intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), uint32(m.activeDelegateCount())
@@ -348,7 +403,7 @@ abstract contract CloseSettlementBase is Test {
         bytes32 memberSetCommitment,
         uint8 memberCount,
         uint32 delegateCount
-    ) external view returns (bytes memory) {
+    ) external view returns (MleVerifier.MleProof memory) {
         uint256[] memory limbs = verifier.expectedCloseLimbs(
             CloseProofFields({
                 channelId: CHANNEL_ID,
@@ -438,7 +493,7 @@ abstract contract CloseSettlementBase is Test {
     function _withdrawalClaimProofFor(ChannelSettlementManager m, ChannelSettlementManager.WithdrawalClaim memory claim)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         uint256[] memory limbs = verifier.expectedWithdrawalClaimLimbs(
             CHANNEL_ID,
@@ -458,7 +513,7 @@ abstract contract CloseSettlementBase is Test {
     function _withdrawalClaimProof(ChannelSettlementManager.WithdrawalClaim memory claim)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         return _withdrawalClaimProofFor(manager, claim);
     }
@@ -507,7 +562,7 @@ abstract contract CloseSettlementBase is Test {
     function _postCloseClaimProofFor(ChannelSettlementManager m, ChannelSettlementManager.PostCloseClaim memory claim)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         bytes32 snn = _expectedSharedNativeNullifier(claim.closeIntentDigest, claim.incomingTxHash, claim.receiverPkG);
         uint256[] memory limbs = verifier.expectedPostCloseClaimLimbs(
@@ -528,7 +583,7 @@ abstract contract CloseSettlementBase is Test {
     function _postCloseClaimProof(ChannelSettlementManager.PostCloseClaim memory claim)
         internal
         view
-        returns (bytes memory)
+        returns (MleVerifier.MleProof memory)
     {
         return _postCloseClaimProofFor(manager, claim);
     }

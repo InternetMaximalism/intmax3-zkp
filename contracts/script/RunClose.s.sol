@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Drive the complex-calldata steps of the Sepolia close lifecycle (one fn per broadcast tx).
@@ -31,10 +32,10 @@ contract RunClose is Script {
     }
 
     function materializeAttestProofDataCalldataStep() external {
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
         uint256 subId = vm.envOr("SUB_ID", uint256(2));
-        _writeCalldata(abi.encodeCall(IntmaxRollup.attestProofData, (subId, compactProof, blobSidecars)));
+        _writeCalldata(abi.encodeCall(IntmaxRollup.attestProofData, (subId, abi.encode(proof), blobSidecars)));
     }
 
     function materializeFinalizeCalldataStep() external {
@@ -48,9 +49,9 @@ contract RunClose is Script {
         vpis.finalExtCommitment = vm.parseJsonBytes32(lc, ".vpis.final_ext_commitment");
         vpis.prover = vm.parseJsonAddress(lc, ".vpis.prover");
         bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         uint256 subId = vm.envOr("SUB_ID", uint256(2));
-        _writeCalldata(abi.encodeCall(IntmaxRollup.finalize, (subId, finalRoot, vpis, compactProof)));
+        _writeCalldata(abi.encodeCall(IntmaxRollup.finalize, (subId, finalRoot, vpis, proof)));
     }
 
     function materializeWithdrawNativeCalldataStep() external {
@@ -64,8 +65,8 @@ contract RunClose is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_wmle());
-        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawNative, (ws, prover, compactProof)));
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wmle());
+        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawNative, (ws, prover, proof)));
     }
 
     function materializeWithdrawErc20CalldataStep() external {
@@ -81,20 +82,20 @@ contract RunClose is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(
             vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_mle.json"))
         );
-        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawERC20, (ws, prover, compactProof)));
+        _writeCalldata(abi.encodeCall(IntmaxRollup.withdrawERC20, (ws, prover, proof)));
     }
 
     /// Authenticate the exact blob-backed proof in its own transaction before MLE verification.
     function attestProofDataStep() external {
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
         uint256 subId = vm.envOr("SUB_ID", uint256(2));
 
         vm.startBroadcast();
-        bytes32 digest = _rollup().attestProofData(subId, compactProof, blobSidecars);
+        bytes32 digest = _rollup().attestProofData(subId, abi.encode(proof), blobSidecars);
         vm.stopBroadcast();
         console2.log("proof DA attested:");
         console2.logBytes32(digest);
@@ -112,11 +113,11 @@ contract RunClose is Script {
         vpis.finalExtCommitment = vm.parseJsonBytes32(lc, ".vpis.final_ext_commitment");
         vpis.prover = vm.parseJsonAddress(lc, ".vpis.prover");
         bytes32 finalRoot = vm.parseJsonBytes32(lc, ".final_state_root");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_vmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_vmle());
         uint256 subId = vm.envOr("SUB_ID", uint256(2));
 
         vm.startBroadcast();
-        bool ok = _rollup().finalize(subId, finalRoot, vpis, compactProof);
+        bool ok = _rollup().finalize(subId, finalRoot, vpis, proof);
         vm.stopBroadcast();
         require(ok, "finalize returned false");
         console2.log("finalize OK; latestFinalizedStateRoot:");
@@ -135,10 +136,10 @@ contract RunClose is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_wmle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wmle());
 
         vm.startBroadcast();
-        _rollup().withdrawNative(ws, prover, compactProof);
+        _rollup().withdrawNative(ws, prover, proof);
         vm.stopBroadcast();
         console2.log("withdrawNative OK; pendingWithdrawals[manager]:", _rollup().pendingWithdrawals(address(_manager())));
     }
@@ -159,12 +160,12 @@ contract RunClose is Script {
             auxData: vm.parseJsonBytes32(j, ".withdrawals[0].aux_data")
         });
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(
             vm.readFile(string.concat(vm.projectRoot(), "/test/data/sepolia_erc20_withdrawal_mle.json"))
         );
 
         vm.startBroadcast();
-        _rollup().withdrawERC20(ws, prover, compactProof);
+        _rollup().withdrawERC20(ws, prover, proof);
         vm.stopBroadcast();
         console2.log(
             "withdrawERC20 OK; pendingTokenWithdrawals[t][manager]:",
@@ -172,15 +173,16 @@ contract RunClose is Script {
         );
     }
 
-    /// submitCloseIntent with the canonical compact-v2 close MLE/WHIR proof. The CloseIntent fields
-    /// are read from the proved descriptor and the adapter returns the authenticated public inputs
-    /// that the manager/verifier boundary strictly rebinds. The channel MUST be registered
+    /// submitCloseIntent with the REAL wrapped-close MLE/WHIR proof (Phase A). The CloseIntent fields
+    /// are read from the proved close descriptor (`sepolia_close_intent.json`), and the proof is the
+    /// wrapped close `MleVerifier.MleProof` from `sepolia_close_intent_mle.json` (publicInputs = the
+    /// 87 raw close limbs the manager's `_runCloseVerify` rebinds). The channel MUST be registered
     /// with the descriptor's `member_pk_gs` so `registeredMemberSetCommitment()` matches the proof.
     function closeIntentStep() external {
         ChannelSettlementManager.CloseIntent memory intent = _closeIntentFromDescriptor();
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_closeMle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_closeMle());
         vm.startBroadcast();
-        _manager().submitCloseIntent(intent, compactProof);
+        _manager().submitCloseIntent(intent, proof);
         vm.stopBroadcast();
         console2.log("submitCloseIntent OK; challengeDeadline:", _manager().getPendingClose().challengeDeadline);
     }
@@ -238,8 +240,8 @@ contract RunClose is Script {
     /// Phase B-D: `verifyWithdrawalClaim` is now a REAL MLE/WHIR verification — the former
     /// stub-proof construction (`withdrawalClaimPIHash` + abi.encode(bytes32)) no longer produces an
     /// acceptable proof. Driving this step on a live deployment now requires (a) the
-    /// constructor-pinned withdrawal-claim adapter and a canonical compact proof from
-    /// `generate_withdrawal_claim_fixture`. That fixture-driven flow is
+    /// withdrawal-claim VK initialized via `initializeWithdrawalClaimVk` and (b) a real
+    /// `MleVerifier.MleProof` from `generate_withdrawal_claim_fixture`. That fixture-driven flow is
     /// exercised in `ChannelSettlementManager.t.sol`; this demo script intentionally no longer
     /// fabricates a stub proof (it would be rejected). Kept as a documented no-op so the deploy
     /// script still builds.
@@ -253,7 +255,7 @@ contract RunClose is Script {
 
     /// A-3 P4: submit a member's withdrawal claim with the REAL withdrawal-claim MLE/WHIR proof
     /// (produced by the CLI `claim` command via `WithdrawalClaimProver`). Reads the descriptor + the
-    /// canonical compact proof staged by the CLI and calls `submitWithdrawalClaim`.
+    /// wrapped MLE proof staged by the CLI and calls `submitWithdrawalClaim`.
     function submitWithdrawalClaimStep() external {
         string memory j = _wclaim();
         ChannelSettlementManager.WithdrawalClaim memory claim = ChannelSettlementManager.WithdrawalClaim({
@@ -268,9 +270,9 @@ contract RunClose is Script {
             tokenIndex: uint32(vm.parseJsonUint(j, ".token_index")),
             withdrawalNullifier: vm.parseJsonBytes32(j, ".withdrawal_nullifier")
         });
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_wclaimMle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_wclaimMle());
         vm.startBroadcast();
-        _manager().submitWithdrawalClaim(claim, compactProof);
+        _manager().submitWithdrawalClaim(claim, proof);
         vm.stopBroadcast();
         console2.log("submitWithdrawalClaim OK; recipient credit pending claimWithdrawalCredit");
     }
@@ -295,9 +297,9 @@ contract RunClose is Script {
             revivedStateVersion: uint64(vm.parseJsonUint(j, ".revived_state_version")),
             revivedChannelStateDigest: vm.parseJsonBytes32(j, ".revived_channel_state_digest")
         });
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_cancelCloseMle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_cancelCloseMle());
         vm.startBroadcast();
-        _manager().cancelClose(request, compactProof);
+        _manager().cancelClose(request, proof);
         vm.stopBroadcast();
         console2.log("cancelClose OK; channel status restored to Active");
     }
@@ -326,9 +328,9 @@ contract RunClose is Script {
             // TM-16: the PROVED base token (PI limb 56) emitted by the CLI descriptor.
             tokenIndex: uint32(vm.parseJsonUint(j, ".token_index"))
         });
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_postCloseClaimMle());
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_postCloseClaimMle());
         vm.startBroadcast();
-        _manager().submitPostCloseClaim(claim, compactProof);
+        _manager().submitPostCloseClaim(claim, proof);
         vm.stopBroadcast();
         console2.log("submitPostCloseClaim OK; recipient credit pending claimWithdrawalCredit");
     }

@@ -4,9 +4,9 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
-import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 /// @title Cheap on-chain validation of the c2c block-hash chain (no proofs).
 /// @notice De-risks the Sepolia c2c run before spending 5x postBlock stakes: replays the exact
@@ -30,12 +30,14 @@ contract C2CBlockHashTest is Test {
             ready = false;
             return;
         }
+        string memory vkJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle.json"));
+        MleVerifier verifier = new MleVerifier(block.chainid);
+        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(vkJson);
+        IntmaxRollup.MleVk memory vk = FixtureLib.buildMleVk(vkJson, verifier);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
         rollup = new IntmaxRollup(
-            makeAddr("ft"),
-            new MockPinnedMleVerifierV2(31337),
-            new MockPinnedMleVerifierV2(31337),
-            genesis
+            makeAddr("ft"), vk, dd.whirParams, dd.protocolId, dd.sessionId, dd.kIs, dd.subgroupGenPowers, verifier, genesis,
+            true // A-2: test opt-in for the degreeBits==0 bypass
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting

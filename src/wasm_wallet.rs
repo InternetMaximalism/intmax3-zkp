@@ -466,10 +466,8 @@ struct WithdrawalClaimDescriptor {
 #[serde(rename_all = "camelCase")]
 struct WithdrawalClaimArtifact {
     claim: WithdrawalClaimDescriptor,
-    /// Strict canonical wire-v3 full fixture emitted by the MLE V2 API. It contains the public
-    /// proof and verifier metadata, never the Regev secret witness. The Node submitter
-    /// validates its duplicated views and submits the exact `.compactProof.bytes`; it must
-    /// never reconstruct an ABI proof tuple.
+    /// Full MLE fixture object. It contains the public proof and verifier metadata, never the
+    /// Regev secret witness. The Node submitter projects its fields into `MleVerifier.MleProof`.
     mle_proof: serde_json::Value,
 }
 

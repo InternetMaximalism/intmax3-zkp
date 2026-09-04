@@ -11,8 +11,7 @@ import {
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
-import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
-import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 import {DeployConfig} from "./DeployConfig.sol";
 import {RegRecordLib} from "./RegRecordLib.sol";
@@ -25,11 +24,9 @@ import {RegRecordLib} from "./RegRecordLib.sol";
 ///         on-chain registration. The MLE/WHIR VKs are channel/member-INDEPENDENT (they are the
 ///         circuits' verifier data), so they are taken from the existing `close_*` fixtures and the
 ///         CLI's freshly-proved (channel-7) close/withdraw proofs verify under them.
-/// @dev All four settlement-circuit adapters are constructed and pinned before the settlement
-///      verifier; a fresh rollup likewise receives its two adapters atomically. Env: none required;
-///      reads contracts/test/data/{close_*_mle_config.json,cli_reg_record.json}; a fresh-rollup
-///      bootstrap additionally reads close_lifecycle.json for its genesis root. Prints deployed
-///      addresses.
+/// @dev Run with the broadcasting EOA = deployer (so `initializeWithdrawalVk` / `initializeCloseVk`
+///      pass their deployer-only guards). Env: none required; reads contracts/test/data/{close_*,
+///      cli_reg_record.json}. Prints the deployed addresses for the driver.
 contract DeployCloseCli is Script {
     // SECURITY (challenge-period floor): the challenge window is the ONLY interval in which an
     // honest member can replace or cancel a stale close intent, and guarded finalization is
@@ -64,12 +61,10 @@ contract DeployCloseCli is Script {
         external
         returns (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager)
     {
-        string memory vkJson = _read("close_lifecycle_validity_mle_config.json");
-        string memory wJson = _read("close_withdrawal_mle_config.json");
-        string memory cJson = _read("close_intent_mle_config.json");
-        string memory wcJson = _read("withdrawal_claim_mle_config.json");
-        string memory pcJson = _read("post_close_claim_mle_config.json");
-        string memory ccJson = _read("cancel_close_mle_config.json");
+        string memory vkJson = _read("close_lifecycle_validity_mle.json");
+        string memory lcJson = _read("close_lifecycle.json");
+        string memory wJson = _read("close_withdrawal_mle.json");
+        string memory cJson = _read("close_intent_mle.json");
         // Staged into test/data/ by the driver. Parsed through the SHARED reader, which is the one
         // place that decides which delegate count reaches `registerChannel` (a constant zero) and
         // which reaches the manager (the record's live `active_delegate_count`).
@@ -88,16 +83,7 @@ contract DeployCloseCli is Script {
             }
             require(broadcasterIsParticipant, "settlement broadcaster is not an active signed-state recipient");
         }
-        // SECURITY / OPERABILITY: attaching the settlement stack to an already-funded rollup
-        // must not depend on a witness-derived lifecycle proof fixture.  Only a fresh rollup needs
-        // the fixture's genesis root; the existing-rollup branch authenticates its deployed state
-        // and V2 adapters below.  This keeps verifier deployment config-first and breaks the
-        // verifier-address -> proof-fixture -> deployment circularity for the production path.
-        bytes32 genesis;
-        if (existingRollup == address(0)) {
-            string memory lcJson = _read("close_lifecycle.json");
-            genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
-        }
+        bytes32 genesis = vm.parseJsonBytes32(lcJson, ".genesis_state_root");
         // SECURITY (#6): a fresh rollup needs a fraud treasury.  An attach does not create or
         // mutate this immutable and therefore must not demand an unrelated value.
         address fraudTreasury = vm.envOr("FRAUD_TREASURY", address(0));
@@ -111,58 +97,150 @@ contract DeployCloseCli is Script {
         // 1. Attach to the rollup that already escrows this channel's funds when
         // `EXISTING_ROLLUP` is supplied.  The fresh branch is retained for isolated/dev bootstrap,
         // but the production Rust driver always supplies the backing rollup.
+        MleVerifier verifier = new MleVerifier(FixtureLib.mleVerifierChainId());
         if (existingRollup == address(0)) {
-            (, PinnedMleVerifierV2 validityVerifier) = FixtureLib.deployPinnedMleV2(vkJson);
-            (, PinnedMleVerifierV2 withdrawalVerifier) = FixtureLib.deployPinnedMleV2(wJson);
+            IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(vkJson, verifier);
+            FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(vkJson);
             rollup = new IntmaxRollup(
                 fraudTreasury,
-                IPinnedMleVerifierV2(address(validityVerifier)),
-                IPinnedMleVerifierV2(address(withdrawalVerifier)),
-                genesis
+                vvk,
+                vdd.whirParams,
+                vdd.protocolId,
+                vdd.sessionId,
+                vdd.kIs,
+                vdd.subgroupGenPowers,
+                verifier,
+                genesis,
+                false
             );
             // Pin the KZG blob-binding satellite (EIP-170 relief; fraudProof binding is fail-closed until set).
             rollup.setKzgVerifier(new BlobKZGVerifierExt());
             // Authorize the block producer used by the CLI withdraw flow (the selected Foundry signer).
             rollup.setBlockProducer(vm.envOr("BLOCK_PRODUCER", msg.sender), true);
+
+            // Withdrawal VK (deployer == EOA == broadcaster).
+            FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(wJson);
+            IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(wJson, verifier);
+            rollup.initializeWithdrawalVk(
+                wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers
+            );
         } else {
             require(existingRollup.code.length != 0, "EXISTING_ROLLUP has no code");
             rollup = IntmaxRollup(payable(existingRollup));
             require(rollup.deployer() == expectedBroadcaster, "broadcaster is not existing rollup deployer");
-            require(rollup.deploymentChainId() == block.chainid, "existing rollup deployment chain mismatch");
-            IPinnedMleVerifierV2 validityVerifier = rollup.validityMleVerifier();
-            IPinnedMleVerifierV2 withdrawalVerifier = rollup.withdrawalMleVerifier();
-            require(
-                address(validityVerifier) != address(withdrawalVerifier), "existing rollup reuses one circuit adapter"
-            );
-            require(
-                address(validityVerifier).code.length != 0 && address(withdrawalVerifier).code.length != 0,
-                "existing rollup V2 adapter unavailable"
-            );
-            require(
-                validityVerifier.allowedChainId() == block.chainid
-                    && withdrawalVerifier.allowedChainId() == block.chainid,
-                "existing rollup V2 adapter chain mismatch"
-            );
-            require(
-                validityVerifier.core().code.length != 0 && withdrawalVerifier.core().code.length != 0,
-                "existing rollup V2 core unavailable"
-            );
+            require(!rollup.allowMleDisabled(), "existing rollup has test-only validity bypass enabled");
+            require(rollup.withdrawalVkInitialized(), "existing rollup withdrawal VK is not initialized");
             require(address(rollup.kzgVerifier()) != address(0), "existing rollup KZG verifier is not set");
         }
         CloseFundingMaterializer materializer = new CloseFundingMaterializer(rollup);
 
-        // 3. Deploy all four circuit-specific adapters before the parent verifier.  Distinct
-        //    constructor slots make cross-statement replay and partial initialization impossible.
-        (, PinnedMleVerifierV2 closeVerifier) = FixtureLib.deployPinnedMleV2(cJson);
-        (, PinnedMleVerifierV2 withdrawalClaimVerifier) = FixtureLib.deployPinnedMleV2(wcJson);
-        (, PinnedMleVerifierV2 postCloseClaimVerifier) = FixtureLib.deployPinnedMleV2(pcJson);
-        (, PinnedMleVerifierV2 cancelCloseVerifier) = FixtureLib.deployPinnedMleV2(ccJson);
-        sv = new ChannelSettlementVerifier(
-            IPinnedMleVerifierV2(address(closeVerifier)),
-            IPinnedMleVerifierV2(address(withdrawalClaimVerifier)),
-            IPinnedMleVerifierV2(address(postCloseClaimVerifier)),
-            IPinnedMleVerifierV2(address(cancelCloseVerifier))
-        );
+        // 3. Settlement verifier + the REAL close VK (the close circuit's MLE/WHIR verifier data).
+        sv = new ChannelSettlementVerifier();
+        {
+            FixtureLib.DeployData memory cdd = FixtureLib.parseDeployData(cJson);
+            MleVerifier.MleProof memory cproof = FixtureLib.parseProof(cJson);
+            bytes32 gatesDigest = verifier.computeGatesDigest(
+                cproof.gates,
+                cproof.witnessIndividualEvalsAtRGateV2.length,
+                cproof.numSelectors,
+                cproof.numGateConstraints,
+                cproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.CloseVk memory cvk = ChannelSettlementVerifier.CloseVk({
+                degreeBits: cdd.degreeBits,
+                preprocessedRoot: cdd.preCommitRoot,
+                numConstants: cdd.numConstants,
+                numRoutedWires: cdd.numRoutedWires,
+                gatesDigest: gatesDigest
+            });
+            sv.initializeCloseVk(
+                verifier, cvk, cdd.whirParams, cdd.protocolId, cdd.sessionId, cdd.kIs, cdd.subgroupGenPowers
+            );
+        }
+
+        // 3b. Withdrawal-claim VK (the claim circuit's MLE/WHIR verifier data — channel-independent,
+        //     taken from the checked-in claim fixture; the CLI's fresh per-member claim proof verifies
+        //     under it). Required for `claim` → `submitWithdrawalClaim` → `verifyWithdrawalClaim`.
+        {
+            string memory wcJson = _read("withdrawal_claim_mle.json");
+            FixtureLib.DeployData memory wcdd = FixtureLib.parseDeployData(wcJson);
+            MleVerifier.MleProof memory wcproof = FixtureLib.parseProof(wcJson);
+            bytes32 wcGatesDigest = verifier.computeGatesDigest(
+                wcproof.gates,
+                wcproof.witnessIndividualEvalsAtRGateV2.length,
+                wcproof.numSelectors,
+                wcproof.numGateConstraints,
+                wcproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory wcvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: wcdd.degreeBits,
+                preprocessedRoot: wcdd.preCommitRoot,
+                numConstants: wcdd.numConstants,
+                numRoutedWires: wcdd.numRoutedWires,
+                gatesDigest: wcGatesDigest
+            });
+            sv.initializeWithdrawalClaimVk(
+                verifier, wcvk, wcdd.whirParams, wcdd.protocolId, wcdd.sessionId, wcdd.kIs, wcdd.subgroupGenPowers
+            );
+        }
+
+        // 3b. Post-close-claim VK. SECURITY/LIVENESS (audit622 A-M4, reported 2026-06-22, open until
+        //     now; same class as the gate-8 defect — a fail-closed check that protects soundness
+        //     while making an HONEST path impossible): without this,
+        //     `ChannelSettlementVerifier.sol:1111` reverts `PostCloseClaimVkNotSet()` on every call,
+        //     so the live `post-close-claim` CLI command (`channel_member.rs:2152-2184`) can never
+        //     succeed on a real deployment. No fail-closed check is weakened here — the revert stays;
+        //     we supply the VK it was correctly demanding.
+        {
+            string memory pcJson = _read("post_close_claim_mle.json");
+            FixtureLib.DeployData memory pcdd = FixtureLib.parseDeployData(pcJson);
+            MleVerifier.MleProof memory pcproof = FixtureLib.parseProof(pcJson);
+            bytes32 pcGatesDigest = verifier.computeGatesDigest(
+                pcproof.gates,
+                pcproof.witnessIndividualEvalsAtRGateV2.length,
+                pcproof.numSelectors,
+                pcproof.numGateConstraints,
+                pcproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory pcvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: pcdd.degreeBits,
+                preprocessedRoot: pcdd.preCommitRoot,
+                numConstants: pcdd.numConstants,
+                numRoutedWires: pcdd.numRoutedWires,
+                gatesDigest: pcGatesDigest
+            });
+            sv.initializePostCloseClaimVk(
+                verifier, pcvk, pcdd.whirParams, pcdd.protocolId, pcdd.sessionId, pcdd.kIs, pcdd.subgroupGenPowers
+            );
+        }
+
+        // 3c. Cancel-close VK. SECURITY/LIVENESS (audit622 A-M4): without this,
+        //     `ChannelSettlementVerifier.sol:1050` reverts `CancelCloseVkNotSet()`, disabling
+        //     `cancel-close` (`channel_member.rs:1988-2025`) — the ONLY on-chain remedy against a
+        //     stale/unwanted close. Previously initialized only by the two anvil-gated
+        //     (`chainid == 31337`) scripts, so every REAL deployment shipped without it.
+        {
+            string memory ccJson = _read("cancel_close_mle.json");
+            FixtureLib.DeployData memory ccdd = FixtureLib.parseDeployData(ccJson);
+            MleVerifier.MleProof memory ccproof = FixtureLib.parseProof(ccJson);
+            bytes32 ccGatesDigest = verifier.computeGatesDigest(
+                ccproof.gates,
+                ccproof.witnessIndividualEvalsAtRGateV2.length,
+                ccproof.numSelectors,
+                ccproof.numGateConstraints,
+                ccproof.quotientDegreeFactor
+            );
+            ChannelSettlementVerifier.StatementVk memory ccvk = ChannelSettlementVerifier.StatementVk({
+                degreeBits: ccdd.degreeBits,
+                preprocessedRoot: ccdd.preCommitRoot,
+                numConstants: ccdd.numConstants,
+                numRoutedWires: ccdd.numRoutedWires,
+                gatesDigest: ccGatesDigest
+            });
+            sv.initializeCancelCloseVk(
+                verifier, ccvk, ccdd.whirParams, ccdd.protocolId, ccdd.sessionId, ccdd.kIs, ccdd.subgroupGenPowers
+            );
+        }
 
         // 4. registerChannel with the CLI COSIGNER set — the L1 registration record is
         //    cosigners-only (Option B) and its `delegateCount` limb is a CONSTANT zero.
@@ -193,7 +271,9 @@ contract DeployCloseCli is Script {
         ChannelSettlementManager.MemberBinding[] memory mBind =
             new ChannelSettlementManager.MemberBinding[](r.memberCount);
         for (uint256 i = 0; i < r.memberCount; i++) {
-            mBind[i] = ChannelSettlementManager.MemberBinding({pkG: r.pkGs[i], recipient: r.recipients[i]});
+            mBind[i] = ChannelSettlementManager.MemberBinding({
+                pkG: r.pkGs[i], recipient: r.recipients[i]
+            });
         }
         // B-2 (doc/tasks/b2-delegate-close-threat-model.md): `activeDelegateCount` is a FLOOR for
         // the close/partial-withdrawal bind, not an exact expected count. It is the record's

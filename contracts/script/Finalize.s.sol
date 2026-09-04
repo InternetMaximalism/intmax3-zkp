@@ -3,12 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Finalize
 /// @notice Smoke-finalize step: reconstructs the REAL ValidityPublicInputs
-///         (vpi_fixture.json) plus the exact canonical compact v2 proof bytes from
-///         mle_fixture.json, attests that same blob-backed byte stream, then finalizes.
+///         (vpi_fixture.json) + the REAL MleProof (mle_fixture.json, parsed
+///         byte-identically to MleFinalizeE2E.t.sol), attests the exact blob-backed
+///         proof bytes, then finalizes in a second transaction.
 ///
 ///         Reads the rollup address from env `ROLLUP_ADDR` and the standard blob sidecar evidence
 ///         from `BLOB_SIDECARS` as compact hex:
@@ -26,7 +28,7 @@ contract Finalize is Script {
 
         bytes32 finalStateRoot = vm.parseJsonBytes32(FixtureLib.loadBlock(), ".final_state_root");
         IntmaxRollup.ValidityPublicInputs memory vpis = FixtureLib.parseValidityPIs(FixtureLib.loadVpi());
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(FixtureLib.loadMle());
+        MleVerifier.MleProof memory mleProof = FixtureLib.parseProof(FixtureLib.loadMle());
         bytes memory blobSidecars = vm.envBytes("BLOB_SIDECARS");
 
         console2.log("=== IntmaxRollup smoke finalize ===");
@@ -36,8 +38,8 @@ contract Finalize is Script {
         console2.logBytes32(finalStateRoot);
 
         vm.startBroadcast();
-        rollup.attestProofData(SUBMISSION_ID, compactProof, blobSidecars);
-        bool ok = rollup.finalize(SUBMISSION_ID, finalStateRoot, vpis, compactProof);
+        rollup.attestProofData(SUBMISSION_ID, abi.encode(mleProof), blobSidecars);
+        bool ok = rollup.finalize(SUBMISSION_ID, finalStateRoot, vpis, mleProof);
         vm.stopBroadcast();
 
         console2.log("finalize returned:", ok);

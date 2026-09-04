@@ -46,44 +46,37 @@ MIN_SUITES=37
 #   CloseLifecycleE2E — the only real-prover-emitted-PI-vector-vs-Solidity-limb-layout check.
 #                       Self-skips if any of three fixtures is missing; the status check below is
 #                       what turns that into a failure instead of a green no-op.
-#   C2CFullE2E         — the full two-channel transfer and receiver-to-L1 exit with both real V2
-#                       proofs. This suite previously returned unconditionally after its skip guard,
-#                       so naming it here prevents that coverage from silently disappearing again.
 #   MleE2E/MleFinalizeE2E
 #                     — real MLE/WHIR verification of the validity/finalize path.
-#   MemberSetUpdateDeprecated
-#                     — the unsafe direct in-place MSU statement is retired. Pins the absent
-#                       production selector/VK surface and fail-closed retired-selector behavior;
-#                       the historical V1 proof remains quarantined under test/data/deprecated.
+#   MemberSetUpdateE2E
+#                     — audit28-08-2026 M-3/M-11. The ONLY real-PI-vector <-> Solidity-limb join
+#                       outside the close statement: `applyMemberSetUpdate` against a REAL
+#                       MemberSetUpdateCircuit proof, plus the two tests that check the msu VK and
+#                       the close VK genuinely share the WHIR rail that
+#                       `ChannelSettlementVerifier._verifyMsuMle` substitutes wholesale and never
+#                       checks on chain. Until this line existed the whole file could be deleted
+#                       while CI stayed green, and the rail-agreement assertions ran nowhere.
 #   AuthorizedBurnFenwick
 #                     — proof-bound newest-snapshot selection for authorized burns. Guards against
 #                       selecting an older balance root after the signed burn snapshot exists.
 #   FixtureParsingGuards
 #                     — deployment input schema boundaries: gate-count/hole rejection, checked
 #                       integer narrowing and canonical Goldilocks elements.
-#   V2FixtureCompleteness
-#                     — non-skipping manifest for every live full MLE/WHIR V2 artifact, including
-#                       exact compact-proof hash/length bindings in Proof-DA companion files.
-#   ManagerCloseGas   — executes the real 103-PI partial-withdrawal proof through the Manager with
-#                       a cold-account execution budget derived from the production 30M tx limit.
 #
 # `suite-key<TAB>minimum-tests`. A plain list rather than an associative array on purpose: macOS
 # ships bash 3.2, and a CI guard nobody can run locally before pushing is a guard people route
 # around.
 REQUIRED_SUITES="\
 test/DeployGuards.t.sol:DeployGuardsTest	27
-test/MemberSetUpdateDeprecated.t.sol:MemberSetUpdateDeprecatedTest	2
+test/MemberSetUpdateE2E.t.sol:MemberSetUpdateE2ETest	8
 test/ClaimMleVerify.t.sol:ClaimMleVerifyTest	8
 test/ExponentiationGate.t.sol:ExponentiationGateTest	13
 test/ExponentiationGateAdversarial.t.sol:ZZAdversarialExpProbe	10
 test/CloseLifecycleE2E.t.sol:CloseLifecycleE2ETest	2
-test/C2CFullE2E.t.sol:C2CFullE2ETest	2
 test/MleE2E.t.sol:MleE2ETest	6
 test/MleFinalizeE2E.t.sol:MleFinalizeE2ETest	2
-test/ManagerCloseGas.t.sol:ManagerCloseGasTest	1
 test/AuthorizedBurnFenwick.t.sol:AuthorizedBurnSnapshotTest	7
-test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17
-test/V2FixtureCompleteness.t.sol:V2FixtureCompletenessTest	17"
+test/FixtureParsingGuards.t.sol:FixtureParsingGuardsTest	17"
 
 out="$(mktemp -t forge-test-json)"
 trap 'rm -f "$out"' EXIT

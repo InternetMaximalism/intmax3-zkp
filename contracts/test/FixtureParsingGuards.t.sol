@@ -5,29 +5,40 @@ import {Test} from "forge-std/Test.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {RegRecordLib} from "../script/RegRecordLib.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
-import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
-import {Plonky2GateEvaluatorExt3} from "@mle/Plonky2GateEvaluatorExt3.sol";
+import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {
-    COMPACT_LAYOUT_HASH_V2,
-    MLE_PROOF_ABI_SIGNATURE_V2,
-    MLE_PROOF_LAYOUT_HASH_V2
-} from "@mle/generated/MleWhirV2.sol";
 
 contract FixtureParsingHarness {
+    function countGates(string calldata json) external pure returns (uint256) {
+        return FixtureLib.countGates(json);
+    }
+
+    function parseGateInfo(string calldata json, uint256 index)
+        external
+        pure
+        returns (Plonky2GateEvaluator.GateInfo memory)
+    {
+        return FixtureLib.parseGateInfo(json, index);
+    }
+
     function parseValidityBlockNumbers(string calldata json) external pure returns (uint64 initial, uint64 final_) {
         IntmaxRollup.ValidityPublicInputs memory vpis = FixtureLib.parseValidityPIs(json);
         return (vpis.initialBlockNumber, vpis.finalBlockNumber);
     }
 
-    function parseRegRecord(string calldata json) external view returns (RegRecordLib.Record memory) {
-        return RegRecordLib.parse(json);
+    function parseWhirDomainGenerators(string calldata json) external pure returns (uint64 initial, uint64 round0) {
+        SpongefishWhirVerify.WhirParams memory params = FixtureLib.parseWhirParams(json, ".whirParams");
+        return (params.initialDomainGenerator, params.rounds[0].domainGenerator);
     }
 
-    function parseCompactProofV2(string calldata json) external pure returns (bytes memory) {
-        return FixtureLib.parseCompactProofV2(json);
+    function parseExt3(string calldata json) external pure returns (uint64 c0, uint64 c1, uint64 c2) {
+        GoldilocksExt3.Ext3 memory value = FixtureLib.parseExt3(json, ".value");
+        return (value.c0, value.c1, value.c2);
+    }
+
+    function parseRegRecord(string calldata json) external view returns (RegRecordLib.Record memory) {
+        return RegRecordLib.parse(json);
     }
 }
 
@@ -38,12 +49,93 @@ contract FixtureParsingGuardsTest is Test {
         harness = new FixtureParsingHarness();
     }
 
+    function test_countGates_acceptsExactly64Rows() public view {
+        assertEq(harness.countGates(_gateCountJson(64)), 64);
+    }
+
+    function test_countGates_rejects65RowsInsteadOfTruncating() public {
+        vm.expectRevert(bytes("fixture: more than 64 gate rows"));
+        harness.countGates(_gateCountJson(65));
+    }
+
+    function test_countGates_rejectsHoleBeforeLaterRow() public {
+        vm.expectRevert();
+        harness.countGates(_gateCountJsonWithHole(7, 5));
+    }
+
+    function test_countGates_rejectsMalformedTerminalRow() public {
+        vm.expectRevert();
+        harness.countGates(_gateCountJsonWithHole(7, 6));
+    }
+
+    function test_countGates_rejectsMalformedCapRowHidingValidTail() public {
+        vm.expectRevert(bytes("fixture: more than 64 gate rows"));
+        harness.countGates(_gateCountJsonWithHole(66, 64));
+    }
+
+    function test_parseGateInfo_rejectsEveryUint8Overflow() public {
+        for (uint256 field = 0; field < 5; field++) {
+            uint256[9] memory values = _validGateValues();
+            values[field] = uint256(type(uint8).max) + 1;
+            vm.expectRevert(bytes("fixture: GateInfo uint8 overflow"));
+            harness.parseGateInfo(_gateInfoJson(values), 0);
+        }
+    }
+
+    function test_parseGateInfo_rejectsEveryUint16Overflow() public {
+        for (uint256 field = 5; field < 9; field++) {
+            uint256[9] memory values = _validGateValues();
+            values[field] = uint256(type(uint16).max) + 1;
+            vm.expectRevert(bytes("fixture: GateInfo uint16 overflow"));
+            harness.parseGateInfo(_gateInfoJson(values), 0);
+        }
+    }
+
+    function test_parseGateInfo_preservesValidFields() public view {
+        uint256[9] memory values = _validGateValues();
+        Plonky2GateEvaluator.GateInfo memory gate = harness.parseGateInfo(_gateInfoJson(values), 0);
+        assertEq(gate.gateId, values[0]);
+        assertEq(gate.selectorIndex, values[1]);
+        assertEq(gate.groupStart, values[2]);
+        assertEq(gate.groupEnd, values[3]);
+        assertEq(gate.gateRowIndex, values[4]);
+        assertEq(gate.numConstraints, values[5]);
+        assertEq(gate.numOrConsts, values[6]);
+        assertEq(gate.param2, values[7]);
+        assertEq(gate.param3, values[8]);
+    }
+
     function test_parseValidityPIs_rejectsEveryUint64Overflow() public {
         uint256 overflow = uint256(type(uint64).max) + 1;
         vm.expectRevert(bytes("fixture: uint64 overflow"));
         harness.parseValidityBlockNumbers(_validityJson(overflow, 1));
         vm.expectRevert(bytes("fixture: uint64 overflow"));
         harness.parseValidityBlockNumbers(_validityJson(1, overflow));
+    }
+
+    function test_parseWhirParams_rejectsEveryDomainGeneratorOverflow() public {
+        uint256 overflow = uint256(type(uint64).max) + 1;
+        vm.expectRevert(bytes("fixture: uint64 overflow"));
+        harness.parseWhirDomainGenerators(_whirJson(overflow, 1));
+        vm.expectRevert(bytes("fixture: uint64 overflow"));
+        harness.parseWhirDomainGenerators(_whirJson(1, overflow));
+    }
+
+    function test_parseExt3_rejectsEveryUint64Overflow() public {
+        for (uint256 field = 0; field < 3; field++) {
+            uint256[3] memory values = [uint256(1), 2, 3];
+            values[field] = uint256(type(uint64).max) + 1;
+            vm.expectRevert(bytes("fixture: uint64 overflow"));
+            harness.parseExt3(_ext3Json(values));
+        }
+    }
+
+    function test_goldilocksParsers_rejectNonCanonicalModulus() public {
+        uint256 modulus = 0xFFFFFFFF00000001;
+        vm.expectRevert(bytes("fixture: non-canonical Goldilocks element"));
+        harness.parseWhirDomainGenerators(_whirJson(modulus, 1));
+        vm.expectRevert(bytes("fixture: non-canonical Goldilocks element"));
+        harness.parseExt3(_ext3Json([modulus, uint256(2), 3]));
     }
 
     function test_parseRegRecord_rejectsChannelIdOverflow() public {
@@ -76,148 +168,51 @@ contract FixtureParsingGuardsTest is Test {
         assertEq(record.pkGs.length, 5);
     }
 
-    function test_parseCompactProofV2_acceptsExactHeaderAndMagic() public view {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        assertEq(harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, MLE_PROOF_ABI_SIGNATURE_V2)), compact);
+    function _validGateValues() internal pure returns (uint256[9] memory values) {
+        values = [uint256(13), 2, 4, 9, 12, 123, 5, 16, 7];
     }
 
-    function test_parseCompactProofV2_rejectsProofProtocolDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        vm.expectRevert(bytes("fixture: v2 proof protocol version"));
-        harness.parseCompactProofV2(_compactV2Json(compact, 2, 3, MLE_PROOF_ABI_SIGNATURE_V2));
+    function _gateCountJson(uint256 count) internal view returns (string memory) {
+        bytes memory json = bytes('{"gates":[');
+        for (uint256 i = 0; i < count; i++) {
+            json = abi.encodePacked(json, i == 0 ? "" : ",", '{"gateId":', vm.toString(i), "}");
+        }
+        return string(abi.encodePacked(json, "]}"));
     }
 
-    function test_parseCompactProofV2_rejectsVkProtocolDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        vm.expectRevert(bytes("fixture: v2 VK protocol version"));
-        harness.parseCompactProofV2(_compactV2Json(compact, 3, 2, MLE_PROOF_ABI_SIGNATURE_V2));
+    function _gateCountJsonWithHole(uint256 count, uint256 hole) internal view returns (string memory) {
+        bytes memory json = bytes('{"gates":[');
+        for (uint256 i = 0; i < count; i++) {
+            bytes memory row = i == hole ? bytes("{}") : abi.encodePacked('{"gateId":', vm.toString(i), "}");
+            json = abi.encodePacked(json, i == 0 ? "" : ",", row);
+        }
+        return string(abi.encodePacked(json, "]}"));
     }
 
-    function test_parseCompactProofV2_rejectsProofAbiDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        vm.expectRevert(bytes("fixture: v2 proof ABI signature"));
-        harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, "(uint256)"));
-    }
-
-    function test_parseCompactProofV2_rejectsRelabelledWrongMagic() public {
-        bytes memory compact = abi.encodePacked(bytes8("NOTWHIR3"));
-        vm.expectRevert(bytes("fixture: compact magic"));
-        harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, MLE_PROOF_ABI_SIGNATURE_V2));
-    }
-
-    // ── Wire-v3 metadata drift: each recorded field must describe the exact bytes that follow. ──
-    // These replace the retired packed-v1 helper probes (gate table, WHIR domain generators,
-    // Ext3 parsing) with the checks the v3 compact stream actually relies on.
-
-    function test_parseCompactProofV2_rejectsSchemaDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        vm.expectRevert(bytes("fixture: v2 proof schema"));
-        harness.parseCompactProofV2(
-            _compactV2JsonRaw(
-                compact,
-                3,
-                3,
-                MLE_PROOF_ABI_SIGNATURE_V2,
-                "plonky2-mle-v2-solidity",
-                MLE_PROOF_LAYOUT_HASH_V2,
-                compact.length,
-                keccak256(compact)
+    function _gateInfoJson(uint256[9] memory v) internal view returns (string memory) {
+        return string(
+            abi.encodePacked(
+                '{"gates":[{"gateId":',
+                vm.toString(v[0]),
+                ',"selectorIndex":',
+                vm.toString(v[1]),
+                ',"groupStart":',
+                vm.toString(v[2]),
+                ',"groupEnd":',
+                vm.toString(v[3]),
+                ',"gateRowIndex":',
+                vm.toString(v[4]),
+                ',"numConstraints":',
+                vm.toString(v[5]),
+                ',"numOrConsts":',
+                vm.toString(v[6]),
+                ',"param2":',
+                vm.toString(v[7]),
+                ',"param3":',
+                vm.toString(v[8]),
+                "}]}"
             )
         );
-    }
-
-    function test_parseCompactProofV2_rejectsLayoutHashDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
-        vm.expectRevert(bytes("fixture: v2 layout hash"));
-        harness.parseCompactProofV2(
-            _compactV2JsonRaw(
-                compact,
-                3,
-                3,
-                MLE_PROOF_ABI_SIGNATURE_V2,
-                "plonky2-mle-v3-solidity",
-                bytes32(uint256(MLE_PROOF_LAYOUT_HASH_V2) ^ 1),
-                compact.length,
-                keccak256(compact)
-            )
-        );
-    }
-
-    function test_parseCompactProofV2_rejectsRecordedLengthDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"), bytes4(0));
-        vm.expectRevert(bytes("fixture: compact length"));
-        harness.parseCompactProofV2(
-            _compactV2JsonRaw(
-                compact,
-                3,
-                3,
-                MLE_PROOF_ABI_SIGNATURE_V2,
-                "plonky2-mle-v3-solidity",
-                MLE_PROOF_LAYOUT_HASH_V2,
-                compact.length - 1,
-                keccak256(compact)
-            )
-        );
-    }
-
-    function test_parseCompactProofV2_rejectsRecordedHashDrift() public {
-        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"), bytes4(0));
-        vm.expectRevert(bytes("fixture: compact hash"));
-        harness.parseCompactProofV2(
-            _compactV2JsonRaw(
-                compact,
-                3,
-                3,
-                MLE_PROOF_ABI_SIGNATURE_V2,
-                "plonky2-mle-v3-solidity",
-                MLE_PROOF_LAYOUT_HASH_V2,
-                compact.length,
-                bytes32(uint256(keccak256(compact)) ^ 1)
-            )
-        );
-    }
-
-    function test_parseCompactProofV2_rejectsEmptyCompactBytes() public {
-        bytes memory compact = "";
-        vm.expectRevert(bytes("fixture: compact cap"));
-        harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, MLE_PROOF_ABI_SIGNATURE_V2));
-    }
-
-    function test_parseCompactProofV2_acceptsCheckedInMaxResourceFixture() public view {
-        string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json")
-        );
-        bytes memory compact = harness.parseCompactProofV2(json);
-        assertEq(compact.length, vm.parseJsonUint(json, ".compactProof.byteLength"), "recorded length");
-        assertEq(keccak256(compact), vm.parseJsonBytes32(json, ".compactProof.keccak256"), "recorded keccak");
-    }
-
-    function test_deployPinnedMleV2_rejectsTrailingConfigBytesBeforeCreate() public {
-        MleVerifierV2.VerificationConfig memory config;
-        config.kIs = new uint256[](0);
-        config.subgroupGenPowers = new uint256[](0);
-        config.gates = new Plonky2GateEvaluatorExt3.GateInfoV2[](0);
-        config.whir.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        config.whir.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-        config.whir.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](0);
-        config.whir.rounds = new SpongefishWhirVerify.RoundParams[](0);
-
-        // `abi.decode` accepts this valid tuple plus an ignored trailing word. All fixture length
-        // and hash metadata are updated to match the malicious representation, so only the
-        // decode/re-encode canonicality guard can reject it before either CREATE executes.
-        bytes memory nonCanonical = abi.encodePacked(abi.encode(config), bytes32(0));
-        vm.expectRevert(bytes("fixture: non-canonical v2 config"));
-        this.deployPinnedMleV2(_configV2Json(nonCanonical));
-    }
-
-    /// @dev External self-call so `vm.expectRevert` observes the library revert. This lives on the
-    /// test contract, not on `FixtureParsingHarness`: `FixtureLib.deployPinnedMleV2` embeds the
-    /// creation code of both `MleVerifierV2` and `PinnedMleVerifierV2`, which pushes any
-    /// non-test contract that carries it far past EIP-170 and fails the `forge build --sizes`
-    /// gate, whereas test contracts are excluded from that gate.
-    function deployPinnedMleV2(string calldata json) external returns (address core, address adapter) {
-        (MleVerifierV2 deployedCore, PinnedMleVerifierV2 deployedAdapter) = FixtureLib.deployPinnedMleV2(json);
-        return (address(deployedCore), address(deployedAdapter));
     }
 
     function _validityJson(uint256 initial, uint256 final_) internal view returns (string memory) {
@@ -243,81 +238,34 @@ contract FixtureParsingGuardsTest is Test {
         );
     }
 
-    function _compactV2Json(bytes memory compact, uint256 proofProtocol, uint256 vkProtocol, string memory abiSig)
-        internal
-        view
-        returns (string memory)
-    {
-        return _compactV2JsonRaw(
-            compact,
-            proofProtocol,
-            vkProtocol,
-            abiSig,
-            "plonky2-mle-v3-solidity",
-            MLE_PROOF_LAYOUT_HASH_V2,
-            compact.length,
-            keccak256(compact)
-        );
-    }
-
-    /// @dev Every recorded field is a parameter so a single metadata drift can be injected while
-    ///      the rest of the document stays canonical.
-    function _compactV2JsonRaw(
-        bytes memory compact,
-        uint256 proofProtocol,
-        uint256 vkProtocol,
-        string memory abiSig,
-        string memory schema,
-        bytes32 layoutHash,
-        uint256 byteLength,
-        bytes32 recordedKeccak
-    ) internal view returns (string memory) {
+    function _whirJson(uint256 initialDomain, uint256 roundDomain) internal view returns (string memory) {
         return string(
             abi.encodePacked(
-                '{"schema":"',
-                schema,
-                '","schemaVersion":3,"protocolVersion":3,',
-                '"proofAbiSignature":"',
-                abiSig,
-                '","proofLayoutHash":"',
-                vm.toString(layoutHash),
-                '","proof":{"protocolVersion":',
-                vm.toString(proofProtocol),
-                '},"verificationKey":{"protocolVersion":',
-                vm.toString(vkProtocol),
-                '},"compactProof":{"encoding":"MLEWHIR3","byteLength":',
-                vm.toString(byteLength),
-                ',"keccak256":"',
-                vm.toString(recordedKeccak),
-                '","bytes":"',
-                vm.toString(compact),
-                '"}}'
+                '{"whirParams":{"numVariables":1,"foldingFactor":1,"numVectors":1,',
+                '"numCommitments":4,"outDomainSamples":1,"inDomainSamples":1,',
+                '"initialSumcheckRounds":1,"numRounds":1,"finalSumcheckRounds":1,',
+                '"finalSize":1,"initialCodewordLength":1,"initialMerkleDepth":1,',
+                '"initialDomainGenerator":"',
+                vm.toString(initialDomain),
+                '","initialInterleavingDepth":0,"initialNumVariables":1,',
+                '"initialCosetSize":1,"initialNumCosets":1,"rounds":[{',
+                '"codewordLength":1,"merkleDepth":1,"domainGenerator":"',
+                vm.toString(roundDomain),
+                '","inDomainSamples":1,"outDomainSamples":1,"sumcheckRounds":1,',
+                '"interleavingDepth":0,"cosetSize":1,"numCosets":1,"numVariables":1}]}}'
             )
         );
     }
 
-    function _configV2Json(bytes memory encodedConfig) internal view returns (string memory) {
-        bytes32 configHash = keccak256(encodedConfig);
+    function _ext3Json(uint256[3] memory values) internal view returns (string memory) {
         return string(
             abi.encodePacked(
-                '{"schema":"plonky2-mle-v3-solidity-config","schemaVersion":3,"protocolVersion":3,',
-                '"proofAbiSignature":"',
-                MLE_PROOF_ABI_SIGNATURE_V2,
-                '","proofLayoutHash":"',
-                vm.toString(MLE_PROOF_LAYOUT_HASH_V2),
-                '","compactLayoutHash":"',
-                vm.toString(COMPACT_LAYOUT_HASH_V2),
-                '","compactProofEncoding":"MLEWHIR3","whirPowBits":22,',
-                '"verificationKey":{"protocolVersion":3},',
-                '"pinnedVerifier":{"verificationConfigDigest":"',
-                vm.toString(configHash),
-                '"},"solidityAbiVerificationConfig":{',
-                '"encoding":"abi.encode(MleVerifierV2.VerificationConfig)","byteLength":',
-                vm.toString(encodedConfig.length),
-                ',"keccak256":"',
-                vm.toString(configHash),
-                '","bytes":"',
-                vm.toString(encodedConfig),
+                '{"value":{"c0":"',
+                vm.toString(values[0]),
+                '","c1":"',
+                vm.toString(values[1]),
+                '","c2":"',
+                vm.toString(values[2]),
                 '"}}'
             )
         );

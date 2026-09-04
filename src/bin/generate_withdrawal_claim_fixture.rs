@@ -2,10 +2,9 @@
 //!
 //! Phase B-D (tasks/phase-b-claims-threat-model.md):
 //! `ChannelSettlementVerifier.verifyWithdrawalClaim` is turned into a REAL on-chain verification of
-//! the plonky2 `WithdrawalClaimCircuit` via its circuit-specific pinned compact-v2 MLE/WHIR adapter
-//! (the SAME rail proven by close/validity/withdrawal). Produces:
+//! the plonky2 `WithdrawalClaimCircuit` via the shared `@mle/MleVerifier.sol` rail (the SAME rail
+//! proven by close/validity/withdrawal). Produces:
 //!
-//!   - contracts/test/data/withdrawal_claim_mle_config.json — strict proof-free V2 configuration.
 //!   - contracts/test/data/withdrawal_claim_mle.json — the wrapped MLE proof + VK params, in the
 //!     SAME JSON schema the validity/close fixtures use.
 //!   - contracts/test/data/withdrawal_claim.json — a descriptor with every PI field value the
@@ -13,15 +12,14 @@
 //!     recipient, userAmountDigest, withdrawalNullifier, amount).
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED circuit public inputs
-//! (the 50 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers them
+//! (the 48 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers them
 //! verbatim). Nothing is hardcoded.
 //!
 //! Usage:  cargo run --release --features withdrawal-claim-fixture-bin --bin
 //! generate_withdrawal_claim_fixture
 //!
 //! HEAVY COMPUTE: full circuit proof + WrapperCircuit recursion + MLE/WHIR commit-and-open. Run
-//! explicitly. Developer-facing Solidity tests may skip while the JSON is absent, but the
-//! non-skipping V2 fixture release manifest makes absence or a stale schema a release failure.
+//! explicitly; the Solidity tests skip until the JSON exists.
 
 use std::{fs, path::Path};
 
@@ -32,11 +30,7 @@ use intmax3_zkp::{
     },
     utils::{
         conversion::ToU64,
-        mle_prover::{
-            export_mle_v2_config_json, export_mle_v2_json, mle_v2_config_only_requested,
-            persist_or_validate_mle_v2_config_json, prove_with_mle_v2, setup_mle_vk_v2,
-            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
-        },
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
         wrapper::WrapperCircuit,
     },
 };
@@ -71,19 +65,6 @@ struct WithdrawalClaimDescriptor {
 fn main() -> anyhow::Result<()> {
     eprintln!("[wclaim] Step 0: build withdrawal-claim circuit");
     let circuit = test_fixture::circuit();
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
-    let mle_config_json = export_mle_v2_config_json(&wrapper.data)?;
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-    persist_or_validate_mle_v2_config_json(
-        out_dir.join("withdrawal_claim_mle_config.json"),
-        &mle_config_json,
-    )?;
-    eprintln!("[wclaim] wrote contracts/test/data/withdrawal_claim_mle_config.json");
-    if mle_v2_config_only_requested() {
-        eprintln!("[wclaim] config-only mode: no witness or proof was constructed");
-        return Ok(());
-    }
 
     eprintln!("[wclaim] Step 1: build witness + prove");
     let witness = test_fixture::build_full_witness();
@@ -100,21 +81,21 @@ fn main() -> anyhow::Result<()> {
         WithdrawalClaimPublicInputs::from_u64_slice(&pi_limbs).map_err(|e| anyhow::anyhow!(e))?;
 
     eprintln!("[wclaim] Step 3: wrap + MLE");
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
     let wrapped = wrapper.prove(&proof)?;
     wrapper.data.verify(wrapped.clone())?;
-    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
+    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
     let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof)?;
-    let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)?;
-    verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)?;
-    let mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)?;
-    validate_mle_v2_full_against_config_json(&mle_json, &mle_config_json)?;
+    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof);
+    let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
+    verify_mle_proof(&wrapper.data, &vk, &mle.proof)?;
+    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common)?;
 
     // SANITY: the MLE proof's publicInputs equal the 48 raw limbs the on-chain bind rebinds.
     {
         let parsed: serde_json::Value = serde_json::from_str(&mle_json)?;
         let mle_pis = parsed
-            .pointer("/proof/publicInputs")
+            .get("publicInputs")
             .and_then(|v| v.as_array())
             .expect("MLE json must carry publicInputs");
         assert_eq!(mle_pis.len(), WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN);
@@ -128,11 +109,11 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved limb");
         }
-        eprintln!(
-            "[wclaim] MLE publicInputs == {WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN} raw limbs (sanity OK)"
-        );
+        eprintln!("[wclaim] MLE publicInputs == 50 raw limbs (sanity OK)");
     }
 
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("withdrawal_claim_mle.json"), &mle_json)?;
     eprintln!("[wclaim] wrote contracts/test/data/withdrawal_claim_mle.json");
 

@@ -2,10 +2,8 @@
 //!
 //! Phase B-D (tasks/phase-b-claims-threat-model.md):
 //! `ChannelSettlementVerifier.verifyPostCloseClaim` is turned into a REAL on-chain verification of
-//! the plonky2 `PostCloseClaimCircuit` via its circuit-specific pinned compact-v2 MLE/WHIR adapter.
-//! Produces:
+//! the plonky2 `PostCloseClaimCircuit` via the shared `@mle/MleVerifier.sol` rail. Produces:
 //!
-//!   - contracts/test/data/post_close_claim_mle_config.json — strict proof-free V2 configuration.
 //!   - contracts/test/data/post_close_claim_mle.json — the wrapped MLE proof + VK params.
 //!   - contracts/test/data/post_close_claim.json — a descriptor with every PI field value
 //!     (closeIntentDigest, receiverChannelId, incomingTxHash, receiverPkG, recipient,
@@ -13,7 +11,7 @@
 //!     Solidity manager recomputes the SAME value.
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from the PROVED circuit public inputs
-//! (the 57 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers verbatim).
+//! (the 40 raw Goldilocks limbs the circuit registers — `WrapperCircuit` re-registers verbatim).
 //!
 //! Usage:  cargo run --release --features post-close-claim-fixture-bin --bin
 //! generate_post_close_claim_fixture
@@ -27,11 +25,7 @@ use intmax3_zkp::{
     },
     utils::{
         conversion::ToU64,
-        mle_prover::{
-            export_mle_v2_config_json, export_mle_v2_json, mle_v2_config_only_requested,
-            persist_or_validate_mle_v2_config_json, prove_with_mle_v2, setup_mle_vk_v2,
-            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
-        },
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
         wrapper::WrapperCircuit,
     },
 };
@@ -63,19 +57,6 @@ struct PostCloseClaimDescriptor {
 fn main() -> anyhow::Result<()> {
     eprintln!("[pcclaim] Step 0: build post-close-claim circuit");
     let circuit = test_fixture::circuit();
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
-    let mle_config_json = export_mle_v2_config_json(&wrapper.data)?;
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-    persist_or_validate_mle_v2_config_json(
-        out_dir.join("post_close_claim_mle_config.json"),
-        &mle_config_json,
-    )?;
-    eprintln!("[pcclaim] wrote contracts/test/data/post_close_claim_mle_config.json");
-    if mle_v2_config_only_requested() {
-        eprintln!("[pcclaim] config-only mode: no witness or proof was constructed");
-        return Ok(());
-    }
 
     eprintln!("[pcclaim] Step 1: build witness + prove");
     let witness = test_fixture::build_full_witness();
@@ -92,20 +73,20 @@ fn main() -> anyhow::Result<()> {
         PostCloseClaimPublicInputs::from_u64_slice(&pi_limbs).map_err(|e| anyhow::anyhow!(e))?;
 
     eprintln!("[pcclaim] Step 3: wrap + MLE");
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&circuit.data.verifier_data());
     let wrapped = wrapper.prove(&proof)?;
     wrapper.data.verify(wrapped.clone())?;
-    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
+    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
     let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof)?;
-    let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)?;
-    verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)?;
-    let mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)?;
-    validate_mle_v2_full_against_config_json(&mle_json, &mle_config_json)?;
+    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &proof);
+    let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
+    verify_mle_proof(&wrapper.data, &vk, &mle.proof)?;
+    let mle_json = export_mle_json(&mle.proof, &wrapper.data.common)?;
 
     {
         let parsed: serde_json::Value = serde_json::from_str(&mle_json)?;
         let mle_pis = parsed
-            .pointer("/proof/publicInputs")
+            .get("publicInputs")
             .and_then(|v| v.as_array())
             .expect("MLE json must carry publicInputs");
         assert_eq!(mle_pis.len(), POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN);
@@ -119,11 +100,11 @@ fn main() -> anyhow::Result<()> {
             };
             assert_eq!(got_u64, *want, "MLE publicInputs[{i}] != proved limb");
         }
-        eprintln!(
-            "[pcclaim] MLE publicInputs == {POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN} raw limbs (sanity OK)"
-        );
+        eprintln!("[pcclaim] MLE publicInputs == 40 raw limbs (sanity OK)");
     }
 
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("post_close_claim_mle.json"), &mle_json)?;
     eprintln!("[pcclaim] wrote contracts/test/data/post_close_claim_mle.json");
 

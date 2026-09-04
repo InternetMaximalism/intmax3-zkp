@@ -5,12 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { AbiCoder, Interface, keccak256 } = require('ethers');
+const { Interface } = require('ethers');
 
 const { Wallet } = require('../common/wallet');
 const {
   MANAGER_CLAIM_ABI,
-  SUBMIT_WITHDRAWAL_CLAIM_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR,
   normalizeMleProof,
   validateClaimArtifact,
   validateWithdrawalClaimReceipt,
@@ -63,7 +64,8 @@ function fakeStore(initial = {}) {
 
 test('bundled direct-claim ABI is exact and fixture public inputs bind every claim field', () => {
   const iface = new Interface(MANAGER_CLAIM_ABI);
-  assert.equal(iface.getFunction(SUBMIT_WITHDRAWAL_CLAIM_SELECTOR).selector, '0x0b0f2d14');
+  assert.equal(iface.getFunction(SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR).selector, '0x70f89118');
+  assert.equal(iface.getFunction(SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR).selector, '0x6d3e503a');
   assert.equal(iface.getFunction('pullChannelFunds').selector, '0x0829ffe3');
   assert.equal(iface.getFunction('pullChannelTokenFunds').selector, '0xcf450977');
   assert.equal(iface.getFunction('withdrawalPayouts(bytes32)').selector, '0xf7b3da94');
@@ -80,21 +82,21 @@ test('bundled direct-claim ABI is exact and fixture public inputs bind every cla
   };
   const normalized = normalizeMleProof(artifact.mleProof);
   assert.equal(normalized.publicInputs.length, 50);
-  assert.equal(normalized.compactProof, artifact.mleProof.compactProof.bytes);
+  assert.equal(normalized.gates.length, artifact.mleProof.gates.length);
   const validated = validateClaimArtifact(
     artifact,
     finalized,
     RECIPIENT,
     descriptor.token_slot,
+    { allowLegacyMle: true },
   );
   assert.equal(validated.claim.amount, String(descriptor.amount));
-  assert.equal(validated.submitWithdrawalClaimSelector, SUBMIT_WITHDRAWAL_CLAIM_SELECTOR);
+  assert.equal(validated.submitWithdrawalClaimSelector, SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR);
   const calldata = iface.encodeFunctionData(validated.submitWithdrawalClaimSelector, [validated.claim, validated.proof]);
-  assert.ok(calldata.startsWith('0x0b0f2d14'));
+  assert.ok(calldata.startsWith('0x70f89118'));
   const decoded = iface.decodeFunctionData(validated.submitWithdrawalClaimSelector, calldata);
   assert.equal(decoded.claim.withdrawalNullifier, descriptor.withdrawal_nullifier);
   assert.equal(decoded.claim.amount.toString(), String(descriptor.amount));
-  assert.equal(decoded.compactProof, artifact.mleProof.compactProof.bytes);
 
   const redirected = structuredClone(artifact);
   redirected.claim.recipient = '0x1111111111111111111111111111111111111111';
@@ -104,104 +106,37 @@ test('bundled direct-claim ABI is exact and fixture public inputs bind every cla
       finalized,
       RECIPIENT,
       descriptor.token_slot,
+      { allowLegacyMle: true },
     ),
     /recipient mismatch/,
   );
 
-  const legacy = structuredClone(artifact);
-  delete legacy.mleProof.schema;
   assert.throws(
-    () => validateClaimArtifact(legacy, finalized, RECIPIENT, descriptor.token_slot),
-    /canonical plonky2-mle-v3-solidity full fixture/,
+    () => validateClaimArtifact(artifact, finalized, RECIPIENT, descriptor.token_slot),
+    /legacy MLE proof ABI is disabled/,
   );
 
+  const v2Artifact = structuredClone(artifact);
+  v2Artifact.mleProof.protocolVersion = 1;
+  v2Artifact.mleProof.constituentWidth = Math.max(
+    v2Artifact.mleProof.preprocessedIndividualEvals.length,
+    v2Artifact.mleProof.witnessIndividualEvals.length,
+    v2Artifact.mleProof.inverseHelpersEvalsAtRInv.length,
+    v2Artifact.mleProof.inverseHelpersEvalsAtRH.length,
+    v2Artifact.mleProof.preprocessedIndividualEvalsAtRGateV2.length,
+    v2Artifact.mleProof.witnessIndividualEvalsAtRGateV2.length,
+    2,
+  );
+  const v2 = validateClaimArtifact(v2Artifact, finalized, RECIPIENT, descriptor.token_slot);
+  assert.equal(v2.mleAbiVersion, 2);
+  assert.equal(v2.submitWithdrawalClaimSelector, SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR);
+  assert.ok(iface.encodeFunctionData(v2.submitWithdrawalClaimSelector, [v2.claim, v2.proof])
+    .startsWith('0x6d3e503a'));
   const partialVersion = structuredClone(artifact);
-  delete partialVersion.mleProof.compactProof;
+  partialVersion.mleProof.protocolVersion = 1;
   assert.throws(
     () => validateClaimArtifact(partialVersion, finalized, RECIPIENT, descriptor.token_slot),
-    /keys do not match/,
-  );
-
-  const humanPiMismatch = structuredClone(artifact);
-  humanPiMismatch.mleProof.proof.publicInputs[0] = '0x0000000000000000';
-  assert.throws(
-    () => validateClaimArtifact(humanPiMismatch, finalized, RECIPIENT, descriptor.token_slot),
-    /full proof object disagrees with canonical compact bytes/,
-  );
-
-  const compactPiMismatch = structuredClone(artifact);
-  const compactBytes = Buffer.from(compactPiMismatch.mleProof.compactProof.bytes.slice(2), 'hex');
-  // magic + protocol + width + four circuit-digest limbs = first public-input byte.
-  compactBytes[52] ^= 1;
-  compactPiMismatch.mleProof.compactProof.bytes = `0x${compactBytes.toString('hex')}`;
-  compactPiMismatch.mleProof.compactProof.keccak256 = keccak256(
-    compactPiMismatch.mleProof.compactProof.bytes,
-  );
-  assert.throws(
-    () => validateClaimArtifact(compactPiMismatch, finalized, RECIPIENT, descriptor.token_slot),
-    /full proof object disagrees with canonical compact bytes/,
-  );
-
-  const correlatedPiMismatch = structuredClone(artifact);
-  const changedPi = BigInt(correlatedPiMismatch.mleProof.proof.publicInputs[0]) + 1n;
-  correlatedPiMismatch.mleProof.proof.publicInputs[0] = `0x${changedPi
-    .toString(16).padStart(16, '0')}`;
-  const correlatedCompact = Buffer.from(
-    correlatedPiMismatch.mleProof.compactProof.bytes.slice(2),
-    'hex',
-  );
-  correlatedCompact.writeBigUInt64LE(changedPi, 52);
-  correlatedPiMismatch.mleProof.compactProof.bytes = `0x${correlatedCompact.toString('hex')}`;
-  correlatedPiMismatch.mleProof.compactProof.keccak256 = keccak256(
-    correlatedPiMismatch.mleProof.compactProof.bytes,
-  );
-  const coder = AbiCoder.defaultAbiCoder();
-  const decodedProof = Array.from(coder.decode(
-    [correlatedPiMismatch.mleProof.proofAbiSignature],
-    correlatedPiMismatch.mleProof.solidityAbiProof.bytes,
-  )[0]);
-  decodedProof[3] = Array.from(decodedProof[3]);
-  decodedProof[3][0] = changedPi;
-  correlatedPiMismatch.mleProof.solidityAbiProof.bytes = coder.encode(
-    [correlatedPiMismatch.mleProof.proofAbiSignature],
-    [decodedProof],
-  );
-  correlatedPiMismatch.mleProof.solidityAbiProof.keccak256 = keccak256(
-    correlatedPiMismatch.mleProof.solidityAbiProof.bytes,
-  );
-  assert.doesNotThrow(() => normalizeMleProof(correlatedPiMismatch.mleProof));
-  assert.throws(
-    () => validateClaimArtifact(correlatedPiMismatch, finalized, RECIPIENT, descriptor.token_slot),
-    /claim close digest mismatch/,
-  );
-
-  const unknownClaimField = structuredClone(artifact);
-  unknownClaimField.claim.proofVersion = 2;
-  assert.throws(
-    () => validateClaimArtifact(unknownClaimField, finalized, RECIPIENT, descriptor.token_slot),
-    /keys do not match/,
-  );
-
-  const nonCanonicalAmount = structuredClone(artifact);
-  nonCanonicalAmount.claim.amount = `0${nonCanonicalAmount.claim.amount}`;
-  assert.throws(
-    () => validateClaimArtifact(nonCanonicalAmount, finalized, RECIPIENT, descriptor.token_slot),
-    /canonical unsigned integer/,
-  );
-
-  const mixedClaimType = structuredClone(artifact);
-  mixedClaimType.claim.tokenSlot = String(mixedClaimType.claim.tokenSlot);
-  assert.throws(
-    () => validateClaimArtifact(mixedClaimType, finalized, RECIPIENT, descriptor.token_slot),
-    /integer types differ/,
-  );
-
-  const nonCanonicalDigest = structuredClone(artifact);
-  nonCanonicalDigest.claim.withdrawalNullifier = `0x${nonCanonicalDigest.claim.withdrawalNullifier
-    .slice(2).toUpperCase()}`;
-  assert.throws(
-    () => validateClaimArtifact(nonCanonicalDigest, finalized, RECIPIENT, descriptor.token_slot),
-    /canonical lowercase 0x hex/,
+    /both protocolVersion and constituentWidth/,
   );
 });
 

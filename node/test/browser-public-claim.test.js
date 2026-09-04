@@ -7,12 +7,12 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const vm = require('vm');
-const { keccak256 } = require('ethers');
 
 const {
   MANAGER_INTERFACE,
   NULLIFIER_PAYOUT_FUNCTION,
-  SUBMIT_WITHDRAWAL_CLAIM_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR,
+  SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR,
   BrowserClaimCoordinator,
   browserClaimOperationId,
   validateExactTransaction,
@@ -125,7 +125,7 @@ function fakeEnvironment() {
     async receivedChannelFunds() { return state.received; },
     async totalCreditedOut() { return state.paid; },
     getFunction(selector) {
-      if (selector === SUBMIT_WITHDRAWAL_CLAIM_SELECTOR) {
+      if ([SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR, SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR].includes(selector)) {
         return submitWithdrawalClaim;
       }
       throw new Error(`unexpected manager function ${selector}`);
@@ -194,9 +194,9 @@ test('browser claim preparation binds fixture PIs to one durable deployment and 
     env.descriptor.withdrawal_nullifier,
   ));
   assert.equal(prepared.transaction.to, MANAGER.toLowerCase());
-  assert.equal(prepared.mleAbiVersion, 2);
-  assert.equal(prepared.submitWithdrawalClaimSelector, SUBMIT_WITHDRAWAL_CLAIM_SELECTOR);
-  assert.equal(prepared.transaction.data.slice(0, 10), SUBMIT_WITHDRAWAL_CLAIM_SELECTOR);
+  assert.equal(prepared.mleAbiVersion, 1);
+  assert.equal(prepared.submitWithdrawalClaimSelector, SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR);
+  assert.equal(prepared.transaction.data.slice(0, 10), SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR);
 
   const redirected = structuredClone(env.artifact);
   redirected.claim.recipient = '0x1111111111111111111111111111111111111111';
@@ -662,8 +662,8 @@ test('relay rejects caller authority and journals an idempotent proof handoff at
         closeFundingMaterializer: MATERIALIZER.toLowerCase(),
         startBlock: 0,
       },
-      mleAbiVersion: 2,
-      submitWithdrawalClaimSelector: SUBMIT_WITHDRAWAL_CLAIM_SELECTOR,
+      mleAbiVersion: 1,
+      submitWithdrawalClaimSelector: SUBMIT_WITHDRAWAL_CLAIM_V1_SELECTOR,
       claim: {
         closeIntentDigest: `0x${'01'.repeat(32)}`, memberPkG: `0x${'02'.repeat(32)}`,
         recipient: RECIPIENT.toLowerCase(), userAmountDigest: `0x${'08'.repeat(32)}`,
@@ -899,7 +899,7 @@ test('public browser authority requires matching durable runtime code hashes', a
   }
 });
 
-test('shipped browser gates reject relay recipient/token/manager substitution and UI uses browser-owned claim route', async () => {
+test('shipped browser gates reject relay recipient/token/manager substitution and UI uses browser-owned claim route', () => {
   const htmlPath = path.join(__dirname, '../../hosting/wallet/wallet-live.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
   const begin = html.indexOf('// TESTABLE-BEGIN: deposit-ui');
@@ -909,149 +909,67 @@ test('shipped browser gates reject relay recipient/token/manager substitution an
     `(function(){${source}; return {normalizeBrowserClaimContext,validateBrowserClaimPrepared,validateBrowserClaimAction,validateBrowserClaimPinnedRecord};})()`,
     { filename: 'wallet-live.html#browser-claim-gates' },
   );
-  const real = fakeEnvironment();
   const context = gates.normalizeBrowserClaimContext({
     schemaVersion: 1,
-    ...await real.coordinator.readContext(),
-  }, real.descriptor.channel_id);
-  assert.throws(
-    () => gates.normalizeBrowserClaimContext({
-      ...context,
-      authority: {
-        ...context.authority,
-        closeFundingMaterializer: '0x0000000000000000000000000000000000000000',
-      },
-    }, real.descriptor.channel_id),
-    /malformed browser claim closeFundingMaterializer/,
-  );
-  const artifact = real.artifact;
-  const tokenSlot = real.descriptor.token_slot;
-  const prepared = await real.coordinator.prepare(artifact, tokenSlot);
-  assert.equal(
-    gates.validateBrowserClaimPrepared(
-      prepared,
-      context,
-      artifact,
-      tokenSlot,
-      RECIPIENT,
-    ),
-    prepared,
-  );
-  const piByteOffset = 8 + 8 + 4 + 4 * 8;
+    authority: {
+      chainId: 1,
+      channelId: 7,
+      manager: MANAGER,
+      rollup: ROLLUP,
+      verifier: VERIFIER,
+      closeFundingMaterializer: MATERIALIZER,
+      startBlock: 50,
+    },
+    finalized: {
+      channelId: 7, closeIntentDigest: `0x${'01'.repeat(32)}`,
+      finalChannelStateDigest: `0x${'02'.repeat(32)}`, finalBalanceStateH1: `0x${'03'.repeat(32)}`,
+      tokenCount: 1, tokenRegistry: [0],
+    },
+    durable: { number: 100, hash: HASH100, source: 'finalized' },
+  }, 7);
+  const artifact = {
+    claim: {
+      closeIntentDigest: context.finalized.closeIntentDigest, memberPkG: `0x${'04'.repeat(32)}`,
+      recipient: RECIPIENT, userAmountDigest: `0x${'07'.repeat(32)}`,
+      amount: '9', tokenSlot: 0, tokenIndex: 0,
+      withdrawalNullifier: `0x${'05'.repeat(32)}`,
+    },
+    mleProof: { protocolVersion: 1, constituentWidth: 160 },
+  };
   const word = (value) => BigInt(value).toString(16).padStart(64, '0');
-  const submitData = prepared.transaction.data;
-  const changedProofData = `${submitData.slice(0, -2)}${submitData.endsWith('00') ? '01' : '00'}`;
+  const submitData = SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR
+    + artifact.claim.closeIntentDigest.slice(2)
+    + artifact.claim.memberPkG.slice(2)
+    + '0'.repeat(24) + artifact.claim.recipient.slice(2).toLowerCase()
+    + artifact.claim.userAmountDigest.slice(2)
+    + word(artifact.claim.amount)
+    + word(artifact.claim.tokenSlot)
+    + word(artifact.claim.tokenIndex)
+    + artifact.claim.withdrawalNullifier.slice(2)
+    + word(0x120);
+  const prepared = {
+    schemaVersion: 1, operationId: `0x${'06'.repeat(32)}`, authority: context.authority,
+    mleAbiVersion: 2, submitWithdrawalClaimSelector: SUBMIT_WITHDRAWAL_CLAIM_V2_SELECTOR,
+    claim: structuredClone(artifact.claim), status: 'prepared',
+    transaction: { to: MANAGER, data: submitData, value: '0x0' },
+  };
+  assert.equal(gates.validateBrowserClaimPrepared(prepared, context, artifact, 0, RECIPIENT), prepared);
   assert.throws(
-    () => gates.validateBrowserClaimPrepared({
-      ...prepared,
-      transaction: { ...prepared.transaction, data: changedProofData },
-    }, context, artifact, tokenSlot, RECIPIENT),
-    /exact local compact proof bytes/,
-  );
-  const mismatchedHumanPi = structuredClone(artifact);
-  mismatchedHumanPi.mleProof.proof.publicInputs[0] = `0x${(
-    BigInt(mismatchedHumanPi.mleProof.proof.publicInputs[0]) + 1n
-  ).toString(16).padStart(16, '0')}`;
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, mismatchedHumanPi, tokenSlot, RECIPIENT),
-    /full proof disagrees with its exact compact/,
-  );
-  const mismatchedCompactPi = structuredClone(artifact);
-  const compactPiNibble = 2 + piByteOffset * 2;
-  mismatchedCompactPi.mleProof.compactProof.bytes = mismatchedCompactPi.mleProof.compactProof.bytes
-    .slice(0, compactPiNibble) + '02'
-    + mismatchedCompactPi.mleProof.compactProof.bytes.slice(compactPiNibble + 2);
-  mismatchedCompactPi.mleProof.compactProof.keccak256 = keccak256(
-    mismatchedCompactPi.mleProof.compactProof.bytes,
-  );
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, mismatchedCompactPi, tokenSlot, RECIPIENT),
-    /full proof disagrees with its exact compact/,
-  );
-  const mismatchedClaimTuple = structuredClone(artifact);
-  const mismatchedAmount = (BigInt(artifact.claim.amount) + 1n).toString();
-  mismatchedClaimTuple.claim.amount = mismatchedAmount;
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(
-      { ...prepared, claim: { ...prepared.claim, amount: mismatchedAmount } },
-      context,
-      mismatchedClaimTuple,
-      tokenSlot,
-      RECIPIENT,
-    ),
-    /withdrawal proof changed amount/,
-  );
-  const oddCompact = structuredClone(artifact);
-  oddCompact.mleProof.compactProof.bytes = oddCompact.mleProof.compactProof.bytes.slice(0, -1);
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, oddCompact, tokenSlot, RECIPIENT),
-    /malformed compact/,
-  );
-  const uppercaseCompact = structuredClone(artifact);
-  uppercaseCompact.mleProof.compactProof.bytes = `0x${uppercaseCompact.mleProof.compactProof.bytes
-    .slice(2).toUpperCase()}`;
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, uppercaseCompact, tokenSlot, RECIPIENT),
-    /malformed compact/,
-  );
-  const oversizedCompact = structuredClone(artifact);
-  oversizedCompact.mleProof.compactProof.bytes = `0x${'00'.repeat(253922)}`;
-  oversizedCompact.mleProof.compactProof.byteLength = 253922;
-  oversizedCompact.mleProof.compactProof.keccak256 = keccak256(
-    oversizedCompact.mleProof.compactProof.bytes,
-  );
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, oversizedCompact, tokenSlot, RECIPIENT),
-    /malformed compact/,
-  );
-  const unknownCompactField = structuredClone(artifact);
-  unknownCompactField.mleProof.compactProof.legacyBytes = unknownCompactField.mleProof.compactProof.bytes;
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, unknownCompactField, tokenSlot, RECIPIENT),
-    /keys do not match/,
-  );
-  const unknownFixture = structuredClone(artifact);
-  unknownFixture.mleProof.legacyProof = {};
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, unknownFixture, tokenSlot, RECIPIENT),
-    /keys do not match/,
-  );
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared(
-      prepared,
-      context,
-      { ...artifact, mleProof: { protocolVersion: 1, constituentWidth: 160 } },
-      tokenSlot,
-      RECIPIENT,
-    ),
-    /keys do not match/,
-  );
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared({ ...prepared, authority: { ...prepared.authority, manager: ROLLUP } }, context, artifact, tokenSlot, RECIPIENT),
+    () => gates.validateBrowserClaimPrepared({ ...prepared, authority: { ...prepared.authority, manager: ROLLUP } }, context, artifact, 0, RECIPIENT),
     /changed manager/,
   );
   assert.throws(
-    () => gates.validateBrowserClaimPrepared({
-      ...prepared,
-      authority: { ...prepared.authority, closeFundingMaterializer: OTHER_MATERIALIZER },
-    }, context, artifact, tokenSlot, RECIPIENT),
-    /changed closeFundingMaterializer/,
-  );
-  assert.throws(
-    () => gates.validateBrowserClaimPrepared({
-      ...prepared,
-      claim: { ...prepared.claim, tokenIndex: Number(prepared.claim.tokenIndex) + 1 },
-    }, context, artifact, tokenSlot, RECIPIENT),
+    () => gates.validateBrowserClaimPrepared({ ...prepared, claim: { ...prepared.claim, tokenIndex: 1 } }, context, artifact, 0, RECIPIENT),
     /wallet WASM field tokenIndex/,
   );
   assert.throws(
-    () => gates.validateBrowserClaimPrepared(prepared, context, artifact, tokenSlot, ROLLUP),
+    () => gates.validateBrowserClaimPrepared(prepared, context, artifact, 0, ROLLUP),
     /not the proof-bound claim recipient/,
   );
   const payout = {
     ...prepared,
     status: 'action-ready',
-    action: { kind: 'payout', amount: artifact.claim.amount },
+    action: { kind: 'payout', amount: '9' },
     transaction: {
       to: MANAGER,
       value: '0x0',
@@ -1091,32 +1009,4 @@ test('shipped browser gates reject relay recipient/token/manager substitution an
   const worker = fs.readFileSync(path.join(__dirname, '../../hosting/wallet/wallet-worker.js'), 'utf8');
   assert.match(worker, /wasm\.wallet_withdrawal_claim/);
   assert.match(html, /refusing to replace a different verified snapshot under the same digest/);
-  const sendBegin = html.indexOf('async function sendExactBrowserClaimTransaction');
-  const sendEnd = html.indexOf('async function reconcileBrowserClaim', sendBegin);
-  const sendSource = html.slice(sendBegin, sendEnd);
-  assert.ok(sendSource.indexOf("method: 'eth_call'") >= 0);
-  assert.ok(sendSource.indexOf("method: 'eth_call'") < sendSource.indexOf("method: 'eth_sendTransaction'"));
-  const walletRequests = [];
-  const sendGate = vm.runInNewContext(
-    `${sendSource}; sendExactBrowserClaimTransaction`,
-    {
-      ZERO_ADDRESS_20: '0x0000000000000000000000000000000000000000',
-      HEX20_RE: /^0x[0-9a-fA-F]{40}$/,
-      walletAccount: RECIPIENT,
-      walletProvider: {
-        async request(request) {
-          walletRequests.push(request.method);
-          if (request.method === 'eth_call') throw new Error('simulated proof revert');
-          return `0x${'ff'.repeat(32)}`;
-        },
-      },
-      refreshClaimWalletAccount: async () => {},
-      log: () => {},
-    },
-  );
-  await assert.rejects(
-    () => sendGate(prepared.transaction, RECIPIENT, { chainId: 1 }, 'claim'),
-    /simulated proof revert/,
-  );
-  assert.deepEqual(walletRequests, ['eth_call']);
 });

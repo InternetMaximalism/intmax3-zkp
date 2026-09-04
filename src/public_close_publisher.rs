@@ -20,22 +20,6 @@ use std::{
 use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _, unix::fs::PermissionsExt as _};
 
 use num_bigint::BigUint;
-use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2_mle::{
-    compact_v2::{decode_compact_v2, encode_compact_v2},
-    fixture_v2::{
-        MLE_VERIFIER_FIXTURE_SCHEMA_V2, MleProofV2Fixture, MleVerifierV2Fixture,
-        SOLIDITY_MLE_PROOF_ENCODING_V2, SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2,
-        derive_whir_deployment_profile_v2, proof_encoding_size_upper_bound_v2,
-        solidity_abi_encode_mle_proof_v2, solidity_abi_encode_verification_config_v2,
-    },
-    protocol_schema_v2::{
-        CIRCUIT_DIGEST_LENGTH_V2, COMPACT_LAYOUT_HASH_V2, COMPACT_MAGIC_V2,
-        MAX_COMPACT_PROOF_BYTES_V2, MAX_WHIR_HINT_BYTES_V2, MAX_WHIR_NARG_BYTES_V2,
-        MLE_PROOF_ABI_SIGNATURE_V2, MLE_PROOF_LAYOUT_HASH_V2, MLE_PROTOCOL_VERSION_CURRENT,
-        SCHEMA_VERSION_CURRENT,
-    },
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -53,9 +37,10 @@ use crate::{
     public_close_prover::PublicCloseIntentDescriptor,
 };
 
-const JOURNAL_VERSION: u32 = 4;
+const JOURNAL_VERSION: u32 = 3;
 const PUBLIC_CLOSE_MANIFEST_VERSION: u32 = 1;
-const DEPLOYMENT_MANIFEST_VERSION: u32 = 2;
+const DEPLOYMENT_MANIFEST_VERSION: u32 = 1;
+const MLE_PROOF_ABI_VERSION: u8 = 2;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_INTENT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PUBLIC_INPUT_BYTES: u64 = 2 * 1024 * 1024;
@@ -69,7 +54,7 @@ const PUBLIC_CHALLENGE_PERIOD_FLOOR: u64 = 86_400;
 pub const SUBMIT_CLOSE_SIGNATURE: &str = concat!(
     "submitCloseIntent(",
     "(uint64,uint64,uint64,uint64,bytes32,bytes32,uint256[10],uint32[10],uint8,bytes32,bytes32,bytes32,uint64,uint64,bytes32,bytes32),",
-    "bytes",
+    "(uint256,uint256,uint256[],bytes,bytes,bytes32,bytes32,bytes32,uint256,uint256,uint256[],uint256,uint256,uint256[],uint256,uint256,uint256,uint256,((uint256[])[]),uint256[],uint256,uint256,uint256,uint256,bytes32,uint256,((uint256[])[]),((uint256[])[]),uint256,uint256,uint256[],uint256[],uint256[],uint256[],uint256,uint256,uint256,uint256,((uint256[])[]),uint256[],uint256[],uint256,uint256,uint256,uint256,uint256,(uint8,uint8,uint8,uint8,uint8,uint16,uint16,uint16,uint16)[],uint256[4])",
     ")"
 );
 pub const FINALIZE_CLOSE_GUARDED_SIGNATURE: &str = "finalizeCloseGuarded(bytes32,uint64)";
@@ -225,120 +210,14 @@ struct DeploymentManifest {
     manager_runtime_code_hash: String,
     settlement_verifier: String,
     settlement_verifier_runtime_code_hash: String,
-    close_mle_verifier: String,
-    close_mle_verifier_runtime_code_hash: String,
-    close_mle_verifier_core: String,
-    close_mle_verifier_core_runtime_code_hash: String,
-    close_mle_verification_config_digest: String,
-    close_mle_circuit_config_digest: String,
-    close_mle_whir_parameters_digest: String,
-    close_mle_whir_protocol_id: String,
-    close_mle_whir_session_id: String,
-    withdrawal_claim_mle_verifier: String,
-    withdrawal_claim_mle_verifier_runtime_code_hash: String,
-    withdrawal_claim_mle_verifier_core: String,
-    withdrawal_claim_mle_verifier_core_runtime_code_hash: String,
-    withdrawal_claim_mle_verification_config_digest: String,
-    withdrawal_claim_mle_circuit_config_digest: String,
-    withdrawal_claim_mle_whir_parameters_digest: String,
-    withdrawal_claim_mle_whir_protocol_id: String,
-    withdrawal_claim_mle_whir_session_id: String,
-    post_close_claim_mle_verifier: String,
-    post_close_claim_mle_verifier_runtime_code_hash: String,
-    post_close_claim_mle_verifier_core: String,
-    post_close_claim_mle_verifier_core_runtime_code_hash: String,
-    post_close_claim_mle_verification_config_digest: String,
-    post_close_claim_mle_circuit_config_digest: String,
-    post_close_claim_mle_whir_parameters_digest: String,
-    post_close_claim_mle_whir_protocol_id: String,
-    post_close_claim_mle_whir_session_id: String,
-    cancel_close_mle_verifier: String,
-    cancel_close_mle_verifier_runtime_code_hash: String,
-    cancel_close_mle_verifier_core: String,
-    cancel_close_mle_verifier_core_runtime_code_hash: String,
-    cancel_close_mle_verification_config_digest: String,
-    cancel_close_mle_circuit_config_digest: String,
-    cancel_close_mle_whir_parameters_digest: String,
-    cancel_close_mle_whir_protocol_id: String,
-    cancel_close_mle_whir_session_id: String,
+    mle_verifier: String,
+    mle_verifier_runtime_code_hash: String,
     balance_verifier_data_sha256: String,
-    mle_fixture_schema: String,
-    mle_protocol_version: u64,
-    mle_proof_abi_signature: String,
-    mle_proof_layout_hash: String,
-    mle_compact_layout_hash: String,
-    mle_compact_proof_encoding: String,
+    mle_proof_abi_version: u8,
     submit_close_intent_selector: String,
     finalize_close_guarded_selector: String,
     close_submitted_topic: String,
     close_finalized_topic: String,
-}
-
-#[derive(Clone, Copy)]
-struct ManifestMlePin<'a> {
-    label: &'static str,
-    adapter: &'a str,
-    adapter_runtime_code_hash: &'a str,
-    core: &'a str,
-    core_runtime_code_hash: &'a str,
-    verification_config_digest: &'a str,
-    circuit_config_digest: &'a str,
-    whir_parameters_digest: &'a str,
-    whir_protocol_id: &'a str,
-    whir_session_id: &'a str,
-}
-
-fn manifest_mle_pins(manifest: &DeploymentManifest) -> [ManifestMlePin<'_>; 4] {
-    [
-        ManifestMlePin {
-            label: "close",
-            adapter: &manifest.close_mle_verifier,
-            adapter_runtime_code_hash: &manifest.close_mle_verifier_runtime_code_hash,
-            core: &manifest.close_mle_verifier_core,
-            core_runtime_code_hash: &manifest.close_mle_verifier_core_runtime_code_hash,
-            verification_config_digest: &manifest.close_mle_verification_config_digest,
-            circuit_config_digest: &manifest.close_mle_circuit_config_digest,
-            whir_parameters_digest: &manifest.close_mle_whir_parameters_digest,
-            whir_protocol_id: &manifest.close_mle_whir_protocol_id,
-            whir_session_id: &manifest.close_mle_whir_session_id,
-        },
-        ManifestMlePin {
-            label: "withdrawal-claim",
-            adapter: &manifest.withdrawal_claim_mle_verifier,
-            adapter_runtime_code_hash: &manifest.withdrawal_claim_mle_verifier_runtime_code_hash,
-            core: &manifest.withdrawal_claim_mle_verifier_core,
-            core_runtime_code_hash: &manifest.withdrawal_claim_mle_verifier_core_runtime_code_hash,
-            verification_config_digest: &manifest.withdrawal_claim_mle_verification_config_digest,
-            circuit_config_digest: &manifest.withdrawal_claim_mle_circuit_config_digest,
-            whir_parameters_digest: &manifest.withdrawal_claim_mle_whir_parameters_digest,
-            whir_protocol_id: &manifest.withdrawal_claim_mle_whir_protocol_id,
-            whir_session_id: &manifest.withdrawal_claim_mle_whir_session_id,
-        },
-        ManifestMlePin {
-            label: "post-close-claim",
-            adapter: &manifest.post_close_claim_mle_verifier,
-            adapter_runtime_code_hash: &manifest.post_close_claim_mle_verifier_runtime_code_hash,
-            core: &manifest.post_close_claim_mle_verifier_core,
-            core_runtime_code_hash: &manifest.post_close_claim_mle_verifier_core_runtime_code_hash,
-            verification_config_digest: &manifest.post_close_claim_mle_verification_config_digest,
-            circuit_config_digest: &manifest.post_close_claim_mle_circuit_config_digest,
-            whir_parameters_digest: &manifest.post_close_claim_mle_whir_parameters_digest,
-            whir_protocol_id: &manifest.post_close_claim_mle_whir_protocol_id,
-            whir_session_id: &manifest.post_close_claim_mle_whir_session_id,
-        },
-        ManifestMlePin {
-            label: "cancel-close",
-            adapter: &manifest.cancel_close_mle_verifier,
-            adapter_runtime_code_hash: &manifest.cancel_close_mle_verifier_runtime_code_hash,
-            core: &manifest.cancel_close_mle_verifier_core,
-            core_runtime_code_hash: &manifest.cancel_close_mle_verifier_core_runtime_code_hash,
-            verification_config_digest: &manifest.cancel_close_mle_verification_config_digest,
-            circuit_config_digest: &manifest.cancel_close_mle_circuit_config_digest,
-            whir_parameters_digest: &manifest.cancel_close_mle_whir_parameters_digest,
-            whir_protocol_id: &manifest.cancel_close_mle_whir_protocol_id,
-            whir_session_id: &manifest.cancel_close_mle_whir_session_id,
-        },
-    ]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,26 +253,9 @@ struct PreparedClose {
     channel_id: u32,
     balance_vd_sha256: String,
     expected: ExpectedClose,
-    compact_proof_hash: String,
-    compact_proof_length: u32,
-    verification_config_digest: String,
-    circuit_config_digest: String,
-    whir_parameters_digest: String,
-    whir_protocol_id: String,
-    whir_session_id: String,
     submit_calldata: String,
     artifact_hash: String,
     component_hashes: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug)]
-struct ValidatedMleV2Artifact {
-    compact_proof: Vec<u8>,
-    verification_config_digest: String,
-    circuit_config_digest: String,
-    whir_parameters_digest: String,
-    whir_protocol_id: String,
-    whir_session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,12 +272,6 @@ struct PublicationBinding {
     close_intent_digest: String,
     artifact_hash: String,
     component_hashes: BTreeMap<String, String>,
-    compact_proof_hash: String,
-    compact_proof_length: u32,
-    mle_fixture_schema: String,
-    mle_protocol_version: u64,
-    mle_proof_layout_hash: String,
-    mle_compact_layout_hash: String,
     deployment_manifest_hash: String,
     submit_calldata_hash: String,
     /// Canonical shared root prevents a restart from silently moving nonce coordination to a
@@ -494,33 +350,18 @@ pub struct BlockObservation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObservedMleVerifier {
-    pub adapter: String,
-    pub adapter_runtime_code_hash: String,
-    pub core: String,
-    pub core_runtime_code_hash: String,
-    pub verification_config_digest: String,
-    pub circuit_config_digest: String,
-    pub whir_parameters_digest: String,
-    pub whir_protocol_id: String,
-    pub whir_session_id: String,
-    pub adapter_allowed_chain_id: u64,
-    pub core_allowed_chain_id: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedDeployment {
     pub rollup_runtime_code_hash: String,
     pub manager_runtime_code_hash: String,
     pub settlement_verifier_runtime_code_hash: String,
+    pub mle_verifier_runtime_code_hash: String,
     pub manager_registry: String,
     pub manager_verifier: String,
-    pub close_mle: ObservedMleVerifier,
-    pub withdrawal_claim_mle: ObservedMleVerifier,
-    pub post_close_claim_mle: ObservedMleVerifier,
-    pub cancel_close_mle: ObservedMleVerifier,
+    pub verifier_close_mle_verifier: String,
+    pub mle_allowed_chain_id: u64,
     pub manager_channel_id: u32,
     pub challenge_period: u64,
+    pub close_vk_initialized: bool,
     pub registered_member_set_commitment: String,
     pub active_member_count: u8,
     pub active_delegate_count: u16,
@@ -640,6 +481,7 @@ enum AbiKind {
     FixedBytes(usize),
     Bytes,
     Tuple(Vec<AbiField>),
+    DynamicArray(Box<AbiKind>),
     FixedArray(Box<AbiKind>, usize),
 }
 
@@ -661,6 +503,90 @@ fn uint(name: &'static str, bits: usize) -> AbiField {
 
 fn bytes32(name: &'static str) -> AbiField {
     AbiField::new(name, AbiKind::FixedBytes(32))
+}
+
+fn uint_array(name: &'static str) -> AbiField {
+    AbiField::new(name, AbiKind::DynamicArray(Box::new(AbiKind::Uint(256))))
+}
+
+fn sumcheck(name: &'static str) -> AbiField {
+    AbiField::new(
+        name,
+        AbiKind::Tuple(vec![AbiField::new(
+            "roundPolys",
+            AbiKind::DynamicArray(Box::new(AbiKind::Tuple(vec![uint_array("evals")]))),
+        )]),
+    )
+}
+
+fn gate_kind() -> AbiKind {
+    AbiKind::Tuple(vec![
+        uint("gateId", 8),
+        uint("selectorIndex", 8),
+        uint("groupStart", 8),
+        uint("groupEnd", 8),
+        uint("gateRowIndex", 8),
+        uint("numConstraints", 16),
+        uint("numOrConsts", 16),
+        uint("param2", 16),
+        uint("param3", 16),
+    ])
+}
+
+fn mle_v2_fields() -> Vec<AbiField> {
+    vec![
+        uint("protocolVersion", 256),
+        uint("constituentWidth", 256),
+        uint_array("circuitDigest"),
+        AbiField::new("whirTranscript", AbiKind::Bytes),
+        AbiField::new("whirHints", AbiKind::Bytes),
+        bytes32("preprocessedRoot"),
+        bytes32("witnessRoot"),
+        bytes32("auxCommitmentRoot"),
+        uint("preprocessedEvalValue", 256),
+        uint("preprocessedBatchR", 256),
+        uint_array("preprocessedIndividualEvals"),
+        uint("witnessEvalValue", 256),
+        uint("witnessBatchR", 256),
+        uint_array("witnessIndividualEvals"),
+        uint("auxBatchR", 256),
+        uint("auxConstraintEval", 256),
+        uint("auxPermEval", 256),
+        uint("auxEvalValue", 256),
+        sumcheck("combinedProof"),
+        uint_array("publicInputs"),
+        uint("alpha", 256),
+        uint("beta", 256),
+        uint("gamma", 256),
+        uint("mu", 256),
+        bytes32("inverseHelpersCommitmentRoot"),
+        uint("inverseHelpersBatchR", 256),
+        sumcheck("invSumcheckProof"),
+        sumcheck("hSumcheckProof"),
+        uint("lambdaInv", 256),
+        uint("muInv", 256),
+        uint_array("witnessIndividualEvalsAtRInv"),
+        uint_array("preprocessedIndividualEvalsAtRInv"),
+        uint_array("inverseHelpersEvalsAtRInv"),
+        uint_array("inverseHelpersEvalsAtRH"),
+        uint("gSubEvalAtRInv", 256),
+        uint("witnessEvalValueAtRInv", 256),
+        uint("preprocessedEvalValueAtRInv", 256),
+        uint("extChallenge", 256),
+        sumcheck("gateSumcheckProof"),
+        uint_array("witnessIndividualEvalsAtRGateV2"),
+        uint_array("preprocessedIndividualEvalsAtRGateV2"),
+        uint("witnessEvalValueAtRGateV2", 256),
+        uint("preprocessedEvalValueAtRGateV2", 256),
+        uint("quotientDegreeFactor", 256),
+        uint("numSelectors", 256),
+        uint("numGateConstraints", 256),
+        AbiField::new("gates", AbiKind::DynamicArray(Box::new(gate_kind()))),
+        AbiField::new(
+            "publicInputsHash",
+            AbiKind::FixedArray(Box::new(AbiKind::Uint(256)), 4),
+        ),
+    ]
 }
 
 fn close_intent_fields() -> Vec<AbiField> {
@@ -704,13 +630,14 @@ impl AbiKind {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::DynamicArray(element) => format!("{}[]", element.signature()),
             Self::FixedArray(element, length) => format!("{}[{length}]", element.signature()),
         }
     }
 
     fn is_dynamic(&self) -> bool {
         match self {
-            Self::Bytes => true,
+            Self::Bytes | Self::DynamicArray(_) => true,
             Self::Tuple(fields) => fields.iter().any(|field| field.kind.is_dynamic()),
             Self::FixedArray(element, _) => element.is_dynamic(),
             Self::Uint(_) | Self::FixedBytes(_) => false,
@@ -732,7 +659,7 @@ impl AbiKind {
                 .static_size()?
                 .checked_mul(*length)
                 .ok_or_else(|| "ABI fixed-array size overflow".into()),
-            Self::Bytes => unreachable!("dynamic checked above"),
+            Self::Bytes | Self::DynamicArray(_) => unreachable!("dynamic checked above"),
         }
     }
 }
@@ -742,11 +669,17 @@ fn json_member<'a>(
     field: &AbiField,
     path: &str,
 ) -> std::result::Result<&'a Value, String> {
+    let alias = match field.name {
+        "preprocessedRoot" => Some("preprocessedCommitmentRoot"),
+        "witnessRoot" => Some("witnessCommitmentRoot"),
+        _ => None,
+    };
     let object = value
         .as_object()
         .ok_or_else(|| format!("{path} must be a JSON object"))?;
     object
         .get(field.name)
+        .or_else(|| alias.and_then(|name| object.get(name)))
         .ok_or_else(|| format!("{path}.{} is missing", field.name))
 }
 
@@ -812,21 +745,6 @@ fn normalize_hex(value: &str, bytes: usize, path: &str) -> std::result::Result<S
         "0x{}",
         hex::encode(decode_hex(value, Some(bytes), path)?)
     ))
-}
-
-fn normalize_nonzero_hex(
-    value: &str,
-    bytes: usize,
-    path: &str,
-) -> std::result::Result<String, String> {
-    let normalized = normalize_hex(value, bytes, path)?;
-    if decode_hex(&normalized, Some(bytes), path)?
-        .iter()
-        .all(|byte| *byte == 0)
-    {
-        return Err(format!("{path} must be nonzero"));
-    }
-    Ok(normalized)
 }
 
 fn same_hex(left: &str, right: &str) -> bool {
@@ -918,6 +836,11 @@ fn encode_value_body(
             Ok(encoded)
         }
         AbiKind::Tuple(fields) => {
+            // Sumcheck JSON exports a round as the eval array itself; Solidity wraps it in a
+            // one-field `RoundPoly` tuple.
+            if value.is_array() && fields.len() == 1 && fields[0].name == "evals" {
+                return encode_sequence([(&fields[0].kind, value, format!("{path}.evals"))]);
+            }
             let members = fields
                 .iter()
                 .map(|field| {
@@ -926,6 +849,16 @@ fn encode_value_body(
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             encode_sequence(members)
+        }
+        AbiKind::DynamicArray(element) => {
+            let array = value
+                .as_array()
+                .ok_or_else(|| format!("{path} must be an array"))?;
+            let mut encoded = abi_word_from_usize(array.len())?;
+            encoded.extend(encode_sequence(array.iter().enumerate().map(
+                |(index, value)| (element.as_ref(), value, format!("{path}[{index}]")),
+            ))?);
+            Ok(encoded)
         }
         AbiKind::FixedArray(element, expected) => {
             let array = value
@@ -1145,225 +1078,53 @@ fn expect_hex(value: &str, bytes: usize, path: &str) -> Result<String> {
     normalize_hex(value, bytes, path).map_err(PublicClosePublisherError::Bundle)
 }
 
-fn generated_hex(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
-
-fn validate_close_mle_public_inputs(public_inputs: &[String], expected: &[u64]) -> Result<()> {
-    if public_inputs.len() != expected.len() {
-        return Err(PublicClosePublisherError::Bundle(format!(
-            "MLE proof public input count {} differs from close_public_inputs.json {}",
-            public_inputs.len(),
-            expected.len()
-        )));
+fn mle_constituent_width(proof: &Value) -> Result<()> {
+    let object = proof.as_object().ok_or_else(|| {
+        PublicClosePublisherError::Bundle("close_intent_mle.json must be an object".into())
+    })?;
+    let protocol = object.get("protocolVersion").ok_or_else(|| {
+        PublicClosePublisherError::Bundle(
+            "production close MLE proof has no protocolVersion (legacy ABI is refused)".into(),
+        )
+    })?;
+    if parse_uint_value(protocol, 256, "mleProof.protocolVersion")
+        .map_err(PublicClosePublisherError::Bundle)?
+        != BigUint::from(1u8)
+    {
+        return Err(PublicClosePublisherError::Bundle(
+            "mleProof.protocolVersion is not the release-reviewed version 1".into(),
+        ));
     }
-    for (index, (value, expected)) in public_inputs.iter().zip(expected).enumerate() {
-        let digits = value.strip_prefix("0x").ok_or_else(|| {
-            PublicClosePublisherError::Bundle(format!(
-                "mleProof.publicInputs[{index}] must have a lowercase 0x prefix"
-            ))
-        })?;
-        if digits.len() != 16
-            || !digits
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(PublicClosePublisherError::Bundle(format!(
-                "mleProof.publicInputs[{index}] must be a canonical 64-bit Goldilocks limb"
-            )));
-        }
-        let actual = u64::from_str_radix(digits, 16).map_err(|error| {
-            PublicClosePublisherError::Bundle(format!(
-                "decode mleProof.publicInputs[{index}]: {error}"
-            ))
-        })?;
-        if actual >= (1u64 << 32) || actual != *expected {
-            return Err(PublicClosePublisherError::Bundle(format!(
-                "mleProof.publicInputs[{index}] is non-canonical or differs from close_public_inputs.json"
-            )));
-        }
+    let mut width = 2usize;
+    for field in [
+        "preprocessedIndividualEvals",
+        "witnessIndividualEvals",
+        "inverseHelpersEvalsAtRInv",
+        "inverseHelpersEvalsAtRH",
+        "preprocessedIndividualEvalsAtRGateV2",
+        "witnessIndividualEvalsAtRGateV2",
+    ] {
+        width = width.max(
+            object
+                .get(field)
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    PublicClosePublisherError::Bundle(format!("mleProof.{field} must be an array"))
+                })?
+                .len(),
+        );
+    }
+    let declared = object.get("constituentWidth").ok_or_else(|| {
+        PublicClosePublisherError::Bundle("mleProof.constituentWidth is missing".into())
+    })?;
+    let declared = parse_uint_value(declared, 256, "mleProof.constituentWidth")
+        .map_err(PublicClosePublisherError::Bundle)?;
+    if declared != BigUint::from(width) {
+        return Err(PublicClosePublisherError::Bundle(format!(
+            "mleProof.constituentWidth {declared} != canonical constituent width {width}"
+        )));
     }
     Ok(())
-}
-
-/// Authenticate the strict full v2 artifact and return its one canonical compact byte stream.
-/// The JSON proof and Solidity ABI record are consistency witnesses only; neither is accepted as
-/// an alternate manager-calldata representation.
-fn validated_compact_mle_v2_fixture(
-    json: &str,
-    public_inputs: &[u64],
-) -> Result<ValidatedMleV2Artifact> {
-    let fail = |message: String| PublicClosePublisherError::Bundle(message);
-    let fixture = MleVerifierV2Fixture::from_canonical_json(json)
-        .map_err(|error| fail(format!("strict canonical MLE/WHIR v2 fixture: {error}")))?;
-    fixture
-        .config_fixture()
-        .validate_self_consistency()
-        .map_err(|error| fail(format!("self-consistent MLE/WHIR deployment config: {error}")))?;
-    if fixture.schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
-        || fixture.schema_version != SCHEMA_VERSION_CURRENT
-        || fixture.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.proof.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.verification_key.protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || fixture.proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
-        || fixture.proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
-    {
-        return Err(fail(
-            "MLE/WHIR v2 fixture schema/protocol/proof-layout identity mismatch".into(),
-        ));
-    }
-
-    let proof = &fixture.proof;
-    let vk = &fixture.verification_key;
-    let config = &fixture.verification_config;
-    let pinned = &fixture.pinned_verifier;
-    let shape = fixture.compact_shape.decode();
-    let expected_gate_round_degree = config
-        .circuit
-        .quotient_degree_factor
-        .checked_add(2)
-        .ok_or_else(|| fail("MLE/WHIR v2 gate round degree overflow".into()))?;
-    if shape.circuit_digest_len != CIRCUIT_DIGEST_LENGTH_V2
-        || shape.max_whir_narg_bytes != MAX_WHIR_NARG_BYTES_V2
-        || shape.max_whir_hint_bytes != MAX_WHIR_HINT_BYTES_V2
-        || shape.max_encoded_bytes != MAX_COMPACT_PROOF_BYTES_V2
-        || shape.constituent_width != proof.constituent_width
-        || shape.constituent_width != vk.constituent_width
-        || shape.public_inputs_len != proof.public_inputs.len()
-        || shape.public_inputs_len != CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
-        || shape.degree_bits != config.circuit.degree_bits
-        || shape.public_inputs_len != config.circuit.num_public_inputs
-        || shape.num_constants != config.circuit.num_constants
-        || shape.num_routed_wires != config.circuit.num_routed_wires
-        || shape.num_wires != config.circuit.num_wires
-        || shape.gate_round_degree != expected_gate_round_degree
-        || config.circuit.num_constants != vk.num_constants
-        || config.circuit.num_routed_wires != vk.num_routed_wires
-        || config.circuit.num_wires != vk.num_wires
-        || config.circuit.num_selectors != vk.num_selectors
-        || config.circuit.num_gate_constraints != vk.num_gate_constraints
-        || config.circuit.quotient_degree_factor != vk.quotient_degree_factor
-        || config.public_input_wire_map != vk.public_input_wire_map
-        || config.k_is != vk.k_is
-        || config.subgroup_gen_powers != vk.subgroup_gen_powers
-        || config.gates != vk.gates
-    {
-        return Err(fail(
-            "MLE/WHIR v2 fixture proof/VK/config/compact shape mismatch".into(),
-        ));
-    }
-    if proof.circuit_digest.len() != CIRCUIT_DIGEST_LENGTH_V2
-        || proof.circuit_digest != vk.circuit_digest
-        || pinned.circuit_digest.as_slice() != vk.circuit_digest.as_slice()
-        || proof.preprocessed_root != vk.preprocessed_commitment_root
-        || pinned.preprocessed_commitment_root != vk.preprocessed_commitment_root
-        || pinned.circuit_config_digest != vk.circuit_config_digest
-        || pinned.whir_protocol_id != vk.whir_protocol_id
-        || pinned.whir_session_id != vk.whir_session_id
-    {
-        return Err(fail(
-            "MLE/WHIR v2 fixture proof/VK/pinned views disagree".into(),
-        ));
-    }
-    vk.try_decode::<GoldilocksField>()
-        .map_err(|error| fail(format!("canonical MLE/WHIR v2 verification key: {error}")))?;
-
-    let recorded_solidity_abi = fixture
-        .solidity_abi_proof
-        .decode_and_validate(SOLIDITY_MLE_PROOF_ENCODING_V2)
-        .map_err(|error| fail(format!("MLE/WHIR v2 Solidity proof record: {error}")))?;
-    let expected_solidity_abi = solidity_abi_encode_mle_proof_v2(proof)
-        .map_err(|error| fail(format!("canonical MLE/WHIR v2 Solidity proof: {error}")))?;
-    if recorded_solidity_abi != expected_solidity_abi {
-        return Err(fail(
-            "MLE/WHIR v2 Solidity proof bytes disagree with the proof object".into(),
-        ));
-    }
-
-    let recorded_config_abi = fixture
-        .solidity_abi_verification_config
-        .decode_and_validate(SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2)
-        .map_err(|error| fail(format!("MLE/WHIR v2 Solidity config record: {error}")))?;
-    let expected_config_abi = solidity_abi_encode_verification_config_v2(config)
-        .map_err(|error| fail(format!("canonical MLE/WHIR v2 Solidity config: {error}")))?;
-    if recorded_config_abi != expected_config_abi
-        || pinned.verification_config_digest != fixture.solidity_abi_verification_config.keccak256
-    {
-        return Err(fail(
-            "MLE/WHIR v2 Solidity config bytes/digest disagree with pinned views".into(),
-        ));
-    }
-
-    let compact_encoding = std::str::from_utf8(&COMPACT_MAGIC_V2).map_err(|error| {
-        fail(format!(
-            "generated compact-v2 encoding is not UTF-8: {error}"
-        ))
-    })?;
-    let compact = fixture
-        .compact_proof
-        .decode_and_validate(compact_encoding)
-        .map_err(|error| fail(format!("MLE/WHIR v2 compact proof record: {error}")))?;
-    if compact.is_empty() || compact.len() > MAX_COMPACT_PROOF_BYTES_V2 {
-        return Err(fail(format!(
-            "MLE/WHIR v2 compact proof length {} is outside 1..={MAX_COMPACT_PROOF_BYTES_V2}",
-            compact.len()
-        )));
-    }
-    let decoded = decode_compact_v2::<GoldilocksField>(&compact, &shape)
-        .map_err(|error| fail(format!("strict MLE/WHIR v2 compact decode: {error}")))?;
-    if MleProofV2Fixture::encode(&decoded) != *proof {
-        return Err(fail(
-            "MLE/WHIR v2 compact bytes disagree with the proof object".into(),
-        ));
-    }
-    let reencoded = encode_compact_v2(&decoded, &shape)
-        .map_err(|error| fail(format!("canonical MLE/WHIR v2 compact encode: {error}")))?;
-    if reencoded != compact {
-        return Err(fail(
-            "MLE/WHIR v2 compact proof is not canonically encoded".into(),
-        ));
-    }
-
-    let profile = derive_whir_deployment_profile_v2(shape.degree_bits, shape.constituent_width)
-        .map_err(|error| fail(format!("canonical MLE/WHIR v2 profile: {error}")))?;
-    if config.whir != profile.params
-        || vk.whir_protocol_id != generated_hex(&profile.protocol_id)
-        || vk.whir_session_id != generated_hex(&profile.session_id)
-        || pinned.whir_parameters_digest != generated_hex(&profile.parameters_digest)
-    {
-        return Err(fail(
-            "MLE/WHIR v2 native WHIR profile or pinned identifiers drifted".into(),
-        ));
-    }
-    let upper_bound = proof_encoding_size_upper_bound_v2(&shape)
-        .map_err(|error| fail(format!("MLE/WHIR v2 size upper bound: {error}")))?;
-    if fixture.size_upper_bound != upper_bound
-        || !upper_bound.fits_whir_blob_caps
-        || !upper_bound.fits_compact_cap
-        || compact.len() > upper_bound.max_compact_bytes
-        || recorded_solidity_abi.len() > upper_bound.max_solidity_abi_bytes
-        || decoded.whir_eval_proof.narg_string.len() != upper_bound.max_whir_transcript_bytes
-        || decoded.whir_eval_proof.hints.len() > upper_bound.max_whir_hint_bytes
-        || fixture.stats.solidity_abi_bytes != recorded_solidity_abi.len()
-        || fixture.stats.solidity_abi_verification_config_bytes != recorded_config_abi.len()
-        || fixture.stats.compact_bytes != compact.len()
-        || fixture.stats.whir_transcript_bytes != decoded.whir_eval_proof.narg_string.len()
-        || fixture.stats.whir_hint_bytes != decoded.whir_eval_proof.hints.len()
-    {
-        return Err(fail(
-            "MLE/WHIR v2 proof statistics or resource envelope mismatch".into(),
-        ));
-    }
-
-    validate_close_mle_public_inputs(&proof.public_inputs, public_inputs)?;
-    Ok(ValidatedMleV2Artifact {
-        compact_proof: compact,
-        verification_config_digest: pinned.verification_config_digest.clone(),
-        circuit_config_digest: pinned.circuit_config_digest.clone(),
-        whir_parameters_digest: pinned.whir_parameters_digest.clone(),
-        whir_protocol_id: pinned.whir_protocol_id.clone(),
-        whir_session_id: pinned.whir_session_id.clone(),
-    })
 }
 
 fn parse_public_input_array(value: &Value, path: &str) -> Result<Vec<u64>> {
@@ -1728,10 +1489,16 @@ fn prepare_bundle(
             CHANNEL_CLOSE_PUBLIC_INPUTS_LEN
         )));
     }
-    let mle_json = std::str::from_utf8(&mle_bytes).map_err(|error| {
-        PublicClosePublisherError::Bundle(format!("close MLE fixture is not UTF-8: {error}"))
+    let mle_proof: Value = parse_json(&mle_bytes, "close MLE proof")?;
+    mle_constituent_width(&mle_proof)?;
+    let mle_inputs = mle_proof.get("publicInputs").ok_or_else(|| {
+        PublicClosePublisherError::Bundle("mleProof.publicInputs is missing".into())
     })?;
-    let mle_artifact = validated_compact_mle_v2_fixture(mle_json, &raw_inputs)?;
+    if parse_public_input_array(mle_inputs, "mleProof.publicInputs")? != raw_inputs {
+        return Err(PublicClosePublisherError::Bundle(
+            "MLE proof public inputs differ from close_public_inputs.json".into(),
+        ));
+    }
     let (expected, intent_json) = compare_close_public_inputs(&descriptor, &full, &raw_inputs)?;
     if !same_hex(
         &expected.final_channel_state_digest,
@@ -1749,7 +1516,7 @@ fn prepare_bundle(
     }
 
     let intent_kind = AbiKind::Tuple(close_intent_fields());
-    let proof_kind = AbiKind::Bytes;
+    let proof_kind = AbiKind::Tuple(mle_v2_fields());
     let computed_signature = format!(
         "submitCloseIntent({},{})",
         intent_kind.signature(),
@@ -1764,19 +1531,11 @@ fn prepare_bundle(
         "submitCloseIntent",
         &[
             (&intent_kind, &intent_json, "closeIntent"),
-            (
-                &proof_kind,
-                &Value::String(format!("0x{}", hex::encode(&mle_artifact.compact_proof))),
-                "compactProof",
-            ),
+            (&proof_kind, &mle_proof, "mleProof"),
         ],
     )
     .map_err(|error| {
         PublicClosePublisherError::Bundle(format!("encode close calldata: {error}"))
-    })?;
-    let compact_proof_hash = keccak_hex(&mle_artifact.compact_proof);
-    let compact_proof_length = u32::try_from(mle_artifact.compact_proof.len()).map_err(|_| {
-        PublicClosePublisherError::Bundle("compact proof length does not fit uint32".into())
     })?;
     let components = [
         ("public_close_manifest.json", manifest_bytes.as_slice()),
@@ -1791,17 +1550,11 @@ fn prepare_bundle(
         .map(|(name, bytes)| ((*name).to_string(), sha256_hex(bytes)))
         .collect::<BTreeMap<_, _>>();
     let artifact_description = serde_json::json!({
-        "domain": "intmax-public-close-bundle-v2",
+        "domain": "intmax-public-close-bundle-v1",
         "chainId": manifest.chain_id,
         "rollup": rollup,
         "channelId": manifest.channel_id.channel_id(),
         "closeIntentDigest": expected.close_intent_digest,
-        "compactProofHash": compact_proof_hash.clone(),
-        "compactProofLength": compact_proof_length,
-        "mleFixtureSchema": MLE_VERIFIER_FIXTURE_SCHEMA_V2,
-        "mleProtocolVersion": MLE_PROTOCOL_VERSION_CURRENT,
-        "mleProofLayoutHash": generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
-        "mleCompactLayoutHash": generated_hex(&COMPACT_LAYOUT_HASH_V2),
         "componentHashes": component_hashes,
     });
     let artifact_hash = sha256_hex(canonical_json(&artifact_description).as_bytes());
@@ -1811,13 +1564,6 @@ fn prepare_bundle(
         channel_id: manifest.channel_id.channel_id(),
         balance_vd_sha256,
         expected,
-        compact_proof_hash,
-        compact_proof_length,
-        verification_config_digest: mle_artifact.verification_config_digest,
-        circuit_config_digest: mle_artifact.circuit_config_digest,
-        whir_parameters_digest: mle_artifact.whir_parameters_digest,
-        whir_protocol_id: mle_artifact.whir_protocol_id,
-        whir_session_id: mle_artifact.whir_session_id,
         submit_calldata,
         artifact_hash,
         component_hashes,
@@ -1827,83 +1573,50 @@ fn prepare_bundle(
 fn load_deployment_manifest(
     path: &Path,
     prepared: &PreparedClose,
-    expected_sha256: &str,
 ) -> Result<(DeploymentManifest, String)> {
     let bytes = read_bounded(path, MAX_MANIFEST_BYTES, "close deployment manifest")?;
-    let expected_sha256 = normalize_nonzero_hex(
-        expected_sha256,
-        32,
-        "independently configured deployment manifest SHA-256",
-    )
-    .map_err(PublicClosePublisherError::Configuration)?;
-    let manifest_hash = sha256_hex(&bytes);
-    if !same_hex(&manifest_hash, &expected_sha256) {
-        return Err(PublicClosePublisherError::Deployment(
-            "deployment manifest bytes differ from the independently configured SHA-256 pin".into(),
-        ));
-    }
-    // The exact raw bytes are authenticated before JSON parsing. Canonically equivalent JSON is
-    // intentionally a different release artifact.
     let mut manifest: DeploymentManifest = parse_json(&bytes, "close deployment manifest")?;
     let fail = |message: String| PublicClosePublisherError::Configuration(message);
-    macro_rules! normalize_pin {
-        ($field:ident, $bytes:expr) => {
-            manifest.$field = normalize_nonzero_hex(
-                &manifest.$field,
-                $bytes,
-                concat!("deployment.", stringify!($field)),
-            )
-            .map_err(&fail)?;
-        };
-    }
-    normalize_pin!(rollup, 20);
-    normalize_pin!(rollup_runtime_code_hash, 32);
-    normalize_pin!(manager, 20);
-    normalize_pin!(manager_runtime_code_hash, 32);
-    normalize_pin!(settlement_verifier, 20);
-    normalize_pin!(settlement_verifier_runtime_code_hash, 32);
-    normalize_pin!(balance_verifier_data_sha256, 32);
-
-    normalize_pin!(close_mle_verifier, 20);
-    normalize_pin!(close_mle_verifier_runtime_code_hash, 32);
-    normalize_pin!(close_mle_verifier_core, 20);
-    normalize_pin!(close_mle_verifier_core_runtime_code_hash, 32);
-    normalize_pin!(close_mle_verification_config_digest, 32);
-    normalize_pin!(close_mle_circuit_config_digest, 32);
-    normalize_pin!(close_mle_whir_parameters_digest, 32);
-    normalize_pin!(close_mle_whir_protocol_id, 64);
-    normalize_pin!(close_mle_whir_session_id, 32);
-
-    normalize_pin!(withdrawal_claim_mle_verifier, 20);
-    normalize_pin!(withdrawal_claim_mle_verifier_runtime_code_hash, 32);
-    normalize_pin!(withdrawal_claim_mle_verifier_core, 20);
-    normalize_pin!(withdrawal_claim_mle_verifier_core_runtime_code_hash, 32);
-    normalize_pin!(withdrawal_claim_mle_verification_config_digest, 32);
-    normalize_pin!(withdrawal_claim_mle_circuit_config_digest, 32);
-    normalize_pin!(withdrawal_claim_mle_whir_parameters_digest, 32);
-    normalize_pin!(withdrawal_claim_mle_whir_protocol_id, 64);
-    normalize_pin!(withdrawal_claim_mle_whir_session_id, 32);
-
-    normalize_pin!(post_close_claim_mle_verifier, 20);
-    normalize_pin!(post_close_claim_mle_verifier_runtime_code_hash, 32);
-    normalize_pin!(post_close_claim_mle_verifier_core, 20);
-    normalize_pin!(post_close_claim_mle_verifier_core_runtime_code_hash, 32);
-    normalize_pin!(post_close_claim_mle_verification_config_digest, 32);
-    normalize_pin!(post_close_claim_mle_circuit_config_digest, 32);
-    normalize_pin!(post_close_claim_mle_whir_parameters_digest, 32);
-    normalize_pin!(post_close_claim_mle_whir_protocol_id, 64);
-    normalize_pin!(post_close_claim_mle_whir_session_id, 32);
-
-    normalize_pin!(cancel_close_mle_verifier, 20);
-    normalize_pin!(cancel_close_mle_verifier_runtime_code_hash, 32);
-    normalize_pin!(cancel_close_mle_verifier_core, 20);
-    normalize_pin!(cancel_close_mle_verifier_core_runtime_code_hash, 32);
-    normalize_pin!(cancel_close_mle_verification_config_digest, 32);
-    normalize_pin!(cancel_close_mle_circuit_config_digest, 32);
-    normalize_pin!(cancel_close_mle_whir_parameters_digest, 32);
-    normalize_pin!(cancel_close_mle_whir_protocol_id, 64);
-    normalize_pin!(cancel_close_mle_whir_session_id, 32);
-
+    manifest.rollup = normalize_hex(&manifest.rollup, 20, "deployment.rollup").map_err(&fail)?;
+    manifest.manager = normalize_hex(&manifest.manager, 20, "deployment.manager").map_err(&fail)?;
+    manifest.settlement_verifier = normalize_hex(
+        &manifest.settlement_verifier,
+        20,
+        "deployment.settlementVerifier",
+    )
+    .map_err(&fail)?;
+    manifest.mle_verifier =
+        normalize_hex(&manifest.mle_verifier, 20, "deployment.mleVerifier").map_err(&fail)?;
+    manifest.rollup_runtime_code_hash = normalize_hex(
+        &manifest.rollup_runtime_code_hash,
+        32,
+        "deployment.rollupRuntimeCodeHash",
+    )
+    .map_err(&fail)?;
+    manifest.manager_runtime_code_hash = normalize_hex(
+        &manifest.manager_runtime_code_hash,
+        32,
+        "deployment.managerRuntimeCodeHash",
+    )
+    .map_err(&fail)?;
+    manifest.settlement_verifier_runtime_code_hash = normalize_hex(
+        &manifest.settlement_verifier_runtime_code_hash,
+        32,
+        "deployment.settlementVerifierRuntimeCodeHash",
+    )
+    .map_err(&fail)?;
+    manifest.mle_verifier_runtime_code_hash = normalize_hex(
+        &manifest.mle_verifier_runtime_code_hash,
+        32,
+        "deployment.mleVerifierRuntimeCodeHash",
+    )
+    .map_err(&fail)?;
+    manifest.balance_verifier_data_sha256 = normalize_hex(
+        &manifest.balance_verifier_data_sha256,
+        32,
+        "deployment.balanceVerifierDataSha256",
+    )
+    .map_err(&fail)?;
     for (value, path, size) in [
         (
             &mut manifest.submit_close_intent_selector,
@@ -1928,18 +1641,20 @@ fn load_deployment_manifest(
     ] {
         *value = normalize_hex(value, size, path).map_err(&fail)?;
     }
+    let zero_address = format!("0x{}", "00".repeat(20));
     if manifest.schema_version != DEPLOYMENT_MANIFEST_VERSION
         || manifest.chain_id == 0
-        || manifest.mle_fixture_schema != MLE_VERIFIER_FIXTURE_SCHEMA_V2
-        || manifest.mle_protocol_version != MLE_PROTOCOL_VERSION_CURRENT
-        || manifest.mle_proof_abi_signature != MLE_PROOF_ABI_SIGNATURE_V2
-        || manifest.mle_proof_layout_hash != generated_hex(&MLE_PROOF_LAYOUT_HASH_V2)
-        || manifest.mle_compact_layout_hash != generated_hex(&COMPACT_LAYOUT_HASH_V2)
-        || manifest.mle_compact_proof_encoding
-            != std::str::from_utf8(&COMPACT_MAGIC_V2).expect("generated compact-v2 magic is ASCII")
+        || [
+            &manifest.rollup,
+            &manifest.manager,
+            &manifest.settlement_verifier,
+            &manifest.mle_verifier,
+        ]
+        .iter()
+        .any(|address| same_hex(address, &zero_address))
     {
         return Err(fail(
-            "deployment manifest version/chain/MLE v2 protocol identity is invalid".into(),
+            "deployment manifest version/chain/address is invalid".into(),
         ));
     }
     if manifest.chain_id != prepared.chain_id
@@ -1953,44 +1668,11 @@ fn load_deployment_manifest(
             "deployment manifest differs from bundle chain/rollup/balance-VD pin".into(),
         ));
     }
-    let close_pin = manifest_mle_pins(&manifest)[0];
-    if !same_hex(
-        close_pin.verification_config_digest,
-        &prepared.verification_config_digest,
-    ) || !same_hex(
-        close_pin.circuit_config_digest,
-        &prepared.circuit_config_digest,
-    ) || !same_hex(
-        close_pin.whir_parameters_digest,
-        &prepared.whir_parameters_digest,
-    ) || !same_hex(close_pin.whir_protocol_id, &prepared.whir_protocol_id)
-        || !same_hex(close_pin.whir_session_id, &prepared.whir_session_id)
-    {
-        return Err(fail(
-            "close fixture immutable config/protocol/session pins differ from the close adapter manifest"
-                .into(),
-        ));
-    }
-    let mle_pins = manifest_mle_pins(&manifest);
-    let mle_addresses = [
-        ("close adapter", mle_pins[0].adapter),
-        ("close core", mle_pins[0].core),
-        ("withdrawal-claim adapter", mle_pins[1].adapter),
-        ("withdrawal-claim core", mle_pins[1].core),
-        ("post-close-claim adapter", mle_pins[2].adapter),
-        ("post-close-claim core", mle_pins[2].core),
-        ("cancel-close adapter", mle_pins[3].adapter),
-        ("cancel-close core", mle_pins[3].core),
-    ];
-    for first in 0..mle_addresses.len() {
-        for second in first + 1..mle_addresses.len() {
-            if same_hex(mle_addresses[first].1, mle_addresses[second].1) {
-                return Err(fail(format!(
-                    "{} and {} must be distinct MLE adapters and cores",
-                    mle_addresses[first].0, mle_addresses[second].0
-                )));
-            }
-        }
+    if manifest.mle_proof_abi_version != MLE_PROOF_ABI_VERSION {
+        return Err(fail(format!(
+            "deployment MLE ABI version {} != required release version {MLE_PROOF_ABI_VERSION}",
+            manifest.mle_proof_abi_version
+        )));
     }
     let expected_submit = selector(SUBMIT_CLOSE_SIGNATURE);
     let expected_finalize = selector(FINALIZE_CLOSE_GUARDED_SIGNATURE);
@@ -2008,7 +1690,7 @@ fn load_deployment_manifest(
             "deployment selector/event pins differ from the compiled release ABI".into(),
         ));
     }
-    Ok((manifest, manifest_hash))
+    Ok((manifest, sha256_hex(&bytes)))
 }
 
 fn validate_deployment_observation(
@@ -2025,6 +1707,9 @@ fn validate_deployment_observation(
     ) || !same_hex(
         &observed.settlement_verifier_runtime_code_hash,
         &manifest.settlement_verifier_runtime_code_hash,
+    ) || !same_hex(
+        &observed.mle_verifier_runtime_code_hash,
+        &manifest.mle_verifier_runtime_code_hash,
     ) {
         return Err(PublicClosePublisherError::Deployment(
             "runtime bytecode hash differs from release-reviewed deployment".into(),
@@ -2032,52 +1717,17 @@ fn validate_deployment_observation(
     }
     if !same_hex(&observed.manager_registry, &manifest.rollup)
         || !same_hex(&observed.manager_verifier, &manifest.settlement_verifier)
+        || !same_hex(
+            &observed.verifier_close_mle_verifier,
+            &manifest.mle_verifier,
+        )
+        || observed.mle_allowed_chain_id != manifest.chain_id
         || observed.manager_channel_id != prepared.channel_id
+        || !observed.close_vk_initialized
     {
         return Err(PublicClosePublisherError::Deployment(
-            "manager→rollup/verifier linkage or channel is invalid".into(),
+            "manager→rollup/verifier→MLE linkage, chain, channel, or close VK is invalid".into(),
         ));
-    }
-    let manifest_pins = manifest_mle_pins(manifest);
-    let observed_pins = [
-        &observed.close_mle,
-        &observed.withdrawal_claim_mle,
-        &observed.post_close_claim_mle,
-        &observed.cancel_close_mle,
-    ];
-    for (expected, actual) in manifest_pins.iter().zip(observed_pins) {
-        if !same_hex(actual.adapter.as_str(), expected.adapter)
-            || !same_hex(
-                actual.adapter_runtime_code_hash.as_str(),
-                expected.adapter_runtime_code_hash,
-            )
-            || !same_hex(actual.core.as_str(), expected.core)
-            || !same_hex(
-                actual.core_runtime_code_hash.as_str(),
-                expected.core_runtime_code_hash,
-            )
-            || !same_hex(
-                actual.verification_config_digest.as_str(),
-                expected.verification_config_digest,
-            )
-            || !same_hex(
-                actual.circuit_config_digest.as_str(),
-                expected.circuit_config_digest,
-            )
-            || !same_hex(
-                actual.whir_parameters_digest.as_str(),
-                expected.whir_parameters_digest,
-            )
-            || !same_hex(actual.whir_protocol_id.as_str(), expected.whir_protocol_id)
-            || !same_hex(actual.whir_session_id.as_str(), expected.whir_session_id)
-            || actual.adapter_allowed_chain_id != manifest.chain_id
-            || actual.core_allowed_chain_id != manifest.chain_id
-        {
-            return Err(PublicClosePublisherError::Deployment(format!(
-                "{} MLE adapter/core/code/config/protocol/session/chain identity differs from release manifest",
-                expected.label
-            )));
-        }
     }
     if manifest.chain_id != ANVIL_CHAIN_ID
         && observed.challenge_period < PUBLIC_CHALLENGE_PERIOD_FLOOR
@@ -3328,7 +2978,7 @@ fn validate_config(config: &PublicClosePublisherConfig) -> Result<()> {
         "trusted expected final channel state digest",
     )
     .map_err(PublicClosePublisherError::Configuration)?;
-    normalize_nonzero_hex(
+    normalize_hex(
         &config.deployment_manifest_sha256,
         32,
         "deployment manifest SHA-256",
@@ -3383,12 +3033,6 @@ fn make_binding(
         close_intent_digest: prepared.expected.close_intent_digest.clone(),
         artifact_hash: prepared.artifact_hash.clone(),
         component_hashes: prepared.component_hashes.clone(),
-        compact_proof_hash: prepared.compact_proof_hash.clone(),
-        compact_proof_length: prepared.compact_proof_length,
-        mle_fixture_schema: MLE_VERIFIER_FIXTURE_SCHEMA_V2.into(),
-        mle_protocol_version: MLE_PROTOCOL_VERSION_CURRENT,
-        mle_proof_layout_hash: generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
-        mle_compact_layout_hash: generated_hex(&COMPACT_LAYOUT_HASH_V2),
         deployment_manifest_hash,
         submit_calldata_hash: keccak_hex(&submit_bytes),
         signer_lock_root: signer_lock_root.to_string(),
@@ -3993,11 +3637,16 @@ fn advance_with_backend<B: ClosePublisherBackend>(
         &config.bundle_dir,
         &config.expected_final_channel_state_digest,
     )?;
-    let (deployment, deployment_manifest_hash) = load_deployment_manifest(
-        &config.deployment_manifest_path,
-        &prepared,
+    let (deployment, deployment_manifest_hash) =
+        load_deployment_manifest(&config.deployment_manifest_path, &prepared)?;
+    if !same_hex(
+        &deployment_manifest_hash,
         &config.deployment_manifest_sha256,
-    )?;
+    ) {
+        return Err(PublicClosePublisherError::Deployment(
+            "deployment manifest bytes differ from the independently configured SHA-256 pin".into(),
+        ));
+    }
     let observed_chain = backend.chain_id()?;
     if observed_chain != prepared.chain_id {
         return Err(PublicClosePublisherError::Evidence(format!(
@@ -5091,62 +4740,6 @@ impl CastCloseBackend {
         }
         Ok(keccak_hex(&bytes))
     }
-
-    fn observe_mle_verifier(
-        &self,
-        adapter: &str,
-        block_number: u64,
-    ) -> Result<ObservedMleVerifier> {
-        let core = word_address(
-            &self.one_word(adapter, "core()", block_number)?,
-            "MLE adapter.core",
-        )?;
-        let protocol_first =
-            word_bytes32(&self.one_word(&core, "whirProtocolIdFirst()", block_number)?);
-        let protocol_second =
-            word_bytes32(&self.one_word(&core, "whirProtocolIdSecond()", block_number)?);
-        Ok(ObservedMleVerifier {
-            adapter: adapter.to_ascii_lowercase(),
-            adapter_runtime_code_hash: self.runtime_code_hash(adapter, block_number)?,
-            core: core.clone(),
-            core_runtime_code_hash: self.runtime_code_hash(&core, block_number)?,
-            verification_config_digest: word_bytes32(&self.one_word(
-                &core,
-                "verificationConfigDigest()",
-                block_number,
-            )?),
-            circuit_config_digest: word_bytes32(&self.one_word(
-                &core,
-                "circuitConfigDigest()",
-                block_number,
-            )?),
-            whir_parameters_digest: word_bytes32(&self.one_word(
-                &core,
-                "whirParametersDigest()",
-                block_number,
-            )?),
-            whir_protocol_id: format!(
-                "0x{}{}",
-                protocol_first.trim_start_matches("0x"),
-                protocol_second.trim_start_matches("0x")
-            ),
-            whir_session_id: word_bytes32(&self.one_word(
-                &core,
-                "whirSessionId()",
-                block_number,
-            )?),
-            adapter_allowed_chain_id: word_uint(
-                &self.one_word(adapter, "allowedChainId()", block_number)?,
-                8,
-                "MLE adapter allowedChainId",
-            )?,
-            core_allowed_chain_id: word_uint(
-                &self.one_word(&core, "allowedChainId()", block_number)?,
-                8,
-                "MLE core allowedChainId",
-            )?,
-        })
-    }
 }
 
 fn checked_output(mut command: Command, what: &str, maximum: usize) -> Result<String> {
@@ -5362,37 +4955,13 @@ impl ClosePublisherBackend for CastCloseBackend {
             &self.one_word(&manifest.manager, "verifier()", block_number)?,
             "manager.verifier",
         )?;
-        let close_mle_verifier = word_address(
+        let verifier_close_mle_verifier = word_address(
             &self.one_word(
                 &manifest.settlement_verifier,
                 "closeMleVerifier()",
                 block_number,
             )?,
             "settlementVerifier.closeMleVerifier",
-        )?;
-        let withdrawal_claim_mle_verifier = word_address(
-            &self.one_word(
-                &manifest.settlement_verifier,
-                "withdrawalClaimMleVerifier()",
-                block_number,
-            )?,
-            "settlementVerifier.withdrawalClaimMleVerifier",
-        )?;
-        let post_close_claim_mle_verifier = word_address(
-            &self.one_word(
-                &manifest.settlement_verifier,
-                "postCloseClaimMleVerifier()",
-                block_number,
-            )?,
-            "settlementVerifier.postCloseClaimMleVerifier",
-        )?;
-        let cancel_close_mle_verifier = word_address(
-            &self.one_word(
-                &manifest.settlement_verifier,
-                "cancelCloseMleVerifier()",
-                block_number,
-            )?,
-            "settlementVerifier.cancelCloseMleVerifier",
         )?;
         let channel_word = self.one_word(&manifest.manager, "channelId()", block_number)?;
         if channel_word[4..] != [0u8; 28] {
@@ -5405,15 +4974,16 @@ impl ClosePublisherBackend for CastCloseBackend {
             manager_runtime_code_hash: self.runtime_code_hash(&manifest.manager, block_number)?,
             settlement_verifier_runtime_code_hash: self
                 .runtime_code_hash(&manifest.settlement_verifier, block_number)?,
+            mle_verifier_runtime_code_hash: self
+                .runtime_code_hash(&manifest.mle_verifier, block_number)?,
             manager_registry,
             manager_verifier,
-            close_mle: self.observe_mle_verifier(&close_mle_verifier, block_number)?,
-            withdrawal_claim_mle: self
-                .observe_mle_verifier(&withdrawal_claim_mle_verifier, block_number)?,
-            post_close_claim_mle: self
-                .observe_mle_verifier(&post_close_claim_mle_verifier, block_number)?,
-            cancel_close_mle: self
-                .observe_mle_verifier(&cancel_close_mle_verifier, block_number)?,
+            verifier_close_mle_verifier,
+            mle_allowed_chain_id: word_uint(
+                &self.one_word(&manifest.mle_verifier, "allowedChainId()", block_number)?,
+                8,
+                "MLE allowedChainId",
+            )?,
             manager_channel_id: u32::from_be_bytes(
                 channel_word[..4].try_into().expect("four bytes"),
             ),
@@ -5421,6 +4991,14 @@ impl ClosePublisherBackend for CastCloseBackend {
                 &self.one_word(&manifest.manager, "challengePeriod()", block_number)?,
                 8,
                 "manager.challengePeriod",
+            )?,
+            close_vk_initialized: word_bool(
+                &self.one_word(
+                    &manifest.settlement_verifier,
+                    "closeVkInitialized()",
+                    block_number,
+                )?,
+                "settlementVerifier.closeVkInitialized",
             )?,
             registered_member_set_commitment: word_bytes32(&self.one_word(
                 &manifest.manager,
@@ -5903,20 +5481,7 @@ pub fn advance_public_close(config: &PublicClosePublisherConfig) -> Result<Publi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plonky2::{
-        field::types::Field as _,
-        iop::witness::{PartialWitness, WitnessWrite as _},
-        plonk::{
-            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
-            config::PoseidonGoldilocksConfig,
-        },
-        util::timing::TimingTree,
-    };
-    use plonky2_mle::fixture_v2::try_prove_and_export_mle_v2;
-    use std::{
-        collections::{BTreeSet, VecDeque},
-        sync::OnceLock,
-    };
+    use std::collections::{BTreeSet, VecDeque};
 
     use crate::common::channel::ChannelFund;
 
@@ -5953,10 +5518,6 @@ mod tests {
         format!("0x{}", format!("{byte:02x}").repeat(32))
     }
 
-    fn repeated64(byte: u8) -> String {
-        format!("0x{}", format!("{byte:02x}").repeat(64))
-    }
-
     fn address(byte: u8) -> String {
         format!("0x{}", format!("{byte:02x}").repeat(20))
     }
@@ -5965,34 +5526,22 @@ mod tests {
         repeated(byte).parse().expect("valid Bytes32")
     }
 
-    fn close_mle_fixture(public_inputs: &[u64]) -> MleVerifierV2Fixture {
-        static FIXTURE: OnceLock<(Vec<u64>, MleVerifierV2Fixture)> = OnceLock::new();
-        let (expected, fixture) = FIXTURE.get_or_init(|| {
-            let mut builder = CircuitBuilder::<GoldilocksField, 2>::new(
-                CircuitConfig::standard_recursion_config(),
-            );
-            let targets = (0..public_inputs.len())
-                .map(|_| {
-                    let target = builder.add_virtual_target();
-                    builder.register_public_input(target);
-                    target
-                })
-                .collect::<Vec<_>>();
-            let circuit = builder.build::<PoseidonGoldilocksConfig>();
-            let mut witness = PartialWitness::new();
-            for (target, value) in targets.iter().zip(public_inputs) {
-                witness
-                    .set_target(*target, GoldilocksField::from_canonical_u64(*value))
-                    .unwrap();
+    fn zero_abi_value(kind: &AbiKind) -> Value {
+        match kind {
+            AbiKind::Uint(_) => Value::String("0".into()),
+            AbiKind::FixedBytes(bytes) => Value::String(format!("0x{}", "00".repeat(*bytes))),
+            AbiKind::Bytes => Value::String("0x".into()),
+            AbiKind::Tuple(fields) => Value::Object(
+                fields
+                    .iter()
+                    .map(|field| (field.name.to_string(), zero_abi_value(&field.kind)))
+                    .collect(),
+            ),
+            AbiKind::DynamicArray(_) => Value::Array(Vec::new()),
+            AbiKind::FixedArray(element, count) => {
+                Value::Array((0..*count).map(|_| zero_abi_value(element)).collect())
             }
-            let fixture =
-                try_prove_and_export_mle_v2(&circuit, witness, &mut TimingTree::default())
-                    .unwrap()
-                    .fixture;
-            (public_inputs.to_vec(), fixture)
-        });
-        assert_eq!(expected, public_inputs);
-        fixture.clone()
+        }
     }
 
     fn write_json(path: &Path, value: &impl Serialize) {
@@ -6001,10 +5550,6 @@ mod tests {
             serde_json::to_vec_pretty(value).expect("serialize fixture"),
         )
         .expect("write fixture");
-    }
-
-    fn file_sha256(path: &Path) -> String {
-        sha256_hex(&fs::read(path).expect("read fixture file for SHA-256"))
     }
 
     fn fixture(label: &str) -> Fixture {
@@ -6098,12 +5643,21 @@ mod tests {
             token_count,
         };
 
-        let mle = close_mle_fixture(&public_inputs);
+        let mut mle = zero_abi_value(&AbiKind::Tuple(mle_v2_fields()));
+        let mle_object = mle.as_object_mut().expect("MLE object");
+        mle_object.insert("protocolVersion".into(), Value::String("1".into()));
+        mle_object.insert("constituentWidth".into(), Value::String("2".into()));
+        mle_object.insert(
+            "publicInputs".into(),
+            Value::Array(
+                public_inputs
+                    .iter()
+                    .map(|value| Value::String(value.to_string()))
+                    .collect(),
+            ),
+        );
         let proof = vec![0x51, 0x4b, 0x50];
-        let mle_bytes = mle
-            .to_canonical_json()
-            .expect("serialize canonical MLE v2 fixture")
-            .into_bytes();
+        let mle_bytes = serde_json::to_vec_pretty(&mle).expect("serialize MLE");
         fs::write(bundle_dir.join("close_proof.bin"), &proof).expect("write proof");
         fs::write(bundle_dir.join("close_intent_mle.json"), &mle_bytes).expect("write MLE");
         write_json(&bundle_dir.join("close_intent.json"), &descriptor);
@@ -6146,52 +5700,10 @@ mod tests {
             manager_runtime_code_hash: repeated(0x32),
             settlement_verifier: address(0x33),
             settlement_verifier_runtime_code_hash: repeated(0x34),
-            close_mle_verifier: address(0x44),
-            close_mle_verifier_runtime_code_hash: repeated(0x35),
-            close_mle_verifier_core: address(0x45),
-            close_mle_verifier_core_runtime_code_hash: repeated(0x36),
-            close_mle_verification_config_digest: mle
-                .pinned_verifier
-                .verification_config_digest
-                .clone(),
-            close_mle_circuit_config_digest: mle.pinned_verifier.circuit_config_digest.clone(),
-            close_mle_whir_parameters_digest: mle.pinned_verifier.whir_parameters_digest.clone(),
-            close_mle_whir_protocol_id: mle.pinned_verifier.whir_protocol_id.clone(),
-            close_mle_whir_session_id: mle.pinned_verifier.whir_session_id.clone(),
-            withdrawal_claim_mle_verifier: address(0x46),
-            withdrawal_claim_mle_verifier_runtime_code_hash: repeated(0x37),
-            withdrawal_claim_mle_verifier_core: address(0x47),
-            withdrawal_claim_mle_verifier_core_runtime_code_hash: repeated(0x38),
-            withdrawal_claim_mle_verification_config_digest: repeated(0x39),
-            withdrawal_claim_mle_circuit_config_digest: repeated(0x3a),
-            withdrawal_claim_mle_whir_parameters_digest: repeated(0x3b),
-            withdrawal_claim_mle_whir_protocol_id: repeated64(0x3c),
-            withdrawal_claim_mle_whir_session_id: repeated(0x3d),
-            post_close_claim_mle_verifier: address(0x48),
-            post_close_claim_mle_verifier_runtime_code_hash: repeated(0x3e),
-            post_close_claim_mle_verifier_core: address(0x49),
-            post_close_claim_mle_verifier_core_runtime_code_hash: repeated(0x4a),
-            post_close_claim_mle_verification_config_digest: repeated(0x4b),
-            post_close_claim_mle_circuit_config_digest: repeated(0x4c),
-            post_close_claim_mle_whir_parameters_digest: repeated(0x4d),
-            post_close_claim_mle_whir_protocol_id: repeated64(0x4e),
-            post_close_claim_mle_whir_session_id: repeated(0x4f),
-            cancel_close_mle_verifier: address(0x50),
-            cancel_close_mle_verifier_runtime_code_hash: repeated(0x51),
-            cancel_close_mle_verifier_core: address(0x52),
-            cancel_close_mle_verifier_core_runtime_code_hash: repeated(0x53),
-            cancel_close_mle_verification_config_digest: repeated(0x54),
-            cancel_close_mle_circuit_config_digest: repeated(0x55),
-            cancel_close_mle_whir_parameters_digest: repeated(0x56),
-            cancel_close_mle_whir_protocol_id: repeated64(0x57),
-            cancel_close_mle_whir_session_id: repeated(0x58),
+            mle_verifier: address(0x44),
+            mle_verifier_runtime_code_hash: repeated(0x35),
             balance_verifier_data_sha256: balance_vd,
-            mle_fixture_schema: MLE_VERIFIER_FIXTURE_SCHEMA_V2.into(),
-            mle_protocol_version: MLE_PROTOCOL_VERSION_CURRENT,
-            mle_proof_abi_signature: MLE_PROOF_ABI_SIGNATURE_V2.into(),
-            mle_proof_layout_hash: generated_hex(&MLE_PROOF_LAYOUT_HASH_V2),
-            mle_compact_layout_hash: generated_hex(&COMPACT_LAYOUT_HASH_V2),
-            mle_compact_proof_encoding: String::from_utf8(COMPACT_MAGIC_V2.to_vec()).unwrap(),
+            mle_proof_abi_version: MLE_PROOF_ABI_VERSION,
             submit_close_intent_selector: selector(SUBMIT_CLOSE_SIGNATURE),
             finalize_close_guarded_selector: selector(FINALIZE_CLOSE_GUARDED_SIGNATURE),
             close_submitted_topic: keccak_hex(CLOSE_SUBMITTED_EVENT.as_bytes()),
@@ -6311,24 +5823,7 @@ mod tests {
         }
     }
 
-    fn observed_mle(pin: ManifestMlePin<'_>) -> ObservedMleVerifier {
-        ObservedMleVerifier {
-            adapter: pin.adapter.into(),
-            adapter_runtime_code_hash: pin.adapter_runtime_code_hash.into(),
-            core: pin.core.into(),
-            core_runtime_code_hash: pin.core_runtime_code_hash.into(),
-            verification_config_digest: pin.verification_config_digest.into(),
-            circuit_config_digest: pin.circuit_config_digest.into(),
-            whir_parameters_digest: pin.whir_parameters_digest.into(),
-            whir_protocol_id: pin.whir_protocol_id.into(),
-            whir_session_id: pin.whir_session_id.into(),
-            adapter_allowed_chain_id: ANVIL_CHAIN_ID,
-            core_allowed_chain_id: ANVIL_CHAIN_ID,
-        }
-    }
-
     fn observed_deployment(fixture: &Fixture) -> ObservedDeployment {
-        let mle_pins = manifest_mle_pins(&fixture.deployment);
         ObservedDeployment {
             rollup_runtime_code_hash: fixture.deployment.rollup_runtime_code_hash.clone(),
             manager_runtime_code_hash: fixture.deployment.manager_runtime_code_hash.clone(),
@@ -6336,14 +5831,17 @@ mod tests {
                 .deployment
                 .settlement_verifier_runtime_code_hash
                 .clone(),
+            mle_verifier_runtime_code_hash: fixture
+                .deployment
+                .mle_verifier_runtime_code_hash
+                .clone(),
             manager_registry: fixture.deployment.rollup.clone(),
             manager_verifier: fixture.deployment.settlement_verifier.clone(),
-            close_mle: observed_mle(mle_pins[0]),
-            withdrawal_claim_mle: observed_mle(mle_pins[1]),
-            post_close_claim_mle: observed_mle(mle_pins[2]),
-            cancel_close_mle: observed_mle(mle_pins[3]),
+            verifier_close_mle_verifier: fixture.deployment.mle_verifier.clone(),
+            mle_allowed_chain_id: ANVIL_CHAIN_ID,
             manager_channel_id: fixture.prepared.channel_id,
             challenge_period: 900,
+            close_vk_initialized: true,
             registered_member_set_commitment: fixture
                 .prepared
                 .expected
@@ -6366,16 +5864,6 @@ mod tests {
 
     fn abi_word_u64(value: u64) -> Vec<u8> {
         abi_word_decimal(&value.to_string())
-    }
-
-    fn abi_usize(word: &[u8]) -> usize {
-        assert_eq!(word.len(), 32);
-        word.iter().fold(0usize, |value, byte| {
-            value
-                .checked_mul(256)
-                .and_then(|value| value.checked_add(usize::from(*byte)))
-                .expect("ABI word fits usize")
-        })
     }
 
     fn indexed_u64(value: u64) -> String {
@@ -7664,165 +7152,6 @@ mod tests {
     }
 
     #[test]
-    fn close_accepts_only_canonical_full_v2_and_submits_exact_compact_bytes() {
-        let fixture = fixture("strict-mle-v2");
-        let mle_path = fixture.config.bundle_dir.join("close_intent_mle.json");
-        let canonical = String::from_utf8(fs::read(&mle_path).unwrap()).unwrap();
-        let mle = MleVerifierV2Fixture::from_canonical_json(&canonical).unwrap();
-        let public_inputs = parse_public_input_array(
-            &serde_json::from_slice::<Value>(
-                &fs::read(fixture.config.bundle_dir.join("close_public_inputs.json")).unwrap(),
-            )
-            .unwrap(),
-            "close public inputs",
-        )
-        .unwrap();
-        let expected_compact = mle
-            .compact_proof
-            .decode_and_validate(std::str::from_utf8(&COMPACT_MAGIC_V2).unwrap())
-            .unwrap();
-        let validated = validated_compact_mle_v2_fixture(&canonical, &public_inputs).unwrap();
-        assert_eq!(validated.compact_proof, expected_compact);
-
-        let calldata = decode_hex(&fixture.prepared.submit_calldata, None, "submit calldata")
-            .expect("decode submit calldata");
-        assert_eq!(
-            &calldata[..4],
-            decode_hex(&selector(SUBMIT_CLOSE_SIGNATURE), Some(4), "selector")
-                .unwrap()
-                .as_slice()
-        );
-        let arguments = &calldata[4..];
-        let intent_size = AbiKind::Tuple(close_intent_fields()).static_size().unwrap();
-        let proof_offset = abi_usize(&arguments[intent_size..intent_size + 32]);
-        assert_eq!(proof_offset, intent_size + 32);
-        let proof_length = abi_usize(&arguments[proof_offset..proof_offset + 32]);
-        let proof_start = proof_offset + 32;
-        let proof_end = proof_start + proof_length;
-        assert_eq!(&arguments[proof_start..proof_end], expected_compact);
-        assert!(arguments[proof_end..].iter().all(|byte| *byte == 0));
-        assert_eq!(
-            fixture.prepared.compact_proof_length,
-            u32::try_from(expected_compact.len()).unwrap()
-        );
-        assert_eq!(
-            fixture.prepared.compact_proof_hash,
-            keccak_hex(&expected_compact)
-        );
-
-        let binding = make_binding(
-            &fixture.prepared,
-            &fixture.deployment,
-            fixture.config.deployment_manifest_sha256.clone(),
-            &fixture.config.signer_lock_root,
-        )
-        .unwrap();
-        assert_eq!(binding.compact_proof_hash, keccak_hex(&expected_compact));
-        assert_eq!(binding.compact_proof_length, expected_compact.len() as u32);
-        assert_eq!(binding.mle_fixture_schema, MLE_VERIFIER_FIXTURE_SCHEMA_V2);
-        assert_eq!(binding.mle_protocol_version, MLE_PROTOCOL_VERSION_CURRENT);
-
-        let legacy_proof_only = format!("{}\n", serde_json::to_string_pretty(&mle.proof).unwrap());
-        assert!(validated_compact_mle_v2_fixture(&legacy_proof_only, &public_inputs).is_err());
-        assert!(validated_compact_mle_v2_fixture(canonical.trim_end(), &public_inputs).is_err());
-
-        let mut wrong_layout = mle.clone();
-        wrong_layout.proof_layout_hash = repeated(0x99);
-        assert!(
-            validated_compact_mle_v2_fixture(
-                &wrong_layout.to_canonical_json().unwrap(),
-                &public_inputs,
-            )
-            .is_err()
-        );
-        let mut wrong_compact_hash = mle.clone();
-        wrong_compact_hash.compact_proof.keccak256 = repeated(0x98);
-        assert!(
-            validated_compact_mle_v2_fixture(
-                &wrong_compact_hash.to_canonical_json().unwrap(),
-                &public_inputs,
-            )
-            .is_err()
-        );
-        let mut wrong_config_map = mle.clone();
-        let mut map = hex::decode(
-            wrong_config_map
-                .verification_config
-                .public_input_wire_map
-                .strip_prefix("0x")
-                .unwrap(),
-        )
-        .unwrap();
-        map[0] ^= 1;
-        wrong_config_map.verification_config.public_input_wire_map =
-            format!("0x{}", hex::encode(map));
-        assert!(
-            validated_compact_mle_v2_fixture(
-                &wrong_config_map.to_canonical_json().unwrap(),
-                &public_inputs,
-            )
-            .is_err(),
-            "publisher must bind the Solidity config PI map to the VK PI map"
-        );
-        let mut wrong_public_inputs = public_inputs;
-        wrong_public_inputs[0] ^= 1;
-        assert!(validated_compact_mle_v2_fixture(&canonical, &wrong_public_inputs).is_err());
-    }
-
-    #[test]
-    fn manifest_and_checkpoint_observation_pin_all_four_v2_verifiers() {
-        let fixture = fixture("four-mle-pins");
-
-        let mut duplicate = fixture.deployment.clone();
-        duplicate.cancel_close_mle_verifier = duplicate.close_mle_verifier.clone();
-        write_json(&fixture.config.deployment_manifest_path, &duplicate);
-        let error = load_deployment_manifest(
-            &fixture.config.deployment_manifest_path,
-            &fixture.prepared,
-            &file_sha256(&fixture.config.deployment_manifest_path),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("distinct MLE adapters and cores")
-        );
-
-        let mut legacy: Value = serde_json::to_value(&fixture.deployment).unwrap();
-        legacy["mleProofAbiVersion"] = serde_json::json!(2);
-        write_json(&fixture.config.deployment_manifest_path, &legacy);
-        assert!(
-            load_deployment_manifest(
-                &fixture.config.deployment_manifest_path,
-                &fixture.prepared,
-                &file_sha256(&fixture.config.deployment_manifest_path),
-            )
-            .is_err()
-        );
-
-        let mut observed = observed_deployment(&fixture);
-        observed.withdrawal_claim_mle.core_runtime_code_hash = repeated(0xfe);
-        let error =
-            validate_deployment_observation(&fixture.deployment, &observed, &fixture.prepared)
-                .unwrap_err();
-        assert!(error.to_string().contains("withdrawal-claim MLE"));
-
-        let mut observed = observed_deployment(&fixture);
-        observed.post_close_claim_mle.whir_protocol_id = repeated64(0xfd);
-        let error =
-            validate_deployment_observation(&fixture.deployment, &observed, &fixture.prepared)
-                .unwrap_err();
-        assert!(error.to_string().contains("post-close-claim MLE"));
-
-        let mut observed = observed_deployment(&fixture);
-        observed.cancel_close_mle.core_allowed_chain_id = 1;
-        let error =
-            validate_deployment_observation(&fixture.deployment, &observed, &fixture.prepared)
-                .unwrap_err();
-        assert!(error.to_string().contains("cancel-close MLE"));
-    }
-
-    #[test]
     fn manifest_rejects_unguarded_finalize_and_lock_name_is_global() {
         let fixture = fixture("pins");
         let mut wrong_pin = fixture.config.clone();
@@ -7837,12 +7166,9 @@ mod tests {
         let mut deployment = fixture.deployment.clone();
         deployment.finalize_close_guarded_selector = selector("finalizeClose()");
         write_json(&fixture.config.deployment_manifest_path, &deployment);
-        let error = load_deployment_manifest(
-            &fixture.config.deployment_manifest_path,
-            &fixture.prepared,
-            &file_sha256(&fixture.config.deployment_manifest_path),
-        )
-        .unwrap_err();
+        let error =
+            load_deployment_manifest(&fixture.config.deployment_manifest_path, &fixture.prepared)
+                .unwrap_err();
         assert!(error.to_string().contains("selector/event pins"));
 
         let path = global_signer_lock_path(

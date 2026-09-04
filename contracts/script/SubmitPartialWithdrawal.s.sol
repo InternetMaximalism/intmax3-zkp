@@ -3,20 +3,14 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {ChannelSettlementManager, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID} from "../src/ChannelSettlementManager.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Submit a partial-withdrawal intent (anvil E2E).
 /// @notice Reads intent + withdrawal fields from `test/data/pw_submit.json` and drives the
-///         `manager.submitPartialWithdrawalIntent` call with the canonical compact-v2 close proof.
+///         `manager.submitPartialWithdrawalIntent` call with the real wrapped-close MLE proof.
 contract SubmitPartialWithdrawal is Script {
     error LocalDevnetOnly(uint256 actualChainId);
-
-    /// @dev Foundry preserves an explicitly supplied Solidity call-gas limit as the broadcast
-    /// transaction gas limit and skips its conservative estimator. The real cold-path regression
-    /// in `ManagerCloseGas.t.sol` proves that calldata intrinsic gas plus Manager execution fits
-    /// this production envelope. Keeping the fixed limit equal to the Anvil block limit prevents
-    /// tooling headroom from manufacturing a transaction the node must reject before execution.
-    uint256 internal constant SUBMIT_TRANSACTION_GAS_LIMIT = 30_000_000;
 
     function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
@@ -80,12 +74,10 @@ contract SubmitPartialWithdrawal is Script {
 
         bytes32 prevSettledTxChain = vm.parseJsonBytes32(j, ".prev_settled_tx_chain");
 
-        bytes memory compactProof = FixtureLib.parseCompactProofV2(_read("pw_close_intent_mle.json"));
+        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_read("pw_close_intent_mle.json"));
 
         vm.startBroadcast();
-        manager.submitPartialWithdrawalIntent{gas: SUBMIT_TRANSACTION_GAS_LIMIT}(
-            intent, compactProof, prevSettledTxChain, w
-        );
+        manager.submitPartialWithdrawalIntent(intent, proof, prevSettledTxChain, w);
         vm.stopBroadcast();
 
         bytes32 authDigest = manager.pendingPartialWithdrawalAuthDigest();

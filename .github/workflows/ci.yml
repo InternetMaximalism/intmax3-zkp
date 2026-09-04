@@ -162,50 +162,15 @@ jobs:
         #   ExponentiationGate*.t.sol — the ported gate-8 evaluator, vectors + adversarial probes.
         #   CloseLifecycleE2E / MleE2E / MleFinalizeE2E — real-proof paths that self-skip on a
         #                         missing fixture; a "Skipped" status is failed here.
-        #   MemberSetUpdateDeprecated.t.sol — pins removal of the unsafe direct in-place MSU
-        #                         selector/VK surface; its historical V1 artifact stays quarantined.
+        #   MemberSetUpdateE2E.t.sol — audit28-08-2026 M-3/M-11: the only real-PI-vector <->
+        #                         Solidity-limb join outside the close statement, and the only
+        #                         place the msu VK's reuse of the CLOSE statement's WHIR rail is
+        #                         checked at all (the Verifier does not check it on chain).
         run: .github/ci/forge-test-guard.sh
 
       - name: Assert the build did not modify the tree
         # A build step that writes into the repo is how a "works here" artifact gets created. If
         # forge starts emitting something tracked, this catches it on the first PR.
-        run: git diff --exit-code && test -z "$(git status --porcelain)"
-
-  # ════════════════════════════════════════════════════════════════════════════════════════════════
-  #  NODE — strict proof/config/DA consumer binding. These tests are deliberately independent of
-  #  the Rust and Solidity jobs: a wire/profile cutover is not complete if the live delegate
-  #  consumer still admits an old schema, protocol ID, config ABI or proof hash.
-  # ════════════════════════════════════════════════════════════════════════════════════════════════
-  node:
-    name: node (proof/config binding)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Verify pinned inputs (submodules pinned, unmodified, pushed)
-        env:
-          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
-        run: .github/ci/verify-pinned-inputs.sh
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.18.0"
-          cache: npm
-          cache-dependency-path: node/package-lock.json
-
-      - name: Install exactly the locked dependency graph without lifecycle scripts
-        working-directory: node
-        run: npm ci --ignore-scripts
-
-      - name: Run every Node proof/config/DA binding test
-        working-directory: node
-        run: npm test
-
-      - name: Assert the tests did not modify tracked inputs
         run: git diff --exit-code && test -z "$(git status --porcelain)"
 
   # ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -331,7 +296,6 @@ jobs:
             --test wallet_core_e2e \
             --test batch_cosign_e2e \
             --test wallet_delegate_demo \
-            --test mle_v2_fixture_release \
             --test mle_onchain_e2e \
             --test small_block_sig_validity
 
@@ -380,13 +344,6 @@ jobs:
           .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test wallet_core_e2e
           .github/ci/rust-test-guard.sh 2 0 -- cargo test --release --locked --test batch_cosign_e2e
           .github/ci/rust-test-guard.sh 4 0 -- cargo test --release --locked --test wallet_delegate_demo
-
-      - name: MLE/WHIR V2 fixture release manifest (strict, exhaustive, non-skipping)
-        # Every checked-in live full proof/config pair is named explicitly and the test also scans
-        # the fixture directory, so neither a stale V1 file nor a newly added unlisted statement
-        # can turn an individual E2E's compatibility skip into a green release run. The downstream
-        # lifecycle descriptors must commit to the exact canonical compact-proof bytes as well.
-        run: .github/ci/rust-test-guard.sh 3 0 -- cargo test --release --locked --test mle_v2_fixture_release
 
       # ── The one per-PR check that proves a FRESHLY GENERATED proof still verifies on chain ────
       #

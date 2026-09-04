@@ -1,14 +1,9 @@
 # Production public close publisher
 
-> **RELEASE STATUS (2026-09-03): NO-GO.** The commit-before-challenge MLE/WHIR V2 path is
-> integrated, but independent cryptographic review and a real public-chain acceptance run remain
-> incomplete. `IntmaxRollup.releaseRuntime` still confines value-bearing operation to chain
-> `31337`; this publisher does not override containment. Preserve every separate NO-GO item in
-> `doc/audit/audit30-08-2026-final-security-closure.md`.
->
-> Deployment-manifest schema 2 and publisher journal version 4 are a clean V2 cutover. A V1 proof,
-> tuple selector, old journal, old pending close, or old deployment cannot be reinterpreted as V2.
-> Resolve/retire old state under its original contracts before using a fresh V2 deployment.
+> **Integration precondition:** public close and every resulting value movement remain
+> release-blocked while the separately tracked MLE/WHIR PCS soundness repair and a real
+> public-chain acceptance run are unfinished. This publisher hardens transport, recovery, and
+> reconciliation; it does not repair the PCS or make a local/mock run a release acceptance result.
 
 `public_close_publisher` is the release path from the keyless artifacts produced by
 `public_close_prover` to `ChannelSettlementManager.submitCloseIntent`, followed by the exact-digest
@@ -28,7 +23,7 @@ copy addresses or hashes from the downloaded `/backing` response.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 1,
   "chainId": 1,
   "rollup": "0x1111111111111111111111111111111111111111",
   "rollupRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
@@ -37,49 +32,10 @@ copy addresses or hashes from the downloaded `/backing` response.
   "managerRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "settlementVerifier": "0x3333333333333333333333333333333333333333",
   "settlementVerifierRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
-  "closeMleVerifier": "0x<adapter>",
-  "closeMleVerifierRuntimeCodeHash": "0x...",
-  "closeMleVerifierCore": "0x<core>",
-  "closeMleVerifierCoreRuntimeCodeHash": "0x...",
-  "closeMleVerificationConfigDigest": "0x...",
-  "closeMleCircuitConfigDigest": "0x...",
-  "closeMleWhirParametersDigest": "0x...",
-  "closeMleWhirProtocolId": "0x<64-bytes>",
-  "closeMleWhirSessionId": "0x...",
-  "withdrawalClaimMleVerifier": "0x<adapter>",
-  "withdrawalClaimMleVerifierRuntimeCodeHash": "0x...",
-  "withdrawalClaimMleVerifierCore": "0x<core>",
-  "withdrawalClaimMleVerifierCoreRuntimeCodeHash": "0x...",
-  "withdrawalClaimMleVerificationConfigDigest": "0x...",
-  "withdrawalClaimMleCircuitConfigDigest": "0x...",
-  "withdrawalClaimMleWhirParametersDigest": "0x...",
-  "withdrawalClaimMleWhirProtocolId": "0x<64-bytes>",
-  "withdrawalClaimMleWhirSessionId": "0x...",
-  "postCloseClaimMleVerifier": "0x<adapter>",
-  "postCloseClaimMleVerifierRuntimeCodeHash": "0x...",
-  "postCloseClaimMleVerifierCore": "0x<core>",
-  "postCloseClaimMleVerifierCoreRuntimeCodeHash": "0x...",
-  "postCloseClaimMleVerificationConfigDigest": "0x...",
-  "postCloseClaimMleCircuitConfigDigest": "0x...",
-  "postCloseClaimMleWhirParametersDigest": "0x...",
-  "postCloseClaimMleWhirProtocolId": "0x<64-bytes>",
-  "postCloseClaimMleWhirSessionId": "0x...",
-  "cancelCloseMleVerifier": "0x<adapter>",
-  "cancelCloseMleVerifierRuntimeCodeHash": "0x...",
-  "cancelCloseMleVerifierCore": "0x<core>",
-  "cancelCloseMleVerifierCoreRuntimeCodeHash": "0x...",
-  "cancelCloseMleVerificationConfigDigest": "0x...",
-  "cancelCloseMleCircuitConfigDigest": "0x...",
-  "cancelCloseMleWhirParametersDigest": "0x...",
-  "cancelCloseMleWhirProtocolId": "0x<64-bytes>",
-  "cancelCloseMleWhirSessionId": "0x...",
+  "mleVerifier": "0x4444444444444444444444444444444444444444",
+  "mleVerifierRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "balanceVerifierDataSha256": "0x<sha256-canonical-balance-vd>",
-  "mleFixtureSchema": "plonky2-mle-v3-solidity",
-  "mleProtocolVersion": 3,
-  "mleProofAbiSignature": "<generated MLE_PROOF_ABI_SIGNATURE_V2>",
-  "mleProofLayoutHash": "0x...",
-  "mleCompactLayoutHash": "0x...",
-  "mleCompactProofEncoding": "MLEWHIR3",
+  "mleProofAbiVersion": 2,
   "submitCloseIntentSelector": "0x<4-byte-selector>",
   "finalizeCloseGuardedSelector": "0x<4-byte-selector>",
   "closeSubmittedTopic": "0x<32-byte-event-topic>",
@@ -88,12 +44,11 @@ copy addresses or hashes from the downloaded `/backing` response.
 ```
 
 The binary recomputes all four selector/topic values from its compiled ABI and rejects a typo. At
-the finalized block it additionally checks all parent, adapter, and core runtime code hashes and the live linkage
+the finalized block it additionally checks all four runtime code hashes and the live linkage
 `manager.registry == rollup`, `manager.verifier == settlementVerifier`,
-the four ordered `settlementVerifier.*MleVerifier()` adapters, each adapter's distinct `core()`,
-both adapter/core chain IDs, and every immutable configuration/circuit/WHIR/protocol/session pin.
-It also checks channel id, challenge-period floor, member-set commitment, member count, and delegate
-count. There is no mutable VK-initialized latch.
+`settlementVerifier.closeMleVerifier == mleVerifier`, `mleVerifier.allowedChainId == chainId`, the
+initialized close VK, channel id, challenge-period floor, member-set commitment, member count, and
+delegate count.
 
 `managerDeploymentBlock` is the release-reviewed deployment receipt block. It bounds a complete
 event search used to adopt an exact permissionless submission/finalization performed by another
@@ -102,17 +57,15 @@ participant; guessing a recent search window is not accepted.
 Useful derivations are:
 
 ```sh
-cast sig 'submitCloseIntent((uint64,uint64,uint64,uint64,bytes32,bytes32,uint256[10],uint32[10],uint8,bytes32,bytes32,bytes32,uint64,uint64,bytes32,bytes32),bytes)'
+cast sig 'submitCloseIntent((uint64,uint64,uint64,uint64,bytes32,bytes32,uint256[10],uint32[10],uint8,bytes32,bytes32,bytes32,uint64,uint64,bytes32,bytes32),(<audited-MleProof-v2-tuple>))'
 cast sig 'finalizeCloseGuarded(bytes32,uint64)'
 cast keccak 'CloseSubmitted(bytes32,bytes32,uint64,uint64,uint64,uint256,uint64,uint64,bytes32)'
 cast keccak 'CloseFinalized(bytes32,bytes32,uint64,uint256,uint64,bytes32)'
 cast code <address> --block finalized --rpc-url "$ETH_RPC_URL" | cast keccak
 ```
 
-The submission's second argument is the exact canonical `.compactProof.bytes`, not a decoded proof
-tuple. Its current compiled selector is derived from the signature above (currently `0xae819fa1`);
-always let the binary recompute and compare it with the reviewed manifest. A retired tuple selector
-is evidence of the wrong deployment, not something to normalize.
+Use the exact MLE tuple printed by the audited deployment ABI; the publisher rejects anything
+other than release ABI v2.
 
 ## Run
 
@@ -124,7 +77,7 @@ target/release/public_close_publisher \
   --bundle-dir public-close-output \
   --expected-final-channel-state-digest "0x<authenticated-final-signed-head-digest>" \
   --deployment-manifest close-deployment.json \
-  --deployment-manifest-sha256 "0x<independently-reviewed-raw-file-sha256>" \
+  --deployment-manifest-sha256 "0x$(shasum -a 256 close-deployment.json | cut -d' ' -f1)" \
   --journal private/channel-7-close-publisher.json \
   --signer-lock-root private/l1-signer-locks \
   --rpc-url "$ETH_RPC_URL" \
@@ -139,8 +92,7 @@ coherent bundle for another (including older) head is rejected before WAL creati
 an actionable deterministic diagnostic; it is never silently overwritten or quarantined.
 
 The deployment SHA-256 is likewise independent startup authority, not a field read from the
-manifest itself. Do not compute it inline from the same path in the publisher invocation. The
-publisher hashes the exact bytes it parses and rejects a path replacement.
+manifest itself. The publisher hashes the exact bytes it parses and rejects a path replacement.
 The account argument is a keystore selector. There is no raw-key CLI option. The journal and lock
 directories are forced to private permissions. Every INTMAX publisher using the same account must
 use the same canonical `--signer-lock-root`; the lock filename is
@@ -154,10 +106,7 @@ is waiting for. This makes it suitable for systemd timers or a delegate supervis
 
 - The six proof-bundle files are regular-file checked, size bounded, individually SHA-256 bound,
   and cross-checked against the full Rust intent, all 103 close public inputs, and MLE public
-  inputs. The MLE file must be the strict canonical full V2 schema. Proof, VK, immutable pins,
-  encoded config, redundant Solidity ABI view, compact shape, compact bytes, statistics, generated
-  resource ceiling and canonical re-encoding must all agree before the exact compact bytes are
-  appended to calldata.
+  inputs before ABI encoding.
 - The exact signed transaction is written with mode 0600, file fsync, atomic rename, and directory
   fsync before broadcast. Recovery decodes the raw bytes and only resends that transaction. If its
   nonce was consumed by an unknown sibling, publication stops.
@@ -175,7 +124,7 @@ is waiting for. This makes it suitable for systemd timers or a delegate supervis
 - Finalization exclusively calls
   `finalizeCloseGuarded(closeIntentDigest, closeRequestGeneration)`. The Manager's monotone
   `closeRequestGeneration` is read at one canonical durable checkpoint, then the generation,
-  checkpoint, calldata, and calldata hash are fsynced in journal version 4 before signer access.
+  checkpoint, calldata, and calldata hash are fsynced in journal version 3 before signer access.
   The publisher re-reads the complete Manager state immediately before signing and again before
   broadcast. Cancellation never restores the generation, so an old signed finalizer cannot become
   valid if a later request reuses the same proof digest and freeze nonce. Prepared authorization
@@ -195,8 +144,7 @@ is waiting for. This makes it suitable for systemd timers or a delegate supervis
 
 This implementation has mock/fault-injection coverage and Solidity lifecycle coverage. It has not
 been exercised against a real public-chain deployment; that remains a release acceptance test,
-not a claim made by this runbook. Even after that run, the independent cryptographic review and all
-separate final-audit blockers must be closed before `releaseRuntime` containment can change.
+not a claim made by this runbook.
 
 ## Delegate handoff
 

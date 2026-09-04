@@ -12,16 +12,17 @@ import {
     SETTLEMENT_LOCAL_DEVNET_CHAIN_ID
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
-import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
-import {InvalidMleVerifierChainId} from "@mle/MleProofErrors.sol";
-import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
+import {MleVerifier} from "@mle/MleVerifier.sol";
+import {InvalidMleVerifierChainId, MleProofEngineUnavailable} from "@mle/MleProofErrors.sol";
+import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
+import {MockMleVerifier, CloseTestLib} from "./CloseTestLib.sol";
 import {MockChannelRegistry} from "./ChannelSettlementManager.t.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 import {DeployTestnetBlockProducer} from "../script/DeployTestnetBlockProducer.s.sol";
 import {DeployClose} from "../script/DeployClose.s.sol";
 import {DeployCloseCli} from "../script/DeployCloseCli.s.sol";
-import {DeployPartialWithdrawalE2E} from "../script/DeployPartialWithdrawalE2E.s.sol";
-import {DeployWalletSettlement} from "../script/DeployWalletSettlement.s.sol";
+import {DeployPartialWithdrawalE2E, E2EMockMleVerifier} from "../script/DeployPartialWithdrawalE2E.s.sol";
+import {DeployWalletSettlement, WalletMockMleVerifier} from "../script/DeployWalletSettlement.s.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {DeployConfig} from "../script/DeployConfig.sol";
 
@@ -112,6 +113,7 @@ contract DeployGuardsTest is Test {
     uint256 internal constant INITIAL_BP_BOND = 0;
 
     ChannelSettlementVerifier internal verifier;
+    MockMleVerifier internal mockMle;
     MockChannelRegistry internal registry;
 
     address internal alice = makeAddr("guards_alice");
@@ -121,11 +123,18 @@ contract DeployGuardsTest is Test {
 
     function setUp() public {
         vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
-        verifier = new ChannelSettlementVerifier(
-            new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
-            new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
-            new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID),
-            new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID)
+        verifier = new ChannelSettlementVerifier();
+        mockMle = new MockMleVerifier();
+        (
+            ChannelSettlementVerifier.CloseVk memory vk,
+            SpongefishWhirVerify.WhirParams memory whir,
+            bytes memory protocolId,
+            bytes memory sessionId,
+            uint256[] memory kIs,
+            uint256[] memory subgroupGenPowers
+        ) = CloseTestLib.dummyVkArgs();
+        verifier.initializeCloseVk(
+            MleVerifier(address(mockMle)), vk, whir, protocolId, sessionId, kIs, subgroupGenPowers
         );
 
         registry = new MockChannelRegistry(IChannelSettlementVerifier(address(verifier)));
@@ -322,9 +331,10 @@ contract DeployGuardsTest is Test {
 
     function test_mleVerifierChainId_explicitConfiguredChainDeploysPinnedVerifier() public {
         vm.chainId(REAL_CHAIN_ID);
-        (MleVerifierV2 configured,) =
-            FixtureLib.deployPinnedMleV2ForChain(FixtureLib.loadMleConfig(), REAL_CHAIN_ID);
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(REAL_CHAIN_ID));
+        MleVerifier configured = new MleVerifier(FixtureLib.mleVerifierChainId());
         assertEq(configured.allowedChainId(), REAL_CHAIN_ID, "constructor must persist the explicit chain pin");
+        vm.setEnv("MLE_VERIFIER_CHAIN_ID", vm.toString(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID));
     }
 
     /// `DeployClose.s.sol` on the devnet keeps the short window, so the local lifecycle E2Es that
@@ -369,19 +379,19 @@ contract DeployGuardsTest is Test {
         script.run();
     }
 
-    /// Validity and withdrawal adapters are distinct, immutable, code-backed, and chain-pinned.
-    function test_deployScript_localDevnet_verifiersAreAtomicallyPinned() public {
+    /// The withdrawal VK must be bound to the SAME `MleVerifier` the script deployed and must be
+    /// set exactly once — a second call is refused, so a later "top-up" cannot silently swap the
+    /// circuit a payout is checked against.
+    function test_deployScript_localDevnet_withdrawalVkIsSetOnce() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         Deploy script = new Deploy();
         (IntmaxRollup rollup,) = script.run();
-        address validity = address(rollup.validityMleVerifier());
-        address withdrawal = address(rollup.withdrawalMleVerifier());
-        assertTrue(validity != withdrawal, "statement adapters must be distinct");
-        assertGt(validity.code.length, 0, "validity adapter code");
-        assertGt(withdrawal.code.length, 0, "withdrawal adapter code");
-        assertEq(rollup.validityMleVerifier().allowedChainId(), SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        assertEq(rollup.withdrawalMleVerifier().allowedChainId(), SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
+        IntmaxRollup.MleVk memory zeroVk;
+        SpongefishWhirVerify.WhirParams memory whir;
+        vm.prank(rollup.deployer());
+        vm.expectRevert(IntmaxRollup.WithdrawalVkAlreadySet.selector);
+        rollup.initializeWithdrawalVk(zeroVk, whir, hex"", hex"", new uint256[](0), new uint256[](0));
     }
 
     // ── (3) HOLE 1 — the settlement manager must be REGISTERED on the rollup ───────────────────
@@ -448,27 +458,19 @@ contract DeployGuardsTest is Test {
         rollup.registerSettlementManager(alice);
     }
 
-    /// A real settlement deployment atomically pins every live statement adapter.
-    function test_deployCloseCliScript_localDevnet_pinsOnlyLiveAdapters() public {
+    /// A real settlement deployment keys every live statement VK. Direct member-set updates are
+    /// retired, so the active verifier has no MSU key or initialization surface at all.
+    function test_deployCloseCliScript_localDevnet_keysOnlyLiveVks() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         (IntmaxRollup rollup, ChannelSettlementVerifier sv,) = new DeployCloseCliHarness().run();
-        address validity = address(rollup.validityMleVerifier());
-        address withdrawal = address(rollup.withdrawalMleVerifier());
-        address close = address(sv.closeMleVerifier());
-        address withdrawalClaim = address(sv.withdrawalClaimMleVerifier());
-        address postCloseClaim = address(sv.postCloseClaimMleVerifier());
-        address cancelClose = address(sv.cancelCloseMleVerifier());
-        assertGt(validity.code.length, 0, "validity adapter");
-        assertGt(withdrawal.code.length, 0, "withdrawal adapter");
-        assertGt(close.code.length, 0, "close adapter");
-        assertGt(withdrawalClaim.code.length, 0, "withdrawal-claim adapter");
-        assertGt(postCloseClaim.code.length, 0, "post-close-claim adapter");
-        assertGt(cancelClose.code.length, 0, "cancel-close adapter");
-        assertTrue(validity != withdrawal, "rollup statement adapters must be distinct");
-        assertTrue(close != withdrawalClaim && close != postCloseClaim && close != cancelClose);
-        assertTrue(withdrawalClaim != postCloseClaim && withdrawalClaim != cancelClose);
-        assertTrue(postCloseClaim != cancelClose);
+        assertTrue(rollup.withdrawalVkInitialized(), "withdrawal VK: the rollup could never pay out");
+        (uint256 degreeBits,,,,) = rollup.withdrawalMleVk();
+        assertGt(degreeBits, 0, "the installed withdrawal VK must have verification enabled");
+        assertTrue(sv.closeVkInitialized(), "close VK: the channel could be frozen and never closed");
+        assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK: no remedy against a stale close");
+        assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK: members could not collect");
+        assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK: `post-close-claim` bricked");
         assertTrue(address(rollup.kzgVerifier()).code.length > 0, "KZG satellite must be pinned");
     }
 
@@ -477,7 +479,7 @@ contract DeployGuardsTest is Test {
     function test_deployCloseCliScript_localDevnet_removedMsuSelectorCannotMutate() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
-        (,, ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
+        (, , ChannelSettlementManager manager) = new DeployCloseCliHarness().run();
 
         uint8 beforeCount = manager.activeMemberCount();
         bytes32 beforeBp = manager.bpPkG();
@@ -487,14 +489,18 @@ contract DeployGuardsTest is Test {
             proposed[i] = manager.memberPkGs(i);
         }
         proposed[beforeCount - 1] = keccak256("must-not-be-installed");
-        bytes memory noProof;
+        MleVerifier.MleProof memory noProof;
 
-        (bool ok, bytes memory revertData) = address(manager)
-            .call(
-                abi.encodeWithSelector(
-                    LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR, proposed, beforeCount, address(0), uint64(1), noProof
-                )
-            );
+        (bool ok, bytes memory revertData) = address(manager).call(
+            abi.encodeWithSelector(
+                LEGACY_APPLY_MEMBER_SET_UPDATE_SELECTOR,
+                proposed,
+                beforeCount,
+                address(0),
+                uint64(1),
+                noProof
+            )
+        );
         assertFalse(ok, "removed MSU selector unexpectedly succeeded");
         assertEq(revertData.length, 0, "removed MSU selector unexpectedly has an active decoder");
 
@@ -524,7 +530,9 @@ contract DeployGuardsTest is Test {
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployClose script = new DeployClose();
         vm.expectRevert(
-            bytes("local-devnet only: demo fixtures are not a release manifest -- use DeployCloseCli.s.sol")
+            bytes(
+                "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+            )
         );
         script.run();
     }
@@ -536,34 +544,42 @@ contract DeployGuardsTest is Test {
         vm.setEnv("FRAUD_TREASURY", vm.toString(fraudTreasury));
         DeployClose script = new DeployClose();
         vm.expectRevert(
-            bytes("local-devnet only: demo fixtures are not a release manifest -- use DeployCloseCli.s.sol")
+            bytes(
+                "local-devnet only: this script keys no settlement VKs and reads stale fixtures -- use DeployCloseCli.s.sol"
+            )
         );
         script.run();
     }
 
-    /// The devnet stack also has no mutable verifier-initialization window.
-    function test_deployCloseScript_devnetStackPinsSettlementAdapters() public {
+    /// The reason the guard is needed, stated as an executable fact rather than a comment: the
+    /// manager this script produces on the devnet is bound to a settlement verifier with NO close
+    /// VK and NO cancel-close VK. If a future edit keys them here, this test fails loudly and the
+    /// devnet-only gate can be revisited on purpose — it will not drift silently.
+    function test_deployCloseScript_devnetStackHasNoSettlementVks() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         DeployClose script = new DeployClose();
         (, ChannelSettlementManager manager) = script.run();
         ChannelSettlementVerifier sv = ChannelSettlementVerifier(address(manager.verifier()));
-        assertGt(address(sv.closeMleVerifier()).code.length, 0, "close adapter");
-        assertGt(address(sv.cancelCloseMleVerifier()).code.length, 0, "cancel-close adapter");
-        assertGt(address(sv.withdrawalClaimMleVerifier()).code.length, 0, "withdrawal-claim adapter");
-        assertGt(address(sv.postCloseClaimMleVerifier()).code.length, 0, "post-close-claim adapter");
+        assertFalse(sv.closeVkInitialized(), "unexpected close VK: revisit the devnet-only gate");
+        assertFalse(sv.cancelCloseVkInitialized(), "unexpected cancelClose VK: revisit the gate");
+        assertFalse(sv.withdrawalClaimVkInitialized(), "unexpected withdrawalClaim VK: revisit the gate");
+        assertFalse(sv.postCloseClaimVkInitialized(), "unexpected postCloseClaim VK: revisit the gate");
     }
 
     // ── (5) the anvil-gated mock deployers: complete stacks, still fail-closed off-devnet ──────
 
-    /// The partial-withdrawal deployer pins all four independent statement adapters.
-    function test_deployPartialWithdrawalE2EScript_devnet_pinsAllFourSettlementAdapters() public {
+    /// `DeployPartialWithdrawalE2E` and `DeployWalletSettlement` keyed only close + cancelClose, so
+    /// `verifyWithdrawalClaim` / `verifyPostCloseClaim` reverted their own `*VkNotSet()` — the
+    /// wallet demo's `full_withdrawal` ticket ends in a `claim` step that could not succeed. Same
+    /// defect class, devnet blast radius. Asserted on the script whose inputs are all checked in.
+    function test_deployPartialWithdrawalE2EScript_devnet_keysAllFourSettlementVks() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
         (IntmaxRollup rollup, ChannelSettlementVerifier sv, ChannelSettlementManager manager) =
             new DeployPartialWithdrawalE2E().run();
-        assertGt(address(sv.closeMleVerifier()).code.length, 0, "close adapter");
-        assertGt(address(sv.cancelCloseMleVerifier()).code.length, 0, "cancel-close adapter");
-        assertGt(address(sv.withdrawalClaimMleVerifier()).code.length, 0, "withdrawal-claim adapter");
-        assertGt(address(sv.postCloseClaimMleVerifier()).code.length, 0, "post-close-claim adapter");
+        assertTrue(sv.closeVkInitialized(), "close VK");
+        assertTrue(sv.cancelCloseVkInitialized(), "cancelClose VK");
+        assertTrue(sv.withdrawalClaimVkInitialized(), "withdrawalClaim VK");
+        assertTrue(sv.postCloseClaimVkInitialized(), "postCloseClaim VK");
         assertTrue(rollup.isRegisteredSettlementManager(address(manager)), "the manager must be registered here too");
     }
 
@@ -574,31 +590,29 @@ contract DeployGuardsTest is Test {
     function test_deployPartialWithdrawalE2EScript_realChain_refusesToDeploy() public {
         vm.chainId(REAL_CHAIN_ID);
         DeployPartialWithdrawalE2E script = new DeployPartialWithdrawalE2E();
-        vm.expectRevert(bytes("local-devnet only: partial-withdrawal E2E"));
+        vm.expectRevert(bytes("local-devnet only: this script deploys mock verifiers"));
         script.run();
     }
 
-    /// Script-entry guards do not protect already-deployed dev bytecode after a chain-id change.
-    /// The shared pinned-adapter mock enforces the chain again at verification time and classifies
-    /// the mismatch as non-convicting UNEVALUABLE on the fraud path.
+    /// Script-entry guards do not protect already-deployed dev bytecode after
+    /// a chain-id change or state migration. Each always-true mock therefore
+    /// enforces the local chain again at proof-verification time.
     function test_devSettlementMocks_runtimeGuardAfterChainIdChange() public {
         vm.chainId(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        MockPinnedMleVerifierV2 walletMock = new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        MockPinnedMleVerifierV2 e2eMock = new MockPinnedMleVerifierV2(SETTLEMENT_LOCAL_DEVNET_CHAIN_ID);
-        bytes memory proof = abi.encode(new uint256[](0));
+        WalletMockMleVerifier walletMock = new WalletMockMleVerifier();
+        E2EMockMleVerifier e2eMock = new E2EMockMleVerifier();
+        MleVerifier.MleProof memory proof;
+        MleVerifier.VerifyParams memory params;
+        SpongefishWhirVerify.WhirParams memory whir;
 
-        assertEq(walletMock.verifyCompactPublicInputs(proof).length, 0, "wallet mock works locally");
-        assertEq(e2eMock.verifyCompactPublicInputs(proof).length, 0, "E2E mock works locally");
+        assertTrue(walletMock.verify(proof, params, whir, bytes32(0)), "wallet mock must work locally");
+        assertTrue(e2eMock.verify(proof, params, whir, bytes32(0)), "E2E mock must work locally");
 
         vm.chainId(REAL_CHAIN_ID);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                MockPinnedMleVerifierV2.MockMleWrongChain.selector, REAL_CHAIN_ID, SETTLEMENT_LOCAL_DEVNET_CHAIN_ID
-            )
-        );
-        walletMock.verifyCompactPublicInputs(proof);
-        assertEq(walletMock.fraudVerdictCompact(proof, bytes32(0)), 2, "wrong chain is non-fraud");
-        assertEq(e2eMock.fraudVerdictCompact(proof, bytes32(0)), 2, "wrong chain is non-fraud");
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        walletMock.verify(proof, params, whir, bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(MleProofEngineUnavailable.selector, REAL_CHAIN_ID));
+        e2eMock.verify(proof, params, whir, bytes32(0));
     }
 
     // ── (6) the REGISTRATION delegate count and the MANAGER's are different things ─────────────

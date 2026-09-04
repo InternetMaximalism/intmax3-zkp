@@ -1,9 +1,7 @@
 //! Generate a complete E2E fixture for Solidity finalize() test.
 //!
 //! Pipeline: Plonky2 validity proof → 2x WrapperCircuit → MLE proof
-//! Output:   contracts/test/data/mle_fixture_config.json (proof-free deployment config)
-//!           contracts/test/data/mle_fixture.json (strict full V2 proof)
-//!           contracts/test/data/vpi_fixture.json + block_fixture.json (downstream descriptors)
+//! Output:   contracts/test/data/mle_fixture.json
 //!
 //! Usage:    cargo run --bin generate_e2e_fixture --release
 
@@ -18,20 +16,16 @@ use intmax3_zkp::{
             validity_circuit::{ValidityCircuit, ValidityPublicInputs},
         },
     },
-    ethereum_types::{address::Address, bytes32::Bytes32},
+    ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait},
     utils::{
         conversion::ToU64,
-        mle_prover::{
-            export_mle_v2_config_json, export_mle_v2_json, mle_v2_compact_submission_metadata,
-            mle_v2_config_only_requested, persist_or_validate_mle_v2_config_json,
-            prove_with_mle_v2, setup_mle_vk_v2, validate_mle_v2_full_against_config_json,
-            verify_mle_proof_v2,
-        },
+        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk},
         wrapper::WrapperCircuit,
     },
+    wrapper_config::plonky2_config::PoseidonBN128GoldilocksConfig,
 };
 use plonky2::{
-    field::goldilocks_field::GoldilocksField,
+    field::{goldilocks_field::GoldilocksField, types::PrimeField64},
     iop::witness::{PartialWitness, WitnessWrite},
     plonk::config::PoseidonGoldilocksConfig,
 };
@@ -39,6 +33,7 @@ use serde::Serialize;
 
 type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
+type BN128C = PoseidonBN128GoldilocksConfig;
 const D: usize = 2;
 
 #[derive(Serialize)]
@@ -79,10 +74,9 @@ struct BlockFixture {
     final_block_number: u64,
     initial_block_chain: String,
     final_block_chain: String,
-    // --- _submit() / Proof-DA commitment inputs ---
-    // The exact keccak256 + byte length of canonical compactProof.bytes. Calldata, Proof-DA,
-    // attestation, finalize and fraud must refer to this one payload; the JSON container is never
-    // an alternative proof byte stream.
+    // --- _submit() commitment inputs (NOT re-checked by finalize/fullVerify; see note) ---
+    // proofHash/proofLength only feed the submission commitment used by the FRAUD path,
+    // which finalize does not touch. Deterministic values derived from the MLE proof bytes.
     proof_hash: String,
     proof_length: u32,
 }
@@ -101,34 +95,9 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let supported_user_counts = vec![2u32];
-    let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
-    let block_chain_vd = processor.block_chain_vd();
-
-    // Circuit-only setup is deliberately completed before any witness/proof work. This makes the
-    // deployment address/config available before a recipient address must be chosen.
-    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
-    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
-        &agg_circuit.verifier_data(),
-    );
-    let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
-    let wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
-    let mle_config_json = export_mle_v2_config_json(&wrapper.data)?;
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-    persist_or_validate_mle_v2_config_json(
-        out_dir.join("mle_fixture_config.json"),
-        &mle_config_json,
-    )?;
-    eprintln!("[e2e] wrote contracts/test/data/mle_fixture_config.json");
-    if mle_v2_config_only_requested() {
-        eprintln!("[e2e] config-only mode: no witness or proof was constructed");
-        return Ok(());
-    }
-
     eprintln!("[e2e] Step 1: Generate Plonky2 validity proof");
 
+    let supported_user_counts = vec![2u32];
     let mut generator = BlockWitnessGenerator::new(&supported_user_counts);
     let initial_state = generator.current_extended_public_state();
 
@@ -140,9 +109,18 @@ fn main() -> anyhow::Result<()> {
         .cloned()
         .expect("block witness");
 
+    let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
     let block_proof = processor.prove_block(Some(initial_state.clone()), None, &block_witness)?;
+    let block_chain_vd = processor.block_chain_vd();
+
     // P2b: the validity circuit conditionally verifies an N-of-N Falcon AggListCircuit proof. This
     // empty (all-padding) block has no signing event ⇒ final.bp_sig_chain == 0 ⇒ list proof None.
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     let prover = Address::default();
     let validity_proof = validity_circuit.prove(&block_proof, None, prover)?;
 
@@ -168,6 +146,7 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     eprintln!("[e2e] Step 2: Wrap with WrapperCircuit");
 
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
     let wrapped_proof = wrapper.prove(&validity_proof)?;
     wrapper.data.verify(wrapped_proof.clone())?;
     let common = &wrapper.data.common;
@@ -180,7 +159,7 @@ fn main() -> anyhow::Result<()> {
     // Step 3: Generate MLE proof
     // -----------------------------------------------------------------------
     // Setup: compute verification key (deterministic, once per circuit)
-    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
+    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
     eprintln!(
         "[e2e] MLE VK computed (preprocessed_commitment_root: {} bytes)",
         vk.preprocessed_commitment_root.len()
@@ -189,23 +168,27 @@ fn main() -> anyhow::Result<()> {
     eprintln!("[e2e] Step 3: Generate MLE proof");
 
     let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof)?;
+    pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof);
 
-    let mle_result = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)?;
+    let mle_result = prove_with_mle::<F, C, D>(&wrapper.data, pw)?;
     eprintln!("[e2e] MLE proof generated in {:?}", mle_result.prove_time);
 
-    verify_mle_proof_v2(&wrapper.data, &vk, &mle_result.proof)?;
+    intmax3_zkp::utils::mle_prover::verify_mle_proof(&wrapper.data, &vk, &mle_result.proof)?;
     eprintln!("[e2e] MLE proof verified locally");
 
     // -----------------------------------------------------------------------
     // Step 4: Export fixture
     // -----------------------------------------------------------------------
-    let mle_json = export_mle_v2_json(&mle_result.proof, &vk, &wrapper.data)?;
-    validate_mle_v2_full_against_config_json(&mle_json, &mle_config_json)?;
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+
+    let mle_json = export_mle_json(&mle_result.proof, &wrapper.data.common)?;
     fs::write(out_dir.join("mle_fixture.json"), &mle_json)?;
     eprintln!("[e2e] MLE fixture written to contracts/test/data/mle_fixture.json");
 
     // Export validity public inputs
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
     let vpi_fixture = VPIFixture {
         initial_block_number: vpis.initial_block_number.as_u64(),
         initial_block_chain: vpis.initial_block_chain.to_string(),
@@ -252,11 +235,22 @@ fn main() -> anyhow::Result<()> {
         "empty block #1 channel_reg_hash_chain must be zero"
     );
 
-    // There is one proof payload across calldata, Proof-DA, attestation and fraud: the strict
-    // canonical compact-v2 bytes. Commit to exactly those bytes, never to the much larger JSON
-    // container or a non-cryptographic placeholder digest.
-    let (proof_hash, proof_length) =
-        mle_v2_compact_submission_metadata(&mle_json, &mle_config_json)?;
+    // proofHash/proofLength feed ONLY the submission commitment used by the fraud
+    // path; finalize()/fullVerify() never re-check them. Deterministic values
+    // derived from the serialized MLE proof bytes.
+    let proof_length = mle_json.len() as u32;
+    let proof_hash = {
+        // Deterministic, dependency-free FNV-1a digest over the MLE JSON, placed
+        // in the low 64 bits of a bytes32. The value is UNCONSTRAINED on-chain
+        // (finalize/fullVerify never re-derive the submission commitment), so any
+        // deterministic value is sound; we use this only for reproducibility.
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in mle_json.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("0x{:064x}", h as u128)
+    };
 
     let block_fixture = BlockFixture {
         channel_id: block.channel_id,
