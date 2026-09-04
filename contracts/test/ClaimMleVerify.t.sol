@@ -14,7 +14,7 @@ import {FixtureLib} from "../script/FixtureLib.sol";
 ///      V1 ABI fixtures self-skip here rather than being reinterpreted as compact bytes; the
 ///      non-skipping V2FixtureCompletenessTest and CI anti-skip guard make that a release failure.
 contract ClaimMleVerifyTest is Test {
-    uint256 private constant MAX_PRODUCTION_VERIFY_GAS = 30_000_000;
+    uint256 private constant MAX_PRODUCTION_VERIFY_GAS = 20_000_000;
 
     function _load(string memory name) internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", name));
@@ -94,7 +94,7 @@ contract ClaimMleVerifyTest is Test {
         // Keep this last: reading adapter.core() itself performs a STATICCALL that warms adapter.
         vm.cool(address(adapter));
 
-        // Execute under the actual post-intrinsic 30M budget rather than measuring with unlimited
+        // Execute under the actual post-intrinsic 20M budget rather than measuring with unlimited
         // wrapper gas and checking only afterwards. Nested EIP-150 forwarding is therefore part of
         // the acceptance condition.
         uint256 executionBudget = MAX_PRODUCTION_VERIFY_GAS - _calldataIntrinsicGas(callData);

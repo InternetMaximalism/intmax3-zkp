@@ -65,7 +65,7 @@ MIN_SUITES=37
 #                     — non-skipping manifest for every live full MLE/WHIR V2 artifact, including
 #                       exact compact-proof hash/length bindings in Proof-DA companion files.
 #   ManagerCloseGas   — executes the real 103-PI partial-withdrawal proof through the Manager with
-#                       a cold-account execution budget derived from the production 30M tx limit.
+#                       a cold-account execution budget derived from the production 20M tx limit.
 #
 # `suite-key<TAB>minimum-tests`. A plain list rather than an associative array on purpose: macOS
 # ships bash 3.2, and a CI guard nobody can run locally before pushing is a guard people route

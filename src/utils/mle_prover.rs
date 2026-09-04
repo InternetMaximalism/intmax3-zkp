@@ -31,7 +31,7 @@ use plonky2_mle::{
         try_export_mle_v2_config_fixture, try_export_mle_v2_fixture,
     },
     proof_v2::{MleProofV2, MleVerificationKeyV2},
-    protocol_schema_v2::{COMPACT_MAGIC_V2, MAX_COMPACT_PROOF_BYTES_V2, WHIR_SECURITY_LEVEL_V2},
+    protocol_schema_v2::{COMPACT_MAGIC_V2, MAX_COMPACT_PROOF_BYTES_V2},
     prover_v2::{mle_prove_v2, mle_setup_v2},
     verifier_v2::mle_verify_v2,
 };
@@ -408,12 +408,6 @@ pub const MLE_V2_CONFIG_ONLY_FLAG: &str = "--mle-config-only";
 /// remains create-once/compare-only.
 pub const MLE_V3_CONFIG_CUTOVER_ENV: &str = "MLE_ALLOW_WIRE_V3_CONFIG_CUTOVER";
 
-/// Explicit one-release switch for replacing a fully validated wire-v3,
-/// WHIR-target-132 configuration with its circuit-identical target-133
-/// successor. This permission is intentionally independent from the retired
-/// wire-v2 -> wire-v3 cutover above.
-pub const MLE_WHIR_133_CONFIG_CUTOVER_ENV: &str = "MLE_ALLOW_WHIR_133_CONFIG_CUTOVER";
-
 /// Whether the current process was invoked in proof-free MLE-v2 configuration mode.
 pub fn mle_v2_config_only_requested() -> bool {
     std::env::args_os().any(|arg| arg == MLE_V2_CONFIG_ONLY_FLAG)
@@ -430,34 +424,18 @@ pub fn persist_or_validate_mle_v2_config_json(
 ) -> Result<()> {
     let allow_v3_cutover =
         std::env::var_os(MLE_V3_CONFIG_CUTOVER_ENV).is_some_and(|value| value == OsStr::new("1"));
-    let allow_whir_133_cutover = std::env::var_os(MLE_WHIR_133_CONFIG_CUTOVER_ENV)
-        .is_some_and(|value| value == OsStr::new("1"));
-    persist_or_validate_mle_v2_config_json_inner(
-        path.as_ref(),
-        generated_json,
-        allow_v3_cutover,
-        allow_whir_133_cutover,
-    )
+    persist_or_validate_mle_v2_config_json_inner(path.as_ref(), generated_json, allow_v3_cutover)
 }
 
 fn persist_or_validate_mle_v2_config_json_inner(
     path: &Path,
     generated_json: &str,
     allow_v3_cutover: bool,
-    allow_whir_133_cutover: bool,
 ) -> Result<()> {
-    ensure!(
-        !(allow_v3_cutover && allow_whir_133_cutover),
-        "MLE config cutover permissions are mutually exclusive; set only one of {MLE_V3_CONFIG_CUTOVER_ENV} or {MLE_WHIR_133_CONFIG_CUTOVER_ENV}"
-    );
     let generated =
         MleVerifierV2ConfigFixture::from_canonical_json(generated_json).map_err(|e| {
             anyhow::anyhow!("generated MLE v2 config is not strict canonical JSON: {e}")
         })?;
-    ensure!(
-        !allow_whir_133_cutover || WHIR_SECURITY_LEVEL_V2 == 133,
-        "WHIR-target-133 config cutover requires the generated current target to equal 133"
-    );
     match fs::read_to_string(path) {
         Ok(existing_json) => {
             match MleVerifierV2ConfigFixture::from_canonical_json(&existing_json) {
@@ -476,19 +454,9 @@ fn persist_or_validate_mle_v2_config_json_inner(
                         })?;
                     atomic_replace_config(path, generated_json)?;
                 }
-                Err(_parse_error) if allow_whir_133_cutover => {
-                    validate_whir_133_config_cutover(path, &existing_json, generated_json)
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "refuse MLE WHIR-target-133 config cutover for {}: {error}",
-                                path.display()
-                            )
-                        })?;
-                    atomic_replace_config(path, generated_json)?;
-                }
                 Err(parse_error) => {
                     bail!(
-                        "existing MLE v2 config artifact {} is not the strict current config: {parse_error}; set {MLE_V3_CONFIG_CUTOVER_ENV}=1 only for the reviewed retired wire-v2 to wire-v3 cohort cutover, or {MLE_WHIR_133_CONFIG_CUTOVER_ENV}=1 only for the reviewed wire-v3 target-132 to target-133 cohort cutover",
+                        "existing MLE v2 config artifact {} is not the strict current config: {parse_error}; set {MLE_V3_CONFIG_CUTOVER_ENV}=1 only for the reviewed retired wire-v2 to wire-v3 cohort cutover; a WHIR profile change is a fresh cohort (remove the retired config artifacts first)",
                         path.display()
                     );
                 }
@@ -740,101 +708,6 @@ fn validate_protocol_v2_config_cutover(
             "underlying circuit identity differs at {pointer}"
         );
     }
-    Ok(())
-}
-
-/// Admit only the reviewed wire-v3 WHIR target-132 -> target-133
-/// configuration migration. Both artifacts must independently reconstruct
-/// every WHIR parameter, identifier, digest, ABI byte string, canonical PI
-/// map, and proof-size bound for their respective target. The fields below
-/// then pin the circuit identity across the replacement.
-fn validate_whir_133_config_cutover(
-    path: &Path,
-    existing_json: &str,
-    generated_json: &str,
-) -> Result<()> {
-    ensure!(
-        WHIR_SECURITY_LEVEL_V2 == 133,
-        "generated current WHIR security target is not exactly 133"
-    );
-    let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-    ensure!(
-        file_name.ends_with("_mle_config.json") || file_name == "mle_fixture_config.json",
-        "cutover target is not a canonical MLE config artifact"
-    );
-
-    // Serde supplies the strict deny-unknown-fields shape. The dedicated
-    // historical validator re-derives the target-132 WHIR profile rather than
-    // trusting a caller-provided security label (there is intentionally no
-    // unauthenticated top-level `securityLevel` field in this schema).
-    let existing: MleVerifierV2ConfigFixture = serde_json::from_str(existing_json)
-        .map_err(|error| anyhow::anyhow!("target-132 config is not strict JSON: {error}"))?;
-    existing
-        .validate_retired_whir_132_self_consistency_for_config_cutover()
-        .map_err(|error| anyhow::anyhow!("target-132 config is not self-consistent: {error}"))?;
-    ensure!(
-        existing
-            .to_canonical_json()
-            .map_err(|error| anyhow::anyhow!("cannot canonicalize target-132 config: {error}"))?
-            == existing_json,
-        "target-132 config is not byte-for-byte canonical JSON"
-    );
-
-    let generated = MleVerifierV2ConfigFixture::from_canonical_json(generated_json)
-        .map_err(|error| anyhow::anyhow!("target-133 config is not self-consistent: {error}"))?;
-    ensure!(
-        existing != generated,
-        "target-132 -> target-133 cutover unexpectedly has identical artifacts"
-    );
-
-    let existing_value = serde_json::to_value(&existing)?;
-    let generated_value = serde_json::to_value(&generated)?;
-    for pointer in [
-        "/schema",
-        "/schemaVersion",
-        "/protocolVersion",
-        "/proofAbiSignature",
-        "/proofLayoutHash",
-        "/compactLayoutHash",
-        "/compactProofEncoding",
-        "/whirPowBits",
-        "/verificationKey/protocolVersion",
-        "/verificationKey/constituentWidth",
-        "/verificationKey/circuitDigest",
-        "/verificationKey/preprocessedCommitmentRoot",
-        "/verificationKey/whirSessionId",
-        "/verificationKey/circuitConfigDigest",
-        "/verificationKey/numSelectors",
-        "/verificationKey/numGateConstraints",
-        "/verificationKey/quotientDegreeFactor",
-        "/verificationKey/gates",
-        "/verificationKey/publicInputWireMap",
-        "/verificationKey/numConstants",
-        "/verificationKey/numRoutedWires",
-        "/verificationKey/numWires",
-        "/verificationKey/kIs",
-        "/verificationKey/subgroupGenPowers",
-        "/verificationConfig/circuit",
-        "/verificationConfig/publicInputWireMap",
-        "/verificationConfig/kIs",
-        "/verificationConfig/subgroupGenPowers",
-        "/verificationConfig/gates",
-        "/pinnedVerifier/preprocessedCommitmentRoot",
-        "/pinnedVerifier/circuitConfigDigest",
-        "/pinnedVerifier/whirSessionId",
-        "/pinnedVerifier/circuitDigest",
-        "/compactShape",
-    ] {
-        ensure!(
-            existing_value.pointer(pointer).is_some()
-                && existing_value.pointer(pointer) == generated_value.pointer(pointer),
-            "target-132 and target-133 circuit identity differs at {pointer}"
-        );
-    }
-    ensure!(
-        existing.verification_key.whir_protocol_id != generated.verification_key.whir_protocol_id,
-        "WHIR protocol identifier did not change across target 132 -> 133"
-    );
     Ok(())
 }
 
@@ -1167,10 +1040,7 @@ mod v2_export_tests {
             config::PoseidonGoldilocksConfig,
         },
     };
-    use plonky2_mle::fixture_v2::{
-        EncodedProofV2Fixture, derive_retired_whir_132_deployment_profile_v2_for_config_cutover,
-        proof_encoding_size_upper_bound_retired_whir_132_v2_for_config_cutover,
-    };
+    use plonky2_mle::fixture_v2::EncodedProofV2Fixture;
 
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
@@ -1201,44 +1071,6 @@ mod v2_export_tests {
             .unwrap()
             .remove("publicInputWireMap");
         retired
-    }
-
-    fn retired_whir_132_config_from_current(current_json: &str) -> String {
-        let mut retired = MleVerifierV2ConfigFixture::from_canonical_json(current_json).unwrap();
-        let degree_bits = retired.verification_config.circuit.degree_bits;
-        let constituent_width = retired.verification_key.constituent_width;
-        let profile = derive_retired_whir_132_deployment_profile_v2_for_config_cutover(
-            degree_bits,
-            constituent_width,
-        )
-        .unwrap();
-
-        retired.verification_config.whir = profile.params;
-        retired.verification_key.whir_protocol_id =
-            format!("0x{}", hex::encode(profile.protocol_id));
-        retired.verification_key.whir_session_id = format!("0x{}", hex::encode(profile.session_id));
-        retired.pinned_verifier.whir_protocol_id =
-            retired.verification_key.whir_protocol_id.clone();
-        retired.pinned_verifier.whir_session_id = retired.verification_key.whir_session_id.clone();
-        retired.pinned_verifier.whir_parameters_digest =
-            format!("0x{}", hex::encode(profile.parameters_digest));
-        retired.size_upper_bound =
-            proof_encoding_size_upper_bound_retired_whir_132_v2_for_config_cutover(
-                &retired.compact_shape.decode(),
-            )
-            .unwrap();
-        let config_abi =
-            solidity_abi_encode_verification_config_v2(&retired.verification_config).unwrap();
-        retired.solidity_abi_verification_config = EncodedProofV2Fixture::from_bytes(
-            SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2,
-            &config_abi,
-        );
-        retired.pinned_verifier.verification_config_digest =
-            retired.solidity_abi_verification_config.keccak256.clone();
-        retired
-            .validate_retired_whir_132_self_consistency_for_config_cutover()
-            .unwrap();
-        retired.to_canonical_json().unwrap()
     }
 
     #[test]
@@ -1427,17 +1259,15 @@ mod v2_export_tests {
         fs::create_dir(&directory).unwrap();
 
         let fresh_path = directory.join("fresh_mle_config.json");
-        persist_or_validate_mle_v2_config_json_inner(&fresh_path, &current_json, false, false)
-            .unwrap();
+        persist_or_validate_mle_v2_config_json_inner(&fresh_path, &current_json, false).unwrap();
         assert_eq!(fs::read_to_string(&fresh_path).unwrap(), current_json);
-        persist_or_validate_mle_v2_config_json_inner(&fresh_path, &current_json, false, false)
-            .unwrap();
+        persist_or_validate_mle_v2_config_json_inner(&fresh_path, &current_json, false).unwrap();
 
         let path = directory.join("mle_fixture_config.json");
         fs::write(&path, &retired_json).unwrap();
 
         let without_explicit_cutover =
-            persist_or_validate_mle_v2_config_json_inner(&path, &current_json, false, false)
+            persist_or_validate_mle_v2_config_json_inner(&path, &current_json, false)
                 .expect_err("retired config must not be overwritten implicitly");
         assert!(
             without_explicit_cutover
@@ -1446,7 +1276,7 @@ mod v2_export_tests {
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), retired_json);
 
-        persist_or_validate_mle_v2_config_json_inner(&path, &current_json, true, false).unwrap();
+        persist_or_validate_mle_v2_config_json_inner(&path, &current_json, true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), current_json);
         assert!(
             fs::read_dir(&directory).unwrap().all(|entry| !entry
@@ -1465,12 +1295,7 @@ mod v2_export_tests {
             serde_json::to_string_pretty(&changed_current).unwrap()
         );
         assert!(
-            persist_or_validate_mle_v2_config_json_inner(
-                &path,
-                &changed_current_json,
-                true,
-                false,
-            )
+            persist_or_validate_mle_v2_config_json_inner(&path, &changed_current_json, true)
                 .is_err(),
             "the cutover switch must not overwrite a different current-v3 config"
         );
@@ -1570,130 +1395,5 @@ mod v2_export_tests {
                 "underlying circuit drift at {pointer} must fail"
             );
         }
-    }
-
-    #[test]
-    fn whir_133_config_cutover_is_explicit_self_consistent_and_atomic() {
-        let (circuit, _) = test_config_circuit();
-        let current_json = export_mle_v2_config_json(&circuit).unwrap();
-        let retired_json = retired_whir_132_config_from_current(&current_json);
-        let unique = format!(
-            "intmax-mle-whir-133-cutover-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let directory = std::env::temp_dir().join(unique);
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("mle_fixture_config.json");
-        fs::write(&path, &retired_json).unwrap();
-
-        let implicit =
-            persist_or_validate_mle_v2_config_json_inner(&path, &current_json, false, false)
-                .expect_err("target-132 config must not be replaced implicitly");
-        assert!(
-            implicit
-                .to_string()
-                .contains(MLE_WHIR_133_CONFIG_CUTOVER_ENV)
-        );
-        assert_eq!(fs::read_to_string(&path).unwrap(), retired_json);
-
-        assert!(
-            persist_or_validate_mle_v2_config_json_inner(&path, &current_json, true, false,)
-                .is_err(),
-            "the wire-v2 migration permission must not authorize target 132 -> 133"
-        );
-        assert_eq!(fs::read_to_string(&path).unwrap(), retired_json);
-        assert!(
-            persist_or_validate_mle_v2_config_json_inner(&path, &current_json, true, true,)
-                .is_err(),
-            "the two migration permissions must not be composable"
-        );
-        assert_eq!(fs::read_to_string(&path).unwrap(), retired_json);
-
-        persist_or_validate_mle_v2_config_json_inner(&path, &current_json, false, true).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), current_json);
-        assert!(
-            fs::read_dir(&directory).unwrap().all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains(".tmp")),
-            "successful target-133 cutover must leave no staging file"
-        );
-
-        fs::remove_file(&path).unwrap();
-        fs::remove_dir(&directory).unwrap();
-    }
-
-    #[test]
-    fn whir_133_config_cutover_rejects_profile_identity_and_permission_aliases() {
-        let (circuit, _) = test_config_circuit();
-        let current_json = export_mle_v2_config_json(&circuit).unwrap();
-        let retired_json = retired_whir_132_config_from_current(&current_json);
-        validate_whir_133_config_cutover(
-            Path::new("mle_fixture_config.json"),
-            &retired_json,
-            &current_json,
-        )
-        .unwrap();
-        assert!(
-            validate_whir_133_config_cutover(
-                Path::new("not-a-config.json"),
-                &retired_json,
-                &current_json,
-            )
-            .is_err()
-        );
-
-        let mut corrupted_old: serde_json::Value = serde_json::from_str(&retired_json).unwrap();
-        corrupted_old["verificationConfig"]["whir"]["outDomainSamples"] = serde_json::json!(999);
-        let corrupted_old = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&corrupted_old).unwrap()
-        );
-        assert!(
-            validate_whir_133_config_cutover(
-                Path::new("mle_fixture_config.json"),
-                &corrupted_old,
-                &current_json,
-            )
-            .is_err(),
-            "a relabelled or internally inconsistent target-132 profile must fail"
-        );
-
-        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let left = builder.add_virtual_target();
-        let right = builder.add_virtual_target();
-        builder.register_public_input(left);
-        builder.register_public_input(right);
-        let other_circuit = builder.build::<C>();
-        let other_current_json = export_mle_v2_config_json(&other_circuit).unwrap();
-        assert!(
-            validate_whir_133_config_cutover(
-                Path::new("mle_fixture_config.json"),
-                &retired_json,
-                &other_current_json,
-            )
-            .is_err(),
-            "two independently valid configs for different circuits must not cut over"
-        );
-
-        let retired_wire_v2 = retired_v2_config_from_current(&current_json);
-        let retired_wire_v2 = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&retired_wire_v2).unwrap()
-        );
-        assert!(
-            validate_whir_133_config_cutover(
-                Path::new("mle_fixture_config.json"),
-                &retired_wire_v2,
-                &current_json,
-            )
-            .is_err(),
-            "the target-133 permission must not alias the wire-v2 migration"
-        );
     }
 }

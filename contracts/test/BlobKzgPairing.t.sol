@@ -107,10 +107,10 @@ contract BlobKzgPairingTest is Test {
             )
         );
         bytes memory payload = FixtureLib.parseCompactProofV2(json);
-        assertEq(payload.length, 195_012);
+        assertEq(payload.length, 129_284);
         assertEq(
             keccak256(payload),
-            0xf1094bb2cc33e2c7368d9bd12e3a8c08b81c8b9e8ce0c5b653887862e16ced0f
+            0x9bb89a1e4ca4bf9dca4d140eedb8836cbd41982922f2a212cf99861dc9715175
         );
         assertEq(verifier.count(payload.length), 2);
     }

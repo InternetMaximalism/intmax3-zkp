@@ -16,7 +16,7 @@ contract SubmitPartialWithdrawal is Script {
     /// in `ManagerCloseGas.t.sol` proves that calldata intrinsic gas plus Manager execution fits
     /// this production envelope. Keeping the fixed limit equal to the Anvil block limit prevents
     /// tooling headroom from manufacturing a transaction the node must reject before execution.
-    uint256 internal constant SUBMIT_TRANSACTION_GAS_LIMIT = 30_000_000;
+    uint256 internal constant SUBMIT_TRANSACTION_GAS_LIMIT = 20_000_000;
 
     function _read(string memory f) internal view virtual returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));

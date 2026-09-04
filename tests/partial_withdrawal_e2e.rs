@@ -61,7 +61,7 @@ type C = PoseidonGoldilocksConfig;
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const PORT: u16 = 8553;
-const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 30_000_000;
+const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 20_000_000;
 
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
@@ -784,7 +784,7 @@ fn partial_withdrawal_e2e_anvil() {
     eprintln!("[PW E2E] submitPartialWithdrawalIntent succeeded");
 
     // Pin the operational liveness claim to the actual transaction, not Forge's in-process trace.
-    // The script must bypass Foundry's conservative estimator with its explicit 30M limit, and the
+    // The script must bypass Foundry's conservative estimator with its explicit 20M limit, and the
     // node receipt must show that the real cold transaction consumed no more than that envelope.
     {
         let artifact_path = contracts

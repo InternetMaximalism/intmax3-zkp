@@ -1,5 +1,10 @@
 # MLE/WHIR PCS repair: proof cohort completed (2026-09-04)
 
+> **Superseded later the same day** by `mle-whir-gas-envelope-2026-09-04.md`: the target-133 /
+> inverse-rate-4 profile described below was replaced by target-105 / inverse-rate-6 and the
+> verifier was optimized so the cold close path fits a 20,000,000-gas envelope. The proof cohort,
+> fixture and gas numbers in this file describe the retired profile.
+
 Continues `mle-whir-pcs-repair-progress-handoff-2026-09-03.md`. That checkpoint had all 15
 proof-free target-133 configs but only 7 of the 16 parent full wire-v3 proofs.
 

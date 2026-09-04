@@ -25,7 +25,7 @@ import {MockRollupRegistry} from "./CloseSettlementBase.sol";
 ///      measured call is the exact `submitPartialWithdrawalIntent` ABI, including its state writes;
 ///      calldata intrinsic gas is added explicitly to the measured execution cost.
 contract ManagerCloseGasTest is Test {
-    uint256 private constant MAX_PRODUCTION_TRANSACTION_GAS = 30_000_000;
+    uint256 private constant MAX_PRODUCTION_TRANSACTION_GAS = 20_000_000;
 
     ChannelSettlementManager private manager;
     ChannelSettlementVerifier private settlementVerifier;
@@ -172,9 +172,9 @@ contract ManagerCloseGasTest is Test {
 
         emit log_named_uint("partial-withdrawal compact bytes", compactProof.length);
         emit log_named_uint("transaction intrinsic gas", intrinsicGas);
-        emit log_named_uint("Manager execution budget at 30M", managerExecutionBudget);
+        emit log_named_uint("Manager execution budget at 20M", managerExecutionBudget);
         emit log_named_uint("cold harness CALL gas spent", harnessCallGasSpent);
-        assertTrue(success, "real Manager partial-withdrawal submit does not execute within 30M transaction budget");
+        assertTrue(success, "real Manager partial-withdrawal submit does not execute within 20M transaction budget");
         assertTrue(manager.partialWithdrawalPending(), "real partial withdrawal was not recorded");
     }
 
