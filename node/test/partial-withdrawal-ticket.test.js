@@ -61,6 +61,13 @@ function loadBurnRoute(relativeRoute, endpoint) {
         authoritativeBaseNonceEnv: async () => ({ INTMAX_LIVE_BASE_NONCE: '0' }),
       };
     }
+    if (request === '../lib/exit-kit') {
+      // The pre-sign exit-kit wrapper is one CLI signing round from the route's point of view.
+      return {
+        cliWithPreparedExitKit: async () => { cliCalls += 1; },
+        installHeadExitKit: async () => {},
+      };
+    }
     if (request === '../lib/cli') {
       return {
         RPC: 'http://127.0.0.1:8545',

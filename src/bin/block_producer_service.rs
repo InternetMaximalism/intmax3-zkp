@@ -9,16 +9,22 @@ use intmax3_zkp::{
         BlockProducerCommand, BlockProducerReceipt, BlockProducerService, BlockProducerServiceError,
     },
     close_funding::CloseFundingPlan,
-    common::{channel::ChannelState, channel_id::ChannelId},
+    common::{
+        channel::{ChannelRecord, ChannelState},
+        channel_id::ChannelId,
+    },
     ethereum_types::{address::Address, bytes32::Bytes32},
     live_balance_service::{
         LiveBalanceService, LiveBalanceServiceError, LiveInterChannelSendArtifact,
+        PreparedExitKitProposal,
     },
     regev::RegevSecurityLevel,
     validity_prover_service::{
         L1FinalizationRpcConfig, ValidityProverService, ValidityProverServiceError,
     },
-    wallet_core::{ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor},
+    wallet_core::{
+        ChannelSnapshot, InterChannelDebitPayload, InterChannelTransferDescriptor, MemberInfo,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +121,33 @@ enum ValidityCommand {
 
 /// Live-balance base-state commands. Each channel's durable snapshot lives under `--live-root`;
 /// the resident `LiveBalanceService` for a channel is opened once and retained, exactly like the
+/// Wire shape of a prepared exit-kit proposal. The debit variant names the request id of the
+/// producer block to stage; the daemon composes the staged receipt itself so no caller can name
+/// an arbitrary journal anchor.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum LiveExitKitProposal {
+    TokenRegister {
+        successor: ChannelState,
+    },
+    L1DepositImport {
+        record: ChannelRecord,
+        members: Vec<MemberInfo>,
+        fund_import_state: ChannelState,
+    },
+    InterChannelDebit {
+        request_id: String,
+        proposed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+    },
+}
+
 /// producer journal. `RegevSecurityLevel` is DELIBERATELY absent from every request shape: proving
 /// strength is fixed at startup (`--regev-test-proofs`), so a wire request can never downgrade it.
 #[derive(Clone, Debug, Deserialize)]
@@ -156,6 +189,19 @@ enum LiveCommand {
     },
     LiveBackingArtifact {
         channel_id: ChannelId,
+    },
+    /// Prove the signer-independent exit kit of a PROPOSED asset/composition-moving successor
+    /// before any member signs it. A debit proposal first stages the producer block the real
+    /// N-of-N must later reproduce; the staged block freezes every other producer mutation until
+    /// it is committed by `postInterChannel` or abandoned.
+    LivePrepareExitKit {
+        channel_id: ChannelId,
+        proposal: LiveExitKitProposal,
+    },
+    /// Drop a staged debit exit-kit block whose transition will not be signed.
+    LiveAbandonPreparedExitKit {
+        channel_id: ChannelId,
+        request_id: String,
     },
     LiveBaseHead {
         channel_id: ChannelId,
@@ -501,6 +547,73 @@ fn execute_live_command(
                 .service(channel_id, producer)?
                 .channel_backing_artifact()?;
             to_value(serde_json::to_value(artifact))
+        }
+        LiveCommand::LivePrepareExitKit {
+            channel_id,
+            proposal,
+        } => {
+            let (proposal, staged_request) = match proposal {
+                LiveExitKitProposal::TokenRegister { successor } => {
+                    (PreparedExitKitProposal::TokenRegister { successor }, None)
+                }
+                LiveExitKitProposal::L1DepositImport {
+                    record,
+                    members,
+                    fund_import_state,
+                } => (
+                    PreparedExitKitProposal::L1DepositImport {
+                        record,
+                        members,
+                        fund_import_state,
+                    },
+                    None,
+                ),
+                LiveExitKitProposal::InterChannelDebit {
+                    request_id,
+                    proposed_state,
+                    debit_payload,
+                    descriptor,
+                } => {
+                    let producer_receipt = producer.prepare_inter_channel_exit_kit(
+                        request_id.clone(),
+                        proposed_state.clone(),
+                        debit_payload.clone(),
+                        descriptor.clone(),
+                    )?;
+                    (
+                        PreparedExitKitProposal::InterChannelDebit {
+                            producer_receipt,
+                            proposed_state,
+                            debit_payload,
+                            descriptor,
+                        },
+                        Some(request_id),
+                    )
+                }
+            };
+            let prepared = live
+                .service(channel_id, producer)?
+                .prepare_exit_kit(producer, &proposal);
+            let artifact = match prepared {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    // A staged block that will never receive its exit kit must not keep the
+                    // producer frozen; the signer never saw a kit for it.
+                    if let Some(request_id) = staged_request {
+                        let _ = producer.abandon_prepared_inter_channel_exit_kit(&request_id);
+                    }
+                    return Err(error);
+                }
+            };
+            to_value(serde_json::to_value(artifact))
+        }
+        LiveCommand::LiveAbandonPreparedExitKit {
+            channel_id,
+            request_id,
+        } => {
+            producer.abandon_prepared_inter_channel_exit_kit(&request_id)?;
+            let status = live.service(channel_id, producer)?.status()?;
+            to_value(serde_json::to_value(status))
         }
         LiveCommand::LiveBaseHead { channel_id } => {
             let head = live.service(channel_id, producer)?.base_head_artifact()?;

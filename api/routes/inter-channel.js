@@ -3,6 +3,7 @@ const fs = require('fs');
 const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLocks } = require('../lib/lock');
 const producer = require('../lib/block-producer');
+const { cliWithPreparedExitKit, installHeadExitKit } = require('../lib/exit-kit');
 const { flushPublishedHead } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
@@ -53,6 +54,8 @@ async function flushLastProducerBlock(ch) {
     fundImportState: result.bFundImportState,
     destinationSnapshot: result.bSnapshot,
   });
+  // The credited head was signed kit-pending; archive its exit kit into B's CLI state.
+  await installHeadExitKit(destination);
   return { blockReceipt, destinationHeadReceipt, liveReceipt, destinationLiveReceipt };
 }
 
@@ -133,7 +136,15 @@ router.post('/send', (req, res) => {
     // Read under the same per-channel lock that encloses signing + producer admission + live
     // settlement. A second API request cannot observe/reuse this cursor before the first advances.
     const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
-    cli(ch, ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json'], liveNonceEnv);
+    // Signer-independent exit: the source debit's exit kit is proved against the staged producer
+    // block before any A-side signature; B signs its pure credit against its durable head receipt
+    // and receives its own kit below.
+    await cliWithPreparedExitKit(
+      ch,
+      ['cosign-inter-transfer', 'inter_debit_payload.json', 'inter_descriptor.json', 'inter_transfer.json'],
+      liveNonceEnv,
+      { requestId: producerRequestId },
+    );
     const result = readJson(wc(ch, 'inter_transfer.json'));
     const sourceHead = result.aHead || result.sourceHead || result;
     if (!Number.isSafeInteger(destination) || !result.bFundImportState || !result.bSnapshot) {
@@ -175,6 +186,9 @@ router.post('/send', (req, res) => {
       fundImportState: result.bFundImportState,
       destinationSnapshot: result.bSnapshot,
     });
+    // The credited head was signed kit-pending; archive its exit kit into B's CLI state now so
+    // B's next H2=0 signature has a receipt for its durable head.
+    await installHeadExitKit(destination);
     const response = {
       sourceHead,
       destSnapshot: result.bSnapshot || result.destSnapshot || null,

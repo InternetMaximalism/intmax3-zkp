@@ -426,9 +426,27 @@ fn validate_transport_values(
     Ok(())
 }
 
+/// Whose authority the envelope's `signed_head` carries.
+#[derive(Clone, Copy, Debug)]
+enum HeadAuthority {
+    /// The complete N-of-N; the ordinary public close/backing artifact.
+    SignedNofN,
+    /// A PROPOSED successor that no member has signed yet: the exact digest the signer is about
+    /// to sign, carried unsigned. Used only for the pre-sign exit-kit receipt.
+    Proposed { digest: Bytes32 },
+}
+
 fn validate_public_backing(
     envelope: &PublicCloseBackingEnvelope,
     expected: &PublicCloseExpectations,
+) -> PublicCloseResult<ValidatedPublicBacking> {
+    validate_public_backing_with(envelope, expected, HeadAuthority::SignedNofN)
+}
+
+fn validate_public_backing_with(
+    envelope: &PublicCloseBackingEnvelope,
+    expected: &PublicCloseExpectations,
+    authority: HeadAuthority,
 ) -> PublicCloseResult<ValidatedPublicBacking> {
     validate_transport_context(envelope, expected)?;
     let artifact = &envelope.backing;
@@ -464,8 +482,27 @@ fn validate_public_backing(
         .balance_state
         .validate()
         .map_err(|error| PublicCloseError::Backing(format!("invalid balance state: {error:?}")))?;
-    verify_all_signatures(&artifact.channel_record, &[], &artifact.signed_head)
-        .map_err(|error| PublicCloseError::Backing(format!("N-of-N head: {error}")))?;
+    match authority {
+        HeadAuthority::SignedNofN => {
+            verify_all_signatures(&artifact.channel_record, &[], &artifact.signed_head)
+                .map_err(|error| PublicCloseError::Backing(format!("N-of-N head: {error}")))?;
+        }
+        HeadAuthority::Proposed { digest } => {
+            let head = &artifact.signed_head;
+            if head.digest != digest {
+                return Err(PublicCloseError::Backing(format!(
+                    "prepared exit kit is for head {} rather than the proposed successor {digest}",
+                    head.digest
+                )));
+            }
+            if head.digest != head.signing_digest() {
+                return Err(PublicCloseError::Backing(
+                    "a prepared exit kit must carry the proposed successor with its exact signing digest"
+                        .into(),
+                ));
+            }
+        }
+    }
 
     let vd_sha256 = sha256(&artifact.balance_verifier_data);
     validate_vd_pin(expected, vd_sha256)?;
@@ -604,6 +641,34 @@ pub fn verify_public_backing(
     expected: &PublicCloseExpectations,
 ) -> PublicCloseResult<PublicBackingVerification> {
     let validated = validate_public_backing(envelope, expected)?;
+    verification_from(envelope, expected, validated)
+}
+
+/// Verify a PRE-SIGN exit kit: the same canonical Balance VD, Balance proof and backing proof
+/// checks as [`verify_public_backing`], for an envelope whose head is the unsigned successor with
+/// exactly `proposed_head_digest`. This is the only place a head without its N-of-N is accepted,
+/// and it never yields a close artifact — only the signer's receipt that the kit it holds backs
+/// the state it is about to sign.
+pub fn verify_public_backing_proposed(
+    envelope: &PublicCloseBackingEnvelope,
+    expected: &PublicCloseExpectations,
+    proposed_head_digest: Bytes32,
+) -> PublicCloseResult<PublicBackingVerification> {
+    let validated = validate_public_backing_with(
+        envelope,
+        expected,
+        HeadAuthority::Proposed {
+            digest: proposed_head_digest,
+        },
+    )?;
+    verification_from(envelope, expected, validated)
+}
+
+fn verification_from(
+    envelope: &PublicCloseBackingEnvelope,
+    expected: &PublicCloseExpectations,
+    validated: ValidatedPublicBacking,
+) -> PublicCloseResult<PublicBackingVerification> {
     let backing_public_inputs = validated.backing_public_inputs.to_u64_vec();
     Ok(PublicBackingVerification {
         schema_version: PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION,
@@ -727,7 +792,11 @@ fn add_release_mle_envelope(mle_json: String, proof_kind: &str) -> PublicCloseRe
 /// consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 26 public
 /// inputs verbatim; checking the exported JSON again prevents serialization or pipeline drift
 /// from weakening the Solidity strict-limb binding.
-fn wrap_and_export_backing_mle(
+///
+/// `pub` so the close-fixture co-generator (`generate_close_fixture`) emits the checked-in
+/// `close_asset_backing_mle.json` through this ONE path — the same wrap + MLE + release envelope a
+/// live `public_close_prover` bundle carries, so the Solidity readers see one artifact shape.
+pub fn wrap_and_export_backing_mle(
     backing_circuit: &CloseAssetBackingCircuit<F, C, D>,
     backing_proof: &ProofWithPublicInputs<F, C, D>,
 ) -> PublicCloseResult<String> {

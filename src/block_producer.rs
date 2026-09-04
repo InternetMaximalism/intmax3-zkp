@@ -166,6 +166,15 @@ impl ProductionChannelRegistration {
     }
 }
 
+/// How a co-signed block is admitted: with the real N-of-N verified, or as an unsigned exit-kit
+/// staging block on a non-authoritative producer clone (see
+/// `BlockWitnessGenerator::unsigned_staging`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CosignMode {
+    Verified,
+    UnsignedStaging,
+}
+
 /// Keyless block producer core. The wrapped generator is private so production callers cannot
 /// reach its deterministic fixture-key registration APIs.
 #[derive(Clone, Debug)]
@@ -381,12 +390,50 @@ impl ProductionBlockProducer {
             .map_err(|e| ProductionBlockProducerError::WalletAuthorization(e.to_string()))?;
 
         let tx_tree_root = inter_channel_tx.signed_small_block.message.tx_tree_root;
-        self.produce_cosigned_block(
+        self.produce_cosigned_block_with(
             signed_state,
             key_ids,
             timestamp,
             tx_tree_root,
             tx_v2_witness,
+            CosignMode::Verified,
+        )
+    }
+
+    /// Exit-kit staging twin of [`Self::produce_inter_channel_block`]: fold the PROPOSED, still
+    /// unsigned post-debit state into a block on this (cloned, non-authoritative) producer so the
+    /// signer's exit kit can be anchored on the exact block the real N-of-N will later commit.
+    /// Every identity binding between the state and the block is still enforced; only the member
+    /// signatures are absent, and the resulting head snapshot must equal the committed one.
+    pub fn produce_inter_channel_block_unsigned_staging(
+        &mut self,
+        proposed_state: &ChannelState,
+        inter_channel_tx: &InterChannelTx,
+        key_ids: &[u32],
+        timestamp: u64,
+        tx_v2_witness: BlockTxV2Witness,
+    ) -> Result<(), ProductionBlockProducerError> {
+        let channel = inter_channel_tx.source_channel_id;
+        let record = self.channel_records.get(&channel).ok_or_else(|| {
+            ProductionBlockProducerError::WalletAuthorization(format!(
+                "source channel {} is not registered in this producer",
+                channel.as_u64()
+            ))
+        })?;
+        crate::wallet_core::verify_small_block_state_binding(
+            record,
+            proposed_state,
+            inter_channel_tx,
+        )
+        .map_err(|e| ProductionBlockProducerError::WalletAuthorization(e.to_string()))?;
+        let tx_tree_root = inter_channel_tx.signed_small_block.message.tx_tree_root;
+        self.produce_cosigned_block_with(
+            proposed_state,
+            key_ids,
+            timestamp,
+            tx_tree_root,
+            tx_v2_witness,
+            CosignMode::UnsignedStaging,
         )
     }
 
@@ -550,6 +597,41 @@ impl ProductionBlockProducer {
         descriptor: &InterChannelTransferDescriptor,
         timestamp: u64,
     ) -> Result<InterChannelTx, ProductionBlockProducerError> {
+        self.produce_inter_channel_descriptor_block_with(
+            signed_state,
+            debit_payload,
+            descriptor,
+            timestamp,
+            CosignMode::Verified,
+        )
+    }
+
+    /// Exit-kit staging: admit the descriptor's block for a PROPOSED, unsigned post-debit state
+    /// (see [`Self::produce_inter_channel_block_unsigned_staging`]).
+    pub fn produce_inter_channel_descriptor_block_unsigned_staging(
+        &mut self,
+        proposed_state: &ChannelState,
+        debit_payload: &InterChannelDebitPayload,
+        descriptor: &InterChannelTransferDescriptor,
+        timestamp: u64,
+    ) -> Result<InterChannelTx, ProductionBlockProducerError> {
+        self.produce_inter_channel_descriptor_block_with(
+            proposed_state,
+            debit_payload,
+            descriptor,
+            timestamp,
+            CosignMode::UnsignedStaging,
+        )
+    }
+
+    fn produce_inter_channel_descriptor_block_with(
+        &mut self,
+        signed_state: &ChannelState,
+        debit_payload: &InterChannelDebitPayload,
+        descriptor: &InterChannelTransferDescriptor,
+        timestamp: u64,
+        mode: CosignMode,
+    ) -> Result<InterChannelTx, ProductionBlockProducerError> {
         if self
             .terminal_close_funding
             .contains(&descriptor.source_channel_id)
@@ -633,22 +715,32 @@ impl ProductionBlockProducer {
 
         let mut attached_tx = descriptor.inter_channel_tx.clone();
         let mut candidate = self.clone();
-        candidate.produce_inter_channel_block(
-            signed_state,
-            &mut attached_tx,
-            &[1],
-            timestamp,
-            BlockTxV2Witness {
-                tx_v2_indices,
-                tx_v2s,
-                tx_v2_merkle_proofs,
-                new_member_leaves: None,
-                // §Q-2: UserTransfer-only slot — no channel action to open.
-                channel_action_indices: None,
-                channel_actions: None,
-                channel_action_merkle_proofs: None,
-            },
-        )?;
+        let tx_v2_witness = BlockTxV2Witness {
+            tx_v2_indices,
+            tx_v2s,
+            tx_v2_merkle_proofs,
+            new_member_leaves: None,
+            // §Q-2: UserTransfer-only slot — no channel action to open.
+            channel_action_indices: None,
+            channel_actions: None,
+            channel_action_merkle_proofs: None,
+        };
+        match mode {
+            CosignMode::Verified => candidate.produce_inter_channel_block(
+                signed_state,
+                &mut attached_tx,
+                &[1],
+                timestamp,
+                tx_v2_witness,
+            )?,
+            CosignMode::UnsignedStaging => candidate.produce_inter_channel_block_unsigned_staging(
+                signed_state,
+                &attached_tx,
+                &[1],
+                timestamp,
+                tx_v2_witness,
+            )?,
+        }
         candidate
             .accepted_inter_channel_txs
             .insert(descriptor.tx_hash);
@@ -852,6 +944,25 @@ impl ProductionBlockProducer {
         tx_tree_root: Bytes32,
         tx_v2_witness: BlockTxV2Witness,
     ) -> Result<(), ProductionBlockProducerError> {
+        self.produce_cosigned_block_with(
+            signed_state,
+            key_ids,
+            timestamp,
+            tx_tree_root,
+            tx_v2_witness,
+            CosignMode::Verified,
+        )
+    }
+
+    fn produce_cosigned_block_with(
+        &mut self,
+        signed_state: &ChannelState,
+        key_ids: &[u32],
+        timestamp: u64,
+        tx_tree_root: Bytes32,
+        tx_v2_witness: BlockTxV2Witness,
+        mode: CosignMode,
+    ) -> Result<(), ProductionBlockProducerError> {
         // Retired-MSU gate at the LOWEST public production facade. Rejecting only
         // `produce_member_set_update_block` is insufficient: callers of this generic method can
         // otherwise smuggle the same MemberSetUpdate action + new-member leaves directly inside a
@@ -887,12 +998,26 @@ impl ProductionBlockProducer {
                 channel.as_u64()
             ))
         })?;
-        verify_all_signatures(record, &[], signed_state).map_err(|e| {
-            ProductionBlockProducerError::WalletAuthorization(format!(
-                "channel {} is not N-of-N authorized: {e}",
-                channel.as_u64()
-            ))
-        })?;
+        match mode {
+            CosignMode::Verified => {
+                verify_all_signatures(record, &[], signed_state).map_err(|e| {
+                    ProductionBlockProducerError::WalletAuthorization(format!(
+                        "channel {} is not N-of-N authorized: {e}",
+                        channel.as_u64()
+                    ))
+                })?;
+            }
+            CosignMode::UnsignedStaging => {
+                // A staged exit-kit block is identified by the proposed state's digest; whatever
+                // partial signatures the proposer attached are ignored (the witness folds the
+                // registered signer set), so the staged head equals the committed one.
+                if signed_state.digest != signed_state.signing_digest() {
+                    return Err(ProductionBlockProducerError::WalletAuthorization(
+                        "proposed state digest does not match its signing digest".to_string(),
+                    ));
+                }
+            }
+        }
         if tx_tree_root == Bytes32::default() || signed_state.h2_tag != tx_tree_root {
             return Err(ProductionBlockProducerError::WalletAuthorization(
                 "co-signed state must bind this block's non-zero tx_tree_root in h2_tag"
@@ -957,9 +1082,13 @@ impl ProductionBlockProducer {
         }
 
         let mut candidate = self.clone();
+        candidate.witness.unsigned_staging = matches!(mode, CosignMode::UnsignedStaging);
         candidate.witness.next_channel_cosign = Some(ChannelCosignBundle {
             state: signed_state.clone(),
-            signatures: signed_state.member_signatures.clone(),
+            signatures: match mode {
+                CosignMode::Verified => signed_state.member_signatures.clone(),
+                CosignMode::UnsignedStaging => Vec::new(),
+            },
         });
         candidate.witness.add_block_with_tx_v2(
             channel.as_u64() as u32,

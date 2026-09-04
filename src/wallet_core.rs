@@ -1199,6 +1199,17 @@ pub fn verify_snapshot(
     // Own BALANCE-SLOT (member OR delegate, `0..1024`) — u16, see `MemberInfo::slot`.
     my_keys: Option<(&MemberKeys, u16)>,
 ) -> WResult<()> {
+    verify_snapshot_structure(snapshot)?;
+    verify_all_signatures(&snapshot.record, &snapshot.members, &snapshot.state)?;
+    verify_snapshot_own_slot(snapshot, my_keys)
+}
+
+/// Everything [`verify_snapshot`] checks EXCEPT the member signatures: channel-id agreement,
+/// record validity, the slot-bijective member list anchored to `member_pubkeys_root` /
+/// `regev_pk_root`, and balance-state validity. This is the exact structural gate a PROPOSED,
+/// not-yet-signed successor passes when the live balance service prepares its signer-independent
+/// exit kit before any member releases a signature; it never stands in for the N-of-N.
+pub fn verify_snapshot_structure(snapshot: &ChannelSnapshot) -> WResult<()> {
     // A snapshot is one channel-scoped object.  Do this before any nested validation so a record
     // cannot be paired with an otherwise self-consistent, genuinely signed state from another
     // channel (in particular when two channels reuse the same member set).
@@ -1257,7 +1268,15 @@ pub fn verify_snapshot(
         .balance_state
         .validate()
         .map_err(|e| WalletError(format!("{e:?}")))?;
-    verify_all_signatures(&snapshot.record, &snapshot.members, &snapshot.state)?;
+    Ok(())
+}
+
+/// The own-slot decryption half of [`verify_snapshot`].
+fn verify_snapshot_own_slot(
+    snapshot: &ChannelSnapshot,
+    my_keys: Option<(&MemberKeys, u16)>,
+) -> WResult<()> {
+    let active = snapshot.record.member_count as usize + snapshot.record.delegate_count as usize;
     if let Some((keys, slot)) = my_keys {
         // A delegate (slot in `member_count..active`) verifies/decrypts its own slot exactly like a
         // member, so admit the full active region.
@@ -2319,6 +2338,35 @@ pub fn attach_small_block_signatures(
         ))
     })?;
 
+    verify_small_block_state_binding(record, a_signed, inter_channel_tx)?;
+
+    // Slot order is the order every aggregation path consumes; `verify_all_signatures` has already
+    // proved one signature per active slot with the registered pk_g. Install on a clone and assert
+    // that the sender-authorized A11 message is invariant under this final-wire mutation. This
+    // would have failed before IMI5 stopped hashing the mutable signature/proof carriers.
+    let a11_before = inter_channel_tx.signing_digest();
+    let mut signatures = a_signed.member_signatures.clone();
+    signatures.sort_by_key(|s| s.member_slot);
+    let mut final_tx = inter_channel_tx.clone();
+    final_tx.signed_small_block.signatures = signatures;
+    if final_tx.signing_digest() != a11_before {
+        return bail(
+            "attaching N-of-N small-block signatures changed the A11 sender-authorized digest",
+        );
+    }
+    *inter_channel_tx = final_tx;
+    Ok(())
+}
+
+/// The signature-independent half of [`attach_small_block_signatures`]: the state/block identity
+/// bindings (4), (2) and (3) above. Exit-kit staging folds a PROPOSED post-debit state into a
+/// producer block before any member signs, and this is exactly the check set it may rely on;
+/// (1), the cryptographic N-of-N, is verified when the real signatures arrive.
+pub fn verify_small_block_state_binding(
+    record: &ChannelRecord,
+    a_signed: &ChannelState,
+    inter_channel_tx: &InterChannelTx,
+) -> WResult<()> {
     let msg = &inter_channel_tx.signed_small_block.message;
 
     // (4) Identity of the state vs the block, before the value-bearing bindings.
@@ -2370,22 +2418,6 @@ pub fn attach_small_block_signatures(
             h1, msg.state_commitment_root
         ));
     }
-
-    // Slot order is the order every aggregation path consumes; `verify_all_signatures` has already
-    // proved one signature per active slot with the registered pk_g. Install on a clone and assert
-    // that the sender-authorized A11 message is invariant under this final-wire mutation. This
-    // would have failed before IMI5 stopped hashing the mutable signature/proof carriers.
-    let a11_before = inter_channel_tx.signing_digest();
-    let mut signatures = a_signed.member_signatures.clone();
-    signatures.sort_by_key(|s| s.member_slot);
-    let mut final_tx = inter_channel_tx.clone();
-    final_tx.signed_small_block.signatures = signatures;
-    if final_tx.signing_digest() != a11_before {
-        return bail(
-            "attaching N-of-N small-block signatures changed the A11 sender-authorized digest",
-        );
-    }
-    *inter_channel_tx = final_tx;
     Ok(())
 }
 
@@ -6395,6 +6427,24 @@ pub struct ChannelWithdrawalArtifacts {
     pub erc20_withdrawal_mle_json: Option<String>,
     /// Multitoken Phase 5b: the ERC-20 lane's committed payout descriptor (`withdrawERC20` input).
     pub erc20_payout_json: Option<String>,
+    /// Signer-independent exit co-generation: the channel's FULL private state after the whole
+    /// registration → deposit → withdrawal-tx chain (the opening of the final balance proof's
+    /// `private_commitment`). The close-fixture co-generator feeds it to
+    /// `CloseAssetBackingWitness::from_full_private_state_and_channel_state` so the backing proof
+    /// witnesses the SAME asset tree the lifecycle's balance proof committed to.
+    pub full_private_state: crate::common::private_state::FullPrivateState,
+    /// The final (post-withdrawal-send) balance proof of the lifecycle, verifiable against
+    /// [`Self::balance_vd`]. Its `settled_tx_chain` / `private_commitment` / `public_state` are
+    /// what the close AND backing circuits bind.
+    pub final_balance_proof: ProofWithPublicInputs<F, C, D>,
+    /// The chain's FINAL `ExtendedPublicState` (`commitment()` == the lifecycle's
+    /// `final_state_root`; `inner.block_number` == the last block, the backing anchor).
+    pub final_ext_public_state:
+        crate::circuits::validity::block_hash_chain::ext_public_state::ExtendedPublicState,
+    /// The balance verifier data the lifecycle proved under (the `BalanceProcessor`'s
+    /// `balance_vd()`), so a consumer can assert its own close/backing circuits were built over the
+    /// identical balance VK before spending minutes proving.
+    pub balance_vd: VerifierCircuitData<F, C, D>,
 }
 
 // ── Output JSON schemas (moved verbatim from generate_withdrawal_fixture.rs) ──────────────────
@@ -7228,6 +7278,10 @@ pub fn build_channel_withdrawal(
         payout_json,
         erc20_withdrawal_mle_json,
         erc20_payout_json,
+        full_private_state: balance_witness_generator.full_private_state.clone(),
+        final_balance_proof: withdrawal_balance_proof,
+        final_ext_public_state: ext_public_state,
+        balance_vd,
     })
 }
 

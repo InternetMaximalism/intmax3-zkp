@@ -19,27 +19,40 @@ required for the earlier `requestClose` transaction.
 ## Release deployment manifest
 
 Create this manifest from independently reviewed deployment records and runtime bytecode. Do not
-copy addresses or hashes from the downloaded `/backing` response.
+copy addresses or hashes from the downloaded `/backing` response. After `channel_member
+deploy-settlement` has activated the settlement binding, `channel_member
+export-close-deployment-manifest close-deployment.json <rpc>` writes exactly this file (schema 3)
+from the durable binding: every runtime code hash recorded at activation is re-read from the
+chain at the activation checkpoint and must still match, the MLE verifier is read back through
+the settlement verifier and its `allowedChainId` must equal the RPC chain, and the printed SHA-256
+is the `--deployment-manifest-sha256` pin. Review the output against the deployment records
+before handing it to a publisher.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "chainId": 1,
   "rollup": "0x1111111111111111111111111111111111111111",
   "rollupRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "manager": "0x2222222222222222222222222222222222222222",
   "managerDeploymentBlock": 12345678,
   "managerRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
+  "closeFundingMaterializer": "0x5555555555555555555555555555555555555555",
+  "closeFundingMaterializerRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "settlementVerifier": "0x3333333333333333333333333333333333333333",
   "settlementVerifierRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "mleVerifier": "0x4444444444444444444444444444444444444444",
   "mleVerifierRuntimeCodeHash": "0x<keccak256-runtime-bytecode>",
   "balanceVerifierDataSha256": "0x<sha256-canonical-balance-vd>",
   "mleProofAbiVersion": 2,
+  "attestSignedHeadBackingSelector": "0x<4-byte-selector>",
   "submitCloseIntentSelector": "0x<4-byte-selector>",
   "finalizeCloseGuardedSelector": "0x<4-byte-selector>",
+  "materializeSignedHeadSelector": "0x<4-byte-selector>",
   "closeSubmittedTopic": "0x<32-byte-event-topic>",
-  "closeFinalizedTopic": "0x<32-byte-event-topic>"
+  "closeFinalizedTopic": "0x<32-byte-event-topic>",
+  "signedHeadBackingAttestedTopic": "0x<32-byte-event-topic>",
+  "signedHeadExitMaterializedTopic": "0x<32-byte-event-topic>"
 }
 ```
 

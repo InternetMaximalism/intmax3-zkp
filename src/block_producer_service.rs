@@ -103,6 +103,16 @@ enum ProductionJournalAction {
         plan: CloseFundingPlan,
         timestamp: u64,
     },
+    /// Exit-kit staging: the descriptor's block folded for a PROPOSED, still unsigned post-debit
+    /// state on the prepared (non-authoritative) producer. It only ever exists as `prepared`; the
+    /// authoritative journal records the `PostInterChannel` twin that `post_inter_channel`
+    /// promotes it into once the real N-of-N arrives and reproduces the identical head.
+    StagedInterChannelExitKit {
+        proposed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+        timestamp: u64,
+    },
     /// detail2 §Q-3: one member-set-update block (rotate / add on the registered cluster).
     PostMemberSetUpdate {
         signed_state: ChannelState,
@@ -121,6 +131,7 @@ impl ProductionJournalAction {
             | Self::SyncOffchainHeads { timestamp, .. }
             | Self::PostInterChannel { timestamp, .. }
             | Self::PostCloseFunding { timestamp, .. }
+            | Self::StagedInterChannelExitKit { timestamp, .. }
             | Self::PostMemberSetUpdate { timestamp, .. } => *timestamp,
         }
     }
@@ -312,6 +323,17 @@ pub enum BlockProducerCommand {
         signed_state: ChannelState,
         plan: CloseFundingPlan,
     },
+    /// Stage the exit-kit block of a proposed, unsigned post-debit state (see
+    /// [`BlockProducerService::prepare_inter_channel_exit_kit`]).
+    PrepareInterChannelExitKit {
+        request_id: String,
+        proposed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+    },
+    AbandonPreparedInterChannelExitKit {
+        request_id: String,
+    },
     PostMemberSetUpdate {
         request_id: String,
         signed_state: ChannelState,
@@ -445,6 +467,23 @@ impl BlockProducerService {
                     IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON.to_string(),
                 ))
             }
+            BlockProducerCommand::PrepareInterChannelExitKit {
+                request_id,
+                proposed_state,
+                debit_payload,
+                descriptor,
+            } => Ok(BlockProducerCommandResult::Receipt(
+                self.prepare_inter_channel_exit_kit(
+                    request_id,
+                    proposed_state,
+                    debit_payload,
+                    descriptor,
+                )?,
+            )),
+            BlockProducerCommand::AbandonPreparedInterChannelExitKit { request_id } => {
+                self.abandon_prepared_inter_channel_exit_kit(&request_id)?;
+                Ok(BlockProducerCommandResult::Status(self.status()?))
+            }
             BlockProducerCommand::PostMemberSetUpdate { .. } => {
                 Err(BlockProducerServiceError::InvalidRequest(
                     MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
@@ -484,7 +523,6 @@ impl BlockProducerService {
         descriptor: InterChannelTransferDescriptor,
     ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
         self.ensure_healthy()?;
-        self.ensure_no_prepared()?;
         validate_request_id(&request_id)?;
         let fingerprint = request_fingerprint(
             "postInterChannel",
@@ -495,6 +533,55 @@ impl BlockProducerService {
             },
         )?;
         if let Some(receipt) = self.idempotent_receipt(&request_id, fingerprint)? {
+            return Ok(receipt);
+        }
+        if let Some(prepared) = self.disk.prepared.clone() {
+            // A staged exit-kit block for exactly this transition is promoted in place: the real
+            // N-of-N must reproduce the identical head the signer's exit kit was anchored on.
+            let staged_fingerprint =
+                staged_exit_kit_fingerprint(&signed_state, &debit_payload, &descriptor)?;
+            let staged_timestamp = match &prepared.action {
+                ProductionJournalAction::StagedInterChannelExitKit { timestamp, .. }
+                    if prepared.request_fingerprint == staged_fingerprint =>
+                {
+                    *timestamp
+                }
+                _ => {
+                    return Err(BlockProducerServiceError::Conflict(format!(
+                        "prepared request {:?} freezes the authoritative producer and is not the \
+                         staged exit-kit block of this transition",
+                        prepared.request_id
+                    )));
+                }
+            };
+            let action = ProductionJournalAction::PostInterChannel {
+                signed_state,
+                debit_payload,
+                descriptor,
+                timestamp: staged_timestamp,
+            };
+            let (candidate, entry) =
+                self.build_candidate_entry(request_id, fingerprint, action)?;
+            if entry.result != prepared.result {
+                return Err(BlockProducerServiceError::Conflict(
+                    "the N-of-N block does not reproduce the staged exit-kit head; abandon the \
+                     staged entry and prepare the exit kit again"
+                        .to_string(),
+                ));
+            }
+            let receipt = BlockProducerReceipt::from_entry(&entry);
+            let mut next_disk = self.disk.clone();
+            next_disk.prepared = None;
+            next_disk.entries.push(entry);
+            next_disk.generation = receipt.generation;
+            next_disk.tail_hash = receipt.entry_hash;
+            if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+                self.poisoned = true;
+                return Err(error);
+            }
+            self.disk = next_disk;
+            self.producer = candidate;
+            self.prepared_producer = None;
             return Ok(receipt);
         }
         for entry in &self.disk.entries {
@@ -1053,6 +1140,11 @@ impl BlockProducerService {
         for entry in &self.disk.entries {
             consider(&entry.result)?;
         }
+        // A prepared entry is durable and hash-linked to the journal tail; an exit kit proved
+        // against it anchors on the exact head the pending commit must reproduce.
+        if let Some(prepared) = &self.disk.prepared {
+            consider(&prepared.result)?;
+        }
         matched.ok_or_else(|| {
             BlockProducerServiceError::Conflict(
                 "balance public state is absent from the authenticated producer journal".into(),
@@ -1151,6 +1243,151 @@ impl BlockProducerService {
         self.idempotent_receipt(request_id, fingerprint)
     }
 
+    /// The receipt of the currently staged exit-kit block for exactly this proposed transition.
+    pub fn receipt_for_staged_inter_channel_exit_kit(
+        &self,
+        request_id: &str,
+        proposed_state: &ChannelState,
+        debit_payload: &InterChannelDebitPayload,
+        descriptor: &InterChannelTransferDescriptor,
+    ) -> Result<Option<BlockProducerReceipt>, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = staged_exit_kit_fingerprint(proposed_state, debit_payload, descriptor)?;
+        match &self.disk.prepared {
+            Some(prepared) if prepared.request_id == request_id => {
+                if prepared.request_fingerprint != fingerprint
+                    || !matches!(
+                        &prepared.action,
+                        ProductionJournalAction::StagedInterChannelExitKit { .. }
+                    )
+                {
+                    return Err(BlockProducerServiceError::Conflict(format!(
+                        "prepared request {request_id:?} was staged with different content"
+                    )));
+                }
+                Ok(Some(BlockProducerReceipt::from_entry(prepared)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Stage the descriptor's block for a PROPOSED, unsigned post-debit state so the live balance
+    /// service can prove the signer's exit kit against the exact block `post_inter_channel` will
+    /// commit once the N-of-N arrives. Like a prepared close funding, a staged entry freezes every
+    /// other producer mutation: the anchor a signer archived before signing must be the anchor
+    /// that lands, or nothing lands.
+    pub fn prepare_inter_channel_exit_kit(
+        &mut self,
+        request_id: String,
+        proposed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+    ) -> Result<BlockProducerReceipt, BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        validate_request_id(&request_id)?;
+        // A proposal may carry the proposer's own partial signatures; the staged block is
+        // identified by the state digest, so every fingerprint is taken over the
+        // signature-stripped proposal (the same normalisation `post_inter_channel` applies).
+        let fingerprint = staged_exit_kit_fingerprint(&proposed_state, &debit_payload, &descriptor)?;
+        if let Some(prepared) = &self.disk.prepared {
+            if prepared.request_id == request_id && prepared.request_fingerprint == fingerprint {
+                return Ok(BlockProducerReceipt::from_entry(prepared));
+            }
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "prepared request {:?} freezes the authoritative producer; commit or abandon it \
+                 before staging another exit kit",
+                prepared.request_id
+            )));
+        }
+        if self
+            .disk
+            .entries
+            .iter()
+            .any(|entry| entry.request_id == request_id)
+        {
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "request id {request_id:?} already names a committed journal entry"
+            )));
+        }
+        for entry in &self.disk.entries {
+            let accepted_digest = match &entry.action {
+                ProductionJournalAction::PostCloseFunding {
+                    signed_state: accepted,
+                    ..
+                }
+                | ProductionJournalAction::PostInterChannel {
+                    signed_state: accepted,
+                    ..
+                } => Some(accepted.digest),
+                ProductionJournalAction::SyncOffchainHeads { signed_states, .. } => signed_states
+                    .iter()
+                    .find(|state| state.digest == proposed_state.digest)
+                    .map(|state| state.digest),
+                _ => None,
+            };
+            if accepted_digest == Some(proposed_state.digest) {
+                return Err(BlockProducerServiceError::Conflict(format!(
+                    "channel state {} was already admitted by request {}",
+                    proposed_state.digest, entry.request_id
+                )));
+            }
+        }
+        let timestamp = self.next_timestamp()?;
+        let action = ProductionJournalAction::StagedInterChannelExitKit {
+            proposed_state,
+            debit_payload,
+            descriptor,
+            timestamp,
+        };
+        let (candidate, entry) = self.build_candidate_entry(request_id, fingerprint, action)?;
+        let receipt = BlockProducerReceipt::from_entry(&entry);
+        let mut next_disk = self.disk.clone();
+        next_disk.prepared = Some(entry);
+        if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.disk = next_disk;
+        self.prepared_producer = Some(candidate);
+        Ok(receipt)
+    }
+
+    /// Drop a staged exit-kit block that will not be committed (the signer refused, or the
+    /// transition was rebuilt). Idempotent. A prepared close funding is never abandoned here: only
+    /// the local validity acknowledgement decides its fate.
+    pub fn abandon_prepared_inter_channel_exit_kit(
+        &mut self,
+        request_id: &str,
+    ) -> Result<(), BlockProducerServiceError> {
+        self.ensure_healthy()?;
+        let Some(prepared) = &self.disk.prepared else {
+            return Ok(());
+        };
+        if prepared.request_id != request_id {
+            return Err(BlockProducerServiceError::Conflict(format!(
+                "prepared request {:?} is not {request_id:?}",
+                prepared.request_id
+            )));
+        }
+        if !matches!(
+            &prepared.action,
+            ProductionJournalAction::StagedInterChannelExitKit { .. }
+        ) {
+            return Err(BlockProducerServiceError::InvalidRequest(
+                "only a staged exit-kit block may be abandoned".to_string(),
+            ));
+        }
+        let mut next_disk = self.disk.clone();
+        next_disk.prepared = None;
+        if let Err(error) = persist_journal(&self.journal_path, &next_disk) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.disk = next_disk;
+        self.prepared_producer = None;
+        Ok(())
+    }
+
     /// Authenticate a terminal close-funding receipt against its complete signed state and plan.
     pub fn receipt_for_close_funding(
         &self,
@@ -1247,7 +1484,7 @@ impl BlockProducerService {
     fn ensure_no_prepared(&self) -> Result<(), BlockProducerServiceError> {
         if let Some(prepared) = &self.disk.prepared {
             Err(BlockProducerServiceError::Conflict(format!(
-                "prepared close-funding request {:?} freezes all other producer mutations",
+                "prepared request {:?} freezes all other producer mutations until it is committed or abandoned",
                 prepared.request_id
             )))
         } else {
@@ -1360,6 +1597,32 @@ impl BlockProducerService {
     }
 }
 
+/// Fingerprint domain of a staged exit-kit block: the proposed state (no signatures), the debit
+/// payload and the descriptor.
+const STAGED_INTER_CHANNEL_EXIT_KIT_DOMAIN: &str = "stageInterChannelExitKit";
+
+/// Fingerprint of a staged exit-kit block over the signature-stripped proposal (state and the
+/// payload's proposed state): the proposer may attach partial signatures and the co-signed post
+/// carries the complete set, yet both name the same block.
+fn staged_exit_kit_fingerprint(
+    state: &ChannelState,
+    debit_payload: &InterChannelDebitPayload,
+    descriptor: &InterChannelTransferDescriptor,
+) -> Result<Bytes32, BlockProducerServiceError> {
+    let mut stripped_state = state.clone();
+    stripped_state.member_signatures.clear();
+    let mut stripped_payload = debit_payload.clone();
+    stripped_payload.proposed_next_state.member_signatures.clear();
+    request_fingerprint(
+        STAGED_INTER_CHANNEL_EXIT_KIT_DOMAIN,
+        &PostFingerprint {
+            signed_state: &stripped_state,
+            debit_payload: &stripped_payload,
+            descriptor,
+        },
+    )
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PostFingerprint<'a> {
@@ -1412,6 +1675,19 @@ fn apply_action(
         } => {
             producer.produce_close_funding_block(signed_state, plan, *timestamp)?;
         }
+        ProductionJournalAction::StagedInterChannelExitKit {
+            proposed_state,
+            debit_payload,
+            descriptor,
+            timestamp,
+        } => {
+            producer.produce_inter_channel_descriptor_block_unsigned_staging(
+                proposed_state,
+                debit_payload,
+                descriptor,
+                *timestamp,
+            )?;
+        }
         ProductionJournalAction::PostMemberSetUpdate { .. } => {
             return Err(BlockProducerServiceError::InvalidRequest(
                 MEMBER_SET_UPDATE_RETIRED_REASON.to_string(),
@@ -1445,6 +1721,17 @@ fn verify_and_replay(
     }) {
         return Err(BlockProducerServiceError::Journal(format!(
             "entry {} contains a disabled legacy member-set update; operator migration is required",
+            index + 1
+        )));
+    }
+    if let Some((index, _)) = disk.entries.iter().enumerate().find(|(_, entry)| {
+        matches!(
+            &entry.action,
+            ProductionJournalAction::StagedInterChannelExitKit { .. }
+        )
+    }) {
+        return Err(BlockProducerServiceError::Journal(format!(
+            "entry {} is an unsigned exit-kit staging block inside the authoritative journal",
             index + 1
         )));
     }
@@ -1545,9 +1832,11 @@ fn verify_and_replay(
         if !matches!(
             &prepared.action,
             ProductionJournalAction::PostCloseFunding { .. }
+                | ProductionJournalAction::StagedInterChannelExitKit { .. }
         ) {
             return Err(BlockProducerServiceError::Journal(
-                "prepared entry is not a terminal close-funding action".to_string(),
+                "prepared entry is neither a terminal close funding nor a staged exit-kit block"
+                    .to_string(),
             ));
         }
         let expected_fingerprint = fingerprint_for_action(&prepared.action)?;
@@ -1688,6 +1977,12 @@ fn fingerprint_for_action(
             "postCloseFunding",
             &CloseFundingFingerprint { signed_state, plan },
         ),
+        ProductionJournalAction::StagedInterChannelExitKit {
+            proposed_state,
+            debit_payload,
+            descriptor,
+            ..
+        } => staged_exit_kit_fingerprint(proposed_state, debit_payload, descriptor),
         ProductionJournalAction::PostMemberSetUpdate {
             signed_state,
             old_members,

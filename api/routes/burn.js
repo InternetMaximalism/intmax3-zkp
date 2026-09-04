@@ -4,6 +4,7 @@ const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 const producer = require('../lib/block-producer');
+const { cliWithPreparedExitKit } = require('../lib/exit-kit');
 
 const router = Router({ mergeParams: true });
 
@@ -57,7 +58,16 @@ router.post('/cosign', (req, res) => {
     }
     const liveNonceEnv = await producer.authoritativeBaseNonceEnv(ch);
     if (!fs.existsSync(wc(ch, 'burn_cosigned.json'))) {
-      cli(ch, ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'], liveNonceEnv);
+      // Signer-independent exit: the burn debits the fund vector and pushes the settle chain, so
+      // the exit kit for the exact post-burn state is proved against the staged producer block
+      // BEFORE the co-signers release their signatures; `postInterChannel` then commits that
+      // very block.
+      await cliWithPreparedExitKit(
+        ch,
+        ['cosign-burn-send', 'burn_payload.json', 'burn_descriptor.json', 'burn_cosigned.json'],
+        liveNonceEnv,
+        { requestId: producerRequestId },
+      );
     }
     // This legacy alias must have the same atomic security semantics as
     // `/partial-withdrawal/burn`. Merely co-signing would leave the resident base nonce unchanged,

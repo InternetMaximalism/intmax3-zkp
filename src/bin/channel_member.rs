@@ -92,7 +92,7 @@ use intmax3_zkp::{
     },
     public_close_prover::{
         MAX_BALANCE_VERIFIER_DATA_BYTES, MAX_PUBLIC_BACKING_ENVELOPE_BYTES,
-        PublicCloseExpectations, parse_public_close_backing_envelope, verify_public_backing,
+        PublicCloseExpectations, parse_public_close_backing_envelope, verify_public_backing, verify_public_backing_proposed,
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::{
@@ -278,22 +278,29 @@ struct ControlledMember {
 /// `applied_tx_identities` and the old entries were dropped without a diagnostic. A security
 /// ledger that resets itself in silence is worse than no ledger, because the operator believes it
 /// is running. Bump this whenever the on-disk shape of a ledger changes.
-const STATE_SCHEMA_VERSION: u32 = 4;
+const STATE_SCHEMA_VERSION: u32 = 5;
 
 /// The replay-ledger keys `cli_state.json` MUST carry. SECURITY: `load_state` checks for these BY
 /// NAME and fails LOUDLY on absence — the enumeration is deliberately in one auditable place. Add
 /// a key here the moment a new ledger is added; RENAMING a key here without a
 /// `STATE_SCHEMA_VERSION` bump is the exact mistake this list exists to make impossible to repeat.
-const REQUIRED_LEDGER_KEYS: [&str; 5] = [
+const REQUIRED_LEDGER_KEYS: [&str; 6] = [
     "applied_tx_identities",
     "spent_tx_identities",
     "imported_deposits",
     "state_signing_ledger",
     "signer_exit_kit_receipt",
+    "prepared_exit_kit_receipt",
 ];
 const SETTLEMENT_BINDING_KEY: &str = "settlement_binding";
 const STATE_SIGNING_LEDGER_KEY: &str = "state_signing_ledger";
 const SIGNER_EXIT_KIT_RECEIPT_KEY: &str = "signer_exit_kit_receipt";
+const PREPARED_EXIT_KIT_RECEIPT_KEY: &str = "prepared_exit_kit_receipt";
+/// Path of the envelope the live balance service prepared for the exact successor a command is
+/// about to sign (`--propose-exit-kit` emits the proposal; the API relays it and sets this).
+const PREPARED_EXIT_KIT_ENV: &str = "INTMAX_PREPARED_EXIT_KIT";
+const EXIT_KIT_PROPOSAL_FILE: &str = "exit_kit_proposal.json";
+const PROPOSE_EXIT_KIT_FLAG: &str = "--propose-exit-kit";
 const SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION: u32 = 1;
 const SIGNER_EXIT_KIT_ARCHIVE_DIR: &str = ".signer-exit-kits";
 
@@ -341,6 +348,15 @@ impl StateSigningPurpose {
         )
     }
 
+    /// Destination-side inter-channel credits only ADD funds to this channel and post no block
+    /// for it, so the predecessor head's exit kit stays current on L1: members can still exit at
+    /// the pre-credit head if the coordinator withholds the credited one. Signing such a successor
+    /// therefore needs the durable head receipt rather than a pre-sign kit; the credited head's
+    /// own kit is installed right after the live balance service receives the transfer.
+    fn is_credit_only(self) -> bool {
+        matches!(self, Self::InterChannelFundImport | Self::InterChannelBundleApply)
+    }
+
     /// H2=0 value-preserving successors may reuse the predecessor's backing proof, but only when
     /// the complete proof statement key is unchanged. Genesis has no predecessor and delegate
     /// enrollment is handled by its separate zero-opening construction.
@@ -370,6 +386,19 @@ struct SignerExitKitReceipt {
     token_funds_digest: Bytes32,
 }
 
+/// A verified, fsynced exit kit for a PROPOSED successor the signer has not released a
+/// signature over yet. `receipt.source_signed_head_digest` is the successor digest; the kit
+/// statement key is the successor's. Promoted into `signer_exit_kit_receipt` when that successor
+/// becomes the durable head, or discarded when the head moves elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreparedExitKitReceipt {
+    /// The durable head the proposal extends (the first of a two-state import chain extends it
+    /// directly; the second extends the first).
+    predecessor_digest: Bytes32,
+    receipt: SignerExitKitReceipt,
+}
+
 fn exit_kit_statement_key(state: &ChannelState) -> (ChannelId, Bytes32, Bytes32) {
     (
         state.channel_id,
@@ -385,6 +414,185 @@ fn exit_kit_statement_key(state: &ChannelState) -> (ChannelId, Bytes32, Bytes32)
 fn exit_kit_receipt_archive_path(receipt: &SignerExitKitReceipt) -> PathBuf {
     Path::new(SIGNER_EXIT_KIT_ARCHIVE_DIR)
         .join(format!("{}.json", hex::encode(receipt.archive_sha256)))
+}
+
+/// The pre-sign gate for deposit imports, token registrations and debits: a verified, fsynced
+/// exit kit for EXACTLY this successor (or for the first state of a two-state import chain the
+/// successor extends with an unchanged statement key) must be durable before the signature exists.
+/// The kit is installed from `INTMAX_PREPARED_EXIT_KIT` the first time it is needed and persisted
+/// before returning, so a crash between receipt and signature can only lose the signature.
+fn require_prepared_exit_kit(
+    cli: &mut CliState,
+    successor: &ChannelState,
+    purpose: StateSigningPurpose,
+) -> Result<(), String> {
+    let predecessor_digest = cli.snapshot.state.digest;
+    let key = exit_kit_statement_key(successor);
+    let matches = |prepared: &PreparedExitKitReceipt| {
+        prepared.predecessor_digest == predecessor_digest
+            && (
+                prepared.receipt.channel_id,
+                prepared.receipt.settled_tx_chain,
+                prepared.receipt.token_funds_digest,
+            ) == key
+            && (prepared.receipt.source_signed_head_digest == successor.digest
+                || successor.prev_digest == prepared.receipt.source_signed_head_digest)
+    };
+    if let Some(prepared) = cli.prepared_exit_kit_receipt.clone() {
+        if matches(&prepared) {
+            if !cli.prepared_exit_kit_receipt_verified {
+                verify_persisted_prepared_exit_kit(cli, &prepared)?;
+                cli.prepared_exit_kit_receipt_verified = true;
+            }
+            return Ok(());
+        }
+    }
+    let Ok(path) = std::env::var(PREPARED_EXIT_KIT_ENV) else {
+        return Err(format!(
+            "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} before signature release; \
+             no verified pre-sign exit kit is durable for successor {} (statement key {}, {}, {}). \
+             Run this command with {PROPOSE_EXIT_KIT_FLAG}, have the live balance service prepare \
+             the kit for that exact proposal, and re-run with {PREPARED_EXIT_KIT_ENV}=<envelope>",
+            successor.digest,
+            key.0.as_u64(),
+            key.1,
+            key.2
+        ));
+    };
+    let envelope_bytes = read_bounded_regular_file(
+        Path::new(&path),
+        MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+        "prepared signer exit-kit envelope",
+    )?;
+    let receipt = verified_prepared_exit_kit_receipt(cli, &envelope_bytes, successor)?;
+    validate_signer_exit_kit_archive_directory()?;
+    let archive_path = exit_kit_receipt_archive_path(&receipt);
+    match fs::symlink_metadata(&archive_path) {
+        Ok(_) => {
+            let existing = read_bounded_regular_file(
+                &archive_path,
+                MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+                "existing content-addressed signer exit-kit envelope",
+            )?;
+            if existing != envelope_bytes {
+                return Err(
+                    "content-addressed signer exit-kit path contains different bytes".into(),
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_private_bytes_at(&archive_path, &envelope_bytes);
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect signer exit-kit archive {}: {error}",
+                archive_path.display()
+            ));
+        }
+    }
+    // Archive fsync first, then the small receipt, then (only after this returns) the signature.
+    cli.prepared_exit_kit_receipt = Some(PreparedExitKitReceipt {
+        predecessor_digest,
+        receipt,
+    });
+    cli.prepared_exit_kit_receipt_verified = true;
+    save_state(cli);
+    Ok(())
+}
+
+/// Destination-side inter-channel credits: the successor may only ADD funds (registry, token
+/// count and every non-credited position unchanged) and the durable head must already hold a
+/// verified exit kit, so an unavailable coordinator can never make the pre-credit head
+/// unexitable. The credited head's kit is installed by `install-exit-kit` once the live balance
+/// service has received the transfer; until then H2=0 signing stays refused.
+fn require_credit_only_successor_with_head_exit_kit(
+    cli: &mut CliState,
+    successor: &ChannelState,
+    purpose: StateSigningPurpose,
+) -> Result<(), String> {
+    let predecessor = cli.snapshot.state.clone();
+    if successor.prev_digest != predecessor.digest
+        && successor.prev_digest == Bytes32::default()
+    {
+        return Err(format!(
+            "SIGNER-INDEPENDENT EXIT: {purpose:?} successor does not extend the durable head"
+        ));
+    }
+    let same_registry = successor.balance_state.token_registry
+        == predecessor.balance_state.token_registry
+        && successor.balance_state.token_count == predecessor.balance_state.token_count;
+    let mut credited = 0usize;
+    let mut debited = false;
+    for slot in 0..successor.channel_fund.amounts.len() {
+        let (before, after) = (
+            predecessor.channel_fund.amounts[slot],
+            successor.channel_fund.amounts[slot],
+        );
+        if after > before {
+            credited += 1;
+        } else if after < before {
+            debited = true;
+        }
+    }
+    if !same_registry || debited || credited != 1 {
+        return Err(format!(
+            "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} before signature release; \
+             only a pure single-position credit of an unchanged token registry may be signed \
+             without a pre-sign exit kit"
+        ));
+    }
+    let receipt = cli.signer_exit_kit_receipt.clone().ok_or_else(|| {
+        format!(
+            "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} before signature release; \
+             the durable head has no verified signer exit-kit receipt, so the pre-credit head \
+             could not be exited if the credited one were withheld (run install-exit-kit)"
+        )
+    })?;
+    validate_exit_kit_receipt_for_head(&receipt, &predecessor)?;
+    if !cli.signer_exit_kit_receipt_verified {
+        verify_persisted_signer_exit_kit(cli)?;
+        cli.signer_exit_kit_receipt_verified = true;
+    }
+    Ok(())
+}
+
+/// Adopt `new_head` as the durable head and move the exit-kit receipts with it: a prepared kit
+/// whose statement key is the new head's becomes the head receipt; otherwise the head has no
+/// receipt until `install-exit-kit` archives the live balance service's kit for it.
+fn adopt_head_with_exit_kit_receipts(cli: &mut CliState, new_head: ChannelState) {
+    let key = exit_kit_statement_key(&new_head);
+    let promoted = cli.prepared_exit_kit_receipt.take().and_then(|prepared| {
+        let receipt = prepared.receipt;
+        let same_key = (
+            receipt.channel_id,
+            receipt.settled_tx_chain,
+            receipt.token_funds_digest,
+        ) == key;
+        let extends = receipt.source_signed_head_digest == new_head.digest
+            || new_head.prev_digest == receipt.source_signed_head_digest;
+        (same_key && extends).then_some(receipt)
+    });
+    let verified = cli.prepared_exit_kit_receipt_verified;
+    cli.prepared_exit_kit_receipt_verified = false;
+    match promoted {
+        Some(receipt) => {
+            cli.signer_exit_kit_receipt = Some(receipt);
+            cli.signer_exit_kit_receipt_verified = verified;
+        }
+        None => {
+            if cli
+                .signer_exit_kit_receipt
+                .as_ref()
+                .is_some_and(|receipt| validate_exit_kit_receipt_for_head(receipt, &new_head).is_err())
+            {
+                // The new head has a different statement key than the durable receipt: the head
+                // is kit-pending until `install-exit-kit` archives its kit.
+                cli.signer_exit_kit_receipt = None;
+                cli.signer_exit_kit_receipt_verified = false;
+            }
+        }
+    }
+    cli.snapshot.state = new_head;
 }
 
 fn validate_exit_kit_receipt_for_head(
@@ -430,12 +638,19 @@ fn enforce_exit_kit_before_signature_release(
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
     if purpose.requires_prepared_exit_kit() {
-        return Err(format!(
-            "SIGNER-INDEPENDENT EXIT REQUIRED: refusing {purpose:?} before signature release; \
-             this asset/composition-moving transition has no exact durable pre-sign exit kit. \
-             Stage and fsync the exact (channel_id, settled_tx_chain, token_funds_digest) kit \
-             before enabling this signing purpose"
-        ));
+        if purpose.is_terminal() {
+            return Err(
+                "SIGNER-INDEPENDENT EXIT REQUIRED: refusing CloseFunding before signature release; \
+                 the cooperative close-funding route is retired on-chain \
+                 (CooperativeCloseFundingDeprecated) and the close is published from the durable \
+                 signed head plus its exit kit instead"
+                    .into(),
+            );
+        }
+        if purpose.is_credit_only() {
+            return require_credit_only_successor_with_head_exit_kit(cli, successor, purpose);
+        }
+        return require_prepared_exit_kit(cli, successor, purpose);
     }
 
     if purpose.reuses_predecessor_exit_kit() {
@@ -596,6 +811,11 @@ struct CliState {
     /// once before the first signature is released.
     #[serde(skip)]
     signer_exit_kit_receipt_verified: bool,
+    /// No serde default: the pre-sign exit kit of the ONE asset/composition-moving successor
+    /// currently being co-signed. Absent in a legacy file is a migration event.
+    prepared_exit_kit_receipt: Option<PreparedExitKitReceipt>,
+    #[serde(skip)]
+    prepared_exit_kit_receipt_verified: bool,
     /// REPLAY LEDGER (inter-channel invariant 6): the set of inter-channel REPLAY IDENTITIES
     /// (`InterChannelTx::replay_identity()` — the token-FREE fold over
     /// `(source, dest, tx_tree_root, tx_leaf)`) already CREDITED into THIS channel (the
@@ -719,6 +939,21 @@ fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
         validate_exit_kit_receipt_for_head(receipt, &state.snapshot.state)?;
     } else if state.signer_exit_kit_receipt_verified {
         return Err("exit-kit verification cache is set without a durable receipt".into());
+    }
+    if let Some(prepared) = &state.prepared_exit_kit_receipt {
+        if prepared.predecessor_digest != state.snapshot.state.digest {
+            return Err(
+                "prepared exit-kit receipt does not extend the durable signed head".into(),
+            );
+        }
+        if prepared.receipt.schema_version != SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION
+            || prepared.receipt.source_signed_head_digest == Bytes32::default()
+            || prepared.receipt.archive_sha256 == [0u8; 32]
+        {
+            return Err("prepared exit-kit receipt is malformed".into());
+        }
+    } else if state.prepared_exit_kit_receipt_verified {
+        return Err("prepared exit-kit verification cache is set without a receipt".into());
     }
     for (key, entry) in &state.state_signing_ledger {
         let expected_key = state_signing_ledger_key(
@@ -2594,11 +2829,14 @@ fn cmd_migrate_state(args: &[String]) {
         .collect();
     let missing_signing = missing.contains(&STATE_SIGNING_LEDGER_KEY);
     let missing_exit_kit_receipt = missing.contains(&SIGNER_EXIT_KIT_RECEIPT_KEY);
+    let missing_prepared_exit_kit_receipt = missing.contains(&PREPARED_EXIT_KIT_RECEIPT_KEY);
     let missing_replay: Vec<&str> = missing
         .iter()
         .copied()
         .filter(|key| {
-            *key != STATE_SIGNING_LEDGER_KEY && *key != SIGNER_EXIT_KIT_RECEIPT_KEY
+            *key != STATE_SIGNING_LEDGER_KEY
+                && *key != SIGNER_EXIT_KIT_RECEIPT_KEY
+                && *key != PREPARED_EXIT_KIT_RECEIPT_KEY
         })
         .collect();
     let stale_version = obj
@@ -2643,6 +2881,14 @@ fn cmd_migrate_state(args: &[String]) {
         obj.insert(
             STATE_SIGNING_LEDGER_KEY.to_string(),
             serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+    if missing_prepared_exit_kit_receipt {
+        // Null is exact here: a legacy file was written before any pre-sign kit could exist, and
+        // every asset-moving signature stays refused until one is prepared and verified.
+        obj.insert(
+            PREPARED_EXIT_KIT_RECEIPT_KEY.to_string(),
+            serde_json::Value::Null,
         );
     }
     if missing_exit_kit_receipt {
@@ -3041,6 +3287,83 @@ fn verified_signer_exit_kit_receipt(
     Ok(receipt)
 }
 
+/// Cryptographically verify a PRE-SIGN exit-kit envelope for exactly `successor` and derive its
+/// receipt. The envelope carries the unsigned successor as its head; every Balance/backing proof
+/// check of the ordinary path applies, only the N-of-N check is replaced by digest equality.
+fn verified_prepared_exit_kit_receipt(
+    cli: &CliState,
+    envelope_bytes: &[u8],
+    successor: &ChannelState,
+) -> Result<SignerExitKitReceipt, String> {
+    let envelope = parse_public_close_backing_envelope(envelope_bytes)
+        .map_err(|error| format!("parse prepared signer exit-kit envelope: {error}"))?;
+    let (chain_id, rollup, vd_sha256) = signer_exit_kit_context(cli)?;
+    let expected = PublicCloseExpectations {
+        channel_id: cli.snapshot.record.channel_id,
+        chain_id,
+        rollup,
+        balance_verifier_data_sha256: Some(vd_sha256),
+    };
+    let verification =
+        verify_public_backing_proposed(&envelope, &expected, successor.digest)
+            .map_err(|error| format!("cryptographically verify prepared exit kit: {error}"))?;
+    if !verification.self_verified {
+        return Err("public backing verifier returned a non-verified receipt".into());
+    }
+    if envelope.backing.channel_record != cli.snapshot.record {
+        return Err("prepared exit kit is not for the signer's exact channel record".into());
+    }
+    let kit = envelope
+        .backing
+        .signed_head_exit_kit
+        .as_ref()
+        .ok_or_else(|| "verified prepared backing unexpectedly omitted its exit kit".to_string())?;
+    let receipt = SignerExitKitReceipt {
+        schema_version: SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION,
+        archive_sha256: sha256_bytes(envelope_bytes),
+        balance_verifier_data_sha256: vd_sha256,
+        chain_id,
+        rollup,
+        source_signed_head_digest: successor.digest,
+        channel_id: kit.backing_public_inputs.channel_id,
+        settled_tx_chain: kit.backing_public_inputs.settled_tx_chain,
+        token_funds_digest: kit.backing_public_inputs.token_funds_digest,
+    };
+    validate_exit_kit_receipt_for_head(&receipt, successor)?;
+    Ok(receipt)
+}
+
+/// Re-open, re-hash and cryptographically verify the archived PRE-SIGN envelope once per process.
+fn verify_persisted_prepared_exit_kit(
+    cli: &CliState,
+    prepared: &PreparedExitKitReceipt,
+) -> Result<(), String> {
+    validate_signer_exit_kit_archive_directory()?;
+    let path = exit_kit_receipt_archive_path(&prepared.receipt);
+    let bytes = read_bounded_regular_file(
+        &path,
+        MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
+        "content-addressed prepared signer exit-kit envelope",
+    )?;
+    if sha256_bytes(&bytes) != prepared.receipt.archive_sha256 {
+        return Err(format!(
+            "prepared signer exit-kit archive {} does not match its SHA-256 receipt",
+            path.display()
+        ));
+    }
+    let envelope = parse_public_close_backing_envelope(&bytes)
+        .map_err(|error| format!("parse archived prepared exit-kit envelope: {error}"))?;
+    let recomputed =
+        verified_prepared_exit_kit_receipt(cli, &bytes, &envelope.backing.signed_head)?;
+    if recomputed != prepared.receipt {
+        return Err(
+            "cryptographically reverified prepared exit-kit archive differs from its durable receipt"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Re-open, re-hash and cryptographically verify the exact archived envelope once per process.
 /// The boolean cache is non-serialized, so a restart can never trust yesterday's filesystem.
 fn verify_persisted_signer_exit_kit(cli: &CliState) -> Result<(), String> {
@@ -3069,6 +3392,163 @@ fn verify_persisted_signer_exit_kit(cli: &CliState) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// `--propose-exit-kit`: write the live balance service's proposal for the exact successor(s)
+/// this command would sign, and stop before any signature. The API relays the proposal to
+/// `livePrepareExitKit` and re-runs the command with `INTMAX_PREPARED_EXIT_KIT` set.
+fn emit_exit_kit_proposal(proposal: serde_json::Value) -> ! {
+    write_json(EXIT_KIT_PROPOSAL_FILE, &proposal);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&proposal).expect("serialize exit-kit proposal")
+    );
+    std::process::exit(0)
+}
+
+fn propose_exit_kit_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == PROPOSE_EXIT_KIT_FLAG)
+}
+
+/// `export-close-deployment-manifest <out.json> <rpc_url>`: emit the release deployment manifest
+/// (`DEPLOYMENT_MANIFEST_VERSION`) that `public_close_publisher` pins, from the ACTIVE settlement
+/// binding. Every address comes from the durable binding, every runtime code hash recorded at
+/// activation is re-read from the chain at the activation checkpoint and must still match, the
+/// MLE verifier is read back through the settlement verifier and its `allowedChainId` must equal
+/// the RPC chain, and the Balance verifier data is hashed from the local canonical bytes. The
+/// printed SHA-256 is the publisher's independent `--deployment-manifest-sha256` pin.
+fn cmd_export_close_deployment_manifest(args: &[String]) {
+    const USAGE: &str = "export-close-deployment-manifest <out.json> <rpc_url>";
+    let out_path = args.get(1).unwrap_or_else(|| die(USAGE));
+    let rpc = args.get(2).unwrap_or_else(|| die(USAGE));
+    let state = load_state();
+    let binding = state
+        .settlement_binding
+        .clone()
+        .unwrap_or_else(|| die("no durable settlement binding; run deploy-settlement first"));
+    if binding.status != SettlementBindingStatus::Active {
+        die("settlement binding is PREPARED, not ACTIVE; no deployment manifest can be exported");
+    }
+    let manager = binding
+        .manager
+        .as_deref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no manager"));
+    let verifier = binding
+        .verifier
+        .as_deref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no verifier"));
+    let materializer = binding
+        .materializer
+        .as_deref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no close-funding materializer"));
+    let checkpoint = binding
+        .activation_checkpoint
+        .as_ref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no activation checkpoint"));
+    let recorded = binding
+        .runtime_code_hashes
+        .as_ref()
+        .unwrap_or_else(|| die("ACTIVE settlement binding has no recorded runtime code hashes"));
+    let chain_id = rpc_chain_id(rpc);
+    if checkpoint.chain_id != chain_id {
+        die(format!(
+            "activation checkpoint chain {} differs from RPC chain {chain_id}",
+            checkpoint.chain_id
+        ));
+    }
+    if let Some(deployment) = &binding.deployment {
+        if deployment.chain_id != chain_id {
+            die(format!(
+                "deployment intent chain {} differs from RPC chain {chain_id}",
+                deployment.chain_id
+            ));
+        }
+    }
+    let block = checkpoint.block_number;
+    require_settlement_runtime_code_hashes_at(
+        rpc,
+        &binding.rollup,
+        verifier,
+        manager,
+        materializer,
+        recorded,
+        block,
+    );
+    let mle_verifier = cast_call_at(rpc, verifier, "closeMleVerifier()(address)", &[], block);
+    let mle_verifier = Address::from_hex(&mle_verifier)
+        .unwrap_or_else(|error| die(format!("settlement verifier closeMleVerifier(): {error:?}")));
+    let mle_verifier_hex = mle_verifier.to_hex();
+    let mle_runtime_code_hash = settlement_runtime_code_hash_at(rpc, &mle_verifier_hex, block);
+    let allowed_chain =
+        cast_call_at(rpc, &mle_verifier_hex, "allowedChainId()(uint256)", &[], block);
+    let allowed_chain: u64 = allowed_chain
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| die(format!("MLE verifier allowedChainId() is not a u64: {allowed_chain}")));
+    if allowed_chain != chain_id {
+        die(format!(
+            "MLE verifier {mle_verifier_hex} allows chain {allowed_chain}, RPC chain is {chain_id}"
+        ));
+    }
+    let manager_deployment_block = binding
+        .deployment
+        .as_ref()
+        .map(|deployment| deployment.start_block)
+        .unwrap_or(block);
+    if manager_deployment_block > block {
+        die("deployment start block is after the activation checkpoint");
+    }
+    let vd_bytes = read_bounded_regular_file(
+        Path::new(BALANCE_VD_FILE),
+        MAX_BALANCE_VERIFIER_DATA_BYTES as u64,
+        "local Balance verifier data",
+    )
+    .unwrap_or_else(|error| die(error));
+    let vd_sha256 = sha256_bytes(&vd_bytes);
+    let topic = |signature: &str| format!("0x{}", hex::encode(keccak_hash::keccak(signature.as_bytes()).0));
+    let finalize_selector = format!(
+        "0x{}",
+        hex::encode(
+            &keccak_hash::keccak(
+                intmax3_zkp::public_close_publisher::FINALIZE_CLOSE_GUARDED_SIGNATURE.as_bytes()
+            )
+            .0[..4]
+        )
+    );
+    let manifest = serde_json::json!({
+        "schemaVersion": intmax3_zkp::public_close_publisher::DEPLOYMENT_MANIFEST_VERSION,
+        "chainId": chain_id,
+        "rollup": binding.rollup,
+        "rollupRuntimeCodeHash": recorded.rollup,
+        "manager": manager,
+        "managerDeploymentBlock": manager_deployment_block,
+        "managerRuntimeCodeHash": recorded.manager,
+        "closeFundingMaterializer": materializer,
+        "closeFundingMaterializerRuntimeCodeHash": recorded.materializer,
+        "settlementVerifier": verifier,
+        "settlementVerifierRuntimeCodeHash": recorded.verifier,
+        "mleVerifier": mle_verifier_hex,
+        "mleVerifierRuntimeCodeHash": mle_runtime_code_hash,
+        "balanceVerifierDataSha256": format!("0x{}", hex::encode(vd_sha256)),
+        "mleProofAbiVersion": intmax3_zkp::public_close_publisher::MLE_PROOF_ABI_VERSION,
+        "attestSignedHeadBackingSelector": intmax3_zkp::public_close_publisher::ATTEST_SIGNED_HEAD_BACKING_SELECTOR,
+        "submitCloseIntentSelector": intmax3_zkp::public_close_publisher::SUBMIT_CLOSE_SELECTOR,
+        "finalizeCloseGuardedSelector": finalize_selector,
+        "materializeSignedHeadSelector": intmax3_zkp::public_close_publisher::MATERIALIZE_SIGNED_HEAD_SELECTOR,
+        "closeSubmittedTopic": topic(intmax3_zkp::public_close_publisher::CLOSE_SUBMITTED_EVENT),
+        "closeFinalizedTopic": topic(intmax3_zkp::public_close_publisher::CLOSE_FINALIZED_EVENT),
+        "signedHeadBackingAttestedTopic": topic(intmax3_zkp::public_close_publisher::SIGNED_HEAD_BACKING_ATTESTED_EVENT),
+        "signedHeadExitMaterializedTopic": topic(intmax3_zkp::public_close_publisher::SIGNED_HEAD_EXIT_MATERIALIZED_EVENT),
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest)
+        .unwrap_or_else(|error| die(format!("serialize deployment manifest: {error}")));
+    write_private_bytes_at(Path::new(out_path), &bytes);
+    println!(
+        "export-close-deployment-manifest OK: {out_path} (chain {chain_id}, checkpoint block {block}) \
+         sha256 0x{}",
+        hex::encode(sha256_bytes(&bytes))
+    );
 }
 
 fn cmd_install_exit_kit(args: &[String]) {
@@ -8651,6 +9131,7 @@ fn main() {
         "add-genesis-sig" => cmd_add_genesis_sig(&args),
         "send" => cmd_send(&args),
         "install-exit-kit" => cmd_install_exit_kit(&args),
+        "export-close-deployment-manifest" => cmd_export_close_deployment_manifest(&args),
         "cosign" => cmd_cosign(&args),
         "cosign-batch" => cmd_cosign_batch(&args),
         "cosign-refresh" => cmd_cosign_refresh(&args),
@@ -8696,7 +9177,7 @@ fn main() {
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  export-close-deployment-manifest <out.json> <rpc_url>: write the public_close_publisher deployment manifest (schema 3) from the ACTIVE settlement binding, re-reading every runtime code hash and the MLE verifier at the activation checkpoint; prints the manifest SHA-256 pin\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -8833,6 +9314,8 @@ fn cmd_init(args: &[String]) {
         // opens at zero, do not carry an archive verified against the older record: the new head
         // must be exported, verified and installed before any subsequent signature is released.
         signer_exit_kit_receipt: None,
+        prepared_exit_kit_receipt: None,
+        prepared_exit_kit_receipt_verified: false,
         signer_exit_kit_receipt_verified: false,
     };
 
@@ -10164,6 +10647,15 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("inter-channel send transition invalid: {e}")));
 
+    if propose_exit_kit_requested(args) {
+        emit_exit_kit_proposal(serde_json::json!({
+            "kind": "interChannelDebit",
+            "proposedState": payload.proposed_next_state,
+            "debitPayload": payload,
+            "descriptor": descriptor,
+        }));
+    }
+
     let mut a_head = payload.proposed_next_state.clone();
     ledger_sign_all_controlled(
         &mut a_state,
@@ -10333,9 +10825,9 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // The PREPARED journal contains both complete post-states and is fsynced before either channel
     // moves. A crash after one replacement is recovered by `recover-inter-transfers`; no later API
     // mutation can run first because its producer-head preflight invokes that command.
-    a_state.snapshot.state = a_head.clone();
+    adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
     a_state.spent_tx_identities.insert(replay_identity);
-    b_state.snapshot.state = b_head.clone();
+    adopt_head_with_exit_kit_receipts(&mut b_state, b_head.clone());
     b_state.applied_tx_identities.insert(replay_identity);
     let result = InterTransferOut {
         a_head: a_head.clone(),
@@ -10469,6 +10961,15 @@ fn cmd_cosign_burn_send(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("burn send transition invalid: {e}")));
 
+    if propose_exit_kit_requested(args) {
+        emit_exit_kit_proposal(serde_json::json!({
+            "kind": "interChannelDebit",
+            "proposedState": payload.proposed_next_state,
+            "debitPayload": payload,
+            "descriptor": descriptor,
+        }));
+    }
+
     let mut a_head = payload.proposed_next_state.clone();
     ledger_sign_all_controlled(
         &mut a_state,
@@ -10507,7 +11008,7 @@ fn cmd_cosign_burn_send(args: &[String]) {
     }
 
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
-    a_state.snapshot.state = a_head.clone();
+    adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
     a_state.spent_tx_identities.insert(burn_replay_identity);
     save_state(&a_state);
     write_json("channel_snapshot.json", &a_state.snapshot);
@@ -10671,6 +11172,19 @@ fn cmd_register_token(args: &[String]) {
     let mut proposed =
         build_token_register(&builder_keys, &state.snapshot, builder.slot, token_index)
             .unwrap_or_else(|e| die(format!("build token register: {e}")));
+    if propose_exit_kit_requested(args) {
+        verify_token_register_state_transition(
+            &state.snapshot.state,
+            &state.snapshot.record,
+            &proposed,
+            token_index,
+        )
+        .unwrap_or_else(|e| die(format!("REFUSING TO PROPOSE token register — {e}")));
+        emit_exit_kit_proposal(serde_json::json!({
+            "kind": "tokenRegister",
+            "successor": proposed,
+        }));
+    }
 
     // Every other CLI-controlled member re-runs the gate itself, then signs (check-and-sign).
     let controlled = state.controlled.clone();
@@ -10698,7 +11212,7 @@ fn cmd_register_token(args: &[String]) {
     verify_all_signatures(&state.snapshot.record, &state.snapshot.members, &proposed)
         .unwrap_or_else(|e| die(format!("token register not fully/validly signed: {e}")));
 
-    state.snapshot.state = proposed;
+    adopt_head_with_exit_kit_receipts(&mut state, proposed);
     save_state(&state);
     write_json("channel_snapshot.json", &state.snapshot);
     write_json(out_path, &state.snapshot.state);
@@ -14314,6 +14828,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     if let Some(bad) = args.iter().skip(1).find(|a| {
         a.starts_with("--")
             && a.as_str() != "--allow-unbound-depositor"
+            && a.as_str() != PROPOSE_EXIT_KIT_FLAG
             && !a.starts_with("--intmax-block-number=")
     }) {
         die(format!("unknown flag {bad:?}\nusage: {USAGE}"));
@@ -14599,6 +15114,15 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("L1 deposit import transition invalid: {e}")));
 
+    if propose_exit_kit_requested(args) {
+        emit_exit_kit_proposal(serde_json::json!({
+            "kind": "l1DepositImport",
+            "record": state.snapshot.record,
+            "members": state.snapshot.members,
+            "fundImportState": fund_state,
+        }));
+    }
+
     ledger_sign_all_controlled(
         &mut state,
         &mut fund_state,
@@ -14620,7 +15144,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("L1 bundle-apply state not N-of-N signed: {e}")));
 
-    state.snapshot.state = bundle_state.clone();
+    adopt_head_with_exit_kit_receipts(&mut state, bundle_state.clone());
     // Consume the deposit in the SAME save as the new snapshot: the credit and the ledger entry
     // land together, so a crash cannot leave a credited-but-unconsumed deposit.
     state.imported_deposits.insert(deposit_identity.clone());
@@ -17041,6 +17565,8 @@ mod signing_ledger_tests {
             // resets this skipped field to false and must re-open + cryptographically verify the
             // content-addressed archive before signing.
             signer_exit_kit_receipt_verified: true,
+            prepared_exit_kit_receipt: None,
+            prepared_exit_kit_receipt_verified: false,
         }
     }
 
@@ -17218,6 +17744,224 @@ mod signing_ledger_tests {
             "key equality must not become a vacuous receipt: {refusal}"
         );
         assert!(cli.state_signing_ledger.is_empty());
+    }
+
+    /// A registry change moves the token-funds digest and therefore the exit-kit statement key.
+    fn token_register_child(predecessor: &ChannelState) -> ChannelState {
+        let mut child = child_of(predecessor, 1);
+        child.balance_state.token_registry[1] = 7;
+        child.balance_state.token_count = 2;
+        child.balance_state.state_version = predecessor.balance_state.state_version + 1;
+        child.with_computed_digest()
+    }
+
+    fn prepared_receipt_for(cli: &CliState, successor: &ChannelState) -> PreparedExitKitReceipt {
+        let (channel_id, settled_tx_chain, token_funds_digest) =
+            exit_kit_statement_key(successor);
+        PreparedExitKitReceipt {
+            predecessor_digest: cli.snapshot.state.digest,
+            receipt: SignerExitKitReceipt {
+                schema_version: SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION,
+                archive_sha256: [0x33; 32],
+                balance_verifier_data_sha256: [0x22; 32],
+                chain_id: DEVNET_CHAIN_ID,
+                rollup: Address::from_hex("0x0000000000000000000000000000000000000043").unwrap(),
+                source_signed_head_digest: successor.digest,
+                channel_id,
+                settled_tx_chain,
+                token_funds_digest,
+            },
+        }
+    }
+
+    #[test]
+    fn prepared_exit_kit_releases_only_its_exact_successor_and_is_promoted_on_adoption() {
+        let mut cli = fixture();
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let successor = token_register_child(&cli.snapshot.state);
+        cli.prepared_exit_kit_receipt = Some(prepared_receipt_for(&cli, &successor));
+        cli.prepared_exit_kit_receipt_verified = true;
+        validate_signing_security_state(&cli).expect("prepared receipt extends the head");
+
+        // A sibling with a different statement key is not covered by the prepared kit.
+        let mut sibling = successor.clone();
+        sibling.balance_state.token_registry[1] = 9;
+        let sibling = sibling.with_computed_digest();
+        let refusal = ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &sibling,
+            StateSigningPurpose::TokenRegister,
+            None,
+            None,
+            |_| panic!("a sibling statement must be refused before signing"),
+        )
+        .unwrap_err();
+        assert!(
+            refusal.contains("no verified pre-sign exit kit is durable"),
+            "unexpected refusal: {refusal}"
+        );
+        assert!(cli.state_signing_ledger.is_empty());
+
+        // The exact successor signs.
+        ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &successor,
+            StateSigningPurpose::TokenRegister,
+            None,
+            None,
+            |keys| sign_state(keys, controlled.slot as u8, &successor).map_err(|e| e.to_string()),
+        )
+        .expect("prepared exit kit releases the exact successor");
+        assert_eq!(cli.state_signing_ledger.len(), 1);
+
+        // Adoption promotes the prepared receipt into the head receipt.
+        let prepared = cli.prepared_exit_kit_receipt.clone().unwrap();
+        adopt_head_with_exit_kit_receipts(&mut cli, successor.clone());
+        assert_eq!(cli.snapshot.state.digest, successor.digest);
+        assert_eq!(cli.signer_exit_kit_receipt, Some(prepared.receipt));
+        assert!(cli.signer_exit_kit_receipt_verified);
+        assert!(cli.prepared_exit_kit_receipt.is_none());
+        validate_signing_security_state(&cli).expect("promoted receipt matches the new head");
+    }
+
+    #[test]
+    fn two_state_import_chain_reuses_one_prepared_kit_for_its_bundle_step() {
+        let mut cli = fixture();
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let mut fund_import = child_of(&cli.snapshot.state, 1);
+        fund_import.channel_fund.amounts[0] = U256::from(5u64);
+        fund_import.balance_state.settled_tx_chain =
+            Bytes32::from_hex("0x2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
+        let fund_import = fund_import.with_computed_digest();
+        let mut bundle = fund_import.clone();
+        bundle.prev_digest = fund_import.digest;
+        bundle.epoch += 1;
+        bundle.balance_state.state_version += 1;
+        let bundle = bundle.with_computed_digest();
+        cli.prepared_exit_kit_receipt = Some(prepared_receipt_for(&cli, &fund_import));
+        cli.prepared_exit_kit_receipt_verified = true;
+
+        for (state, purpose) in [
+            (&fund_import, StateSigningPurpose::L1DepositFundImport),
+            (&bundle, StateSigningPurpose::L1DepositBundleApply),
+        ] {
+            ledgered_state_signature_with(
+                &mut cli,
+                &record,
+                &controlled,
+                state,
+                purpose,
+                None,
+                None,
+                |keys| sign_state(keys, controlled.slot as u8, state).map_err(|e| e.to_string()),
+            )
+            .unwrap_or_else(|e| panic!("{purpose:?} must sign under the shared kit: {e}"));
+        }
+        adopt_head_with_exit_kit_receipts(&mut cli, bundle.clone());
+        assert!(cli.signer_exit_kit_receipt.is_some());
+        validate_signing_security_state(&cli).expect("bundle head carries the promoted receipt");
+    }
+
+    #[test]
+    fn destination_credit_signs_against_the_head_receipt_and_becomes_kit_pending() {
+        let template = fixture();
+        let record = template.snapshot.record.clone();
+        let controlled = template.controlled[0].clone();
+        let mut credit = child_of(&template.snapshot.state, 1);
+        credit.channel_fund.amounts[0] = U256::from(5u64);
+        credit.balance_state.settled_tx_chain =
+            Bytes32::from_hex("0x3333333333333333333333333333333333333333333333333333333333333333")
+                .unwrap();
+        let credit = credit.with_computed_digest();
+
+        let mut cli = template.clone();
+        ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &credit,
+            StateSigningPurpose::InterChannelFundImport,
+            None,
+            None,
+            |keys| sign_state(keys, controlled.slot as u8, &credit).map_err(|e| e.to_string()),
+        )
+        .expect("a pure credit signs against the durable head receipt");
+        adopt_head_with_exit_kit_receipts(&mut cli, credit.clone());
+        assert!(
+            cli.signer_exit_kit_receipt.is_none(),
+            "the credited head is kit-pending until install-exit-kit"
+        );
+        validate_signing_security_state(&cli).expect("kit-pending head is a valid state");
+
+        // No head receipt at all: the pre-credit head could not be exited, so refuse.
+        let mut bare = template.clone();
+        bare.signer_exit_kit_receipt = None;
+        bare.signer_exit_kit_receipt_verified = false;
+        let refusal = ledgered_state_signature_with(
+            &mut bare,
+            &record,
+            &controlled,
+            &credit,
+            StateSigningPurpose::InterChannelFundImport,
+            None,
+            None,
+            |_| panic!("a credit without a head receipt must be refused before signing"),
+        )
+        .unwrap_err();
+        assert!(refusal.contains("no verified signer exit-kit receipt"), "{refusal}");
+
+        // A "credit" that also debits another position is not a pure credit.
+        let mut mixed = credit.clone();
+        mixed.channel_fund.amounts[1] = U256::from(1u64);
+        let mut predecessor_with_two = template.clone();
+        predecessor_with_two.snapshot.state.channel_fund.amounts[1] = U256::from(2u64);
+        let mixed = {
+            let mut m = mixed;
+            m.prev_digest = predecessor_with_two.snapshot.state.digest;
+            m.with_computed_digest()
+        };
+        let refusal = ledgered_state_signature_with(
+            &mut predecessor_with_two,
+            &record,
+            &controlled,
+            &mixed,
+            StateSigningPurpose::InterChannelBundleApply,
+            None,
+            None,
+            |_| panic!("a mixed credit/debit must be refused before signing"),
+        )
+        .unwrap_err();
+        assert!(refusal.contains("only a pure single-position credit"), "{refusal}");
+    }
+
+    #[test]
+    fn close_funding_stays_refused_as_a_retired_route() {
+        let mut cli = fixture();
+        let record = cli.snapshot.record.clone();
+        let controlled = cli.controlled[0].clone();
+        let successor = child_of(&cli.snapshot.state, 1);
+        let refusal = ledgered_state_signature_with(
+            &mut cli,
+            &record,
+            &controlled,
+            &successor,
+            StateSigningPurpose::CloseFunding,
+            Some(Bytes32::from_hex(
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap()),
+            None,
+            |_| panic!("close funding must be refused before signing"),
+        )
+        .unwrap_err();
+        assert!(refusal.contains("CooperativeCloseFundingDeprecated"), "{refusal}");
     }
 
     fn assert_exit_kit_reuse_refused(mut cli: CliState, successor: ChannelState, needle: &str) {

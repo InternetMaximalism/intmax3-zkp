@@ -576,6 +576,15 @@ pub struct BlockWitnessGenerator {
     /// `bp_sig_chain` and force a fixture regeneration. Consumed by the next
     /// `add_block_with_tx_v2`.
     pub next_channel_cosign: Option<ChannelCosignBundle>,
+    /// Exit-kit staging. When true, the staged `next_channel_cosign` bundle's signatures are
+    /// ignored and the block is folded as the registered N-of-N signer set in slot order without
+    /// any signature gadget witness. Every value that reaches the producer head snapshot — block hash chain,
+    /// account/deposit roots and the `bp_sig_chain` statement `(IMSB digest, signer pk list)` —
+    /// is then byte-identical to what the same block produces once the real member cosignatures
+    /// arrive, so a co-signer can be handed an exit kit anchored on this exact block BEFORE it
+    /// releases its signature. A generator that folded an unsigned event can never prove a
+    /// validity span: `build_agg_sig_list_proof` refuses it.
+    pub unsigned_staging: bool,
 }
 
 /// A wallet's co-signed channel state and the N real member cosignatures over its IMCH digest —
@@ -612,6 +621,7 @@ impl BlockWitnessGenerator {
             bp_sig_events: Vec::new(),
             next_imsb_state_commitment_root: None,
             next_channel_cosign: None,
+            unsigned_staging: false,
         }
     }
 
@@ -1088,6 +1098,16 @@ impl BlockWitnessGenerator {
         if self.bp_sig_events.is_empty() {
             return Ok(None);
         }
+        if self
+            .bp_sig_events
+            .iter()
+            .any(|event| event.witnesses.len() != event.signer_pks.len())
+        {
+            anyhow::bail!(
+                "a staged unsigned exit-kit block was folded into this generator; it can anchor an \
+                 exit kit but never a validity proof — commit the real N-of-N block first"
+            );
+        }
         let entries: Vec<AggListEntry> = self.bp_sig_events.iter().map(BpSigEvent::entry).collect();
         let mut prev = None;
         for (i, event) in self.bp_sig_events.iter().enumerate() {
@@ -1433,6 +1453,15 @@ impl BlockWitnessGenerator {
                 // Phase 6: DECODE the members' existing cosignatures. The producer holds no key —
                 // `FalconAggWitness` consumes only `(h, sig)`, both public, so aggregating is
                 // public work. This is the path a real block producer takes.
+                Some(_) if self.unsigned_staging => {
+                    // Exit-kit staging: the statement the chain folds is the registered N-of-N
+                    // signer set, not the signature bytes, so it is known before any member
+                    // signs. No gadget witness exists for it (see `unsigned_staging`).
+                    let signer_pks = (0..public.member_count)
+                        .map(|slot| Bytes32::from(public.member_tree.get_leaf(slot as u64).pk_g))
+                        .collect::<Vec<_>>();
+                    (signer_pks, Vec::new())
+                }
                 Some(bundle) => {
                     let n = public.member_count;
                     if bundle.signatures.len() != n {

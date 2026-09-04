@@ -23,7 +23,11 @@ use intmax3_zkp::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256,
     },
-    live_balance_service::{LiveBalanceService, LiveBalanceServiceError},
+    live_balance_service::{LiveBalanceService, LiveBalanceServiceError, PreparedExitKitProposal},
+    public_close_prover::{
+        PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION, PublicCloseBackingEnvelope, PublicCloseExpectations,
+        verify_public_backing, verify_public_backing_proposed,
+    },
     regev::{RegevSecurityLevel, encrypt_amount},
     wallet_core::{
         BuiltInterChannelSend, ChannelSnapshot, MemberInfo, MemberKeys, add_signature,
@@ -747,7 +751,7 @@ fn run_live_balance_e2e() {
         )) if message.contains("expected 1")
     ));
 
-    let mut second = build_burn(
+    let second = build_burn(
         &keys,
         &first_snapshot,
         1,
@@ -757,9 +761,97 @@ fn run_live_balance_e2e() {
         3,
         &mut rng,
     );
-    second.debit_payload.proposed_next_state =
-        sign_all(second.debit_payload.proposed_next_state.clone(), &keys);
-    let second_state = second.debit_payload.proposed_next_state.clone();
+
+    // ── Pre-sign exit kit (doc/docs/pre-sign-exit-kit.md): before any member signs the second
+    // burn, the producer stages its block for the UNSIGNED proposal and the live balance service
+    // proves the kit whose statement key is the post-burn state's, anchored on that staged block.
+    // The builder attaches the proposer's own signature; a proposal is identified by its digest.
+    let proposed = second.debit_payload.proposed_next_state.clone();
+    assert!(proposed.member_signatures.len() < keys.len());
+    let staged = producer
+        .prepare_inter_channel_exit_kit(
+            "burn:1:exit-kit".into(),
+            proposed.clone(),
+            second.debit_payload.clone(),
+            second.transfer_descriptor.clone(),
+        )
+        .expect("stage the exit-kit block");
+    assert_eq!(staged.generation, first_receipt.generation + 1);
+    assert!(matches!(
+        producer.prepare_inter_channel_exit_kit(
+            "burn:other".into(),
+            proposed.clone(),
+            second.debit_payload.clone(),
+            second.transfer_descriptor.clone(),
+        ),
+        Err(BlockProducerServiceError::Conflict(message)) if message.contains("freezes")
+    ));
+    let debit_proposal = PreparedExitKitProposal::InterChannelDebit {
+        producer_receipt: staged.clone(),
+        proposed_state: proposed.clone(),
+        debit_payload: second.debit_payload.clone(),
+        descriptor: second.transfer_descriptor.clone(),
+    };
+    let prepared = live
+        .prepare_exit_kit(&producer, &debit_proposal)
+        .expect("prepare the debit exit kit before any signature");
+    assert_eq!(prepared.signed_head.digest, proposed.digest);
+    let prepared_kit = prepared
+        .signed_head_exit_kit
+        .clone()
+        .expect("prepared kit");
+    assert_eq!(
+        prepared_kit.backing_public_inputs.settled_tx_chain,
+        proposed.balance_state.settled_tx_chain
+    );
+    assert_eq!(
+        prepared_kit.backing_public_inputs.token_funds_digest,
+        token_funds_digest(
+            &proposed.balance_state.token_registry,
+            proposed.balance_state.token_count,
+            &proposed.channel_fund.amounts,
+        )
+    );
+    assert_eq!(
+        prepared_kit
+            .backing_public_inputs
+            .finalized_extended_state_commitment,
+        staged.extended_state_commitment,
+        "the kit anchors on the staged block"
+    );
+    // Preparing is idempotent and commits nothing: the durable service is still at the first burn.
+    assert_eq!(live.base_nonce().expect("nonce unchanged by prepare"), 1);
+    assert_eq!(
+        live.status().expect("status").signed_head_digest,
+        Some(first_state.digest)
+    );
+    // The signer's verifier accepts the envelope for exactly this proposal and for nothing else.
+    let expectations = PublicCloseExpectations {
+        channel_id: ChannelId::new(CHANNEL as u64).expect("channel id"),
+        chain_id: 31337,
+        rollup: Address::from_u32_slice(&[0, 0, 0, 0, 0x4242]).expect("rollup"),
+        balance_verifier_data_sha256: None,
+    };
+    let envelope = PublicCloseBackingEnvelope {
+        schema_version: PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION,
+        source: "liveBalanceService".into(),
+        chain_id: expectations.chain_id,
+        rollup: expectations.rollup,
+        backing: prepared.clone(),
+    };
+    verify_public_backing_proposed(&envelope, &expectations, proposed.digest)
+        .expect("the prepared envelope verifies for the exact proposed successor");
+    assert!(
+        verify_public_backing_proposed(&envelope, &expectations, first_state.digest).is_err(),
+        "a prepared kit never verifies for another head"
+    );
+    assert!(
+        verify_public_backing(&envelope, &expectations).is_err(),
+        "an unsigned proposal is never an N-of-N close artifact"
+    );
+
+    // The real N-of-N arrives; posting promotes the staged block in place.
+    let second_state = sign_all(proposed.clone(), &keys);
     let second_receipt = producer
         .post_inter_channel(
             "burn:1".into(),
@@ -767,7 +859,22 @@ fn run_live_balance_e2e() {
             second.debit_payload.clone(),
             second.transfer_descriptor.clone(),
         )
-        .expect("durable second burn block");
+        .expect("durable second burn block promoted from the staged exit-kit block");
+    assert_eq!(second_receipt.generation, staged.generation);
+    assert_eq!(second_receipt.block_number, staged.block_number);
+    assert_eq!(second_receipt.timestamp, staged.timestamp);
+    assert_eq!(
+        second_receipt.extended_state_commitment,
+        staged.extended_state_commitment
+    );
+    assert_eq!(second_receipt.bp_sig_chain, staged.bp_sig_chain);
+    assert!(
+        producer
+            .prepared_producer()
+            .expect("healthy")
+            .is_none(),
+        "promotion consumes the staged entry"
+    );
     let second_settle = live
         .settle_inter_channel(
             &producer,
@@ -781,6 +888,16 @@ fn run_live_balance_e2e() {
     assert_eq!(
         second_settle.settled_tx_chain,
         second_state.balance_state.settled_tx_chain
+    );
+    // The settled head's kit carries the identical statement the signer archived before signing.
+    let settled_kit = live
+        .channel_backing_artifact()
+        .expect("settled backing artifact")
+        .signed_head_exit_kit
+        .expect("settled kit");
+    assert_eq!(
+        settled_kit.backing_public_inputs,
+        prepared_kit.backing_public_inputs
     );
 
     // ── P3-2/P3-3 (partial-withdrawal-payout-design): the payout proof comes from the LIVE base
@@ -1161,109 +1278,47 @@ fn run_live_balance_e2e() {
             | Err(LiveBalanceServiceError::ProducerReconciliation(_))
     ));
 
-    // The release close path is a terminal, ordinary TxV2 send: every remaining asset is paid
-    // to the immutable Manager under one shared IMCF authorization, then the exact N-of-N child
-    // is settled into the resident balance IVC. No close-specific circuit or VK is introduced.
+    // The cooperative close-funding route is retired (`CooperativeCloseFundingDeprecated` on
+    // L1; the daemon refuses `LivePrepareCloseFunding`): the resident service will not plan one
+    // from a settled H2!=0 head, and the signer-independent exit kit of that head — installed
+    // atomically with every settle above — is the exit material instead.
     let rollup = Address::from_u32_slice(&[0x524f_4c4c; 5]).expect("rollup address");
     let manager = Address::from_u32_slice(&[0x4d41_4e47; 5]).expect("manager address");
-    let proposal = live
-        .prepare_close_funding(1, rollup, manager)
-        .expect("prepare exact terminal funding plan");
-    assert_eq!(proposal.plan.base_nonce, 3);
-    assert_eq!(proposal.plan.transfers.len(), 1);
-    assert_eq!(proposal.plan.transfers[0].token_index, 0);
-    assert_eq!(proposal.plan.transfers[0].amount, U256::from(78u64));
-    let close_state = sign_all(proposal.proposed_state, &keys);
-    let close_receipt = producer
-        .post_close_funding(
-            "close-funding:41".into(),
-            close_state.clone(),
-            proposal.plan.clone(),
-        )
-        .expect("producer admits terminal funding block");
-    let close_settle = live
-        .settle_close_funding(&producer, &close_receipt, &close_state, &proposal.plan)
-        .expect("settle terminal funding into live balance proof");
-    assert_eq!(close_settle.base_nonce, 4);
-    let close_status = live.status().expect("terminal live status");
-    assert!(close_status.terminal_close_funding);
-    assert_eq!(
-        close_status.close_funding_plan_digest,
-        Some(proposal.plan.plan_digest)
-    );
+    #[allow(deprecated)]
+    let refused = live.prepare_close_funding(1, rollup, manager);
     assert!(matches!(
-        live.prepare_close_funding(1, rollup, manager),
-        Err(LiveBalanceServiceError::InvalidRequest(message)) if message.contains("terminal")
+        refused,
+        Err(LiveBalanceServiceError::InvalidRequest(message)) if message.contains("zero-H2")
     ));
-
-    // Extract the paid leaf from the proved Spend/TxV2 history, aggregate it through the existing
-    // withdrawal circuits, wrap it and self-verify the MLE artifact. This is the public/operator
-    // handoff later submitted to the Rollup after Manager close finalization.
-    let close_artifacts = live
-        .close_funding_payout_artifacts(&producer, "close-funding:41", payout_prover)
-        .expect("terminal close-funding payout artifacts");
-    assert_eq!(close_artifacts.plan_digest, proposal.plan.plan_digest);
+    let settled_status = live.status().expect("settled live status");
+    assert!(!settled_status.terminal_close_funding);
+    let settled_digest = settled_status
+        .signed_head_digest
+        .expect("settled signed head");
+    let settled_kit = live
+        .channel_backing_artifact()
+        .expect("settled backing artifact")
+        .signed_head_exit_kit
+        .expect("settled head carries its exit kit");
     assert_eq!(
-        close_artifacts.funding_aux_data,
-        proposal.plan.funding_aux_data
-    );
-    assert_eq!(close_artifacts.lanes.len(), 1);
-    assert_eq!(close_artifacts.lanes[0].withdrawals.len(), 1);
-    assert_eq!(
-        close_artifacts.lanes[0].withdrawals[0].amount,
-        U256::from(78u64)
-    );
-    assert_eq!(
-        close_artifacts.lanes[0].withdrawals[0].aux_data,
-        proposal.plan.funding_aux_data
-    );
-    assert!(close_artifacts.lanes[0].withdrawal_mle_json.len() > 100_000);
-    // A one-leaf terminal lane uses exactly the same frozen proof statements as the pre-existing
-    // one-leaf burn payout above.  These byte-for-byte size equalities make an accidental circuit
-    // or recursion-layout expansion a release-test failure instead of a documentation claim.
-    assert_eq!(
-        close_artifacts.lanes[0]
-            .metrics
-            .single_withdrawal_proof_bytes,
-        first_artifacts.metrics.single_withdrawal_proof_bytes
-    );
-    assert_eq!(
-        close_artifacts.lanes[0]
-            .metrics
-            .withdrawal_chain_proof_bytes,
-        first_artifacts.metrics.withdrawal_chain_proof_bytes
-    );
-    assert_eq!(
-        close_artifacts.lanes[0]
-            .metrics
-            .withdrawal_final_proof_bytes,
-        first_artifacts.metrics.withdrawal_final_proof_bytes
-    );
-    eprintln!(
-        "terminal close lane metrics: single={}ms/{}B chain={}ms/{}B final={}ms/{}B wrap+mle={}ms json={}B",
-        close_artifacts.lanes[0].metrics.single_withdrawal_millis,
-        close_artifacts.lanes[0]
-            .metrics
-            .single_withdrawal_proof_bytes,
-        close_artifacts.lanes[0].metrics.withdrawal_chain_millis,
-        close_artifacts.lanes[0]
-            .metrics
-            .withdrawal_chain_proof_bytes,
-        close_artifacts.lanes[0].metrics.withdrawal_final_millis,
-        close_artifacts.lanes[0]
-            .metrics
-            .withdrawal_final_proof_bytes,
-        close_artifacts.lanes[0].metrics.wrap_mle_millis,
-        close_artifacts.lanes[0].metrics.mle_json_bytes,
+        settled_kit.backing_public_inputs.settled_tx_chain,
+        settled_status.settled_tx_chain
     );
 
     drop(live);
     let live = LiveBalanceService::open(&balance_path, &producer)
-        .expect("terminal marker and zero asset vector survive restart");
-    assert!(
-        live.status()
-            .expect("restarted status")
-            .terminal_close_funding
+        .expect("signed head and its exit kit survive restart");
+    assert_eq!(
+        live.status().expect("restarted status").signed_head_digest,
+        Some(settled_digest)
+    );
+    assert_eq!(
+        live.channel_backing_artifact()
+            .expect("restarted backing artifact")
+            .signed_head_exit_kit
+            .expect("restarted kit")
+            .backing_public_inputs,
+        settled_kit.backing_public_inputs
     );
 
     drop(live);

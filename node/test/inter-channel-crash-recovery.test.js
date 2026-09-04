@@ -10,34 +10,45 @@ const Module = require('node:module');
 function harness() {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-inter-route-'));
   const handlers = new Map();
-  const calls = { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0 };
+  const calls = { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0, install: 0 };
   const router = { post(route, handler) { handlers.set(route, handler); } };
   const wc = (_ch, name) => path.join(work, name);
   const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
   const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value));
   const stableRequestId = (_kind, body) => `inter:${JSON.stringify(body)}`;
 
+  const cliMock = {
+    wc,
+    readJson,
+    writeJson,
+    cli() {
+      calls.cli += 1;
+      writeJson(wc(7, 'inter_transfer.json'), {
+        aHead: { channelId: 7, digest: 'after' },
+        bFundImportState: { channelId: 8, digest: 'dest-import' },
+        bBundleApplyState: { channelId: 8, digest: 'dest-apply' },
+        bSnapshot: { channelId: 8, digest: 'dest' },
+      });
+    },
+  };
+
   const originalLoad = Module._load;
   Module._load = function mockedLoad(request, parent, isMain) {
     if (request === 'express') return { Router: () => router };
     if (request === '../lib/lock') return { withLocks: (_channels, fn) => Promise.resolve().then(fn) };
     if (request === '../lib/producer-head') return { flushPublishedHead: async () => null };
-    if (request === '../lib/cli') {
+    if (request === '../lib/exit-kit') {
+      // The pre-sign exit-kit wrapper is one CLI signing round from the route's point of view;
+      // the destination's kit install happens exactly once per completed transfer.
       return {
-        wc,
-        readJson,
-        writeJson,
-        cli() {
-          calls.cli += 1;
-          writeJson(wc(7, 'inter_transfer.json'), {
-            aHead: { channelId: 7, digest: 'after' },
-            bFundImportState: { channelId: 8, digest: 'dest-import' },
-            bBundleApplyState: { channelId: 8, digest: 'dest-apply' },
-            bSnapshot: { channelId: 8, digest: 'dest' },
-          });
+        cliWithPreparedExitKit: async (ch, args, env) => cliMock.cli(ch, args, env),
+        installHeadExitKit: async (channelId) => {
+          assert.equal(channelId, 8);
+          calls.install += 1;
         },
       };
     }
+    if (request === '../lib/cli') return cliMock;
     if (request === '../lib/block-producer') {
       return {
         stableRequestId,
@@ -100,11 +111,11 @@ test('completed inter-channel HTTP retries return the journaled response without
   t.after(() => fs.rmSync(h.work, { recursive: true, force: true }));
   const first = await h.invoke();
   assert.equal(first.statusCode, 200);
-  assert.deepEqual(h.calls, { cli: 1, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1 });
+  assert.deepEqual(h.calls, { cli: 1, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1, install: 1 });
   const second = await h.invoke();
   assert.equal(second.statusCode, 200);
   assert.deepEqual(second.body, first.body);
-  assert.deepEqual(h.calls, { cli: 1, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1 });
+  assert.deepEqual(h.calls, { cli: 1, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1, install: 1 });
 });
 
 test('a signed prepared operation resumes producer admission and live settlement', async t => {
@@ -123,7 +134,7 @@ test('a signed prepared operation resumes producer admission and live settlement
   });
   const response = await h.invoke();
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(h.calls, { cli: 0, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1 });
+  assert.deepEqual(h.calls, { cli: 0, post: 1, settle: 1, sync: 1, artifact: 1, receive: 1, install: 1 });
   assert.equal(JSON.parse(fs.readFileSync(h.wc(7, 'inter_operation.json'))).status, 'completed');
 });
 
@@ -135,5 +146,5 @@ test('a different request cannot overwrite a prepared signed operation', async t
   });
   const response = await h.invoke();
   assert.equal(response.statusCode, 409);
-  assert.deepEqual(h.calls, { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0 });
+  assert.deepEqual(h.calls, { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0, install: 0 });
 });

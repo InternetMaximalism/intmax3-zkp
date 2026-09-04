@@ -20,8 +20,28 @@ function write(ch, name, value) {
   fs.writeFileSync(path.join(directory, name), JSON.stringify(value));
 }
 
-cliModule.cli = (ch, args) => {
-  events.push(args[0]);
+cliModule.chainId = () => 31337;
+cliModule.cli = (ch, args, env) => {
+  const proposing = args.includes('--propose-exit-kit');
+  events.push(proposing ? `${args[0]} --propose-exit-kit` : args[0]);
+  if (proposing) {
+    // The propose run signs nothing: it emits the exact successor the daemon must prove for.
+    write(ch, 'exit_kit_proposal.json', {
+      kind: 'l1DepositImport',
+      record: { channelId: ch },
+      members: [],
+      fundImportState: { channelId: ch, digest: 'fund' },
+    });
+    return '';
+  }
+  if (args[0] === 'cosign-l1-deposit-import') {
+    assert.equal(env && env.INTMAX_PREPARED_EXIT_KIT, 'prepared_exit_kit.json',
+      'the signing run must be bound to the prepared exit kit');
+    const envelope = JSON.parse(fs.readFileSync(path.join(work, `ch${ch}`, 'prepared_exit_kit.json'), 'utf8'));
+    assert.equal(envelope.chainId, 31337);
+    assert.equal(envelope.rollup, '0x' + '44'.repeat(20));
+    assert.equal(envelope.signedHead.digest, 'fund');
+  }
   if (args[0] === 'inspect-l1-deposit') {
     write(ch, 'producer_deposit.json', {
       depositIndex: 4,
@@ -47,6 +67,12 @@ cliModule.cli = (ch, args) => {
   }
 };
 producerHead.flushPublishedHead = async () => { events.push('flushPublishedHead'); };
+producer.livePrepareExitKit = async (ch, proposal) => {
+  events.push('livePrepareExitKit');
+  assert.equal(proposal.kind, 'l1DepositImport');
+  assert.equal(proposal.fundImportState.digest, 'fund');
+  return { signedHead: proposal.fundImportState, signedHeadExitKit: { schemaVersion: 1 } };
+};
 producer.postDeposit = async deposit => {
   events.push('postDeposit');
   return { requestId: 'deposit:4', blockNumber: 11, deposit };
@@ -73,6 +99,7 @@ test.after(() => fs.rmSync(work, { recursive: true, force: true }));
 test('deposit head is never published before durable live receive and N-of-N bind', async () => {
   events.length = 0;
   const txHash = '0x' + 'ab'.repeat(32);
+  write(7, 'channel_backing.json', { rollup: '0x' + '44'.repeat(20) });
   const result = await importL1Deposit(7, 0, txHash);
 
   assert.deepEqual(events, [
@@ -80,6 +107,9 @@ test('deposit head is never published before durable live receive and N-of-N bin
     'inspect-l1-deposit',
     'postDeposit',
     'liveReceiveConfiguredDeposit',
+    // Signer-independent exit: propose -> prove the pre-sign kit -> sign with it bound.
+    'cosign-l1-deposit-import --propose-exit-kit',
+    'livePrepareExitKit',
     'cosign-l1-deposit-import',
     'liveBindSnapshot',
     'syncOffchainHeads',
@@ -91,6 +121,7 @@ test('restart completes an old receive/bind before inspecting the next deposit',
   events.length = 0;
   const oldHash = '0x' + 'cd'.repeat(32);
   write(8, 'producer_deposit.json', { depositIndex: 3 });
+  write(8, 'channel_backing.json', { rollup: '0x' + '44'.repeat(20) });
   write(8, 'channel_snapshot.json', {
     record: { channelId: 8 }, state: { channelId: 8, digest: 'old-bundle' }, members: [],
   });

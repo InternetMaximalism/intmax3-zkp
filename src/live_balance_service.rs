@@ -83,6 +83,7 @@ use crate::{
         InterChannelTransferDescriptor, MemberInfo, canonical_inter_channel_base_transfer,
         inter_channel_tx_v2, verify_all_signatures, verify_inter_channel_credit_states,
         verify_inter_channel_descriptor_matches_debit, verify_snapshot,
+        verify_snapshot_structure,
     },
 };
 
@@ -220,6 +221,40 @@ pub struct BurnWithdrawalProof {
     pub single_proof_bytes: usize,
     /// Serialized byte length of the withdrawal-chain proof, captured before the final wrap.
     pub chain_proof_bytes: usize,
+}
+
+/// A proposed asset/composition-moving successor whose signer-independent exit kit a co-signer
+/// needs BEFORE it releases its signature (`channel_member`'s
+/// `StateSigningPurpose::requires_prepared_exit_kit`). The service proves the kit for the exact
+/// proposed vector without committing anything and without any member signature; the real
+/// N-of-N is still verified by the later bind/settle, which recomputes an identical statement.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PreparedExitKitProposal {
+    /// H2=0 token registration: the balance proof is unchanged, only the composition moves.
+    TokenRegister { successor: ChannelState },
+    /// L1 deposit import whose deposit is already folded into the pending (unbound) balance
+    /// proof. The bundle-apply successor shares this statement key and needs no second kit.
+    L1DepositImport {
+        record: ChannelRecord,
+        members: Vec<MemberInfo>,
+        fund_import_state: ChannelState,
+    },
+    /// Inter-channel or burn debit against the producer's staged exit-kit block
+    /// (`BlockProducerService::prepare_inter_channel_exit_kit`).
+    InterChannelDebit {
+        producer_receipt: BlockProducerReceipt,
+        proposed_state: ChannelState,
+        debit_payload: InterChannelDebitPayload,
+        descriptor: InterChannelTransferDescriptor,
+    },
+}
+
+struct SendCandidate {
+    candidate: LiveBalanceSnapshot,
+    spend_proof: ProofWithPublicInputs<F, C, D>,
+    transfer: crate::common::transfer::Transfer,
+    record: ChannelRecord,
 }
 
 /// Public channel backing projection: a verifiable balance proof, its exact base cursor, and the
@@ -508,7 +543,7 @@ impl LiveBalanceService {
             terminal_close_funding: None,
             signed_head_exit_kit: None,
         };
-        verify_snapshot_semantics(&disk, &spend, &balance, None, None, true)?;
+        verify_snapshot_semantics(&disk, &spend, &balance, None, None, true, true)?;
         persist_snapshot(&snapshot_path, &disk)?;
         Ok(Self {
             snapshot_path,
@@ -549,6 +584,7 @@ impl LiveBalanceService {
                 Some(producer),
                 None,
                 false,
+                true,
             )?;
         }
         let mut service = Self {
@@ -643,23 +679,29 @@ impl LiveBalanceService {
 
     pub fn base_head_artifact(&self) -> Result<LiveBaseHeadArtifact, LiveBalanceServiceError> {
         self.ensure_healthy()?;
-        let proof = decode_balance_proof(&self.disk, &self.balance)?;
+        self.base_head_artifact_of(&self.disk)
+    }
+
+    fn base_head_artifact_of(
+        &self,
+        disk: &LiveBalanceSnapshot,
+    ) -> Result<LiveBaseHeadArtifact, LiveBalanceServiceError> {
+        let proof = decode_balance_proof(disk, &self.balance)?;
         let pis = balance_public_inputs(&proof, &self.balance)?;
         Ok(LiveBaseHeadArtifact {
             snapshot_version: LIVE_BALANCE_SNAPSHOT_VERSION,
-            channel_id: self.disk.channel_id,
-            balance_generation: self.disk.balance_generation,
-            base_nonce: self.disk.base_nonce,
+            channel_id: disk.channel_id,
+            balance_generation: disk.balance_generation,
+            base_nonce: disk.base_nonce,
             private_commitment: pis.private_commitment,
             settled_tx_chain: pis.settled_tx_chain,
-            proof_size: self.disk.balance_proof.len(),
-            producer_receipt: self
-                .disk
+            proof_size: disk.balance_proof.len(),
+            producer_receipt: disk
                 .applied
                 .last()
                 .map(|entry| entry.producer_receipt.clone()),
-            signed_head_digest: self.disk.signed_head.as_ref().map(|head| head.digest),
-            awaiting_channel_binding: self.disk.awaiting_channel_binding,
+            signed_head_digest: disk.signed_head.as_ref().map(|head| head.digest),
+            awaiting_channel_binding: disk.awaiting_channel_binding,
         })
     }
 
@@ -667,30 +709,39 @@ impl LiveBalanceService {
         &self,
     ) -> Result<LiveChannelBackingArtifact, LiveBalanceServiceError> {
         self.ensure_healthy()?;
-        if self.disk.awaiting_channel_binding {
+        self.backing_artifact_of(&self.disk)
+    }
+
+    fn backing_artifact_of(
+        &self,
+        disk: &LiveBalanceSnapshot,
+    ) -> Result<LiveChannelBackingArtifact, LiveBalanceServiceError> {
+        if disk.awaiting_channel_binding {
             return Err(LiveBalanceServiceError::InvalidRequest(
                 "the newest live balance transition is not yet bound to an N-of-N channel head"
                     .into(),
             ));
         }
-        let record = self.disk.channel_record.clone().ok_or_else(|| {
+        let record = disk.channel_record.clone().ok_or_else(|| {
             LiveBalanceServiceError::InvalidRequest(
                 "live balance proof is not yet bound to an N-of-N channel snapshot".into(),
             )
         })?;
-        let signed_head = self.disk.signed_head.clone().ok_or_else(|| {
+        let signed_head = disk.signed_head.clone().ok_or_else(|| {
             LiveBalanceServiceError::InvalidRequest(
                 "live balance proof has no bound N-of-N channel head".into(),
             )
         })?;
-        let signed_head_exit_kit = self.disk.signed_head_exit_kit.clone().ok_or_else(|| {
+        let signed_head_exit_kit = disk.signed_head_exit_kit.clone().ok_or_else(|| {
             LiveBalanceServiceError::Snapshot(
                 "bound N-of-N channel head has no signer-independent exit kit".into(),
             )
         })?;
         Ok(LiveChannelBackingArtifact {
-            base_head: self.base_head_artifact()?,
-            balance_attestation: self.attestation()?,
+            base_head: self.base_head_artifact_of(disk)?,
+            balance_attestation: ChannelBalanceAttestation {
+                balance_proof: disk.balance_proof.clone(),
+            },
             balance_verifier_data: serialize_verifier_data(&self.balance.balance_vd()).map_err(
                 |error| {
                     LiveBalanceServiceError::Snapshot(format!(
@@ -702,6 +753,179 @@ impl LiveBalanceService {
             signed_head,
             signed_head_exit_kit: Some(signed_head_exit_kit),
         })
+    }
+
+    /// Prove the signer-independent exit kit of a PROPOSED asset/composition-moving successor
+    /// before any member releases a signature over it. Nothing is committed: the returned artifact
+    /// carries the unsigned proposed state as `signed_head` plus the kit whose statement key
+    /// `(channel_id, settled_tx_chain, token_funds_digest)` is exactly the successor's. The signer
+    /// verifies and archives the artifact, records a receipt bound to the successor digest, and
+    /// only then signs; the later bind/settle recomputes an identical statement for the real
+    /// N-of-N head.
+    pub fn prepare_exit_kit(
+        &self,
+        producer: &BlockProducerService,
+        proposal: &PreparedExitKitProposal,
+    ) -> Result<LiveChannelBackingArtifact, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        self.ensure_not_terminal()?;
+        let mut candidate = match proposal {
+            PreparedExitKitProposal::TokenRegister { successor } => {
+                if self.disk.awaiting_channel_binding {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "bind the pending deposit proof before registering a token".into(),
+                    ));
+                }
+                let previous = self.disk.signed_head.as_ref().ok_or_else(|| {
+                    LiveBalanceServiceError::InvalidRequest(
+                        "token registration needs a bound N-of-N channel head".into(),
+                    )
+                })?;
+                verify_proposed_successor_shape(successor, self.disk.channel_id)?;
+                if successor.prev_digest != previous.digest
+                    || successor.h2_tag != Bytes32::default()
+                    || successor.close_freeze_nonce != previous.close_freeze_nonce
+                    || successor.epoch != previous.epoch.checked_add(1).ok_or_else(|| {
+                        LiveBalanceServiceError::InvalidRequest("channel epoch overflow".into())
+                    })?
+                    || successor.balance_state.state_version
+                        != previous.balance_state.state_version.checked_add(1).ok_or_else(
+                            || {
+                                LiveBalanceServiceError::InvalidRequest(
+                                    "balance-state version overflow".into(),
+                                )
+                            },
+                        )?
+                    || successor.small_block_number != previous.small_block_number
+                    || successor.channel_fund != previous.channel_fund
+                    || successor.shared_native_nullifier_root
+                        != previous.shared_native_nullifier_root
+                    || successor.unallocated_confirmed_incoming
+                        != previous.unallocated_confirmed_incoming
+                    || successor.balance_state.settled_tx_chain
+                        != previous.balance_state.settled_tx_chain
+                    || successor.balance_state.settled_tx_accumulator_root
+                        != previous.balance_state.settled_tx_accumulator_root
+                {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "token-register successor skips, forks, or moves more than the registry"
+                            .into(),
+                    ));
+                }
+                verify_close_asset_vector(&self.disk, successor)?;
+                let mut candidate = self.disk.clone();
+                candidate.signed_head = Some(successor.clone());
+                candidate
+            }
+            PreparedExitKitProposal::L1DepositImport {
+                record,
+                members,
+                fund_import_state,
+            } => {
+                if !self.disk.awaiting_channel_binding {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "no validity-backed deposit proof awaits its channel binding".into(),
+                    ));
+                }
+                verify_proposed_successor_shape(fund_import_state, self.disk.channel_id)?;
+                if fund_import_state.h2_tag != Bytes32::default() {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "a deposit fund-import successor requires h2_tag == 0".into(),
+                    ));
+                }
+                let proof = decode_balance_proof(&self.disk, &self.balance)?;
+                let pis = balance_public_inputs(&proof, &self.balance)?;
+                if pis.settled_tx_chain != fund_import_state.balance_state.settled_tx_chain {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "proposed fund-import settle chain differs from the pending live balance proof"
+                            .into(),
+                    ));
+                }
+                if let Some(pinned) = self.disk.channel_record.as_ref() {
+                    if pinned.signing_digest() != record.signing_digest() {
+                        return Err(LiveBalanceServiceError::InvalidRequest(
+                            "proposed record differs from the pinned channel record".into(),
+                        ));
+                    }
+                }
+                if let Some(pinned) = self.disk.channel_members.as_ref() {
+                    if hash_serializable(pinned)? != hash_serializable(members)? {
+                        return Err(LiveBalanceServiceError::InvalidRequest(
+                            "proposed member set differs from the pinned channel members".into(),
+                        ));
+                    }
+                }
+                verify_record_and_head_continuity(
+                    self.disk.channel_record.as_ref(),
+                    self.disk.signed_head.as_ref(),
+                    record,
+                    fund_import_state,
+                    false,
+                )?;
+                verify_close_asset_vector(&self.disk, fund_import_state)?;
+                let mut candidate = self.disk.clone();
+                candidate.channel_record = Some(record.clone());
+                candidate.channel_members = Some(members.clone());
+                candidate.signed_head = Some(fund_import_state.clone());
+                candidate.awaiting_channel_binding = false;
+                candidate.pending_deposit_salt = None;
+                candidate
+            }
+            PreparedExitKitProposal::InterChannelDebit {
+                producer_receipt,
+                proposed_state,
+                debit_payload,
+                descriptor,
+            } => {
+                if self.disk.awaiting_channel_binding {
+                    return Err(LiveBalanceServiceError::InvalidRequest(
+                        "bind the pending deposit proof before preparing a debit exit kit".into(),
+                    ));
+                }
+                let canonical = producer
+                    .receipt_for_staged_inter_channel_exit_kit(
+                        &producer_receipt.request_id,
+                        proposed_state,
+                        debit_payload,
+                        descriptor,
+                    )?
+                    .ok_or_else(|| {
+                        LiveBalanceServiceError::ProducerReconciliation(
+                            "the producer has no staged exit-kit block for this transition".into(),
+                        )
+                    })?;
+                if *producer_receipt != canonical {
+                    return Err(LiveBalanceServiceError::ProducerReconciliation(
+                        "supplied receipt differs from the staged exit-kit block".into(),
+                    ));
+                }
+                self.require_new_producer_generation(producer_receipt)?;
+                let staged = producer.prepared_producer()?.ok_or_else(|| {
+                    LiveBalanceServiceError::ProducerReconciliation(
+                        "the staged exit-kit producer view is absent".into(),
+                    )
+                })?;
+                let mut candidate = self
+                    .build_send_candidate(staged, proposed_state, debit_payload, descriptor, false)?
+                    .candidate;
+                // Nothing is applied yet: the prepared candidate previews the post-send balance
+                // proof and private trees, but its journal (and therefore its generation) stays
+                // the durable one until the real N-of-N settle appends the transition.
+                candidate.balance_generation = self.disk.balance_generation;
+                candidate
+            }
+        };
+        self.install_signed_head_exit_kit(&mut candidate, producer)?;
+        verify_snapshot_semantics(
+            &candidate,
+            &self.spend,
+            &self.balance,
+            Some(producer),
+            Some(self.close_asset_backing_circuit()),
+            true,
+            false,
+        )?;
+        self.backing_artifact_of(&candidate)
     }
 
     /// Legacy library helper for fixture compatibility. Production command routing rejects this
@@ -950,6 +1174,9 @@ impl LiveBalanceService {
         candidate.full_private_state = generator.full_private_state;
         candidate.base_nonce = candidate.full_private_state.nonce;
         candidate.awaiting_channel_binding = true;
+        // The previous head's kit no longer matches the advanced balance proof; the next N-of-N
+        // bind (or a prepared exit kit for the proposed import) proves the new statement.
+        candidate.signed_head_exit_kit = None;
         let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
         candidate.applied.push(AppliedTransition {
             request_id: producer_receipt.request_id.clone(),
@@ -1142,49 +1369,18 @@ impl LiveBalanceService {
         self.commit(candidate)
     }
 
-    /// Settle the canonical base `SendTx` for a producer-admitted inter-channel send or burn.
-    /// The exact descriptor body, N-of-N head, explicit base nonce, H2 opening, private commitment
-    /// and resulting settle chain are all checked before the snapshot is made durable.
-    pub fn settle_inter_channel(
-        &mut self,
-        producer: &BlockProducerService,
-        producer_receipt: &BlockProducerReceipt,
+    /// Advance a candidate snapshot through the canonical base `SendTx` of an inter-channel send
+    /// or burn against `producer_view` (the authoritative producer for a settle, the staged
+    /// exit-kit producer for a prepare). Nothing is committed; the caller verifies the receipt
+    /// and, for a settle, the N-of-N.
+    fn build_send_candidate(
+        &self,
+        producer_view: &ProductionBlockProducer,
         signed_state: &ChannelState,
         debit_payload: &InterChannelDebitPayload,
         descriptor: &InterChannelTransferDescriptor,
-    ) -> Result<LiveBalanceReceipt, LiveBalanceServiceError> {
-        self.ensure_healthy()?;
-        let fingerprint = hash_serializable(&SendFingerprint {
-            domain: "INTMAX_LIVE_BALANCE_SEND_V1",
-            producer_receipt,
-            signed_state,
-            debit_payload,
-            descriptor,
-        })?;
-        if let Some(receipt) = self.idempotent_result(&producer_receipt.request_id, fingerprint)? {
-            verify_inter_channel_receipt(
-                producer,
-                producer_receipt,
-                signed_state,
-                debit_payload,
-                descriptor,
-            )?;
-            return Ok(receipt);
-        }
-        self.ensure_not_terminal()?;
-        if self.disk.awaiting_channel_binding {
-            return Err(LiveBalanceServiceError::InvalidRequest(
-                "bind the pending deposit proof before settling a send".into(),
-            ));
-        }
-        verify_inter_channel_receipt(
-            producer,
-            producer_receipt,
-            signed_state,
-            debit_payload,
-            descriptor,
-        )?;
-        self.require_new_producer_generation(producer_receipt)?;
+        require_signatures: bool,
+    ) -> Result<SendCandidate, LiveBalanceServiceError> {
         verify_inter_channel_descriptor_matches_debit(debit_payload, descriptor).map_err(|e| {
             LiveBalanceServiceError::InvalidRequest(format!(
                 "canonical inter-channel descriptor/debit binding: {e}"
@@ -1205,11 +1401,17 @@ impl LiveBalanceService {
                 "debit record differs from the balance service's pinned channel record".into(),
             ));
         }
-        verify_all_signatures(record, &[], signed_state).map_err(|e| {
-            LiveBalanceServiceError::InvalidRequest(format!(
-                "inter-channel head is not N-of-N signed: {e}"
-            ))
-        })?;
+        if require_signatures {
+            verify_all_signatures(record, &[], signed_state).map_err(|e| {
+                LiveBalanceServiceError::InvalidRequest(format!(
+                    "inter-channel head is not N-of-N signed: {e}"
+                ))
+            })?;
+        } else if signed_state.digest != signed_state.signing_digest() {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "a prepared exit-kit proposal must carry its exact signing digest".into(),
+            ));
+        }
         verify_record_and_head_continuity(
             Some(record),
             self.disk.signed_head.as_ref(),
@@ -1254,7 +1456,7 @@ impl LiveBalanceService {
             ));
         }
 
-        let mut generator = self.generator(producer)?;
+        let mut generator = self.generator_from_producer(producer_view)?;
         let spend_witness = generator
             .spend_witness(std::slice::from_ref(&transfer))
             .map_err(|e| LiveBalanceServiceError::Transition(format!("spend witness: {e}")))?;
@@ -1310,6 +1512,70 @@ impl LiveBalanceService {
         candidate.balance_proof = new_proof.to_bytes();
         candidate.full_private_state = generator.full_private_state;
         candidate.base_nonce = candidate.full_private_state.nonce;
+        candidate.signed_head = Some(signed_state.clone());
+        Ok(SendCandidate {
+            candidate,
+            spend_proof,
+            transfer,
+            record: record.clone(),
+        })
+    }
+
+    /// Settle the canonical base `SendTx` for a producer-admitted inter-channel send or burn.
+    /// The exact descriptor body, N-of-N head, explicit base nonce, H2 opening, private commitment
+    /// and resulting settle chain are all checked before the snapshot is made durable.
+    pub fn settle_inter_channel(
+        &mut self,
+        producer: &BlockProducerService,
+        producer_receipt: &BlockProducerReceipt,
+        signed_state: &ChannelState,
+        debit_payload: &InterChannelDebitPayload,
+        descriptor: &InterChannelTransferDescriptor,
+    ) -> Result<LiveBalanceReceipt, LiveBalanceServiceError> {
+        self.ensure_healthy()?;
+        let fingerprint = hash_serializable(&SendFingerprint {
+            domain: "INTMAX_LIVE_BALANCE_SEND_V1",
+            producer_receipt,
+            signed_state,
+            debit_payload,
+            descriptor,
+        })?;
+        if let Some(receipt) = self.idempotent_result(&producer_receipt.request_id, fingerprint)? {
+            verify_inter_channel_receipt(
+                producer,
+                producer_receipt,
+                signed_state,
+                debit_payload,
+                descriptor,
+            )?;
+            return Ok(receipt);
+        }
+        self.ensure_not_terminal()?;
+        if self.disk.awaiting_channel_binding {
+            return Err(LiveBalanceServiceError::InvalidRequest(
+                "bind the pending deposit proof before settling a send".into(),
+            ));
+        }
+        verify_inter_channel_receipt(
+            producer,
+            producer_receipt,
+            signed_state,
+            debit_payload,
+            descriptor,
+        )?;
+        self.require_new_producer_generation(producer_receipt)?;
+        let SendCandidate {
+            mut candidate,
+            spend_proof,
+            transfer,
+            record,
+        } = self.build_send_candidate(
+            producer.producer()?,
+            signed_state,
+            debit_payload,
+            descriptor,
+            true,
+        )?;
         candidate.signed_head = Some(signed_state.clone());
         let result = make_receipt(&candidate, producer_receipt, &self.balance)?;
         candidate.applied.push(AppliedTransition {
@@ -2430,6 +2696,7 @@ impl LiveBalanceService {
             producer,
             backing_circuit,
             true,
+            true,
         )
     }
 
@@ -2743,6 +3010,28 @@ fn verify_exact_receipt(
     Ok(())
 }
 
+/// A proposed successor must be one channel state of this channel with its canonical digest; the
+/// proposer's partial signatures, if any, are irrelevant to the statement being proved.
+fn verify_proposed_successor_shape(
+    successor: &ChannelState,
+    channel_id: ChannelId,
+) -> Result<(), LiveBalanceServiceError> {
+    if successor.channel_id != channel_id
+        || successor.channel_fund.channel_id != channel_id
+        || successor.balance_state.channel_id != channel_id
+    {
+        return Err(LiveBalanceServiceError::InvalidRequest(
+            "proposed successor belongs to a different channel".into(),
+        ));
+    }
+    if successor.digest != successor.signing_digest() {
+        return Err(LiveBalanceServiceError::InvalidRequest(
+            "proposed successor digest is not its signing digest".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_record_and_head_continuity(
     old_record: Option<&ChannelRecord>,
     old_head: Option<&ChannelState>,
@@ -2814,6 +3103,7 @@ fn verify_snapshot_semantics(
     producer: Option<&BlockProducerService>,
     backing_circuit: Option<&CloseAssetBackingCircuit<F, C, D>>,
     require_exit_kit: bool,
+    require_signed_head: bool,
 ) -> Result<(), LiveBalanceServiceError> {
     if disk.applied.len() > MAX_APPLIED_TRANSITIONS
         || disk.balance_generation != disk.applied.len() as u64
@@ -2866,20 +3156,34 @@ fn verify_snapshot_semantics(
                     "pinned record/head channel differs from balance account".into(),
                 ));
             }
-            verify_snapshot(
-                &ChannelSnapshot {
-                    record: record.clone(),
-                    state: head.clone(),
-                    members: members.clone(),
-                    settled_tx_accumulator: crate::wallet_core::default_settled_tx_accumulator(),
-                },
-                None,
-            )
-            .map_err(|e| {
-                LiveBalanceServiceError::Snapshot(format!(
-                    "pinned channel snapshot/member set: {e}"
-                ))
-            })?;
+            let pinned = ChannelSnapshot {
+                record: record.clone(),
+                state: head.clone(),
+                members: members.clone(),
+                settled_tx_accumulator: crate::wallet_core::default_settled_tx_accumulator(),
+            };
+            if require_signed_head {
+                verify_snapshot(&pinned, None).map_err(|e| {
+                    LiveBalanceServiceError::Snapshot(format!(
+                        "pinned channel snapshot/member set: {e}"
+                    ))
+                })?;
+            } else {
+                // A prepared exit-kit candidate carries the PROPOSED, still unsigned successor.
+                // It is structurally authenticated against the pinned record and member set and
+                // must carry no signature at all; the N-of-N is verified by the caller that
+                // later binds or settles the real head.
+                verify_snapshot_structure(&pinned).map_err(|e| {
+                    LiveBalanceServiceError::Snapshot(format!(
+                        "proposed channel snapshot/member set: {e}"
+                    ))
+                })?;
+                if head.digest != head.signing_digest() {
+                    return Err(LiveBalanceServiceError::Snapshot(
+                        "proposed successor must carry its exact signing digest".into(),
+                    ));
+                }
+            }
             if !disk.awaiting_channel_binding
                 && pis.settled_tx_chain != head.balance_state.settled_tx_chain
             {
@@ -3115,11 +3419,20 @@ fn verify_snapshot_semantics(
         }
     }
     if let Some(last) = disk.applied.last() {
-        if last.result.balance_generation != disk.balance_generation
-            || last.result.base_nonce != disk.base_nonce
-            || last.result.private_commitment != pis.private_commitment
-            || last.result.settled_tx_chain != pis.settled_tx_chain
-            || last.result.proof_size != disk.balance_proof.len()
+        // A prepared exit-kit candidate for a debit previews the balance proof one send AHEAD of
+        // the last applied transition (its own transition is appended only by the real settle);
+        // the proof and private trees were cryptographically checked above, so only the journal
+        // linkage is relaxed to "at most one send ahead" for that candidate.
+        let one_send_ahead = !require_signed_head
+            && last.result.balance_generation == disk.balance_generation
+            && (disk.base_nonce == last.result.base_nonce
+                || disk.base_nonce == last.result.base_nonce.wrapping_add(1));
+        if !one_send_ahead
+            && (last.result.balance_generation != disk.balance_generation
+                || last.result.base_nonce != disk.base_nonce
+                || last.result.private_commitment != pis.private_commitment
+                || last.result.settled_tx_chain != pis.settled_tx_chain
+                || last.result.proof_size != disk.balance_proof.len())
         {
             return Err(LiveBalanceServiceError::Snapshot(
                 "snapshot head differs from its last applied transition receipt".into(),

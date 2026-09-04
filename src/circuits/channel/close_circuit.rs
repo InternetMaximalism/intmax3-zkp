@@ -1389,15 +1389,65 @@ pub mod test_fixture {
         amount1: U256,
     ) -> ChannelCloseFullWitness<F, C, D> {
         let fx = fixture();
+        let id = ChannelId::new(channel_id as u64).unwrap();
+        let mut token_registry = BalanceState::single_token_registry(0);
+        token_registry[1] = registry1;
+        let mut amounts = ChannelFund::single_token_amounts(U256::from(77u32));
+        amounts[1] = amount1;
+        let mut rng = rand::thread_rng();
+        let final_balance_proof = fx
+            .balance_processor
+            .prove_initial(id, Salt::rand(&mut rng))
+            .expect("initial balance proof");
+        build_close_full_witness_over_balance_proof(
+            channel_id,
+            sks,
+            Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+            Bytes32::default(),
+            token_registry,
+            2,
+            amounts,
+            final_balance_proof,
+        )
+    }
+
+    /// Signer-independent exit co-generation: build a full close witness over a CALLER-SUPPLIED
+    /// final balance proof and the fund vector / chain state that proof actually committed to.
+    ///
+    /// Used by `generate_close_fixture` to close the lifecycle produced by
+    /// `wallet_core::build_channel_withdrawal`: the close circuit binds `settled_tx_chain` and
+    /// `channel_id` to the balance proof's public inputs, and the on-chain manager binds
+    /// `intmax_state_root` to a FINALIZED rollup state root and the `token_funds_digest` to an
+    /// attested `CloseAssetBackingCircuit` proof over the same balance proof. So, unlike the
+    /// self-contained builders above, every one of these fields must be the lifecycle's real
+    /// value:
+    ///   - `intmax_state_root`: the final `ExtendedPublicState::commitment()` (the lifecycle's
+    ///     `final_state_root`);
+    ///   - `settled_tx_chain`: the balance proof's `settled_tx_chain` PI (after a deposit this is
+    ///     `settled_tx_chain_push(0, deposit_nullifier)`, no longer the genesis 0);
+    ///   - `token_registry` / `token_count` / `amounts`: exactly the balance proof's private
+    ///     asset tree (the backing circuit rebuilds the tree from these and requires root
+    ///     equality).
+    /// The rest of the state (epoch, small block, encrypted balances, recipients, …) keeps the
+    /// `final_state_n` shape; the close circuit authenticates it only through the member
+    /// signatures over its digest. `close_freeze_nonce` is 0 so the proved intent carries freeze
+    /// nonce 1 (what the manager's `requestClose` produces).
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_close_full_witness_over_balance_proof(
+        channel_id: u32,
+        sks: &[FalconKeys],
+        intmax_state_root: Bytes32,
+        settled_tx_chain: Bytes32,
+        token_registry: [u32; crate::constants::MAX_CHANNEL_TOKENS],
+        token_count: u8,
+        amounts: [U256; crate::constants::MAX_CHANNEL_TOKENS],
+        final_balance_proof: ProofWithPublicInputs<F, C, D>,
+    ) -> ChannelCloseFullWitness<F, C, D> {
         let member_count = sks.len();
         let id = ChannelId::new(channel_id as u64).unwrap();
         let enc: Vec<_> = (0..member_count as u32)
             .map(|i| ciphertext(1 + i))
             .collect();
-        let mut token_registry = BalanceState::single_token_registry(0);
-        token_registry[1] = registry1;
-        let mut amounts = ChannelFund::single_token_amounts(U256::from(77u32));
-        amounts[1] = amount1;
         let state = ChannelState {
             channel_id: id,
             epoch: 3,
@@ -1406,7 +1456,7 @@ pub mod test_fixture {
             channel_fund: ChannelFund {
                 channel_id: id,
                 amounts,
-                intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+                intmax_state_root,
             },
             balance_state: BalanceState {
                 channel_id: id,
@@ -1424,12 +1474,12 @@ pub mod test_fixture {
                         })
                         .collect::<Vec<_>>(),
                 ),
-                settled_tx_chain: Bytes32::default(),
+                settled_tx_chain,
                 settled_tx_accumulator_root: Bytes32::default(),
                 state_version: 9,
                 pending_adds: BalanceState::pad_pending_adds_token0(&vec![0u32; member_count]),
                 token_registry,
-                token_count: 2,
+                token_count,
             },
             h2_tag: Bytes32::default(),
             shared_native_nullifier_root: Bytes32::from_u32_slice(&[3, 0, 0, 0, 0, 0, 0, 0])
@@ -1462,11 +1512,6 @@ pub mod test_fixture {
             close_intent,
         };
 
-        let mut rng = rand::thread_rng();
-        let final_balance_proof = fx
-            .balance_processor
-            .prove_initial(id, Salt::rand(&mut rng))
-            .expect("initial balance proof");
         let (member_auth, agg_proof) = member_auth_for_sks(digest, sks);
         ChannelCloseFullWitness {
             close,

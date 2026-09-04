@@ -2,6 +2,7 @@ const fs = require('fs');
 const { cli, wc, RPC, readJson } = require('./cli');
 const producer = require('./block-producer');
 const { flushPublishedHead } = require('./producer-head');
+const { cliWithPreparedExitKit } = require('./exit-kit');
 
 async function flushLastDepositImport(ch) {
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
@@ -63,7 +64,9 @@ async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDeposito
       `--intmax-block-number=${producerReceipt.blockNumber}`,
     ];
     if (allowUnboundDepositor) args.push('--allow-unbound-depositor');
-    cli(ch, args);
+    // Signer-independent exit: the deposit moves the channel's fund vector and settle chain, so
+    // the co-signers' exit kit for the exact import state is proved BEFORE they sign it.
+    await cliWithPreparedExitKit(ch, args);
     artifact = readJson(artifactPath);
   }
 

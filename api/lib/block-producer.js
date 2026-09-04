@@ -261,6 +261,15 @@ function liveBackingArtifact(channelId) {
   return execute({ command: 'liveBackingArtifact', channelId });
 }
 
+// Prove the pre-sign exit kit of a proposed asset/composition-moving successor (see lib/exit-kit.js).
+function livePrepareExitKit(channelId, proposal) {
+  return execute({ command: 'livePrepareExitKit', channelId, proposal });
+}
+
+function liveAbandonPreparedExitKit(channelId, requestId) {
+  return execute({ command: 'liveAbandonPreparedExitKit', channelId, requestId });
+}
+
 function liveBaseHead(channelId) {
   return execute({ command: 'liveBaseHead', channelId });
 }
@@ -342,6 +351,8 @@ module.exports = {
   liveSettleInterChannel,
   liveSendArtifact,
   liveBackingArtifact,
+  livePrepareExitKit,
+  liveAbandonPreparedExitKit,
   liveBaseHead,
   livePrepareCloseFunding,
   liveSettleCloseFunding,

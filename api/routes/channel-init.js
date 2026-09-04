@@ -3,6 +3,7 @@ const fs = require('fs');
 const { cli, wc, RPC, l1SignerArgs, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
+const { cliWithPreparedExitKit } = require('../lib/exit-kit');
 const producer = require('../lib/block-producer');
 const { importL1Deposit } = require('../lib/deposit-pipeline');
 const { flushPublishedHead, publishOffchainSnapshot } = require('../lib/producer-head');
@@ -143,7 +144,9 @@ router.post('/register-token', (req, res) => {
       res.status(400).json({ error: 'needs { tokenIndex } (decimal u32)' });
       return;
     }
-    cli(ch, ['register-token', tokenIndex, 'token_register_cosigned.json']);
+    // Signer-independent exit: the registration changes the token-funds digest, so its exit kit
+    // is proved for the exact proposal before any member signature is released.
+    await cliWithPreparedExitKit(ch, ['register-token', String(tokenIndex), 'token_register_cosigned.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     await publishOffchainSnapshot(ch, snapshot.state);
     res.json(snapshot);
