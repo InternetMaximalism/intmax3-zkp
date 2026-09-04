@@ -97,6 +97,7 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
     function test_printCloseManagerAddress() external {
         if (ready) {
             emit log_named_address("CLOSE_MANAGER_ADDRESS", address(manager));
+            emit log_named_address("CLOSE_ROLLUP_ADDRESS", address(rollup));
             return;
         }
         if (!_v2DeploymentConfigsReady() || !vm.exists(_dataPath("close_lifecycle.json"))) {
@@ -106,8 +107,12 @@ contract CloseLifecycleE2ETest is CloseE2EBase {
         // Deploy from configuration artifacts alone. This both prints the pre-witness address and
         // executes the exact constructor/CREATE2 path, so an initcode/prediction drift cannot hide
         // behind a pure address calculation.
-        (,,, ChannelSettlementManager configOnlyManager) = _deployAll(_lifecycleJson());
+        // The Rollup address is also printed: the `close_` withdrawal generator binds the
+        // close-funding aux data (`close_funding_aux_data`) to `(chainid, rollup, manager, ...)`
+        // and the Manager rejects a payout whose aux was baked against any other pair.
+        (IntmaxRollup configOnlyRollup,,, ChannelSettlementManager configOnlyManager) = _deployAll(_lifecycleJson());
         emit log_named_address("CLOSE_MANAGER_ADDRESS", address(configOnlyManager));
+        emit log_named_address("CLOSE_ROLLUP_ADDRESS", address(configOnlyRollup));
     }
 
     function test_closeLifecycle_endToEnd() public {

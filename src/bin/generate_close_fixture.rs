@@ -37,7 +37,7 @@ use intmax3_zkp::{
         close_circuit::test_fixture,
         close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
     },
-    ethereum_types::u256::U256,
+    ethereum_types::{bytes32::Bytes32, u32limb_trait::U32LimbTrait as _, u256::U256},
     utils::{
         conversion::ToU64,
         mle_prover::{
@@ -153,11 +153,37 @@ fn main() -> anyhow::Result<()> {
         "[close] Step 1: build two-token close witness (channel {CLOSE_FIXTURE_CHANNEL_ID}, \
          member_count = {member_count}, registry [0, {NON_GENESIS_TOKEN_INDEX}]) + prove"
     );
-    let witness = test_fixture::build_close_full_witness_two_token(
+    // The Manager admits a close proof only if its `channel_fund_intmax_state_root` public input
+    // is a Rollup-finalized state root (`ChannelFundStateRootNotFinalized`). Prove the close over
+    // the co-generated `close_` lifecycle's `final_state_root`, which `CloseLifecycleE2E`
+    // finalizes on the real Rollup before submitting this exact proof. This is why the `close_`
+    // withdrawal family must be generated (and be stable) BEFORE this generator runs.
+    let close_lifecycle_path = out_dir.join("close_lifecycle.json");
+    let close_lifecycle: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&close_lifecycle_path).map_err(|e| {
+            anyhow::anyhow!(
+                "read {}: {e} (generate the close_ withdrawal family first)",
+                close_lifecycle_path.display()
+            )
+        })?)?;
+    let final_state_root_hex = close_lifecycle["final_state_root"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("close_lifecycle.json lacks a string final_state_root"))?;
+    let final_state_root = Bytes32::from_hex(final_state_root_hex)
+        .map_err(|e| anyhow::anyhow!("close_lifecycle.json final_state_root: {e:?}"))?;
+    anyhow::ensure!(
+        final_state_root != Bytes32::default(),
+        "close_lifecycle.json final_state_root must be nonzero"
+    );
+    eprintln!(
+        "[close] channel_fund_intmax_state_root = close_lifecycle.final_state_root = {final_state_root_hex}"
+    );
+    let witness = test_fixture::build_close_full_witness_two_token_with_state_root(
         CLOSE_FIXTURE_CHANNEL_ID,
         &member_keys,
         NON_GENESIS_TOKEN_INDEX,
         U256::from(55u32),
+        final_state_root,
     );
     let close_proof = fx.close_circuit.prove(&witness)?;
     fx.close_circuit.data.verify(close_proof.clone())?;

@@ -29,11 +29,6 @@ contract FixtureParsingHarness {
     function parseCompactProofV2(string calldata json) external pure returns (bytes memory) {
         return FixtureLib.parseCompactProofV2(json);
     }
-
-    function deployPinnedMleV2(string calldata json) external returns (address core, address adapter) {
-        (MleVerifierV2 deployedCore, PinnedMleVerifierV2 deployedAdapter) = FixtureLib.deployPinnedMleV2(json);
-        return (address(deployedCore), address(deployedAdapter));
-    }
 }
 
 contract FixtureParsingGuardsTest is Test {
@@ -110,6 +105,93 @@ contract FixtureParsingGuardsTest is Test {
         harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, MLE_PROOF_ABI_SIGNATURE_V2));
     }
 
+    // ── Wire-v3 metadata drift: each recorded field must describe the exact bytes that follow. ──
+    // These replace the retired packed-v1 helper probes (gate table, WHIR domain generators,
+    // Ext3 parsing) with the checks the v3 compact stream actually relies on.
+
+    function test_parseCompactProofV2_rejectsSchemaDrift() public {
+        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
+        vm.expectRevert(bytes("fixture: v2 proof schema"));
+        harness.parseCompactProofV2(
+            _compactV2JsonRaw(
+                compact,
+                3,
+                3,
+                MLE_PROOF_ABI_SIGNATURE_V2,
+                "plonky2-mle-v2-solidity",
+                MLE_PROOF_LAYOUT_HASH_V2,
+                compact.length,
+                keccak256(compact)
+            )
+        );
+    }
+
+    function test_parseCompactProofV2_rejectsLayoutHashDrift() public {
+        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"));
+        vm.expectRevert(bytes("fixture: v2 layout hash"));
+        harness.parseCompactProofV2(
+            _compactV2JsonRaw(
+                compact,
+                3,
+                3,
+                MLE_PROOF_ABI_SIGNATURE_V2,
+                "plonky2-mle-v3-solidity",
+                bytes32(uint256(MLE_PROOF_LAYOUT_HASH_V2) ^ 1),
+                compact.length,
+                keccak256(compact)
+            )
+        );
+    }
+
+    function test_parseCompactProofV2_rejectsRecordedLengthDrift() public {
+        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"), bytes4(0));
+        vm.expectRevert(bytes("fixture: compact length"));
+        harness.parseCompactProofV2(
+            _compactV2JsonRaw(
+                compact,
+                3,
+                3,
+                MLE_PROOF_ABI_SIGNATURE_V2,
+                "plonky2-mle-v3-solidity",
+                MLE_PROOF_LAYOUT_HASH_V2,
+                compact.length - 1,
+                keccak256(compact)
+            )
+        );
+    }
+
+    function test_parseCompactProofV2_rejectsRecordedHashDrift() public {
+        bytes memory compact = abi.encodePacked(bytes8("MLEWHIR3"), bytes4(0));
+        vm.expectRevert(bytes("fixture: compact hash"));
+        harness.parseCompactProofV2(
+            _compactV2JsonRaw(
+                compact,
+                3,
+                3,
+                MLE_PROOF_ABI_SIGNATURE_V2,
+                "plonky2-mle-v3-solidity",
+                MLE_PROOF_LAYOUT_HASH_V2,
+                compact.length,
+                bytes32(uint256(keccak256(compact)) ^ 1)
+            )
+        );
+    }
+
+    function test_parseCompactProofV2_rejectsEmptyCompactBytes() public {
+        bytes memory compact = "";
+        vm.expectRevert(bytes("fixture: compact cap"));
+        harness.parseCompactProofV2(_compactV2Json(compact, 3, 3, MLE_PROOF_ABI_SIGNATURE_V2));
+    }
+
+    function test_parseCompactProofV2_acceptsCheckedInMaxResourceFixture() public view {
+        string memory json = vm.readFile(
+            string.concat(vm.projectRoot(), "/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json")
+        );
+        bytes memory compact = harness.parseCompactProofV2(json);
+        assertEq(compact.length, vm.parseJsonUint(json, ".compactProof.byteLength"), "recorded length");
+        assertEq(keccak256(compact), vm.parseJsonBytes32(json, ".compactProof.keccak256"), "recorded keccak");
+    }
+
     function test_deployPinnedMleV2_rejectsTrailingConfigBytesBeforeCreate() public {
         MleVerifierV2.VerificationConfig memory config;
         config.kIs = new uint256[](0);
@@ -125,7 +207,17 @@ contract FixtureParsingGuardsTest is Test {
         // decode/re-encode canonicality guard can reject it before either CREATE executes.
         bytes memory nonCanonical = abi.encodePacked(abi.encode(config), bytes32(0));
         vm.expectRevert(bytes("fixture: non-canonical v2 config"));
-        harness.deployPinnedMleV2(_configV2Json(nonCanonical));
+        this.deployPinnedMleV2(_configV2Json(nonCanonical));
+    }
+
+    /// @dev External self-call so `vm.expectRevert` observes the library revert. This lives on the
+    /// test contract, not on `FixtureParsingHarness`: `FixtureLib.deployPinnedMleV2` embeds the
+    /// creation code of both `MleVerifierV2` and `PinnedMleVerifierV2`, which pushes any
+    /// non-test contract that carries it far past EIP-170 and fails the `forge build --sizes`
+    /// gate, whereas test contracts are excluded from that gate.
+    function deployPinnedMleV2(string calldata json) external returns (address core, address adapter) {
+        (MleVerifierV2 deployedCore, PinnedMleVerifierV2 deployedAdapter) = FixtureLib.deployPinnedMleV2(json);
+        return (address(deployedCore), address(deployedAdapter));
     }
 
     function _validityJson(uint256 initial, uint256 final_) internal view returns (string memory) {
@@ -156,21 +248,47 @@ contract FixtureParsingGuardsTest is Test {
         view
         returns (string memory)
     {
+        return _compactV2JsonRaw(
+            compact,
+            proofProtocol,
+            vkProtocol,
+            abiSig,
+            "plonky2-mle-v3-solidity",
+            MLE_PROOF_LAYOUT_HASH_V2,
+            compact.length,
+            keccak256(compact)
+        );
+    }
+
+    /// @dev Every recorded field is a parameter so a single metadata drift can be injected while
+    ///      the rest of the document stays canonical.
+    function _compactV2JsonRaw(
+        bytes memory compact,
+        uint256 proofProtocol,
+        uint256 vkProtocol,
+        string memory abiSig,
+        string memory schema,
+        bytes32 layoutHash,
+        uint256 byteLength,
+        bytes32 recordedKeccak
+    ) internal view returns (string memory) {
         return string(
             abi.encodePacked(
-                '{"schema":"plonky2-mle-v3-solidity","schemaVersion":3,"protocolVersion":3,',
+                '{"schema":"',
+                schema,
+                '","schemaVersion":3,"protocolVersion":3,',
                 '"proofAbiSignature":"',
                 abiSig,
                 '","proofLayoutHash":"',
-                vm.toString(MLE_PROOF_LAYOUT_HASH_V2),
+                vm.toString(layoutHash),
                 '","proof":{"protocolVersion":',
                 vm.toString(proofProtocol),
                 '},"verificationKey":{"protocolVersion":',
                 vm.toString(vkProtocol),
                 '},"compactProof":{"encoding":"MLEWHIR3","byteLength":',
-                vm.toString(compact.length),
+                vm.toString(byteLength),
                 ',"keccak256":"',
-                vm.toString(keccak256(compact)),
+                vm.toString(recordedKeccak),
                 '","bytes":"',
                 vm.toString(compact),
                 '"}}'

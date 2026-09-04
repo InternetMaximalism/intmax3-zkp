@@ -52,4 +52,37 @@ contract MleE2ETest is Test {
         verifier.verifyCompact(compactProof);
         assertEq(verifier.fraudVerdictCompact(compactProof, bytes32(0)), 2);
     }
+
+    /// A compact stream cut short must never verify: the decoder derives every vector length
+    /// from the pinned circuit and requires exact EOF, so a truncated DA payload is a grammar
+    /// error, not a shorter proof.
+    function test_mleVerify_rejects_truncatedCompactProof() public {
+        bytes memory truncated = new bytes(compactProof.length - 1);
+        for (uint256 i = 0; i < truncated.length; ++i) {
+            truncated[i] = compactProof[i];
+        }
+        vm.expectRevert();
+        verifier.verifyCompact(truncated);
+        uint8 verdict = verifier.fraudVerdictCompact(truncated, bytes32(0));
+        assertTrue(verdict != 1 && verdict != 4, "truncated compact proof classified as verified");
+    }
+
+    /// A genuine wire-v3 proof of ANOTHER statement (the parent validity circuit) fed to this
+    /// adapter must be rejected. The adapter is constructor-pinned to one circuit; a proof whose
+    /// shape or digest belongs to a different circuit is not "a different valid proof".
+    function test_mleVerify_rejects_crossStatementProof() public {
+        string memory validityJson = vm.readFile(string.concat(vm.projectRoot(), "/test/data/mle_fixture.json"));
+        bytes memory validityProof = FixtureLib.parseCompactProofV2(validityJson);
+        (, PinnedMleVerifierV2 validityAdapter) = FixtureLib.deployPinnedMleV2(validityJson);
+        // Sanity: the foreign proof is genuine against its own adapter.
+        assertTrue(validityAdapter.verifyCompact(validityProof), "validity fixture must verify on its own adapter");
+
+        vm.expectRevert();
+        verifier.verifyCompact(validityProof);
+        uint8 verdict = verifier.fraudVerdictCompact(validityProof, bytes32(0));
+        assertTrue(verdict != 1 && verdict != 4, "cross-statement proof classified as verified");
+
+        vm.expectRevert();
+        validityAdapter.verifyCompact(compactProof);
+    }
 }

@@ -33,7 +33,7 @@ contract ProofDaCodecTest is Test {
         bytes memory payload = codec.canonicalProofBytes(proof);
 
         assertEq(keccak256(payload), keccak256(proof));
-        assertEq(payload.length, 194_244);
+        assertEq(payload.length, 195_012);
         assertEq(codec.blobCountForLength(payload.length), 2);
     }
 

@@ -302,9 +302,16 @@ Step 2 as its recipient.
 
 cargo run --release --locked --bin generate_e2e_fixture
 cargo run --release --locked --bin generate_withdrawal_fixture
-WD_RECIPIENT=0x<exact-manager-address> WD_OUT_PREFIX=close_ \
-  cargo run --release --locked --bin generate_withdrawal_fixture
+WD_RECIPIENT=0x<exact-manager-address> WD_CLOSE_FUNDING_ROLLUP=0x<exact-rollup-address> \
+  WD_OUT_PREFIX=close_ cargo run --release --locked --bin generate_withdrawal_fixture
 ```
+
+Both addresses come from `forge test --match-test test_printCloseManagerAddress -vv`
+(`CLOSE_MANAGER_ADDRESS` / `CLOSE_ROLLUP_ADDRESS`). The printer reads the committed `close_`
+set's genesis and registration, which the aux binding does not touch, so run it before the first
+`close_` pass; if it rejects a mixed fixture generation because the plain set changed shape,
+copy the fresh plain `lifecycle.json` / `lifecycle_validity_mle.json` over their `close_` names
+first and rerun the printer. The `close_` generator refuses to run without both variables.
 
 The exact `close_` prefix is a semantic fixture mode, not merely a filename prefix. Its lifecycle
 native deposit and sole native withdrawal are both the close circuit's shared fixture amount `77`;
@@ -318,18 +325,45 @@ For the local CREATE2 lifecycle fixture, stop here and rerun
 context. The `close_` generator rewrites `close_lifecycle.json`; its genesis and registration
 fields participate in the Rollup and Manager initcodes. Require the printed address to equal the
 address just baked into `close_withdrawal_payout.json`. If it moved, rerun only the `close_`
-generator with the newly printed address and repeat the printer check until the address is stable.
+generator with the newly printed Manager and Rollup addresses and repeat the printer check until
+both are stable.
 Do not run the remaining parent generators, deploy, publish, or accept the fixture cohort while
 those addresses disagree. This local feedback check does not apply to an existing-Rollup
 production attach, whose Manager address comes from the finalized deployment read-back and which
 never reads `close_lifecycle.json`.
 
-Only after that check is stable, continue the same pinned batch:
+Only after that check is stable, continue the same pinned batch. Two Manager-side bindings
+(added with the 2026-09-02 release-blocker work) make the `close_` family and the close intent
+mutually dependent, so the close intent is generated between two `close_` passes:
+
+- `ChannelSettlementManager._checkCloseProof` requires the close proof's
+  `channel_fund_intmax_state_root` public input to be a Rollup-finalized root
+  (`ChannelFundStateRootNotFinalized`). `generate_close_fixture` therefore proves over
+  `close_lifecycle.json.final_state_root`, which `CloseLifecycleE2E` finalizes before submitting
+  that exact proof. The first `close_` pass above must already exist.
+- `ChannelSettlementManager.pullChannelFunds` accepts the close payout only if its `aux_data`
+  equals `close_funding_aux_data(chainid, rollup, manager, channel id, close freeze nonce,
+  finalized token-funds digest)` (`CloseFundingAuxMismatch`). In `close_` mode the withdrawal
+  generator computes that value from `close_intent.json` plus `WD_RECIPIENT` (Manager) and
+  `WD_CLOSE_FUNDING_ROLLUP` (Rollup, printed as `CLOSE_ROLLUP_ADDRESS` by the same printer test).
+  The aux value depends only on the close fixture's fixed token vector (registry `[0, 7]`,
+  amounts `[77, 55]`, count 2, freeze nonce 1, channel 1), never on the lifecycle root, so it is
+  read from the committed `close_intent.json` descriptor and cross-checked by recomputation.
+  The lifecycle's `final_state_root` DOES depend on the withdrawal aux (the withdrawal is part of
+  the finalized chain), which fixes the order: the aux-bound `close_` pass first, then the close
+  intent over the resulting root. The Manager address depends only on genesis/registration and
+  stays put across both.
 
 ```bash
 WD_OUT_PREFIX=sepolia_ cargo run --release --locked --bin generate_withdrawal_fixture
 cargo run --release --locked --bin generate_burn_withdrawal_fixture
+# Aux-bound close_ pass: WD_CLOSE_FUNDING_ROLLUP is the CLOSE_ROLLUP_ADDRESS printed above.
+WD_RECIPIENT=0x<exact-manager-address> WD_CLOSE_FUNDING_ROLLUP=0x<exact-rollup-address> \
+  WD_OUT_PREFIX=close_ cargo run --release --locked --bin generate_withdrawal_fixture
+# Then the close intent, proved over the new close_lifecycle.json.final_state_root.
 cargo run --release --locked --features close-fixture-bin --bin generate_close_fixture
+# Require: the printer still reports the same Manager and Rollup addresses, and
+# `forge test --match-contract CloseLifecycleE2ETest` passes against the pair.
 cargo run --release --locked --features withdrawal-claim-fixture-bin \
   --bin generate_withdrawal_claim_fixture
 cargo run --release --locked --features post-close-claim-fixture-bin \

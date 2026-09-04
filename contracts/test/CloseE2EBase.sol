@@ -242,5 +242,12 @@ abstract contract CloseE2EBase is Test {
                     _managerInitcode(lifecycleJson, address(settlementVerifier), address(rollup), address(materializer))
                 ))
         );
+        // Same deployer-only registration the broadcast scripts perform (Step 2 of the regen
+        // runbook: `... ChannelSettlementManager -> registerSettlementManager`). Without it the
+        // Manager's post-finality funding path (`authorizePartialWithdrawal` /
+        // `pullChannelFunds`) reverts `NotRegisteredSettlementManager`, so the lifecycle E2E
+        // would stop before exercising the value path. The CREATE2 factory is the Rollup's deployer.
+        vm.prank(FACTORY);
+        rollup.registerSettlementManager(address(manager));
     }
 }

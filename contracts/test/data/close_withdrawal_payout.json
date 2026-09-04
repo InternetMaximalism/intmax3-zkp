@@ -4,11 +4,11 @@
       "recipient": "0xfe7cb59c300218c04ae5360f77cda771019eabb7",
       "token_index": 0,
       "amount": "77",
-      "nullifier": "0xc8f0ee36f9340fe5dc1481ebd848165097502a7c9e073e2973fca01515efc902",
-      "aux_data": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      "nullifier": "0xc27a6cf291bd43634896a6d81b20c7a932f076541ffa3a32365299588a64a4bc",
+      "aux_data": "0xdde498b624d8cb96bed92d957b76b31bd89a36682631fbc2639a7a920114a64a"
     }
   ],
   "withdrawal_prover": "0x09637b2ba62a2a5e9695b1e9ffa8d8f9fba63816",
   "block_number": 3,
-  "ext_commitment": "0x76f5feb3152d0d62fa7712dc12c4f6c9fd67980d7e015c1c660550deccf18c16"
+  "ext_commitment": "0x46fa20438a98f59c4d755ed7fb8951861fb68afb37cc2027a766b1f52da69b90"
 }

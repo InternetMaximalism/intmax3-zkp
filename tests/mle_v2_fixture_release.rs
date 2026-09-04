@@ -1912,7 +1912,7 @@ fn validate_partial_withdrawal_bindings() -> Result<(), String> {
         return Err("pw_submit withdrawal exceeds the proved per-token fund".to_owned());
     }
     require_equal(
-        &settled_tx_chain_push(submit.prev_settled_tx_chain, submit.burn_tx_leaf),
+        &settled_tx_chain_push(submit.prev_settled_tx_chain, submit.withdrawal_aux_data),
         &submit.final_settled_tx_chain,
         "pw_submit settled transaction chain push",
     )?;

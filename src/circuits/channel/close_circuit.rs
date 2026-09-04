@@ -1398,6 +1398,28 @@ pub mod test_fixture {
         registry1: u32,
         amount1: U256,
     ) -> ChannelCloseFullWitness<F, C, D> {
+        build_close_full_witness_two_token_with_state_root(
+            channel_id,
+            sks,
+            registry1,
+            amount1,
+            Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+        )
+    }
+
+    /// Same closable two-token state as [`build_close_full_witness_two_token`], but with the
+    /// channel fund's `intmax_state_root` supplied by the caller. The close circuit copies this
+    /// value into the `channel_fund_intmax_state_root` public input; `ChannelSettlementManager`
+    /// then requires it to be a state root the Rollup has finalized. The fixture generator passes
+    /// the co-generated lifecycle's `final_state_root` so the checked-in close proof is admissible
+    /// against the real Rollup, while in-tree circuit tests keep the synthetic default above.
+    pub fn build_close_full_witness_two_token_with_state_root(
+        channel_id: u32,
+        sks: &[FalconKeys],
+        registry1: u32,
+        amount1: U256,
+        intmax_state_root: Bytes32,
+    ) -> ChannelCloseFullWitness<F, C, D> {
         let fx = fixture();
         let member_count = sks.len();
         let id = ChannelId::new(channel_id as u64).unwrap();
@@ -1417,7 +1439,7 @@ pub mod test_fixture {
             channel_fund: ChannelFund {
                 channel_id: id,
                 amounts,
-                intmax_state_root: Bytes32::from_u32_slice(&[1, 2, 3, 4, 0, 0, 0, 0]).unwrap(),
+                intmax_state_root,
             },
             balance_state: BalanceState {
                 channel_id: id,
