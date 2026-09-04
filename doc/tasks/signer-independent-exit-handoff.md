@@ -218,3 +218,63 @@ Rust 側は §2 のテストで再現。node delegate 側の監査で実害の�
 ## 7. commit/push
 
 本記録の変更は同一ブランチ上に論理単位でコミットする。実チェーンへの broadcast は未実施。
+
+---
+
+# 追記（2026-09-04）: 資産移動 8 purpose の解放と close 経路の残件
+
+前節「テストネットを止めているもの」のうち、このリポジトリ内で完結する 2 項目を実装した。
+
+## 1. pre-sign exit kit（`doc/docs/pre-sign-exit-kit.md`）
+
+`requires_prepared_exit_kit` の一律拒否を、「署名対象の後続状態 H' の kit が検証・fsync 済みで
+durable であること」を要求する本来のゲートに置き換えた。
+
+- **live balance service** `prepare_exit_kit`: 提案（未署名）の後続状態に対し、commit せずに
+  kit を証明し、署名検証を構造検証（`verify_snapshot_structure`）に置き換えた意味検証を通した
+  artifact を返す。TokenRegister / L1DepositImport / InterChannelDebit の 3 proposal。
+- **producer staging**: debit 系は後続の settle chain が「N-of-N 済みブロックの投稿」に依存する
+  ため、未署名の提案状態でブロックを journal の `prepared` entry として staging する
+  （`StagedInterChannelExitKit`、`BlockWitnessGenerator::unsigned_staging`）。ブロックハッシュ・
+  各 root・`bp_sig_chain` の statement `(IMSB digest, 登録 signer pk 列)` は署名バイトに依存
+  しないため、staging 時の head snapshot は実 N-of-N ブロックと byte 一致し、`post_inter_channel`
+  はそれを検証したうえで in-place で promote する（不一致は fail-closed）。staging 中は close
+  funding の prepared と同様に他の producer 変更を凍結し、`abandon` で解除できる。
+- **CLI**: `cli_state.json` schema 5（`prepared_exit_kit_receipt` 必須キー）、
+  `--propose-exit-kit`、`INTMAX_PREPARED_EXIT_KIT`、`verify_public_backing_proposed` による
+  検証・content-addressed アーカイブ・署名前 save、採用時の receipt promote。宛先側 credit
+  （InterChannelFundImport/BundleApply）は「純増のみ ＋ 現 head の receipt 検証済み」で署名し、
+  受領後に `install-exit-kit` で kit を入れる（kit-pending 状態）。CloseFunding は on-chain で
+  退役済みのため拒否のまま。
+- **API**: `api/lib/exit-kit.js`（propose → `livePrepareExitKit` → 署名、失敗時 abandon）、
+  register-token / deposit import / burn / inter-channel の各ルートを二相化。
+- **wasm**: 変更なし（ブラウザは資産移動 purpose の署名者ではない。前節の cosign ゲートは維持）。
+
+副作用の修正: `receive_deposit_unbound` が awaiting 遷移時に旧 kit を落とすようにし、bound 済み
+channel への追加 deposit が fail-closed で止まる問題を解消。
+
+テスト: `signing_ledger_tests` 10/10（新規 4 件: exact successor 解放と promote、二段 import の
+kit 共有、宛先 credit の kit-pending、CloseFunding 退役）、`tests/live_balance_service.rs` に
+staging → prepare → 検証（提案 digest のみ受理、N-of-N 検証は拒否）→ 署名 → promote → settle の
+実 proof 統合テスト、node `api-exit-kit.test.js` 3 件と既存ルートテストの更新。
+
+## 2. close 経路の残件
+
+- **backing fixture 共生成器**（`generate_close_fixture`）: lifecycle chain（deposit 6 / withdraw 3）
+  の最終 `ExtendedPublicState`・balance proof・asset vector から close witness と whole-vector
+  backing proof を共生成し、`close_asset_backing_{manifest,mle,public_inputs}.json` を出力。
+  `intmax_state_root` は finalized な `final_state_root`、anchor は 3。
+- **CloseLifecycleE2E**: `initializeBackingVk` と `attestSignedHeadBacking` を追加し、実 contract
+  で request → attest → submit → finalize → payout が通る。
+- **DeployCloseCli 接続ブランチ**: `DeployGuards.t.sol` に `EXISTING_ROLLUP` ブランチのテストを
+  追加（`Deploy.s.sol` で作った Rollup に接続し、backing VK 初期化と readback を検証）。
+- **deploy readback**: `channel_member export-close-deployment-manifest <out> <rpc>` を追加。
+  ACTIVE settlement binding から publisher の deployment manifest v3 を生成し、activation
+  checkpoint で runtime code hash と MLE verifier（`allowedChainId`）を再読込・照合する。
+  `doc/docs/public-close-publisher.md` の例を v3 に更新。Sepolia 等の実チェーンでの実行は
+  鍵と資金が必要なため未実施。
+
+## 残る前提
+
+MLE/WHIR PCS の Critical と `IntmaxRollup.releaseRuntime` の chain 31337 固定は変わらず、
+公開チェーンでの価値移動はその解決後になる。
