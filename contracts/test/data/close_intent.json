@@ -4,17 +4,17 @@
   "final_epoch": 3,
   "final_small_block_number": 7,
   "close_freeze_nonce": 1,
-  "final_channel_state_digest": "0x2186b27730fa7f90c9ca9ef063a1beb99573388ecff7bdbdd49d0402e9ff16b9",
-  "final_balance_state_h1": "0x8ad301d4bee2d03b5a34db4b799f4b05e8396a2479db7007fe70a92ecc0972f4",
-  "channel_fund_amount": "77",
-  "channel_fund_intmax_state_root": "0x0000000100000002000000030000000400000000000000000000000000000000",
+  "final_channel_state_digest": "0x0e54c1725f3ef17abe24a228dece662dcfb9ce6aedbaa9d80a63bb6b5c0a1d50",
+  "final_balance_state_h1": "0x99f8f7fa66a70e562051d59497ade7f8d39f5847412739eff33610ddbea205ab",
+  "channel_fund_amount": "3",
+  "channel_fund_intmax_state_root": "0x634b0688603b96789ee844c9882efe0ff77f8f84b88269df1aef6fd544fd29a7",
   "burn_tx_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "close_withdrawal_digest": "0x4a290c0406b82d5bf5d0655c8dde5cd5a0d8d27cea5276ec5844a7978521307f",
+  "close_withdrawal_digest": "0x585d618fbc3db4ef6741e5e7818a7dbdc6229060de6745093e57894df293b96a",
   "snapshot_medium_block_number": 0,
   "final_state_version": 9,
-  "final_settled_tx_chain": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "final_settled_tx_chain": "0x4c14efc4102b620eb7e7d5c1d05c07bd00eba445dcbfef202cb600f973c399ec",
   "final_settled_tx_accumulator_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "close_intent_digest": "0xa092c36a328ce2d8292136cded5131004a1e21b0faa6b609f6892093f316a5a5",
+  "close_intent_digest": "0x8caa754e6fade363a7440caf56ea94f9d1fa82e1fa0a14c9fa881239557f1ade",
   "member_set_commitment": "0x26826dea758d418b1fc4ce2031b80198dfa1509ac6b2f7e404397a3b22aa4abc",
   "member_count": 3,
   "delegate_count": 0,
@@ -24,8 +24,8 @@
     "0x9974000438b05a40e306da3185c36bd3325566f3e1a9fbc2f7c1a726d307a67a"
   ],
   "channel_fund_amounts": [
-    "77",
-    "55",
+    "3",
+    "0",
     "0",
     "0",
     "0",
@@ -37,7 +37,7 @@
   ],
   "token_registry": [
     0,
-    7,
+    0,
     0,
     0,
     0,
@@ -47,6 +47,6 @@
     0,
     0
   ],
-  "token_count": 2,
-  "token_funds_digest": "0xbf22129b94310fd5fa4ab8489da811849136208740bdcdc470b2eb45210a3d54"
+  "token_count": 1,
+  "token_funds_digest": "0x7f3c379760b9c7ed64191d64d8f02d38c98ebceca5495ce04168ae3cba7a0443"
 }

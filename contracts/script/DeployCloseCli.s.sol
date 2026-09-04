@@ -49,6 +49,16 @@ contract DeployCloseCli is Script {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", f));
     }
 
+    /// @dev The ONLY two env inputs that select the attach branch (`EXISTING_ROLLUP`,
+    ///      `EXPECTED_BROADCASTER`). `virtual` for the same reason as `_read`: `vm.setEnv` is
+    ///      PROCESS-global and forge runs the test functions of one contract in parallel, so a
+    ///      guard test that set these through the environment would flip every concurrently
+    ///      running fresh-branch guard onto the attach branch for the duration of the run. The
+    ///      harness substitutes VALUES only; `run()` under test is this exact `run()`.
+    function _envOrAddress(string memory name, address defaultValue) internal view virtual returns (address) {
+        return vm.envOr(name, defaultValue);
+    }
+
     /// @dev Read and authenticate the exact CloseAssetBacking MLE artifact staged by the Rust
     ///      deployment driver from a `public_close_prover` bundle. This is deliberately a separate
     ///      file from `close_intent_mle.json`: the two VKs describe different circuits and using the
@@ -113,8 +123,8 @@ contract DeployCloseCli is Script {
         // place that decides which delegate count reaches `registerChannel` (a constant zero) and
         // which reaches the manager (the record's live `active_delegate_count`).
         RegRecordLib.Record memory r = RegRecordLib.parse(_read("cli_reg_record.json"));
-        address existingRollup = vm.envOr("EXISTING_ROLLUP", address(0));
-        address expectedBroadcaster = vm.envOr("EXPECTED_BROADCASTER", address(0));
+        address existingRollup = _envOrAddress("EXISTING_ROLLUP", address(0));
+        address expectedBroadcaster = _envOrAddress("EXPECTED_BROADCASTER", address(0));
         // A public deployment must attach to the already-live rollup, because the authenticated
         // backing bundle is scoped to that exact escrow contract. The fresh branch remains a
         // local-dev bootstrap only; it cannot silently deploy a public materializer with no VK.

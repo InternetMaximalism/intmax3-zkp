@@ -98,10 +98,21 @@ cargo run --release --bin generate_withdrawal_fixture
 # Compute the manager CREATE2 address from the JUST-regenerated plain set:
 cd contracts && forge build && \
   forge test --match-test test_printCloseManagerAddress -vv && cd ..
-# Close family (bake the manager CREATE2 recipient printed above)
-WD_RECIPIENT=0x<close-manager-addr> WD_OUT_PREFIX=close_ \
-  cargo run --release --bin generate_withdrawal_fixture
-cargo run --release --features close-fixture-bin            --bin generate_close_fixture
+# Close family (bake the manager CREATE2 recipient printed above). Signer-independent exit
+# (2026-09): `generate_close_fixture` is now the CO-GENERATOR of the whole family — it builds the
+# `close_` lifecycle itself (deposit 6 / withdraw 3, recipient = WD_RECIPIENT; what
+# `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` used to write), closes THAT lifecycle's final
+# balance proof (`intmax_state_root` = its finalized `final_state_root`, single-lane vector
+# {ETH -> 3}) and proves the whole-vector CloseAssetBacking proof over the same balance proof
+# (`close_asset_backing_{mle,public_inputs,manifest}.json`, anchor block 3). `submitCloseIntent`
+# requires the finalized root AND an attested backing, so the three are only valid together.
+# The printer's cross-check needs `close_lifecycle*.json` present and agreeing with the plain set:
+# seed them from the plain set BEFORE the printer (the generator overwrites them).
+cp contracts/test/data/lifecycle.json contracts/test/data/close_lifecycle.json
+cp contracts/test/data/lifecycle_validity_mle.json contracts/test/data/close_lifecycle_validity_mle.json
+# (printer, see above) then:
+WD_RECIPIENT=0x<close-manager-addr> \
+  cargo run --release --features close-fixture-bin          --bin generate_close_fixture
 cargo run --release --features withdrawal-claim-fixture-bin --bin generate_withdrawal_claim_fixture
 cargo run --release --features post-close-claim-fixture-bin --bin generate_post_close_claim_fixture
 cargo run --release --features cancel-close-fixture-bin     --bin generate_cancel_close_fixture
@@ -194,7 +205,8 @@ Until that is done, `CloseLifecycleE2E.t.sol::test_closeLifecycle_endToEnd` fail
 `manager CREATE2 address != close payout fixture recipient (stale fixtures -- regenerate)` — the
 intended signal, per Step 2 above. Get the new address from
 `forge test --match-test test_printCloseManagerAddress -vv`, then rerun Step 1's
-`WD_RECIPIENT=<addr> WD_OUT_PREFIX=close_ cargo run --release --bin generate_withdrawal_fixture`.
+`WD_RECIPIENT=<addr> cargo run --release --features close-fixture-bin --bin generate_close_fixture`
+(the close-family co-generator: `close_` lifecycle + close intent + backing proof in one run).
 
 **Settlement-manager registration — FIXED 2026-08-13.** `DeployCloseCli.s.sol` did not call
 `rollup.registerSettlementManager(manager)`; its only callers were the two anvil-gated scripts. That

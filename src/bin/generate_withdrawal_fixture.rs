@@ -52,9 +52,14 @@ fn parse_address_hex(hex: &str) -> Address {
 
 fn main() -> anyhow::Result<()> {
     eprintln!("[wd] building channel withdrawal artifacts (HEAVY proving)…");
+    // Co-generation contract with `generate_close_fixture` (the `close_` set): deposit 6, withdraw
+    // 3, so the final asset tree is {ETH -> 3} and the close/backing fund vector `amounts[0] == 3`
+    // equals the L1 withdrawal payout the manager receives (CloseLifecycleE2E asserts
+    // `payout.amount == finalizedChannelFundAmount(0) == amounts[0]`). Keep the plain set on the
+    // SAME numbers so the two lifecycles differ only in the baked withdrawal recipient.
     let params = ChannelWithdrawalParams {
         channel_id: 1,
-        deposit_amount: 10,
+        deposit_amount: 6,
         withdrawal_amount: 3,
         depositor: std::env::var("WD_DEPOSITOR")
             .ok()
