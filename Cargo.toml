@@ -26,7 +26,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 # polygon-plonky2 main (≥ PR #11 wasm-webgpu-merkle merge `940ce731`, currently
-# pinned to `d67ab49e`) carries both the MLE PCS and the WASM/WebGPU Merkle
+# selected by the parent gitlink) carries both the MLE PCS and the WASM/WebGPU Merkle
 # port. The local submodule under contracts/lib/polygon-plonky2 is the source
 # of truth; the [patch] block below redirects all transitive `polygon-plonky2.git`
 # refs (regardless of branch label) to the submodule path so everything in the
@@ -218,7 +218,9 @@ cancel-close-fixture-bin = []
 # Retired direct member-set-update prototype. This feature exists only so old audit fixtures can
 # still be reproduced from an explicitly non-production build. No release binary enables it, and
 # the production producer/service/CLI contain no constructive MSU path.
-deprecated-msu = []
+# The historical fixture alone may import the submodule's quarantined v1 APIs.
+# Never enable this feature in a production build.
+deprecated-msu = ["plonky2_mle/legacy-conformance"]
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
