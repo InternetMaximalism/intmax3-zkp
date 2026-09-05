@@ -1789,7 +1789,9 @@ function makeClaimSettlement({
       }
       const claimCredit = manager['claimWithdrawalCredit(bytes32)'];
       if (!outbox.status(actionId)) {
-        await claimCredit.staticCall(nullifier);
+        // This read-only Contract has no connected signer. Simulate the same recipient that
+        // the outbox will sign for, since the nullifier-scoped payout is recipient-only.
+        await claimCredit.staticCall(nullifier, { from: expectedRecipient });
       }
       const transaction = await claimCredit.populateTransaction(nullifier);
       await rememberPrepared(txOptions.onPrepared, {

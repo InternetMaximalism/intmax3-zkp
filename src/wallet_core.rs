@@ -874,6 +874,45 @@ fn member_pubkeys_root(record: &ChannelRecord, members: &[MemberInfo]) -> WResul
 /// followed by `delegate_count` delegates `member_count..active`), bijectively. `bp_member_slot` is
 /// the block proposer and MUST be a co-signing member (`< member_count`). Pass `delegate_count = 0`
 /// for a classic member-only channel (byte-for-byte the legacy build).
+/// Admission for new channel compositions, not a retroactive rewrite of a signed head.
+/// Claim nullifiers identify a Regev key, so two active slots must not share that key.
+pub fn validate_new_participant_exit_keys(members: &[MemberInfo]) -> WResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    for member in members {
+        member
+            .regev_pk
+            .validate()
+            .map_err(|error| WalletError(error.to_string()))?;
+        if member
+            .regev_pk
+            .a
+            .iter()
+            .all(|&coefficient| coefficient == 0)
+        {
+            return bail(format!(
+                "active slot {} has a zero Regev a polynomial; the withdrawal claim requires a nonzero key",
+                member.slot
+            ));
+        }
+        if !seen.insert(Bytes32::from(member.regev_pk.poseidon_digest())) {
+            return bail(
+                "active participants must have distinct Regev keys for independently claimable balances",
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_new_exit_key_digests(digests: &[Bytes32]) -> WResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    for digest in digests {
+        if *digest == Bytes32::default() || !seen.insert(*digest) {
+            return bail("new active exit-key digests must be nonzero and distinct");
+        }
+    }
+    Ok(())
+}
+
 pub fn build_record(
     channel_id: u32,
     members: &[MemberInfo],
@@ -907,6 +946,7 @@ pub fn build_record(
             "bp_member_slot {bp_member_slot} must be a co-signing member (< member_count {member_count})"
         ));
     }
+    validate_new_participant_exit_keys(members)?;
     let mut hashes: [Bytes32; MAX_CHANNEL_MEMBERS] = std::array::from_fn(|_| Bytes32::default());
     for (slot, hash) in hashes.iter_mut().enumerate().take(active) {
         let m = member_at(members, slot)?;
@@ -985,6 +1025,12 @@ pub fn assemble_genesis_state_backed(
     // claim circuit can bind the witnessed `(a, b)` to the member's registered key.
     if regev_pk_digests_active.len() != active {
         return bail("genesis Regev pk digest count must equal member_count + delegate_count");
+    }
+    validate_new_exit_key_digests(regev_pk_digests_active)?;
+    for ciphertext in enc_balances_active {
+        ciphertext
+            .validate_balance_exit_shape()
+            .map_err(|error| WalletError(error.to_string()))?;
     }
     // B-1b: one NONZERO L1 exit address per ACTIVE slot (members then delegates), folded into the
     // signed H1 via the slot leaves. FAIL-CLOSED here (before the state is even assembled): a
@@ -1118,7 +1164,9 @@ pub fn verify_exit_kit_preserving_successor(
         .checked_add(1)
         .ok_or_else(|| WalletError("balance-state version overflow".into()))?;
     if next.epoch != expected_epoch || next.balance_state.state_version != expected_version {
-        return bail("SIGNER-INDEPENDENT EXIT: successor skips, forks, or rolls back the signed head");
+        return bail(
+            "SIGNER-INDEPENDENT EXIT: successor skips, forks, or rolls back the signed head",
+        );
     }
     if next.close_freeze_nonce != prev.close_freeze_nonce {
         return bail("SIGNER-INDEPENDENT EXIT: successor changes the close era");
@@ -1498,18 +1546,10 @@ pub fn build_send_token(
         sender_pk_b: keys.pk_b(),
     };
 
-    let mut proposed = next_state;
-    // SECURITY/delegate account: a co-signing MEMBER sender (slot < member_count) contributes its
-    // own Goldilocks state signature here (it is one of the N-of-N). A DELEGATE sender
-    // (slot >= member_count) is send-only — it authorizes the debit with its BabyBear A11 hash-sig
-    // (above) but does NOT co-sign channel state, so it adds NO state signature; the N-of-N members
-    // co-sign the resulting state. (A delegate signature would be ignored by verify_all_signatures
-    // anyway, but emitting it would contradict the send-only model and waste a proof.)
-    if (sender_slot as usize) < prev.balance_state.member_count as usize {
-        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
-        let sender_sig = sign_state(keys, sender_slot as u8, &proposed)?;
-        add_signature(&mut proposed, sender_sig);
-    }
+    // A proposal authorizes only the transfer (A11 above), never the channel successor.
+    // Member and delegate builders are deliberately identical here: state signatures may be
+    // released only by the host's checked, durable co-signing boundary after exit-kit admission.
+    let proposed = next_state;
 
     Ok(BuiltSend {
         payload: SendPayload {
@@ -1996,8 +2036,8 @@ pub struct RefreshPayload {
 /// FRESH ciphertext (clean digits, same value), prove `old_ct ≡ new_ct` (RefreshAir), and propose
 /// the next state (slot's ct replaced, its `pending_adds` reset to 0, version++). Returns the
 /// payload for the members to co-sign AND the fresh `AmountWitness` so the wallet can SEND from the
-/// slot afterwards. A DELEGATE slot does NOT co-sign state; a member slot self-signs (it is
-/// N-of-N).
+/// slot afterwards. Both member and delegate builders return an unsigned state; the host runs
+/// its checked co-signing round separately.
 pub fn build_refresh(
     keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
@@ -2049,13 +2089,9 @@ pub fn build_refresh(
     }
     .with_computed_digest();
 
-    let mut proposed = next_state;
-    if (slot as usize) < prev.balance_state.member_count as usize {
-        // A co-signing MEMBER self-signs (N-of-N). A DELEGATE is send-only — no state signature.
-        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
-        let sig = sign_state(keys, slot as u8, &proposed)?;
-        add_signature(&mut proposed, sig);
-    }
+    // Refresh is also an unsigned proposal; being the owner is not a substitute for the
+    // co-signer's transition, exit-kit and durable anti-equivocation checks.
+    let proposed = next_state;
 
     let payload = RefreshPayload {
         member_index: slot,
@@ -2233,7 +2269,7 @@ pub struct InterChannelTransferDescriptor {
 
 /// A built inter-channel credit (LEG B): the import state (`ChannelFund` += amount; unallocated
 /// += amount) followed by the bundle-apply state (recipient slot += delta; unallocated -= amount).
-/// Both states carry the building member's signature; co-signers add theirs after re-verifying.
+/// Both states are unsigned; co-signers authorize them only after re-verifying and recording them.
 pub struct BuiltInterChannelCredit {
     pub fund_import_state: ChannelState,
     pub bundle_apply_state: ChannelState,
@@ -2476,8 +2512,8 @@ pub fn build_inter_channel_send(
 /// the tx leaf, `h2_tag = tx_tree_root`; delegate_count + the untouched positions'
 /// enc_balances/pending_adds preserved via the `..prev.balance_state.clone()` spread), the REAL
 /// E-2 (whose IMU2 PVs bind `token_index`), the 1-tx `TxV2Tree` (root + inclusion proof
-/// computed INTERNALLY), self-signs the building member's slot if it is a co-signing member, and
-/// CALLS `InterChannelSendUpdateWitness::verify` to self-check before returning.
+/// computed INTERNALLY), and CALLS `InterChannelSendUpdateWitness::verify` to self-check before
+/// returning an unsigned state proposal.
 /// `prev_user_leaf_index` must be read from the authenticated pre-block `ChannelLeaf`: the
 /// validity circuit requires `TxV2.nonce == prev_user_leaf.index`. It cannot be reconstructed from
 /// `small_block_number`, because incoming-only channel transitions advance that independent
@@ -2708,7 +2744,7 @@ pub fn build_inter_channel_send_token_at_base_nonce(
     // every other position via `ensure_funds_unchanged_except`).
     let mut enc_balances = prev.balance_state.enc_balances.clone();
     enc_balances[sender_slot as usize][token_slot] = after_ct.clone();
-    let mut a_send = ChannelState {
+    let a_send = ChannelState {
         epoch: prev.epoch + 1,
         small_block_number: prev.small_block_number + 1,
         channel_fund: ChannelFund {
@@ -2797,21 +2833,12 @@ pub fn build_inter_channel_send_token_at_base_nonce(
     inter_channel_tx.sender_hash_sig =
         sign_channel_tx_sender(keys, &inter_channel_tx.signing_digest(), level)?;
 
-    // If the building participant is a co-signing MEMBER (slot < member_count) it self-signs the
-    // post-debit state (one of the N-of-N). A DELEGATE sender does NOT co-sign state.
-    if (sender_slot as usize) < record.member_count as usize {
-        // Cosigner space (guarded above): slot < member_count <= MAX_SIG_CLUSTER, so u8 fits.
-        let sender_sig = sign_state(keys, sender_slot as u8, &a_send)?;
-        add_signature(&mut a_send, sender_sig);
-    }
-
     // SELF-CHECK: the post-debit state must pass the REAL inter-channel send witness BEFORE we hand
     // it to co-signers. The witness's `verify_next_state_signatures` is STRUCTURAL (one non-empty
     // sig per member slot) — it does NOT run the real SingleSig proofs (that is
-    // `verify_all_signatures`, run once the full set is collected). At build time only the building
-    // member (if any) has signed, so fill placeholder structural sigs on a CLONE for the
-    // self-check; the RETURNED `a_send` carries only the building member's REAL signature
-    // (co-signers add the rest). Placeholder sigs do not affect `signing_digest()` (member
+    // `verify_all_signatures`, run once the full set is collected). No member has signed the
+    // proposal: fill placeholder structural sigs on a CLONE for the self-check only. The returned
+    // `a_send` is unsigned. Placeholder sigs do not affect `signing_digest()` (member
     // signatures are excluded from it), so the digest binding is unchanged.
     let mut next_for_check = a_send.clone();
     fill_placeholder_sigs(record, &mut next_for_check);
@@ -4305,8 +4332,8 @@ pub fn verify_inter_channel_send_transition_with_lookup(
 /// settled_tx_chain pushes the same tx leaf as A) then `ReceiverBundleApplyUpdateWitness`
 /// (recipient slot += delta; unallocated -= amount; settle chain unchanged). One logical base
 /// transfer is folded exactly once, matching `BalanceProcessor::prove_receive_transfer`. The
-/// building member self-signs both states (if it is a co-signing member); both witnesses are CALLED
-/// as self-checks. `b_snapshot` is channel B; `keys` belong to a channel-B member (used for the
+/// builder signs neither state; both witnesses are CALLED as self-checks. `b_snapshot` is channel
+/// B; `keys` belong to a channel-B member (used for the
 /// recipient decryption check when it owns the slot).
 ///
 /// SECURITY: this builder's per-channel witness self-checks verify B-LOCAL invariants (fund/unalloc
@@ -4370,7 +4397,7 @@ pub fn build_inter_channel_credit(
     let incoming_settle_tag = inter_channel_tx
         .tx_leaf_hash()
         .map_err(|e| WalletError(format!("fund import tx_leaf_hash: {e}")))?;
-    let mut fund_import_state = ChannelState {
+    let fund_import_state = ChannelState {
         epoch: b_prev.epoch + 1,
         small_block_number: b_prev.small_block_number + 1,
         channel_fund: ChannelFund {
@@ -4400,10 +4427,8 @@ pub fn build_inter_channel_credit(
         ..b_prev.clone()
     }
     .with_computed_digest();
-    sign_member_if_present(keys, b_record, &mut fund_import_state)?;
-    // Structural-signature completeness for the witness self-check (see build_inter_channel_send):
-    // the building member has signed; fill placeholders for the rest. The returned state keeps only
-    // the real building-member signature; co-signers add the rest after re-verifying.
+    // Structural placeholders are confined to the self-check clone. Neither half of an incoming
+    // credit may leak a member signature before the host has checked and recorded its decision.
     let mut import_for_check = fund_import_state.clone();
     fill_placeholder_sigs(b_record, &mut import_for_check);
     let import_witness = InterChannelFundImportUpdateWitness {
@@ -4436,7 +4461,7 @@ pub fn build_inter_channel_credit(
     // accounting half of that one receive and must not fold a second logical settlement.
     let bundle_accumulator = import_accumulator.clone();
     let bundle_accumulator_root = import_accumulator_root;
-    let mut bundle_apply_state = ChannelState {
+    let bundle_apply_state = ChannelState {
         epoch: fund_import_state.epoch + 1,
         balance_state: BalanceState {
             enc_balances: bundle_enc,
@@ -4454,7 +4479,6 @@ pub fn build_inter_channel_credit(
         ..fund_import_state.clone()
     }
     .with_computed_digest();
-    sign_member_if_present(keys, b_record, &mut bundle_apply_state)?;
 
     // The recipient decryption check only applies when THIS member owns the recipient slot.
     let owns_recipient = b_record.member_pk_gs[recipient_slot] == keys.pk_g();
@@ -4812,7 +4836,7 @@ pub struct BuiltL1DepositImport {
 /// Trust anchor: the `receive_deposit` balance proof verified externally via
 /// `verify_channel_backing` — no transport proof needed (unlike inter-channel import).
 pub fn build_l1_deposit_import(
-    keys: &MemberKeys,
+    _keys: &MemberKeys,
     snapshot: &ChannelSnapshot,
     deposit: &Deposit,
     recipient_slot: usize,
@@ -4844,7 +4868,7 @@ pub fn build_l1_deposit_import(
         import_accumulator_root,
     )
     .map_err(|e| WalletError(format!("l1 deposit fund import accumulator push: {e:?}")))?;
-    let mut fund_import_state = ChannelState {
+    let fund_import_state = ChannelState {
         epoch: prev.epoch + 1,
         small_block_number: prev.small_block_number + 1,
         channel_fund: ChannelFund {
@@ -4875,7 +4899,6 @@ pub fn build_l1_deposit_import(
         ..prev.clone()
     }
     .with_computed_digest();
-    sign_member_if_present(keys, record, &mut fund_import_state)?;
     let mut import_for_check = fund_import_state.clone();
     fill_placeholder_sigs(record, &mut import_for_check);
     let import_witness = L1DepositImportUpdateWitness {
@@ -4897,14 +4920,13 @@ pub fn build_l1_deposit_import(
     // One consumed L1 deposit is one settle-history/accumulator event. The import step already
     // inserted it; the bundle only assigns the confirmed amount to a ciphertext slot.
     let bundle_accumulator = import_accumulator.clone();
-    let mut bundle_apply_state = l1_deposit_bundle_state(
+    let bundle_apply_state = l1_deposit_bundle_state(
         &fund_import_state,
         recipient_slot,
         token_slot,
         recipient_delta,
         amount_u64,
     )?;
-    sign_member_if_present(keys, record, &mut bundle_apply_state)?;
 
     Ok(BuiltL1DepositImport {
         fund_import_state,
@@ -5002,12 +5024,14 @@ pub fn verify_l1_deposit_import_transition(
     let amount = deposit.amount.to_u32_vec();
     let amount_u64 = (amount[BYTES32_LEN - 2] as u64) << 32 | amount[BYTES32_LEN - 1] as u64;
     let deposit_nullifier = deposit.nullifier();
-    // Step 1: the fund-import witness (registry resolution, per-token fund delta, frozen
-    // leaves, chain push, structural signatures).
+    // Step 1 is a PRE-SIGN check. Placeholders exist only in this private validation clone;
+    // the caller's proposal stays unsigned until the durable host gate authorizes signing.
+    let mut import_for_check = fund_import_state.clone();
+    fill_placeholder_sigs(record, &mut import_for_check);
     let witness = L1DepositImportUpdateWitness {
         channel_record: record.clone(),
         prev_state: prev.clone(),
-        next_state: fund_import_state.clone(),
+        next_state: import_for_check,
         amount: amount_u64,
         deposit_nullifier,
         // TM-7: the co-signer gate hands the deposit's base token_index to the witness verify,
@@ -5047,8 +5071,8 @@ pub fn verify_l1_deposit_import_transition(
 
 /// Build the proposed next state for a cosigned `TokenRegister(token_index)` transition
 /// (detail2 §N-1): the CANONICAL `token_register_next_state` (registry append + epoch/
-/// state_version bump, everything else frozen) with the building member's own state signature
-/// attached when it is a co-signing member. No ZKP is generated — a registration mutates no
+/// state_version bump, everything else frozen), WITHOUT a channel state signature. No ZKP is
+/// generated — a registration mutates no
 /// ciphertext (`ChannelTransitionKind::TokenRegister::required_state_backend()` is `None`); the
 /// gate is [`verify_token_register_state_transition`] + the N-of-N signatures.
 pub fn build_token_register(
@@ -5059,15 +5083,14 @@ pub fn build_token_register(
 ) -> WResult<ChannelState> {
     let prev = &snapshot.state;
     let record = &snapshot.record;
-    let mut proposed =
+    let proposed =
         crate::common::channel::token_register_next_state(prev, token_index).map_err(we)?;
     // Self-check through the SAME gate every cosigner runs (structural sigs on a clone).
     verify_token_register_state_transition(prev, record, &proposed, token_index)?;
-    if (builder_slot as usize) < record.member_count as usize
-        && record.member_pk_gs[builder_slot as usize] == keys.pk_g()
+    let active = record.member_count as usize + record.delegate_count as usize;
+    if builder_slot as usize >= active || record.member_pk_gs[builder_slot as usize] != keys.pk_g()
     {
-        let sig = sign_state(keys, builder_slot as u8, &proposed)?;
-        add_signature(&mut proposed, sig);
+        return bail("token-register builder does not match the trusted participant slot");
     }
     Ok(proposed)
 }
@@ -5137,26 +5160,6 @@ fn advance_nullifier(prev: Bytes32, tag: Bytes32) -> Bytes32 {
 // canonical single source (it gained the base `token_index` ids limb, and the gates/claim circuit
 // must recompute the SAME fold). The token-free replay-ledger identity lives beside it
 // (`inter_channel_tx_identity` / `InterChannelTx::replay_identity`).
-
-/// Sign `state` with `keys` IFF `keys` is a co-signing member of `record` (slot < member_count).
-/// The building member is one of the N-of-N; co-signers add the rest after re-verifying. A delegate
-/// builder does NOT co-sign state (it is send-only at the co-sign layer).
-fn sign_member_if_present(
-    keys: &MemberKeys,
-    record: &ChannelRecord,
-    state: &mut ChannelState,
-) -> WResult<()> {
-    if let Some(slot) = record
-        .member_pk_gs
-        .iter()
-        .take(record.member_count as usize)
-        .position(|m| *m == keys.pk_g())
-    {
-        let sig = sign_state(keys, slot as u8, state)?;
-        add_signature(state, sig);
-    }
-    Ok(())
-}
 
 /// The source channel record stub used for the fund-import small-block validation. The import
 /// witness's `validate_signed_small_block` checks the small block's BP slot/pk_g against THIS
@@ -6448,8 +6451,8 @@ pub struct ChannelWithdrawalArtifacts {
     pub final_ext_public_state:
         crate::circuits::validity::block_hash_chain::ext_public_state::ExtendedPublicState,
     /// The balance verifier data the lifecycle proved under (the `BalanceProcessor`'s
-    /// `balance_vd()`), so a consumer can assert its own close/backing circuits were built over the
-    /// identical balance VK before spending minutes proving.
+    /// `balance_vd()`), so a consumer can assert its own close/backing circuits were built over
+    /// the identical balance VK before spending minutes proving.
     pub balance_vd: VerifierCircuitData<F, C, D>,
 }
 
@@ -7574,6 +7577,10 @@ mod delegate_send_tests {
         let r = build_record(77, &members, 0, 1).expect("delegate record");
         assert_eq!((r.member_count, r.delegate_count), (2, 1));
         r.validate().expect("delegate record valid");
+        validate_new_participant_exit_keys(&members).expect("independently generated exit keys");
+        let mut duplicate_exit_keys = members.clone();
+        duplicate_exit_keys[2].regev_pk = duplicate_exit_keys[0].regev_pk.clone();
+        assert!(validate_new_participant_exit_keys(&duplicate_exit_keys).is_err());
 
         // bp in the delegate region (slot 2) is rejected — bp must be a co-signing member.
         assert!(build_record(77, &members, 2, 1).is_err());
@@ -7593,6 +7600,15 @@ mod delegate_send_tests {
             .iter()
             .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()))
             .collect();
+        validate_new_exit_key_digests(&pkds).expect("distinct genesis digests");
+        assert!(validate_new_exit_key_digests(&[pkds[0], pkds[0]]).is_err());
+        for ct in &encs {
+            ct.validate_balance_exit_shape()
+                .expect("normal encrypted balance remains claim-admissible");
+        }
+        crate::common::balance_state::zero_ciphertext()
+            .validate_balance_exit_shape()
+            .expect("empty delegate and inactive-token slots remain accepted");
         let recips = test_recipients(3);
         let g = assemble_genesis_state(&r, &encs, &pkds, &recips, 30).expect("active genesis");
         assert_eq!(g.balance_state.delegate_count, 1);
@@ -7747,6 +7763,18 @@ mod delegate_send_tests {
                 LEVEL,
             )
             .unwrap();
+            assert!(built.fund_import_state.member_signatures.is_empty());
+            assert!(built.bundle_apply_state.member_signatures.is_empty());
+            verify_l1_deposit_import_transition(
+                &snapshot.state,
+                &snapshot.record,
+                &deposit,
+                &built.fund_import_state,
+                &built.bundle_apply_state,
+                recipient_slot,
+                &delta,
+            )
+            .expect("unsigned deposit proposal passes the co-signer gate");
             let mut bundle = built.bundle_apply_state.clone();
             let s0 = sign_state(&keys[0], 0, &bundle).unwrap();
             add_signature(&mut bundle, s0);
@@ -7821,10 +7849,14 @@ mod delegate_send_tests {
                 "{label}: unexpected error {error}"
             );
         };
-        refused("fork", &|n| n.prev_digest = Bytes32::from_bytes_be(&[9u8; 32]).unwrap());
+        refused("fork", &|n| {
+            n.prev_digest = Bytes32::from_bytes_be(&[9u8; 32]).unwrap()
+        });
         refused("skip epoch", &|n| n.epoch += 1);
         refused("rollback version", &|n| n.balance_state.state_version -= 1);
-        refused("base-moving h2", &|n| n.h2_tag = Bytes32::from_bytes_be(&[1u8; 32]).unwrap());
+        refused("base-moving h2", &|n| {
+            n.h2_tag = Bytes32::from_bytes_be(&[1u8; 32]).unwrap()
+        });
         refused("close era", &|n| n.close_freeze_nonce += 1);
         refused("small block", &|n| n.small_block_number += 1);
         refused("channel fund", &|n| {
@@ -7843,9 +7875,12 @@ mod delegate_send_tests {
             n.balance_state.settled_tx_chain = Bytes32::from_bytes_be(&[4u8; 32]).unwrap()
         });
         refused("accumulator", &|n| {
-            n.balance_state.settled_tx_accumulator_root = Bytes32::from_bytes_be(&[5u8; 32]).unwrap()
+            n.balance_state.settled_tx_accumulator_root =
+                Bytes32::from_bytes_be(&[5u8; 32]).unwrap()
         });
-        refused("token registry", &|n| n.balance_state.token_registry[1] = 77);
+        refused("token registry", &|n| {
+            n.balance_state.token_registry[1] = 77
+        });
         refused("member set", &|n| n.balance_state.member_count += 1);
     }
 
@@ -7882,6 +7917,7 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("delegate build_send");
+        assert!(payload.proposed_next_state.member_signatures.is_empty());
 
         // Recipient (member 0) verifies the transition + E-1 proof + the delegate's A11 hash-sig.
         verify_send_transition(
@@ -8185,6 +8221,7 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("member build_send");
+        assert!(payload.proposed_next_state.member_signatures.is_empty());
         verify_send_transition(
             &snapshot.state,
             &snapshot.record,
@@ -9643,6 +9680,7 @@ mod delegate_send_tests {
             rng,
         )
         .expect("build_send_token");
+        assert!(payload.proposed_next_state.member_signatures.is_empty());
         (payload.to_slim(), new_balance_witness)
     }
 
@@ -9858,9 +9896,20 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("credit send builds");
+        assert!(
+            credit
+                .payload
+                .proposed_next_state
+                .member_signatures
+                .is_empty()
+        );
         let mut credited = credit.payload.proposed_next_state.clone();
-        let sig0 = sign_state(&keys[0], 0, &credited).expect("slot 0 co-signs");
-        add_signature(&mut credited, sig0);
+        verify_send_transition(&snapshot.state, &record, &credit.payload, LEVEL, None, None)
+            .expect("co-signers validate the credit before signing");
+        for slot in 0..record.member_count as usize {
+            let sig = sign_state(&keys[slot], slot as u8, &credited).expect("member co-signs");
+            add_signature(&mut credited, sig);
+        }
         verify_all_signatures(&record, &snapshot.members, &credited)
             .expect("credited head is N-of-N signed");
         snapshot.state = credited;
@@ -9902,6 +9951,7 @@ mod delegate_send_tests {
             &mut StdRng::from_seed(seed),
         )
         .expect("refresh builds");
+        assert!(payload.proposed_next_state.member_signatures.is_empty());
         assert_eq!(
             witness.amount, 50,
             "the refresh must preserve the CREDITED value (40 + 10), never mint or lose"
@@ -9921,8 +9971,10 @@ mod delegate_send_tests {
         );
 
         let mut refreshed = payload.proposed_next_state.clone();
-        let sig1 = sign_state(&keys[1], 1, &refreshed).expect("slot 1 co-signs");
-        add_signature(&mut refreshed, sig1);
+        for slot in 0..record.member_count as usize {
+            let sig = sign_state(&keys[slot], slot as u8, &refreshed).expect("member co-signs");
+            add_signature(&mut refreshed, sig);
+        }
         verify_all_signatures(&record, &snapshot.members, &refreshed)
             .expect("refreshed head is N-of-N signed");
         assert_eq!(
@@ -9946,6 +9998,12 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("the refreshed position must be spendable again");
+        assert!(
+            drip.payload
+                .proposed_next_state
+                .member_signatures
+                .is_empty()
+        );
         verify_send_transition(
             &snapshot.state,
             &record,
@@ -10013,6 +10071,8 @@ mod delegate_send_tests {
         let built =
             build_l1_deposit_import(&keys[0], &snapshot, &deposit(T1_INDEX), 1, &delta, LEVEL)
                 .expect("token-55 deposit import");
+        assert!(built.fund_import_state.member_signatures.is_empty());
+        assert!(built.bundle_apply_state.member_signatures.is_empty());
         let prev = &snapshot.state;
         let bundle = &built.bundle_apply_state;
         assert_eq!(
@@ -10031,12 +10091,23 @@ mod delegate_send_tests {
         assert_eq!(bundle.balance_state.pending_adds[1][1], 1);
         assert_eq!(bundle.balance_state.pending_adds[1][0], 0);
 
-        // Co-signer gate accepts BOTH steps for the resolved non-genesis token (the fund-import
-        // witness takes a fully-signed state, so add the second member's signature first; the
-        // bundle rebuild-equality ignores signatures by construction).
+        // Gate FIRST, then both members explicitly sign the unsigned fund-import proposal.
+        // The bundle rebuild-equality ignores signatures by construction.
+        verify_l1_deposit_import_transition(
+            prev,
+            &snapshot.record,
+            &deposit(T1_INDEX),
+            &built.fund_import_state,
+            &built.bundle_apply_state,
+            1,
+            &delta,
+        )
+        .expect("unsigned resolved-token proposal passes the co-signer gate");
         let mut signed_import = built.fund_import_state.clone();
-        let s1 = sign_state(&keys[1], 1, &signed_import).unwrap();
-        add_signature(&mut signed_import, s1);
+        for slot in 0..snapshot.record.member_count as usize {
+            let sig = sign_state(&keys[slot], slot as u8, &signed_import).unwrap();
+            add_signature(&mut signed_import, sig);
+        }
         verify_l1_deposit_import_transition(
             prev,
             &snapshot.record,
@@ -10047,6 +10118,8 @@ mod delegate_send_tests {
             &delta,
         )
         .expect("co-signer gate must accept the resolved-token two-step import");
+        verify_all_signatures(&snapshot.record, &snapshot.members, &signed_import)
+            .expect("fund import is N-of-N signed only after the gate");
     }
 
     /// TM-7 leg (b) — Phase 2b review MAJOR 1: the co-signer gate REBUILDS the bundle-apply
@@ -10078,9 +10151,23 @@ mod delegate_send_tests {
         let (delta, _) = encrypt_amount(&mut rng, &keys[1].regev_pk, amount).unwrap();
         let built = build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &delta, LEVEL)
             .expect("token-55 deposit import");
+        assert!(built.fund_import_state.member_signatures.is_empty());
+        assert!(built.bundle_apply_state.member_signatures.is_empty());
+        verify_l1_deposit_import_transition(
+            &snapshot.state,
+            &snapshot.record,
+            &deposit,
+            &built.fund_import_state,
+            &built.bundle_apply_state,
+            1,
+            &delta,
+        )
+        .expect("canonical unsigned deposit proposal passes before signing");
         let mut signed_import = built.fund_import_state.clone();
-        let s1 = sign_state(&keys[1], 1, &signed_import).unwrap();
-        add_signature(&mut signed_import, s1);
+        for slot in 0..snapshot.record.member_count as usize {
+            let sig = sign_state(&keys[slot], slot as u8, &signed_import).unwrap();
+            add_signature(&mut signed_import, sig);
+        }
         let gate = |bundle: &ChannelState| {
             verify_l1_deposit_import_transition(
                 &snapshot.state,
@@ -10250,6 +10337,8 @@ mod delegate_send_tests {
         let incoming =
             build_l1_deposit_import(&keys[0], &snapshot, &deposit, 1, &incoming_delta, LEVEL)
                 .expect("incoming deposit transition builds");
+        assert!(incoming.fund_import_state.member_signatures.is_empty());
+        assert!(incoming.bundle_apply_state.member_signatures.is_empty());
         let incoming_snapshot = ChannelSnapshot {
             record: record.clone(),
             state: resign_two_members(incoming.bundle_apply_state, &keys),
@@ -10285,6 +10374,12 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("post-incoming compatibility send builds");
+        assert!(
+            send.debit_payload
+                .proposed_next_state
+                .member_signatures
+                .is_empty()
+        );
         assert_eq!(send.transfer_descriptor.inter_channel_tx.base_nonce, 0);
         assert_eq!(send.transfer_descriptor.tx_v2.nonce, 0);
 
@@ -10303,13 +10398,19 @@ mod delegate_send_tests {
             &mut rng,
         )
         .expect("post-incoming compatibility burn builds");
+        assert!(
+            burn.debit_payload
+                .proposed_next_state
+                .member_signatures
+                .is_empty()
+        );
         assert_eq!(burn.transfer_descriptor.inter_channel_tx.base_nonce, 0);
         assert_eq!(burn.transfer_descriptor.tx_v2.nonce, 0);
     }
 
     /// §N-1 TokenRegister via the cosign gate, end-to-end: member 0 proposes through
-    /// `build_token_register` (canonical builder + self-check + own REAL signature), member 1
-    /// re-runs the gate and co-signs, and the fully-signed head passes the authoritative
+    /// `build_token_register` (canonical unsigned builder + self-check), both members
+    /// explicitly run the gate and co-sign, and the fully-signed head passes the authoritative
     /// `verify_all_signatures` N-of-N check with the new registry committed. Negatives: a
     /// registration bundling a balance touch is refused by the gate; a duplicate base index is
     /// refused by the builder (TM-1).
@@ -10327,11 +10428,14 @@ mod delegate_send_tests {
 
         let mut proposed =
             build_token_register(&keys[0], &snapshot, 0, 777).expect("build token register");
-        // Cosigner 1: gate FIRST, then sign (the CLAUDE.md check-and-sign discipline).
-        verify_token_register_state_transition(&snapshot.state, &record, &proposed, 777)
-            .expect("cosigner gate must accept the canonical registration");
-        let s1 = sign_state(&keys[1], 1, &proposed).unwrap();
-        add_signature(&mut proposed, s1);
+        assert!(proposed.member_signatures.is_empty());
+        // Every member, including the proposer: gate FIRST, then sign.
+        for slot in 0..record.member_count as usize {
+            verify_token_register_state_transition(&snapshot.state, &record, &proposed, 777)
+                .expect("cosigner gate must accept the canonical registration");
+            let sig = sign_state(&keys[slot], slot as u8, &proposed).unwrap();
+            add_signature(&mut proposed, sig);
+        }
         verify_all_signatures(&record, &members, &proposed)
             .expect("N-of-N over the registered head");
         assert_eq!(proposed.balance_state.token_count, 2);
@@ -10550,6 +10654,7 @@ mod delegate_send_tests {
         )
         .expect("token-1 C2C debit builds");
         let a_send = &built.debit_payload.proposed_next_state;
+        assert!(a_send.member_signatures.is_empty());
         assert_eq!(
             a_send.channel_fund.amounts[1] + u64_to_u256(5),
             snapshot.state.channel_fund.amounts[1],
@@ -10741,9 +10846,14 @@ mod delegate_send_tests {
             );
         }
 
-        // Only the sending member has signed so far — N-1 of N.
-        assert_eq!(a_send.member_signatures.len(), 1);
-        let err = attach_small_block_signatures(&record, &a_send, &mut tx)
+        // Building is not authorization: even the sending member has not signed the state.
+        assert!(a_send.member_signatures.is_empty());
+        verify_inter_channel_send_transition(&snapshot.state, &record, &built.debit_payload, LEVEL)
+            .expect("members validate the debit before signing");
+        let mut a_signed = a_send.clone();
+        let sender_sig = sign_state(&keys[0], 0, &a_signed).expect("sender explicitly co-signs");
+        add_signature(&mut a_signed, sender_sig);
+        let err = attach_small_block_signatures(&record, &a_signed, &mut tx)
             .expect_err("a block must not be signable while a member is withholding");
         let msg = format!("{err:?}");
         assert!(
@@ -10763,7 +10873,6 @@ mod delegate_send_tests {
 
         // Complete the co-sign round: the remaining member signs the SAME state (member signatures
         // are excluded from `signing_digest()`, so the digest they all signed is unchanged).
-        let mut a_signed = a_send.clone();
         for slot in 1..n {
             let sig = sign_state(&keys[slot], slot as u8, &a_signed).expect("co-sign");
             add_signature(&mut a_signed, sig);

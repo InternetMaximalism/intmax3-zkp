@@ -56,6 +56,16 @@ function context(store, overrides = {}) {
   };
 }
 
+// Normal close lifecycle fixtures explicitly model a fully prepared, L1-final exact-head kit.
+function readyRecovery() {
+  return { snapshotVault: {}, backingVault: {}, publicClosePublisher: {
+    async checkReadiness({ acceptedHead }) {
+      return { ready: true, signedHeadDigest: acceptedHead.digest, chainId: 31337,
+        channelId: 7, manager: MANAGER, currentCloseFreezeNonce: 1 };
+    },
+  } };
+}
+
 function managerEvent(kind, args = {}, extra = {}) {
   return {
     source: 'chain',
@@ -295,12 +305,14 @@ test('CloseCancelled clears the old era and re-requests after the finalized batc
       closeKey: `${DIGEST}:old`,
       challengeDeadline: '100',
     },
-    participantCloseProof: { slot: 3, participantRoot: DIGEST, siblings: [] },
+    acceptedHead: { digest: DIGEST },
+    participantCloseProof: { slot: 3, participantRoot: DIGEST, stateDigest: DIGEST, siblings: [] },
     participantCloseSubmission: { txHash: `0x${'01'.repeat(32)}` },
     actions: { [requestAction]: { result: 'pending' } },
   });
   const broadcasts = [];
   const ctx = context(store, {
+    ...readyRecovery(),
     readDurableCloseState: async () => ({
       status: 0,
       closeRequestGenerationExact: '7',
@@ -347,7 +359,8 @@ test('durable participant request Store/outbox ids change across a canonical can
   const store = fakeStore({
     mode: 'exiting',
     chainCheckpoint: checkpoint,
-    participantCloseProof: { slot: 3, participantRoot: DIGEST, siblings: [] },
+    acceptedHead: { digest: DIGEST },
+    participantCloseProof: { slot: 3, participantRoot: DIGEST, stateDigest: DIGEST, siblings: [] },
   });
   const calls = [];
   let hashByte = 1;
@@ -364,6 +377,7 @@ test('durable participant request Store/outbox ids change across a canonical can
       };
     },
     async requestClose(_manager, _proof, onBroadcast, options) {
+      assert.equal((await options.checkReadiness()).ready, true);
       calls.push(options);
       const txHash = `0x${String(hashByte++).padStart(2, '0').repeat(32)}`;
       await onBroadcast(txHash, { actionId: options.actionId });
@@ -380,6 +394,7 @@ test('durable participant request Store/outbox ids change across a canonical can
     },
   };
   const ctx = context(store, {
+    ...readyRecovery(),
     participantCloser,
     readDurableCloseState: async () => ({
       status: 0,
@@ -600,7 +615,8 @@ test('legacy awaitingClaim journal is upgraded from finalized manager state with
   const store = fakeStore({
     mode: 'exiting',
     awaitingClaim: true,
-    participantCloseProof: { slot: 3, participantRoot: DIGEST, siblings: [] },
+    acceptedHead: { digest: DIGEST },
+    participantCloseProof: { slot: 3, participantRoot: DIGEST, stateDigest: DIGEST, siblings: [] },
   });
   let chainState = {
     status: 1,
@@ -615,6 +631,7 @@ test('legacy awaitingClaim journal is upgraded from finalized manager state with
   };
   let requests = 0;
   const ctx = context(store, {
+    ...readyRecovery(),
     readDurableCloseState: async () => chainState,
     participantCloser: {
       async requestClose(_manager, _proof, onBroadcast) {
@@ -683,4 +700,40 @@ test('crash gap without a durable tx hash fails closed instead of blindly reusin
   assert.equal(requests, 0);
   assert.equal(store.get('actions')[requestAction].result, 'pending');
   assert.ok(ctx.alerts.some((args) => args[2] === 'PARTICIPANT_CLOSE_JOURNAL_GAP'));
+});
+
+test('new close waits for exact-head readiness, then pins that prepared head before freezing', async () => {
+  const store = fakeStore({ mode: 'exiting', acceptedHead: { digest: DIGEST },
+    participantCloseProof: { slot: 3, participantRoot: DIGEST, stateDigest: DIGEST, siblings: [] } });
+  const events = [];
+  let available = false;
+  const snapshotVault = { immutable: 'snapshot' };
+  const backingVault = { immutable: 'backing' };
+  const ctx = context(store, {
+    snapshotVault, backingVault,
+    publicClosePublisher: {
+      async checkReadiness(input) {
+        events.push('readiness');
+        assert.deepEqual(input, { acceptedHead: { digest: DIGEST }, snapshotVault, backingVault });
+        if (!available) throw new Error('backing post is not finalized yet');
+        return { ready: true, signedHeadDigest: DIGEST };
+      },
+    },
+    participantCloser: {
+      async requestClose(_manager, _proof, onBroadcast) {
+        events.push('freeze');
+        assert.equal(store.get('publicClosePublication').acceptedHeadDigest, DIGEST);
+        await onBroadcast(`0x${'09'.repeat(32)}`);
+        return { txHash: `0x${'09'.repeat(32)}` };
+      },
+    },
+  });
+  await exit.attemptCloseRequest(ctx);
+  assert.deepEqual(events, ['readiness']);
+  assert.equal(store.get('participantCloseSubmission'), undefined);
+  assert.equal(store.get('publicClosePublication'), undefined);
+  assert.equal(store.get('closeLifecycle').phase, exit.CLOSE_PHASES.OPEN);
+  available = true;
+  await exit.attemptCloseRequest(ctx);
+  assert.deepEqual(events, ['readiness', 'readiness', 'freeze']);
 });

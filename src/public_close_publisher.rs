@@ -151,6 +151,40 @@ pub struct PublicClosePublisherConfig {
     pub allow_unfinalized_devnet: bool,
 }
 
+/// Read-only preflight for the exact signed head that a participant intends to freeze.
+/// The immutable bundle is generated once, before freezing, and reused by the publisher.
+/// Deliberately contains no account, signer lock, or journal destination.
+#[derive(Clone, Debug)]
+pub struct PublicCloseReadinessConfig {
+    pub bundle_dir: PathBuf,
+    pub expected_final_channel_state_digest: String,
+    pub deployment_manifest_path: PathBuf,
+    pub deployment_manifest_sha256: String,
+    pub rpc_url: String,
+    pub allow_unfinalized_devnet: bool,
+}
+
+/// Point-in-time L1 evidence, not permission to reuse a stale check for a later signed head.
+/// A participant must still authenticate its current freeze/cancellation era immediately before
+/// first signing. Existing raw-transaction reconciliation must not depend on this preflight.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicCloseReadiness {
+    pub schema_version: u32,
+    pub ready: bool,
+    pub chain_id: u64,
+    pub rollup: String,
+    pub manager: String,
+    pub materializer: String,
+    pub channel_id: u32,
+    pub signed_head_digest: String,
+    pub backing_finalized_extended_state_commitment: String,
+    pub backing_anchor_block_number: u64,
+    pub current_close_freeze_nonce: u64,
+    pub close_request_generation: u64,
+    pub finalized_checkpoint: L1FinalizedCheckpoint,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicClosePublication {
@@ -667,6 +701,8 @@ pub struct ObservedDeployment {
     pub materialized_channel_exit: String,
     pub rollup_latest_finalized_block_number: u64,
     pub backing_root_finalized: bool,
+    /// The signed fund root and the backing proof root may differ; the Manager requires both.
+    pub channel_fund_root_finalized: bool,
     pub close_mle: ObservedMleVerifier,
     pub withdrawal_claim_mle: ObservedMleVerifier,
     pub post_close_claim_mle: ObservedMleVerifier,
@@ -2704,12 +2740,14 @@ fn validate_deployment_observation(
         )));
     }
     if !observed.backing_root_finalized
+        || !observed.channel_fund_root_finalized
         || prepared.backing_public_inputs.anchor_block_number.as_u64()
             > observed.rollup_latest_finalized_block_number
     {
         return Err(PublicClosePublisherError::Evidence(format!(
-            "backing root/anchor is not finalized: rootFinalized={}, anchor={}, latestFinalized={}",
+            "close roots/anchor are not finalized: backingRootFinalized={}, signedFundRootFinalized={}, anchor={}, latestFinalized={}",
             observed.backing_root_finalized,
+            observed.channel_fund_root_finalized,
             prepared.backing_public_inputs.anchor_block_number.as_u64(),
             observed.rollup_latest_finalized_block_number
         )));
@@ -7570,6 +7608,19 @@ impl ClosePublisherBackend for CastCloseBackend {
                 )?[0],
                 "rollup.isFinalizedStateRoot",
             )?,
+            channel_fund_root_finalized: word_bool(
+                &decode_words(
+                    &self.one_bytes32(
+                        &manifest.rollup,
+                        "isFinalizedStateRoot",
+                        &prepared.expected.channel_fund_intmax_state_root,
+                        block_number,
+                    )?,
+                    1,
+                    "rollup.isFinalizedStateRoot(signed fund root)",
+                )?[0],
+                "rollup.isFinalizedStateRoot(signed fund root)",
+            )?,
             close_mle: self.observe_mle_verifier(&close_mle_verifier, block_number)?,
             withdrawal_claim_mle: self
                 .observe_mle_verifier(&withdrawal_claim_mle_verifier, block_number)?,
@@ -8038,6 +8089,111 @@ impl ClosePublisherBackend for CastCloseBackend {
         }
         Ok(hashes.into_keys().collect())
     }
+}
+
+fn check_readiness_with_backend<B: ClosePublisherBackend>(
+    config: &PublicCloseReadinessConfig,
+    backend: &mut B,
+) -> Result<PublicCloseReadiness> {
+    if config.rpc_url.trim().is_empty() {
+        return Err(PublicClosePublisherError::Configuration(
+            "RPC URL must not be empty".into(),
+        ));
+    }
+    normalize_hex(
+        &config.expected_final_channel_state_digest,
+        32,
+        "trusted expected final channel state digest",
+    )
+    .map_err(PublicClosePublisherError::Configuration)?;
+    normalize_nonzero_hex(
+        &config.deployment_manifest_sha256,
+        32,
+        "deployment manifest SHA-256",
+    )
+    .map_err(PublicClosePublisherError::Configuration)?;
+    if config.bundle_dir == config.deployment_manifest_path {
+        return Err(PublicClosePublisherError::Configuration(
+            "bundle and deployment manifest must be distinct paths".into(),
+        ));
+    }
+    let prepared = prepare_bundle(
+        &config.bundle_dir,
+        &config.expected_final_channel_state_digest,
+    )?;
+    let (deployment, _) = load_deployment_manifest(
+        &config.deployment_manifest_path,
+        &prepared,
+        &config.deployment_manifest_sha256,
+    )?;
+    let chain_id = backend.chain_id()?;
+    if chain_id != prepared.chain_id {
+        return Err(PublicClosePublisherError::Evidence(format!(
+            "RPC chain {chain_id} differs from bundle chain {}",
+            prepared.chain_id
+        )));
+    }
+    if config.allow_unfinalized_devnet && chain_id != ANVIL_CHAIN_ID {
+        return Err(PublicClosePublisherError::Configuration(format!(
+            "unfinalized-head escape is restricted to chain {ANVIL_CHAIN_ID}"
+        )));
+    }
+    // This shared reader pins all deployment, verifier, participant and backing-root observations
+    // to one durable block, and checks that the same block remains canonical after the reads.
+    // It requires the backing anchor to cover the channel's actual last L1 post; a merely staged
+    // producer history therefore cannot make a participant freeze before its dependencies land.
+    let (manager, observed, checkpoint) = read_stable_context(
+        backend,
+        &deployment,
+        &prepared,
+        config.allow_unfinalized_devnet,
+    )?;
+    if manager.status != 0
+        || manager.pending.is_some()
+        || manager.finalized.is_some()
+        || observed.materializer_frozen_generation != 0
+        || !same_hex(&observed.materialized_channel_exit, &format!("0x{}", "00".repeat(32)))
+    {
+        return Err(PublicClosePublisherError::Conflict(
+            "close readiness requires an Active, unfrozen, unmaterialized channel".into(),
+        ));
+    }
+    if manager.current_close_freeze_nonce.checked_add(1)
+        != Some(prepared.expected.close_freeze_nonce)
+    {
+        return Err(PublicClosePublisherError::Conflict(
+            "exact signed-head close proof does not target the next live freeze nonce".into(),
+        ));
+    }
+    Ok(PublicCloseReadiness {
+        schema_version: 1,
+        ready: true,
+        chain_id,
+        rollup: deployment.rollup,
+        manager: deployment.manager,
+        materializer: deployment.close_funding_materializer,
+        channel_id: prepared.channel_id,
+        signed_head_digest: prepared.expected.final_channel_state_digest,
+        backing_finalized_extended_state_commitment: prepared
+            .backing_public_inputs
+            .finalized_extended_state_commitment
+            .to_string(),
+        backing_anchor_block_number: prepared.backing_public_inputs.anchor_block_number.as_u64(),
+        current_close_freeze_nonce: manager.current_close_freeze_nonce,
+        close_request_generation: manager.close_request_generation,
+        finalized_checkpoint: checkpoint,
+    })
+}
+
+/// Verify the exact already-prepared bundle's L1 dependencies before a NEW participant freeze.
+/// Does not create proofs, resolve an account, write a WAL/lock, sign, attest, or broadcast.
+/// This is point-in-time evidence: it is not an atomic guard against transactions mined after the
+/// read. The participant still uses the existing era-guarded request and durable raw-tx outbox.
+pub fn check_public_close_readiness(
+    config: &PublicCloseReadinessConfig,
+) -> Result<PublicCloseReadiness> {
+    let mut backend = CastCloseBackend::new(&config.rpc_url);
+    check_readiness_with_backend(config, &mut backend)
 }
 
 /// Advance the publication state by one durable boundary. The command is intentionally
@@ -8672,6 +8828,7 @@ mod tests {
                 .anchor_block_number
                 .as_u64(),
             backing_root_finalized: true,
+            channel_fund_root_finalized: true,
             close_mle: observed_mle(mle_pins[0]),
             withdrawal_claim_mle: observed_mle(mle_pins[1]),
             post_close_claim_mle: observed_mle(mle_pins[2]),
@@ -9239,6 +9396,100 @@ mod tests {
             PublicCloseProgress::MaterializeBroadcast { .. }
         ));
         backend.transaction(2)
+    }
+
+    fn readiness_config(fixture: &Fixture) -> PublicCloseReadinessConfig {
+        PublicCloseReadinessConfig {
+            bundle_dir: fixture.config.bundle_dir.clone(),
+            expected_final_channel_state_digest: fixture
+                .config
+                .expected_final_channel_state_digest
+                .clone(),
+            deployment_manifest_path: fixture.config.deployment_manifest_path.clone(),
+            deployment_manifest_sha256: fixture.config.deployment_manifest_sha256.clone(),
+            rpc_url: fixture.config.rpc_url.clone(),
+            allow_unfinalized_devnet: fixture.config.allow_unfinalized_devnet,
+        }
+    }
+
+    fn active_readiness_backend(fixture: &Fixture) -> FakeBackend {
+        let mut backend = FakeBackend::new(fixture);
+        let active = backend.managers.get_mut(&backend.head).expect("current manager");
+        active.status = 0;
+        active.current_close_freeze_nonce = fixture.prepared.expected.close_freeze_nonce - 1;
+        active.close_requested_at = 0;
+        backend.deployment.materializer_frozen_generation = 0;
+        // Readiness precedes attestation. It must not require or emit that L1 transaction.
+        backend.deployment.signed_head_backing_anchor_plus_one = 0;
+        backend.deployment.exact_backing_proof_attested = false;
+        backend.deployment.signed_head_backing_current = false;
+        backend
+    }
+
+    #[test]
+    fn readiness_checks_the_existing_bundle_without_signing_or_writing() {
+        let fixture = fixture("readiness-read-only");
+        let config = readiness_config(&fixture);
+        let mut backend = active_readiness_backend(&fixture);
+        let manifest_before = fs::read(&config.deployment_manifest_path).expect("manifest");
+        assert!(!fixture.config.journal_path.exists());
+        assert!(!fixture.config.signer_lock_root.exists());
+        let ready = check_readiness_with_backend(&config, &mut backend).expect("ready before freeze");
+        assert!(ready.ready);
+        assert_eq!(ready.signed_head_digest, config.expected_final_channel_state_digest);
+        assert_eq!(ready.finalized_checkpoint, backend.checkpoint());
+        assert_eq!(ready.current_close_freeze_nonce + 1, fixture.prepared.expected.close_freeze_nonce);
+        assert_eq!(backend.sign_count, 0);
+        assert!(backend.publish_attempts.is_empty());
+        assert!(!fixture.config.journal_path.exists());
+        assert!(!fixture.config.signer_lock_root.exists());
+        assert_eq!(fs::read(&config.deployment_manifest_path).expect("manifest"), manifest_before);
+        let wire = serde_json::to_value(&ready).expect("readiness receipt");
+        assert_eq!(wire["schemaVersion"], 1);
+        assert_eq!(wire["signedHeadDigest"], ready.signed_head_digest);
+        assert!(wire.get("signed_head_digest").is_none());
+    }
+
+    #[test]
+    fn readiness_waits_for_finalized_dependencies_and_the_live_active_era() {
+        let fixture = fixture("readiness-dependencies");
+        let config = readiness_config(&fixture);
+        for condition in 0..6 {
+            let mut backend = active_readiness_backend(&fixture);
+            match condition {
+                0 => backend.deployment.backing_root_finalized = false,
+                1 => backend.deployment.rollup_latest_finalized_block_number =
+                    fixture.prepared.backing_public_inputs.anchor_block_number.as_u64() - 1,
+                2 => backend.deployment.materializer_last_posted_block =
+                    fixture.prepared.backing_public_inputs.anchor_block_number.as_u64() + 1,
+                3 => backend.managers.get_mut(&backend.head).expect("manager").status = 1,
+                4 => backend.managers.get_mut(&backend.head).expect("manager").current_close_freeze_nonce += 1,
+                5 => backend.deployment.channel_fund_root_finalized = false,
+                _ => unreachable!(),
+            }
+            assert!(check_readiness_with_backend(&config, &mut backend).is_err());
+            assert_eq!(backend.sign_count, 0);
+            assert!(backend.publish_attempts.is_empty());
+            assert!(!fixture.config.journal_path.exists());
+            assert!(!fixture.config.signer_lock_root.exists());
+        }
+    }
+
+    #[test]
+    fn readiness_keeps_the_independent_head_and_manifest_pins() {
+        let fixture = fixture("readiness-authority");
+        for wrong_head in [true, false] {
+            let mut config = readiness_config(&fixture);
+            if wrong_head {
+                config.expected_final_channel_state_digest = repeated(0x71);
+            } else {
+                config.deployment_manifest_sha256 = repeated(0x72);
+            }
+            let mut backend = active_readiness_backend(&fixture);
+            assert!(check_readiness_with_backend(&config, &mut backend).is_err());
+            assert_eq!(backend.sign_count, 0);
+            assert!(backend.publish_attempts.is_empty());
+        }
     }
 
     #[test]

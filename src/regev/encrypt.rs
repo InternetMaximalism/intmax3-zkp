@@ -96,6 +96,22 @@ impl RegevCiphertext {
         Ok(())
     }
 
+    /// Host admission for a newly accepted balance. The existing withdrawal gadget requires
+    /// a nonzero c1 polynomial. Canonical zero remains valid as an EMPTY slot: it carries no
+    /// money to claim and receiving a normal ciphertext replaces it by homomorphic identity.
+    /// This check does not establish the plaintext, range, encryption, or conservation proof.
+    pub fn validate_balance_exit_shape(&self) -> Result<(), RegevError> {
+        self.validate()?;
+        if self.c1.iter().all(|&coefficient| coefficient == 0)
+            && self.c2.iter().any(|&coefficient| coefficient != 0)
+        {
+            return Err(RegevError::InvalidCiphertext(
+                "balance has zero c1 but is not canonical empty; re-encrypt before signing so the existing withdrawal claim can open it".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Keccak digest per detail2 §B-2: `hash_words([IMRC, c1.len(), c1…, c2…])`.
     ///
     /// SECURITY: canonicality is enforced in ALL build profiles — a non-canonical coefficient

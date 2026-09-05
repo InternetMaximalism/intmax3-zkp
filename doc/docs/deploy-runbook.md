@@ -70,12 +70,22 @@ O="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 scp -i $PEM ${=O} signer-bin/channel_member       ${H}:relay/bin/channel_member   # if Rust changed
 scp -i $PEM ${=O} pkg/intmax3_zkp.js pkg/intmax3_zkp_bg.wasm ${H}:relay/public/pkg/ # if wasm changed
 scp -i $PEM ${=O} hosting/wallet/wallet-live.html ${H}:relay/public/index.html     # if frontend changed
-scp -i $PEM ${=O} hosting/wallet/wallet-worker.js ${H}:relay/public/
+scp -i $PEM ${=O} hosting/wallet/wallet-worker.js hosting/wallet/signature-release-ledger.mjs ${H}:relay/public/
 scp -i $PEM ${=O} hosting/wallet/wallet-relay-ec2.js ${H}:relay/
 scp -i $PEM ${=O} node/common/token-registry.js   ${H}:relay/token-registry.js  # token metadata (§N)
 ssh -i $PEM ${=O} $H 'chmod +x ~/relay/bin/channel_member; sudo systemctl restart intmax-relay'
 ```
 Notes:
+- Ship `wallet-worker.js` and `signature-release-ledger.mjs` together; the worker imports the
+  module before initialization. A missing module prevents all wallet actions. For this release,
+  rebuild and deploy the matching WASM package too: old proposal builders containing channel-state
+  signatures are explicitly refused by the worker, not treated as unsigned delegate proposals.
+- Browser member signatures are released only after a strict IndexedDB transaction stores the
+  signer/channel/predecessor decision. Same-state retries reuse the exact saved signature. Keep
+  this origin's browser data when restarting a member signer; clearing it, using another browser
+  profile/origin, or restoring only its key does not carry the ledger across. Browser member use
+  requires strict durable IndexedDB; ordinary unsigned delegate proposals do not use this ledger.
+  This is a worker release boundary, not a restriction on consumers importing raw WASM directly.
 - **zsh gotcha**: brace host paths as `${H}:relay/...` (bare `$H:relay` triggers the `:r` modifier);
   word-split option strings with `${=O}`.
 - **Membership is durable across restarts** (the cosigner is the member registry). A restart does NOT
@@ -83,6 +93,12 @@ Notes:
 - index.html / wasm are served `no-store` (frontend) / `max-age 3600` (`/pkg`); a browser hard-reload
   picks up a new frontend. A new binary is picked up on the next `/api` call (exec'd fresh).
 - CLI-only change → just ship the binary + restart (no wasm/frontend rebuild).
+- Update the Node public-close adapter and `public_close_publisher` binary together. The current
+  adapter consumes native schema-3 completion (attestation/materialization included), and new
+  delegate freezes require the binary's read-only `--check-readiness` mode. It prepares and reuses
+  one exact-head proof bundle before freezing; a readiness error must not be bypassed by manually
+  requesting close. Preserve the immutable snapshot/backing vaults, prepared bundles, signer
+  outbox and destination inter-transfer recovery sidecars across restarts.
 
 ### Verify after deploy
 ```bash

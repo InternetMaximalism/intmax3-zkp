@@ -1184,6 +1184,8 @@ fn run_live_balance_e2e() {
         &mut rng,
     )
     .expect("build destination credit states");
+    assert!(credit.fund_import_state.member_signatures.is_empty());
+    assert!(credit.bundle_apply_state.member_signatures.is_empty());
     credit.fund_import_state = sign_all(credit.fund_import_state, &destination_keys);
     credit.bundle_apply_state = sign_all(credit.bundle_apply_state, &destination_keys);
     let destination_credit_snapshot = ChannelSnapshot {

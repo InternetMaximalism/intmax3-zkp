@@ -26,6 +26,7 @@ const { PUBLIC_BACKING_SCHEMA_VERSION } = require('../../node/delegate/backing-v
 const PROPOSAL_FILE = 'exit_kit_proposal.json';
 const ENVELOPE_FILE = 'prepared_exit_kit.json';
 const INSTALL_FILE = 'installed_exit_kit.json';
+const OPERATION_FILE = 'exit_kit_operation.json';
 const PROPOSE_FLAG = '--propose-exit-kit';
 const ENVELOPE_ENV = 'INTMAX_PREPARED_EXIT_KIT';
 
@@ -49,30 +50,60 @@ function debitRequestId(producerRequestId) {
 // Run `args` once with --propose-exit-kit, prove the kit for that exact proposal, then run `args`
 // for real with the envelope bound. `requestId` names the producer block a debit proposal stages.
 async function cliWithPreparedExitKit(ch, args, extraEnv, options = {}) {
-  fs.rmSync(wc(ch, PROPOSAL_FILE), { force: true });
-  cliModule.cli(ch, [...args, PROPOSE_FLAG], extraEnv);
-  const proposal = readJson(wc(ch, PROPOSAL_FILE));
-  let stagedRequestId = null;
-  if (proposal.kind === 'interChannelDebit') {
-    if (!options.requestId) {
-      throw new Error('a debit exit kit needs the producer request id of the block it stages');
+  const inputPositions = ['cosign-burn-send', 'cosign-inter-transfer'].includes(args[0]) ? [1, 2] : [];
+  const inputs = inputPositions.map(i => ({ name: args[i], value: readJson(wc(ch, args[i])) }));
+  const binding = producer.stableRequestId('presign', { ch, args, inputs, requestId: options.requestId || null });
+  let signingArgs = args;
+  let operation = null;
+  try { operation = readJson(wc(ch, OPERATION_FILE)); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (operation && operation.status !== 'complete') {
+    // The destination-recovery upgrade adds one metadata flag. A pre-upgrade in-flight debit
+    // must still resume its ORIGINAL argv/kit/cursor. Permit only removal of that exact new flag
+    // and recompute the old binding over the CURRENT inputs and same producer request id. No
+    // changed command, output, payload, descriptor or request can use this migration exception.
+    const legacyArgs = args.slice(0, -1);
+    const exactLegacyInterRetry = args[0] === 'cosign-inter-transfer' && args.length === 5
+      && typeof options.requestId === 'string' && options.requestId.length > 0
+      && args[4] === `--producer-request-id=${options.requestId}`
+      && Array.isArray(operation.args)
+      && JSON.stringify(operation.args) === JSON.stringify(legacyArgs)
+      && operation.binding === producer.stableRequestId('presign', {
+        ch, args: legacyArgs, inputs, requestId: options.requestId,
+      });
+    if (operation.schemaVersion !== 1 || (operation.binding !== binding && !exactLegacyInterRetry)) {
+      throw new Error('a different pre-sign operation requires exact recovery before another signature');
     }
-    stagedRequestId = debitRequestId(options.requestId);
-    proposal.requestId = stagedRequestId;
-  }
-  const artifact = await producer.livePrepareExitKit(ch, proposal);
-  writeJson(wc(ch, ENVELOPE_FILE), envelopeFor(ch, artifact));
-  try {
-    return cliModule.cli(ch, args, { ...(extraEnv || {}), [ENVELOPE_ENV]: ENVELOPE_FILE });
-  } catch (error) {
-    // The signer refused: the staged block would otherwise freeze every other producer mutation.
-    // A signed-but-not-yet-posted debit is NOT abandoned here — the crash-recovery flush posts it
-    // and promotes the staged block.
-    if (stagedRequestId) {
-      await producer.liveAbandonPreparedExitKit(ch, stagedRequestId).catch(() => {});
+    if (exactLegacyInterRetry) signingArgs = operation.args;
+  } else {
+    fs.rmSync(wc(ch, PROPOSAL_FILE), { force: true });
+    cliModule.cli(ch, [...args, PROPOSE_FLAG], extraEnv);
+    const proposal = readJson(wc(ch, PROPOSAL_FILE));
+    if (proposal.kind === 'interChannelDebit') {
+      if (!options.requestId) {
+        throw new Error('a debit exit kit needs the producer request id of the block it stages');
+      }
+      proposal.requestId = debitRequestId(options.requestId);
     }
-    throw error;
+    operation = { schemaVersion: 1, binding, status: 'proposed', args, inputs,
+      extraEnv: extraEnv || {}, proposal, envelope: null };
+    writeJson(wc(ch, OPERATION_FILE), operation);
   }
+  if (!operation.envelope) {
+    // An interrupted daemon request is replayed with the exact saved proposal/request id.
+    const artifact = await producer.livePrepareExitKit(ch, operation.proposal);
+    operation = { ...operation, status: 'prepared', envelope: envelopeFor(ch, artifact) };
+    writeJson(wc(ch, OPERATION_FILE), operation);
+  }
+  writeJson(wc(ch, ENVELOPE_FILE), operation.envelope);
+  operation = { ...operation, status: 'signing' };
+  writeJson(wc(ch, OPERATION_FILE), operation);
+  // After invocation begins, timeout/ENOSPC/nonzero exit cannot prove that no signature escaped.
+  // Keep the exact proposal, kit, cursor and producer reservation. An identical retry resumes
+  // the native signing/recovery command without reproposing against an already-advanced head.
+  const result = cliModule.cli(ch, signingArgs, { ...operation.extraEnv, [ENVELOPE_ENV]: ENVELOPE_FILE });
+  writeJson(wc(ch, OPERATION_FILE), { ...operation, status: 'complete' });
+  return result;
 }
 
 // Archive the live balance service's kit for the channel's CURRENT head into the CLI state. Used
@@ -83,14 +114,32 @@ async function installHeadExitKit(ch) {
   return cliModule.cli(ch, ['install-exit-kit', INSTALL_FILE]);
 }
 
+// A child can save its output and then lose the final API journal acknowledgement. Recovery
+// routes call this only after the producer/live service accepted the exact N-of-N result. It
+// closes that local marker without proving/signing again or discarding a producer reservation.
+function acknowledgePreparedExitKit(ch, acceptedState) {
+  let operation;
+  try { operation = readJson(wc(ch, OPERATION_FILE)); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  if (!operation || operation.status === 'complete') return false;
+  const expected = operation.envelope && operation.envelope.signedHead;
+  if (operation.schemaVersion !== 1 || !expected || !acceptedState
+      || Number(expected.channelId) !== ch || Number(acceptedState.channelId) !== ch
+      || String(expected.digest).toLowerCase() !== String(acceptedState.digest).toLowerCase()) return false;
+  writeJson(wc(ch, OPERATION_FILE), { ...operation, status: 'complete' });
+  return true;
+}
+
 module.exports = {
   cliWithPreparedExitKit,
   installHeadExitKit,
+  acknowledgePreparedExitKit,
   debitRequestId,
   envelopeFor,
   PROPOSAL_FILE,
   ENVELOPE_FILE,
   INSTALL_FILE,
+  OPERATION_FILE,
   PROPOSE_FLAG,
   ENVELOPE_ENV,
 };

@@ -163,7 +163,8 @@ test('own CloseRequested terminalizes from its exact receipt even when submit an
 });
 
 test('exit mode initiates participant close itself and never submits a claim before finalization', async () => {
-  const store = fakeStore({ participantCloseProof: buildParticipantCloseProof(snapshot(), 2, RECIPIENTS[2]) });
+  const store = fakeStore({ acceptedHead: { digest: snapshot().state.digest },
+    participantCloseProof: buildParticipantCloseProof(snapshot(), 2, RECIPIENTS[2]) });
   const closeCalls = [];
   const claimCalls = [];
   const alerts = [];
@@ -173,6 +174,10 @@ test('exit mode initiates participant close itself and never submits a claim bef
     recipient: RECIPIENTS[2],
     store,
     sm: { signal() {} },
+    snapshotVault: {}, backingVault: {},
+    publicClosePublisher: { async checkReadiness({ acceptedHead }) {
+      return { ready: true, signedHeadDigest: acceptedHead.digest };
+    } },
     participantCloser: {
       async requestClose(manager, proof) { closeCalls.push({ manager, proof }); return { txHash: `0x${'99'.repeat(32)}` }; },
     },

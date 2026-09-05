@@ -13,6 +13,7 @@ const cliModule = require('../../api/lib/cli');
 const producer = require('../../api/lib/block-producer');
 const producerHead = require('../../api/lib/producer-head');
 const events = [];
+const invocations = [];
 
 function write(ch, name, value) {
   const directory = path.join(work, `ch${ch}`);
@@ -22,6 +23,7 @@ function write(ch, name, value) {
 
 cliModule.chainId = () => 31337;
 cliModule.cli = (ch, args, env) => {
+  invocations.push(args);
   const proposing = args.includes('--propose-exit-kit');
   events.push(proposing ? `${args[0]} --propose-exit-kit` : args[0]);
   if (proposing) {
@@ -103,6 +105,8 @@ test('deposit head is never published before durable live receive and N-of-N bin
   const result = await importL1Deposit(7, 0, txHash);
 
   assert.deepEqual(events, [
+    'recover-inter-transfers',
+    'publish-snapshot',
     'flushPublishedHead',
     'inspect-l1-deposit',
     'postDeposit',
@@ -133,12 +137,25 @@ test('restart completes an old receive/bind before inspecting the next deposit',
   });
 
   await importL1Deposit(8, 0, '0x' + 'ef'.repeat(32));
-  assert.deepEqual(events.slice(0, 4), [
+  assert.deepEqual(events.slice(0, 2), ['recover-inter-transfers', 'publish-snapshot']);
+  assert.deepEqual(events.slice(2, 6), [
     'postDeposit',
     'liveReceiveConfiguredDeposit',
     'liveBindSnapshot',
     'syncOffchainHeads',
   ]);
-  assert.equal(events[4], 'flushPublishedHead');
-  assert.equal(events[5], 'inspect-l1-deposit');
+  assert.equal(events[6], 'flushPublishedHead');
+  assert.equal(events[7], 'inspect-l1-deposit');
+});
+
+test('a rotated live recipient is imported only through its private transaction-bound reservation', async () => {
+  invocations.length = 0;
+  write(9, 'channel_backing.json', { rollup: '0x' + '44'.repeat(20) });
+  const reservation = `deposit:${'01'.repeat(32)}`;
+  await importL1Deposit(9, 1, `0x${'02'.repeat(32)}`, { depositReservation: reservation });
+  const inspect = invocations.find(args => args[0] === 'inspect-l1-deposit');
+  assert.deepEqual(inspect.slice(-2), ['--deposit-reservation', reservation]);
+  const sign = invocations.find(args => args[0] === 'cosign-l1-deposit-import' && !args.includes('--propose-exit-kit'));
+  assert.deepEqual(sign.slice(-2), ['--deposit-reservation', reservation]);
+  assert.ok(!inspect.some(arg => arg.startsWith('--recipient')), 'public caller cannot override native recipient authority');
 });

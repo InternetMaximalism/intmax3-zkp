@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod block_producer;
+pub mod channel_credit_safety;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod block_producer_service;
 pub mod circuits;

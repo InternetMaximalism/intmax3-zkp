@@ -1,6 +1,10 @@
 // Web Worker for the browser wallet: initializes the wasm module + the wasm-bindgen-rayon thread
 // pool (multithreaded proving), then dispatches wallet_* calls. Mirrors test-worker.js's init.
+import { createSignatureReleaseGate } from './signature-release-ledger.mjs';
 let wasm = null;
+let signerPkG = null;
+const signatureRelease = createSignatureReleaseGate();
+let operationQueue = Promise.resolve();
 
 function post(type, payload) {
   self.postMessage({ type, ...payload });
@@ -69,21 +73,36 @@ const CALLS = {
   ),
 };
 
-self.onmessage = async (e) => {
-  const { action } = e.data;
+async function dispatch(e) {
+  const request = e.data || {};
+  const { action } = request;
   try {
     if (action === 'init') {
-      await init(e.data.threads);
+      await init(request.threads);
       return;
     }
     if (!wasm) throw new Error('wasm not initialized');
     const fn = CALLS[action];
     if (!fn) throw new Error('unknown action: ' + action);
     const t0 = performance.now();
-    const result = await fn(e.data);
+    const wasmResult = await fn(request);
+    if (action === 'keygen' || action === 'keygenSeeded') {
+      const identity = JSON.parse(wasmResult);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(identity.pkG || '')) throw new Error('wallet returned an invalid signer identity');
+      signerPkG = identity.pkG.toLowerCase();
+    }
+    // No own channel-state signature crosses postMessage before the strict durable predecessor
+    // decision commits. Ordinary delegate proposals are unsigned and need no storage round trip.
+    const result = await signatureRelease.release({ action, input: request, result: wasmResult, signerPkG });
     const ms = (performance.now() - t0).toFixed(0);
-    post('result', { action, _callId: e.data._callId, result: result ?? '', ms });
+    post('result', { action, _callId: request._callId, result: result ?? '', ms });
   } catch (err) {
-    post('error', { action, _callId: e.data._callId, message: String((err && err.message) || err) });
+    post('error', { action, _callId: request._callId, message: String((err && err.message) || err) });
   }
+}
+
+self.onmessage = (e) => {
+  // Keep session identity/head changes behind an in-flight signature release; IndexedDB also
+  // serializes independent workers/tabs sharing this origin and restored signing identity.
+  operationQueue = operationQueue.then(() => dispatch(e));
 };

@@ -221,6 +221,8 @@ fn run_positive(
         rng,
     )
     .expect("build_inter_channel_credit");
+    assert!(credit.fund_import_state.member_signatures.is_empty());
+    assert!(credit.bundle_apply_state.member_signatures.is_empty());
 
     (transfer_descriptor, a_send, credit)
 }
@@ -683,6 +685,8 @@ fn inter_channel_live_token1_send_and_credit() {
         &mut rng,
     )
     .expect("build_inter_channel_credit at token 55");
+    assert!(credit.fund_import_state.member_signatures.is_empty());
+    assert!(credit.bundle_apply_state.member_signatures.is_empty());
 
     // Fund import + bundle apply land at B's LOCAL slot 2 (cross-registry resolution) …
     assert_eq!(

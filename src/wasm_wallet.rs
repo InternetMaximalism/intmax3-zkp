@@ -10,12 +10,13 @@
 //! SECURITY: `RegevSecurityLevel::Production` is used for all real proving. Keys are session-only
 //! (lost on reload) per the approved threat-model default.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use crate::{
+    channel_credit_safety::{ChannelCreditBounds, OwnedPlaintexts},
     circuits::channel::withdrawal_claim_pis::{
         WITHDRAWAL_CLAIM_PUBLIC_INPUTS_LEN, WithdrawalClaimPublicInputs,
     },
@@ -57,6 +58,62 @@ struct Session {
     /// assert `recipients[my_slot]` equals it — fail-closed. `None` until a contribution is made
     /// (e.g. a pure importer with no contribution of its own).
     expected_recipient: Option<crate::ethereum_types::address::Address>,
+    /// Private host evidence only; never serialized into a public snapshot. A reload loses
+    /// precision, not safety: import bootstraps unknown cells conservatively from the fund.
+    credit_safety_bounds: BTreeMap<String, ChannelCreditBounds>,
+}
+
+fn owned_credit_plaintexts(
+    session: &Session,
+    state: &ChannelState,
+    slot: u16,
+) -> Result<OwnedPlaintexts, JsValue> {
+    state.balance_state.validate().map_err(js_err)?;
+    let active =
+        state.balance_state.member_count as usize + state.balance_state.delegate_count as usize;
+    if slot as usize >= active {
+        return Err(js_err("credit-safety: own slot is not active"));
+    }
+    let mut known = OwnedPlaintexts::new();
+    for row in 0..active {
+        for token in 0..state.balance_state.token_count as usize {
+            let ciphertext = &state.balance_state.enc_balances[row][token];
+            if ciphertext == crate::common::balance_state::zero_ciphertext() {
+                known.insert((row, token), 0);
+            } else if row == slot as usize {
+                let amount = crate::regev::decrypt_amount(&session.keys.regev_sk, ciphertext)
+                    .map_err(js_err)?;
+                known.insert((row, token), amount);
+            }
+        }
+    }
+    Ok(known)
+}
+
+fn credit_bounds_for(
+    session: &Session,
+    state: &ChannelState,
+    slot: u16,
+) -> Result<ChannelCreditBounds, JsValue> {
+    if let Some(bounds) = session.credit_safety_bounds.get(&state.digest.to_hex()) {
+        bounds.validate_for(state).map_err(js_err)?;
+        return Ok(bounds.clone());
+    }
+    ChannelCreditBounds::bootstrap(state, &owned_credit_plaintexts(session, state, slot)?)
+        .map_err(js_err)
+}
+
+fn remember_credit_head(
+    session: &mut Session,
+    state: &ChannelState,
+    slot: u16,
+) -> Result<(), JsValue> {
+    let bounds = credit_bounds_for(session, state, slot)?;
+    session.credit_safety_bounds.clear();
+    session
+        .credit_safety_bounds
+        .insert(state.digest.to_hex(), bounds);
+    Ok(())
 }
 
 thread_local! {
@@ -129,6 +186,7 @@ fn keygen_with_rng(rng: &mut impl rand010::Rng) -> Result<String, JsValue> {
             balance: None,
             pending_send: None,
             expected_recipient: None,
+            credit_safety_bounds: BTreeMap::new(),
         });
     });
     Ok(json)
@@ -236,6 +294,30 @@ pub fn wallet_sign_state(slot: u16, state_json: String) -> Result<String, JsValu
         if !(state.epoch == 1 && state.balance_state.state_version == 0) {
             return Err(js_err(
                 "wallet_sign_state is genesis-only (epoch 1, state_version 0)",
+            ));
+        }
+        state.balance_state.validate().map_err(js_err)?;
+        let active = mc + state.balance_state.delegate_count as usize;
+        crate::wallet_core::validate_new_exit_key_digests(
+            &state.balance_state.regev_pk_digests[..active],
+        )
+        .map_err(js_err)?;
+        for slot in 0..active {
+            for token in 0..state.balance_state.token_count as usize {
+                state.balance_state.enc_balances[slot][token]
+                    .validate_balance_exit_shape()
+                    .map_err(js_err)?;
+            }
+        }
+        let expected_recipient = session.expected_recipient.ok_or_else(|| {
+            js_err("set your recoverable L1 recipient in a genesis contribution before signing")
+        })?;
+        if state.balance_state.recipients[slot as usize] != expected_recipient
+            || state.balance_state.regev_pk_digests[slot as usize]
+                != Bytes32::from(session.keys.regev_pk.poseidon_digest())
+        {
+            return Err(js_err(
+                "genesis does not bind this wallet's expected recipient and Regev key",
             ));
         }
         // Confirm our slot decrypts at EVERY active token position (sanity: we are signing a
@@ -415,6 +497,7 @@ pub fn wallet_import_channel(snapshot_json: String) -> Result<String, JsValue> {
         }
         let report = balance_report(session, &snapshot, slot)?;
         session.slot = Some(slot);
+        remember_credit_head(session, &snapshot.state, slot)?;
         session.snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })
@@ -953,8 +1036,24 @@ pub fn wallet_cosign(payload_json: String) -> Result<String, JsValue> {
         // release a signature over an H2=0 successor whose exact backing statement equals the
         // durable head's. This is the same refusal the CLI applies at its signing primitive.
         verify_exit_kit_preserving_successor(&snapshot.state, &next).map_err(js_err)?;
+        let before_bounds = credit_bounds_for(session, &snapshot.state, slot)?;
+        let after_bounds = before_bounds
+            .advance_authenticated(
+                &snapshot.state,
+                &next,
+                &owned_credit_plaintexts(session, &next, slot)?,
+            )
+            .map_err(js_err)?;
         let sig = sign_state(&session.keys, slot as u8, &next).map_err(js_err)?;
         add_signature(&mut next, sig);
+        // The shipped worker persists the exact signing decision in IndexedDB before posting
+        // this result outside the worker. SDK hosts must provide the same durable boundary.
+        session
+            .credit_safety_bounds
+            .retain(|key, _| key == &snapshot.state.digest.to_hex());
+        session
+            .credit_safety_bounds
+            .insert(next.digest.to_hex(), after_bounds);
         serde_json::to_string(&next).map_err(js_err)
     })
 }
@@ -1001,6 +1100,7 @@ pub fn wallet_finalize(state_json: String) -> Result<String, JsValue> {
             session.balance = None;
         }
         let report = balance_report(session, &snapshot, slot)?;
+        remember_credit_head(session, &snapshot.state, slot)?;
         session.snapshot = Some(snapshot);
         serde_json::to_string(&report).map_err(js_err)
     })

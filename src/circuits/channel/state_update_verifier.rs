@@ -364,6 +364,7 @@ impl InChannelTransferUpdateWitness {
         // (b) State linkage and invariants.
         verify_state_linkage(&self.prev_state, &self.next_state)?;
         verify_balance_state_common(&self.channel_record, &self.prev_state, &self.next_state)?;
+        require_small_block_unchanged(&self.prev_state, &self.next_state)?;
         require_h2_zero(&self.next_state)?;
         require_chain_unchanged(&self.prev_state, &self.next_state)?;
         // Stage 3: an in-channel transfer is not a settle — the accumulator root is unchanged.
@@ -1178,6 +1179,7 @@ impl BalanceRefreshUpdateWitness {
         verify_regev_pk_root(&self.channel_record, &self.regev_pks)?;
         verify_state_linkage(&self.prev_state, &self.next_state)?;
         verify_balance_state_common(&self.channel_record, &self.prev_state, &self.next_state)?;
+        require_small_block_unchanged(&self.prev_state, &self.next_state)?;
         verify_next_state_signatures(&self.channel_record, &self.next_state)?;
         require_h2_zero(&self.next_state)?;
         require_chain_unchanged(&self.prev_state, &self.next_state)?;
@@ -1447,8 +1449,51 @@ fn verify_state_linkage(
     Ok(())
 }
 
-/// Common balance-state checks for every transition: canonical ciphertexts and D3 budgets on
-/// both sides, channel-id consistency, and the strict `state_version` increment. This is the
+/// Ordinary transitions never change the participant split or close era. Membership changes and
+/// close cancellation have separate admission paths; a normal update must preserve the already
+/// authenticated record's member/delegate counts on BOTH sides. Do not compare the state's era
+/// to the record's genesis-era field: a valid post-cancellation state can have a later era.
+fn verify_ordinary_state_metadata(
+    record: &ChannelRecord,
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+) -> Result<(), ChannelStateUpdateError> {
+    for (label, state) in [("prev", prev_state), ("next", next_state)] {
+        if state.balance_state.member_count != record.member_count
+            || state.balance_state.delegate_count != record.delegate_count
+        {
+            return Err(ChannelStateUpdateError::InvalidStateLinkage(format!(
+                "{label} member_count/delegate_count must match the trusted channel record"
+            )));
+        }
+    }
+    if next_state.close_freeze_nonce != prev_state.close_freeze_nonce {
+        return Err(ChannelStateUpdateError::InvalidStateLinkage(
+            "close_freeze_nonce must remain unchanged across an ordinary transition".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// In-channel sends and refreshes do not create a small block. Keep this separate from the
+/// shared metadata checks: inter-channel sends and incoming fund imports legitimately advance
+/// this cursor, even though they must preserve the participant split and close era.
+fn require_small_block_unchanged(
+    prev_state: &ChannelState,
+    next_state: &ChannelState,
+) -> Result<(), ChannelStateUpdateError> {
+    if next_state.small_block_number != prev_state.small_block_number {
+        return Err(ChannelStateUpdateError::InvalidStateLinkage(
+            "small_block_number must remain unchanged across an in-channel send or refresh"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Common balance-state checks for every transition: trusted participant split and close-era
+/// preservation, canonical ciphertexts and D3 budgets on both sides, channel-id consistency, and
+/// the strict `state_version` increment. This is the
 /// registry-agnostic core shared by ALL transition kinds INCLUDING `TokenRegister`; the
 /// registry/token_count immutability equality lives in [`verify_balance_state_common`] (every
 /// kind except `TokenRegister`) — see the SECURITY comment there.
@@ -1457,6 +1502,7 @@ fn verify_balance_state_shared(
     prev_state: &ChannelState,
     next_state: &ChannelState,
 ) -> Result<(), ChannelStateUpdateError> {
+    verify_ordinary_state_metadata(record, prev_state, next_state)?;
     prev_state
         .balance_state
         .validate()
@@ -2259,6 +2305,126 @@ mod tests {
         level: RegevSecurityLevel::Test,
     };
 
+    /// Exercise only the repaired header admission checks: no proof is constructed or accepted
+    /// for a rejected header. Both predecessor and successor must agree with the trusted record.
+    #[test]
+    fn ordinary_metadata_rejects_untrusted_participant_counts() {
+        let fixture = l1_deposit_import_fixture();
+        verify_ordinary_state_metadata(
+            &fixture.channel_record,
+            &fixture.prev_state,
+            &fixture.next_state,
+        )
+        .expect("canonical participant counts must pass");
+
+        for predecessor in [true, false] {
+            for member_count in [true, false] {
+                let mut prev = fixture.prev_state.clone();
+                let mut next = fixture.next_state.clone();
+                let state = if predecessor { &mut prev } else { &mut next };
+                if member_count {
+                    state.balance_state.member_count -= 1;
+                } else {
+                    state.balance_state.delegate_count += 1;
+                }
+                let error = verify_ordinary_state_metadata(&fixture.channel_record, &prev, &next)
+                    .expect_err("a header inconsistent with the record must be rejected");
+                assert!(matches!(
+                    error,
+                    ChannelStateUpdateError::InvalidStateLinkage(message)
+                        if message.contains("member_count/delegate_count")
+                ));
+            }
+        }
+
+        // Agreement between the two states alone does not authenticate their participant split.
+        let mut record = fixture.channel_record.clone();
+        record.member_count -= 1;
+        record.delegate_count += 1;
+        assert!(
+            verify_ordinary_state_metadata(&record, &fixture.prev_state, &fixture.next_state,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_metadata_preserves_era_without_pinning_genesis_era() {
+        let mut fixture = l1_deposit_import_fixture();
+        fixture.prev_state.close_freeze_nonce = 7;
+        fixture.next_state.close_freeze_nonce = 7;
+        assert_eq!(fixture.channel_record.close_freeze_nonce, 0);
+        verify_ordinary_state_metadata(
+            &fixture.channel_record,
+            &fixture.prev_state,
+            &fixture.next_state,
+        )
+        .expect("a stable later close era must not be compared to the record's genesis era");
+
+        for next_era in [6, 8] {
+            fixture.next_state.close_freeze_nonce = next_era;
+            let error = verify_ordinary_state_metadata(
+                &fixture.channel_record,
+                &fixture.prev_state,
+                &fixture.next_state,
+            )
+            .expect_err("ordinary updates cannot change close era");
+            assert!(matches!(
+                error,
+                ChannelStateUpdateError::InvalidStateLinkage(message)
+                    if message.contains("close_freeze_nonce")
+            ));
+        }
+    }
+
+    #[test]
+    fn ordinary_metadata_accepts_consistent_delegate_record() {
+        let mut fixture = l1_deposit_import_fixture();
+        // Model an already completed, separately authenticated join. These validators do not
+        // perform the join: they admit the subsequent ordinary update under its current record.
+        fixture.channel_record.delegate_count = 1;
+        fixture.prev_state.balance_state.delegate_count = 1;
+        fixture.next_state.balance_state.delegate_count = 1;
+        verify_ordinary_state_metadata(
+            &fixture.channel_record,
+            &fixture.prev_state,
+            &fixture.next_state,
+        )
+        .expect("a delegate in the current trusted record must remain usable");
+    }
+
+    #[test]
+    fn ordinary_metadata_small_block_rule_is_transition_specific() {
+        let fixture = l1_deposit_import_fixture();
+        assert_eq!(
+            fixture.next_state.small_block_number,
+            fixture.prev_state.small_block_number + 1
+        );
+        verify_balance_state_common(
+            &fixture.channel_record,
+            &fixture.prev_state,
+            &fixture.next_state,
+        )
+        .expect("the shared checks must allow an incoming deposit's legitimate block advance");
+
+        let mut ordinary_next = fixture.next_state.clone();
+        ordinary_next.small_block_number = fixture.prev_state.small_block_number;
+        require_small_block_unchanged(&fixture.prev_state, &ordinary_next)
+            .expect("send/refresh preserve the cursor after previous incoming blocks");
+        for next_block in [
+            fixture.prev_state.small_block_number - 1,
+            fixture.prev_state.small_block_number + 1,
+        ] {
+            ordinary_next.small_block_number = next_block;
+            let error = require_small_block_unchanged(&fixture.prev_state, &ordinary_next)
+                .expect_err("send/refresh cannot move the small-block cursor");
+            assert!(matches!(
+                error,
+                ChannelStateUpdateError::InvalidStateLinkage(message)
+                    if message.contains("small_block_number")
+            ));
+        }
+    }
+
     #[test]
     fn in_channel_transfer_happy_path_with_real_zkp() {
         let fixture = in_channel_fixture();
@@ -2268,6 +2434,23 @@ mod tests {
         assert_eq!(pis.prev_state_version, 3);
         assert_eq!(pis.next_state_version, 4);
         assert_eq!(pis.h2_tag, Bytes32::default());
+    }
+
+    #[test]
+    fn in_channel_transfer_keeps_later_close_era_and_small_block() {
+        let mut fixture = in_channel_fixture();
+        fixture.witness.prev_state.close_freeze_nonce = 7;
+        fixture.witness.prev_state.small_block_number = 41;
+        fixture.witness.prev_state = fixture.witness.prev_state.clone().with_computed_digest();
+        fixture.witness.next_state.close_freeze_nonce = 7;
+        fixture.witness.next_state.small_block_number = 41;
+        fixture.witness.next_state.prev_digest = fixture.witness.prev_state.digest;
+        fixture.witness.next_state = fixture.witness.next_state.clone().with_computed_digest();
+        let pis = fixture
+            .witness
+            .verify(&VERIFIER)
+            .expect("a valid send remains usable after a close-era or incoming-block advance");
+        assert_eq!(pis.kind, ChannelTransitionKind::InChannelTransfer);
     }
 
     #[test]
@@ -2944,6 +3127,23 @@ mod tests {
                 proof,
             },
         }
+    }
+
+    /// A normal refresh remains available in a later close era and after prior small blocks.
+    #[test]
+    fn balance_refresh_keeps_later_close_era_and_small_block() {
+        let mut witness = two_token_refresh_fixture();
+        witness.prev_state.close_freeze_nonce = 7;
+        witness.prev_state.small_block_number = 41;
+        witness.prev_state = witness.prev_state.clone().with_computed_digest();
+        witness.next_state.close_freeze_nonce = 7;
+        witness.next_state.small_block_number = 41;
+        witness.next_state.prev_digest = witness.prev_state.digest;
+        witness.next_state = witness.next_state.clone().with_computed_digest();
+        let pis = witness
+            .verify(&VERIFIER)
+            .expect("a valid refresh preserves a later close era and small-block cursor");
+        assert_eq!(pis.kind, ChannelTransitionKind::BalanceRefresh);
     }
 
     /// TM-13 completeness: refreshing (member 1, token 1) verifies, and token 0 of the same row

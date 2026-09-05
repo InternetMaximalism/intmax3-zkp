@@ -411,6 +411,18 @@ function makeParticipantCloser({
         // Preflight is only for a new action. Once raw bytes exist, a restart must reconcile them
         // even when their prior execution has already changed manager state and staticCall reverts.
         if (!outbox.status(actionId)) {
+          if (typeof txOptions.checkReadiness !== 'function' || !isHexString(proof.stateDigest, 32)) {
+            throw new Error('new participant close requires exact-head public-close readiness before signing');
+          }
+          const readiness = await txOptions.checkReadiness();
+          if (!readiness || readiness.ready !== true
+              || String(readiness.chainId) !== String(expectedChainId)
+              || String(readiness.channelId) !== String(channelId)
+              || getAddress(readiness.manager) !== getAddress(managerAddress)
+              || String(readiness.signedHeadDigest).toLowerCase() !== String(proof.stateDigest).toLowerCase()
+              || String(readiness.currentCloseFreezeNonce) !== String(txOptions.era.expectedCurrentCloseFreezeNonce)) {
+            throw new Error('public-close readiness differs from the exact participant head or freeze era');
+          }
           const [onChainRoot, onChainCount] = await Promise.all([
             manager.participantRoot(),
             manager.activeParticipantCount(),
@@ -436,6 +448,9 @@ function makeParticipantCloser({
             proof.siblings,
             txOptions.era.expectedCurrentCloseFreezeNonce,
             txOptions.era.expectedHighestCancelledRevivedStateVersion,
+            // The Contract is provider-only to keep signing in the durable outbox. eth_call
+            // still needs the exact signer: the participant leaf includes msg.sender.
+            { from: expectedRecipient },
           );
         }
       } catch (error) {

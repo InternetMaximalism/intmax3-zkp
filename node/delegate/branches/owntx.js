@@ -118,7 +118,7 @@ async function doInterChannelSend(event, ctx) {
   // prove time; a concurrent winner advances it and makes the co-signer reject this stale proof.
   const baseHead = await api.getBaseHead(ch.id);
   const built = wallet.sendInterChannel(
-    toChannel, toSlot, amount, destRecipient, tokenIndex, Number(baseHead.nonce)
+    toChannel, toSlot, amount, destRecipient, tokenIndex, baseHead.nonce
   );
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
@@ -148,7 +148,7 @@ async function doBurn(event, ctx) {
   // Multi-token (§N): tokenIndex is the burned BASE token (undefined = genesis registry[0]);
   // the resulting L1 partial withdrawal pays out in that asset (IMPW binds tokenIndex).
   const baseHead = await api.getBaseHead(ch.id);
-  const built = wallet.burnSend(amount, l1Address, tokenIndex, Number(baseHead.nonce));
+  const built = wallet.burnSend(amount, l1Address, tokenIndex, baseHead.nonce);
   sm.signal(dsm.SIGNALS.SENT);
   let resp;
   try { resp = await api.pwBurn(ch.id, { debitPayload: built.debit_payload || built.debitPayload, transferDescriptor: built.transfer_descriptor || built.transferDescriptor, amount: String(amount), recipient: l1Address, tokenIndex }); }

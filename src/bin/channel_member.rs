@@ -28,6 +28,15 @@ use std::{
     process::{Command, Stdio, exit},
 };
 
+#[path = "channel_member/burn_recovery.rs"]
+mod burn_recovery;
+#[path = "channel_member/deposit_capacity.rs"]
+mod deposit_capacity;
+#[path = "channel_member/deposit_recovery.rs"]
+mod deposit_recovery;
+#[path = "channel_member/inter_transfer_recovery_codec.rs"]
+mod inter_transfer_recovery_codec;
+
 #[cfg(unix)]
 use std::os::{
     fd::AsRawFd as _,
@@ -42,6 +51,7 @@ use intmax3_zkp::wallet_core::{
 };
 use intmax3_zkp::{
     block_producer::ProductionDepositRequest,
+    channel_credit_safety::{ChannelCreditBounds, OwnedPlaintexts},
     circuits::{
         balance::{
             balance_pis::{BALANCE_PUBLIC_INPUTS_LEN, BalancePublicInputs},
@@ -92,7 +102,8 @@ use intmax3_zkp::{
     },
     public_close_prover::{
         MAX_BALANCE_VERIFIER_DATA_BYTES, MAX_PUBLIC_BACKING_ENVELOPE_BYTES,
-        PublicCloseExpectations, parse_public_close_backing_envelope, verify_public_backing, verify_public_backing_proposed,
+        PublicCloseExpectations, parse_public_close_backing_envelope, verify_public_backing,
+        verify_public_backing_proposed,
     },
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
     utils::{
@@ -282,7 +293,7 @@ struct ControlledMember {
 /// `applied_tx_identities` and the old entries were dropped without a diagnostic. A security
 /// ledger that resets itself in silence is worse than no ledger, because the operator believes it
 /// is running. Bump this whenever the on-disk shape of a ledger changes.
-const STATE_SCHEMA_VERSION: u32 = 5;
+const STATE_SCHEMA_VERSION: u32 = 6;
 
 /// The replay-ledger keys `cli_state.json` MUST carry. SECURITY: `load_state` checks for these BY
 /// NAME and fails LOUDLY on absence — the enumeration is deliberately in one auditable place. Add
@@ -358,7 +369,10 @@ impl StateSigningPurpose {
     /// therefore needs the durable head receipt rather than a pre-sign kit; the credited head's
     /// own kit is installed right after the live balance service receives the transfer.
     fn is_credit_only(self) -> bool {
-        matches!(self, Self::InterChannelFundImport | Self::InterChannelBundleApply)
+        matches!(
+            self,
+            Self::InterChannelFundImport | Self::InterChannelBundleApply
+        )
     }
 
     /// H2=0 value-preserving successors may reuse the predecessor's backing proof, but only when
@@ -416,7 +430,12 @@ fn exit_kit_statement_key(state: &ChannelState) -> (ChannelId, Bytes32, Bytes32)
 }
 
 fn exit_kit_receipt_archive_path(receipt: &SignerExitKitReceipt) -> PathBuf {
-    Path::new(SIGNER_EXIT_KIT_ARCHIVE_DIR)
+    exit_kit_receipt_archive_path_at(receipt, Path::new("."))
+}
+
+fn exit_kit_receipt_archive_path_at(receipt: &SignerExitKitReceipt, directory: &Path) -> PathBuf {
+    directory
+        .join(SIGNER_EXIT_KIT_ARCHIVE_DIR)
         .join(format!("{}.json", hex::encode(receipt.archive_sha256)))
 }
 
@@ -515,9 +534,7 @@ fn require_credit_only_successor_with_head_exit_kit(
     purpose: StateSigningPurpose,
 ) -> Result<(), String> {
     let predecessor = cli.snapshot.state.clone();
-    if successor.prev_digest != predecessor.digest
-        && successor.prev_digest == Bytes32::default()
-    {
+    if successor.prev_digest != predecessor.digest && successor.prev_digest == Bytes32::default() {
         return Err(format!(
             "SIGNER-INDEPENDENT EXIT: {purpose:?} successor does not extend the durable head"
         ));
@@ -584,11 +601,9 @@ fn adopt_head_with_exit_kit_receipts(cli: &mut CliState, new_head: ChannelState)
             cli.signer_exit_kit_receipt_verified = verified;
         }
         None => {
-            if cli
-                .signer_exit_kit_receipt
-                .as_ref()
-                .is_some_and(|receipt| validate_exit_kit_receipt_for_head(receipt, &new_head).is_err())
-            {
+            if cli.signer_exit_kit_receipt.as_ref().is_some_and(|receipt| {
+                validate_exit_kit_receipt_for_head(receipt, &new_head).is_err()
+            }) {
                 // The new head has a different statement key than the durable receipt: the head
                 // is kit-pending until `install-exit-kit` archives its kit.
                 cli.signer_exit_kit_receipt = None;
@@ -802,6 +817,15 @@ struct CliState {
     state_schema_version: u32,
     controlled: Vec<ControlledMember>,
     snapshot: ChannelSnapshot,
+    /// Conservative, host-verified bounds keyed by the exact state digest. Missing legacy bounds
+    /// mean UNKNOWN, never zero: bootstrap can only use owned decryptions or the channel fund.
+    /// Keep the current head and at most its two proposal steps; no per-payment history growth.
+    #[serde(default)]
+    credit_safety_bounds: BTreeMap<String, ChannelCreditBounds>,
+    /// Capacity reserved BEFORE an L1 deposit is signed. An unrelated credit cannot consume this
+    /// room while the deposit is waiting for finality/import. Legacy files predate reservations.
+    #[serde(default)]
+    deposit_capacity_reservations: BTreeMap<String, DepositCapacityReservation>,
     /// No serde default: absence is a schema/migration event, never an implicit "not frozen".
     /// `load_state` names the missing key and `migrate-state` may add null only while no local
     /// settlement record exists.  Once Some, no command clears it.
@@ -891,6 +915,175 @@ struct CliState {
     state_signing_ledger: BTreeMap<String, StateSigningLedgerEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DepositCapacityReservation {
+    token_index: u32,
+    amount: u64,
+    recipient_slots: Vec<u16>,
+    /// Exact one-time address from the trusted local live service, pinned before L1 signing.
+    /// Never taken from a public import request. Legacy reservations keep the backing address.
+    #[serde(default)]
+    deposit_recipient: Option<Bytes32>,
+    tx_hash: Option<Bytes32>,
+    /// A completed receipt remains an idempotency tombstone but no longer reserves capacity.
+    completed: bool,
+}
+
+/// Only locally owned keys and the canonical all-zero ciphertext supply exact plaintexts.
+/// A request's claimed balance is never evidence. Evaluating only active positions also keeps
+/// padding and unused tokens out of both the cost and the security decision.
+fn owned_credit_plaintexts(cli: &CliState, head: &ChannelState) -> Result<OwnedPlaintexts, String> {
+    let mut known = OwnedPlaintexts::new();
+    let active =
+        head.balance_state.member_count as usize + head.balance_state.delegate_count as usize;
+    let tokens = head.balance_state.token_count as usize;
+    if active > MAX_CHANNEL_MEMBERS || tokens > intmax3_zkp::constants::MAX_CHANNEL_TOKENS {
+        return Err("credit-safety state has invalid dimensions".into());
+    }
+    let zero = intmax3_zkp::common::balance_state::zero_ciphertext();
+    for slot in 0..active {
+        for token in 0..tokens {
+            if &head.balance_state.enc_balances[slot][token] == zero {
+                known.insert((slot, token), 0);
+            }
+        }
+    }
+    for member in &cli.controlled {
+        let slot = member.slot as usize;
+        if slot >= active {
+            continue;
+        }
+        let keys = keys_for(member.keygen_seed);
+        if cli.snapshot.record.member_pk_gs[slot] != keys.pk_g() {
+            return Err(format!("credit-safety key mismatch at slot {slot}"));
+        }
+        for token in 0..tokens {
+            if known.contains_key(&(slot, token)) {
+                continue;
+            }
+            let amount = intmax3_zkp::regev::decrypt_amount(
+                &keys.regev_sk,
+                &head.balance_state.enc_balances[slot][token],
+            )
+            .map_err(|error| {
+                format!("credit-safety: slot {slot}, token {token} is not claimable: {error}")
+            })?;
+            known.insert((slot, token), amount);
+        }
+    }
+    Ok(known)
+}
+
+fn credit_bounds_for(cli: &CliState, head: &ChannelState) -> Result<ChannelCreditBounds, String> {
+    if let Some(bounds) = cli.credit_safety_bounds.get(&head.digest.to_hex()) {
+        bounds
+            .validate_for(head)
+            .map_err(|error| error.to_string())?;
+        return Ok(bounds.clone());
+    }
+    ChannelCreditBounds::bootstrap(head, &owned_credit_plaintexts(cli, head)?)
+        .map_err(|error| error.to_string())
+}
+
+fn reserved_credit_amounts(
+    cli: &CliState,
+    excluded: Option<&str>,
+) -> Result<BTreeMap<(usize, u32), u64>, String> {
+    let mut totals = BTreeMap::new();
+    for (id, reservation) in &cli.deposit_capacity_reservations {
+        if reservation.completed || Some(id.as_str()) == excluded {
+            continue;
+        }
+        for slot in &reservation.recipient_slots {
+            let amount = totals
+                .entry((*slot as usize, reservation.token_index))
+                .or_insert(0u64);
+            *amount = amount
+                .checked_add(reservation.amount)
+                .ok_or_else(|| "reserved L1 deposit capacity exceeds u64".to_string())?;
+        }
+    }
+    Ok(totals)
+}
+
+fn check_reserved_credit_capacity(
+    cli: &CliState,
+    head: &ChannelState,
+    bounds: &ChannelCreditBounds,
+    owned: &OwnedPlaintexts,
+    excluded: Option<&str>,
+) -> Result<(), String> {
+    for ((slot, token_index), amount) in reserved_credit_amounts(cli, excluded)? {
+        let token = resolve_local_token_slot(&head.balance_state, token_index)
+            .map_err(|e| e.to_string())?;
+        let reserved_adds = cli
+            .deposit_capacity_reservations
+            .iter()
+            .filter(|(id, r)| {
+                !r.completed
+                    && Some(id.as_str()) != excluded
+                    && r.token_index == token_index
+                    && r.recipient_slots.contains(&(slot as u16))
+            })
+            .count();
+        if u64::from(head.balance_state.pending_adds[slot][token]) + reserved_adds as u64
+            > u64::from(intmax3_zkp::regev::MAX_HOMO_ADDS_BEFORE_REFRESH)
+        {
+            return Err(format!(
+                "reserved deposit refresh capacity at slot {slot}, token {token_index}: refresh this position before another credit"
+            ));
+        }
+        bounds
+            .can_credit(
+                head,
+                slot,
+                token,
+                amount,
+                owned.get(&(slot, token)).copied(),
+            )
+            .map_err(|error| {
+                format!("reserved deposit capacity at slot {slot}, token {token_index}: {error}")
+            })?;
+    }
+    Ok(())
+}
+
+/// Run AFTER the transition-specific authentication/conservation verifier, BEFORE any state
+/// signature. The cache is keyed by the entire signed preimage, so N signers pay this check once.
+fn admit_credit_safe_successor(
+    cli: &mut CliState,
+    predecessor: &ChannelState,
+    successor: &ChannelState,
+) -> Result<(), String> {
+    admit_credit_safe_successor_excluding(cli, predecessor, successor, None)
+}
+
+fn admit_credit_safe_successor_excluding(
+    cli: &mut CliState,
+    predecessor: &ChannelState,
+    successor: &ChannelState,
+    excluded_reservation: Option<&str>,
+) -> Result<(), String> {
+    if let Some(bounds) = cli.credit_safety_bounds.get(&successor.digest.to_hex()) {
+        return bounds.validate_for(successor).map_err(|e| e.to_string());
+    }
+    let before = credit_bounds_for(cli, predecessor)?;
+    let owned = owned_credit_plaintexts(cli, successor)?;
+    let after = before
+        .advance_authenticated(predecessor, successor, &owned)
+        .map_err(|error| format!("CREDIT CAPACITY REQUIRED before signing: {error}"))?;
+    check_reserved_credit_capacity(cli, successor, &after, &owned, excluded_reservation)?;
+    let current = cli.snapshot.state.digest.to_hex();
+    let prev_key = predecessor.digest.to_hex();
+    let next_key = successor.digest.to_hex();
+    cli.credit_safety_bounds
+        .retain(|key, _| key == &current || key == &prev_key || key == &next_key);
+    cli.credit_safety_bounds.insert(prev_key, before);
+    cli.credit_safety_bounds.insert(next_key, after);
+    Ok(())
+}
+
 fn state_signing_ledger_key(
     channel_id: ChannelId,
     predecessor_digest: Bytes32,
@@ -939,6 +1132,30 @@ fn terminal_signing_reservation(
 /// signature is checked before persistence.
 fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
     let record = &state.snapshot.record;
+    if state.credit_safety_bounds.len() > 3 {
+        return Err("credit-safety cache exceeds the head/two-step bound".into());
+    }
+    if let Some(bounds) = state
+        .credit_safety_bounds
+        .get(&state.snapshot.state.digest.to_hex())
+    {
+        bounds
+            .validate_for(&state.snapshot.state)
+            .map_err(|error| error.to_string())?;
+    }
+    for reservation in state.deposit_capacity_reservations.values() {
+        if reservation.amount == 0
+            || reservation.recipient_slots.is_empty()
+            || reservation.recipient_slots.len() > MAX_CHANNEL_MEMBERS
+            || reservation
+                .recipient_slots
+                .windows(2)
+                .any(|slots| slots[0] >= slots[1])
+            || (reservation.completed && reservation.tx_hash.is_none())
+        {
+            return Err("invalid deposit capacity reservation".into());
+        }
+    }
     if let Some(receipt) = &state.signer_exit_kit_receipt {
         validate_exit_kit_receipt_for_head(receipt, &state.snapshot.state)?;
     } else if state.signer_exit_kit_receipt_verified {
@@ -946,9 +1163,7 @@ fn validate_signing_security_state(state: &CliState) -> Result<(), String> {
     }
     if let Some(prepared) = &state.prepared_exit_kit_receipt {
         if prepared.predecessor_digest != state.snapshot.state.digest {
-            return Err(
-                "prepared exit-kit receipt does not extend the durable signed head".into(),
-            );
+            return Err("prepared exit-kit receipt does not extend the durable signed head".into());
         }
         if prepared.receipt.schema_version != SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION
             || prepared.receipt.source_signed_head_digest == Bytes32::default()
@@ -1056,6 +1271,25 @@ where
     // `signer`. Returning stored signature bytes is still an external release; grandfathering an
     // unsafe historical decision here would recreate the signer-withholding failure.
     enforce_exit_kit_before_signature_release(cli, successor, purpose)?;
+
+    if !matches!(
+        purpose,
+        StateSigningPurpose::Genesis | StateSigningPurpose::DelegateJoin
+    ) {
+        if !cli
+            .credit_safety_bounds
+            .contains_key(&successor.digest.to_hex())
+        {
+            let predecessor = cli.snapshot.state.clone();
+            if successor.prev_digest != predecessor.digest {
+                return Err("credit-safety: intermediate successor must be checked against its exact predecessor before signing".into());
+            }
+            admit_credit_safe_successor(cli, &predecessor, successor)?;
+        }
+        cli.credit_safety_bounds[&successor.digest.to_hex()]
+            .validate_for(successor)
+            .map_err(|error| error.to_string())?;
+    }
 
     let requested_terminal = plan_digest.map(|plan| {
         (
@@ -1190,7 +1424,7 @@ fn ledger_sign_all_controlled(
 }
 
 const INTER_TRANSFER_COMMIT_MAGIC: &str = "INTMAX_INTER_TRANSFER_2PC";
-const INTER_TRANSFER_COMMIT_VERSION: u32 = 1;
+const INTER_TRANSFER_COMMIT_VERSION: u32 = 2;
 const INTER_TRANSFER_COMMIT_DIR: &str = ".inter-transfer-journal";
 const MAX_INTER_TRANSFER_JOURNALS: usize = 100_000;
 const MAX_INTER_TRANSFER_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
@@ -1211,9 +1445,22 @@ enum InterTransferCommitPhase {
     Committed,
 }
 
+/// Immutable recovery inputs for B. A's convenience files may be overwritten by a later send;
+/// B must finish this already signed credit without asking A to sign or recreate its proposal.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InterTransferSourceRecovery {
+    source_channel_id: u64,
+    producer_request_id: Option<String>,
+    debit_payload: InterChannelDebitPayload,
+    descriptor: InterChannelTransferDescriptor,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InterTransferCommitJournal {
+    #[serde(default)]
+    source_recovery: Option<InterTransferSourceRecovery>,
     magic: String,
     version: u32,
     phase: InterTransferCommitPhase,
@@ -1232,7 +1479,9 @@ struct InterTransferCommitJournal {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InterTransferCommitEnvelope {
     checksum: Bytes32,
-    journal: InterTransferCommitJournal,
+    // Preserve serialized HashSet array order when checking the durable checksum. Deserialize
+    // into CliState only AFTER integrity verification, never to recompute a checksum.
+    journal: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -1662,52 +1911,94 @@ fn cosigner_recipient_env(slot: u16) -> String {
     format!("CLI_RECIPIENT_SLOT_{slot}")
 }
 
-/// The B-1b L1 exit address written into a CLI COSIGNER's genesis balance-slot leaf.
-///
-/// Default: `test_recipient_for(channel_id, slot)` — the canonical deterministic per-(channel,
-/// slot) address, which is also what the on-chain registration record carries. It is SYNTHETIC:
-/// nobody holds its key, so a claim credited to it can never be pulled (`claimWithdrawalCredit`
-/// pays `msg.sender`). That is fine for every flow that never exercises the payout, and it is the
-/// default here so no real address is baked into library/CLI code.
-///
-/// Opt-in override: `CLI_RECIPIENT_SLOT_<slot>=0x<20-byte address>` makes THAT slot's leaf a
-/// caller-chosen exit address, so an end-to-end test (or a live deployment) can route a slot's
-/// payout to a key it actually holds. Only the slot(s) named are affected; every other slot keeps
-/// the default.
-///
-/// SECURITY: this override moves the recipient in the ONE place B-1b makes authoritative — the
-/// cosigner-signed genesis balance-slot leaf, folded into H1 — so it WEAKENS NOTHING:
-///   * every cosigner signs the genesis that carries it (an override that the other members did not
-///     intend simply does not get signed / does not reproduce their expected state);
-///   * `WithdrawalClaimWitness` still requires `member.l1_withdrawal_recipient ==
-///     final_balance_state.recipients[member_index]`, and the circuit still opens the leaf, so a
-///     claim can never name an address other than the signed leaf's;
-///   * the payout still requires the recipient's own key (`claimWithdrawalCredit` credits
-///     `withdrawalCredits[token][claim.recipient]` and pays `msg.sender`).
-/// It is fail-closed: a set-but-unparsable or zero address aborts rather than silently falling
-/// back to the default (a silent fallback would strand the payout at an unclaimable address —
-/// exactly the failure this override exists to remove).
-/// INTENTIONALLY SIMPLE: no channel scoping in the env name — the CLI already scopes everything it
-/// does to `INTMAX_CHANNEL`, and genesis is written exactly once per channel.
+/// Pure configuration validation, shared by pre-deposit admission and genesis construction.
+/// Only the explicitly insecure key mode may use synthetic defaults. An explicit address is
+/// still required to be nonzero in that mode so malformed settings never silently fall back.
+fn resolve_cosigner_leaf_recipient(
+    channel_id: u32,
+    slot: u16,
+    configured: Option<&str>,
+    allow_test_default: bool,
+) -> Result<Address, String> {
+    let key = cosigner_recipient_env(slot);
+    let Some(raw) = configured else {
+        if allow_test_default {
+            return Ok(test_recipient_for(channel_id, slot as usize));
+        }
+        return Err(format!(
+            "{key} is required with production co-signer keys: configure this slot's controlled \
+             L1 recovery address before setup-backing or init; synthetic defaults cannot recover \
+             funds. See doc/tasks/node-presign-recipient-setup.md"
+        ));
+    };
+    let trimmed = raw.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    // Address::from_hex also accepts short integers by left-padding them. A recovery address
+    // setting must instead name the complete address so a truncated configuration is rejected.
+    if digits.len() != 40 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{key} must contain exactly 20 bytes of hexadecimal address"
+        ));
+    }
+    let address = Address::from_hex(digits)
+        .map_err(|error| format!("{key}: not a 20-byte L1 address ({error:?})"))?;
+    if address == Address::default() {
+        return Err(format!(
+            "{key} must be nonzero: a zero recipient cannot recover this slot's funds"
+        ));
+    }
+    // Refuse this channel's known fixture recipients even when copied into explicit settings.
+    // This also catches copying another controlled member's default into the current slot.
+    if !allow_test_default
+        && (0..MAX_SIG_CLUSTER)
+            .any(|test_slot| address == test_recipient_for(channel_id, test_slot))
+    {
+        return Err(format!(
+            "{key} is a synthetic test recipient, not a configured recovery address; production \
+             co-signer keys cannot use it. See doc/tasks/node-presign-recipient-setup.md"
+        ));
+    }
+    Ok(address)
+}
+
+/// The B-1b recipient is fixed inside the signed genesis leaf. Production requires an explicit
+/// recovery address for every controlled member; only insecure deterministic fixtures retain
+/// the old synthetic fallback. No new key is generated and no operator address is substituted.
+/// This function does not read or rewrite recipients in an existing signed channel state.
 fn cosigner_leaf_recipient(channel_id: u32, slot: u16) -> Address {
     let key = cosigner_recipient_env(slot);
-    match std::env::var(&key) {
-        Ok(raw) => {
-            let addr = Address::from_hex(raw.trim())
-                .unwrap_or_else(|e| die(format!("{key}: not a 20-byte L1 address ({e:?})")));
-            if addr == Address::default() {
-                die(format!(
-                    "{key} is the zero address — REFUSING (B-1b: an active slot's exit address \
-                     must be nonzero, and a zero recipient could never claim)"
-                ));
-            }
-            eprintln!(
-                "[init] slot {slot} genesis leaf recipient OVERRIDDEN to {} (via {key})",
-                addr.to_hex()
-            );
-            addr
+    let configured = match std::env::var(&key) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            die(format!("{key} is not a valid UTF-8 address setting"))
         }
-        Err(_) => test_recipient_for(channel_id, slot as usize),
+    };
+    let allow_test_default = matches!(key_provenance(), KeyProvenance::InsecureDeterministic);
+    let address = resolve_cosigner_leaf_recipient(
+        channel_id,
+        slot,
+        configured.as_deref(),
+        allow_test_default,
+    )
+    .unwrap_or_else(|error| die(error));
+    if configured.is_some() {
+        eprintln!(
+            "[recipient] slot {slot} genesis recovery address {} (via {key})",
+            address.to_hex()
+        );
+    }
+    address
+}
+
+/// Run before creating the initial backing deposit, including zero-allocation cosigner slots:
+/// they may receive funds later under the same immutable genesis recipient.
+fn preflight_genesis_recipients(channel_id: u32) {
+    for slot in cli_slots() {
+        cosigner_leaf_recipient(channel_id, slot);
     }
 }
 
@@ -1764,28 +2055,37 @@ struct CliStateProcessLock(fs::File);
 #[cfg(unix)]
 impl CliStateProcessLock {
     fn acquire() -> Self {
-        let path = Path::new(STATE_PROCESS_LOCK_FILE);
-        secure_private_path(path);
+        Self::acquire_at(Path::new("."))
+    }
+
+    // Nonblocking for BOTH channels: opposite-direction transfers must retry, never deadlock
+    // while each process holds its source lock. The caller keeps this guard through commit.
+    fn acquire_at(directory: &Path) -> Self {
+        let path = directory.join(STATE_PROCESS_LOCK_FILE);
+        secure_private_path(&path);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .mode(0o600)
-            .open(path)
+            .open(&path)
             .unwrap_or_else(|error| {
                 die(format!(
-                    "open state process lock {STATE_PROCESS_LOCK_FILE}: {error}"
+                    "open state process lock {}: {error}",
+                    path.display()
                 ))
             });
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap_or_else(|error| {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap_or_else(|error| {
             die(format!(
-                "chmod 0600 state process lock {STATE_PROCESS_LOCK_FILE}: {error}"
+                "chmod 0600 state process lock {}: {error}",
+                path.display()
             ))
         });
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if result != 0 {
             die(format!(
-                "another channel_member process holds {STATE_PROCESS_LOCK_FILE}; refusing a concurrent state read/write"
+                "another channel_member process holds {}; retry after it completes; refusing a concurrent state read/write",
+                path.display()
             ));
         }
         Self(file)
@@ -1808,6 +2108,10 @@ struct CliStateProcessLock;
 impl CliStateProcessLock {
     fn acquire() -> Self {
         die("channel_member requires an OS advisory file lock; this build target is unsupported")
+    }
+
+    fn acquire_at(_directory: &Path) -> Self {
+        Self::acquire()
     }
 }
 
@@ -1930,13 +2234,6 @@ fn inter_transfer_commit_path(tx_hash: Bytes32) -> PathBuf {
     inter_transfer_commit_dir().join(format!("{}.json", hex.trim_start_matches("0x")))
 }
 
-fn inter_transfer_commit_checksum(journal: &InterTransferCommitJournal) -> Bytes32 {
-    let bytes = serde_json::to_vec(journal)
-        .unwrap_or_else(|e| die(format!("serialize inter-transfer commit journal: {e}")));
-    Bytes32::from_bytes_be(&keccak_hash::keccak(bytes).0)
-        .unwrap_or_else(|e| die(format!("inter-transfer journal checksum: {e:?}")))
-}
-
 fn write_inter_transfer_commit(path: &Path, journal: &InterTransferCommitJournal) {
     let directory = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(directory).unwrap_or_else(|e| {
@@ -1964,21 +2261,24 @@ fn write_inter_transfer_commit(path: &Path, journal: &InterTransferCommitJournal
             directory.display()
         ))
     });
-    let envelope = InterTransferCommitEnvelope {
-        checksum: inter_transfer_commit_checksum(journal),
-        journal: journal.clone(),
-    };
+    let mut journal = journal.clone();
+    journal.version = INTER_TRANSFER_COMMIT_VERSION;
+    let envelope =
+        inter_transfer_recovery_codec::encode(&journal).unwrap_or_else(|error| die(error));
     write_private_json_at(path, &envelope);
 }
 
-fn read_inter_transfer_commit(path: &Path) -> InterTransferCommitJournal {
+fn read_inter_transfer_commit(path: &Path) -> Option<InterTransferCommitJournal> {
     secure_private_path(path);
-    let metadata = fs::metadata(path).unwrap_or_else(|e| {
-        die(format!(
-            "stat inter-transfer journal {}: {e}",
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        // An unrelated channel pair can finish recovery while this directory is scanned.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => die(format!(
+            "stat inter-transfer journal {}: {error}",
             path.display()
-        ))
-    });
+        )),
+    };
     if metadata.len() > MAX_INTER_TRANSFER_JOURNAL_BYTES {
         die(format!(
             "inter-transfer journal {} is too large ({} bytes)",
@@ -1986,33 +2286,27 @@ fn read_inter_transfer_commit(path: &Path) -> InterTransferCommitJournal {
             metadata.len()
         ));
     }
-    let bytes = fs::read(path).unwrap_or_else(|e| {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => die(format!(
+            "read inter-transfer journal {}: {error}",
+            path.display()
+        )),
+    };
+    let journal = inter_transfer_recovery_codec::decode(&bytes).unwrap_or_else(|error| {
         die(format!(
-            "read inter-transfer journal {}: {e}",
+            "inter-transfer journal {}: {error}",
             path.display()
         ))
     });
-    let envelope: InterTransferCommitEnvelope =
-        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            die(format!(
-                "parse inter-transfer journal {}: {e}",
-                path.display()
-            ))
-        });
-    let expected = inter_transfer_commit_checksum(&envelope.journal);
-    if envelope.checksum != expected {
-        die(format!(
-            "inter-transfer journal {} checksum mismatch — refusing partial/corrupt state",
-            path.display()
-        ));
-    }
-    validate_inter_transfer_commit(&envelope.journal);
-    envelope.journal
+    validate_inter_transfer_commit(&journal);
+    Some(journal)
 }
 
 fn validate_inter_transfer_commit(journal: &InterTransferCommitJournal) {
     if journal.magic != INTER_TRANSFER_COMMIT_MAGIC
-        || journal.version != INTER_TRANSFER_COMMIT_VERSION
+        || !matches!(journal.version, 1 | INTER_TRANSFER_COMMIT_VERSION)
     {
         die("unsupported inter-transfer commit journal magic/version");
     }
@@ -2033,6 +2327,25 @@ fn validate_inter_transfer_commit(journal: &InterTransferCommitJournal) {
         || journal.result.b_snapshot.state.digest != journal.result.b_bundle_apply_state.digest
     {
         die("inter-transfer commit journal breaks the prepared digest chain");
+    }
+    if let Some(recovery) = &journal.source_recovery {
+        if recovery.source_channel_id != journal.source_channel_id
+            || recovery.descriptor.source_channel_id.as_u64() != journal.source_channel_id
+            || recovery.descriptor.destination_channel_id.as_u64() != journal.destination_channel_id
+            || recovery.debit_payload.proposed_next_state.digest != journal.result.a_head.digest
+            || recovery.descriptor.tx_hash != journal.tx_hash
+        {
+            die("inter-transfer recovery inputs disagree with the signed channel pair");
+        }
+        verify_inter_channel_descriptor_matches_debit(
+            &recovery.debit_payload,
+            &recovery.descriptor,
+        )
+        .unwrap_or_else(|error| {
+            die(format!(
+                "inter-transfer recovery descriptor binding: {error}"
+            ))
+        });
     }
     if !journal
         .source_after
@@ -2076,10 +2389,10 @@ fn read_cli_state_at(dir: &Path) -> CliState {
         .unwrap_or_else(|e| die(format!("read channel state {}: {e}", path.display())));
     let state: CliState = serde_json::from_slice(&bytes)
         .unwrap_or_else(|e| die(format!("parse channel state {}: {e}", path.display())));
-    if state.state_schema_version != STATE_SCHEMA_VERSION {
+    if state.state_schema_version > STATE_SCHEMA_VERSION {
         die(format!(
-            "channel state {} has schema version {}, but two-channel recovery requires exact v{} \
-             security-ledger semantics; migrate it in its own channel directory first",
+            "channel state {} has future schema version {}; this binary supports up to v{}; \
+             use a compatible binary before two-channel recovery",
             path.display(),
             state.state_schema_version,
             STATE_SCHEMA_VERSION
@@ -2157,17 +2470,26 @@ fn roll_forward_inter_transfer_commit(path: &Path, journal: &mut InterTransferCo
         &destination_dir.join("incoming_inter_transfer.json"),
         &journal.result,
     );
+    if let Some(recovery) = &journal.source_recovery {
+        write_private_json_at(
+            &destination_dir.join("incoming_inter_transfer_recovery.json"),
+            recovery,
+        );
+    }
 
     journal.phase = InterTransferCommitPhase::Committed;
+    // A valid legacy v1 journal has now been fully rolled forward. Its retirement marker uses
+    // the current writer; never ask the v2 encoder to re-emit the unstable v1 representation.
+    journal.version = INTER_TRANSFER_COMMIT_VERSION;
     write_inter_transfer_commit(path, journal);
     remove_inter_transfer_commit(path);
 }
 
-fn recover_pending_inter_transfers() {
+fn pending_inter_transfer_paths() -> Vec<PathBuf> {
     let directory = inter_transfer_commit_dir();
     let metadata = match fs::symlink_metadata(&directory) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => die(format!(
             "inspect inter-transfer journal directory {}: {error}",
             directory.display()
@@ -2195,8 +2517,27 @@ fn recover_pending_inter_transfers() {
             MAX_INTER_TRANSFER_JOURNALS
         ));
     }
-    for path in paths {
-        let mut journal = read_inter_transfer_commit(&path);
+    paths
+}
+
+fn recover_pending_inter_transfers() {
+    let own_channel = u64::from(channel_id_env());
+    for path in pending_inter_transfer_paths() {
+        let Some(mut journal) = read_inter_transfer_commit(&path) else {
+            continue;
+        };
+        let other_channel = if journal.source_channel_id == own_channel {
+            journal.destination_channel_id
+        } else if journal.destination_channel_id == own_channel {
+            journal.source_channel_id
+        } else {
+            // Unrelated channels remain usable while a different pair needs recovery.
+            continue;
+        };
+        let other_dir = inter_transfer_channel_dir(other_channel);
+        let _other_lock = CliStateProcessLock::acquire_at(&other_dir);
+        deposit_recovery::require_no_pending_at(&other_dir);
+        burn_recovery::require_no_pending_at(&other_dir);
         match journal.phase {
             InterTransferCommitPhase::Prepared => {
                 roll_forward_inter_transfer_commit(&path, &mut journal)
@@ -3134,8 +3475,12 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn validate_signer_exit_kit_archive_directory() -> Result<(), String> {
-    let path = Path::new(SIGNER_EXIT_KIT_ARCHIVE_DIR);
-    match fs::symlink_metadata(path) {
+    validate_signer_exit_kit_archive_directory_at(Path::new("."))
+}
+
+fn validate_signer_exit_kit_archive_directory_at(directory: &Path) -> Result<(), String> {
+    let path = directory.join(SIGNER_EXIT_KIT_ARCHIVE_DIR);
+    match fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(format!(
@@ -3145,7 +3490,7 @@ fn validate_signer_exit_kit_archive_directory() -> Result<(), String> {
             }
             #[cfg(unix)]
             if metadata.permissions().mode() & 0o077 != 0 {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
                     format!(
                         "restrict signer exit-kit archive {} to 0700: {error}",
                         path.display()
@@ -3154,20 +3499,17 @@ fn validate_signer_exit_kit_archive_directory() -> Result<(), String> {
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(path).map_err(|error| {
-                format!(
-                    "create signer exit-kit archive {}: {error}",
-                    path.display()
-                )
+            fs::create_dir(&path).map_err(|error| {
+                format!("create signer exit-kit archive {}: {error}", path.display())
             })?;
             #[cfg(unix)]
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
                 format!(
                     "restrict signer exit-kit archive {} to 0700: {error}",
                     path.display()
                 )
             })?;
-            FileSync::sync_directory(Path::new("."));
+            FileSync::sync_directory(directory);
         }
         Err(error) => {
             return Err(format!(
@@ -3184,8 +3526,15 @@ fn validate_signer_exit_kit_archive_directory() -> Result<(), String> {
 /// production settlement is ACTIVE there is intentionally no production context; only local
 /// chain 31337 may install a receipt from the rollup already pinned by `setup-backing`.
 fn signer_exit_kit_context(cli: &CliState) -> Result<(u64, Address, [u8; 32]), String> {
+    signer_exit_kit_context_at(cli, Path::new("."))
+}
+
+fn signer_exit_kit_context_at(
+    cli: &CliState,
+    directory: &Path,
+) -> Result<(u64, Address, [u8; 32]), String> {
     let vd_bytes = read_bounded_regular_file(
-        Path::new(BALANCE_VD_FILE),
+        &directory.join(BALANCE_VD_FILE),
         MAX_BALANCE_VERIFIER_DATA_BYTES as u64,
         "local Balance verifier data",
     )?;
@@ -3224,7 +3573,7 @@ fn signer_exit_kit_context(cli: &CliState) -> Result<(u64, Address, [u8; 32]), S
     }
 
     let backing_bytes = read_bounded_regular_file(
-        Path::new(BACKING_FILE),
+        &directory.join(BACKING_FILE),
         1024 * 1024,
         "local channel backing",
     )?;
@@ -3243,9 +3592,23 @@ fn verified_signer_exit_kit_receipt(
     envelope_bytes: &[u8],
     require_current_source_head: bool,
 ) -> Result<SignerExitKitReceipt, String> {
+    verified_signer_exit_kit_receipt_at(
+        cli,
+        envelope_bytes,
+        require_current_source_head,
+        Path::new("."),
+    )
+}
+
+fn verified_signer_exit_kit_receipt_at(
+    cli: &CliState,
+    envelope_bytes: &[u8],
+    require_current_source_head: bool,
+    directory: &Path,
+) -> Result<SignerExitKitReceipt, String> {
     let envelope = parse_public_close_backing_envelope(envelope_bytes)
         .map_err(|error| format!("parse public signer exit-kit envelope: {error}"))?;
-    let (chain_id, rollup, vd_sha256) = signer_exit_kit_context(cli)?;
+    let (chain_id, rollup, vd_sha256) = signer_exit_kit_context_at(cli, directory)?;
     let expected = PublicCloseExpectations {
         channel_id: cli.snapshot.record.channel_id,
         chain_id,
@@ -3307,9 +3670,8 @@ fn verified_prepared_exit_kit_receipt(
         rollup,
         balance_verifier_data_sha256: Some(vd_sha256),
     };
-    let verification =
-        verify_public_backing_proposed(&envelope, &expected, successor.digest)
-            .map_err(|error| format!("cryptographically verify prepared exit kit: {error}"))?;
+    let verification = verify_public_backing_proposed(&envelope, &expected, successor.digest)
+        .map_err(|error| format!("cryptographically verify prepared exit kit: {error}"))?;
     if !verification.self_verified {
         return Err("public backing verifier returned a non-verified receipt".into());
     }
@@ -3370,12 +3732,16 @@ fn verify_persisted_prepared_exit_kit(
 /// Re-open, re-hash and cryptographically verify the exact archived envelope once per process.
 /// The boolean cache is non-serialized, so a restart can never trust yesterday's filesystem.
 fn verify_persisted_signer_exit_kit(cli: &CliState) -> Result<(), String> {
+    verify_persisted_signer_exit_kit_at(cli, Path::new("."))
+}
+
+fn verify_persisted_signer_exit_kit_at(cli: &CliState, directory: &Path) -> Result<(), String> {
     let receipt = cli.signer_exit_kit_receipt.as_ref().ok_or_else(|| {
         "SIGNER-INDEPENDENT EXIT REQUIRED: no signer exit-kit receipt is installed".to_string()
     })?;
     validate_exit_kit_receipt_for_head(receipt, &cli.snapshot.state)?;
-    validate_signer_exit_kit_archive_directory()?;
-    let path = exit_kit_receipt_archive_path(receipt);
+    validate_signer_exit_kit_archive_directory_at(directory)?;
+    let path = exit_kit_receipt_archive_path_at(receipt, directory);
     let bytes = read_bounded_regular_file(
         &path,
         MAX_PUBLIC_BACKING_ENVELOPE_BYTES as u64,
@@ -3387,7 +3753,7 @@ fn verify_persisted_signer_exit_kit(cli: &CliState) -> Result<(), String> {
             path.display()
         ));
     }
-    let recomputed = verified_signer_exit_kit_receipt(cli, &bytes, false)?;
+    let recomputed = verified_signer_exit_kit_receipt_at(cli, &bytes, false, directory)?;
     if &recomputed != receipt {
         return Err(
             "cryptographically reverified signer exit-kit archive differs from its durable receipt"
@@ -3434,7 +3800,9 @@ fn observe_mle_v2_pin_at(
     let core = Address::from_hex(&core)
         .unwrap_or_else(|error| die(format!("{label} MLE adapter core(): {error:?}")));
     if core == Address::default() {
-        die(format!("{label} MLE adapter {adapter_hex} exposes the zero core"));
+        die(format!(
+            "{label} MLE adapter {adapter_hex} exposes the zero core"
+        ));
     }
     let core_hex = core.to_hex();
     for (contract, address) in [("adapter", &adapter_hex), ("core", &core_hex)] {
@@ -3461,12 +3829,18 @@ fn observe_mle_v2_pin_at(
     let protocol_first = word("whirProtocolIdFirst()(bytes32)");
     let protocol_second = word("whirProtocolIdSecond()(bytes32)");
     let mut fields = serde_json::Map::new();
-    fields.insert(format!("{label}MleVerifier"), serde_json::json!(adapter_hex));
+    fields.insert(
+        format!("{label}MleVerifier"),
+        serde_json::json!(adapter_hex),
+    );
     fields.insert(
         format!("{label}MleVerifierRuntimeCodeHash"),
         serde_json::json!(settlement_runtime_code_hash_at(rpc, &adapter_hex, block)),
     );
-    fields.insert(format!("{label}MleVerifierCore"), serde_json::json!(core_hex));
+    fields.insert(
+        format!("{label}MleVerifierCore"),
+        serde_json::json!(core_hex),
+    );
     fields.insert(
         format!("{label}MleVerifierCoreRuntimeCodeHash"),
         serde_json::json!(settlement_runtime_code_hash_at(rpc, &core_hex, block)),
@@ -3574,15 +3948,27 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
     ] {
         let adapter = cast_call_at(rpc, verifier, getter, &[], block);
         let fields = observe_mle_v2_pin_at(rpc, chain_id, label, &adapter, block);
-        for key in [format!("{label}MleVerifier"), format!("{label}MleVerifierCore")] {
-            let address = fields[&key].as_str().unwrap_or_default().to_ascii_lowercase();
+        for key in [
+            format!("{label}MleVerifier"),
+            format!("{label}MleVerifierCore"),
+        ] {
+            let address = fields[&key]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             if !pinned_addresses.insert(address) {
                 die(format!("{key} reuses another statement's adapter or core"));
             }
         }
         mle_pins.extend(fields);
     }
-    let backing_adapter = cast_call_at(rpc, materializer, "backingMleVerifier()(address)", &[], block);
+    let backing_adapter = cast_call_at(
+        rpc,
+        materializer,
+        "backingMleVerifier()(address)",
+        &[],
+        block,
+    );
     let backing_fields = observe_mle_v2_pin_at(rpc, chain_id, "backing", &backing_adapter, block);
     for key in ["backingMleVerifier", "backingMleVerifierCore"] {
         let address = backing_fields[key]
@@ -3590,7 +3976,9 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
             .unwrap_or_default()
             .to_ascii_lowercase();
         if !pinned_addresses.insert(address) {
-            die(format!("{key} reuses a settlement statement's adapter or core"));
+            die(format!(
+                "{key} reuses a settlement statement's adapter or core"
+            ));
         }
     }
     mle_pins.extend(backing_fields);
@@ -3609,7 +3997,12 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
     )
     .unwrap_or_else(|error| die(error));
     let vd_sha256 = sha256_bytes(&vd_bytes);
-    let topic = |signature: &str| format!("0x{}", hex::encode(keccak_hash::keccak(signature.as_bytes()).0));
+    let topic = |signature: &str| {
+        format!(
+            "0x{}",
+            hex::encode(keccak_hash::keccak(signature.as_bytes()).0)
+        )
+    };
     let finalize_selector = format!(
         "0x{}",
         hex::encode(
@@ -3656,8 +4049,13 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
         .unwrap_or_else(|error| die(format!("serialize deployment manifest: {error}")));
     // The publisher parses this file with `deny_unknown_fields`; refuse to write a manifest it
     // would reject so the operator learns about a schema drift here, not at publication.
-    intmax3_zkp::public_close_publisher::validate_deployment_manifest_shape(&bytes)
-        .unwrap_or_else(|error| die(format!("exported deployment manifest is not consumable: {error}")));
+    intmax3_zkp::public_close_publisher::validate_deployment_manifest_shape(&bytes).unwrap_or_else(
+        |error| {
+            die(format!(
+                "exported deployment manifest is not consumable: {error}"
+            ))
+        },
+    );
     write_private_bytes_at(Path::new(out_path), &bytes);
     println!(
         "export-close-deployment-manifest OK: {out_path} (chain {chain_id}, checkpoint block {block}) \
@@ -4013,6 +4411,9 @@ fn cmd_setup_backing(args: &[String]) {
     let fund: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
         cli_slots().iter().map(|&s| genesis_amount(s)).sum::<u64>() + DELEGATE_GENESIS
     });
+    // Fail before proving or opening the L1 signer: accepting an initial deposit first would
+    // leave real assets behind when genesis later rejects an unconfigured recovery address.
+    preflight_genesis_recipients(channel_id_env());
     let l1_signer = LazyL1Signer::new(&rpc);
 
     eprintln!("setup-backing: building the balance prover (one-time, ~25s)…");
@@ -9229,12 +9630,14 @@ fn main() {
     // from overwriting a settlement PREPARED by another process.  The sole bypass is the
     // digest-keyed detached proof-cache worker described at its spawn site above.
     let _state_process_lock = (!detached_precompute_bypass).then(CliStateProcessLock::acquire);
-    // A prepared two-channel transfer is a global mutation barrier for every channel CLI command,
+    // A prepared two-channel transfer is a mutation barrier for either involved channel command,
     // not merely for the next inter-transfer. If the previous process died after replacing A but
     // before replacing B, allowing (for example) a burn or token registration to extend either
     // half-head would make deterministic roll-forward impossible and leave value one-sided.
     // Recovery is idempotent and a no-op when the sibling journal directory does not exist.
     if !detached_precompute_bypass {
+        deposit_recovery::recover();
+        burn_recovery::recover();
         recover_pending_inter_transfers();
     }
     match cmd {
@@ -9280,6 +9683,9 @@ fn main() {
         "deploy-settlement" => cmd_deploy_settlement(&args),
         "verify-settlement-binding" => cmd_verify_settlement_binding(&args),
         "inspect-l1-deposit" => cmd_inspect_l1_deposit(&args),
+        "preflight-l1-deposit" => deposit_capacity::preflight(&args),
+        "reserve-l1-deposit" => deposit_capacity::reserve(&args),
+        "bind-l1-deposit-reservation" => deposit_capacity::bind(&args),
         "cosign-l1-deposit-import" => cmd_cosign_l1_deposit_import(&args),
         "pw-submit" => cmd_pw_submit(&args),
         "pw-finalize" => cmd_pw_finalize(&args),
@@ -9420,6 +9826,14 @@ fn cmd_init(args: &[String]) {
         state_schema_version: STATE_SCHEMA_VERSION,
         controlled,
         snapshot,
+        credit_safety_bounds: previous
+            .as_ref()
+            .map(|p| p.credit_safety_bounds.clone())
+            .unwrap_or_default(),
+        deposit_capacity_reservations: previous
+            .as_ref()
+            .map(|p| p.deposit_capacity_reservations.clone())
+            .unwrap_or_default(),
         applied_tx_identities: prior_applied,
         spent_tx_identities: prior_spent,
         imported_deposits: prior_imported,
@@ -9433,6 +9847,18 @@ fn cmd_init(args: &[String]) {
         prepared_exit_kit_receipt_verified: false,
         signer_exit_kit_receipt_verified: false,
     };
+
+    let opening = cli.snapshot.state.clone();
+    if let Some(prev) = &previous {
+        // The join constructor authenticates a new zero opening without changing old balances.
+        // Preserve prior bounds rather than losing precision on enrollment.
+        admit_credit_safe_successor(&mut cli, &prev.snapshot.state, &opening)
+            .unwrap_or_else(|error| die(error));
+    } else {
+        let bounds = credit_bounds_for(&cli, &opening).unwrap_or_else(|error| die(error));
+        cli.credit_safety_bounds
+            .insert(opening.digest.to_hex(), bounds);
+    }
 
     // No signature leaves the process before the decision and exact bytes are fsynced in `cli`.
     // Genesis retains the stronger deposit-backing gate; delegate joins use the ordinary
@@ -9606,9 +10032,8 @@ fn create_channel(
         .iter()
         .map(|m| Bytes32::from(m.regev_pk.poseidon_digest()))
         .collect();
-    // B-1b: per-active-slot L1 exit addresses, in slot order. The CLI COSIGNERS default to the
-    // deterministic per-(channel, slot) `test_recipient_for` (the same formula their on-chain
-    // registration record carries), overridable per slot (see `cosigner_leaf_recipient`), and the
+    // B-1b: per-active-slot L1 exit addresses, in slot order. Production CLI COSIGNERS require an
+    // explicit per-slot recipient; only insecure fixtures retain test defaults. The
     // browser DELEGATE's slot carries its contribution recipient (already fail-closed nonzero).
     // All folded into the cosigner-signed genesis H1 via the slot leaves.
     let channel_id = channel_id_env();
@@ -10581,9 +11006,8 @@ fn cmd_sign_close_funding(args: &[String]) {
 
 /// Load the sibling DESTINATION-channel `CliState` (channel B) from
 /// `../ch<dest_id>/cli_state.json`, relative to A's cwd. FAIL-CLOSED: refuse if it is missing.
-/// Returns (B state, B's dir path) so the caller can persist B's head back under the same resolved
-/// paths.
-fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBuf) {
+/// Returns B state and its process-lock guard. The caller must retain the guard through commit.
+fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, CliStateProcessLock) {
     let dir = std::path::PathBuf::from(format!("../ch{dest_channel_id}"));
     let path = dir.join(STATE_FILE);
     if !path.exists() {
@@ -10594,12 +11018,33 @@ fn load_sibling_dest_state(dest_channel_id: u64) -> (CliState, std::path::PathBu
             path.display()
         ));
     }
-    secure_private_path(&path);
-    let s =
-        fs::read_to_string(&path).unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
-    let st: CliState =
-        serde_json::from_str(&s).unwrap_or_else(|e| die(format!("parse B state: {e}")));
-    (st, dir)
+    let lock = CliStateProcessLock::acquire_at(&dir);
+    deposit_recovery::require_no_pending_at(&dir);
+    burn_recovery::require_no_pending_at(&dir);
+    for journal_path in pending_inter_transfer_paths() {
+        if let Some(journal) = read_inter_transfer_commit(&journal_path) {
+            if journal.source_channel_id == dest_channel_id
+                || journal.destination_channel_id == dest_channel_id
+            {
+                die(format!(
+                    "destination channel {dest_channel_id} has a pending inter-transfer; run recover-inter-transfers in {} and retry before signing",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    let mut st = read_cli_state_at(&dir);
+    if st.snapshot.record.channel_id.as_u64() != dest_channel_id {
+        die("destination channel directory contains a different channel record");
+    }
+    verify_snapshot(&st.snapshot, None)
+        .unwrap_or_else(|error| die(format!("destination snapshot verification: {error}")));
+    // The caller still has A as cwd. Verify B's own archive AND its own verifier/backing files
+    // explicitly under the held B lock; never mark the process-local cache from receipt metadata.
+    verify_persisted_signer_exit_kit_at(&st, &dir)
+        .unwrap_or_else(|error| die(format!("destination signer exit-kit verification: {error}")));
+    st.signer_exit_kit_receipt_verified = true;
+    (st, lock)
 }
 
 /// detail2 §P-3: trusted member sets for FOREIGN channels' manifest leaves, resolved from the
@@ -10683,6 +11128,22 @@ fn guard_outgoing_base_nonce(backing: &ChannelBacking, descriptor_base_nonce: u3
 /// out.json.
 fn cmd_cosign_inter_transfer(args: &[String]) {
     recover_pending_inter_transfers();
+    let request_ids: Vec<_> = args
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--producer-request-id="))
+        .collect();
+    if request_ids.len() > 1
+        || request_ids.first().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > 256
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })
+    {
+        die("--producer-request-id must be one nonempty canonical operation id");
+    }
+    let producer_request_id = request_ids.first().map(|id| (*id).to_string());
     let payload_path = args.get(1).unwrap_or_else(|| {
         die("cosign-inter-transfer <debit_payload.json> <descriptor.json> <out.json>")
     });
@@ -10731,6 +11192,24 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
             descriptor.destination_channel_id.as_u64()
         ));
     }
+
+    // Acquire B and check its recovery barrier BEFORE releasing any A signature. Keep its
+    // process lock until both states and replay ledgers have committed atomically.
+    let (mut b_state, _b_process_lock) =
+        load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
+    deposit_capacity::check_candidates(
+        &b_state,
+        descriptor.inter_channel_tx.token_index,
+        descriptor.amount,
+        &[descriptor.recipient_slot],
+        None,
+        true,
+    )
+    .unwrap_or_else(|error| {
+        die(format!(
+            "destination credit preflight before source signing: {error}"
+        ))
+    });
 
     // SPENT LEDGER (A side, TM-16 obligation 1): refuse a debit whose token-FREE replay identity
     // was already debited out of A (single-use on the source, across ALL token relabelings of the
@@ -10814,8 +11293,6 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
 
     // ================= LEG B (in memory): validate + build B's credited head.
     // ======================
-    let (mut b_state, _b_dir) = load_sibling_dest_state(descriptor.destination_channel_id.as_u64());
-
     // REPLAY LEDGER (B side, invariant 6 + TM-16 obligation 1): refuse a credit whose token-FREE
     // replay identity was already credited into B. Keying on the identity (never the
     // token-bearing tx_hash) is what refuses a SECOND, fully-consistent token-Y variant of an
@@ -10874,7 +11351,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     let BuiltInterChannelCredit {
         fund_import_state,
         bundle_apply_state,
-        ..
+        settled_tx_accumulator: b_settled_tx_accumulator,
     } = build_inter_channel_credit(
         &builder_keys,
         &b_state.snapshot,
@@ -10907,6 +11384,11 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     // contiguous sequence after a crash. Persisting only the final bundle state would leave its
     // `prev_digest` pointing at an unauthenticated, unrecoverable gap.
     let mut b_fund_import = fund_import_state;
+    let b_before_credit = b_state.snapshot.state.clone();
+    admit_credit_safe_successor(&mut b_state, &b_before_credit, &b_fund_import)
+        .unwrap_or_else(|error| die(error));
+    admit_credit_safe_successor(&mut b_state, &b_fund_import, &bundle_apply_state)
+        .unwrap_or_else(|error| die(error));
     ledger_sign_all_controlled(
         &mut b_state,
         &mut b_fund_import,
@@ -10943,6 +11425,7 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
     adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
     a_state.spent_tx_identities.insert(replay_identity);
     adopt_head_with_exit_kit_receipts(&mut b_state, b_head.clone());
+    b_state.snapshot.settled_tx_accumulator = b_settled_tx_accumulator;
     b_state.applied_tx_identities.insert(replay_identity);
     let result = InterTransferOut {
         a_head: a_head.clone(),
@@ -10951,6 +11434,12 @@ fn cmd_cosign_inter_transfer(args: &[String]) {
         b_snapshot: b_state.snapshot.clone(),
     };
     let mut commit = InterTransferCommitJournal {
+        source_recovery: Some(InterTransferSourceRecovery {
+            source_channel_id: descriptor.source_channel_id.as_u64(),
+            producer_request_id,
+            debit_payload: payload.clone(),
+            descriptor: descriptor.clone(),
+        }),
         magic: INTER_TRANSFER_COMMIT_MAGIC.to_string(),
         version: INTER_TRANSFER_COMMIT_VERSION,
         phase: InterTransferCommitPhase::Prepared,
@@ -11125,8 +11614,6 @@ fn cmd_cosign_burn_send(args: &[String]) {
     let pre_burn_settled_tx_chain = a_state.snapshot.state.balance_state.settled_tx_chain;
     adopt_head_with_exit_kit_receipts(&mut a_state, a_head.clone());
     a_state.spent_tx_identities.insert(burn_replay_identity);
-    save_state(&a_state);
-    write_json("channel_snapshot.json", &a_state.snapshot);
 
     // Persist burn metadata for `pw-submit` to reconstruct the Withdrawal. `token_index` is the
     // BASE token the burn debited (multitoken §N — rides into the Withdrawal + IPW2 authDigest).
@@ -11160,28 +11647,24 @@ fn cmd_cosign_burn_send(args: &[String]) {
         descriptor.tx_v2.nonce,
     )
     .unwrap_or_else(|e| die(format!("burn withdrawal leaf: {e:?}")));
-    write_json(
-        "last_burn.json",
-        &serde_json::json!({
-            "tx_hash": descriptor.tx_hash.to_hex(),
-            "amount": descriptor.amount,
-            "token_index": descriptor.inter_channel_tx.token_index,
-            "source_pk_g": descriptor.source_pk_g.to_hex(),
-            "receiver_pk_g": descriptor.receiver_pk_g.to_hex(),
-            "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
-            "receiver_delta_ct_digest": descriptor.receiver_delta.digest().to_hex(),
-            "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
-            "channel_id": descriptor.source_channel_id.as_u64(),
-            "tx_nonce": descriptor.tx_v2.nonce,
-            "base_nonce": descriptor.inter_channel_tx.base_nonce,
-            "tx_leaf": burn_tx_leaf.to_hex(),
-            "aux_data": burn_aux_data.to_hex(),
-            "withdrawal_recipient": format!("0x{}", hex::encode(burn_leaf.recipient.to_bytes_be())),
-            "withdrawal_nullifier": burn_leaf.nullifier.to_hex(),
-        }),
-    );
-
-    write_json(out_path, &a_head);
+    let burn_metadata = serde_json::json!({
+        "tx_hash": descriptor.tx_hash.to_hex(),
+        "amount": descriptor.amount,
+        "token_index": descriptor.inter_channel_tx.token_index,
+        "source_pk_g": descriptor.source_pk_g.to_hex(),
+        "receiver_pk_g": descriptor.receiver_pk_g.to_hex(),
+        "sender_delta_ct_digest": payload.inter_channel_tx.sender_delta_ct.digest().to_hex(),
+        "receiver_delta_ct_digest": descriptor.receiver_delta.digest().to_hex(),
+        "pre_burn_settled_tx_chain": pre_burn_settled_tx_chain.to_hex(),
+        "channel_id": descriptor.source_channel_id.as_u64(),
+        "tx_nonce": descriptor.tx_v2.nonce,
+        "base_nonce": descriptor.inter_channel_tx.base_nonce,
+        "tx_leaf": burn_tx_leaf.to_hex(),
+        "aux_data": burn_aux_data.to_hex(),
+        "withdrawal_recipient": format!("0x{}", hex::encode(burn_leaf.recipient.to_bytes_be())),
+        "withdrawal_nullifier": burn_leaf.nullifier.to_hex(),
+    });
+    burn_recovery::commit(&a_state, burn_metadata, out_path);
     let signed: Vec<u8> = a_head
         .member_signatures
         .iter()
@@ -12031,7 +12514,10 @@ fn close_backing_v2_public_input(value: &str, index: usize) -> Result<u64, Strin
 /// Authenticate the CloseAssetBacking wire-v3 artifact pair exactly as the publisher and the
 /// materializer will: strict canonical full fixture, proof-free config it must match, and one
 /// canonical `.compactProof.bytes`. Returns the 26 raw public-input limbs the proof carries.
-fn validate_close_backing_mle_v2(mle_bytes: &[u8], config_bytes: &[u8]) -> Result<Vec<u64>, String> {
+fn validate_close_backing_mle_v2(
+    mle_bytes: &[u8],
+    config_bytes: &[u8],
+) -> Result<Vec<u64>, String> {
     let mle_json = std::str::from_utf8(mle_bytes)
         .map_err(|error| format!("backing_mle.json is not UTF-8: {error}"))?;
     let config_json = std::str::from_utf8(config_bytes)
@@ -13903,7 +14389,13 @@ mod settlement_broadcast_recovery_tests {
             let adapter_constructor = expected_mle_v2_adapter_constructor(core, pin).unwrap();
             let adapter_input = format!("0x6002{}", hex::encode(adapter_constructor));
             [
-                create_tx(first_nonce, "MleVerifierV2", core, Some(core_args), &core_input),
+                create_tx(
+                    first_nonce,
+                    "MleVerifierV2",
+                    core,
+                    Some(core_args),
+                    &core_input,
+                ),
                 create_tx(
                     first_nonce + 1,
                     "PinnedMleVerifierV2",
@@ -14026,7 +14518,11 @@ mod settlement_broadcast_recovery_tests {
             let fixture = tiny_mle_v2_fixture(&backing_test_inputs());
             (
                 fixture.to_canonical_json().unwrap().into_bytes(),
-                fixture.config_fixture().to_canonical_json().unwrap().into_bytes(),
+                fixture
+                    .config_fixture()
+                    .to_canonical_json()
+                    .unwrap()
+                    .into_bytes(),
             )
         })
     }
@@ -14039,12 +14535,20 @@ mod settlement_broadcast_recovery_tests {
             let fixture = tiny_mle_v2_fixture(&vec![0u64; 103]);
             (
                 fixture.to_canonical_json().unwrap().into_bytes(),
-                fixture.config_fixture().to_canonical_json().unwrap().into_bytes(),
+                fixture
+                    .config_fixture()
+                    .to_canonical_json()
+                    .unwrap()
+                    .into_bytes(),
             )
         })
     }
 
-    fn backing_manifest_bytes(mle: &[u8], config: &[u8], public_inputs: &[u8]) -> (Vec<u8>, String) {
+    fn backing_manifest_bytes(
+        mle: &[u8],
+        config: &[u8],
+        public_inputs: &[u8],
+    ) -> (Vec<u8>, String) {
         let inputs = backing_test_inputs();
         let balance_vd_sha256 = close_backing_sha256(b"pinned balance verifier data");
         let manifest = serde_json::to_vec(&serde_json::json!({
@@ -14134,7 +14638,10 @@ mod settlement_broadcast_recovery_tests {
             &balance_vd_sha256,
         )
         .unwrap_err();
-        assert!(error.contains("strict canonical"), "unexpected refusal: {error}");
+        assert!(
+            error.contains("strict canonical"),
+            "unexpected refusal: {error}"
+        );
 
         // A full fixture whose VK/config differs from the config it ships with is refused: the
         // adapter deployed from the config could never verify the attested proof.
@@ -14292,7 +14799,10 @@ mod settlement_broadcast_recovery_tests {
         )
         .unwrap();
         assert_eq!(strip0x(&addresses.verifier), strip0x(VERIFIER));
-        assert_eq!(strip0x(&addresses.backing_mle_core), strip0x(BACKING_MLE_CORE));
+        assert_eq!(
+            strip0x(&addresses.backing_mle_core),
+            strip0x(BACKING_MLE_CORE)
+        );
         assert_eq!(
             strip0x(&addresses.backing_mle_adapter),
             strip0x(BACKING_MLE_ADAPTER)
@@ -14361,24 +14871,45 @@ mod settlement_broadcast_recovery_tests {
         wrong_nonce["transactions"][5]["transaction"]["nonce"] =
             serde_json::json!(format!("0x{:x}", START_NONCE + 99));
         assert!(
-            validate_settlement_broadcast_value(&wrong_nonce, &intent(), &reg, ROLLUP, &pins, &backing)
-                .is_err()
+            validate_settlement_broadcast_value(
+                &wrong_nonce,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing
+            )
+            .is_err()
         );
 
         let mut wrong_rollup = artifact.clone();
         wrong_rollup["transactions"][12]["transaction"]["to"] =
             serde_json::json!("0x0000000000000000000000000000000000000099");
         assert!(
-            validate_settlement_broadcast_value(&wrong_rollup, &intent(), &reg, ROLLUP, &pins, &backing)
-                .is_err()
+            validate_settlement_broadcast_value(
+                &wrong_rollup,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing
+            )
+            .is_err()
         );
 
         let mut wrong_root = artifact.clone();
         wrong_root["transactions"][13]["arguments"][4] =
             serde_json::json!(format!("0x{:064x}", 999));
         assert!(
-            validate_settlement_broadcast_value(&wrong_root, &intent(), &reg, ROLLUP, &pins, &backing)
-                .is_err()
+            validate_settlement_broadcast_value(
+                &wrong_root,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing
+            )
+            .is_err()
         );
 
         let mut forged_materializer_init_code = artifact.clone();
@@ -14462,8 +14993,15 @@ mod settlement_broadcast_recovery_tests {
         let mut zero_final_hash = artifact.clone();
         zero_final_hash["transactions"][14]["hash"] = serde_json::json!(format!("0x{:064x}", 0));
         assert!(
-            validate_settlement_broadcast_value(&zero_final_hash, &intent(), &reg, ROLLUP, &pins, &backing)
-                .is_err()
+            validate_settlement_broadcast_value(
+                &zero_final_hash,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing
+            )
+            .is_err()
         );
 
         let mut value_bearing_registration = artifact.clone();
@@ -15819,6 +16357,9 @@ fn fetch_onchain_deposit(
 /// keyless production block producer. This keeps receipt parsing in one hardened Rust path; the
 /// API never reinterprets ABI words in JavaScript.
 fn cmd_inspect_l1_deposit(args: &[String]) {
+    let (normalized, reservation_id) =
+        deposit_capacity::split_reservation_option(args).unwrap_or_else(|error| die(error));
+    let args = normalized.as_slice();
     const USAGE: &str = "inspect-l1-deposit <tx_hash> <rpc_url> [out.json] [min_confirmations]";
     let tx_hash = args.get(1).unwrap_or_else(|| die(USAGE));
     let rpc = args.get(2).unwrap_or_else(|| die(USAGE));
@@ -15835,6 +16376,12 @@ fn cmd_inspect_l1_deposit(args: &[String]) {
     let (_, _, backing) = load_backing();
     let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
         .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+    let deposit_recipient = if let Some(id) = reservation_id.as_deref() {
+        deposit_capacity::reserved_recipient(&load_state(), id, tx_hash, deposit_recipient)
+            .unwrap_or_else(|error| die(error))
+    } else {
+        deposit_recipient
+    };
     if backing.rollup.is_empty() {
         die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
     }
@@ -15878,6 +16425,10 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     const USAGE: &str = "cosign-l1-deposit-import <recipient_slot|auto> <tx_hash> <rpc_url> \
                          [out.json] [min_confirmations] [--allow-unbound-depositor] \
                          [--intmax-block-number=N]";
+
+    let (normalized, reservation_id) =
+        deposit_capacity::split_reservation_option(args).unwrap_or_else(|error| die(error));
+    let args = normalized.as_slice();
 
     // Flags are position-independent; positional args are the non-flag remainder.
     // SECURITY: an UNKNOWN `--flag` is refused rather than ignored. Silently dropping it would let
@@ -15928,9 +16479,16 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         .get(4)
         .map(|s| s.parse().unwrap_or_else(|_| die("bad [min_confirmations]")));
 
+    let mut state = load_state();
     let (_, _, backing) = load_backing();
     let deposit_recipient = Bytes32::from_hex(&backing.deposit_recipient)
         .unwrap_or_else(|e| die(format!("parse deposit_recipient from backing: {e:?}")));
+    let deposit_recipient = if let Some(id) = reservation_id.as_deref() {
+        deposit_capacity::reserved_recipient(&state, id, tx_hash, deposit_recipient)
+            .unwrap_or_else(|error| die(error))
+    } else {
+        deposit_recipient
+    };
     if backing.rollup.is_empty() {
         die("channel_backing.json has no rollup address — cannot verify the deposit on-chain");
     }
@@ -16000,8 +16558,6 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         explicit_min_conf,
     );
 
-    let mut state = load_state();
-
     // ── REPLAY LEDGER (threat model §4) ────────────────────────────────────────────────────
     // The channel layer has NO nullifier SET — `shared_native_nullifier_root` is a keccak CHAIN,
     // and re-folding an identical nullifier always yields a different root, so the native gate's
@@ -16019,12 +16575,7 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         strip0x(&backing.rollup),
         onchain.deposit_index
     );
-    if state.imported_deposits.contains(&deposit_identity) {
-        die(format!(
-            "REPLAY REFUSED: L1 deposit {deposit_identity} has already been imported into this \
-             channel. A deposit is credited at most once."
-        ));
-    }
+    let already_imported = state.imported_deposits.contains(&deposit_identity);
 
     // ── CREDIT BINDING (threat model §5) ───────────────────────────────────────────────────
     let balance_state = &state.snapshot.state.balance_state;
@@ -16110,6 +16661,40 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         }
     }
 
+    // Keep the reservation active throughout proving/signing (which may itself save receipts).
+    // Exclude it ONLY from this exact deposit's capacity calculation; release it with the WAL
+    // commit after N-of-N succeeds. A pre-sign receipt save cannot release reserved room early.
+    if let Some(id) = reservation_id.as_ref() {
+        let reservation = state
+            .deposit_capacity_reservations
+            .get(id)
+            .unwrap_or_else(|| {
+                die("deposit capacity reservation not found; do not send another deposit")
+            });
+        let expected_hash = Bytes32::from_hex(tx_hash).unwrap_or_else(|e| die(e));
+        if reservation.completed != already_imported
+            || reservation.tx_hash != Some(expected_hash)
+            || reservation.token_index != onchain.token_index
+            || reservation.amount != onchain.amount
+            || !reservation
+                .recipient_slots
+                .contains(&(recipient_slot as u16))
+        {
+            die("on-chain deposit differs from its reserved transaction/token/amount/recipient");
+        }
+    }
+    if already_imported {
+        if let Some(result) = deposit_recovery::completed(tx_hash) {
+            write_json(out_path, &result);
+            println!(
+                "L1 deposit already imported; recovered the same durable receipt without signing again."
+            );
+            return;
+        }
+        die(format!(
+            "REPLAY REFUSED: L1 deposit {deposit_identity} was already imported, but no durable result receipt is available; restore that receipt instead of re-crediting"
+        ));
+    }
     let amount = onchain.amount;
     let token_index = onchain.token_index;
     let deposit = Deposit {
@@ -16172,6 +16757,22 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     )
     .unwrap_or_else(|e| die(format!("L1 deposit import transition invalid: {e}")));
 
+    let deposit_predecessor = state.snapshot.state.clone();
+    admit_credit_safe_successor_excluding(
+        &mut state,
+        &deposit_predecessor,
+        &fund_state,
+        reservation_id.as_deref(),
+    )
+    .unwrap_or_else(|error| die(error));
+    admit_credit_safe_successor_excluding(
+        &mut state,
+        &fund_state,
+        &bundle_state,
+        reservation_id.as_deref(),
+    )
+    .unwrap_or_else(|error| die(error));
+
     if propose_exit_kit_requested(args) {
         emit_exit_kit_proposal(serde_json::json!({
             "kind": "l1DepositImport",
@@ -16203,11 +16804,17 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
     .unwrap_or_else(|e| die(format!("L1 bundle-apply state not N-of-N signed: {e}")));
 
     adopt_head_with_exit_kit_receipts(&mut state, bundle_state.clone());
+    state.snapshot.settled_tx_accumulator = built.settled_tx_accumulator;
     // Consume the deposit in the SAME save as the new snapshot: the credit and the ledger entry
     // land together, so a crash cannot leave a credited-but-unconsumed deposit.
     state.imported_deposits.insert(deposit_identity.clone());
-    save_state(&state);
-    write_json("channel_snapshot.json", &state.snapshot);
+    if let Some(id) = reservation_id.as_ref() {
+        state
+            .deposit_capacity_reservations
+            .get_mut(id)
+            .expect("verified reservation")
+            .completed = true;
+    }
 
     let result = serde_json::json!({
         "fundImportState": fund_state,
@@ -16216,7 +16823,13 @@ fn cmd_cosign_l1_deposit_import(args: &[String]) {
         "depositIndex": onchain.deposit_index,
         "intmaxBlockNumber": intmax_block_number,
     });
-    write_json(out_path, &result);
+    deposit_recovery::commit(
+        deposit_predecessor.digest,
+        &state,
+        &result,
+        tx_hash,
+        out_path,
+    );
     println!(
         "cosign-l1-deposit-import OK: slot {} received {} deposit import (base token_index {}, \
          L1 deposit {}). New state_version = {}.",
@@ -18590,8 +19203,7 @@ mod signing_ledger_tests {
             Bytes32::default(),
         )
         .expect("zero-funded genesis");
-        let (channel_id, settled_tx_chain, token_funds_digest) =
-            exit_kit_statement_key(&genesis);
+        let (channel_id, settled_tx_chain, token_funds_digest) = exit_kit_statement_key(&genesis);
         let receipt = SignerExitKitReceipt {
             schema_version: SIGNER_EXIT_KIT_RECEIPT_SCHEMA_VERSION,
             archive_sha256: [0x11; 32],
@@ -18607,6 +19219,8 @@ mod signing_ledger_tests {
         CliState {
             state_schema_version: STATE_SCHEMA_VERSION,
             controlled,
+            credit_safety_bounds: BTreeMap::new(),
+            deposit_capacity_reservations: BTreeMap::new(),
             snapshot: ChannelSnapshot {
                 record,
                 state: genesis,
@@ -18626,6 +19240,68 @@ mod signing_ledger_tests {
             prepared_exit_kit_receipt: None,
             prepared_exit_kit_receipt_verified: false,
         }
+    }
+
+    #[test]
+    fn destination_exit_kit_context_uses_its_own_directory() {
+        let cli = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "intmax-kit-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir(&root).unwrap();
+        for (name, suffix, vd) in [
+            ("ch7", "43", b"normal A verifier bytes".as_slice()),
+            ("ch8", "44", b"normal B verifier bytes".as_slice()),
+        ] {
+            let directory = root.join(name);
+            fs::create_dir(&directory).unwrap();
+            // This test checks directory selection, not proof verification: the context loader
+            // independently pins the hash of these bytes before the real verifier is called.
+            write_private_bytes_at(&directory.join(BALANCE_VD_FILE), vd);
+            let rollup = format!("0x00000000000000000000000000000000000000{suffix}");
+            write_private_json_at(
+                &directory.join(BACKING_FILE),
+                &serde_json::json!({
+                    "settled_tx_chain": Bytes32::default().to_hex(),
+                    "intmax_state_root": Bytes32::default().to_hex(),
+                    "fund": 0,
+                    "rollup": rollup,
+                }),
+            );
+            let context = signer_exit_kit_context_at(&cli, &directory).unwrap();
+            assert_eq!(
+                context,
+                (
+                    DEVNET_CHAIN_ID,
+                    Address::from_hex(&rollup).unwrap(),
+                    sha256_bytes(vd)
+                )
+            );
+            validate_signer_exit_kit_archive_directory_at(&directory).unwrap();
+            let receipt = cli.signer_exit_kit_receipt.as_ref().unwrap();
+            let archive = exit_kit_receipt_archive_path_at(receipt, &directory);
+            assert_eq!(
+                archive.parent().unwrap(),
+                directory.join(SIGNER_EXIT_KIT_ARCHIVE_DIR)
+            );
+            write_private_json_at(&archive, &serde_json::json!({"normalPublication": name}));
+            let stored = read_bounded_regular_file(&archive, 1024, "test archive").unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&stored).unwrap()["normalPublication"],
+                name
+            );
+            fs::remove_file(archive).unwrap();
+            fs::remove_dir(directory.join(SIGNER_EXIT_KIT_ARCHIVE_DIR)).unwrap();
+            fs::remove_file(directory.join(BALANCE_VD_FILE)).unwrap();
+            fs::remove_file(directory.join(BACKING_FILE)).unwrap();
+            fs::remove_dir(directory).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
     }
 
     fn child_of(predecessor: &ChannelState, epoch_delta: u64) -> ChannelState {
@@ -18814,8 +19490,7 @@ mod signing_ledger_tests {
     }
 
     fn prepared_receipt_for(cli: &CliState, successor: &ChannelState) -> PreparedExitKitReceipt {
-        let (channel_id, settled_tx_chain, token_funds_digest) =
-            exit_kit_statement_key(successor);
+        let (channel_id, settled_tx_chain, token_funds_digest) = exit_kit_statement_key(successor);
         PreparedExitKitReceipt {
             predecessor_digest: cli.snapshot.state.digest,
             receipt: SignerExitKitReceipt {
@@ -18905,6 +19580,9 @@ mod signing_ledger_tests {
         let bundle = bundle.with_computed_digest();
         cli.prepared_exit_kit_receipt = Some(prepared_receipt_for(&cli, &fund_import));
         cli.prepared_exit_kit_receipt_verified = true;
+        let before = cli.snapshot.state.clone();
+        admit_credit_safe_successor(&mut cli, &before, &fund_import).unwrap();
+        admit_credit_safe_successor(&mut cli, &fund_import, &bundle).unwrap();
 
         for (state, purpose) in [
             (&fund_import, StateSigningPurpose::L1DepositFundImport),
@@ -18973,7 +19651,10 @@ mod signing_ledger_tests {
             |_| panic!("a credit without a head receipt must be refused before signing"),
         )
         .unwrap_err();
-        assert!(refusal.contains("no verified signer exit-kit receipt"), "{refusal}");
+        assert!(
+            refusal.contains("no verified signer exit-kit receipt"),
+            "{refusal}"
+        );
 
         // A "credit" that also debits another position is not a pure credit.
         let mut mixed = credit.clone();
@@ -18996,7 +19677,10 @@ mod signing_ledger_tests {
             |_| panic!("a mixed credit/debit must be refused before signing"),
         )
         .unwrap_err();
-        assert!(refusal.contains("only a pure single-position credit"), "{refusal}");
+        assert!(
+            refusal.contains("only a pure single-position credit"),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -19011,15 +19695,20 @@ mod signing_ledger_tests {
             &controlled,
             &successor,
             StateSigningPurpose::CloseFunding,
-            Some(Bytes32::from_hex(
-                "0x1111111111111111111111111111111111111111111111111111111111111111",
-            )
-            .unwrap()),
+            Some(
+                Bytes32::from_hex(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            ),
             None,
             |_| panic!("close funding must be refused before signing"),
         )
         .unwrap_err();
-        assert!(refusal.contains("CooperativeCloseFundingDeprecated"), "{refusal}");
+        assert!(
+            refusal.contains("CooperativeCloseFundingDeprecated"),
+            "{refusal}"
+        );
     }
 
     fn assert_exit_kit_reuse_refused(mut cli: CliState, successor: ChannelState, needle: &str) {
@@ -19583,5 +20272,87 @@ mod deploy_plan_tests {
             !script.contains("initializeBackingVk"),
             "the CloseAssetBacking adapter is constructor-pinned; no mutable VK latch may remain"
         );
+    }
+}
+
+#[cfg(test)]
+mod cosigner_recipient_setup_tests {
+    use super::*;
+
+    fn explicit_recipient(slot: u16) -> Address {
+        Address::from_u32_slice(&[0xaabb_ccdd, u32::from(slot) + 1, 12, 34, 0x1234_5678])
+            .expect("fixed-width test address")
+    }
+
+    #[test]
+    fn production_requires_explicit_recipient_for_every_controlled_slot() {
+        let channel_id = 17;
+        for slot in 0..MAX_SIG_CLUSTER as u16 {
+            let error = resolve_cosigner_leaf_recipient(channel_id, slot, None, false)
+                .expect_err("production has no synthetic fallback, including zero-funded slots");
+            assert!(error.contains(&cosigner_recipient_env(slot)));
+            let expected = explicit_recipient(slot);
+            let configured = expected.to_hex();
+            assert_eq!(
+                resolve_cosigner_leaf_recipient(channel_id, slot, Some(&configured), false)
+                    .expect("an explicitly provisioned recipient must be preserved"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn recipient_settings_reject_zero_empty_and_malformed_in_both_modes() {
+        let zero = Address::default().to_hex();
+        for allow_test_default in [false, true] {
+            for invalid in ["", "   ", "not-an-address", "0x1234", zero.as_str()] {
+                assert!(
+                    resolve_cosigner_leaf_recipient(17, 0, Some(invalid), allow_test_default)
+                        .is_err(),
+                    "an invalid explicit setting must never use the fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_rejects_explicit_synthetic_cosigner_recipients() {
+        let channel_id = 17;
+        for synthetic_slot in 0..MAX_SIG_CLUSTER {
+            let synthetic = test_recipient_for(channel_id, synthetic_slot).to_hex();
+            let error = resolve_cosigner_leaf_recipient(channel_id, 0, Some(&synthetic), false)
+                .expect_err("copying a fixture default into an explicit setting is not recovery");
+            assert!(error.contains("synthetic test recipient"));
+        }
+    }
+
+    #[test]
+    fn insecure_fixtures_keep_the_exact_historical_default() {
+        for slot in 0..MAX_SIG_CLUSTER as u16 {
+            let synthetic = test_recipient_for(17, slot as usize);
+            assert_eq!(
+                resolve_cosigner_leaf_recipient(17, slot, None, true)
+                    .expect("the explicit insecure fixture mode may retain its default"),
+                synthetic
+            );
+            assert_eq!(
+                resolve_cosigner_leaf_recipient(17, slot, Some(&synthetic.to_hex()), true)
+                    .expect("an explicitly named fixture default remains valid in fixture mode"),
+                synthetic
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_recipient_is_not_replaced_or_generated() {
+        let expected = explicit_recipient(0);
+        let configured = format!("  {}  ", expected.to_hex());
+        for allow_test_default in [false, true] {
+            assert_eq!(
+                resolve_cosigner_leaf_recipient(17, 0, Some(&configured), allow_test_default)
+                    .expect("valid configuration must resolve without substitution"),
+                expected
+            );
+        }
     }
 }

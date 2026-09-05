@@ -9,16 +9,25 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const Module = require('module');
+const workdirs = [];
+test.after(() => {
+  for (const work of workdirs) fs.rmSync(work, { recursive: true, force: true });
+});
 
 function loadBurnRoute(relativeRoute, endpoint) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-burn-ticket-'));
+  workdirs.push(work);
   const handlers = new Map();
   const router = {
     post(route, handler) { handlers.set(route, handler); },
   };
   let activeTicket = null;
   let cliCalls = 0;
+  let recoveryCalls = 0;
+  let recoverCommittedBurn = false;
   let liveSettleCalls = 0;
 
   const originalLoad = Module._load;
@@ -65,14 +74,21 @@ function loadBurnRoute(relativeRoute, endpoint) {
       // The pre-sign exit-kit wrapper is one CLI signing round from the route's point of view.
       return {
         cliWithPreparedExitKit: async () => { cliCalls += 1; },
+        acknowledgePreparedExitKit: () => {},
         installHeadExitKit: async () => {},
       };
     }
     if (request === '../lib/cli') {
       return {
         RPC: 'http://127.0.0.1:8545',
-        wc(_channel, filename) { return filename; },
-        cli() { cliCalls += 1; },
+        wc(_channel, filename) { return path.join(work, filename); },
+        cli(_channel, args) {
+          assert.deepEqual(args, ['recover-inter-transfers']);
+          recoveryCalls += 1;
+          if (recoverCommittedBurn) {
+            fs.writeFileSync(path.join(work, 'burn_cosigned.json'), JSON.stringify({ digest: 'committed' }));
+          }
+        },
         readJson() { return {}; },
         writeJson() {},
         ensureSettlement() {},
@@ -97,7 +113,9 @@ function loadBurnRoute(relativeRoute, endpoint) {
 
   return {
     setActive(ticket) { activeTicket = ticket; },
+    restoreCommittedBurn() { recoverCommittedBurn = true; },
     cliCalls() { return cliCalls; },
+    recoveryCalls() { return recoveryCalls; },
     liveSettleCalls() { return liveSettleCalls; },
     async invoke() {
       const response = {
@@ -145,7 +163,8 @@ for (const route of [
       assert.equal(response.body.ticket, ticket, status);
       assert.match(response.body.error, /active partial withdrawal/, status);
     }
-    assert.equal(harness.cliCalls(), 0, 'a conflicting request must not reach the CLI');
+    assert.equal(harness.cliCalls(), 0, 'a conflicting request must not reach signing');
+    assert.equal(harness.recoveryCalls(), 6, 'every request first repairs already-signed native output');
   });
 
   test(`${route.file}: no active PW ticket allows a new burn`, async () => {
@@ -154,6 +173,7 @@ for (const route of [
     const response = await harness.invoke();
     assert.equal(response.statusCode, 200);
     assert.equal(harness.cliCalls(), 1);
+    assert.equal(harness.recoveryCalls(), 1);
     assert.equal(
       harness.liveSettleCalls(),
       1,
@@ -173,6 +193,21 @@ for (const route of [
     const response = await harness.invoke();
     assert.equal(response.statusCode, 200);
     assert.equal(harness.cliCalls(), 1);
+    assert.equal(harness.liveSettleCalls(), 1);
+  });
+
+  test(`${route.file}: committed native burn output is recovered before deciding to sign`, async () => {
+    const harness = loadBurnRoute(route.file, route.endpoint);
+    harness.setActive({
+      id: 'pw_test', type: 'partial_withdrawal', status: 'burn_pending',
+      params: { producerRequestId: 'burn:test', amount: '5', recipient: '0x1', tokenIndex: '0' },
+      steps: { burn: null, settle: null },
+    });
+    harness.restoreCommittedBurn();
+    const response = await harness.invoke();
+    assert.equal(response.statusCode, 200);
+    assert.equal(harness.recoveryCalls(), 1);
+    assert.equal(harness.cliCalls(), 0, 'the recovered signed burn must not be signed again');
     assert.equal(harness.liveSettleCalls(), 1);
   });
 }

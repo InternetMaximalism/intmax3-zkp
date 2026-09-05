@@ -13,6 +13,10 @@ const MAX_PUBLISHER_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_PROVE_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_PUBLISH_TIMEOUT_MS = 5 * 60 * 1000;
 const PROGRESS_PHASES = new Set([
+  'attestBroadcast',
+  'attestAdopted',
+  'awaitingAttestReceipt',
+  'awaitingAttestFinality',
   'awaitingCloseRequest',
   'awaitingGrace',
   'submitBroadcast',
@@ -23,11 +27,17 @@ const PROGRESS_PHASES = new Set([
   'finalizeBroadcast',
   'awaitingFinalizeReceipt',
   'awaitingFinalizeFinality',
+  'materializeBroadcast',
+  'materializeAdopted',
+  'awaitingMaterializeReceipt',
+  'awaitingMaterializeFinality',
+  'awaitingSupersededReceipt',
+  'awaitingSupersededFinality',
   'complete',
 ]);
 
 function canonicalAddress(value, label) {
-  const normalized = String(value || '').toLowerCase();
+  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
   if (!/^0x[0-9a-f]{40}$/.test(normalized) || /^0x0{40}$/.test(normalized)) {
     throw new Error(`${label} must be a nonzero canonical address`);
   }
@@ -35,7 +45,7 @@ function canonicalAddress(value, label) {
 }
 
 function canonicalDigest(value, label) {
-  const normalized = String(value || '').toLowerCase();
+  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
   if (!/^0x[0-9a-f]{64}$/.test(normalized)) throw new Error(`${label} must be bytes32`);
   return normalized;
 }
@@ -64,6 +74,13 @@ function positiveSafeInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) {
     throw new Error(`${label} must be a positive safe integer`);
   }
   return parsed;
+}
+
+function nativeInteger(value, label, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an exact safe integer`);
+  }
+  return value;
 }
 
 function boundedTimeout(value, fallback, label, maximum) {
@@ -129,6 +146,66 @@ function run(execFileImpl, binary, args, options, label) {
   });
 }
 
+function finalizedCheckpoint(value, chain) {
+  const checkpoint = exactObject(value, [
+    'blockHash', 'blockNumber', 'chainId', 'parentHash', 'source',
+  ], 'public-close finalized checkpoint');
+  if (nativeInteger(checkpoint.chainId, 'checkpoint chain id', 1) !== chain) {
+    throw new Error('public-close checkpoint belongs to a different chain');
+  }
+  if (!['rpcFinalized', 'devnetLatest'].includes(checkpoint.source)) {
+    throw new Error('public-close checkpoint has an unknown finality source');
+  }
+  if (checkpoint.source === 'devnetLatest' && chain !== 31337) {
+    throw new Error('public-close devnet checkpoint requires chain 31337');
+  }
+  const blockNumber = nativeInteger(checkpoint.blockNumber, 'checkpoint block number');
+  return {
+    chainId: chain,
+    blockNumber,
+    blockHash: canonicalNonzeroDigest(checkpoint.blockHash, 'checkpoint block hash'),
+    parentHash: blockNumber === 0 ? canonicalDigest(checkpoint.parentHash, 'checkpoint parent hash')
+      : canonicalNonzeroDigest(checkpoint.parentHash, 'checkpoint parent hash'),
+    source: checkpoint.source,
+  };
+}
+
+function parseReadiness(stdout) {
+  const bytes = Buffer.from(String(stdout || ''), 'utf8');
+  if (bytes.length === 0 || bytes.length > MAX_PUBLISHER_OUTPUT_BYTES) {
+    throw new Error('public-close publisher returned empty or oversized readiness output');
+  }
+  let receipt;
+  try { receipt = JSON.parse(bytes.toString('utf8').trim()); }
+  catch (error) { throw new Error(`public-close publisher returned malformed readiness JSON: ${error.message}`); }
+  exactObject(receipt, [
+    'schemaVersion', 'ready', 'chainId', 'rollup', 'manager', 'materializer', 'channelId',
+    'signedHeadDigest', 'backingFinalizedExtendedStateCommitment', 'backingAnchorBlockNumber',
+    'currentCloseFreezeNonce', 'closeRequestGeneration', 'finalizedCheckpoint',
+  ], 'public-close readiness');
+  if (receipt.schemaVersion !== 1 || receipt.ready !== true) {
+    throw new Error('public-close readiness schema or ready status is unsupported');
+  }
+  const chain = nativeInteger(receipt.chainId, 'readiness chain id', 1);
+  return {
+    schemaVersion: 1,
+    ready: true,
+    chainId: chain,
+    rollup: canonicalAddress(receipt.rollup, 'readiness rollup'),
+    manager: canonicalAddress(receipt.manager, 'readiness manager'),
+    materializer: canonicalAddress(receipt.materializer, 'readiness materializer'),
+    channelId: nativeInteger(receipt.channelId, 'readiness channel id', 1, 0xffffffff),
+    signedHeadDigest: canonicalNonzeroDigest(receipt.signedHeadDigest, 'readiness signed-head digest'),
+    backingFinalizedExtendedStateCommitment: canonicalDigest(
+      receipt.backingFinalizedExtendedStateCommitment, 'readiness backing state commitment',
+    ),
+    backingAnchorBlockNumber: nativeInteger(receipt.backingAnchorBlockNumber, 'readiness backing anchor block'),
+    currentCloseFreezeNonce: nativeInteger(receipt.currentCloseFreezeNonce, 'readiness close-freeze nonce'),
+    closeRequestGeneration: nativeInteger(receipt.closeRequestGeneration, 'readiness close-request generation'),
+    finalizedCheckpoint: finalizedCheckpoint(receipt.finalizedCheckpoint, chain),
+  };
+}
+
 function parseProgress(stdout) {
   const bytes = Buffer.from(String(stdout || ''), 'utf8');
   if (bytes.length === 0 || bytes.length > MAX_PUBLISHER_OUTPUT_BYTES) {
@@ -142,44 +219,63 @@ function parseProgress(stdout) {
     throw new Error('public-close publisher returned an unknown progress phase');
   }
   const transactionPhases = new Set([
+    'attestBroadcast',
+    'attestAdopted',
+    'awaitingAttestReceipt',
     'submitBroadcast',
     'submitAdopted',
     'awaitingSubmitReceipt',
     'finalizeBroadcast',
     'awaitingFinalizeReceipt',
+    'materializeBroadcast',
+    'materializeAdopted',
+    'awaitingMaterializeReceipt',
   ]);
-  if (transactionPhases.has(progress.phase)) {
-    exactObject(progress, ['phase', 'transactionHash'], 'public-close progress');
-    return {
+  const finalityPhases = new Set([
+    'awaitingAttestFinality', 'awaitingSubmitFinality',
+    'awaitingFinalizeFinality', 'awaitingMaterializeFinality',
+  ]);
+  const superseded = progress.phase === 'awaitingSupersededReceipt'
+    || progress.phase === 'awaitingSupersededFinality';
+  const hasReceiptBlock = finalityPhases.has(progress.phase)
+    || progress.phase === 'awaitingSupersededFinality';
+  if (transactionPhases.has(progress.phase) || hasReceiptBlock || superseded) {
+    // Serde renames enum variants to camelCase, but their fields stay snake_case. The nested
+    // publication/checkpoint structs have their own camelCase field annotation.
+    const keys = ['phase', 'transaction_hash'];
+    if (hasReceiptBlock) keys.push('receipt_block');
+    if (superseded) keys.push('local_step');
+    exactObject(progress, keys, 'public-close progress');
+    const normalized = {
       phase: progress.phase,
-      transactionHash: canonicalNonzeroDigest(progress.transactionHash, 'progress transaction hash'),
+      transactionHash: canonicalNonzeroDigest(progress.transaction_hash, 'progress transaction hash'),
     };
-  }
-  if (progress.phase === 'awaitingSubmitFinality' || progress.phase === 'awaitingFinalizeFinality') {
-    exactObject(progress, ['phase', 'receiptBlock', 'transactionHash'], 'public-close progress');
-    return {
-      phase: progress.phase,
-      transactionHash: canonicalNonzeroDigest(progress.transactionHash, 'progress transaction hash'),
-      receiptBlock: positiveSafeInteger(progress.receiptBlock, 'progress receipt block'),
-    };
+    if (hasReceiptBlock) normalized.receiptBlock = nativeInteger(progress.receipt_block, 'progress receipt block');
+    if (superseded) {
+      if (!['attest', 'submit', 'finalize', 'materialize'].includes(progress.local_step)) {
+        throw new Error('public-close progress has an unknown superseded local step');
+      }
+      normalized.localStep = progress.local_step;
+    }
+    return normalized;
   }
   if (progress.phase === 'awaitingGrace') {
-    exactObject(progress, ['durableTime', 'eligibleAt', 'phase'], 'public-close progress');
+    exactObject(progress, ['durable_time', 'eligible_at', 'phase'], 'public-close progress');
     return {
       phase: progress.phase,
-      eligibleAt: positiveSafeInteger(progress.eligibleAt, 'progress close eligibility time'),
-      durableTime: positiveSafeInteger(progress.durableTime, 'progress durable time'),
+      eligibleAt: nativeInteger(progress.eligible_at, 'progress close eligibility time'),
+      durableTime: nativeInteger(progress.durable_time, 'progress durable time'),
     };
   }
   if (progress.phase === 'awaitingChallengeDeadline') {
-    exactObject(progress, ['challengeDeadline', 'durableTime', 'phase'], 'public-close progress');
+    exactObject(progress, ['challenge_deadline', 'durable_time', 'phase'], 'public-close progress');
     return {
       phase: progress.phase,
-      challengeDeadline: positiveSafeInteger(
-        progress.challengeDeadline,
+      challengeDeadline: nativeInteger(
+        progress.challenge_deadline,
         'progress challenge deadline',
       ),
-      durableTime: positiveSafeInteger(progress.durableTime, 'progress durable time'),
+      durableTime: nativeInteger(progress.durable_time, 'progress durable time'),
     };
   }
   if (progress.phase === 'awaitingCloseRequest') {
@@ -190,61 +286,54 @@ function parseProgress(stdout) {
   exactObject(progress, ['phase', 'publication'], 'public-close progress');
   const publication = exactObject(progress.publication, [
     'artifactHash',
+    'attestTransactionHash',
     'chainId',
     'channelId',
     'closeIntentDigest',
     'finalizeTransactionHash',
     'finalizedCheckpoint',
     'manager',
+    'materializer',
+    'materializeTransactionHash',
     'rollup',
     'schemaVersion',
     'submitTransactionHash',
   ], 'public-close publication');
-  if (publication.schemaVersion !== 1) {
+  if (publication.schemaVersion !== 3) {
     throw new Error('public-close publication schema version is unsupported');
   }
-  const checkpoint = exactObject(publication.finalizedCheckpoint, [
-    'blockHash',
-    'blockNumber',
-    'chainId',
-    'parentHash',
-    'source',
-  ], 'public-close finalized checkpoint');
-  const chain = positiveSafeInteger(publication.chainId, 'publication chain id');
-  if (positiveSafeInteger(checkpoint.chainId, 'checkpoint chain id') !== chain) {
-    throw new Error('public-close checkpoint belongs to a different chain');
-  }
-  if (!['rpcFinalized', 'devnetLatest'].includes(checkpoint.source)) {
-    throw new Error('public-close checkpoint has an unknown finality source');
-  }
+  const chain = nativeInteger(publication.chainId, 'publication chain id', 1);
   return {
     phase: progress.phase,
     publication: {
-      schemaVersion: 1,
+      schemaVersion: 3,
       chainId: chain,
       rollup: canonicalAddress(publication.rollup, 'publication rollup'),
       manager: canonicalAddress(publication.manager, 'publication manager'),
-      channelId: positiveSafeInteger(publication.channelId, 'publication channel id', 0xffffffff),
+      materializer: canonicalAddress(publication.materializer, 'publication materializer'),
+      channelId: nativeInteger(publication.channelId, 'publication channel id', 1, 0xffffffff),
       closeIntentDigest: canonicalNonzeroDigest(
         publication.closeIntentDigest,
         'publication close-intent digest',
       ),
       artifactHash: canonicalNonzeroDigest(publication.artifactHash, 'publication artifact hash'),
-      submitTransactionHash: canonicalNonzeroDigest(
+      attestTransactionHash: canonicalNonzeroDigest(
+        publication.attestTransactionHash,
+        'publication attest transaction hash',
+      ),
+      submitTransactionHash: publication.submitTransactionHash === null ? null : canonicalNonzeroDigest(
         publication.submitTransactionHash,
         'publication submit transaction hash',
       ),
-      finalizeTransactionHash: canonicalNonzeroDigest(
+      finalizeTransactionHash: publication.finalizeTransactionHash === null ? null : canonicalNonzeroDigest(
         publication.finalizeTransactionHash,
         'publication finalize transaction hash',
       ),
-      finalizedCheckpoint: {
-        chainId: chain,
-        blockNumber: positiveSafeInteger(checkpoint.blockNumber, 'checkpoint block number'),
-        blockHash: canonicalNonzeroDigest(checkpoint.blockHash, 'checkpoint block hash'),
-        parentHash: canonicalNonzeroDigest(checkpoint.parentHash, 'checkpoint parent hash'),
-        source: checkpoint.source,
-      },
+      materializeTransactionHash: canonicalNonzeroDigest(
+        publication.materializeTransactionHash,
+        'publication materialize transaction hash',
+      ),
+      finalizedCheckpoint: finalizedCheckpoint(publication.finalizedCheckpoint, chain),
     },
   };
 }
@@ -327,6 +416,10 @@ function makePublicClosePublisher({
       ) !== authority.balanceVerifierDataSha256) {
     throw new Error('public-close deployment manifest differs from configured channel authority');
   }
+  authority.materializer = canonicalAddress(
+    deployment.closeFundingMaterializer,
+    'deployment close-funding materializer',
+  );
   const configuredAccount = accountSelector(account);
   const configuredRpc = rpcUrl(rpc);
   const lockRoot = path.isAbsolute(String(signerLockRoot || ''))
@@ -362,7 +455,7 @@ function makePublicClosePublisher({
     }
   }
 
-  async function advance({ acceptedHead, snapshotVault, backingVault } = {}) {
+  async function prepareBundle({ acceptedHead, snapshotVault, backingVault } = {}) {
     verifyDeploymentPin();
     const digest = canonicalDigest(acceptedHead && acceptedHead.digest, 'accepted head digest');
     if (!snapshotVault || !backingVault) {
@@ -377,7 +470,6 @@ function makePublicClosePublisher({
     const bundleDirectory = path.join(baseDirectory, 'bundles', digestName);
     const journal = path.join(baseDirectory, 'journals', `${digestName}.json`);
     fs.mkdirSync(path.dirname(bundleDirectory), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.dirname(journal), { recursive: true, mode: 0o700 });
 
     if (!fs.existsSync(bundleDirectory)) {
       const args = [
@@ -397,20 +489,62 @@ function makePublicClosePublisher({
       }, 'public-close proof generation');
     }
     inspectBundleDirectory(bundleDirectory);
+    return { digest, bundleDirectory, journal };
+  }
 
-    const args = [
+  function publisherInputArgs({ digest, bundleDirectory }) {
+    return [
       '--bundle-dir', bundleDirectory,
       // This comes from the WASM-authenticated snapshot key, not from the reusable bundle. The
       // native publisher binds it to the descriptor, full intent, MLE public inputs and WAL.
       '--expected-final-channel-state-digest', digest,
       '--deployment-manifest', deploymentFile.resolved,
       '--deployment-manifest-sha256', deploymentPin,
+      '--rpc-url', configuredRpc,
+      ...(allowUnfinalizedDevnet ? ['--allow-unfinalized-devnet'] : []),
+    ];
+  }
+
+  function verifyResponseAuthority(response, label) {
+    if (response.chainId !== authority.chainId || response.channelId !== authority.channelId
+        || response.rollup !== authority.rollup || response.manager !== authority.manager
+        || response.materializer !== authority.materializer) {
+      throw new Error(`${label} differs from startup channel authority`);
+    }
+    if (response.finalizedCheckpoint.source === 'devnetLatest' && !allowUnfinalizedDevnet) {
+      throw new Error(`${label} uses unconfigured devnet finality`);
+    }
+  }
+
+  async function checkReadiness(request = {}) {
+    const bundle = await prepareBundle(request);
+    const output = await run(execFileImpl, binary.publisher, [
+      '--check-readiness', ...publisherInputArgs(bundle),
+    ], {
+      cwd: repository,
+      encoding: 'utf8',
+      timeout: publishTimeout,
+      maxBuffer: MAX_PUBLISHER_OUTPUT_BYTES,
+      windowsHide: true,
+    }, 'public-close readiness check');
+    const receipt = parseReadiness(output);
+    verifyResponseAuthority(receipt, 'public-close readiness');
+    if (receipt.signedHeadDigest !== bundle.digest) {
+      throw new Error('public-close readiness differs from the authenticated accepted head');
+    }
+    return receipt;
+  }
+
+  async function advance(request = {}) {
+    const bundle = await prepareBundle(request);
+    const { journal } = bundle;
+    fs.mkdirSync(path.dirname(journal), { recursive: true, mode: 0o700 });
+    const args = [
+      ...publisherInputArgs(bundle),
       '--journal', journal,
       '--signer-lock-root', lockRoot,
-      '--rpc-url', configuredRpc,
       '--account', configuredAccount,
     ];
-    if (allowUnfinalizedDevnet) args.push('--allow-unfinalized-devnet');
     const output = await run(execFileImpl, binary.publisher, args, {
       cwd: repository,
       encoding: 'utf8',
@@ -419,13 +553,7 @@ function makePublicClosePublisher({
       windowsHide: true,
     }, 'public-close publication');
     const progress = parseProgress(output);
-    if (progress.phase === 'complete'
-        && (progress.publication.chainId !== authority.chainId
-          || progress.publication.channelId !== authority.channelId
-          || progress.publication.rollup !== authority.rollup
-          || progress.publication.manager !== authority.manager)) {
-      throw new Error('completed public-close publication differs from startup channel authority');
-    }
+    if (progress.phase === 'complete') verifyResponseAuthority(progress.publication, 'completed public-close publication');
     return progress;
   }
 
@@ -433,6 +561,7 @@ function makePublicClosePublisher({
     authority: Object.freeze({ ...authority }),
     deploymentManifestPath: deploymentFile.resolved,
     deploymentManifestSha256: deploymentPin,
+    checkReadiness,
     advance,
   };
 }
@@ -443,4 +572,5 @@ module.exports = {
   MAX_PUBLISHER_OUTPUT_BYTES,
   makePublicClosePublisher,
   parseProgress,
+  parseReadiness,
 };

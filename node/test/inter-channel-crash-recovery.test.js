@@ -11,24 +11,34 @@ function harness() {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'intmax-inter-route-'));
   const handlers = new Map();
   const calls = { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0, install: 0 };
+  const flushed = [];
   const router = { post(route, handler) { handlers.set(route, handler); } };
-  const wc = (_ch, name) => path.join(work, name);
+  const wc = (ch, name) => path.join(work, `ch${ch}`, name);
   const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
-  const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value));
+  const writeJson = (file, value) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(value));
+  };
   const stableRequestId = (_kind, body) => `inter:${JSON.stringify(body)}`;
 
   const cliMock = {
     wc,
     readJson,
     writeJson,
-    cli() {
+    cli(ch, args) {
+      assert.ok(flushed.includes(8), 'destination WAL/head recovery precedes cross-channel signing');
+      assert.equal(ch, 7);
+      assert.ok(args.includes(`--producer-request-id=${requestId}`),
+        'the native destination sidecar retains the exact producer request identity');
       calls.cli += 1;
-      writeJson(wc(7, 'inter_transfer.json'), {
+      const result = {
         aHead: { channelId: 7, digest: 'after' },
         bFundImportState: { channelId: 8, digest: 'dest-import' },
         bBundleApplyState: { channelId: 8, digest: 'dest-apply' },
         bSnapshot: { channelId: 8, digest: 'dest' },
-      });
+      };
+      writeJson(wc(7, 'inter_transfer.json'), result);
+      writeJson(wc(8, 'incoming_inter_transfer.json'), result);
     },
   };
 
@@ -36,12 +46,13 @@ function harness() {
   Module._load = function mockedLoad(request, parent, isMain) {
     if (request === 'express') return { Router: () => router };
     if (request === '../lib/lock') return { withLocks: (_channels, fn) => Promise.resolve().then(fn) };
-    if (request === '../lib/producer-head') return { flushPublishedHead: async () => null };
+    if (request === '../lib/producer-head') return { flushPublishedHead: async ch => { flushed.push(ch); return null; } };
     if (request === '../lib/exit-kit') {
       // The pre-sign exit-kit wrapper is one CLI signing round from the route's point of view;
       // the destination's kit install happens exactly once per completed transfer.
       return {
         cliWithPreparedExitKit: async (ch, args, env) => cliMock.cli(ch, args, env),
+        acknowledgePreparedExitKit: () => {},
         installHeadExitKit: async (channelId) => {
           assert.equal(channelId, 8);
           calls.install += 1;
@@ -147,4 +158,27 @@ test('a different request cannot overwrite a prepared signed operation', async t
   const response = await h.invoke();
   assert.equal(response.statusCode, 409);
   assert.deepEqual(h.calls, { cli: 0, post: 0, settle: 0, sync: 0, artifact: 0, receive: 0, install: 0 });
+});
+
+test('successful source recovery archives the exact missing legacy destination sidecar', async t => {
+  const h = harness();
+  t.after(() => fs.rmSync(h.work, { recursive: true, force: true }));
+  const first = await h.invoke();
+  assert.equal(first.statusCode, 200);
+  const sidecarPath = h.wc(8, 'incoming_inter_transfer_recovery.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(sidecarPath)), {
+    sourceChannelId: 7, producerRequestId: h.requestId,
+    debitPayload: h.body.debitPayload, descriptor: h.body.transferDescriptor,
+  });
+  // A completed pre-sidecar source operation must still finish this one-time migration on retry.
+  fs.rmSync(sidecarPath);
+  const recovered = await h.invoke();
+  assert.equal(recovered.statusCode, 200);
+  assert.deepEqual(recovered.body, first.body);
+  assert.equal(h.calls.cli, 1, 'source retry does not request another channel signature');
+  assert.equal(h.calls.receive, 2);
+  assert.equal(h.calls.install, 2);
+  assert.equal(JSON.parse(fs.readFileSync(sidecarPath)).producerRequestId, h.requestId);
+  await h.invoke();
+  assert.equal(h.calls.receive, 2, 'subsequent HTTP retry uses the completed operation');
 });

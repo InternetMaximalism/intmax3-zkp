@@ -1819,6 +1819,40 @@ async function attemptCloseRequest(ctx) {
     });
   }
   try {
+    const checkReadiness = async () => {
+      try {
+        const acceptedHead = store.get('acceptedHead');
+        if (!acceptedHead || typeof acceptedHead.digest !== 'string'
+            || typeof proof.stateDigest !== 'string'
+            || acceptedHead.digest.toLowerCase() !== proof.stateDigest.toLowerCase()
+            || !ctx.publicClosePublisher || typeof ctx.publicClosePublisher.checkReadiness !== 'function'
+            || !ctx.snapshotVault || !ctx.backingVault) {
+          throw new Error('exact signed head, participant proof and immutable public-close recovery material are required before freezing');
+        }
+        const receipt = await ctx.publicClosePublisher.checkReadiness({
+          acceptedHead, snapshotVault: ctx.snapshotVault, backingVault: ctx.backingVault,
+        });
+        if (!receipt || receipt.ready !== true
+            || String(receipt.signedHeadDigest).toLowerCase() !== acceptedHead.digest.toLowerCase()
+            || String((store.get('acceptedHead') || {}).digest).toLowerCase() !== acceptedHead.digest.toLowerCase()) {
+          throw new Error('public-close readiness does not cover the current exact signed head');
+        }
+        // Pin the same immutable bundle before the L1 freeze can escape. Publication reuses this
+        // head and prepared bundle, rather than generating another proof after channel freeze.
+        setIfChanged(store, 'publicClosePublication', {
+          schemaVersion: 1, acceptedHeadDigest: acceptedHead.digest.toLowerCase(),
+          progress: { phase: 'ready', readiness: receipt },
+        });
+        return receipt;
+      } catch (error) {
+        error.definitelyNotBroadcast = true;
+        throw error;
+      }
+    };
+    // Production closers invoke this only when their raw outbox has no exact existing action;
+    // an already-signed transaction must remain reconcilable after the manager freezes. Legacy
+    // test/adaptor closers have no durable outbox, so their new-action preflight runs here.
+    if (participantCloser.durableOutbox !== true) await checkReadiness();
     const rememberBroadcast = async (txHash, metadata = {}) => {
       store.set('participantCloseSubmission', {
         txHash,
@@ -1840,7 +1874,7 @@ async function attemptCloseRequest(ctx) {
       ch.manager,
       proof,
       rememberBroadcast,
-      era ? { actionId, era } : undefined,
+      { actionId, era, checkReadiness },
     );
     // Persist the hash before terminalizing the action. If the process dies after the send but
     // before this write, the still-pending action deliberately blocks blind resubmission; an

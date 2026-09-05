@@ -2,7 +2,7 @@ const fs = require('fs');
 const { cli, wc, RPC, readJson } = require('./cli');
 const producer = require('./block-producer');
 const { flushPublishedHead } = require('./producer-head');
-const { cliWithPreparedExitKit } = require('./exit-kit');
+const { cliWithPreparedExitKit, acknowledgePreparedExitKit } = require('./exit-kit');
 
 async function flushLastDepositImport(ch) {
   const artifactPath = wc(ch, 'l1_import_cosigned.json');
@@ -23,18 +23,27 @@ async function flushLastDepositImport(ch) {
     artifact.fundImportState,
     artifact.bundleApplyState,
   ]);
+  acknowledgePreparedExitKit(ch, artifact.fundImportState);
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 
 // One crash-recoverable production ordering for every API deposit import:
 //   verified L1 receipt -> durable producer deposit block -> channel N-of-N import -> durable
 //   off-chain head sync. The Rust inspector owns ABI parsing and emits the exact producer schema.
-async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDepositor = true } = {}) {
+async function importL1Deposit(ch, recipientSlot, txHash, {
+  allowUnboundDepositor = true, depositReservation = null,
+} = {}) {
+  // Native command entry rolls pending signing WALs forward before any API artifact read. This
+  // also applies to external/legacy imports, which did not pass through pre-spend preflight.
+  cli(ch, ['recover-inter-transfers']);
+  cli(ch, ['publish-snapshot', 'channel_snapshot.json']);
   // Complete a prior crash window before posting another L1 deposit. The two import states must be
   // replayed together because the final bundle head extends the intermediate fund-import digest.
   await flushLastDepositImport(ch);
   await flushPublishedHead(ch);
-  cli(ch, ['inspect-l1-deposit', String(txHash), RPC, 'producer_deposit.json']);
+  const inspectArgs = ['inspect-l1-deposit', String(txHash), RPC, 'producer_deposit.json'];
+  if (depositReservation) inspectArgs.push('--deposit-reservation', depositReservation);
+  cli(ch, inspectArgs);
   const deposit = readJson(wc(ch, 'producer_deposit.json'));
   const producerReceipt = await producer.postDeposit(deposit);
   // Phase 1 is durable before the N-of-N channel import. This consumes the exact journaled L1
@@ -64,6 +73,7 @@ async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDeposito
       `--intmax-block-number=${producerReceipt.blockNumber}`,
     ];
     if (allowUnboundDepositor) args.push('--allow-unbound-depositor');
+    if (depositReservation) args.push('--deposit-reservation', depositReservation);
     // Signer-independent exit: the deposit moves the channel's fund vector and settle chain, so
     // the co-signers' exit kit for the exact import state is proved BEFORE they sign it.
     await cliWithPreparedExitKit(ch, args);
@@ -79,6 +89,7 @@ async function importL1Deposit(ch, recipientSlot, txHash, { allowUnboundDeposito
     artifact.fundImportState,
     artifact.bundleApplyState,
   ]);
+  acknowledgePreparedExitKit(ch, artifact.fundImportState);
   return { deposit, producerReceipt, liveReceipt, liveStatus, headSyncReceipt, artifact };
 }
 

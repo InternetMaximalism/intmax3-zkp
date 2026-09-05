@@ -4,7 +4,7 @@ const { cli, wc, RPC, readJson, writeJson, ensureSettlement, failRoute } = requi
 const { withLock } = require('../lib/lock');
 const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 const producer = require('../lib/block-producer');
-const { cliWithPreparedExitKit } = require('../lib/exit-kit');
+const { cliWithPreparedExitKit, acknowledgePreparedExitKit } = require('../lib/exit-kit');
 
 const router = Router({ mergeParams: true });
 
@@ -13,6 +13,8 @@ const router = Router({ mergeParams: true });
 router.post('/burn', (req, res) => {
   const ch = Number(req.params.ch);
   withLock(ch, async () => {
+    // Restore the durable burn result before deciding to invoke the signer again.
+    cli(ch, ['recover-inter-transfers']);
     const active = findActiveTicket(ch, 'partial_withdrawal');
     const { debitPayload, transferDescriptor, tokenIndex } = req.body || {};
     if (!debitPayload || !transferDescriptor) {
@@ -92,6 +94,7 @@ router.post('/burn', (req, res) => {
     const liveReceipt = await producer.liveSettleInterChannel(
       ch, blockReceipt, cosignedHead, debitPayload, transferDescriptor,
     );
+    acknowledgePreparedExitKit(ch, cosignedHead);
     writeJson(wc(ch, 'pw_producer.json'), { producerRequestId, blockReceipt, liveReceipt });
     ticket.status = 'burn_done';
     ticket.steps = { ...(ticket.steps || {}), burn: { completedAt: Date.now() }, settle: null };

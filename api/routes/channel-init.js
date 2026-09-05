@@ -1,11 +1,11 @@
 const { Router } = require('express');
 const fs = require('fs');
-const { cli, wc, RPC, l1SignerArgs, sh, rollupOf, readJson, writeJson } = require('../lib/cli');
+const { cli, wc, readJson, writeJson } = require('../lib/cli');
 const { withLock } = require('../lib/lock');
-const { findActiveTicket, upsertTicket } = require('../lib/tickets');
 const { cliWithPreparedExitKit } = require('../lib/exit-kit');
 const producer = require('../lib/block-producer');
-const { importL1Deposit } = require('../lib/deposit-pipeline');
+const preflight = require('../lib/deposit-preflight');
+const { spendDeposit, importTrackedDeposit, depositResponse, failDeposit } = require('../lib/deposit-spend');
 const { flushPublishedHead, publishOffchainSnapshot } = require('../lib/producer-head');
 
 const router = Router({ mergeParams: true });
@@ -18,6 +18,7 @@ router.post('/init', (req, res) => {
     writeJson(wc(ch, 'contribution.json'), req.body);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
     const snapshot = readJson(wc(ch, 'channel_snapshot.json'));
+    preflight.resolveContributionSlot(snapshot, req.body);
     // The durable live-balance spine starts HERE (sole base-state authority): the daemon derives
     // and owns the account/deposit salts; the API only ever learns the deposit recipient.
     // Idempotent across restarts — an existing snapshot returns its configured recipient.
@@ -44,7 +45,7 @@ router.post('/join', (req, res) => {
     const live = await producer.liveInit(ch);
     await producer.liveBindSnapshot(ch, snapshot);
     await producer.register(snapshot);
-    const slot = snapshot.members ? snapshot.members.length - 1 : 0;
+    const slot = preflight.resolveContributionSlot(snapshot, contribution);
     res.json({ snapshot, slot, balance: '0', liveDepositRecipient: live.depositRecipient });
   }).catch(e => {
     console.error(e.stderr ? String(e.stderr) : (e.message || e));
@@ -68,12 +69,9 @@ router.post('/join-and-deposit', (req, res) => {
   withLock(ch, async () => {
     fs.mkdirSync(require('../lib/cli').chDir(ch), { recursive: true });
     const contribution = req.body.contribution || req.body;
-    const depositAmount = req.body.depositAmount || '0';
-    const tokenIndex = parseTokenIndex(req.body.tokenIndex);
-    if (tokenIndex === null) {
-      res.status(400).json({ error: 'tokenIndex must be a decimal u32' });
-      return;
-    }
+    const requestedAmount = req.body.depositAmount ?? '0';
+    const depositAmount = String(requestedAmount) === '0' ? '0' : preflight.depositAmount(requestedAmount);
+    const tokenIndex = preflight.tokenIndex(req.body.tokenIndex ?? 0);
 
     writeJson(wc(ch, 'contribution.json'), contribution);
     cli(ch, ['init', 'contribution.json', 'channel_snapshot.json']);
@@ -81,54 +79,26 @@ router.post('/join-and-deposit', (req, res) => {
     const live = await producer.liveInit(ch);
     await producer.liveBindSnapshot(ch, snapshot);
     await producer.register(snapshot);
-    const slot = snapshot.members ? snapshot.members.length - 1 : 0;
-    let depositTxHash;
-    let depositSucceeded = false;
+    const slot = preflight.resolveContributionSlot(snapshot, contribution);
+    let completed = null;
 
     if (depositAmount && depositAmount !== '0') {
-      try {
-        const backing = readJson(wc(ch, 'channel_backing.json'));
-        if (!backing.rollup) throw new Error('no rollup in channel_backing.json');
-        // tokenIndex 0 = ETH (msg.value == amount); nonzero = registered ERC-20 (msg.value 0;
-        // requires a prior approve(rollup, amount) by the depositor — §N-7).
-        const castArgs = [
-          'send', backing.rollup,
-          'deposit(bytes32,uint32,uint256,bytes32)',
-          live.depositRecipient, tokenIndex, String(depositAmount),
-          '0x0000000000000000000000000000000000000000000000000000000000000000',
-        ];
-        if (tokenIndex === '0') castArgs.push('--value', String(depositAmount));
-        castArgs.push(...l1SignerArgs(), '--rpc-url', RPC, '--json');
-        const out = sh('cast', castArgs, { stdio: 'pipe' });
-        depositTxHash = (out.match(/"transactionHash"\s*:\s*"(0x[0-9a-fA-F]{64})"/) || [])[1] || '';
-        if (!depositTxHash) throw new Error('could not read the deposit transactionHash from cast output');
-
-        // SECURITY: import by TX HASH — the CLI reads depositor/amount/tokenIndex from the
-        // on-chain `Deposited` log.
-        // OPERATOR-FUNDED: the deposit above is signed with the server's configured L1 signer, NOT the
-        // joining delegate's wallet, so the on-chain depositor is the operator and is bound to no
-        // slot. The flag relaxes only that leg; crediting a slot bound to a DIFFERENT member is
-        // still refused unconditionally by the CLI.
-        await importL1Deposit(ch, slot, depositTxHash, { allowUnboundDepositor: true });
-        snapshot = readJson(wc(ch, 'channel_snapshot.json'));
-        depositSucceeded = true;
-      } catch (depErr) {
-        console.error('deposit failed (channel joined with 0 balance):', depErr.message);
-      }
+      const operation = await spendDeposit(ch, { recipientSlot: slot, amount: depositAmount,
+        tokenIndex, requestId: req.body.requestId });
+      completed = await importTrackedDeposit(ch, operation, slot);
+      snapshot = readJson(wc(ch, 'channel_snapshot.json'));
     }
 
     res.json({
       snapshot,
       slot,
-      balance: depositSucceeded ? String(depositAmount) : '0',
-      depositSucceeded,
-      depositTxHash,
+      balance: completed ? depositAmount : '0',
+      depositSucceeded: Boolean(completed),
+      depositTxHash: completed && completed.operation.txHash,
+      ...(completed ? depositResponse(completed.operation) : {}),
       liveDepositRecipient: live.depositRecipient,
     });
-  }).catch(e => {
-    console.error(e.stderr ? String(e.stderr) : (e.message || e));
-    res.status(500).json({ error: String(e.stderr || e.message || e) });
-  });
+  }).catch(error => failDeposit(res, error));
 });
 
 // POST /api/v1/channel/:ch/register-token (multi-token §N-1)

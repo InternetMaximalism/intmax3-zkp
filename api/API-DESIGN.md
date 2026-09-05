@@ -382,6 +382,17 @@ Request:  { debitPayload, transferDescriptor }
 Response: { sourceHead: <Snapshot>, destSnapshot: <Snapshot> }
 ```
 
+**Crash recovery:** the native two-channel commit retains both the destination's signed
+`incoming_inter_transfer.json` and immutable `incoming_inter_transfer_recovery.json` (source
+channel, original producer request ID, debit payload and descriptor). A destination-only head
+flush replays the exact producer admission and source live settlement, obtains the retained source
+proof, receives it into destination backing, and installs the destination's exact-head exit kit
+before binding or publishing the two credit states. It needs neither new channel signatures nor
+the source channel's mutable convenience files. Keep both copies with the destination wallet.
+A legacy incoming copy without a sidecar requires retrying its original source operation; after
+verified receive and kit installation, that locked source retry archives the missing sidecar.
+Conflicting recovery copies are retained and refused, never guessed or silently skipped.
+
 ---
 
 ### A17. receiveInterChannel
@@ -410,7 +421,7 @@ Response: <ChannelSnapshot JSON>
 
 **Overview:** Send an L1 deposit transaction. The member calls `IntmaxRollup.deposit{value}(recipient, tokenIndex, amount, auxData)` on L1, escrowing real ETH. (abstract2-1 §3.3.2c step 1)
 
-**Inputs:** `amount: u256`, `rollup_address: address`
+**Operator-funded API inputs:** `amount: positive u64 decimal string`, optional registered `tokenIndex`, optional active `recipientSlot`, optional `requestId`. The rollup is taken from trusted channel configuration, not the request.
 **Outputs:** `{ txHash: string, depositor: address }`
 
 **Current status:**
@@ -421,9 +432,41 @@ Response: <ChannelSnapshot JSON>
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/deposit/l1-send
-Request:  { amount: string, tokenIndex?: string }   # default '0' (ETH); nonzero = registered ERC-20 (no ETH value; requires prior approve)
-Response: { txHash: string, depositor: string, tokenIndex: string }
+Request:  { amount: string, tokenIndex?: number, recipientSlot?: number, requestId?: string }
+Response: { txHash: string, depositor: string, tokenIndex: number, actionId: string, recipientSlots: number[], depositStatus: string, retry: string }
 ```
+
+Before any operator payment, the service checks the native wallet's current signed head, token
+registration, active recipient and numeric/cumulative credit capacity, then durably reserves that
+capacity. An omitted slot selects only from the saved admissible candidates; a participant-bound
+L1 depositor can credit only its own slot. Native imports recheck the exact receipt and consume the
+matching transaction-bound reservation. Native token `0` sends ETH value; registered ERC-20s send
+zero ETH value and require a prior allowance.
+The internal resident live-balance service is the deposit-recipient authority. Its allocated
+recipient is saved in the private capacity reservation before spending; inspect and import use
+that reservation id to recognize the exact rotated recipient and bound transaction. HTTP callers
+cannot supply a recipient override. An unreserved legacy import retains the configured backing
+recipient check; a mismatch is not evidence that an observed deposit can safely be skipped.
+
+The operator signs offline and the shared transaction outbox persists the raw transaction before
+broadcast. Retry **the same requestId and the same amount/token/slot** after a timeout. The same id
+cannot change its intent. With no requestId, identical fields intentionally return the original
+operation even after import; **a new identical payment requires a new requestId**. Clients should
+generate an id when the user starts a new payment, persist it, and retain it through all retries.
+No bundled client currently calls this operator-funded API (the browser wallet uses a separate
+user-signed deposit flow); the browser flow is not changed by this API recovery contract.
+
+Pending confirmations or finality return HTTP `202` with the saved `txHash`/`actionId`; recoverable
+refusals return `409` with the same context when available. Resume `/deposit/import` or the same
+combined request. Never start another payment merely because import or the HTTP response failed.
+The canonical journal is `chN/l1-deposits/<action-hash>.json`; `pending_deposit.json` points to the
+latest operation. Keep it, native wallet reservations, `exit_kit_operation.json`, and the L1 outbox
+when backing up or recovering. A reverted transaction is not automatically replaced: reconcile it
+explicitly before changing an id or releasing capacity. `INTMAX_L1_SIGNER_LOCK_ROOT` must match all
+Node processes sharing the operator key (default: `<INTMAX_WORK_DIR>/l1-signer-locks`).
+The API uses the existing `node/common` outbox and its locked ethers dependency: prepare both
+`api/` and `node/` package dependencies (`npm --prefix api ci` and `npm --prefix node ci`) before
+starting the API; installing only Express under `api/` is no longer sufficient.
 Or expose deposit info so the client can submit via their own wallet:
 ```
 GET /api/v1/channel/{ch}/deposit/info
@@ -465,7 +508,7 @@ Internal to the co-signer. The client doesn't generate this proof — the co-sig
 **API implementation:**
 ```
 POST /api/v1/channel/{ch}/deposit/import
-Request:  { recipientSlot: number, txHash: string }   # depositor/amount/tokenIndex are REJECTED: read from the on-chain Deposited log
+Request:  { recipientSlot?: number, txHash?: string }   # defaults to pending operation; receipt economics are not request input
 Response: <ChannelSnapshot JSON>
 ```
 
@@ -624,6 +667,15 @@ POST /api/v1/channel/{ch}/close/request
 Response: { txHash: string, closeRequestedAt: number }
 ```
 Separate from `submitCloseIntent` so the API caller can control timing.
+
+**Production delegate safety gate:** before its first `requestCloseAsParticipant` raw transaction,
+the delegate prepares the complete proof bundle for its exact authenticated accepted head and
+runs the native publisher's read-only `--check-readiness`. The signed head, startup-pinned
+deployment/materializer, current close era and finalized L1 backing must agree. A not-yet-final
+backing post leaves the channel unfrozen and is retried; no extra channel signature is requested.
+The same immutable proof bundle is reused during publication, without repeating proof generation.
+Already-signed outbox transactions bypass a new readiness check so they remain reconcilable after
+their own execution has frozen the manager.
 
 ---
 
@@ -1044,13 +1096,14 @@ W1 (Join)
 
 **Branching:**
 - `depositAmount == 0` → skip A18-A20
-- L1 tx reverts → error, channel joined with 0 balance (user can retry via W7)
-- Import fails → channel joined with 0 balance, deposit ticket at `l1_done` for retry
+- L1 tx pending or import unavailable → return the saved operation; retry the SAME request/id or `/deposit/import`.
+- L1 tx reverts → explicit reconciliation, not an automatic second payment.
+- Rejoining an existing identity returns and funds its original exact slot, not the last member in the channel.
 
 **API (orchestrated):**
 ```
 POST /api/v1/channel/{ch}/join-and-deposit
-Request:  { contribution: <GenesisContribution>, depositAmount: string }
+Request:  { contribution: <GenesisContribution>, depositAmount: string, tokenIndex?: number, requestId?: string }
 Response: { snapshot: <ChannelSnapshot>, slot: number, balance: string, depositTxHash?: string }
 ```
 
@@ -1172,16 +1225,21 @@ A18 l1Deposit (client/L1)
 ```
 
 **Branching:**
-- L1 tx fails → retry
-- L1 tx succeeds but import fails → ticket at `l1_done`, resume via `/api/import-deposit`
+- L1 submission response is lost → repeat the SAME `requestId`; rebroadcast the same saved bytes.
+- L1 tx succeeds but import fails → resume `/api/v1/channel/{ch}/deposit/import` using the saved transaction.
+- A reverted transaction requires explicit reconciliation, not an automatic second payment.
 - Nullifier already used → reject (double-fold prevention, detail2 C-10 T2)
 
 **API (orchestrated):**
 ```
 POST /api/v1/channel/{ch}/deposit
-Request:  { recipientSlot: number, txHash: string }   # depositor/amount/tokenIndex are REJECTED: read from the on-chain Deposited log
-Response: { snapshot: <ChannelSnapshot>, balance: string }
+Request:  { recipientSlot?: number, amount: string, tokenIndex?: number, requestId?: string }
+Response: { snapshot: <ChannelSnapshot>, balance: string, txHash: string, actionId: string, depositStatus: string, retry: string }
 ```
+
+This combined route creates the operator-funded deposit then imports its verified receipt. To
+import an existing transaction without spending, use `/deposit/import`. The exact retry and
+pre-spend capacity rules are the same as A18; a new identical payment needs a new `requestId`.
 
 ---
 
