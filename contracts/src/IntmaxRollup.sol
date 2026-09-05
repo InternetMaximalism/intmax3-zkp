@@ -167,16 +167,20 @@ contract IntmaxRollup {
     error ChannelExitTokenCountOutOfRange();
     error ChannelExitDuplicateToken();
 
-    /// @dev Release containment remains local-devnet-only until the independent cryptographic
-    ///      review is recorded. Repeating the guard at value boundaries also covers copied
-    ///      code/state that did not execute this deployment's constructor.
+    /// @dev Every value boundary is confined to the chain this Rollup was deployed on. The
+    ///      constructor already requires both pinned MLE adapters to name `block.chainid`
+    ///      (`allowedChainId()`), so `deploymentChainId` is exactly the chain the deployer opted
+    ///      into when it pinned the verifiers (`MLE_VERIFIER_CHAIN_ID` in the deploy scripts; a
+    ///      non-31337 deployment is an explicit opt-in). Repeating the guard at runtime covers
+    ///      copied code/state that did not execute this deployment's constructor: the immutable
+    ///      travels with the bytecode, so a Rollup moved to another chain fails closed.
     modifier releaseRuntime() {
         _requireReleaseRuntime();
         _;
     }
 
     function _requireReleaseRuntime() private view {
-        if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ReleaseRuntimeUnavailable();
+        if (block.chainid != deploymentChainId) revert ReleaseRuntimeUnavailable();
     }
 
     // -----------------------------------------------------------------------
@@ -937,9 +941,9 @@ contract IntmaxRollup {
         bytes32 stateRoot,
         bytes32 expectedPendingChains
     ) external payable nonReentrant {
-        // Keep the legacy five-argument selector permanently local-only. In particular, a future
-        // PCS repair that enables `releaseRuntime` on an explicitly configured public chain must
-        // not accidentally expose an endpoint whose preflight can be raced by another producer.
+        // Keep the legacy five-argument selector permanently local-only. `releaseRuntime` follows
+        // the deployment chain, but this endpoint's preflight can be raced by another producer,
+        // so a public deployment only ever publishes through `postBlockAndSubmitGuarded`.
         if (block.chainid != ROLLUP_LOCAL_DEVNET_CHAIN_ID) revert ReleaseRuntimeUnavailable();
         _postBlockAndSubmitPinned(subBlocks, proofHash, proofLength, stateRoot, expectedPendingChains);
     }

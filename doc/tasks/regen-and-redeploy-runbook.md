@@ -3,10 +3,11 @@
 > **RELEASE STATUS (2026-09-03): NO-GO.** The commit-before-challenge MLE/WHIR wire-v3
 > implementation and its compact proof boundary are integrated, but the independent
 > cryptographic review required by `doc/audit/mle-whir-pcs-repair-handoff.md` is not recorded.
-> `IntmaxRollup.releaseRuntime` therefore remains restricted to chain `31337`. Do not open
-> deposits, publish blocks, finalize, withdraw, or move settlement value on a public chain.
-> Passing local tests, a Forge dry-run, or a deployment whose constructors accept a non-31337
-> chain does not override that runtime containment. The separate NO-GO items in
+> `IntmaxRollup.releaseRuntime` is pinned to the deployment chain (`deploymentChainId`, set from
+> the adapters pinned with `MLE_VERIFIER_CHAIN_ID`); this runbook's acceptance runs stay on `31337`.
+> Do not open deposits, publish blocks, finalize, withdraw, or move settlement value on a public
+> chain. Passing local tests, a Forge dry-run, or a deployment whose constructors accept a
+> non-31337 chain does not constitute that approval. The separate NO-GO items in
 > `doc/audit/audit30-08-2026-final-security-closure.md` also remain in force.
 >
 > **Clean cutover only.** Wire v3 is a new proof/VK/config identity. The historical `V2` suffixes
@@ -271,9 +272,11 @@ reuse an address produced by a different script or test contract. Any bytecode, 
 nonce, constructor, or transaction-order change invalidates the prediction evidence and requires
 this step to be repeated.
 
-On non-31337 chains this is deployment-identity testing only. `IntmaxRollup.releaseRuntime` still
-rejects deposits, posting, finalization, withdrawals, and value movement until the independent
-cryptographic review is recorded and a separate release change is approved.
+`IntmaxRollup.releaseRuntime` is pinned to `deploymentChainId`: the chain both pinned adapters name
+(`MLE_VERIFIER_CHAIN_ID` at deploy time, an explicit opt-in off 31337). A Rollup whose code or state
+is moved to any other chain refuses deposits, posting, finalization, withdrawals and value movement.
+The pin is a containment mechanism, not a release approval: opening value on a public chain remains
+a separate reviewed decision after the independent cryptographic review is recorded.
 
 ## Step 3 — regenerate all full wire-v3 proof fixtures after the Manager is fixed
 
@@ -359,9 +362,13 @@ bash hosting/build-wallet-node-wasm.sh
 bash hosting/build-wallet-wasm.sh
 
 # Canonical producer for pw_close_intent_mle.json. This is not a fixture binary: the release E2E
-# first deploys from the proof-free configs, then builds a real CloseProver proof, wraps it, proves
-# and self-verifies MLE/WHIR wire v3, writes pw_reg.json / pw_submit.json / pw_close_intent_mle.json,
-# and consumes that exact proof on the fresh anvil chain. Requires anvil, forge and cast on PATH.
+# first deploys from the proof-free configs, mirrors the live registration/deposit in the Rust
+# block generator, posts its four blocks to anvil as EIP-4844 blob transactions, attests the
+# proof DA and finalizes them with a real 4-block validity MLE proof, attests the whole-vector
+# CloseAssetBacking proof of the post-burn head, then builds a real CloseProver proof, wraps it,
+# proves and self-verifies MLE/WHIR wire v3, writes pw_reg.json / pw_submit.json /
+# pw_close_intent_mle.json, and consumes that exact proof on the fresh anvil chain (its other
+# artifacts go to the gitignored proof-da-output/pw-e2e/). Requires anvil, forge and cast on PATH.
 cargo test --release --locked --test partial_withdrawal_e2e \
   partial_withdrawal_e2e_anvil -- --nocapture
 ```

@@ -9,21 +9,16 @@
 //! Release-gate execution requires foundry (anvil/forge/cast); missing tooling is a hard failure so
 //! CI cannot silently report an unexecuted payout path as passing.
 //!
-//! KNOWN GAP (signer-independent exit, open since the `requireSignedHeadBacking` admission was
-//! added to `ChannelSettlementManager._checkCloseProof`): `submitPartialWithdrawalIntent` now
-//! requires an ATTESTED whole-vector `CloseAssetBacking` proof for the post-burn head, i.e. a
-//! backing statement whose `finalized_extended_state_commitment` is a root the live Rollup has
-//! finalized and whose anchor is `<= latestFinalizedBlockNumber()`. This E2E only advances the
-//! Rust-side `BlockWitnessGenerator` (deposit / bootstrap / burn blocks) while the anvil Rollup
-//! stays at its genesis root, so no attestable backing statement exists and the submit step fails
-//! with `BackingProofNotAttested()` AFTER `pw_reg.json`, `pw_submit.json` and
-//! `pw_close_intent_mle.json` have been produced and self-verified. Completing it requires
-//! posting the three blocks to anvil (`postBlockAndSubmit` needs EIP-4844 blob transactions plus
-//! `attestProofData` KZG proofs, i.e. the `cast send --blob` machinery of `channel_member withdraw`)
-//! and finalizing them with a 3-block validity MLE proof, then proving the backing statement over
-//! the burn-send balance proof (`CloseAssetBackingWitness::from_full_private_state_and_channel_state`
-//! + `public_close_prover::wrap_and_export_backing_mle`) and calling
-//! `CloseFundingMaterializer.attestSignedHeadBacking(manager, compactProof)` before the submit.
+//! Signer-independent exit: `submitPartialWithdrawalIntent` requires an ATTESTED whole-vector
+//! `CloseAssetBacking` proof for the post-burn head (`requireSignedHeadBacking`), i.e. a backing
+//! statement whose `finalized_extended_state_commitment` the live Rollup has finalized and whose
+//! anchor is `<= latestFinalizedBlockNumber()`. The test therefore drives the real chain the
+//! Rust-side `BlockWitnessGenerator` mirrors: registration block, deposit block, bootstrap block
+//! and burn block are posted to anvil as EIP-4844 blob transactions (`cast mktx --blob`, validated
+//! with `proof_da::validate_decoded_blob_transaction` exactly like `channel_member withdraw`),
+//! the 4-block validity MLE proof is attested (`attestProofData`) and finalized, the backing proof
+//! over the burn-send balance proof is attested through `CloseFundingMaterializer`, and only then
+//! is the partial-withdrawal intent submitted.
 #![cfg(not(debug_assertions))]
 
 use intmax3_zkp::{
@@ -32,11 +27,20 @@ use intmax3_zkp::{
             balance_processor::BalanceProcessor,
             common::recipient::calculate_recipient_from_user_id, spend_circuit::SpendCircuit,
         },
-        channel::close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+        channel::{
+            close_asset_backing_circuit::{CloseAssetBackingCircuit, CloseAssetBackingWitness},
+            close_pis::{CHANNEL_CLOSE_PUBLIC_INPUTS_LEN, ChannelClosePublicInputs},
+        },
         test_utils::{
             balance_witness_generator::{BalanceWitnessGenerator, ReceiveDepositData, SendTxData},
             block_witness_generator::{BlockWitnessGenerator, BlockWitnessGeneratorHandle},
         },
+        validity::block_hash_chain::{
+            block_chain_pis::BlockChainPublicInputs,
+            block_hash_chain_processor::BlockHashChainProcessor,
+            validity_circuit::{ValidityCircuit, ValidityPublicInputs},
+        },
+        witness::block_witness_generator::{BlockTxV2Witness, ChannelMemberKeys},
     },
     common::{
         balance_state::{settled_tx_chain_push, tx_leaf_hash},
@@ -47,10 +51,21 @@ use intmax3_zkp::{
         transfer::Transfer,
         trees::{transfer_tree::TransferTree, tx_tree::TxTree, tx_v2_tree::TxV2Tree},
         tx::{Tx, TxClass, TxV2},
+        u63::BlockNumber,
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
+    falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
+    proof_da::{DecodedBlobTransaction, ValidatedBlobSidecars, validate_decoded_blob_transaction},
+    public_close_prover::wrap_and_export_backing_mle,
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
-    utils::{conversion::ToU64 as _, mle_prover::validate_mle_v2_full_against_config_json},
+    utils::{
+        conversion::ToU64 as _,
+        mle_prover::{
+            export_mle_v2_json, mle_v2_compact_submission_metadata, prove_with_mle_v2,
+            setup_mle_vk_v2, validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
+        },
+        wrapper::WrapperCircuit,
+    },
     wallet_core::{
         ChannelBalanceAttestation, CloseProver, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
@@ -60,10 +75,12 @@ use intmax3_zkp::{
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
+    iop::witness::{PartialWitness, WitnessWrite},
     plonk::{circuit_data::VerifierCircuitData, config::PoseidonGoldilocksConfig},
 };
 use std::{
-    path::PathBuf,
+    io::Write as _,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
 };
@@ -76,8 +93,24 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+/// The account behind `ANVIL0`: deployer, block producer, depositor and submitter of this E2E.
+const ANVIL0_ADDR: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const PORT: u16 = 8553;
+/// The submit transaction's fixed gas limit and the envelope its receipt must respect.
 const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 20_000_000;
+/// The node's block gas limit. Proof-DA attestation (KZG openings over two blobs) and the
+/// multi-block validity finalization are separate transactions above the 20M submit envelope.
+const ANVIL_BLOCK_GAS_LIMIT: u64 = 30_000_000;
+/// `IntmaxRollup.POST_BLOCK_STAKE`.
+const POST_BLOCK_STAKE_WEI: u64 = 1_000_000_000_000_000_000;
+const POST_SIG: &str =
+    "postBlockAndSubmit((uint32,uint64,bytes32,uint32[])[],bytes32,uint32,bytes32,bytes32)";
+/// L1 payout recipients registered for the three members (anvil accounts 1..3).
+const PW_RECIPIENTS: [&str; 3] = [
+    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+];
 
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
@@ -138,6 +171,167 @@ fn find_addr(out: &str, label: &str) -> String {
         .and_then(|l| l.split("0x").nth(1))
         .map(|s| format!("0x{}", &s.trim()[..40]))
         .unwrap_or_else(|| panic!("could not parse {label} from deploy output:\n{out}"))
+}
+
+/// Post one block as an EIP-4844 blob transaction carrying the validity proof-DA payload: sign
+/// with `cast mktx --blob`, decode the signed transaction, validate it against the exact payload
+/// and intended calldata (`proof_da::validate_decoded_blob_transaction`, the same check the
+/// production CLI applies before publishing), publish it and require a successful receipt.
+#[allow(clippy::too_many_arguments)]
+fn post_block_with_blob(
+    rpc: &str,
+    rollup: &str,
+    sub_block: &str,
+    proof_da_path: &Path,
+    payload: &[u8],
+    proof_hash: &str,
+    proof_length: u32,
+    state_root: &str,
+) -> (u64, ValidatedBlobSidecars) {
+    let submission_id: u64 = cast(rpc, &["call", rollup, "nextSubmissionId()(uint256)"], "next sub id")
+        .trim()
+        .parse()
+        .expect("nextSubmissionId");
+    let pending_pin = cast(rpc, &["call", rollup, "pendingChainsPin()(bytes32)"], "pending pin")
+        .trim()
+        .to_string();
+    let proof_length_s = proof_length.to_string();
+    let calldata = run_capture(
+        Command::new("cast").args([
+            "calldata",
+            POST_SIG,
+            sub_block,
+            proof_hash,
+            &proof_length_s,
+            state_root,
+            &pending_pin,
+        ]),
+        "cast calldata postBlockAndSubmit",
+    )
+    .trim()
+    .to_string();
+    let raw = run_capture(
+        Command::new("cast").args([
+            "mktx",
+            rollup,
+            POST_SIG,
+            sub_block,
+            proof_hash,
+            &proof_length_s,
+            state_root,
+            &pending_pin,
+            "--value",
+            "1ether",
+            "--blob",
+            "--path",
+            proof_da_path.to_str().expect("utf-8 proof-DA path"),
+            "--private-key",
+            ANVIL0,
+            "--rpc-url",
+            rpc,
+        ]),
+        "cast mktx --blob postBlockAndSubmit",
+    )
+    .trim()
+    .to_string();
+    assert!(
+        raw.starts_with("0x03"),
+        "cast mktx must return a signed EIP-4844 transaction, got {}",
+        &raw[..raw.len().min(16)]
+    );
+    let mut decoder = Command::new("cast")
+        .args(["decode-transaction", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cast decode-transaction");
+    decoder
+        .stdin
+        .take()
+        .expect("decoder stdin")
+        .write_all(raw.as_bytes())
+        .expect("write signed blob transaction");
+    let decoded_out = decoder.wait_with_output().expect("cast decode-transaction");
+    assert!(
+        decoded_out.status.success(),
+        "cast decode-transaction failed: {}",
+        String::from_utf8_lossy(&decoded_out.stderr)
+    );
+    let decoded: DecodedBlobTransaction =
+        serde_json::from_slice(&decoded_out.stdout).expect("decoded blob transaction JSON");
+    let validated = validate_decoded_blob_transaction(
+        &decoded,
+        payload,
+        31337,
+        ANVIL0_ADDR,
+        rollup,
+        POST_BLOCK_STAKE_WEI,
+        &calldata,
+    )
+    .unwrap_or_else(|e| panic!("signed blob post is not the intended post: {e}"));
+    let published = cast(rpc, &["publish", &raw, "--async"], "cast publish blob post")
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    assert!(
+        published.eq_ignore_ascii_case(&validated.transaction_hash),
+        "published hash {published} != signed hash {}",
+        validated.transaction_hash
+    );
+    let receipt = cast(rpc, &["receipt", &validated.transaction_hash, "--json"], "blob post receipt");
+    let receipt: serde_json::Value = serde_json::from_str(&receipt).expect("receipt JSON");
+    assert_eq!(
+        json_hex_quantity(&receipt["status"], "blob post status"),
+        1,
+        "postBlockAndSubmit reverted for submission {submission_id}"
+    );
+    let next: u64 = cast(rpc, &["call", rollup, "nextSubmissionId()(uint256)"], "next sub id")
+        .trim()
+        .parse()
+        .expect("nextSubmissionId");
+    assert_eq!(next, submission_id + 1, "exactly one submission must have been recorded");
+    (submission_id, validated)
+}
+
+/// One step of `script/PartialWithdrawalE2ELifecycle.s.sol` broadcast from `ANVIL0`.
+fn lifecycle_script(contracts: &Path, rpc: &str, sig: &str, envs: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new("forge");
+    cmd.current_dir(contracts).args([
+        "script",
+        "script/PartialWithdrawalE2ELifecycle.s.sol",
+        "--sig",
+        sig,
+        "--rpc-url",
+        rpc,
+        "--private-key",
+        ANVIL0,
+        "--broadcast",
+        "--slow",
+        "--offline",
+    ]);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    run_capture(&mut cmd, &format!("forge PartialWithdrawalE2ELifecycle {sig}"))
+}
+
+/// The lifecycle-descriptor view of one posted block, formatted for `cast`:
+/// `[(channel_id,timestamp,tx_tree_root,[key_ids...])]`.
+fn sub_block_literal(block: &intmax3_zkp::common::block::Block) -> String {
+    let key_ids = block
+        .key_ids
+        .iter()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "[({},{},{},[{}])]",
+        block.channel_id,
+        block.timestamp,
+        block.tx_tree_root.to_hex(),
+        key_ids
+    )
 }
 
 fn real_onchain_deposit(
@@ -257,7 +451,7 @@ fn partial_withdrawal_e2e_anvil() {
     // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
     // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
     // is not enough. Killed on drop.
-    let block_gas_limit = PRODUCTION_BLOCK_GAS_LIMIT.to_string();
+    let block_gas_limit = ANVIL_BLOCK_GAS_LIMIT.to_string();
     let _guard = AnvilNode::spawn(
         "partial_withdrawal_e2e_anvil",
         PORT,
@@ -272,7 +466,12 @@ fn partial_withdrawal_e2e_anvil() {
     // ── Phase A: Setup prover + keys ──────────────────────────────────────────────────────────
     let spend = SpendCircuit::<F, C, D>::new();
     let bp = BalanceProcessor::<F, C, D>::new(&spend.data.verifier_data());
-    let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&[1, 4, 512]));
+    // The same block profile the deployed validity adapter was pinned from
+    // (`generate_e2e_fixture`: `supported_user_counts = [2]`), so the 4-block validity proof below
+    // verifies against `mle_fixture_config.json`.
+    let supported_user_counts = vec![2u32];
+    let bwgen = BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
+    let initial_ext_state = bwgen.borrow().current_extended_public_state();
     let balance_vd = bp.balance_vd();
 
     let mut crng = rand010::rngs::StdRng::seed_from_u64(0xA553);
@@ -298,11 +497,7 @@ fn partial_withdrawal_e2e_anvil() {
             .map(|k| Bytes32::from(k.regev_pk.poseidon_digest()).to_hex())
             .collect();
         // Use anvil default addresses as recipients.
-        let recipients = vec![
-            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-            "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-            "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-        ];
+        let recipients = PW_RECIPIENTS.to_vec();
         let reg = serde_json::json!({
             "channel_id": 42,
             "bp_member_slot": 0,
@@ -387,14 +582,48 @@ fn partial_withdrawal_e2e_anvil() {
         "latestFinalizedStateRoot must be present in isFinalizedStateRoot, got: {finalized_membership}"
     );
 
-    // ── Phase C: Real ETH deposit + deposit-backed genesis ──────────────────────────────────
+    assert_eq!(
+        initial_ext_state.commitment(),
+        finalized_state_root,
+        "the deployed genesis root must be the Rust generator's initial extended state"
+    );
+
+    // ── Phase B': mirror the live `registerChannel` (deploy script, pw_reg.json) in the Rust
+    // block generator and fold it as block 1, exactly as the posted registration block will.
+    {
+        let member_keys = ChannelMemberKeys::from_member_keys(&keys);
+        let mut reg_record =
+            member_keys.to_reg_record_split(chan_id.channel_id(), keys.len() as u32, 0);
+        for (slot, (entry, recipient)) in reg_record
+            .members
+            .iter_mut()
+            .zip(PW_RECIPIENTS.iter())
+            .enumerate()
+        {
+            assert_eq!(entry.pk_g, keys[slot].pk_g(), "registration pk_g[{slot}]");
+            assert_eq!(entry.pk_b, keys[slot].pk_b(), "registration pk_b[{slot}]");
+            entry.recipient = Address::from_hex(recipient).expect("recipient");
+        }
+        let mut generator = bwgen.borrow_mut();
+        generator
+            .add_channel_registration_with_record(reg_record, member_keys)
+            .expect("mirror the live channel registration");
+        generator
+            .add_registration_block(0)
+            .expect("registration block");
+    }
+    eprintln!("[PW E2E] registration block 1 mirrored");
+
+    // ── Phase C: deposit-backed genesis. The real ETH deposit is sent AFTER the registration
+    // block is posted (a pending deposit would otherwise be folded into block 1 on chain); the
+    // Rust mirror already knows the depositor (ANVIL0) and the deposit index (0).
     let balances = [50u64, 10, 30];
     let fund: u64 = balances.iter().sum(); // 90
 
     let mut brng = rand::rngs::StdRng::seed_from_u64(0xDE_AD_BE_EF);
     let salt = Salt::rand(&mut brng);
     let recipient = calculate_recipient_from_user_id(chan_id, salt);
-    let depositor = real_onchain_deposit(&rpc, &rollup, recipient, fund, Bytes32::default());
+    let depositor = Address::from_hex(ANVIL0_ADDR).expect("depositor");
 
     bwgen
         .borrow_mut()
@@ -461,9 +690,28 @@ fn partial_withdrawal_e2e_anvil() {
     bootstrap_tx_v2_tree.update(chan_id.as_u64(), bootstrap_tx_v2);
     let bootstrap_root: Bytes32 = bootstrap_tx_v2_tree.get_root().into();
     let bootstrap_tx_v2_proof = bootstrap_tx_v2_tree.prove(chan_id.as_u64());
+    // The registered channel's updating slot must open its TxV2 leaf inside the block hash chain
+    // proof (the posted block is proven, not merely mirrored), exactly like the lifecycle fixtures.
     bwgen
         .borrow_mut()
-        .add_block(chan_id.channel_id(), &[1], 0, bootstrap_root)
+        .add_block_with_tx_v2(
+            chan_id.channel_id(),
+            &[1],
+            0,
+            bootstrap_root,
+            Some(BlockTxV2Witness {
+                tx_v2_indices: vec![chan_id.as_u64(), 0],
+                tx_v2s: vec![bootstrap_tx_v2, TxV2::default()],
+                tx_v2_merkle_proofs: vec![
+                    bootstrap_tx_v2_proof.clone(),
+                    bootstrap_tx_v2_proof.clone(),
+                ],
+                new_member_leaves: None,
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
+            }),
+        )
         .unwrap();
     let bootstrap_data = SendTxData {
         spend_proof: bootstrap_spend_proof,
@@ -641,7 +889,21 @@ fn partial_withdrawal_e2e_anvil() {
     let burn_tx_v2_proof = burn_tx_v2_tree.prove(chan_id.as_u64());
     bwgen
         .borrow_mut()
-        .add_block(chan_id.channel_id(), &[1], 0, burn_root)
+        .add_block_with_tx_v2(
+            chan_id.channel_id(),
+            &[1],
+            0,
+            burn_root,
+            Some(BlockTxV2Witness {
+                tx_v2_indices: vec![chan_id.as_u64(), 0],
+                tx_v2s: vec![desc.tx_v2, TxV2::default()],
+                tx_v2_merkle_proofs: vec![burn_tx_v2_proof.clone(), burn_tx_v2_proof.clone()],
+                new_member_leaves: None,
+                channel_action_indices: None,
+                channel_actions: None,
+                channel_action_merkle_proofs: None,
+            }),
+        )
         .unwrap();
     let burn_send_data = SendTxData {
         spend_proof: burn_spend_proof,
@@ -669,6 +931,259 @@ fn partial_withdrawal_e2e_anvil() {
         "base balance IVC and N-of-N channel head must pin the same burn descriptor chain"
     );
 
+    // ── Phase D': the 4-block validity proof of the mirrored chain, posted and finalized on
+    // anvil with the same blob/attest/finalize sequence as the production CLI, then the
+    // whole-vector backing proof of the post-burn head, attested through the materializer. ──
+    let final_ext_state = bwgen.borrow().current_extended_public_state();
+    let pw_e2e_dir = contracts
+        .parent()
+        .expect("repo root")
+        .join("proof-da-output")
+        .join("pw-e2e");
+    std::fs::create_dir_all(&pw_e2e_dir).unwrap();
+    let (pw_lifecycle_json, validity_payload, validity_proof_hash, validity_proof_length) = {
+        let timer = Instant::now();
+        let processor = BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
+        let block_chain_vd = processor.block_chain_vd();
+        let (blocks, final_block_chain_proof) = {
+            let guard = bwgen.borrow();
+            let total_blocks = guard.block_number.as_u64();
+            assert_eq!(total_blocks, 4, "registration, deposit, bootstrap and burn blocks");
+            let mut blocks = Vec::new();
+            let mut prev_block_proof = None;
+            for block_idx in 1..=total_blocks {
+                let block_number = BlockNumber::new(block_idx).expect("block number");
+                let witness = guard
+                    .block_chain_witness
+                    .get(&block_number)
+                    .cloned()
+                    .expect("block witness");
+                let initial_state = prev_block_proof
+                    .is_none()
+                    .then(|| initial_ext_state.clone());
+                let proof = processor
+                    .prove_block(initial_state, prev_block_proof.clone(), &witness)
+                    .expect("block hash chain proof");
+                prev_block_proof = Some(proof);
+                blocks.push(witness.block.clone());
+            }
+            (blocks, prev_block_proof.expect("final block proof"))
+        };
+        eprintln!("[PW BENCH] 4-block hash chain prove={:?}", timer.elapsed());
+        let timer = Instant::now();
+        let agg_circuit = FalconAggCircuit::<F, C, D>::new();
+        let agg_list_circuit = AggListCircuit::<F, C, D>::new(&agg_circuit.verifier_data());
+        let list_proof = bwgen
+            .borrow()
+            .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
+            .expect("bp signature list proof");
+        let validity_circuit =
+            ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
+        let validity_prover = Address::default();
+        let validity_proof = validity_circuit
+            .prove(&final_block_chain_proof, list_proof.as_ref(), validity_prover)
+            .expect("validity proof");
+        validity_circuit
+            .data
+            .verify(validity_proof.clone())
+            .expect("validity proof verifies");
+        eprintln!("[PW BENCH] validity prove={:?}", timer.elapsed());
+        let block_chain_inputs = BlockChainPublicInputs::<F, C, D>::from_u64_slice(
+            &final_block_chain_proof.public_inputs.to_u64_vec(),
+            &block_chain_vd.common.config,
+        )
+        .expect("block chain PIs");
+        let vpis = ValidityPublicInputs::from_states(
+            &block_chain_inputs.initial_ext_public_state,
+            &block_chain_inputs.ext_public_state,
+            validity_prover,
+        );
+        assert_eq!(
+            vpis.final_ext_commitment,
+            final_ext_state.commitment(),
+            "validity proof must end at the generator's current extended state"
+        );
+        assert_eq!(vpis.initial_ext_commitment, finalized_state_root);
+
+        let timer = Instant::now();
+        let wrapper = WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
+        let wrapped = wrapper.prove(&validity_proof).expect("wrap validity proof");
+        wrapper.data.verify(wrapped).expect("wrapped validity proof verifies");
+        let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&wrapper.wrap_proof, &validity_proof)
+            .expect("wrap witness");
+        let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw).expect("validity MLE proof");
+        verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof).expect("validity MLE verifies");
+        let mle_json =
+            export_mle_v2_json(&mle.proof, &vk, &wrapper.data).expect("export validity MLE");
+        let deployed_config = std::fs::read_to_string(data_dir.join("mle_fixture_config.json"))
+            .expect("read the deployed validity config");
+        let payload = validate_mle_v2_full_against_config_json(&mle_json, &deployed_config)
+            .expect("PW validity proof must match the deployed validity adapter config");
+        let (proof_hash, proof_length) =
+            mle_v2_compact_submission_metadata(&mle_json, &deployed_config).expect("metadata");
+        eprintln!(
+            "[PW BENCH] validity wrap+MLE={:?} compact={} bytes",
+            timer.elapsed(),
+            payload.len()
+        );
+        std::fs::write(pw_e2e_dir.join("pw_lifecycle_validity_mle.json"), &mle_json).unwrap();
+        let lifecycle = serde_json::json!({
+            "genesis_state_root": vpis.initial_ext_commitment.to_hex(),
+            "final_state_root": vpis.final_ext_commitment.to_hex(),
+            "blocks": blocks.iter().map(|b| serde_json::json!({
+                "channel_id": b.channel_id,
+                "timestamp": b.timestamp,
+                "tx_tree_root": b.tx_tree_root.to_hex(),
+                "key_ids": b.key_ids,
+            })).collect::<Vec<_>>(),
+            "vpis": {
+                "initial_block_number": vpis.initial_block_number.as_u64(),
+                "initial_block_chain": vpis.initial_block_chain.to_hex(),
+                "initial_ext_commitment": vpis.initial_ext_commitment.to_hex(),
+                "final_block_number": vpis.final_block_number.as_u64(),
+                "final_block_chain": vpis.final_block_chain.to_hex(),
+                "final_ext_commitment": vpis.final_ext_commitment.to_hex(),
+                "prover": format!("0x{}", hex::encode(validity_prover.to_bytes_be())),
+            },
+            "proof_hash": proof_hash,
+            "proof_length": proof_length,
+        });
+        std::fs::write(
+            pw_e2e_dir.join("pw_lifecycle.json"),
+            serde_json::to_string_pretty(&lifecycle).unwrap(),
+        )
+        .unwrap();
+        (blocks, payload, proof_hash, proof_length)
+    };
+    let validity_payload_path = pw_e2e_dir.join("validity-proof.bin");
+    std::fs::write(&validity_payload_path, &validity_payload).unwrap();
+    let final_state_root_hex = final_ext_state.commitment().to_hex();
+
+    // The whole-vector CloseAssetBacking proof over the SAME burn-send balance proof, private
+    // state and extended state; its statement key is the post-burn head's.
+    let backing_pis = {
+        let timer = Instant::now();
+        let backing_circuit = CloseAssetBackingCircuit::<F, C, D>::new(&balance_vd);
+        let backing_witness =
+            CloseAssetBackingWitness::<F, C, D>::from_full_private_state_and_channel_state(
+                &bwg.full_private_state,
+                &next_state,
+                live_balance_proof.clone(),
+                final_ext_state.clone(),
+                &balance_vd,
+            )
+            .expect("backing witness over the burn-send balance proof");
+        let backing_proof = backing_circuit
+            .prove(&backing_witness)
+            .expect("backing proof");
+        backing_circuit
+            .data
+            .verify(backing_proof.clone())
+            .expect("backing proof verifies");
+        let artifacts =
+            wrap_and_export_backing_mle(&backing_circuit, &backing_proof).expect("backing MLE");
+        let deployed_backing_config =
+            std::fs::read_to_string(data_dir.join("close_asset_backing_mle_config.json"))
+                .expect("read the deployed backing config");
+        validate_mle_v2_full_against_config_json(&artifacts.mle_json, &deployed_backing_config)
+            .expect("PW backing proof must match the deployed backing adapter config");
+        std::fs::write(pw_e2e_dir.join("pw_backing_mle.json"), &artifacts.mle_json).unwrap();
+        let pis = backing_witness
+            .public_inputs(&balance_vd)
+            .expect("backing public inputs");
+        eprintln!(
+            "[PW BENCH] backing prove+wrap+MLE={:?} compact={} bytes anchor={}",
+            timer.elapsed(),
+            artifacts.compact_proof.len(),
+            pis.anchor_block_number.as_u64()
+        );
+        pis
+    };
+    assert_eq!(backing_pis.settled_tx_chain, expected_chain);
+    assert_eq!(
+        backing_pis.finalized_extended_state_commitment,
+        final_ext_state.commitment()
+    );
+
+    // On chain: registration block, then the real deposit, then the remaining blocks; every
+    // post is an EIP-4844 blob transaction carrying the validity proof-DA payload.
+    let mut final_submission = None;
+    for (i, block) in pw_lifecycle_json.iter().enumerate() {
+        if i == 1 {
+            let onchain_depositor =
+                real_onchain_deposit(&rpc, &rollup, recipient, fund, Bytes32::default());
+            assert_eq!(onchain_depositor, depositor, "the deposit mirror named the depositor");
+            eprintln!("[PW E2E] real deposit of {fund} wei landed after the registration block");
+        }
+        let (submission_id, sidecars) = post_block_with_blob(
+            &rpc,
+            &rollup,
+            &sub_block_literal(block),
+            &validity_payload_path,
+            &validity_payload,
+            &validity_proof_hash,
+            validity_proof_length,
+            &final_state_root_hex,
+        );
+        assert_eq!(submission_id as usize, i, "submissions are posted in block order");
+        eprintln!(
+            "[PW E2E] posted block {} as submission {submission_id} ({} blob(s))",
+            i + 1,
+            sidecars.blob_versioned_hashes.len()
+        );
+        final_submission = Some((submission_id, sidecars));
+    }
+    let (final_submission_id, final_sidecars) = final_submission.expect("four posts");
+    let pw_e2e_dir_s = pw_e2e_dir.to_str().expect("utf-8 pw-e2e dir").to_string();
+    let final_submission_s = final_submission_id.to_string();
+    lifecycle_script(
+        &contracts,
+        &rpc,
+        "attestProofData()",
+        &[
+            ("ROLLUP", rollup.as_str()),
+            ("SUB_ID", final_submission_s.as_str()),
+            ("BLOB_SIDECARS", final_sidecars.compact_sidecars.as_str()),
+            ("PW_E2E_DIR", pw_e2e_dir_s.as_str()),
+        ],
+    );
+    let finalize_out = lifecycle_script(
+        &contracts,
+        &rpc,
+        "finalize()",
+        &[
+            ("ROLLUP", rollup.as_str()),
+            ("SUB_ID", final_submission_s.as_str()),
+            ("PW_E2E_DIR", pw_e2e_dir_s.as_str()),
+        ],
+    );
+    assert!(
+        finalize_out.contains("PW_E2E_FINALIZED_BLOCK: 4"),
+        "finalize must land the 4-block chain:\n{finalize_out}"
+    );
+    let latest_root = cast(&rpc, &["call", &rollup, "latestFinalizedStateRoot()(bytes32)"], "root")
+        .trim()
+        .to_string();
+    assert!(
+        latest_root.eq_ignore_ascii_case(&final_state_root_hex),
+        "latestFinalizedStateRoot {latest_root} != {final_state_root_hex}"
+    );
+    eprintln!("[PW E2E] 4-block chain finalized on anvil at {final_state_root_hex}");
+
+    let attest_out = lifecycle_script(
+        &contracts,
+        &rpc,
+        "attestBacking()",
+        &[("MANAGER", manager.as_str()), ("PW_E2E_DIR", pw_e2e_dir_s.as_str())],
+    );
+    assert!(
+        attest_out.contains("PW_E2E_BACKING_ATTESTED"),
+        "backing attestation must land:\n{attest_out}"
+    );
+    eprintln!("[PW E2E] whole-vector backing attested for the post-burn head");
+
     // P1: a real close proof and its real wrapped MLE/WHIR proof — no synthesized publicInputs.
     let timer = Instant::now();
     let close_prover = CloseProver::new(&balance_vd);
@@ -682,7 +1197,7 @@ fn partial_withdrawal_e2e_anvil() {
             &record,
             &next_state,
             &next_state.member_signatures,
-            live_balance_proof,
+            live_balance_proof.clone(),
         )
         .expect("real PW close witness");
     eprintln!(

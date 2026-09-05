@@ -312,22 +312,37 @@ envelope、constructor-pinned `PinnedMleVerifierV2`、on-chain VK 初期化の�
 - **Runbook**: `doc/tasks/regen-and-redeploy-runbook.md` Step 1（config cohort、退役した
   target-133 switch の削除）/ Step 2（15 tx、14 address）/ Step 3（共生成器）を更新。
 
-### 未解決: `partial_withdrawal_e2e_anvil`
+### `partial_withdrawal_e2e_anvil`（2026-09-05 修正済み）
 
-`submitPartialWithdrawalIntent` は `requireSignedHeadBacking`（8f70b73 以降）により post-burn head
-の attested backing を要求するが、この E2E は Rust 側の `BlockWitnessGenerator` だけを進め、
-anvil の Rollup は genesis root のまま（block を post しない）ため、finalized root に anchor
-された backing statement を作れず、submit で `BackingProofNotAttested()` になる（マージ前から
-同じ）。`pw_reg.json` / `pw_submit.json` / `pw_close_intent_mle.json` は失敗より前に生成・自己
-検証され、release gate と `ManagerCloseGasTest` はその成果物で pass する。修正には
-3 block を anvil に post（EIP-4844 blob tx + `attestProofData` の KZG proof、
-`channel_member withdraw` の `cast send --blob` 機構）→ 3-block validity MLE で finalize →
-burn-send balance proof 上の backing proof を `attestSignedHeadBacking` する工程が必要
-（`tests/partial_withdrawal_e2e.rs` ヘッダ参照）。
+`submitPartialWithdrawalIntent` は `requireSignedHeadBacking` により post-burn head の attested
+backing（finalized root に anchor）を要求するが、旧 E2E は Rust 側の `BlockWitnessGenerator` だけを
+進め anvil の Rollup は genesis のままだったため、submit で `BackingProofNotAttested()` になっていた
+（8f70b73 以降の既存不整合）。現在は本番 CLI と同じ手順を E2E が実行する:
+
+1. deploy script の `registerChannel` を Rust 側で `add_channel_registration_with_record`
+   （新規 API: 実 recipient を持つ record + Falcon signer）でミラーし registration block を作る。
+2. deposit / bootstrap / burn block（`add_block_with_tx_v2`）→ 4-block validity 証明 → wrap + MLE
+   （deploy 済み `mle_fixture_config.json` と照合、compact 129,484 B）。
+3. 4 block を `cast mktx --blob`（EIP-4844）で投稿し、署名済み tx を
+   `proof_da::validate_decoded_blob_transaction` で検証（本番 CLI と同一）、
+   `attestProofData`（KZG sidecar）→ `finalize`（`script/PartialWithdrawalE2ELifecycle.s.sol`）。
+   実 deposit は registration block の投稿後に送る（pending deposit chain の fold 順序）。
+4. burn-send balance proof 上の `CloseAssetBacking` proof（anchor = block 4、deploy 済み
+   `close_asset_backing_mle_config.json` と照合）を `attestSignedHeadBacking` で attest。
+5. submit（gas 19,028,810 / 20M）→ finalize → authorize → fail-closed claim → replay 拒否。
+
+成果物は gitignore 済みの `proof-da-output/pw-e2e/` に書き、`test/data` には
+`pw_reg.json` / `pw_submit.json` / `pw_close_intent_mle.json` のみ残す（cohort 不変）。
+anvil の block gas limit は 30M（attest / finalize は 20M envelope の対象外）、submit tx の
+固定 gas limit 20M の検証は従来どおり。
 
 ## 残る前提
 
-`IntmaxRollup.releaseRuntime` の chain 31337 固定は MLE ブランチの設計どおり維持されている
-（独立した暗号レビューの記録と別の release change が前提）。MLE/WHIR PCS 側の修復は
-マージ済みだが、protocol 固有の Fiat-Shamir / grinding 解析と外部レビューが完了するまで
-公開チェーンでの価値移動は NO-GO のまま。
+`IntmaxRollup.releaseRuntime` は 2026-09-05 に chain 31337 のハードコードから
+`deploymentChainId`（constructor で両 pinned adapter の `allowedChainId()` == `block.chainid` を
+要求した上で固定される immutable）への pin に変更した。deploy 時に
+`MLE_VERIFIER_CHAIN_ID=<chain id>` を指定すれば任意のチェーンで価値移動が有効になり、
+コード/状態を別チェーンへ移すと fail-closed になる（`test_releaseValueBoundaries_followTheDeploymentChain`）。
+未 pin の旧 `postBlockAndSubmit` は引き続き 31337 限定で、公開チェーンは
+`postBlockAndSubmitGuarded` のみ。MLE/WHIR PCS 側の修復はマージ済みだが、protocol 固有の
+Fiat-Shamir / grinding 解析と外部レビューが完了するまで公開チェーンでの価値移動は運用上 NO-GO。

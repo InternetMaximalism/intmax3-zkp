@@ -683,6 +683,49 @@ impl BlockWitnessGenerator {
 
     /// Like [`Self::add_channel_registration_keys`] but with an explicit member/delegate split
     /// (P5-B). The `keys` member tree must hold `member_count + delegate_count` active leaves.
+    /// Register a channel whose on-chain `registerChannel` record is supplied by the caller
+    /// (member keys AND recipients exactly as the live Rollup folded them into its registration
+    /// chain), while keeping the members' Falcon keys as local block-producer signers. The
+    /// deterministic `to_reg_record*` builders only know the synthetic `test_recipient_for`
+    /// recipients, which cannot mirror a live registration made with real payout addresses.
+    pub fn add_channel_registration_with_record(
+        &mut self,
+        record: ChannelRegRecord,
+        keys: ChannelMemberKeys,
+    ) -> Result<(), BlockWitnessGeneratorError> {
+        let channel = record.channel_id;
+        let active = (record.member_count + record.delegate_count) as usize;
+        if keys.falcon_keys.len() < active || keys.regev_pks.len() < active {
+            return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                "channel {}: {} signer keys / {} regev keys for {active} active participants",
+                channel.as_u64(),
+                keys.falcon_keys.len(),
+                keys.regev_pks.len()
+            )));
+        }
+        for slot in 0..active {
+            let leaf = keys.member_tree.get_leaf(slot as u64);
+            let entry = &record.members[slot];
+            if Bytes32::from(leaf.pk_g) != entry.pk_g
+                || Bytes32::from(leaf.pk_b) != entry.pk_b
+                || Bytes32::from(leaf.regev_pk_digest) != entry.regev_pk_digest
+            {
+                return Err(BlockWitnessGeneratorError::InvalidRequest(format!(
+                    "channel {}: registration record slot {slot} does not describe the supplied \
+                     member keys",
+                    channel.as_u64()
+                )));
+            }
+        }
+        self.add_channel_registration_material(
+            record,
+            keys.regev_pks[..active].to_vec(),
+            Some(keys.falcon_keys[..active].to_vec()),
+        )?;
+        self.fixture_channel_keys.insert(channel, keys);
+        Ok(())
+    }
+
     pub fn add_channel_registration_keys_split(
         &mut self,
         channel_id: u32,

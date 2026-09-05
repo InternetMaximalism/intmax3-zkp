@@ -1104,6 +1104,49 @@ contract IntmaxRollupTest is Test {
         rollup.creditChannelExit(address(this), 0, 1);
     }
 
+    /// @notice `releaseRuntime` follows the deployment chain, not a hard-coded devnet id: a rollup
+    ///         whose pinned adapters name a public chain accepts value on that chain, and only there.
+    function test_releaseValueBoundaries_followTheDeploymentChain() public {
+        uint256 publicChain = 11155111;
+        vm.chainId(publicChain);
+        IntmaxRollup pinned = new IntmaxRollup(
+            fraudTreasury,
+            new MockPinnedMleVerifierV2(publicChain),
+            new MockPinnedMleVerifierV2(publicChain),
+            bytes32(0)
+        );
+        assertEq(pinned.deploymentChainId(), publicChain, "deployment chain pin");
+
+        vm.deal(address(this), 2 ether);
+        pinned.deposit{value: 1}(bytes32(uint256(1)), 0, 1, bytes32(0));
+        assertEq(pinned.totalEscrowed(), 1, "deposit accepted on the deployment chain");
+
+        // The unpinned legacy post selector stays local-devnet-only even on the deployment chain.
+        IntmaxRollup.SubBlock[] memory emptyBatch = new IntmaxRollup.SubBlock[](0);
+        vm.expectRevert(IntmaxRollup.ReleaseRuntimeUnavailable.selector);
+        pinned.postBlockAndSubmit{value: 1 ether}(emptyBatch, bytes32(0), 0, bytes32(0), bytes32(0));
+
+        // Code/state moved to any other chain (including the local devnet) fails closed.
+        vm.chainId(31337);
+        vm.expectRevert(IntmaxRollup.ReleaseRuntimeUnavailable.selector);
+        pinned.deposit{value: 1}(bytes32(uint256(1)), 0, 1, bytes32(0));
+        vm.expectRevert(IntmaxRollup.ReleaseRuntimeUnavailable.selector);
+        pinned.withdraw(1);
+
+        // Adapters pinned to a different chain than the deployment chain are refused outright.
+        // (the mock adapter itself refuses construction off its chain, so pin it on 31337 first).
+        vm.chainId(31337);
+        MockPinnedMleVerifierV2 validity = new MockPinnedMleVerifierV2(31337);
+        vm.chainId(publicChain);
+        MockPinnedMleVerifierV2 withdrawal = new MockPinnedMleVerifierV2(publicChain);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IntmaxRollup.PinnedMleVerifierChainMismatch.selector, address(validity), publicChain, 31337
+            )
+        );
+        new IntmaxRollup(fraudTreasury, validity, withdrawal, bytes32(0));
+    }
+
     function test_finalize_success() public {
         bytes memory mleProof = _defaultMleProof();
 

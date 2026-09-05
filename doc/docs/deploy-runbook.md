@@ -3,7 +3,8 @@
 > **RELEASE STATUS (2026-09-03): NO-GO FOR PUBLIC VALUE.** MLE/WHIR V2 is integrated, but the
 > independent cryptographic review and the other blockers in
 > `doc/audit/audit30-08-2026-final-security-closure.md` are not closed. The Rollup's
-> `releaseRuntime` guard remains chain-31337-only. Do not open deposits, post/finalize, withdraw,
+> `releaseRuntime` guard is pinned to the deployment chain (the chain the MLE adapters were pinned
+> to with `MLE_VERIFIER_CHAIN_ID`); local acceptance stays on 31337. Do not open deposits, post/finalize, withdraw,
 > close, claim, or fund a channel on Sepolia/mainnet. Public-chain configuration may be used only
 > in a non-broadcast simulation to inspect constructor/runtime identity. A local demo,
 > test pass, or explicit `MLE_VERIFIER_CHAIN_ID` does not lift this containment.
@@ -175,9 +176,11 @@ contiguous nonce/order, raw constructor suffixes, all distinct addresses, finali
 adapter/core chain pins and every config/circuit/WHIR/protocol/session digest before publishing
 `settlement.json`.
 
-No production operator may advance beyond local acceptance while `releaseRuntime` is confined to
-31337. Removing that guard is a separate reviewed change after the independent cryptographic
-review, full Rust/Solidity/DA/gas/size matrix, real public-chain acceptance, and closure of all
+`releaseRuntime` is confined to the chain the Rollup was deployed on (`deploymentChainId`, which
+the constructor requires to equal both adapters' `allowedChainId()`); a public deployment needs the
+explicit `MLE_VERIFIER_CHAIN_ID` opt-in at deploy time. That containment is not a release approval:
+no production operator may open value on a public chain before the independent cryptographic
+review, the full Rust/Solidity/DA/gas/size matrix, real public-chain acceptance, and closure of all
 other final-audit NO-GO items.
 
 <details>
