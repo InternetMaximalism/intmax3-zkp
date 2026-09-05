@@ -1,5 +1,11 @@
 # Lean safety proof of abstract2.md (Lattice version) — explanation, threat model, limitations
 
+> **Historical abstract model.** The theorem descriptions below refer to the definitions in
+> `ChannelSafety2`, not to all current implementation paths. Current wire-v3 verification,
+> nullifier-scoped payouts, disabled exit lanes, and proof boundaries are documented in
+> [the 2026-09-05 alignment](../audit/lean-current-safety.md). Abstract close availability does
+> not prove current terminal-proof/signature availability.
+
 [`ChannelSafety2.lean`](./ChannelSafety2.lean) is the Lean 4 formalization and machine verification of the
 safety properties of `abstract2.md` (v2 = Lattice/Regev confidential version). It **reuses, via import**, the v1 proof
 [`ChannelSafety.lean`](./ChannelSafety.lean), and assumes the prerequisite knowledge of the v1 explanation

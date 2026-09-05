@@ -1,5 +1,10 @@
 # abstract2 — Minimal Specification and Security Mechanisms (Lattice version)
 
+> **Current implementation boundary (2026-09-05):** this is the abstract design lineage, not
+> a byte-for-byte description of the deployed protocol. Read the later dispositions in
+> `detail2.md` and [the current Lean scope](../audit/lean-current-safety.md) before treating
+> historical signature, membership, withdrawal, or liveness statements as implementation claims.
+
 This document is a **hypothetical minimal specification** for defining a "secure and confidential transfer function." Each piece of data is given a variable name, and each operation is given a function name.
 No extraneous data or structures are added whatsoever (everything is enumerated in this document).
 Based on [abstract.md](./abstract.md) (v1), this is a revised version (v2) reflecting a balance-confidentiality specification using Lattice (Regev/LWE) encryption.
@@ -441,11 +446,17 @@ This shows which of the **5 properties of §0** each mechanism guards.
 - **Both-wing binding of deltas**: because `TxLeafHash` binds the sending-side `senderDelta` (negative) and the receiving-side `recipientDelta` (positive) into the same hash structure,
   and `channelUpdateZKP` proves equal quantity, the tampering of "decreasing the sending side by a little and increasing the receiving side by a lot" is impossible.
 
-### 4.4 Exit / liveness exit-liveness
-- **Order and challenge of the close game**: `requestClose` → 10 minutes → `startProcess` → 1-day challenge → close.
-  During the challenge period one can replace with **a state of a newer version**, and the final state is finalized (preventing close with an old state).
-- **`GRACE_BEFORE_PROCESS` (10 minutes)**: signatures or communication lag immediately before/after the request can be regarded as "all nonexistent".
-- **`SIGN_TIMEOUT` (3 minutes)**: if signatures are half-assembled and incomplete, it is regarded as a protocol violation, and exit is possible via close (liveness assurance).
+### 4.4 Exit safety / conditional liveness
+- **Order and challenge of the close game**: the abstract sequence is `requestClose` → 10 minutes →
+  `startProcess` → challenge → close. The current Manager uses `submitCloseIntent` for the first
+  intent, a configured challenge period and a bounded replacement deadline.
+  An acceptable **strictly newer `(epoch, version)`** state can replace the pending intent while
+  the replacement window is open. This only protects against stale closure if the required state,
+  proofs and transaction inclusion are available in time; it is not a globally-latest-state theorem.
+- **`GRACE_BEFORE_PROCESS` (10 minutes)** delays first-intent submission. Waiting alone does not
+  erase delayed signatures or prove that all in-flight transfers have been reconciled.
+- **`SIGN_TIMEOUT` (3 minutes)** is an operational violation/exit trigger in the design, not a
+  proof that current terminal funding can complete without the required cooperation below.
 - **Close-request confirmation of both channels (`flowSend1`)**: do not transfer to a channel that has a close request.
 - **`withdrawClaimZKP`**: even if balances are encrypted, each member can generate the proof of
   their own share without another member's decryption help. Claim generation and submission are
@@ -470,3 +481,5 @@ This shows which of the **5 properties of §0** each mechanism guards.
     What is kept confidential is **the per-individual balances and breakdown within the channel**.
   - The channel total balance is visible as a public input of `balanceProof` (needed for determining the close cap).
   - The recipient of an intra-channel transfer naturally knows the amount addressed to them (they can decrypt it).
+  - A current on-chain withdrawal claim exposes its recipient, token and claimed amount in
+    calldata; confidentiality during channel operation does not hide that explicit L1 disclosure.

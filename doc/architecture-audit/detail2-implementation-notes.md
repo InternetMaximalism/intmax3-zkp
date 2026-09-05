@@ -1,5 +1,10 @@
 # detail2.md Implementation Notes — Approved Deviations & Outcomes
 
+> **Historical implementation record (current alignment: 2026-09-05).** The phase-completion
+> statements below refer to their dated revisions, not to a complete current security proof.
+> Later `detail2.md` dispositions (including disabled extra-credit exits and retired direct MSU)
+> and [the current Lean scope](../audit/lean-current-safety.md) supersede inconsistent older claims.
+
 Status: implementation of the detail2.md (SIS → Regev) migration is complete on branch
 `enshrined-paymentchannel` (phases P0–P9). This document records every approved deviation
 from the detail2.md spec text, the rationale, and the concrete implementation outcomes,

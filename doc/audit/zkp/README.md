@@ -1,5 +1,12 @@
 # intmax3-zkp — Lean formalization & soundness audit
 
+> **Current alignment, 2026-09-05:** [current scope and assumptions](../lean-current-safety.md)
+> target parent `c533e710` / submodule `b569e0d7`. The new independent
+> `Zkp.Contracts.CurrentVerification` and architecture `ChannelSafetyCurrent` modules cover
+> selected current security-critical transitions. The historical corpus described below has
+> not been wholesale revalidated. In particular, removed burn claims, the old zero-degree
+> verification bypass, and aggregate Manager payouts are not current code paths.
+
 > ## ⚠ STALENESS / TARGET-COMMIT BANNER (added 2026-08-26)
 >
 > A Lean model verifies THE CODE IT WAS WRITTEN AGAINST, not the working
@@ -33,8 +40,9 @@ vulnerability).
 
 ## Why Lean, and what "express every line" means
 
-A Plonky2 circuit is a set of gate constraints over field wires; a
-proof exists iff some wire assignment satisfies all of them. Bugs in
+A Plonky2 circuit defines a set of satisfying assignments over field wires.
+Connecting cryptographic verifier acceptance to such an assignment requires a
+separate proof-system soundness argument; this corpus does not establish it. Bugs in
 ZK circuits are almost never wrong arithmetic — they are **missing
 constraints**: a relation the protocol *assumes* but the circuit
 never *asserts*, letting a malicious prover pick a witness the
@@ -56,14 +64,16 @@ theorem sound : Constraints i o → o = nativeSpec i
   hint) becomes an existential/relation — never a function — so the
   model never over-constrains the prover and hides a real gap.
 
-**If `sound` is provable, the circuit binds what it should. If it is
-*not* provable, the unprovable obligation pinpoints the missing
-constraint** — that is the audit signal. Each such gap is recorded as
+**If `sound` is provable, the modeled constraints imply the modeled specification**,
+conditional on the explicit hypotheses. Applying that result to Rust requires a faithful
+translation. A failed proof attempt can indicate a missing constraint, an incorrect model,
+or an incomplete proof; it is not itself proof of a vulnerability. Each investigated gap is recorded as
 an `F-*` finding in `tasks/todo.md` with an inline `SECURITY FINDING`
 note at the Lean site.
 
-The translation is faithful line-by-line: every `*.lean` circuit file
-cites the exact `source.rs:line` ranges for each constraint it models.
+The historical translation was manually reviewed with `source.rs:line` citations.
+Those citations are not an automatically verified refinement relation and may be stale.
+For the new bounded scope, source hashes and named theorem/assumption checks now make drift explicit.
 
 ## Trusted base (axioms)
 

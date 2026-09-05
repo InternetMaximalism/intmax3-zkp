@@ -1,5 +1,10 @@
 # Lean safety proof of abstract2-1.md — explanation, threat model, limitations
 
+> **Historical abstract model.** These frozen theorems do not establish the availability of
+> disabled late-proof/post-close-claim paths or current direct membership changes. See
+> [the 2026-09-05 alignment](../audit/lean-current-safety.md) for current implementation coverage,
+> its conditional trust boundaries, and the separate current Lean modules.
+
 [`ChannelSafety21.lean`](./ChannelSafety21.lean) is the Lean 4 formalization of
 `abstract2-1.md` (v2.1 = small-block posting + cross-channel bulk transfer). It
 **imports** [`ChannelSafety2.lean`](./ChannelSafety2.lean) (abstract2 / Lattice v2)

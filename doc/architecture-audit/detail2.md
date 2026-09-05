@@ -1,5 +1,11 @@
 # detail2 — Detailed implementation spec for abstract2.md (data structures / file layout / numerics)
 
+> **Lean / implementation alignment (2026-09-05):** current parent `c533e710` uses submodule
+> `b569e0d7` / wire v3. [Current proof scope and assumptions](../audit/lean-current-safety.md)
+> supersede historical formal-verification and release claims in this document. The new scope
+> covers the current finalization/fraud boundary, close replay fences, and nullifier-scoped per-token payouts, not
+> cryptographic primitive soundness, all circuit constraints, or unconditional exit liveness.
+
 This document treats [abstract2.md](./abstract2.md) (v2 = the minimal spec of the Lattice/Regev confidential version) as a **necessary condition**, and
 describes the **updated spec** of the current implementation (the enshrined-paymentchannel branch) at the level of data structures, file
 layout, and numeric constants. abstract2.md defines "what must be satisfied," and this document defines "how the current
@@ -711,7 +717,7 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 | §3.5.1 `requestClose` | **[New] `requestClose(uint64,uint64)`**: binds the signed transaction to the durable freeze/cancel era, immediately makes `channelStatus` `ClosePending`, increments the monotone request generation, and records `closeRequestedAt = block.timestamp` (the signal to stop signing. `isNativeSendAllowed` becomes false) | Since the current contract does not separate request/startProcess, **a function is added** |
 | §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:submitCloseIntent` :558; GRACE check :587). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
 | §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `submitCloseIntent`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
-| §3.5.4 `closeAndWithdraw` | `finalizeCloseGuarded(bytes32,uint64)` → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` (`:905`). The historical no-arg finalize and aggregate payout selectors are removed from the production ABI. **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
+| §3.5.4 `closeAndWithdraw` | After `finalizeCloseGuarded(bytes32,uint64)`, `submitWithdrawalClaim` records individual claims, while terminal proof materialization plus backing pull funds the Manager. Those two steps may occur in either order; `claimWithdrawalCredit(bytes32 withdrawalNullifier)` requires both the record and sufficient recognized backing. The no-arg finalize and aggregate payout selectors are removed. Lifetime accepted claims are capped by `totalWithdrawn + amount ≤ finalizedChannelFundAmount`; actual payments are separately capped by recognized backing. Terminal funding currently requires a fresh N-of-N terminal child unless a pre-authorized exit kit exists; the historical signature-free burn description is not a current unilateral exit guarantee. | Current conditional exit and nullifier-scoped payout; see the dated Lean scope |
 | §3.5.5 `claimLateTx` | **Disabled:** `submitPostCloseClaim` reverts unconditionally because the old statement can double-credit a delta already absorbed by the closing balance. Re-enable only with an explicit unapplied-incoming commitment. | [Do not expose] |
 
 ### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md)
@@ -1260,8 +1266,16 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
   `totalCreditedOut[t]`, `withdrawalCredits[t][addr]` — with per-token CapInv
   `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` and payout dispatch by t
   (t == 0 → ETH; else ERC-20 at the L1-registered address). Token-t claims are paid ONLY from
-  token-t funds (TM-3). Post-close claims gain the same token dimension.
-- **Post-close claim token binding (TM-16, Phase 5a):** the inter-channel `tx_hash` fold — the
+  token-t funds (TM-3). Current `claimWithdrawalCredit(bytes32)` pays one proof/nullifier-scoped
+  record and subtracts only its amount from aggregate credit. `totalWithdrawn` is the lifetime
+  accepted-claim amount; `totalCreditedOut` is the actual paid amount. Funding pulls exactly the
+  remaining finalized cap after the terminal authorization is issued and consumed, and rejects
+  a mismatched native/ERC-20 balance delta. Unrelated recipient-wide Rollup credit alone is not
+  evidence that this channel's terminal proof was materialized.
+- **Historical post-close claim token binding (TM-16, Phase 5a; current entry point disabled):**
+  the following describes the retained historical circuit/PI format, not an active extra-credit
+  path. `submitPostCloseClaim` unconditionally reverts; ordinary slot-balance claims already include
+  absorbed incoming value. The inter-channel `tx_hash` fold — the
   settled-tx-accumulator leaf and the only artifact of an absorbed incoming tx that the closed
   channel's signed final state anchors — gains the descriptor's BASE `token_index` as its own
   canonical limb in the IMTC ids word: `ids = [0,0,0,0,0, token_index, dest_id, src_id]`
@@ -1295,15 +1309,21 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
 ### N-8. Privacy deviation (ACCEPTED, TM-12)
 
 `token_slot` travels in cleartext (IMPA-v2, slim wire), and per-(member, token) close claims
-reveal each member's holdings DISTRIBUTION at close. Amounts remain hidden; asset identity does
-not. Accepted for v1; revisit only if a future version encrypts the token selector.
+reveal each claimant's recipient, token and claimed amount on chain: `WithdrawalClaim.amount`
+is public calldata. The confidentiality of balances during channel operation does not extend to
+amounts explicitly claimed on L1. Asset identity is also public. This is an interface boundary,
+not a cryptographic confidentiality theorem.
 
 ### N-9. Formal model + security summary
 
-- Lean: `EncBalanceState` generalizes `Member → Ct` to `Member → Fin 10 → Ct`; `ValidEncState`,
-  `TransferProven`/`BulkUpdateProven`, and all conservation theorems become per-token
-  (`ChannelSafety2/21.lean`); the Manager's `CapInv` is re-proven PER BASE TOKEN (not per local
-  slot — TM-1).
+- Lean: the historical multi-token design extension is in `ChannelSafetyMT.lean`; the frozen
+  `ChannelSafety2/21.lean` modules are not silently replaced by a current multi-token contract model.
+  `ChannelSafetyCurrent.lean` covers the current fixed-channel, finalized-cap, per-base-token
+  claim/pull/payout slice, including lifetime claim allocation and nullifier-scoped payments.
+  A separate slice in that module covers current close replay fences and strict deadlines;
+  its composition with finalized accounting remains an explicit open obligation.
+  `Zkp.Contracts.CurrentVerification` covers the current compact verification/finalization/fraud
+  boundary. [The dated scope](../audit/lean-current-safety.md) lists assumptions and exclusions.
 - Domain constants: every changed preimage gets a NEW constant (slot leaf, H1 header, IMPA, IMLD,
   IMCW, E-2 PI, TFD), registered in §G-2 with the non-collision check at implementation time;
   new fields always occupy their own canonical limb (TM-15).

@@ -1,0 +1,372 @@
+{
+  "schema_version": 1,
+  "audit_base_commit": "c533e710a2d8787624fe429fceee70cdbe000221",
+  "submodules": [
+    {
+      "path": "contracts/lib/polygon-plonky2",
+      "commit": "b569e0d71c6a7a180fe616915b7a76976540b155"
+    }
+  ],
+  "files": [
+    {
+      "path": "contracts/src/IntmaxRollup.sol",
+      "sha256": "45c3e7aa5c48f22f07a47590b5404e59338a95956dfff7402fb83be812a2db93",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementManager.sol",
+      "sha256": "d1f0efb8f7b157acfc8b536c3f6eafd686a992723a44ca7ac21b0ec816900ced",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementVerifier.sol",
+      "sha256": "a2fcefa8f762bda6859a38d759151be92eda040cc4db36daa769efd67e031948",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/CloseFundingMaterializer.sol",
+      "sha256": "d6d4ee37fa2938ad2d039e951c942af11ea0736cfc079d915ef462104f293a66",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/BlobKZGVerifier.sol",
+      "sha256": "b9fb050db2c6fcef451f893827fac7fa142d74a4fa45eece555456809e4726ba",
+      "role": "implementation"
+    },
+    {
+      "path": "src/constants.rs",
+      "sha256": "b7cdc6258ee67b3726ce13674711f2671a691572e8d19a697749150ba9106fe7",
+      "role": "implementation"
+    },
+    {
+      "path": "src/utils/mle_prover.rs",
+      "sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
+      "role": "implementation"
+    },
+    {
+      "path": "src/circuits/channel/close_pis.rs",
+      "sha256": "e43f3502121efb39aea65bf6d6b05d6e30744b6d7c87a15a799f439853466914",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+      "sha256": "015d4c60abec6a877085cade3ee021e1a395c474f5cb3703015184f88b5a5eb8",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+      "sha256": "9c2f970e322afc43dd7c52ef44a2f2d7de70e6083e06eeee342d562b1eb85bc4",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+      "sha256": "a3b7d1050c1896cdac853fac75d89b5591dd3bb6ae1935f9252cbddaba570c38",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
+      "sha256": "340f59dbc6f2761de4e052ebbb80d11aea58e66fd331ab10a9574b0b3ed057d9",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyCurrent.lean",
+      "sha256": "76b383ebbb65e6ad09f1216d040d58adbbf72e70ce01898c8b7e5bd353604e2d",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Contracts/CurrentVerification.lean",
+      "sha256": "78c34814315ea73c3c197d09cac378b9c18920c63c4c774acf969f8a64938698",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyQ.lean",
+      "sha256": "75fefb43a000cf5eb275b8da7a2f9203d5600444debef186829f19227c9590e8",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyClose.lean",
+      "sha256": "1e87a250ac05134d58618dad0e775202f72746c5b611ac2f50972221701612fa",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyPW.lean",
+      "sha256": "cc793588d8f9f7996e4b4f82c1b78200df1d3d494a98e7803d21c21f4575d787",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/abstract2.md",
+      "sha256": "00fe258e2558e6449830187d756218f01567f4d083ab1f750ba488ffe262dc9a",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/abstract2-1.md",
+      "sha256": "bc98c5ae6d8efba32daa8a8227ea636de6463e66a65476c4ecd6165586fefd65",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/detail2.md",
+      "sha256": "992a62d0624e41fc0d1e6d73c25642791423e35a1cc576fc403506e766f236cd",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/detail2-implementation-notes.md",
+      "sha256": "58d1cdb4313a67645e5a5d7cb3dcbbe6a58118e651d285744245589f6d89e217",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/lean-safety-proof2.md",
+      "sha256": "a42949f257f7cc91395f9f2c1574a0e335716d4368bd936848519b0eb9b28ebc",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/lean-safety-proof21.md",
+      "sha256": "b6bc4bb8c067225cec8d3ddb26766f7799325e20c04256611b241cac91665e48",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/lean-current-safety.md",
+      "sha256": "e6a27d77a7ce2d84f6c31c43e2318702930f2b635a649090146ad5dae13f6855",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/README.md",
+      "sha256": "a716a8b84a87745b83de4f25d2f01d1cac45d4b63899bfdde46b425eeefc038f",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/SUMMARY.md",
+      "sha256": "6fb14ab5cb6858900476627477070ea6bed969cbcdcdd1fcbdc5fcd632b2a3a3",
+      "role": "spec"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "444d543a87d4eb0675298bafe0cdf0e268ec17d78ab17479b3699852d746adc0",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/verify-pinned-inputs.sh",
+      "sha256": "ddf761539a494bc446ae2d74a5de48f5ab3b9abc5e43c50c20fa5579f27a0086",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/lean-safety-guard.sh",
+      "sha256": "9a49d7753791a94a399cb94b4814f1d3346cc899730cc053b462b73313379119",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/lean-safety-guard.py",
+      "sha256": "4d8a4acfd7502b5304af74e8a303227e5c897d014105e39d4afe7862f0216b40",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/test-lean-safety-guard.py",
+      "sha256": "8b6256d22d39ac82237afbdd43aefac94ace880e7f84a8c196cbcd00baa58270",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/architecture-audit/lakefile.lean",
+      "sha256": "32a77e272102d38ff73577548c12e1d7b033e49a51f7d54d5c02c703b7fee05d",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/architecture-audit/lean-toolchain",
+      "sha256": "f3ea78fdd417d39483583b721709727c225eeea0c0e9d29283de43f577411095",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/lakefile.toml",
+      "sha256": "d4a61a9e97f647fd9e8f90962d535b67142c7c5d6b68dee408fd6722f6c4c618",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/lean-toolchain",
+      "sha256": "f3ea78fdd417d39483583b721709727c225eeea0c0e9d29283de43f577411095",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp.lean",
+      "sha256": "d24ab01ffdc21c37f247bb59d122e6408da04f890f4cc66b98ee7c57d7cf5510",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/forge-test-guard.sh",
+      "sha256": "b87324466e49c8f8b4b620b129a54102c479d60ec7ab45f6cdee58cc57f3d322",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/CloseFundingAuthorization.t.sol",
+      "sha256": "e06aa3ef57d12679f1bcbca4c87a9acb0988e73a58f3f9602a9f7e39d1109916",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/RollupFraudHardening.t.sol",
+      "sha256": "e7cfc33e4932ee7c47e5ea63fb103ef82baa67f280405336e6be87510092f744",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/MleFinalizeE2E.t.sol",
+      "sha256": "7ac86f454aa835111fa5ae287278d2743eaee111383a04d8d163796273835256",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/RollupFinalizeDiagnostics.t.sol",
+      "sha256": "051edf17b59b35af518675c27f4979b778415487202950aa2173f70f2887531e",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/GenesisFinalizedRoot.t.sol",
+      "sha256": "e801def093eb39695473679b699e8c36bbd55fcea7ff80f78143ba9b71d0a141",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/CloseLifecycleHardening.t.sol",
+      "sha256": "49dc948d19b59add9c161a2a48e2c91f9b4861776a25fe574c8fff8e0b783074",
+      "role": "tooling"
+    }
+  ],
+  "theorem_checks": [
+    {
+      "project": "doc/architecture-audit",
+      "module": "ChannelSafetyCurrent",
+      "sources": [
+        "contracts/src/ChannelSettlementManager.sol",
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "contracts/src/CloseFundingMaterializer.sol",
+        "contracts/src/IntmaxRollup.sol",
+        "src/circuits/channel/close_pis.rs",
+        "src/constants.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/audit/lean-current-safety.md"
+      ],
+      "theorems": [
+        "ChannelSafetyCurrent.empty_safe",
+        "ChannelSafetyCurrent.step_preserves_safety",
+        "ChannelSafetyCurrent.trace_preserves_safety",
+        "ChannelSafetyCurrent.trace_caps",
+        "ChannelSafetyCurrent.step_credit_conservation",
+        "ChannelSafetyCurrent.step_token_conservation",
+        "ChannelSafetyCurrent.trace_credit_conservation",
+        "ChannelSafetyCurrent.trace_token_conservation",
+        "ChannelSafetyCurrent.trace_backing_conservation",
+        "ChannelSafetyCurrent.trace_recipient_conservation",
+        "ChannelSafetyCurrent.trace_total_paid_bounded",
+        "ChannelSafetyCurrent.trace_total_credited_bounded",
+        "ChannelSafetyCurrent.step_used_monotone",
+        "ChannelSafetyCurrent.trace_used_monotone",
+        "ChannelSafetyCurrent.step_spent_preserved",
+        "ChannelSafetyCurrent.step_no_payout_of_spent",
+        "ChannelSafetyCurrent.trace_no_payout_of_spent",
+        "ChannelSafetyCurrent.successful_payment_spent",
+        "ChannelSafetyCurrent.trace_payout_at_most_once",
+        "ChannelSafetyCurrent.registered_nullifier_cannot_be_registered_again",
+        "ChannelSafetyCurrent.empty_trace_payout_at_most_once",
+        "ChannelSafetyCurrent.failed_transfer_no_state_change",
+        "ChannelSafetyCurrent.pay_other_token_frame",
+        "ChannelSafetyCurrent.register_other_token_frame",
+        "ChannelSafetyCurrent.fund_other_token_frame",
+        "ChannelSafetyCurrent.pay_other_recipient_frame",
+        "ChannelSafetyCurrent.register_other_recipient_frame",
+        "ChannelSafetyCurrent.pay_other_nullifier_frame",
+        "ChannelSafetyCurrent.register_exact_record",
+        "ChannelSafetyCurrent.register_other_nullifier_frame",
+        "ChannelSafetyCurrent.pay_exact_record_and_amount",
+        "ChannelSafetyCurrent.funded_token_cannot_be_funded_again",
+        "ChannelSafetyCurrent.positive_fund_register_pay",
+        "ChannelSafetyCurrent.positive_accounting_result",
+        "ChannelSafetyCurrent.positive_two_records_failure_then_payment",
+        "ChannelSafetyCurrent.positive_other_record_survives",
+        "ChannelSafetyCurrent.lifecycle_request_success",
+        "ChannelSafetyCurrent.lifecycle_request_increments_counters",
+        "ChannelSafetyCurrent.lifecycle_submit_preserves_fences",
+        "ChannelSafetyCurrent.lifecycle_cancel_success",
+        "ChannelSafetyCurrent.lifecycle_cancel_advances_floor_preserves_generation",
+        "ChannelSafetyCurrent.lifecycle_cancel_strictly_decreases_nonce",
+        "ChannelSafetyCurrent.lifecycle_finalize_success",
+        "ChannelSafetyCurrent.lifecycle_finalize_preserves_fences",
+        "ChannelSafetyCurrent.lifecycle_call_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_step_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_run_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_failed_call_preserves_state",
+        "ChannelSafetyCurrent.lifecycle_request_rejects_stale_floor",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_stale_generation",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_stale_digest",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_deadline_equality",
+        "ChannelSafetyCurrent.lifecycle_finalize_failed_tail_rolls_back",
+        "ChannelSafetyCurrent.lifecycle_cancel_rejects_consumed_version",
+        "ChannelSafetyCurrent.lifecycle_cancel_replay_rejected_after_trace",
+        "ChannelSafetyCurrent.lifecycle_old_request_rejected_after_cancel_trace",
+        "ChannelSafetyCurrent.lifecycle_old_finalize_rejected_after_new_request_trace",
+        "ChannelSafetyCurrent.lifecycle_newer_is_strict_lexicographic",
+        "ChannelSafetyCurrent.lifecycle_same_key_not_newer",
+        "ChannelSafetyCurrent.lifecycle_newer_transitive",
+        "ChannelSafetyCurrent.lifecycle_newer_asymmetric",
+        "ChannelSafetyCurrent.lifecycle_replacement_requires_newer",
+        "ChannelSafetyCurrent.lifecycle_closed_calls_reject",
+        "ChannelSafetyCurrent.lifecycle_closed_trace_unchanged",
+        "ChannelSafetyCurrent.lifecycle_finalized_state_unchanged_after_trace",
+        "ChannelSafetyCurrent.lifecycle_positive_request_cancel_request",
+        "ChannelSafetyCurrent.lifecycle_positive_nonce_restored_generation_advances",
+        "ChannelSafetyCurrent.lifecycle_positive_strict_replay_and_deadline_gates"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Contracts.CurrentVerification",
+      "sources": [
+        "contracts/src/IntmaxRollup.sol",
+        "contracts/src/BlobKZGVerifier.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+        "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
+        "src/utils/mle_prover.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/audit/lean-current-safety.md",
+        "doc/audit/zkp/README.md",
+        "doc/audit/zkp/SUMMARY.md"
+      ],
+      "theorems": [
+        "Zkp.Contracts.CurrentVerification.hashLimbs_length",
+        "Zkp.Contracts.CurrentVerification.hashLimbs_each_lt_u32",
+        "Zkp.Contracts.CurrentVerification.returned_pi_requires_full_core",
+        "Zkp.Contracts.CurrentVerification.fullVerify_requires_bound_authenticated_pi",
+        "Zkp.Contracts.CurrentVerification.finalize_success_checks",
+        "Zkp.Contracts.CurrentVerification.finalize_requires_da_and_full_verification",
+        "Zkp.Contracts.CurrentVerification.finalize_authenticated_pi_are_u32",
+        "Zkp.Contracts.CurrentVerification.no_finalize_without_fullVerify",
+        "Zkp.Contracts.CurrentVerification.proof_conviction_requires_exact_invalid_code",
+        "Zkp.Contracts.CurrentVerification.unknown_code_never_convicts",
+        "Zkp.Contracts.CurrentVerification.starved_and_piMismatch_never_convict",
+        "Zkp.Contracts.CurrentVerification.compact_body_invalid_requires_exact_failure",
+        "Zkp.Contracts.CurrentVerification.compact_body_never_returns_invalid",
+        "Zkp.Contracts.CurrentVerification.compact_invalid_requires_exact_failure",
+        "Zkp.Contracts.CurrentVerification.valid_proof_wrong_pi_is_nonconvicting",
+        "Zkp.Contracts.CurrentVerification.parent_invalid_requires_adapter_invalid",
+        "Zkp.Contracts.CurrentVerification.verifyFraud_conviction_requires_attested_invalid",
+        "Zkp.Contracts.CurrentVerification.proof_removal_requires_typed_conviction",
+        "Zkp.Contracts.CurrentVerification.step_height_nondecreasing",
+        "Zkp.Contracts.CurrentVerification.run_height_nondecreasing",
+        "Zkp.Contracts.CurrentVerification.step_finalized_roots_persist",
+        "Zkp.Contracts.CurrentVerification.run_finalized_roots_persist",
+        "Zkp.Contracts.CurrentVerification.step_receipt_success",
+        "Zkp.Contracts.CurrentVerification.run_receipt_success",
+        "Zkp.Contracts.CurrentVerification.step_root_provenance",
+        "Zkp.Contracts.CurrentVerification.run_root_provenance",
+        "Zkp.Contracts.CurrentVerification.newly_finalized_requires_verified_receipt",
+        "Zkp.Contracts.CurrentVerification.finalized_from_genesis_requires_verified_receipt",
+        "Zkp.Contracts.CurrentVerification.newly_finalized_requires_pinned_core",
+        "Zkp.Contracts.CurrentVerification.accepted_witness_only_conditionally",
+        "Zkp.Contracts.CurrentVerification.ordinary_finalization_is_possible",
+        "Zkp.Contracts.CurrentVerification.empty_trace_has_no_receipt",
+        "Zkp.Contracts.CurrentVerification.trusted_initial_root_needs_no_receipt",
+        "Zkp.Contracts.CurrentVerification.ordinary_valid_proof_is_not_fraud",
+        "Zkp.Contracts.CurrentVerification.timeout_removal_is_separate_policy"
+      ]
+    }
+  ]
+}
