@@ -2,18 +2,24 @@
 //! channel-close-intent MLE/WHIR proof and the REAL whole-vector `CloseAssetBacking` proof.
 //!
 //! Phase A (tasks/close-verifier-a1-plan.md) turned `ChannelSettlementVerifier.verifyCloseIntent`
-//! into a REAL on-chain verification of the plonky2 `ChannelCloseCircuit` via the shared
-//! `@mle/MleVerifier.sol` rail. The signer-independent exit then made `submitCloseIntent` ALSO
-//! require (`ChannelSettlementManager._checkCloseProof`):
+//! into a REAL on-chain verification of the plonky2 `ChannelCloseCircuit` via the shared pinned
+//! compact-v2 MLE/WHIR rail (the SAME rail proven by validity/withdrawal). The signer-independent
+//! exit then made `submitCloseIntent` ALSO require (`ChannelSettlementManager._checkCloseProof`):
 //!   - `registry.isFinalizedStateRoot(intent.channelFundIntmaxStateRoot)` — the signed
 //!     `intmax_state_root` must be a rollup state root the lifecycle actually finalized; and
 //!   - `closeFundingMaterializer.requireSignedHeadBacking(channelId, finalSettledTxChain,
 //!     tokenFundsDigest)` — an attested `CloseAssetBackingCircuit` proof over the SAME final
 //!     balance proof, anchored at (>=) the channel's last posted block.
 //! A close witness with a placeholder state root / genesis balance proof can therefore never be
-//! submitted against the real contracts. This binary now builds the WHOLE family from ONE
-//! lifecycle so every cross-binding holds by construction:
+//! submitted against the real contracts. This binary builds the WHOLE family from ONE lifecycle
+//! so every cross-binding holds by construction:
 //!
+//!   0. Proof-free wire-v3 deployment configs of every close-family statement
+//!      (`close_intent_mle_config.json`, `close_asset_backing_mle_config.json`,
+//!      `close_lifecycle_validity_mle_config.json`, `close_withdrawal_mle_config.json`), each
+//!      create-once/compare-later (`persist_or_validate_mle_v2_config_json`). With
+//!      `--mle-config-only` the binary stops here: no witness or proof is constructed, which is
+//!      how the Manager CREATE2 address printer gets its inputs BEFORE any proof exists.
 //!   1. `wallet_core::build_channel_withdrawal` (channel 1, deposit 6 / withdraw 3, withdrawal
 //!      recipient = the close manager's CREATE2 address from `WD_RECIPIENT`) → the four `close_`
 //!      lifecycle files (`close_lifecycle.json`, `close_lifecycle_validity_mle.json`,
@@ -23,10 +29,13 @@
 //!   2. A close witness over THAT balance proof: `intmax_state_root = final ext commitment`
 //!      (== `close_lifecycle.json.final_state_root`), `settled_tx_chain` = the balance PI, fund
 //!      vector = the private asset tree (`{ETH -> 3}`, single lane) →
-//!      `close_intent_mle.json` + `close_intent.json`.
+//!      `close_intent_mle.json` (strict canonical full wire-v3 fixture whose `.compactProof.bytes`
+//!      is the exact `submitCloseIntent` calldata, validated against its config) +
+//!      `close_intent.json`.
 //!   3. The backing proof over the same balance proof / private state / ext state →
-//!      `close_asset_backing_mle.json`, `close_asset_backing_public_inputs.json` (the bare 26
-//!      raw limbs) and `close_asset_backing_manifest.json` (the `public_close_prover`
+//!      `close_asset_backing_mle.json` (full wire-v3 fixture, validated against
+//!      `close_asset_backing_mle_config.json`), `close_asset_backing_public_inputs.json` (the bare
+//!      26 raw limbs) and `close_asset_backing_manifest.json` (the `public_close_prover`
 //!      `OutputManifest` shape `DeployCloseCli._readBackingMle` authenticates).
 //!
 //! SECURITY: every exported value is pulled PROGRAMMATICALLY from PROVED public inputs
@@ -37,7 +46,8 @@
 //! between the two proofs) so a broken co-generation fails HERE, not at `submitCloseIntent`.
 //!
 //! Usage:
-//!   forge test --match-test test_printCloseManagerAddress -vv   # in contracts/, AFTER the plain set
+//!   cargo run --release --features close-fixture-bin --bin generate_close_fixture -- --mle-config-only
+//!   forge test --match-test test_printCloseManagerAddress -vv   # in contracts/, needs the configs
 //!   WD_RECIPIENT=0x<CLOSE_MANAGER_ADDRESS> \
 //!     cargo run --release --features close-fixture-bin --bin generate_close_fixture
 //!
@@ -51,8 +61,9 @@
 //!
 //! HEAVY COMPUTE: a full 3-block lifecycle (balance / validity / withdrawal proving + two
 //! wrap+MLE passes), a close-circuit proof + wrap + MLE, and a backing proof + wrap + MLE
-//! (degree 2^17-2^19+, many minutes, multi-GB). Run explicitly; the Solidity close tests skip
-//! gracefully until the `close_*` files exist.
+//! (degree 2^17-2^19+, many minutes, multi-GB). Run explicitly; the developer-facing Solidity
+//! close tests skip gracefully until the `close_*` files exist, while the non-skipping V2 fixture
+//! release manifest makes absence or a stale schema a release failure.
 
 use std::{fs, path::Path};
 
@@ -72,14 +83,23 @@ use intmax3_zkp::{
     ethereum_types::{
         address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256,
     },
-    public_close_prover::{sha256_hex, wrap_and_export_backing_mle},
+    public_close_prover::{
+        PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION, export_backing_mle_config, mle_v2_public_inputs,
+        sha256_hex, wrap_and_export_backing_mle,
+    },
     utils::{
         conversion::ToU64,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{
+            export_mle_v2_config_json, export_mle_v2_json, mle_v2_config_only_requested,
+            persist_or_validate_mle_v2_config_json, prove_with_mle_v2, setup_mle_vk_v2,
+            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
+        },
         serialize::serialize_verifier_data,
         wrapper::WrapperCircuit,
     },
-    wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
+    wallet_core::{
+        ChannelWithdrawalParams, build_channel_withdrawal, build_channel_withdrawal_mle_v2_configs,
+    },
 };
 use plonky2::{
     field::goldilocks_field::GoldilocksField,
@@ -103,8 +123,6 @@ const CLOSE_FIXTURE_WITHDRAWAL: u64 = 3;
 /// `31337`: the local devnet every checked-in fixture targets (`DeployCloseCli` requires
 /// `manifest.chainId == block.chainid`).
 const LOCAL_CHAIN_ID: u64 = 31_337;
-/// `public_close_prover` bundle schema (`DeployCloseCli._readBackingMle` requires 2).
-const PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION: u32 = 2;
 
 /// Descriptor JSON consumed by the Solidity close tests. Every field is derived from the PROVED
 /// close public inputs (or the member auth that produced them) — see SECURITY note in the header.
@@ -185,6 +203,8 @@ struct FixtureBackingManifest {
     backing_proof_bytes: usize,
     backing_mle_file: &'static str,
     backing_mle_bytes: usize,
+    backing_mle_config_file: &'static str,
+    backing_mle_config_bytes: usize,
     backing_public_inputs_file: &'static str,
     backing_public_input_count: usize,
     backing_finalized_extended_state_commitment: Bytes32,
@@ -197,6 +217,7 @@ struct FixtureBackingManifest {
     close_mle_sha256: String,
     backing_proof_sha256: String,
     backing_mle_sha256: String,
+    backing_mle_config_sha256: String,
     backing_public_inputs_sha256: String,
     close_intent_sha256: String,
     close_intent_full_sha256: String,
@@ -225,40 +246,17 @@ fn parse_address_hex(hex: &str) -> Address {
     Address::from_u32_slice(&limbs).expect("address from limbs")
 }
 
-/// Normalize an exported MLE `publicInputs` entry (decimal string / hex string / number) to u64.
-fn mle_limb_u64(v: &serde_json::Value, i: usize) -> u64 {
-    match v {
-        serde_json::Value::String(s) => s.parse::<u64>().unwrap_or_else(|_| {
-            u64::from_str_radix(s.trim_start_matches("0x"), 16).expect("limb hex")
-        }),
-        serde_json::Value::Number(n) => n.as_u64().expect("limb number"),
-        _ => panic!("unexpected limb json type at {i}"),
-    }
-}
-
-/// Assert the exported MLE json's `publicInputs` are EXACTLY `want` (the raw inner limbs the
-/// on-chain strict-limb bind rebinds). A mismatch means the on-chain bind could never match the
-/// proof, so fail loudly BEFORE the user spends gas.
+/// Assert the exported wire-v3 fixture's `proof.publicInputs` are EXACTLY `want` (the raw inner
+/// limbs the on-chain strict-limb bind rebinds). A mismatch means the on-chain bind could never
+/// match the proof, so fail loudly BEFORE the user spends gas.
 fn assert_mle_public_inputs(tag: &str, mle_json: &str, want: &[u64]) -> anyhow::Result<()> {
-    let parsed: serde_json::Value = serde_json::from_str(mle_json)?;
-    let mle_pis = parsed
-        .get("publicInputs")
-        .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("{tag} MLE json must carry publicInputs"));
+    let mle_pis = mle_v2_public_inputs(mle_json)?;
     assert_eq!(
-        mle_pis.len(),
-        want.len(),
-        "{tag} MLE publicInputs length must be {} (raw inner limbs), got {}",
-        want.len(),
-        mle_pis.len()
+        mle_pis,
+        want,
+        "{tag} MLE publicInputs must equal the {} raw inner limbs",
+        want.len()
     );
-    for (i, (got, want)) in mle_pis.iter().zip(want.iter()).enumerate() {
-        assert_eq!(
-            mle_limb_u64(got, i),
-            *want,
-            "{tag} MLE publicInputs[{i}] != proved limb"
-        );
-    }
     eprintln!(
         "[close] {tag} MLE publicInputs == {} raw limbs (sanity OK)",
         want.len()
@@ -267,8 +265,56 @@ fn assert_mle_public_inputs(tag: &str, mle_json: &str, want: &[u64]) -> anyhow::
 }
 
 fn main() -> anyhow::Result<()> {
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+
     // -----------------------------------------------------------------------
-    // Step 0: the lifecycle this family closes (the `close_` set, formerly written by
+    // Step 0 (proof-free): the wire-v3 deployment configs of both close-family statements this
+    // binary proves. Circuit setup only — no witness, no proof — so the Manager CREATE2 printer
+    // (`test_printCloseManagerAddress`) can run before the heavy passes, and so a later proof is
+    // refused if it disagrees with the config a verifier was already deployed from.
+    // -----------------------------------------------------------------------
+    eprintln!("[close] Step 0: build close circuit fixture (balance + agg + close circuits)");
+    let fx = test_fixture::fixture();
+    let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
+    let close_mle_config_json = export_mle_v2_config_json(&close_wrapper.data)?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("close_intent_mle_config.json"),
+        &close_mle_config_json,
+    )?;
+    eprintln!("[close] wrote/validated contracts/test/data/close_intent_mle_config.json");
+    // The backing circuit is a deterministic function of the Balance VD alone (the same VD the
+    // lifecycle below proves under; asserted once the lifecycle exists).
+    let fixture_balance_vd = fx.balance_processor.balance_vd();
+    let backing_circuit = CloseAssetBackingCircuit::<F, C, D>::new(&fixture_balance_vd);
+    let backing_mle_config_json = export_backing_mle_config(&backing_circuit)?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("close_asset_backing_mle_config.json"),
+        &backing_mle_config_json,
+    )?;
+    eprintln!("[close] wrote/validated contracts/test/data/close_asset_backing_mle_config.json");
+    if mle_v2_config_only_requested() {
+        // The `close_` lifecycle configs are circuit-derived too; emit them here so ONE
+        // `--mle-config-only` pass yields every close-family deployment config.
+        let lifecycle_configs = build_channel_withdrawal_mle_v2_configs()?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join("close_lifecycle_validity_mle_config.json"),
+            &lifecycle_configs.validity_mle_config_json,
+        )?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join("close_withdrawal_mle_config.json"),
+            &lifecycle_configs.withdrawal_mle_config_json,
+        )?;
+        eprintln!(
+            "[close] config-only mode: wrote/validated close_intent_mle_config.json, \
+             close_asset_backing_mle_config.json, close_lifecycle_validity_mle_config.json and \
+             close_withdrawal_mle_config.json; no witness or proof was constructed"
+        );
+        return Ok(());
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 0b: the lifecycle this family closes (the `close_` set, formerly written by
     // `WD_OUT_PREFIX=close_ generate_withdrawal_fixture`). Same deterministic keys / RNG seeds as
     // the plain set; only the baked withdrawal recipient (the manager) differs.
     // -----------------------------------------------------------------------
@@ -293,14 +339,20 @@ fn main() -> anyhow::Result<()> {
         burn_aux_data: None,
     };
     eprintln!(
-        "[close] Step 0: build the close_ lifecycle (channel {CLOSE_FIXTURE_CHANNEL_ID}, deposit \
+        "[close] Step 0b: build the close_ lifecycle (channel {CLOSE_FIXTURE_CHANNEL_ID}, deposit \
          {CLOSE_FIXTURE_DEPOSIT}, withdraw {CLOSE_FIXTURE_WITHDRAWAL}, recipient = {}) — HEAVY",
         withdrawal_recipient
     );
     let artifacts = build_channel_withdrawal(&params, None)?;
 
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("close_lifecycle_validity_mle_config.json"),
+        &artifacts.validity_mle_config_json,
+    )?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join("close_withdrawal_mle_config.json"),
+        &artifacts.withdrawal_mle_config_json,
+    )?;
     for (name, body) in [
         ("close_withdrawal_mle.json", &artifacts.withdrawal_mle_json),
         (
@@ -390,11 +442,8 @@ fn main() -> anyhow::Result<()> {
     // `build_channel_withdrawal`, so the proof's member-set commitment equals the registered one.
     // Asserted below against the lifecycle's own registration record rather than assumed.
     // -----------------------------------------------------------------------
-    eprintln!("[close] Step 1: build close circuit fixture (balance + agg + close circuits)");
-    let fx = test_fixture::fixture();
     assert_eq!(
-        fx.balance_processor.balance_vd(),
-        artifacts.balance_vd,
+        fixture_balance_vd, artifacts.balance_vd,
         "close-fixture balance verifier data != the lifecycle's balance verifier data (the \
          balance circuit family is deterministic; a mismatch means two different circuit builds)"
     );
@@ -468,17 +517,24 @@ fn main() -> anyhow::Result<()> {
     // verbatim, so the wrapped proof's MLE `publicInputs` equal the 103 close limbs above.
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 3: wrap + MLE (close proof)");
-    let close_wrapper = WrapperCircuit::<F, C, C, D>::new(&fx.close_circuit.data.verifier_data());
     let close_wrapped = close_wrapper.prove(&close_proof)?;
     close_wrapper.data.verify(close_wrapped.clone())?;
-    let close_vk = setup_mle_vk::<F, C, D>(&close_wrapper.data);
+    let close_vk = setup_mle_vk_v2::<F, C, D>(&close_wrapper.data);
     let mut pw = PartialWitness::new();
     pw.set_proof_with_pis_target(&close_wrapper.wrap_proof, &close_proof)?;
-    let close_mle = prove_with_mle::<F, C, D>(&close_wrapper.data, pw)?;
-    verify_mle_proof(&close_wrapper.data, &close_vk, &close_mle.proof)?;
-    let close_mle_json = export_mle_json(&close_mle.proof, &close_wrapper.data.common)?;
+    let close_mle = prove_with_mle_v2::<F, C, D>(&close_wrapper.data, pw)?;
+    verify_mle_proof_v2(&close_wrapper.data, &close_vk, &close_mle.proof)?;
+    let close_mle_json = export_mle_v2_json(&close_mle.proof, &close_vk, &close_wrapper.data)?;
+    let close_compact = validate_mle_v2_full_against_config_json(&close_mle_json, &close_mle_config_json)?;
     assert_mle_public_inputs("close", &close_mle_json, &pi_limbs)?;
+    eprintln!(
+        "[close] close compactProof = {} bytes (the exact submitCloseIntent calldata payload)",
+        close_compact.len()
+    );
 
+    // -----------------------------------------------------------------------
+    // Step 4: write outputs.
+    // -----------------------------------------------------------------------
     fs::write(out_dir.join("close_intent_mle.json"), &close_mle_json)?;
     eprintln!("[close] wrote contracts/test/data/close_intent_mle.json");
 
@@ -545,7 +601,6 @@ fn main() -> anyhow::Result<()> {
         ext.clone(),
         &artifacts.balance_vd,
     )?;
-    let backing_circuit = CloseAssetBackingCircuit::<F, C, D>::new(&artifacts.balance_vd);
     let backing_proof = backing_circuit.prove(&backing_witness)?;
     backing_circuit.data.verify(backing_proof.clone())?;
     eprintln!(
@@ -616,8 +671,17 @@ fn main() -> anyhow::Result<()> {
     // release envelope), then write the artifact triple + its manifest.
     // -----------------------------------------------------------------------
     eprintln!("[close] Step 5: wrap + MLE (backing proof)");
-    let backing_mle_json = wrap_and_export_backing_mle(&backing_circuit, &backing_proof)?;
+    let backing_mle = wrap_and_export_backing_mle(&backing_circuit, &backing_proof)?;
+    assert_eq!(
+        backing_mle.mle_config_json, backing_mle_config_json,
+        "backing wrap config drifted between the proof-free Step 0 export and the proof pass"
+    );
+    let backing_mle_json = backing_mle.mle_json;
     assert_mle_public_inputs("backing", &backing_mle_json, &backing_limbs)?;
+    eprintln!(
+        "[close] backing compactProof = {} bytes (the exact attestSignedHeadBacking calldata payload)",
+        backing_mle.compact_proof.len()
+    );
 
     let backing_public_inputs_bytes = serde_json::to_vec_pretty(&backing_limbs)?;
     fs::write(
@@ -644,7 +708,8 @@ fn main() -> anyhow::Result<()> {
         comment: "Checked-in stand-in for a `public_close_prover` bundle manifest, co-generated by \
                   `generate_close_fixture` with close_intent*.json / close_lifecycle*.json. Only \
                   the backing triple is materialized in this directory (backing_mle.json -> \
-                  close_asset_backing_mle.json, backing_public_inputs.json -> \
+                  close_asset_backing_mle.json, backing_mle_config.json -> \
+                  close_asset_backing_mle_config.json, backing_public_inputs.json -> \
                   close_asset_backing_public_inputs.json); the remaining payload hashes cover the \
                   in-memory bytes of the same run. `rollup` is the CLOSE_BACKING_ROLLUP env at \
                   generation time (0x0 when unset): DeployGuards synthesizes a manifest with its \
@@ -662,6 +727,8 @@ fn main() -> anyhow::Result<()> {
         backing_proof_bytes: backing_proof_bytes.len(),
         backing_mle_file: "backing_mle.json",
         backing_mle_bytes: backing_mle_json.len(),
+        backing_mle_config_file: "backing_mle_config.json",
+        backing_mle_config_bytes: backing_mle_config_json.len(),
         backing_public_inputs_file: "backing_public_inputs.json",
         backing_public_input_count: backing_limbs.len(),
         backing_finalized_extended_state_commitment: backing_pis
@@ -675,6 +742,7 @@ fn main() -> anyhow::Result<()> {
         close_mle_sha256: sha256_hex(close_mle_json.as_bytes()),
         backing_proof_sha256: sha256_hex(&backing_proof_bytes),
         backing_mle_sha256: sha256_hex(backing_mle_json.as_bytes()),
+        backing_mle_config_sha256: sha256_hex(backing_mle_config_json.as_bytes()),
         backing_public_inputs_sha256: sha256_hex(&backing_public_inputs_bytes),
         close_intent_sha256: sha256_hex(descriptor_json.as_bytes()),
         close_intent_full_sha256: sha256_hex(&close_intent_full_bytes),

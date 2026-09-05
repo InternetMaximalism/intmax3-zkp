@@ -3,9 +3,7 @@ pragma solidity ^0.8.24;
 
 import {ChannelSettlementManager} from "./ChannelSettlementManager.sol";
 import {IntmaxRollup} from "./IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
+import {IPinnedMleVerifierV2} from "./IPinnedMleVerifierV2.sol";
 
 /// @title RETIRED terminal-child close-funding implementation
 /// @notice Installs every authorization for one terminal asset lane and consumes them with the
@@ -56,13 +54,13 @@ abstract contract LegacyTerminalChildFundingMaterializer {
         ChannelSettlementManager manager,
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external {
         bytes32 auxData = _validateCompleteLane(manager, withdrawals, true);
         for (uint256 i = 0; i < withdrawals.length; ++i) {
             manager.authorizeCloseFunding(withdrawals[i].tokenIndex, withdrawals[i].auxData);
         }
-        rollup.withdrawNative(withdrawals, withdrawalProver, mleProof);
+        rollup.withdrawNative(withdrawals, withdrawalProver, compactProof);
         emit CloseFundingMaterialized(address(manager), 0, auxData, keccak256(abi.encode(withdrawals)));
     }
 
@@ -70,13 +68,13 @@ abstract contract LegacyTerminalChildFundingMaterializer {
         ChannelSettlementManager manager,
         IntmaxRollup.Withdrawal[] calldata withdrawals,
         address withdrawalProver,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external {
         bytes32 auxData = _validateCompleteLane(manager, withdrawals, false);
         for (uint256 i = 0; i < withdrawals.length; ++i) {
             manager.authorizeCloseFunding(withdrawals[i].tokenIndex, withdrawals[i].auxData);
         }
-        rollup.withdrawERC20(withdrawals, withdrawalProver, mleProof);
+        rollup.withdrawERC20(withdrawals, withdrawalProver, compactProof);
         emit CloseFundingMaterialized(address(manager), 1, auxData, keccak256(abi.encode(withdrawals)));
     }
 
@@ -165,20 +163,11 @@ contract CloseFundingMaterializer {
     // ABI names retained so old publishers/tests can identify the retired route; the tombstone
     // functions below now always return CooperativeCloseFundingDeprecated before evaluating them.
     error FundingLaneLengthMismatch(uint256 expected, uint256 supplied);
-    error OnlyDeployer();
-    error BackingVkAlreadySet();
-    error InvalidBackingVk();
+    error InvalidBackingVerifier(address verifier);
+    error BackingVerifierChainMismatch(address verifier, uint256 expected, uint256 actual);
     error BackingProofInvalid();
     error BackingProofNotAttested();
     error BackingPublicInputsMismatch();
-
-    struct MleVk {
-        uint256 degreeBits;
-        bytes32 preprocessedRoot;
-        uint256 numConstants;
-        uint256 numRoutedWires;
-        bytes32 gatesDigest;
-    }
 
     struct BackingStatement {
         bytes32 settledTxChain;
@@ -188,14 +177,11 @@ contract CloseFundingMaterializer {
     }
 
     IntmaxRollup public immutable rollup;
-    MleVerifier public backingMleVerifier;
-    MleVk public backingMleVk;
-    bool public backingVkInitialized;
-    SpongefishWhirVerify.WhirParams private _backingWhirParams;
-    bytes public backingWhirProtocolId;
-    bytes public backingWhirSessionId;
-    uint256[] private _backingKIs;
-    uint256[] private _backingSubgroupGenPowers;
+    /// @notice The constructor-pinned compact-v2 adapter of the CloseAssetBacking circuit. It
+    ///         recursively checks the Balance proof and exposes only the 26 fields consumed at the
+    ///         L1 exit boundary. Like every other statement verifier of this deployment it owns its
+    ///         complete immutable VK/configuration; there is no post-deploy initialization.
+    IPinnedMleVerifierV2 public immutable backingMleVerifier;
 
     mapping(uint32 => address) public managerOfChannel;
     mapping(uint32 => uint64) public frozenGeneration;
@@ -226,38 +212,46 @@ contract CloseFundingMaterializer {
         uint32 indexed channelId, address indexed manager, bytes32 indexed closeIntentDigest, uint8 tokenCount
     );
 
-    constructor(IntmaxRollup rollup_) {
+    constructor(IntmaxRollup rollup_, IPinnedMleVerifierV2 backingMleVerifier_) {
         if (address(rollup_).code.length == 0) revert InvalidRollup();
         rollup = rollup_;
+        _requirePinnedVerifier(backingMleVerifier_);
+        backingMleVerifier = backingMleVerifier_;
     }
 
-    /// @notice Set the CloseAssetBacking circuit VK exactly once. This circuit recursively checks
-    ///         the Balance proof and exposes only the 26 fields needed at the L1 exit boundary.
-    function initializeBackingVk(
-        MleVerifier verifier,
-        MleVk memory vk,
-        SpongefishWhirVerify.WhirParams memory whirParams,
-        bytes memory protocolId,
-        bytes memory sessionId,
-        uint256[] memory kIs,
-        uint256[] memory subgroupGenPowers
-    ) external {
-        if (msg.sender != rollup.deployer()) revert OnlyDeployer();
-        if (backingVkInitialized) revert BackingVkAlreadySet();
-        if (address(verifier).code.length == 0 || vk.degreeBits == 0) revert InvalidBackingVk();
-        backingVkInitialized = true;
-        backingMleVerifier = verifier;
-        backingMleVk = vk;
-        _copyWhirParams(_backingWhirParams, whirParams);
-        backingWhirProtocolId = protocolId;
-        backingWhirSessionId = sessionId;
-        for (uint256 i = 0; i < kIs.length; ++i) {
-            _backingKIs.push(kIs[i]);
+    /// @dev Mirrors the Rollup/Manager constructor invariant: the adapter and its linked core must
+    ///      be deployed, pinned to this chain, and consistent with each other before any receipt
+    ///      can be recorded against them.
+    function _requirePinnedVerifier(IPinnedMleVerifierV2 verifier) private view {
+        address verifierAddress = address(verifier);
+        if (verifierAddress.code.length == 0) revert InvalidBackingVerifier(verifierAddress);
+        uint256 verifierChainId;
+        try verifier.allowedChainId() returns (uint256 chainId) {
+            verifierChainId = chainId;
+        } catch {
+            revert InvalidBackingVerifier(verifierAddress);
         }
-        for (uint256 i = 0; i < subgroupGenPowers.length; ++i) {
-            _backingSubgroupGenPowers.push(subgroupGenPowers[i]);
+        if (verifierChainId != block.chainid) {
+            revert BackingVerifierChainMismatch(verifierAddress, block.chainid, verifierChainId);
+        }
+        address verifierCore;
+        try verifier.core() returns (address core_) {
+            verifierCore = core_;
+        } catch {
+            revert InvalidBackingVerifier(verifierAddress);
+        }
+        if (verifierCore.code.length == 0) revert InvalidBackingVerifier(verifierAddress);
+        uint256 coreChainId;
+        try IPinnedMleVerifierV2(verifierCore).allowedChainId() returns (uint256 chainId) {
+            coreChainId = chainId;
+        } catch {
+            revert InvalidBackingVerifier(verifierCore);
+        }
+        if (coreChainId != block.chainid) {
+            revert BackingVerifierChainMismatch(verifierCore, block.chainid, coreChainId);
         }
     }
+
 
     modifier onlyRollup() {
         if (msg.sender != address(rollup)) revert OnlyRollup();
@@ -343,12 +337,9 @@ contract CloseFundingMaterializer {
     /// @dev Permissionless and idempotent. Splitting this expensive verification from close
     ///      submission keeps the Manager ABI and challenge transaction bounded while preventing a
     ///      valid but unavailable backing proof from permanently displacing an exit-capable head.
-    function attestSignedHeadBacking(ChannelSettlementManager manager, MleVerifier.MleProof calldata backingProof)
-        external
-    {
-        BackingStatement memory statement = _validateBackingPublicInputs(manager, backingProof.publicInputs);
-        if (!backingVkInitialized) revert InvalidBackingVk();
-        if (!_verifyBackingProof(backingProof)) revert BackingProofInvalid();
+    function attestSignedHeadBacking(ChannelSettlementManager manager, bytes calldata backingProof) external {
+        uint256[] memory pi = _verifyBackingProof(backingProof);
+        BackingStatement memory statement = _validateBackingPublicInputs(manager, pi);
 
         uint32 channelId = uint32(manager.channelId());
         bytes32 statementKey =
@@ -406,10 +397,13 @@ contract CloseFundingMaterializer {
 
     /// @notice Permissionless signer-independent exit using finalized H plus its already-attested
     ///         CloseAssetBacking proof. No new channel signature or terminal child is accepted.
-    function materializeSignedHead(ChannelSettlementManager manager, MleVerifier.MleProof calldata backingProof)
-        external
-    {
-        BackingStatement memory statement = _validateBackingPublicInputs(manager, backingProof.publicInputs);
+    function materializeSignedHead(ChannelSettlementManager manager, bytes calldata backingProof) external {
+        // The public inputs are re-derived by the pinned adapter from the exact compact bytes
+        // rather than trusted from calldata; the statement/manager binding is checked first so a
+        // proof for another channel or an unbound manager fails by its own reason, then the
+        // attestation receipt keyed on these same bytes must exist.
+        BackingStatement memory statement =
+            _validateBackingPublicInputs(manager, _verifyBackingProof(backingProof));
         bytes32 proofId = _backingProofId(address(manager), backingProof);
         if (!attestedBackingProof[proofId]) revert BackingProofNotAttested();
         if (
@@ -419,23 +413,14 @@ contract CloseFundingMaterializer {
         _materialize(manager, statement.anchorBlockNumber);
     }
 
-    function _verifyBackingProof(MleVerifier.MleProof calldata backingProof) private view returns (bool valid) {
-        MleVk memory vk = backingMleVk;
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: vk.degreeBits,
-            preprocessedCommitmentRoot: vk.preprocessedRoot,
-            numConstants: vk.numConstants,
-            numRoutedWires: vk.numRoutedWires,
-            protocolId: backingWhirProtocolId,
-            sessionId: backingWhirSessionId,
-            kIs: _backingKIs,
-            subgroupGenPowers: _backingSubgroupGenPowers
-        });
-        try backingMleVerifier.verify(backingProof, vp, _loadWhirParams(_backingWhirParams), vk.gatesDigest) returns (
-            bool v
-        ) {
-            valid = v;
-        } catch {}
+    /// @dev The pinned adapter verifies the compact proof against its immutable configuration and
+    ///      returns the authenticated public inputs; any verifier failure is one explicit error.
+    function _verifyBackingProof(bytes calldata backingProof) private view returns (uint256[] memory pi) {
+        try backingMleVerifier.verifyCompactPublicInputs(backingProof) returns (uint256[] memory publicInputs) {
+            pi = publicInputs;
+        } catch {
+            revert BackingProofInvalid();
+        }
     }
 
     /// @dev Re-entered only by the Rollup's authenticated endpoint. The digest is consumed before
@@ -486,7 +471,7 @@ contract CloseFundingMaterializer {
     ///      u32 limbs; the anchor is canonical u63. The backing ext root need not equal H's signed
     ///      channel-fund root: it is the later finalized root that actually contains this Balance
     ///      proof. Channel/settled-chain/TFD are the bridge back to H.
-    function _validateBackingPublicInputs(ChannelSettlementManager manager, uint256[] calldata pi)
+    function _validateBackingPublicInputs(ChannelSettlementManager manager, uint256[] memory pi)
         private
         view
         returns (BackingStatement memory statement)
@@ -533,12 +518,13 @@ contract CloseFundingMaterializer {
         );
     }
 
-    function _backingProofId(address manager, MleVerifier.MleProof calldata proof) private view returns (bytes32) {
-        return
-            keccak256(abi.encode(BACKING_PROOF_DOMAIN, block.chainid, address(this), address(rollup), manager, proof));
+    function _backingProofId(address manager, bytes calldata proof) private view returns (bytes32) {
+        return keccak256(
+            abi.encode(BACKING_PROOF_DOMAIN, block.chainid, address(this), address(rollup), manager, keccak256(proof))
+        );
     }
 
-    function _limbsMatch(uint256[] calldata limbs, uint256 offset, bytes32 value) private pure returns (bool) {
+    function _limbsMatch(uint256[] memory limbs, uint256 offset, bytes32 value) private pure returns (bool) {
         uint256 v = uint256(value);
         for (uint256 i = 0; i < 8; ++i) {
             if (limbs[offset + i] != uint32(v >> (224 - 32 * i))) return false;
@@ -546,7 +532,7 @@ contract CloseFundingMaterializer {
         return true;
     }
 
-    function _limbsToBytes32(uint256[] calldata limbs, uint256 offset) private pure returns (bytes32 result) {
+    function _limbsToBytes32(uint256[] memory limbs, uint256 offset) private pure returns (bytes32 result) {
         uint256 v;
         for (uint256 i = 0; i < 8; ++i) {
             v = (v << 32) | limbs[offset + i];
@@ -554,82 +540,12 @@ contract CloseFundingMaterializer {
         result = bytes32(v);
     }
 
-    function _copyWhirParams(SpongefishWhirVerify.WhirParams storage dst, SpongefishWhirVerify.WhirParams memory src)
-        private
-    {
-        dst.numVariables = src.numVariables;
-        dst.foldingFactor = src.foldingFactor;
-        dst.numVectors = src.numVectors;
-        dst.numCommitments = src.numCommitments;
-        dst.outDomainSamples = src.outDomainSamples;
-        dst.inDomainSamples = src.inDomainSamples;
-        dst.initialSumcheckRounds = src.initialSumcheckRounds;
-        dst.numRounds = src.numRounds;
-        dst.finalSumcheckRounds = src.finalSumcheckRounds;
-        dst.finalSize = src.finalSize;
-        dst.initialCodewordLength = src.initialCodewordLength;
-        dst.initialMerkleDepth = src.initialMerkleDepth;
-        dst.initialDomainGenerator = src.initialDomainGenerator;
-        dst.initialInterleavingDepth = src.initialInterleavingDepth;
-        dst.initialNumVariables = src.initialNumVariables;
-        dst.initialCosetSize = src.initialCosetSize;
-        dst.initialNumCosets = src.initialNumCosets;
-        for (uint256 i = 0; i < src.rounds.length; ++i) {
-            dst.rounds.push(src.rounds[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint.length; ++i) {
-            dst.evaluationPoint.push(src.evaluationPoint[i]);
-        }
-        for (uint256 i = 0; i < src.evaluationPoint2.length; ++i) {
-            dst.evaluationPoint2.push(src.evaluationPoint2[i]);
-        }
-    }
-
-    function _loadWhirParams(SpongefishWhirVerify.WhirParams storage s)
-        private
-        view
-        returns (SpongefishWhirVerify.WhirParams memory p)
-    {
-        p.numVariables = s.numVariables;
-        p.foldingFactor = s.foldingFactor;
-        p.numVectors = s.numVectors;
-        p.numCommitments = s.numCommitments;
-        p.outDomainSamples = s.outDomainSamples;
-        p.inDomainSamples = s.inDomainSamples;
-        p.initialSumcheckRounds = s.initialSumcheckRounds;
-        p.numRounds = s.numRounds;
-        p.finalSumcheckRounds = s.finalSumcheckRounds;
-        p.finalSize = s.finalSize;
-        p.initialCodewordLength = s.initialCodewordLength;
-        p.initialMerkleDepth = s.initialMerkleDepth;
-        p.initialDomainGenerator = s.initialDomainGenerator;
-        p.initialInterleavingDepth = s.initialInterleavingDepth;
-        p.initialNumVariables = s.initialNumVariables;
-        p.initialCosetSize = s.initialCosetSize;
-        p.initialNumCosets = s.initialNumCosets;
-        uint256 n = s.rounds.length;
-        p.rounds = new SpongefishWhirVerify.RoundParams[](n);
-        for (uint256 i = 0; i < n; ++i) {
-            p.rounds[i] = s.rounds[i];
-        }
-        n = s.evaluationPoint.length;
-        p.evaluationPoint = new GoldilocksExt3.Ext3[](n);
-        for (uint256 i = 0; i < n; ++i) {
-            p.evaluationPoint[i] = s.evaluationPoint[i];
-        }
-        n = s.evaluationPoint2.length;
-        p.evaluationPoint2 = new GoldilocksExt3.Ext3[](n);
-        for (uint256 i = 0; i < n; ++i) {
-            p.evaluationPoint2[i] = s.evaluationPoint2[i];
-        }
-    }
-
     /// @notice Retired terminal-child route. Stale publishers fail with an explicit error.
     function materializeNative(
         ChannelSettlementManager,
         IntmaxRollup.Withdrawal[] calldata,
         address,
-        MleVerifier.MleProof calldata
+        bytes calldata
     ) external pure {
         revert CooperativeCloseFundingDeprecated();
     }
@@ -639,7 +555,7 @@ contract CloseFundingMaterializer {
         ChannelSettlementManager,
         IntmaxRollup.Withdrawal[] calldata,
         address,
-        MleVerifier.MleProof calldata
+        bytes calldata
     ) external pure {
         revert CooperativeCloseFundingDeprecated();
     }

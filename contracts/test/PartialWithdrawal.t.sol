@@ -5,7 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {IChannelRegistry, IChannelSettlementVerifier} from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol";
 
 contract PartialWithdrawalTest is CloseSettlementBase {
@@ -121,7 +120,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawalIntent_happy() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
@@ -133,7 +132,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_partialWithdrawal_requires_attested_backing_but_allows_historical_anchor() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         _testBackingAvailable = false;
@@ -155,7 +154,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         intent.closeNonce = 2;
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         vm.expectRevert(ChannelSettlementManager.NonCanonicalCloseMetadata.selector);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
 
@@ -174,7 +173,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitAndFinalize_happy() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
@@ -201,7 +200,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     function test_partialWithdrawal_delegateCountAboveFrozenCount_reverts() public {
         assertEq(uint256(manager.activeDelegateCount()), 0, "this manager registers 0 delegates");
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProofWithDelegateCount(intent, 3);
+        bytes memory proof = _closeProofWithDelegateCount(intent, 3);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
@@ -214,7 +213,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         uint32 mc = uint32(manager.activeMemberCount());
         // Build BEFORE arming expectRevert (the builder is itself an external call).
-        MleVerifier.MleProof memory overCap = _closeProofWithDelegateCount(intent, 1024 - mc + 1);
+        bytes memory overCap = _closeProofWithDelegateCount(intent, 1024 - mc + 1);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         vm.expectRevert(ChannelSettlementVerifier.CloseDelegateCountOutOfRange.selector);
@@ -248,7 +247,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         );
 
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory excludes =
+        bytes memory excludes =
             this._closeProofCd(intent, m.registeredMemberSetCommitment(), m.activeMemberCount(), 0);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
@@ -260,7 +259,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_auxDataZero() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.auxData = bytes32(0);
 
@@ -272,7 +271,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_chainMismatch() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         bytes32 wrongPrev = keccak256("wrong_prev");
@@ -291,7 +290,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         assertEq(uint8(manager.channelStatus()), uint8(ChannelSettlementManager.ChannelLifecycleStatus.ClosePending));
 
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
 
         vm.expectRevert(ChannelSettlementManager.ChannelClosed.selector);
@@ -302,7 +301,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_finalizePartialWithdrawal_reverts_challengeWindowOpen() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowOpen.selector);
@@ -313,7 +312,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_finalizePartialWithdrawal_reverts_atExactDeadline() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         vm.warp(block.timestamp + CHALLENGE_PERIOD);
@@ -334,7 +333,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     // it prevents an already-paid burn from monopolizing the singleton slot or re-enabling IPW2.
     function test_submitPartialWithdrawal_accountedBurnCannotBeResubmitted() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
@@ -416,7 +415,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
         // Neither the original nor a proof-side-nullifier variant can bypass the finalized IMBK
         // latch and re-enable the one-shot authorization.
-        MleVerifier.MleProof memory firstProof = _closeProof(firstIntent);
+        bytes memory firstProof = _closeProof(firstIntent);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalAlreadyAccounted.selector);
         manager.submitPartialWithdrawalIntent(firstIntent, firstProof, PREV_CHAIN, first);
         assertEq(manager.authorizedBurnAmount(TOKEN_INDEX), AMOUNT);
@@ -454,7 +453,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_challengeReplacement_newerStateWins() public {
         ChannelSettlementManager.CloseIntent memory intent1 = _partialIntentAtVersion(10, 1);
-        MleVerifier.MleProof memory proof1 = _closeProof(intent1);
+        bytes memory proof1 = _closeProof(intent1);
         ChannelSettlementManager.AuthorizedWithdrawal memory w1 = _authorizedWithdrawal();
 
         // Adjust w1.auxData and PREV_CHAIN to match intent1's finalSettledTxChain
@@ -468,7 +467,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
         // Submit newer intent (higher stateVersion)
         ChannelSettlementManager.CloseIntent memory intent2 = _partialIntentAtVersion(15, 1);
-        MleVerifier.MleProof memory proof2 = _closeProof(intent2);
+        bytes memory proof2 = _closeProof(intent2);
         manager.submitPartialWithdrawalIntent(intent2, proof2, PREV_CHAIN, w1);
 
         // The pending digest should have changed (same withdrawal but new close intent → same authDigest)
@@ -508,7 +507,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         secondIntent.finalSettledTxChain =
             _settledTxChainPush(firstIntent.finalSettledTxChain, second.auxData);
 
-        MleVerifier.MleProof memory secondProof = _closeProof(secondIntent);
+        bytes memory secondProof = _closeProof(secondIntent);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDifferentBurnPending.selector);
         manager.submitPartialWithdrawalIntent(
             secondIntent,
@@ -525,7 +524,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_challengeReplacement_sameVersionReverts() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntentAtVersion(10, 1);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalNotNewer.selector);
@@ -534,11 +533,11 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_challengeReplacement_lowerVersionReverts() public {
         ChannelSettlementManager.CloseIntent memory intent1 = _partialIntentAtVersion(15, 1);
-        MleVerifier.MleProof memory proof1 = _closeProof(intent1);
+        bytes memory proof1 = _closeProof(intent1);
         manager.submitPartialWithdrawalIntent(intent1, proof1, PREV_CHAIN, _authorizedWithdrawal());
 
         ChannelSettlementManager.CloseIntent memory intent2 = _partialIntentAtVersion(10, 1);
-        MleVerifier.MleProof memory proof2 = _closeProof(intent2);
+        bytes memory proof2 = _closeProof(intent2);
 
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalNotNewer.selector);
         manager.submitPartialWithdrawalIntent(intent2, proof2, PREV_CHAIN, _authorizedWithdrawal());
@@ -548,11 +547,11 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_challengeReplacement_higherEpochWins() public {
         ChannelSettlementManager.CloseIntent memory intent1 = _partialIntentAtVersion(100, 1);
-        MleVerifier.MleProof memory proof1 = _closeProof(intent1);
+        bytes memory proof1 = _closeProof(intent1);
         manager.submitPartialWithdrawalIntent(intent1, proof1, PREV_CHAIN, _authorizedWithdrawal());
 
         ChannelSettlementManager.CloseIntent memory intent2 = _partialIntentAtVersion(5, 2);
-        MleVerifier.MleProof memory proof2 = _closeProof(intent2);
+        bytes memory proof2 = _closeProof(intent2);
         manager.submitPartialWithdrawalIntent(intent2, proof2, PREV_CHAIN, _authorizedWithdrawal());
 
         assertEq(manager.pendingPartialWithdrawalEpoch(), 2);
@@ -563,7 +562,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_cancelPartialWithdrawal_happy() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         assertTrue(manager.partialWithdrawalPending());
@@ -583,7 +582,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             request.revivedStateVersion,
             request.revivedChannelStateDigest
         );
-        MleVerifier.MleProof memory cancelProof = CloseTestLib.proofWithLimbs(limbs);
+        bytes memory cancelProof = CloseTestLib.proofWithLimbs(limbs);
 
         manager.cancelPartialWithdrawal(request, cancelProof);
 
@@ -597,7 +596,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager.CancelCloseRequest({
             closeIntentDigest: keccak256("x"), revivedStateVersion: 99, revivedChannelStateDigest: keccak256("revived")
         });
-        MleVerifier.MleProof memory dummy;
+        bytes memory dummy;
 
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalNotPending.selector);
         manager.cancelPartialWithdrawal(request, dummy);
@@ -607,7 +606,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_cancelPartialWithdrawal_reverts_digestMismatch() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         ChannelSettlementManager.CancelCloseRequest memory request = ChannelSettlementManager.CancelCloseRequest({
@@ -615,7 +614,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
             revivedStateVersion: 99,
             revivedChannelStateDigest: keccak256("revived")
         });
-        MleVerifier.MleProof memory dummy;
+        bytes memory dummy;
 
         vm.expectRevert(ChannelSettlementManager.CloseIntentDigestMismatch.selector);
         manager.cancelPartialWithdrawal(request, dummy);
@@ -625,7 +624,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_finalizePartialWithdrawal_reverts_afterRequestClose() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
 
         // requestClose during challenge period → status becomes ClosePending
@@ -658,7 +657,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         intent.closeFreezeNonce = 2;
         intent.closeNonce = 2;
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         vm.expectRevert(ChannelSettlementManager.InvalidFreezeNonce.selector);
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, _authorizedWithdrawal());
@@ -720,7 +719,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
         intent.channelFundAmounts[0] = 0;
         intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
@@ -735,7 +734,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
         intent.channelFundAmounts[0] = 20;
         intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
@@ -754,7 +753,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory firstIntent = _partialIntentAtVersion(12, 1);
         firstIntent.channelFundAmounts[0] = 20;
         firstIntent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, first.auxData);
-        MleVerifier.MleProof memory firstProof = _closeProof(firstIntent);
+        bytes memory firstProof = _closeProof(firstIntent);
 
         manager.submitPartialWithdrawalIntent(firstIntent, firstProof, PREV_CHAIN, first);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
@@ -771,7 +770,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory secondIntent = _partialIntentAtVersion(13, 2);
         secondIntent.channelFundAmounts[0] = 0;
         secondIntent.finalSettledTxChain = _settledTxChainPush(secondPrevChain, second.auxData);
-        MleVerifier.MleProof memory secondProof = _closeProof(secondIntent);
+        bytes memory secondProof = _closeProof(secondIntent);
 
         manager.submitPartialWithdrawalIntent(secondIntent, secondProof, secondPrevChain, second);
         vm.warp(block.timestamp + CHALLENGE_PERIOD + 1);
@@ -801,7 +800,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         intent.channelFundAmounts[0] = postFund;
         intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
@@ -819,7 +818,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
         intent.channelFundAmounts[0] = type(uint256).max;
         intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         w.amount = committedAmount + 1;
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalDescriptorMismatch.selector);
@@ -830,7 +829,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     /// rather than silently defaulting to slot 0.
     function test_submitPartialWithdrawal_reverts_tokenNotInRegistry() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.tokenIndex = 7; // registry is [0] with tokenCount 1
 
@@ -845,7 +844,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         // Slot 1 is beyond tokenCount==1 — pure padding. Give it a token index and a huge fund.
         intent.tokenRegistry[1] = 42;
         intent.channelFundAmounts[1] = type(uint256).max;
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.tokenIndex = 42;
         w.amount = 1_000_000;
@@ -862,7 +861,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_outsiderRecipientTamper() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.recipient = OUTSIDER;
 
@@ -873,7 +872,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
     /// A funded EOA cannot replace the recipient authorized by the signed burn descriptor either.
     function test_submitPartialWithdrawal_reverts_fundedEoaRecipientTamper() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.recipient = mallory;
 
@@ -889,7 +888,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
         w.recipient = bob;
         w.auxData = _burnDescriptor(w.recipient, w.tokenIndex, w.amount);
         intent.finalSettledTxChain = _settledTxChainPush(PREV_CHAIN, w.auxData);
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
 
         manager.submitPartialWithdrawalIntent(intent, proof, PREV_CHAIN, w);
         assertTrue(manager.partialWithdrawalPending());
@@ -898,7 +897,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_amountDescriptorMismatch() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.amount = AMOUNT + 1;
 
@@ -908,7 +907,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_amountMinusOneDescriptorMismatch() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.amount = AMOUNT - 1;
 
@@ -918,7 +917,7 @@ contract PartialWithdrawalTest is CloseSettlementBase {
 
     function test_submitPartialWithdrawal_reverts_recipientDescriptorMismatch() public {
         ChannelSettlementManager.CloseIntent memory intent = _partialIntent();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         ChannelSettlementManager.AuthorizedWithdrawal memory w = _authorizedWithdrawal();
         w.recipient = bob; // registered, but not the recipient committed by auxData
 

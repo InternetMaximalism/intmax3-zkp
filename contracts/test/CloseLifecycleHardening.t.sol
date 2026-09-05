@@ -2,7 +2,6 @@
 pragma solidity ^0.8.29;
 
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
@@ -28,7 +27,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
     // ─────────────────────────────────────────────────────────────────────────
 
     function _cancelProof(ChannelSettlementManager.CancelCloseRequest memory request)
-        internal view returns (MleVerifier.MleProof memory)
+        internal view returns (bytes memory)
     {
         ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
@@ -175,7 +174,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         uint8 statusBefore = uint8(manager.channelStatus());
         bool closePendingBefore = manager.getPendingClose().active;
         bool burnPendingBefore = manager.partialWithdrawalPending();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         vm.expectRevert(selector);
         manager.submitCloseIntent(intent, proof);
         assertEq(uint8(manager.channelStatus()), statusBefore, "status unchanged by the refusal");
@@ -360,13 +359,13 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
 
         // equal — precompute the proof so expectRevert arms on `cancelClose`, not on the view calls.
         ChannelSettlementManager.CancelCloseRequest memory equalReq = _cancelRequest(digest, 20);
-        MleVerifier.MleProof memory equalProof = _cancelProof(equalReq);
+        bytes memory equalProof = _cancelProof(equalReq);
         vm.expectRevert(ChannelSettlementManager.CloseNotNewer.selector);
         manager.cancelClose(equalReq, equalProof);
 
         // older
         ChannelSettlementManager.CancelCloseRequest memory olderReq = _cancelRequest(digest, 19);
-        MleVerifier.MleProof memory olderProof = _cancelProof(olderReq);
+        bytes memory olderProof = _cancelProof(olderReq);
         vm.expectRevert(ChannelSettlementManager.CloseNotNewer.selector);
         manager.cancelClose(olderReq, olderProof);
 
@@ -391,7 +390,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         bytes32 digest = manager.pendingPartialWithdrawalCloseIntentDigest();
 
         ChannelSettlementManager.CancelCloseRequest memory equalReq = _cancelRequest(digest, 12);
-        MleVerifier.MleProof memory equalProof = _cancelProof(equalReq);
+        bytes memory equalProof = _cancelProof(equalReq);
         vm.expectRevert(ChannelSettlementManager.PartialWithdrawalNotNewer.selector);
         manager.cancelPartialWithdrawal(equalReq, equalProof);
         assertTrue(manager.partialWithdrawalPending(), "the burn authorization survived");
@@ -513,7 +512,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         // close (cancel material may have been consumed in an earlier era), but that response must
         // not move the fixed `horizon + minResponse` end.
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, version + 1);
-        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        bytes memory tooLateProof = _closeProof(tooLate);
         vm.warp(uint256(horizon) + 1);
         assertGe(
             manager.getPendingClose().challengeDeadline,
@@ -530,7 +529,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         // It closes permanently one second after that fixed end.
         vm.warp(uint256(horizon) + minResponse + 1);
         ChannelSettlementManager.CloseIntent memory afterEnd = _intentAt(9, version + 2);
-        MleVerifier.MleProof memory afterEndProof = _closeProof(afterEnd);
+        bytes memory afterEndProof = _closeProof(afterEnd);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(afterEnd, afterEndProof);
 
@@ -737,7 +736,7 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         // The second credit for that same delta is refused outright.
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("incoming_tx"), USER_B, bob, 5);
-        MleVerifier.MleProof memory pcProof = _postCloseClaimProof(pc);
+        bytes memory pcProof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, pcProof);
 
@@ -757,21 +756,21 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         // wrong close digest
         ChannelSettlementManager.PostCloseClaim memory wrongDigest =
             _postCloseClaim(keccak256("not_the_close"), keccak256("itx"), USER_B, bob, 5);
-        MleVerifier.MleProof memory p1 = _postCloseClaimProof(wrongDigest);
+        bytes memory p1 = _postCloseClaimProof(wrongDigest);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(wrongDigest, p1);
 
         // unregistered token
         ChannelSettlementManager.PostCloseClaim memory badToken =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 5, 999);
-        MleVerifier.MleProof memory p2 = _postCloseClaimProof(badToken);
+        bytes memory p2 = _postCloseClaimProof(badToken);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(badToken, p2);
 
         // zero amount
         ChannelSettlementManager.PostCloseClaim memory zero =
             _postCloseClaim(d, keccak256("itx"), USER_B, bob, 0);
-        MleVerifier.MleProof memory p3 = _postCloseClaimProof(zero);
+        bytes memory p3 = _postCloseClaimProof(zero);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(zero, p3);
     }
@@ -788,13 +787,13 @@ contract CloseLifecycleHardeningTest is CloseSettlementBase {
         manager.submitWithdrawalClaim(wc, _withdrawalClaimProof(wc));
 
         // replay of the same nullifier is still refused
-        MleVerifier.MleProof memory replay = _withdrawalClaimProof(wc);
+        bytes memory replay = _withdrawalClaimProof(wc);
         vm.expectRevert(ChannelSettlementManager.NullifierAlreadyUsed.selector);
         manager.submitWithdrawalClaim(wc, replay);
 
         // and the cap still binds
         ChannelSettlementManager.WithdrawalClaim memory over = _withdrawalClaim(d, USER_B, bob, 1);
-        MleVerifier.MleProof memory overProof = _withdrawalClaimProof(over);
+        bytes memory overProof = _withdrawalClaimProof(over);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(over, overProof);
 

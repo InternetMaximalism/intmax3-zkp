@@ -4,7 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 
@@ -17,16 +18,15 @@ import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
 ///         This is the strongest local de-risk before spending real Sepolia ETH + 5x1ETH stakes:
 ///         it verifies BOTH real MLE/WHIR proofs (validity + ch2 withdrawal) against the cumulative
 ///         registration + deposit chains, with ch2's received funds exiting to L1 as native ETH.
-/// @dev Fixtures from `cargo run --release --bin generate_c2c_fixture`. Self-skips if absent.
+/// @dev Fixtures come from `cargo run --release --locked --bin generate_c2c_fixture`. This
+///      developer-facing E2E may self-skip while they are absent, but V2FixtureCompletenessTest and
+///      the CI anti-skip guard make absence or a pre-V2 artifact a release failure.
 contract C2CFullE2ETest is Test {
-    MleVerifier public verifier;
     IntmaxRollup public rollup;
     address public fraudTreasury = makeAddr("fraudTreasury");
     address public poster = makeAddr("poster");
 
     string internal lc;
-    string internal validityMleJson;
-    string internal withdrawalMleJson;
     string internal payoutJson;
     bool internal ready;
 
@@ -34,35 +34,43 @@ contract C2CFullE2ETest is Test {
 
     function setUp() public {
         string memory root = string.concat(vm.projectRoot(), "/test/data/");
+        string memory validityMleConfigJson;
+        string memory withdrawalMleConfigJson;
         try vm.readFile(string.concat(root, "c2c_withdrawal_payout.json")) returns (string memory p) {
             payoutJson = p;
             lc = vm.readFile(string.concat(root, "c2c_lifecycle.json"));
-            validityMleJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle.json"));
-            withdrawalMleJson = vm.readFile(string.concat(root, "c2c_withdrawal_mle.json"));
+            validityMleConfigJson = vm.readFile(string.concat(root, "c2c_lifecycle_validity_mle_config.json"));
+            withdrawalMleConfigJson = vm.readFile(string.concat(root, "c2c_withdrawal_mle_config.json"));
             ready = true;
         } catch {
             ready = false;
             return;
         }
 
-        verifier = new MleVerifier(block.chainid);
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(validityMleJson, verifier);
+        // Preserve local compatibility with a checkout whose expensive artifacts have not yet
+        // been regenerated. The non-skipping release manifest independently makes this state red.
+        if (!vm.keyExistsJson(validityMleConfigJson, ".schemaVersion")) {
+            ready = false;
+            return;
+        }
+        (, PinnedMleVerifierV2 validityAdapter) = FixtureLib.deployPinnedMleV2(validityMleConfigJson);
+        (, PinnedMleVerifierV2 withdrawalAdapter) = FixtureLib.deployPinnedMleV2(withdrawalMleConfigJson);
         bytes32 genesis = vm.parseJsonBytes32(lc, ".genesis_state_root");
         rollup = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            true // A-2: test opt-in for the degreeBits==0 bypass
+            fraudTreasury,
+            IPinnedMleVerifierV2(address(validityAdapter)),
+            IPinnedMleVerifierV2(address(withdrawalAdapter)),
+            genesis
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(poster, true); // permissioned posting
-        FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);
-        IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(withdrawalMleJson, verifier);
-        rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
     }
 
     function test_c2c_fullLifecycle_receiverExitsToL1() public {
-        if (!ready) { vm.skip(true); return; }
+        if (!ready) {
+            vm.skip(true);
+            return;
+        }
 
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = keccak256("c2c_full");
@@ -87,7 +95,7 @@ contract C2CFullE2ETest is Test {
 
         // --- finalize the 5-block chain with the REAL validity MLE proof ---
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
-        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(validityMleJson);
+        bytes memory vproof = _readCompactProof("c2c_lifecycle_validity_mle.json");
         assertTrue(rollup.finalize(finalSubId, finalStateRoot, vpis, vproof), "finalize failed (real validity MLE)");
         assertEq(rollup.latestFinalizedStateRoot(), finalStateRoot, "finalized state root mismatch");
         assertEq(rollup.blockHashChainAt(5), vpis.finalBlockChain, "blockHashChainAt[5] != proved final_block_chain");
@@ -98,7 +106,7 @@ contract C2CFullE2ETest is Test {
         uint256 amount = ws[0].amount;
         assertEq(amount, 3, "ch2 received 3 wei across the channel-to-channel transfer");
 
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = _readCompactProof("c2c_withdrawal_mle.json");
         rollup.withdrawNative(ws, prover, wproof);
         assertEq(rollup.pendingWithdrawals(recipient), amount, "EOA credited the cross-channel amount");
         assertEq(rollup.totalEscrowed(), 10 - amount, "escrow decreased by exactly the withdrawn amount");
@@ -123,7 +131,10 @@ contract C2CFullE2ETest is Test {
     ///         block). This test pins both the working refund->withdraw path AND the stranding so a
     ///         future run never silently burns stakes again.
     function test_c2c_postBlockStakes_recovery_and_strandedLesson() public {
-        if (!ready) { vm.skip(true); return; }
+        if (!ready) {
+            vm.skip(true);
+            return;
+        }
 
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = keccak256("c2c_stake");
@@ -153,7 +164,7 @@ contract C2CFullE2ETest is Test {
 
         // Finalize the aggregate genesis->block5 proof: refunds EXACTLY the finalized submission's stake.
         IntmaxRollup.ValidityPublicInputs memory vpis = _parseVpis();
-        MleVerifier.MleProof memory vproof = FixtureLib.parseProof(validityMleJson);
+        bytes memory vproof = _readCompactProof("c2c_lifecycle_validity_mle.json");
         assertTrue(rollup.finalize(finalSubId, finalStateRoot, vpis, vproof), "finalize failed");
 
         // --- WORKING RECOVERY PATH: finalized submission's stake is credited to the poster, then pulled. ---
@@ -183,6 +194,11 @@ contract C2CFullE2ETest is Test {
 
     // ─── helpers ───────────────────────────────────────────────────────────
 
+    function _readCompactProof(string memory filename) internal view returns (bytes memory) {
+        string memory json = vm.readFile(string.concat(vm.projectRoot(), "/test/data/", filename));
+        return FixtureLib.parseCompactProofV2(json);
+    }
+
     function _register(string memory key) internal {
         uint32 channelId = uint32(vm.parseJsonUint(lc, string.concat(key, ".channel_id")));
         uint8 bpSlot = uint8(vm.parseJsonUint(lc, string.concat(key, ".bp_member_slot")));
@@ -211,7 +227,9 @@ contract C2CFullE2ETest is Test {
         string memory base = string.concat(".blocks[", vm.toString(i), "]");
         uint256[] memory keyIdsU = FixtureLib.parseUintArray(lc, string.concat(base, ".key_ids"));
         uint32[] memory keyIds = new uint32[](keyIdsU.length);
-        for (uint256 j = 0; j < keyIdsU.length; j++) keyIds[j] = uint32(keyIdsU[j]);
+        for (uint256 j = 0; j < keyIdsU.length; j++) {
+            keyIds[j] = uint32(keyIdsU[j]);
+        }
         IntmaxRollup.SubBlock[] memory sb = new IntmaxRollup.SubBlock[](1);
         sb[0] = IntmaxRollup.SubBlock({
             channelId: uint32(vm.parseJsonUint(lc, string.concat(base, ".channel_id"))),

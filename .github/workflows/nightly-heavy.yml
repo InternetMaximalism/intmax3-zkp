@@ -129,19 +129,18 @@ jobs:
           for t in anvil forge cast; do
             command -v "$t" >/dev/null || { echo "::error::$t not on PATH — every heavy test would self-skip and pass"; exit 1; }
           done
-          # The fixtures whose absence makes close_lifecycle_cli_e2e and two_token_cli_e2e return
-          # green without doing anything (see their own skip lists).
-          #
-          # member_set_update{,_mle}.json (audit28-08-2026 M-3) are here for a second reason on top
-          # of that one: DeployCloseCli.s.sol now READS member_set_update_mle.json to install the
-          # §Q member-set-update VK, so their absence is not a silently-skipped test but a deploy
-          # script — and therefore the DeployGuards suite — that cannot run at all. They also carry
-          # the msu <-> close WHIR-rail agreement that MemberSetUpdateE2E.t.sol checks and that the
-          # Verifier never checks on chain (M-11).
+          # Full proofs whose absence makes close_lifecycle_cli_e2e and two_token_cli_e2e return
+          # green without doing anything (see their own skip lists), plus the six proof-free V2
+          # configs DeployCloseCli.s.sol actually consumes. Direct member-set update is retired;
+          # its historical V1 artifacts are quarantined under test/data/deprecated and must never
+          # be restored to this production-path preflight.
           missing=0
           for f in close_lifecycle.json close_lifecycle_validity_mle.json close_withdrawal_mle.json \
                    close_intent_mle.json withdrawal_claim_mle.json post_close_claim_mle.json \
-                   cancel_close_mle.json member_set_update.json member_set_update_mle.json; do
+                   cancel_close_mle.json close_lifecycle_validity_mle_config.json \
+                   close_withdrawal_mle_config.json close_intent_mle_config.json \
+                   withdrawal_claim_mle_config.json post_close_claim_mle_config.json \
+                   cancel_close_mle_config.json; do
             [ -f "contracts/test/data/$f" ] || { echo "::error::missing fixture contracts/test/data/$f"; missing=1; }
           done
           [ "$missing" -eq 0 ]

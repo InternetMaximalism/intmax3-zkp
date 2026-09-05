@@ -109,7 +109,8 @@ cargo test --test e2e --release               # end-to-end rollup flow
 # Solidity contracts (from contracts/)
 cd contracts && forge install && forge test -vvv
 
-# Browser wallet (proving runs in your browser via WASM + multi-threading)
+# Browser wallet (only the Regev STARKs are proved in the browser; plonky2/MLE proving is server-side,
+# see doc/docs/proving-boundaries.md)
 bash hosting/build-wallet-wasm.sh              # build the wasm package (needs cdylib at invocation)
 node hosting/wallet/wallet-relay.js            # https://localhost:8000/wallet-live.html (2 channels)
 
@@ -117,7 +118,8 @@ node hosting/wallet/wallet-relay.js            # https://localhost:8000/wallet-l
 bash hosting/build-wallet-node-wasm.sh
 ```
 
-The browser wallet does the ZK proving locally; a small relay co‑signs as the other members. Join a
+The browser wallet proves the Regev ciphertext STARKs locally (never plonky2 or MLE/WHIR proofs — see
+`doc/docs/proving-boundaries.md`); a small relay co‑signs as the other members. Join a
 channel, send intra‑channel (same channel id) or inter‑channel (a different channel id). Deploying the
 demo to Sepolia + AWS is documented in [`doc/docs/deploy-runbook.md`](doc/docs/deploy-runbook.md).
 

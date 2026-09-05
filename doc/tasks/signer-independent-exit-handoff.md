@@ -274,7 +274,60 @@ staging → prepare → 検証（提案 digest のみ受理、N-of-N 検証は�
   `doc/docs/public-close-publisher.md` の例を v3 に更新。Sepolia 等の実チェーンでの実行は
   鍵と資金が必要なため未実施。
 
+## 3. MLE/WHIR PCS 修復ブランチのマージ（2026-09-05）
+
+`origin/codex/mle-whir-pcs-repair-20260904`（c533e71、wire-v3 / WHIR profile 105 / 20M gas
+envelope、constructor-pinned `PinnedMleVerifierV2`、on-chain VK 初期化の廃止）をこのブランチに
+マージし、signer-independent exit を新モデルへ移植した。
+
+- **Solidity**: `CloseFundingMaterializer(rollup, IPinnedMleVerifierV2 backingMleVerifier)`。
+  `attestSignedHeadBacking(manager, bytes compactProof)` / `materializeSignedHead(manager, bytes)`
+  は pinned adapter の `verifyCompactPublicInputs` で 26 limb を再導出し（calldata の PI は信用しない）、
+  receipt は `keccak(domain, chainid, materializer, rollup, manager, keccak256(proof))`。
+  `initializeBackingVk` / `backingVkInitialized` / `MleVk` は削除。Manager の `_checkCloseProof`
+  は `closeMleVerifier.verifyCompactPublicInputs` の PI から funds digest（limb 95..102）を取り
+  `requireSignedHeadBacking` を呼ぶ。`registerSettlementManager` の Yul 修正は維持。
+  `DeployCloseCli` の attach ブランチは `close_asset_backing_mle_config.json` から backing adapter
+  を deploy して materializer に渡す（authenticated backing proof と
+  `pinnedVerifier.verificationConfigDigest` が一致することを要求）。ブロードキャスト core は
+  15 tx（backing core+adapter → materializer → 4×(core, adapter) → verifier → registerChannel →
+  manager → registerSettlementManager）。
+- **Rust**: `public_close_prover::wrap_and_export_backing_mle` は v2 API
+  （`setup_mle_vk_v2` / `prove_with_mle_v2` / `export_mle_v2_json` + config 検証）で
+  `{mle_json, mle_config_json, compact_proof}` を返す。bundle manifest は schema 3
+  （`backingMleConfigFile/Bytes/Sha256` 追加）。publisher の attest / materialize calldata は
+  `(address, bytes)`、deployment manifest は schema 4（4 adapter の pin に加えて
+  `backingMle{Verifier,VerifierCore,…WhirSessionId}` の 9 pin、`closeFundingMaterializer`、
+  attest / materialize selector と 2 topic）。`channel_member` は backing bundle 4 ファイル
+  （manifest / mle / mle_config / public_inputs）を stage し、`settlement.json` は
+  `backing_mle_core` / `backing_mle_adapter` を持つ。
+- **Fixture**: `generate_close_fixture` が close family（`close_` lifecycle、close intent、
+  backing proof）の単一共生成器。`WD_OUT_PREFIX=close_ generate_withdrawal_fixture` は拒否。
+  `--mle-config-only` で close family 4 config を書く。`pullChannelFunds` の aux binding
+  （`CloseFundingAuxMismatch`）は signer-independent exit で退役済みなので
+  `WD_CLOSE_FUNDING_ROLLUP` は不要。`tests/mle_v2_fixture_release.rs` の cohort は 53 ファイル
+  （16 config / 17 full proof / 20 companion）。backing statement は 7 番目の production
+  profile（26 PI）として pin され、close intent / `close_` lifecycle との cross-binding
+  （settled_tx_chain、token_funds_digest、finalized root、anchor）を gate で検証する。
+- **Runbook**: `doc/tasks/regen-and-redeploy-runbook.md` Step 1（config cohort、退役した
+  target-133 switch の削除）/ Step 2（15 tx、14 address）/ Step 3（共生成器）を更新。
+
+### 未解決: `partial_withdrawal_e2e_anvil`
+
+`submitPartialWithdrawalIntent` は `requireSignedHeadBacking`（8f70b73 以降）により post-burn head
+の attested backing を要求するが、この E2E は Rust 側の `BlockWitnessGenerator` だけを進め、
+anvil の Rollup は genesis root のまま（block を post しない）ため、finalized root に anchor
+された backing statement を作れず、submit で `BackingProofNotAttested()` になる（マージ前から
+同じ）。`pw_reg.json` / `pw_submit.json` / `pw_close_intent_mle.json` は失敗より前に生成・自己
+検証され、release gate と `ManagerCloseGasTest` はその成果物で pass する。修正には
+3 block を anvil に post（EIP-4844 blob tx + `attestProofData` の KZG proof、
+`channel_member withdraw` の `cast send --blob` 機構）→ 3-block validity MLE で finalize →
+burn-send balance proof 上の backing proof を `attestSignedHeadBacking` する工程が必要
+（`tests/partial_withdrawal_e2e.rs` ヘッダ参照）。
+
 ## 残る前提
 
-MLE/WHIR PCS の Critical と `IntmaxRollup.releaseRuntime` の chain 31337 固定は変わらず、
-公開チェーンでの価値移動はその解決後になる。
+`IntmaxRollup.releaseRuntime` の chain 31337 固定は MLE ブランチの設計どおり維持されている
+（独立した暗号レビューの記録と別の release change が前提）。MLE/WHIR PCS 側の修復は
+マージ済みだが、protocol 固有の Fiat-Shamir / grinding 解析と外部レビューが完了するまで
+公開チェーンでの価値移動は NO-GO のまま。

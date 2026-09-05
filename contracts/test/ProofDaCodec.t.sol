@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {PrepareProofDa} from "../script/PrepareProofDa.s.sol";
 
@@ -23,14 +22,18 @@ contract ProofDaCodecTest is Test {
         codec.blobCountForLength(253_922);
     }
 
-    function test_realFixture_isCanonicalAbiAndNeedsTwoBlobs() public view {
+    function test_realFixture_isCanonicalCompactV2AndNeedsTwoBlobs() public view {
         string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle.json")
+            string.concat(
+                vm.projectRoot(),
+                "/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json"
+            )
         );
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
+        bytes memory proof = FixtureLib.parseCompactProofV2(json);
         bytes memory payload = codec.canonicalProofBytes(proof);
 
-        assertEq(keccak256(payload), keccak256(abi.encode(proof)));
+        assertEq(keccak256(payload), keccak256(proof));
+        assertEq(payload.length, 129_284);
         assertEq(codec.blobCountForLength(payload.length), 2);
     }
 

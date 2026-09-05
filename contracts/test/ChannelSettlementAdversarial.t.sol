@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {CloseSettlementBase, MockRollupRegistry} from "./CloseSettlementBase.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 
 /// @title ChannelSettlementAdversarial
 /// @notice Adversarial unit + bounded-fuzz coverage for close-settlement scenarios the per-feature
@@ -108,14 +107,14 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         // consume the expectation).
         ChannelSettlementManager.PostCloseClaim memory pc =
             _postCloseClaim(d, keccak256("incoming_tx_1"), USER_B, bob, 40);
-        MleVerifier.MleProof memory pcProof = _postCloseClaimProof(pc);
+        bytes memory pcProof = _postCloseClaimProof(pc);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(pc, pcProof);
         assertEq(manager.totalWithdrawn(0), 40, "the disabled leg accrues nothing");
 
         // The cap still binds on the leg that remains: 40 + 36 > 75 is refused, 40 + 35 == 75 fits.
         ChannelSettlementManager.WithdrawalClaim memory over = _withdrawalClaim(d, USER_B, bob, 36);
-        MleVerifier.MleProof memory overProof = _withdrawalClaimProof(over);
+        bytes memory overProof = _withdrawalClaimProof(over);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(over, overProof);
 
@@ -130,7 +129,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
         assertEq(manager.totalWithdrawn(0), 75, "accrue exactly the fund");
 
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(d, USER_B, bob, 1);
-        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        bytes memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.WithdrawalCapExceeded.selector);
         manager.submitWithdrawalClaim(c, proof);
     }
@@ -201,7 +200,7 @@ contract ChannelSettlementAdversarialTest is CloseSettlementBase {
 
         // A withdrawal claim before any finalize → CloseNotActive (status != Closed).
         ChannelSettlementManager.WithdrawalClaim memory c = _withdrawalClaim(bytes32(uint256(1)), USER_A, alice, 10);
-        MleVerifier.MleProof memory proof = _withdrawalClaimProof(c);
+        bytes memory proof = _withdrawalClaimProof(c);
         vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
         manager.submitWithdrawalClaim(c, proof);
     }

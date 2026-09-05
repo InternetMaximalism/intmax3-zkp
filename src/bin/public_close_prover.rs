@@ -28,7 +28,8 @@ struct Arguments {
     /// File downloaded from GET /api/v1/channel/:id/backing (schemaVersion 3).
     #[arg(long)]
     input: PathBuf,
-    /// Output directory for the close/backing proofs, both MLE JSON files, intent, and manifest.
+    /// Output directory for the close/backing proofs, both wire-v3 MLE JSON files, the backing
+    /// deployment config, intent, and manifest.
     #[arg(long, required_unless_present = "verify_only")]
     output_dir: Option<PathBuf>,
     /// Verify the backing/signatures/VD/balance proof and print a compact JSON receipt without
@@ -65,6 +66,8 @@ struct OutputManifest<'a> {
     backing_proof_bytes: usize,
     backing_mle_file: &'static str,
     backing_mle_bytes: usize,
+    backing_mle_config_file: &'static str,
+    backing_mle_config_bytes: usize,
     backing_public_inputs_file: &'static str,
     backing_public_input_count: usize,
     backing_finalized_extended_state_commitment: Bytes32,
@@ -88,6 +91,7 @@ struct PayloadHashes {
     close_mle_sha256: String,
     backing_proof_sha256: String,
     backing_mle_sha256: String,
+    backing_mle_config_sha256: String,
     backing_public_inputs_sha256: String,
     close_intent_sha256: String,
     close_intent_full_sha256: String,
@@ -101,6 +105,7 @@ impl PayloadHashes {
         close_mle: &[u8],
         backing_proof: &[u8],
         backing_mle: &[u8],
+        backing_mle_config: &[u8],
         backing_public_inputs: &[u8],
         close_intent: &[u8],
         close_intent_full: &[u8],
@@ -111,6 +116,7 @@ impl PayloadHashes {
             close_mle_sha256: sha256_hex(close_mle),
             backing_proof_sha256: sha256_hex(backing_proof),
             backing_mle_sha256: sha256_hex(backing_mle),
+            backing_mle_config_sha256: sha256_hex(backing_mle_config),
             backing_public_inputs_sha256: sha256_hex(backing_public_inputs),
             close_intent_sha256: sha256_hex(close_intent),
             close_intent_full_sha256: sha256_hex(close_intent_full),
@@ -209,6 +215,7 @@ fn main() -> Result<()> {
     const MLE: &str = "close_intent_mle.json";
     const BACKING_PROOF: &str = "backing_proof.bin";
     const BACKING_MLE: &str = "backing_mle.json";
+    const BACKING_MLE_CONFIG: &str = "backing_mle_config.json";
     const BACKING_PIS: &str = "backing_public_inputs.json";
     const INTENT: &str = "close_intent.json";
     const INTENT_FULL: &str = "close_intent_full.json";
@@ -219,6 +226,7 @@ fn main() -> Result<()> {
     // the manifest cannot accidentally describe a semantically equivalent re-serialization.
     let close_mle_bytes = bundle.close_mle_json.as_bytes();
     let backing_mle_bytes = bundle.backing_mle_json.as_bytes();
+    let backing_mle_config_bytes = bundle.backing_mle_config_json.as_bytes();
     let backing_public_inputs_bytes = pretty_json(&bundle.backing_public_inputs)?;
     let close_intent_bytes = pretty_json(&bundle.close_descriptor)?;
     let close_intent_full_bytes = pretty_json(&bundle.close_intent)?;
@@ -228,6 +236,7 @@ fn main() -> Result<()> {
         close_mle_bytes,
         &bundle.backing_proof,
         backing_mle_bytes,
+        backing_mle_config_bytes,
         &backing_public_inputs_bytes,
         &close_intent_bytes,
         &close_intent_full_bytes,
@@ -271,6 +280,7 @@ fn main() -> Result<()> {
     atomic_write(&staging.join(MLE), close_mle_bytes)?;
     atomic_write(&staging.join(BACKING_PROOF), &bundle.backing_proof)?;
     atomic_write(&staging.join(BACKING_MLE), backing_mle_bytes)?;
+    atomic_write(&staging.join(BACKING_MLE_CONFIG), backing_mle_config_bytes)?;
     atomic_write(&staging.join(BACKING_PIS), &backing_public_inputs_bytes)?;
     atomic_write(&staging.join(INTENT), &close_intent_bytes)?;
     atomic_write(&staging.join(INTENT_FULL), &close_intent_full_bytes)?;
@@ -290,6 +300,8 @@ fn main() -> Result<()> {
         backing_proof_bytes: bundle.backing_proof.len(),
         backing_mle_file: BACKING_MLE,
         backing_mle_bytes: bundle.backing_mle_json.len(),
+        backing_mle_config_file: BACKING_MLE_CONFIG,
+        backing_mle_config_bytes: bundle.backing_mle_config_json.len(),
         backing_public_inputs_file: BACKING_PIS,
         backing_public_input_count: bundle.backing_public_inputs.len(),
         backing_finalized_extended_state_commitment: bundle
@@ -331,12 +343,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payload_manifest_hashes_bind_all_eight_exact_files() {
-        let payloads: [&[u8]; 8] = [
+    fn payload_manifest_hashes_bind_all_nine_exact_files() {
+        let payloads: [&[u8]; 9] = [
             b"close-proof",
             b"close-mle",
             b"backing-proof",
             b"backing-mle",
+            b"backing-mle-config",
             b"backing-pis",
             b"close-intent",
             b"close-intent-full",
@@ -351,18 +364,20 @@ mod tests {
             payloads[5],
             payloads[6],
             payloads[7],
+            payloads[8],
         );
         let encoded = serde_json::to_value(&hashes).expect("serialize payload hashes");
-        assert_eq!(encoded.as_object().expect("hash object").len(), 8);
+        assert_eq!(encoded.as_object().expect("hash object").len(), 9);
         for (field, payload) in [
             ("closeProofSha256", payloads[0]),
             ("closeMleSha256", payloads[1]),
             ("backingProofSha256", payloads[2]),
             ("backingMleSha256", payloads[3]),
-            ("backingPublicInputsSha256", payloads[4]),
-            ("closeIntentSha256", payloads[5]),
-            ("closeIntentFullSha256", payloads[6]),
-            ("closePublicInputsSha256", payloads[7]),
+            ("backingMleConfigSha256", payloads[4]),
+            ("backingPublicInputsSha256", payloads[5]),
+            ("closeIntentSha256", payloads[6]),
+            ("closeIntentFullSha256", payloads[7]),
+            ("closePublicInputsSha256", payloads[8]),
         ] {
             let digest = encoded[field].as_str().expect("SHA-256 string");
             assert_eq!(digest, sha256_hex(payload));

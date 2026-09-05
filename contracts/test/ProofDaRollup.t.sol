@@ -4,31 +4,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {Plonky2GateEvaluator} from "@mle/Plonky2GateEvaluator.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {GoldilocksExt3} from "@mle/spongefish/GoldilocksExt3.sol";
-import {InvalidMleProof} from "@mle/MleProofErrors.sol";
-
-contract AuthenticatedRejectingMleVerifier {
-    function verify(
-        MleVerifier.MleProof calldata,
-        MleVerifier.VerifyParams memory,
-        SpongefishWhirVerify.WhirParams memory,
-        bytes32
-    ) external pure returns (bool) {
-        revert InvalidMleProof();
-    }
-
-    function fraudVerdictEncoded(
-        bytes calldata,
-        bytes32,
-        bytes4,
-        bool
-    ) external pure returns (uint8) {
-        return 0;
-    }
-}
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 contract ProofDaIntegrationHarness is BlobKZGVerifierExt {
     function evaluation(bytes calldata proofBytes, bytes calldata compressedCommitment)
@@ -49,11 +25,11 @@ contract ProofDaRollupTest is Test {
     bytes32 internal genesis = keccak256("genesis");
 
     function setUp() public {
-        IntmaxRollup.MleVk memory vk;
-        SpongefishWhirVerify.WhirParams memory whir = _emptyWhir();
-        uint256[] memory empty = new uint256[](0);
         rollup = new IntmaxRollup(
-            address(0xdead), vk, whir, "", "", empty, empty, new MleVerifier(block.chainid), genesis, true
+            address(0xdead),
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            genesis
         );
         da = new ProofDaIntegrationHarness();
         rollup.setKzgVerifier(da);
@@ -66,11 +42,10 @@ contract ProofDaRollupTest is Test {
         IntmaxRollup.SubBlock[] memory batch = _batch();
         IntmaxRollup.ValidityPublicInputs memory pis = _previewPis(batch, root);
 
-        MleVerifier.MleProof memory proofA = _proofFor(pis);
-        MleVerifier.MleProof memory proofB = _proofFor(pis);
-        proofB.whirTranscript = hex"01"; // still valid with the explicit test-only MLE bypass
-        bytes memory encodedA = abi.encode(proofA);
-        bytes memory encodedB = abi.encode(proofB);
+        bytes memory proofA = _proofFor(pis);
+        bytes memory proofB = _differentCanonicalProof(proofA);
+        bytes memory encodedA = proofA;
+        bytes memory encodedB = proofB;
         (bytes memory sidecarA, bytes32 hashA, bytes memory inputA) = _sidecar(encodedA, 0x11, 0x22);
         (bytes memory sidecarB,, bytes memory inputB) = _sidecar(encodedB, 0x33, 0x44);
         _mockPointSuccess(inputA);
@@ -97,8 +72,8 @@ contract ProofDaRollupTest is Test {
         bytes32 root = keccak256("atomic root");
         IntmaxRollup.SubBlock[] memory batch = _batch();
         IntmaxRollup.ValidityPublicInputs memory pis = _previewPis(batch, root);
-        MleVerifier.MleProof memory proof = _proofFor(pis);
-        bytes memory encoded = abi.encode(proof);
+        bytes memory proof = _proofFor(pis);
+        bytes memory encoded = proof;
         (bytes memory sidecar, bytes32 blobHash, bytes memory pointInput) = _sidecar(encoded, 0x55, 0x66);
         _post(batch, root, encoded, blobHash);
 
@@ -116,21 +91,18 @@ contract ProofDaRollupTest is Test {
     }
 
     function test_preTimeoutFraudUsesSameCanonicalProofAndRejectsDifferentProof() public {
-        IntmaxRollup rejecting = _deployRollup(
-            MleVerifier(address(new AuthenticatedRejectingMleVerifier())), 1
-        );
+        IntmaxRollup rejecting = _deployRollup(true);
         rejecting.setKzgVerifier(da);
         rejecting.setBlockProducer(address(this), true);
 
         bytes32 root = keccak256("fraud root");
         IntmaxRollup.SubBlock[] memory batch = _batch();
         IntmaxRollup.ValidityPublicInputs memory pis = _previewPisOn(rejecting, batch, root);
-        MleVerifier.MleProof memory committedProof = _proofFor(pis);
-        MleVerifier.MleProof memory differentProof = _proofFor(pis);
-        differentProof.whirHints = hex"01";
+        bytes memory committedProof = _proofFor(pis);
+        bytes memory differentProof = _differentCanonicalProof(committedProof);
 
-        bytes memory committedBytes = abi.encode(committedProof);
-        bytes memory differentBytes = abi.encode(differentProof);
+        bytes memory committedBytes = committedProof;
+        bytes memory differentBytes = differentProof;
         (bytes memory committedSidecar, bytes32 committedHash, bytes memory committedInput) =
             _sidecar(committedBytes, 0x77, 0x88);
         (bytes memory differentSidecar,, bytes memory differentInput) =
@@ -215,16 +187,11 @@ contract ProofDaRollupTest is Test {
         vm.revertToState(snapshot);
     }
 
-    function _deployRollup(MleVerifier verifier, uint256 degreeBits)
-        private
-        returns (IntmaxRollup deployed)
-    {
-        IntmaxRollup.MleVk memory vk;
-        vk.degreeBits = degreeBits;
-        SpongefishWhirVerify.WhirParams memory whir = _emptyWhir();
-        uint256[] memory empty = new uint256[](0);
+    function _deployRollup(bool invalidFraudVerdict) private returns (IntmaxRollup deployed) {
+        MockPinnedMleVerifierV2 validityMle = new MockPinnedMleVerifierV2(31337);
+        if (invalidFraudVerdict) validityMle.setFraudVerdict(0);
         deployed = new IntmaxRollup(
-            address(0xdead), vk, whir, "", "", empty, empty, verifier, genesis, true
+            address(0xdead), validityMle, new MockPinnedMleVerifierV2(31337), genesis
         );
     }
 
@@ -253,21 +220,8 @@ contract ProofDaRollupTest is Test {
     function _proofFor(IntmaxRollup.ValidityPublicInputs memory pis)
         private
         pure
-        returns (MleVerifier.MleProof memory proof)
+        returns (bytes memory proof)
     {
-        proof.circuitDigest = new uint256[](0);
-        proof.whirTranscript = "";
-        proof.whirHints = "";
-        proof.preprocessedIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvals = new uint256[](0);
-        proof.witnessIndividualEvalsAtRInv = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRInv = new uint256[](0);
-        proof.inverseHelpersEvalsAtRH = new uint256[](0);
-        proof.witnessIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.preprocessedIndividualEvalsAtRGateV2 = new uint256[](0);
-        proof.gates = new Plonky2GateEvaluator.GateInfo[](0);
-
         bytes32 piHash = keccak256(
             abi.encodePacked(
                 pis.initialBlockNumber,
@@ -279,11 +233,20 @@ contract ProofDaRollupTest is Test {
                 pis.prover
             )
         );
-        proof.publicInputs = new uint256[](8);
+        uint256[] memory publicInputs = new uint256[](8);
         uint256 h = uint256(piHash);
         for (uint256 i = 0; i < 8; i++) {
-            proof.publicInputs[i] = (h >> (224 - i * 32)) & 0xffffffff;
+            publicInputs[i] = (h >> (224 - i * 32)) & 0xffffffff;
         }
+        proof = abi.encode(publicInputs);
+    }
+
+    function _differentCanonicalProof(bytes memory proof) private pure returns (bytes memory) {
+        uint256[] memory publicInputs = abi.decode(proof, (uint256[]));
+        uint256[] memory different = new uint256[](publicInputs.length + 1);
+        for (uint256 i = 0; i < publicInputs.length; ++i) different[i] = publicInputs[i];
+        different[publicInputs.length] = 1;
+        return abi.encode(different);
     }
 
     function _batch() private view returns (IntmaxRollup.SubBlock[] memory batch) {
@@ -296,9 +259,4 @@ contract ProofDaRollupTest is Test {
         });
     }
 
-    function _emptyWhir() private pure returns (SpongefishWhirVerify.WhirParams memory whir) {
-        whir.rounds = new SpongefishWhirVerify.RoundParams[](0);
-        whir.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        whir.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
-    }
 }

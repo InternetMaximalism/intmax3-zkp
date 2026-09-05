@@ -19,6 +19,7 @@ use intmax3_zkp::{
     },
     block_producer_service::{
         BlockProducerCommand, BlockProducerService, BlockProducerServiceError,
+        IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON,
     },
     circuits::witness::block_witness_generator::BlockTxV2Witness,
     close_funding::build_close_funding_proposal,
@@ -446,7 +447,7 @@ fn close_funding_prepare_is_durable_frozen_and_exactly_committed() {
                 plan.clone(),
             ),
             Err(BlockProducerServiceError::InvalidRequest(reason))
-                if reason.contains("prepare_close_funding")
+                if reason == IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON
         ));
         assert!(matches!(
             service.execute(BlockProducerCommand::PostCloseFunding {
@@ -455,7 +456,7 @@ fn close_funding_prepare_is_durable_frozen_and_exactly_committed() {
                 plan: plan.clone(),
             }),
             Err(BlockProducerServiceError::InvalidRequest(reason))
-                if reason.contains("prepare_close_funding")
+                if reason == IMMEDIATE_CLOSE_FUNDING_RETIRED_REASON
         ));
 
         prepared_receipt = service

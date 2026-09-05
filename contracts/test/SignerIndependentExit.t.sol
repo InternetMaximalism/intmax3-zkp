@@ -5,9 +5,7 @@ import {Test, stdError} from "forge-std/Test.sol";
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
-import {MockMleVerifier} from "./CloseTestLib.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 contract ExitRollupHarness {
     address public immutable deployer = msg.sender;
@@ -132,35 +130,28 @@ contract SignerIndependentExitTest is Test {
     ExitRollupHarness private rollup;
     CloseFundingMaterializer private materializer;
     ExitManagerHarness private manager;
-    MockMleVerifier private verifier;
+    /// Constructor-pinned stand-in for the CloseAssetBacking adapter. Its compact-proof
+    /// surrogate is exactly `abi.encode(uint256[] publicInputs)`.
+    MockPinnedMleVerifierV2 private verifier;
 
     function setUp() external {
         rollup = new ExitRollupHarness();
-        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))));
+        verifier = new MockPinnedMleVerifierV2(block.chainid);
+        materializer = new CloseFundingMaterializer(IntmaxRollup(payable(address(rollup))), verifier);
         manager = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
-        verifier = new MockMleVerifier();
         rollup.setRegisteredChannel(CHANNEL);
         rollup.setFinalizedRoot(SIGNED_ROOT);
         rollup.setFinalizedRoot(BACKING_ROOT);
         rollup.bind(materializer, address(manager));
-
-        CloseFundingMaterializer.MleVk memory vk = CloseFundingMaterializer.MleVk({
-            degreeBits: 1,
-            preprocessedRoot: bytes32(uint256(1)),
-            numConstants: 1,
-            numRoutedWires: 1,
-            gatesDigest: bytes32(uint256(2))
-        });
-        SpongefishWhirVerify.WhirParams memory whir;
-        uint256[] memory empty = new uint256[](0);
-        materializer.initializeBackingVk(MleVerifier(address(verifier)), vk, whir, bytes(""), bytes(""), empty, empty);
+        assertEq(address(materializer.backingMleVerifier()), address(verifier), "backing adapter pinned");
     }
 
     function test_bindingUsesCanonicalHeadAsPrehistoryFloor() external {
         ExitRollupHarness laterRollup = new ExitRollupHarness();
         laterRollup.setHead(9, 9);
         laterRollup.setRegisteredChannel(CHANNEL);
-        CloseFundingMaterializer later = new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))));
+        CloseFundingMaterializer later =
+            new CloseFundingMaterializer(IntmaxRollup(payable(address(laterRollup))), verifier);
         ExitManagerHarness laterManager = new ExitManagerHarness(bytes4(CHANNEL), address(laterRollup), address(later));
         laterRollup.bind(later, address(laterManager));
         assertEq(later.lastPostedBlock(CHANNEL), 9);
@@ -186,7 +177,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_permissionlessWholeVectorMaterializationIsAtomicAndSingleUse() external {
-        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
         address caller = makeAddr("permissionless caller");
         vm.prank(caller);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), proof);
@@ -206,7 +197,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_crossedTokenFundsDigestFailsClosed() external {
-        MleVerifier.MleProof memory crossed = _proof(0, SETTLED, keccak256("other vector"), BACKING_ROOT);
+        bytes memory crossed = _proof(0, SETTLED, keccak256("other vector"), BACKING_ROOT);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), crossed);
         assertTrue(
             materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, keccak256("other vector"), true)
@@ -220,7 +211,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_pendingPostAndUnfinalizedAnchorFailClosed() external {
-        MleVerifier.MleProof memory stale = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory stale = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), stale);
         rollup.post(materializer, CHANNEL, 1);
         assertFalse(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
@@ -232,13 +223,13 @@ contract SignerIndependentExitTest is Test {
         vm.expectRevert(CloseFundingMaterializer.ChannelExitHasUnfinalizedBlocks.selector);
         materializer.materializeSignedHead(ChannelSettlementManager(payable(address(manager))), stale);
 
-        MleVerifier.MleProof memory future = _proof(2, SETTLED, TFD, BACKING_ROOT);
+        bytes memory future = _proof(2, SETTLED, TFD, BACKING_ROOT);
         vm.expectRevert(CloseFundingMaterializer.ChannelExitHasUnfinalizedBlocks.selector);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), future);
     }
 
     function test_historicalAttestationRemainsAvailableForAuthenticatedPartialWithdrawal() external {
-        MleVerifier.MleProof memory historical = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory historical = _proof(0, SETTLED, TFD, BACKING_ROOT);
         rollup.post(materializer, CHANNEL, 1);
 
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), historical);
@@ -248,7 +239,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_rollbackMakesPreviouslyAttestedHeadCurrentAgain() external {
-        MleVerifier.MleProof memory headZero = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory headZero = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), headZero);
         rollup.post(materializer, CHANNEL, 1);
         assertFalse(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
@@ -259,7 +250,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_erc20FailureRevertsEarlierNativeCreditAndLatch() external {
-        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(ChannelSettlementManager(payable(address(manager))), proof);
         _closeTwoTokens(11, 29);
         rollup.seedEscrow(11, TOKEN, 28);
@@ -271,7 +262,7 @@ contract SignerIndependentExitTest is Test {
     }
 
     function test_invalidBackingProofCannotMaterialize() external {
-        verifier.setVerdict(false);
+        verifier.setVerificationVerdict(false);
         vm.expectRevert(CloseFundingMaterializer.BackingProofInvalid.selector);
         materializer.attestSignedHeadBacking(
             ChannelSettlementManager(payable(address(manager))), _proof(0, SETTLED, TFD, BACKING_ROOT)
@@ -297,7 +288,7 @@ contract SignerIndependentExitTest is Test {
     /// receipt for a different settled-tx chain is not a receipt for the finalized H.
     function test_crossedSettledTxChainFailsClosed() external {
         bytes32 otherChain = keccak256("other chain");
-        MleVerifier.MleProof memory crossed = _proof(0, otherChain, TFD, BACKING_ROOT);
+        bytes memory crossed = _proof(0, otherChain, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), crossed);
         assertTrue(materializer.hasSignedHeadBacking(address(manager), CHANNEL, otherChain, TFD, true));
         assertFalse(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
@@ -317,19 +308,24 @@ contract SignerIndependentExitTest is Test {
     /// though the mutated proof still passes shape validation.
     function test_mutatedAnchorAfterAttestationIsNotAttested() external {
         rollup.setHead(2, 2);
-        MleVerifier.MleProof memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof);
         _closeTwoTokens(11, 29);
         rollup.seedEscrow(11, TOKEN, 29);
 
-        MleVerifier.MleProof memory mutatedAnchor = _proof(1, SETTLED, TFD, BACKING_ROOT);
-        mutatedAnchor.publicInputs[25] = 0;
+        uint256[] memory mutatedLimbs = _limbsFor(CHANNEL, 1, SETTLED, TFD, BACKING_ROOT);
+        mutatedLimbs[25] = 0;
+        bytes memory mutatedAnchor = abi.encode(mutatedLimbs);
         vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
         materializer.materializeSignedHead(_m(manager), mutatedAnchor);
 
-        MleVerifier.MleProof memory mutatedBody = _proof(1, SETTLED, TFD, BACKING_ROOT);
-        mutatedBody.witnessRoot = keccak256("tampered witness root");
-        vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
+        // Any non-PI byte of the compact proof is part of the attested identity too. The pinned
+        // adapter re-derives the public inputs from the exact bytes before the receipt lookup, and
+        // under the mock's compact surrogate (`abi.encode(uint256[])`) a body mutation is a
+        // non-canonical proof, so it is refused as invalid rather than merely unattested; either
+        // way no unattested bytes reach `_materialize`.
+        bytes memory mutatedBody = bytes.concat(_proof(1, SETTLED, TFD, BACKING_ROOT), hex"00");
+        vm.expectRevert(CloseFundingMaterializer.BackingProofInvalid.selector);
         materializer.materializeSignedHead(_m(manager), mutatedBody);
 
         assertEq(materializer.materializedChannelExit(CHANNEL), bytes32(0));
@@ -344,7 +340,7 @@ contract SignerIndependentExitTest is Test {
         uint32 otherChannel = 8;
         ExitManagerHarness manager2 = _bindExtraManager(otherChannel);
 
-        MleVerifier.MleProof memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof7);
         assertTrue(materializer.hasSignedHeadBacking(address(manager), CHANNEL, SETTLED, TFD, true));
         assertFalse(materializer.hasSignedHeadBacking(address(manager2), otherChannel, SETTLED, TFD, true));
@@ -364,7 +360,7 @@ contract SignerIndependentExitTest is Test {
 
         // A well-formed channel-8 proof carrying the same statement limbs: manager1's attestation
         // does not carry over, because the receipt binds the Manager address and the exact proof.
-        MleVerifier.MleProof memory proof8 = _proofFor(otherChannel, 0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof8 = _proofFor(otherChannel, 0, SETTLED, TFD, BACKING_ROOT);
         vm.expectRevert(CloseFundingMaterializer.BackingProofNotAttested.selector);
         materializer.materializeSignedHead(_m(manager2), proof8);
 
@@ -380,7 +376,7 @@ contract SignerIndependentExitTest is Test {
         uint32 strayChannel = 9;
         rollup.setRegisteredChannel(strayChannel);
         ExitManagerHarness stray = new ExitManagerHarness(bytes4(strayChannel), address(rollup), address(materializer));
-        MleVerifier.MleProof memory strayProof = _proofFor(strayChannel, 0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory strayProof = _proofFor(strayChannel, 0, SETTLED, TFD, BACKING_ROOT);
 
         vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
         materializer.attestSignedHeadBacking(_m(stray), strayProof);
@@ -392,7 +388,7 @@ contract SignerIndependentExitTest is Test {
 
         // Impersonating the bound channel's id does not help: binding is by Manager address.
         ExitManagerHarness impostor = new ExitManagerHarness(bytes4(CHANNEL), address(rollup), address(materializer));
-        MleVerifier.MleProof memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof7 = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof7);
         vm.expectRevert(CloseFundingMaterializer.NotBoundManager.selector);
         materializer.attestSignedHeadBacking(_m(impostor), proof7);
@@ -407,7 +403,7 @@ contract SignerIndependentExitTest is Test {
     /// A Manager that reaches Closed without ever freezing the channel journal (no requestClose)
     /// cannot exit: posts were never fenced, so the attested anchor proves nothing about H.
     function test_materializeBeforeFreezeFailsClosed() external {
-        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof);
         _finishTwoTokens(11, 29);
         rollup.seedEscrow(11, TOKEN, 29);
@@ -427,7 +423,7 @@ contract SignerIndependentExitTest is Test {
     /// finalizes, the same attested proof completes the exit.
     function test_materializeRequiresFinalizedSignedRoot() external {
         bytes32 unfinalizedRoot = keccak256("unfinalized root");
-        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof);
         manager.requestClose();
         (uint32[] memory tokens, uint256[] memory amounts) = _twoTokenVector(11, 29);
@@ -509,7 +505,7 @@ contract SignerIndependentExitTest is Test {
     function test_exitLatchSurvivesRollbackAndCannotRematerialize() external {
         rollup.post(materializer, CHANNEL, 1);
         rollup.setHead(1, 1);
-        MleVerifier.MleProof memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(1, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof);
         _closeTwoTokens(11, 29);
         rollup.seedEscrow(11, TOKEN, 29);
@@ -538,7 +534,7 @@ contract SignerIndependentExitTest is Test {
     /// The Rollup's checked debit panics, and the panic unwinds the digest latch and the earlier
     /// lane's credit — no partial exit is ever left behind. Shown for each lane.
     function test_burnAlreadyPaidMakesExactVectorExitFailClosed() external {
-        MleVerifier.MleProof memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
+        bytes memory proof = _proof(0, SETTLED, TFD, BACKING_ROOT);
         materializer.attestSignedHeadBacking(_m(manager), proof);
         _closeTwoTokens(11, 29);
 
@@ -605,10 +601,12 @@ contract SignerIndependentExitTest is Test {
         amounts[1] = tokenAmount;
     }
 
+    /// @dev Compact-proof surrogate accepted by `MockPinnedMleVerifierV2`: the exact 26-limb
+    ///      CloseAssetBacking public-input vector, ABI-encoded as `uint256[]`.
     function _proof(uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
         pure
-        returns (MleVerifier.MleProof memory)
+        returns (bytes memory)
     {
         return _proofFor(CHANNEL, anchor, settled, tfd, backingRoot);
     }
@@ -616,14 +614,22 @@ contract SignerIndependentExitTest is Test {
     function _proofFor(uint32 channelId, uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
         private
         pure
-        returns (MleVerifier.MleProof memory proof)
+        returns (bytes memory)
     {
-        proof.publicInputs = new uint256[](26);
-        proof.publicInputs[0] = channelId;
-        _putBytes32(proof.publicInputs, 1, settled);
-        _putBytes32(proof.publicInputs, 9, tfd);
-        _putBytes32(proof.publicInputs, 17, backingRoot);
-        proof.publicInputs[25] = anchor;
+        return abi.encode(_limbsFor(channelId, anchor, settled, tfd, backingRoot));
+    }
+
+    function _limbsFor(uint32 channelId, uint64 anchor, bytes32 settled, bytes32 tfd, bytes32 backingRoot)
+        private
+        pure
+        returns (uint256[] memory limbs)
+    {
+        limbs = new uint256[](26);
+        limbs[0] = channelId;
+        _putBytes32(limbs, 1, settled);
+        _putBytes32(limbs, 9, tfd);
+        _putBytes32(limbs, 17, backingRoot);
+        limbs[25] = anchor;
     }
 
     function _putBytes32(uint256[] memory limbs, uint256 offset, bytes32 value) private pure {

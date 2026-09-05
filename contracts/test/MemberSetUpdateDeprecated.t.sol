@@ -9,7 +9,7 @@ import {
     IERC20
 } from "../src/ChannelSettlementManager.sol";
 import {ChannelSettlementVerifier} from "../src/ChannelSettlementVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 contract RetiredMsuRegistry is IChannelRegistry {
     mapping(bytes32 => bool) public override partialWithdrawalAuthorized;
@@ -46,7 +46,12 @@ contract MemberSetUpdateDeprecatedTest is Test {
     bytes32[] internal memberPkGs;
 
     function setUp() external {
-        verifier = new ChannelSettlementVerifier();
+        verifier = new ChannelSettlementVerifier(
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337)
+        );
         memberPkGs = new bytes32[](2);
         memberPkGs[0] = keccak256("retired-msu-member-0");
         memberPkGs[1] = keccak256("retired-msu-member-1");
@@ -81,7 +86,7 @@ contract MemberSetUpdateDeprecatedTest is Test {
         bytes32 beforeCommitment = manager.registeredMemberSetCommitment();
         bytes32 beforeBp = manager.bpPkG();
         uint8 beforeCount = manager.activeMemberCount();
-        MleVerifier.MleProof memory noProof;
+        bytes memory noProof;
 
         bytes32[] memory proposed = new bytes32[](2);
         proposed[0] = memberPkGs[0];

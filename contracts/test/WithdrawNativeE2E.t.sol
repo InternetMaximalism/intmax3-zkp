@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 import {WithdrawNativeE2EBase} from "./WithdrawNativeE2EBase.sol";
 
@@ -28,7 +28,7 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         uint256 amount = ws[0].amount;
 
         uint256 escrowBefore = rollup.totalEscrowed();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
         rollup.withdrawNative(ws, prover, wproof);
 
@@ -53,7 +53,7 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         if (!fixturesReady) { vm.skip(true); return; }
         _runLifecycleThroughFinalize();
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
 
         rollup.withdrawNative(ws, prover, wproof); // first ok
         vm.expectRevert(IntmaxRollup.WithdrawalNullifierUsed.selector);
@@ -66,7 +66,7 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         if (!fixturesReady) { vm.skip(true); return; }
         // Do NOT run finalize; latestFinalizedStateRoot is still the genesis root.
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalExtCommitmentMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
@@ -77,42 +77,29 @@ contract WithdrawNativeE2ETest is WithdrawNativeE2EBase {
         _runLifecycleThroughFinalize();
         (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
         ws[0].amount += 1; // tamper
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
+        bytes memory wproof = FixtureLib.parseCompactProofV2(_withdrawalMleJson());
         vm.expectRevert(IntmaxRollup.WithdrawalPublicInputsMismatch.selector);
         rollup.withdrawNative(ws, prover, wproof);
     }
 
-    /// A fresh rollup whose withdrawal VK was never initialized must reject withdrawNative.
-    function test_withdrawNative_vkNotSet_reverts() public {
+    /// The withdrawal circuit is immutable constructor state; no unset-value escrow state exists.
+    function test_withdrawNative_verifierIsPinnedAtConstruction() public {
         if (!fixturesReady) { vm.skip(true); return; }
-        // Deploy a bare rollup (validity VK only; never initialize the withdrawal VK).
-        FixtureLib.DeployData memory vdd = FixtureLib.parseDeployData(validityMleJson);
-        IntmaxRollup.MleVk memory vvk = FixtureLib.buildMleVk(validityMleJson, verifier);
-        bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
-        IntmaxRollup bare = new IntmaxRollup(
-            fraudTreasury, vvk, vdd.whirParams, vdd.protocolId, vdd.sessionId,
-            vdd.kIs, vdd.subgroupGenPowers, verifier, genesis,
-            true // A-2: test opt-in for the degreeBits==0 bypass
-        );
-        (IntmaxRollup.Withdrawal[] memory ws, address prover) = _parsePayout();
-        MleVerifier.MleProof memory wproof = FixtureLib.parseProof(withdrawalMleJson);
-        vm.expectRevert(IntmaxRollup.WithdrawalVkNotSet.selector);
-        bare.withdrawNative(ws, prover, wproof);
+        address validity = address(rollup.validityMleVerifier());
+        address withdrawal = address(rollup.withdrawalMleVerifier());
+        assertTrue(validity.code.length != 0, "validity adapter code");
+        assertTrue(withdrawal.code.length != 0, "withdrawal adapter code");
+        assertTrue(validity != withdrawal, "circuit adapters must be distinct");
     }
 
-    /// initializeWithdrawalVk is deployer-only and set-once.
-    function test_initializeWithdrawalVk_access_and_setOnce() public {
+    /// Constructor rejects aliasing the validity circuit as the withdrawal circuit.
+    function test_constructor_rejectsDuplicateVerifierAdapters() public {
         if (!fixturesReady) { vm.skip(true); return; }
-        FixtureLib.DeployData memory wdd = FixtureLib.parseDeployData(withdrawalMleJson);
-        IntmaxRollup.MleVk memory wvk = FixtureLib.buildMleVk(withdrawalMleJson, verifier);
-
-        // Non-deployer rejected.
-        vm.prank(makeAddr("attacker"));
-        vm.expectRevert(IntmaxRollup.OnlyDeployer.selector);
-        rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
-
-        // Deployer second call rejected (set-once latch; rollup VK already set in setUp).
-        vm.expectRevert(IntmaxRollup.WithdrawalVkAlreadySet.selector);
-        rollup.initializeWithdrawalVk(wvk, wdd.whirParams, wdd.protocolId, wdd.sessionId, wdd.kIs, wdd.subgroupGenPowers);
+        // Resolve every getter before arming expectRevert: Foundry applies it to the very next
+        // external call, which would otherwise be this harmless getter rather than the constructor.
+        IPinnedMleVerifierV2 validity = rollup.validityMleVerifier();
+        bytes32 genesis = vm.parseJsonBytes32(lifecycleJson, ".genesis_state_root");
+        vm.expectRevert(IntmaxRollup.DuplicatePinnedMleVerifier.selector);
+        new IntmaxRollup(fraudTreasury, validity, validity, genesis);
     }
 }

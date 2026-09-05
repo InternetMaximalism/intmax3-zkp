@@ -18,34 +18,24 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {TestProofDaVerifier} from "./helpers/ProofDaTestHelper.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 contract RollupChainPinDoSTest is Test {
     IntmaxRollup internal rollup;
     address internal constant GRIEFER = address(0xBEEF);
 
     function setUp() public {
-        MleVerifier mle = new MleVerifier(block.chainid);
-        IntmaxRollup.MleVk memory emptyVk;
         rollup = new IntmaxRollup(
-            address(this),                 // fraudTreasury
-            emptyVk,                       // mleVk (zero => verification disabled, allowed below)
-            _emptyWhir(), "", "",
-            new uint256[](0), new uint256[](0),
-            mle,
-            bytes32(0),                    // genesisStateRoot
-            true                           // allowMleDisabled (this test never verifies a proof)
+            address(this), // fraudTreasury
+            new MockPinnedMleVerifierV2(31337),
+            new MockPinnedMleVerifierV2(31337),
+            bytes32(0) // genesisStateRoot
         );
         rollup.setKzgVerifier(BlobKZGVerifierExt(address(new TestProofDaVerifier())));
         rollup.setBlockProducer(address(this), true);
         vm.deal(address(this), 100 ether);
         vm.deal(GRIEFER, 10 ether);
-    }
-
-    function _emptyWhir() internal pure returns (SpongefishWhirVerify.WhirParams memory p) {
-        return p;
     }
 
     function _batch() internal pure returns (IntmaxRollup.SubBlock[] memory b) {

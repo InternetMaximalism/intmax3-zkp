@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {Script} from "forge-std/Script.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "./FixtureLib.sol";
 
 /// @title Build the exact proof-backed partial-withdrawal payout transaction.
@@ -40,10 +39,10 @@ contract RunPartialWithdrawalPayout is Script {
         IntmaxRollup.Withdrawal[] memory ws = _withdrawal(j);
         require(ws[0].tokenIndex == 0, "partial withdrawal is not native");
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_mle());
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(_mle());
 
         vm.startBroadcast();
-        _rollup().withdrawNative(ws, prover, proof);
+        _rollup().withdrawNative(ws, prover, compactProof);
         vm.stopBroadcast();
     }
 
@@ -52,10 +51,10 @@ contract RunPartialWithdrawalPayout is Script {
         IntmaxRollup.Withdrawal[] memory ws = _withdrawal(j);
         require(ws[0].tokenIndex != 0, "partial withdrawal is native");
         address prover = vm.parseJsonAddress(j, ".withdrawal_prover");
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(_mle());
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(_mle());
 
         vm.startBroadcast();
-        _rollup().withdrawERC20(ws, prover, proof);
+        _rollup().withdrawERC20(ws, prover, compactProof);
         vm.stopBroadcast();
     }
 }

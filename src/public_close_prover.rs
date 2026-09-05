@@ -13,6 +13,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
+use plonky2_mle::fixture_v2::MleVerifierV2Fixture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -38,7 +39,10 @@ use crate::{
         SIGNED_HEAD_EXIT_KIT_SCHEMA_VERSION,
     },
     utils::{
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{
+            export_mle_v2_config_json, export_mle_v2_json, prove_with_mle_v2, setup_mle_vk_v2,
+            validate_mle_v2_full_against_config_json, verify_mle_proof_v2,
+        },
         serialize::{deserialize_verifier_data, serialize_verifier_data},
         wrapper::WrapperCircuit,
     },
@@ -53,7 +57,11 @@ const D: usize = 2;
 /// operator-pinned balance verifier-data digest.
 pub const LOCAL_DEVELOPMENT_CHAIN_ID: u64 = 31_337;
 pub const PUBLIC_CLOSE_ENVELOPE_SCHEMA_VERSION: u32 = 3;
-pub const PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// Bundle schema 3: both MLE artifacts are strict canonical wire-v3 (`compact-v2`) fixtures whose
+/// `.compactProof.bytes` is the exact calldata, and the CloseAssetBacking statement additionally
+/// ships its proof-free deployment config (`backing_mle_config.json`) so the materializer's
+/// constructor-pinned adapter can be deployed from the same bundle that is later attested.
+pub const PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION: u32 = 3;
 
 /// JSON expands byte arrays substantially. Bound the complete download before serde allocates it.
 pub const MAX_PUBLIC_BACKING_ENVELOPE_BYTES: usize = 64 * 1024 * 1024;
@@ -64,15 +72,7 @@ pub const MAX_BACKING_PROOF_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CLOSE_PROOF_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CLOSE_MLE_JSON_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BACKING_MLE_JSON_BYTES: usize = 32 * 1024 * 1024;
-const RELEASE_MLE_PROTOCOL_VERSION: u64 = 1;
-const RELEASE_MLE_CONSTITUENT_FIELDS: &[&str] = &[
-    "preprocessedIndividualEvals",
-    "witnessIndividualEvals",
-    "inverseHelpersEvalsAtRInv",
-    "inverseHelpersEvalsAtRH",
-    "preprocessedIndividualEvalsAtRGateV2",
-    "witnessIndividualEvalsAtRGateV2",
-];
+pub const MAX_BACKING_MLE_CONFIG_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PublicCloseError {
@@ -140,6 +140,10 @@ pub struct PublicCloseProofBundle {
     /// Exactly 26 raw Goldilocks limbs, in `CloseAssetBackingPublicInputs` wire order.
     pub backing_public_inputs: Vec<u64>,
     pub backing_mle_json: String,
+    /// Proof-free wire-v3 deployment config of the wrapped CloseAssetBacking circuit: the exact
+    /// `PinnedMleVerifierV2` constructor input the materializer must be bound to. Derived from the
+    /// pinned Balance VD alone, and cross-checked against `backing_mle_json` before export.
+    pub backing_mle_config_json: String,
     pub backing_finalized_extended_state_commitment: Bytes32,
     pub backing_anchor_block_number: u64,
     pub close_descriptor: PublicCloseIntentDescriptor,
@@ -695,19 +699,52 @@ fn verification_from(
     })
 }
 
+/// Decode one exported wire-v3 public-input limb (`0x` + 16 lowercase hex digits).
+fn decode_mle_v2_public_input_limb(value: &str, index: usize) -> PublicCloseResult<u64> {
+    let digits = value.strip_prefix("0x").ok_or_else(|| {
+        PublicCloseError::Proving(format!(
+            "generated MLE publicInputs[{index}] must have a lowercase 0x prefix"
+        ))
+    })?;
+    if digits.len() != 16
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PublicCloseError::Proving(format!(
+            "generated MLE publicInputs[{index}] is not a canonical 64-bit Goldilocks limb"
+        )));
+    }
+    u64::from_str_radix(digits, 16).map_err(|error| {
+        PublicCloseError::Proving(format!(
+            "decode generated MLE publicInputs[{index}]: {error}"
+        ))
+    })
+}
+
+/// The raw public-input limbs a strict canonical wire-v3 full fixture carries (`proof.publicInputs`).
+/// The JSON is re-parsed by the strict canonical parser, so a hand-edited or re-serialized file is
+/// refused here rather than at submission time.
+pub fn mle_v2_public_inputs(mle_json: &str) -> PublicCloseResult<Vec<u64>> {
+    let fixture = MleVerifierV2Fixture::from_canonical_json(mle_json).map_err(|error| {
+        PublicCloseError::Proving(format!(
+            "generated MLE JSON is not a strict canonical wire-v3 fixture: {error}"
+        ))
+    })?;
+    fixture
+        .proof
+        .public_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, value)| decode_mle_v2_public_input_limb(value, index))
+        .collect()
+}
+
 fn verify_mle_public_inputs(
-    mle_json: &str,
+    actual: &[u64],
     expected: &[u64],
     proof_kind: &'static str,
 ) -> PublicCloseResult<()> {
-    let value: serde_json::Value = serde_json::from_str(mle_json)
-        .map_err(|error| PublicCloseError::Proving(format!("parse generated MLE JSON: {error}")))?;
-    let actual = value
-        .get("publicInputs")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            PublicCloseError::Proving("generated MLE JSON has no publicInputs array".into())
-        })?;
     if actual.len() != expected.len() {
         return Err(PublicCloseError::Proving(format!(
             "generated {proof_kind} MLE carries {} public inputs; inner proof carries {}",
@@ -716,17 +753,7 @@ fn verify_mle_public_inputs(
         )));
     }
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-        let parsed = match actual {
-            serde_json::Value::String(value) => value.parse::<u64>().ok(),
-            serde_json::Value::Number(value) => value.as_u64(),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            PublicCloseError::Proving(format!(
-                "generated MLE publicInputs[{index}] is not a canonical u64"
-            ))
-        })?;
-        if parsed != *expected {
+        if actual != expected {
             return Err(PublicCloseError::Proving(format!(
                 "generated {proof_kind} MLE publicInputs[{index}] differs from the inner proof"
             )));
@@ -735,71 +762,45 @@ fn verify_mle_public_inputs(
     Ok(())
 }
 
-/// Attach the release-reviewed PCS envelope metadata consumed by the public close publisher.
-/// These two values are transport metadata, not members of Solidity's `MleProof` tuple, so adding
-/// them neither changes the proof nor its verification/proving cost.
-fn add_release_mle_envelope(mle_json: String, proof_kind: &str) -> PublicCloseResult<String> {
-    let mut value: serde_json::Value = serde_json::from_str(&mle_json).map_err(|error| {
-        PublicCloseError::Proving(format!("parse generated {proof_kind} MLE JSON: {error}"))
-    })?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        PublicCloseError::Proving(format!("generated {proof_kind} MLE JSON is not an object"))
-    })?;
-    let mut width = 2usize;
-    for field in RELEASE_MLE_CONSTITUENT_FIELDS {
-        let length = object
-            .get(*field)
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                PublicCloseError::Proving(format!(
-                    "generated {proof_kind} MLE JSON has no array {field}"
-                ))
-            })?
-            .len();
-        width = width.max(length);
-    }
-    let width = u64::try_from(width).map_err(|_| {
-        PublicCloseError::Proving(format!(
-            "generated {proof_kind} MLE constituent width does not fit u64"
-        ))
-    })?;
-    for (field, expected) in [
-        ("protocolVersion", RELEASE_MLE_PROTOCOL_VERSION),
-        ("constituentWidth", width),
-    ] {
-        if let Some(existing) = object.get(field) {
-            let parsed = match existing {
-                serde_json::Value::Number(value) => value.as_u64(),
-                serde_json::Value::String(value) => value.parse::<u64>().ok(),
-                _ => None,
-            };
-            if parsed != Some(expected) {
-                return Err(PublicCloseError::Proving(format!(
-                    "generated {proof_kind} MLE {field} conflicts with release value {expected}"
-                )));
-            }
-        }
-        object.insert(field.into(), serde_json::Value::from(expected));
-    }
-    serde_json::to_string_pretty(&value).map_err(|error| {
-        PublicCloseError::Proving(format!(
-            "serialize generated {proof_kind} MLE envelope: {error}"
-        ))
+/// The wire-v3 artifact pair of one wrapped CloseAssetBacking proof.
+#[derive(Clone, Debug)]
+pub struct BackingMleArtifacts {
+    /// Strict canonical full fixture (`export_mle_v2_json`): proof, VK, config and the one
+    /// `.compactProof.bytes` calldata record.
+    pub mle_json: String,
+    /// Proof-free deployment config (`export_mle_v2_config_json`) of the same wrapper circuit.
+    pub mle_config_json: String,
+    /// The compact calldata bytes re-derived from `mle_json` against `mle_config_json`; exactly
+    /// what `CloseFundingMaterializer.attestSignedHeadBacking(manager, bytes)` consumes.
+    pub compact_proof: Vec<u8>,
+}
+
+/// Proof-free wire-v3 deployment config of the wrapped CloseAssetBacking circuit. This is a pure
+/// function of the pinned Balance VD (the backing circuit is deterministic in it), so the
+/// materializer's `PinnedMleVerifierV2` adapter can be deployed before any exit kit exists and
+/// every later backing proof must match it.
+pub fn export_backing_mle_config(
+    backing_circuit: &CloseAssetBackingCircuit<F, C, D>,
+) -> PublicCloseResult<String> {
+    let wrapper = WrapperCircuit::<F, C, C, D>::new(&backing_circuit.data.verifier_data());
+    export_mle_v2_config_json(&wrapper.data).map_err(|error| {
+        PublicCloseError::Proving(format!("export backing MLE deployment config: {error:?}"))
     })
 }
 
-/// Recursively wrap the already self-verified backing proof and generate the exact PCS artifact
-/// consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 26 public
-/// inputs verbatim; checking the exported JSON again prevents serialization or pipeline drift
-/// from weakening the Solidity strict-limb binding.
+/// Recursively wrap the already self-verified backing proof and generate the exact wire-v3 PCS
+/// artifact consumed by `CloseFundingMaterializer`. The wrapper re-registers the inner proof's 26
+/// public inputs verbatim; checking the exported JSON again prevents serialization or pipeline
+/// drift from weakening the Solidity strict-limb binding.
 ///
 /// `pub` so the close-fixture co-generator (`generate_close_fixture`) emits the checked-in
-/// `close_asset_backing_mle.json` through this ONE path — the same wrap + MLE + release envelope a
-/// live `public_close_prover` bundle carries, so the Solidity readers see one artifact shape.
+/// `close_asset_backing_mle.json` / `close_asset_backing_mle_config.json` through this ONE path —
+/// the same wrap + MLE + config cross-check a live `public_close_prover` bundle carries, so the
+/// Solidity readers see one artifact shape.
 pub fn wrap_and_export_backing_mle(
     backing_circuit: &CloseAssetBackingCircuit<F, C, D>,
     backing_proof: &ProofWithPublicInputs<F, C, D>,
-) -> PublicCloseResult<String> {
+) -> PublicCloseResult<BackingMleArtifacts> {
     let wrapper = WrapperCircuit::<F, C, C, D>::new(&backing_circuit.data.verifier_data());
     let wrapped = wrapper
         .prove(backing_proof)
@@ -808,21 +809,34 @@ pub fn wrap_and_export_backing_mle(
         PublicCloseError::Proving(format!("self-verify wrapped backing proof: {error:?}"))
     })?;
 
-    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+    let mle_config_json = export_mle_v2_config_json(&wrapper.data).map_err(|error| {
+        PublicCloseError::Proving(format!("export backing MLE deployment config: {error:?}"))
+    })?;
+    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
     let mut witness = PartialWitness::new();
     witness
         .set_proof_with_pis_target(&wrapper.wrap_proof, backing_proof)
         .map_err(|error| {
             PublicCloseError::Proving(format!("bind backing wrapper witness: {error:?}"))
         })?;
-    let mle = prove_with_mle::<F, C, D>(&wrapper.data, witness)
+    let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, witness)
         .map_err(|error| PublicCloseError::Proving(format!("prove backing MLE: {error:?}")))?;
-    verify_mle_proof(&wrapper.data, &vk, &mle.proof).map_err(|error| {
+    verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof).map_err(|error| {
         PublicCloseError::Proving(format!("self-verify backing MLE: {error:?}"))
     })?;
-    let json = export_mle_json(&mle.proof, &wrapper.data.common)
+    let mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)
         .map_err(|error| PublicCloseError::Proving(format!("export backing MLE: {error:?}")))?;
-    add_release_mle_envelope(json, "backing")
+    let compact_proof = validate_mle_v2_full_against_config_json(&mle_json, &mle_config_json)
+        .map_err(|error| {
+            PublicCloseError::Proving(format!(
+                "backing MLE full fixture does not match its deployment config: {error:?}"
+            ))
+        })?;
+    Ok(BackingMleArtifacts {
+        mle_json,
+        mle_config_json,
+        compact_proof,
+    })
 }
 
 /// Build a close proof and its MLE artifact entirely from public data. This function has no key
@@ -847,14 +861,23 @@ pub fn prove_public_close(
             CLOSE_ASSET_BACKING_PUBLIC_INPUTS_LEN
         )));
     }
-    let backing_mle_json =
+    let backing_mle =
         wrap_and_export_backing_mle(&validated.backing_circuit, &validated.backing_proof)?;
     enforce_size(
         "backing MLE JSON",
-        backing_mle_json.len(),
+        backing_mle.mle_json.len(),
         MAX_BACKING_MLE_JSON_BYTES,
     )?;
-    verify_mle_public_inputs(&backing_mle_json, &backing_public_inputs, "backing")?;
+    enforce_size(
+        "backing MLE deployment config JSON",
+        backing_mle.mle_config_json.len(),
+        MAX_BACKING_MLE_CONFIG_JSON_BYTES,
+    )?;
+    verify_mle_public_inputs(
+        &mle_v2_public_inputs(&backing_mle.mle_json)?,
+        &backing_public_inputs,
+        "backing",
+    )?;
     let backing_proof_bytes = validated.backing_proof.to_bytes();
     enforce_size(
         "backing proof",
@@ -913,13 +936,16 @@ pub fn prove_public_close(
     let close_mle_json = prover
         .prove_mle(&close_proof)
         .map_err(|error| PublicCloseError::Proving(error.to_string()))?;
-    let close_mle_json = add_release_mle_envelope(close_mle_json, "close")?;
     enforce_size(
         "close MLE JSON",
         close_mle_json.len(),
         MAX_CLOSE_MLE_JSON_BYTES,
     )?;
-    verify_mle_public_inputs(&close_mle_json, &close_public_inputs, "close")?;
+    verify_mle_public_inputs(
+        &mle_v2_public_inputs(&close_mle_json)?,
+        &close_public_inputs,
+        "close",
+    )?;
 
     let state = &artifact.signed_head;
     let close_tx = CloseWithdrawal {
@@ -985,7 +1011,8 @@ pub fn prove_public_close(
         close_mle_json,
         backing_proof: backing_proof_bytes,
         backing_public_inputs,
-        backing_mle_json,
+        backing_mle_json: backing_mle.mle_json,
+        backing_mle_config_json: backing_mle.mle_config_json,
         backing_finalized_extended_state_commitment: validated
             .backing_public_inputs
             .finalized_extended_state_commitment,
@@ -999,45 +1026,6 @@ pub fn prove_public_close(
 mod tests {
     use super::*;
     use crate::ethereum_types::u32limb_trait::U32LimbTrait as _;
-
-    fn bare_mle_json() -> String {
-        serde_json::json!({
-            "preprocessedIndividualEvals": [1],
-            "witnessIndividualEvals": [1, 2, 3],
-            "inverseHelpersEvalsAtRInv": [],
-            "inverseHelpersEvalsAtRH": [1, 2],
-            "preprocessedIndividualEvalsAtRGateV2": [1],
-            "witnessIndividualEvalsAtRGateV2": [1, 2],
-            "publicInputs": [7, 8],
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn close_mle_envelope_declares_canonical_constituent_width() {
-        let encoded = add_release_mle_envelope(bare_mle_json(), "test").expect("add envelope");
-        let value: serde_json::Value = serde_json::from_str(&encoded).expect("parse envelope");
-        assert_eq!(value["protocolVersion"], serde_json::json!(1));
-        assert_eq!(value["constituentWidth"], serde_json::json!(3));
-        assert_eq!(value["publicInputs"], serde_json::json!([7, 8]));
-
-        let encoded_again =
-            add_release_mle_envelope(encoded.clone(), "test").expect("idempotent envelope");
-        assert_eq!(encoded_again, encoded);
-    }
-
-    #[test]
-    fn close_mle_envelope_rejects_conflicting_upstream_metadata() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(&bare_mle_json()).expect("parse fixture");
-        value["protocolVersion"] = serde_json::json!(2);
-        assert!(add_release_mle_envelope(value.to_string(), "test").is_err());
-
-        let mut value: serde_json::Value =
-            serde_json::from_str(&bare_mle_json()).expect("parse fixture");
-        value["constituentWidth"] = serde_json::json!(4);
-        assert!(add_release_mle_envelope(value.to_string(), "test").is_err());
-    }
 
     fn channel(id: u64) -> ChannelId {
         ChannelId::new(id).expect("valid channel")
@@ -1234,19 +1222,22 @@ mod tests {
 
     #[test]
     fn generated_mle_public_inputs_must_exactly_match_close_proof() {
-        verify_mle_public_inputs(r#"{"publicInputs":["1","2",3]}"#, &[1, 2, 3], "test")
-            .expect("exact public inputs");
-        assert!(
-            verify_mle_public_inputs(r#"{"publicInputs":["1","2"]}"#, &[1, 2, 3], "test").is_err()
+        verify_mle_public_inputs(&[1, 2, 3], &[1, 2, 3], "test").expect("exact public inputs");
+        assert!(verify_mle_public_inputs(&[1, 2], &[1, 2, 3], "test").is_err());
+        assert!(verify_mle_public_inputs(&[1, 9, 3], &[1, 2, 3], "test").is_err());
+
+        assert_eq!(
+            decode_mle_v2_public_input_limb("0x0000000000000007", 0).expect("canonical limb"),
+            7
         );
-        assert!(
-            verify_mle_public_inputs(r#"{"publicInputs":["1","9",3]}"#, &[1, 2, 3], "test")
-                .is_err()
+        assert_eq!(
+            decode_mle_v2_public_input_limb("0x00000000ffffffff", 0).expect("canonical limb"),
+            u64::from(u32::MAX)
         );
-        assert!(
-            verify_mle_public_inputs(r#"{"publicInputs":["1","-2",3]}"#, &[1, 2, 3], "test")
-                .is_err()
-        );
+        for malformed in ["7", "0x7", "0x0000000000000007 ", "0X0000000000000007", "0x00000000000000G7"] {
+            assert!(decode_mle_v2_public_input_limb(malformed, 0).is_err(), "{malformed}");
+        }
+        assert!(mle_v2_public_inputs(r#"{"publicInputs":["1","2"]}"#).is_err());
     }
 
     #[test]

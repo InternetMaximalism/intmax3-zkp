@@ -5727,9 +5727,10 @@ impl CloseProver {
     /// Wrap the close proof and produce its MLE/WHIR proof JSON for the on-chain
     /// `ChannelSettlementVerifier.verifyCloseIntent` (the SAME pipeline as
     /// `bin/generate_close_fixture.rs`). The returned JSON is exactly what Solidity's
-    /// `FixtureLib.parseProof` consumes; the 95 raw close PI limbs are embedded as `publicInputs`,
-    /// which the manager's strict limb-bind re-checks. Verifies the MLE proof locally before
-    /// returning (fail-closed): never hand back a proof that does not self-verify.
+    /// `FixtureLib.parseCompactProofV2` consumes; the 95 raw close PI limbs are embedded in the
+    /// canonical compact stream (with an exactly cross-checked structured view), which the
+    /// manager's strict limb bind re-checks. Verifies the MLE proof locally before returning
+    /// (fail-closed): never hand back a proof that does not self-verify.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn prove_mle(&self, close_proof: &ProofWithPublicInputs<F, C, D>) -> WResult<String> {
         wrap_and_export_mle(&self.close_circuit.data.verifier_data(), close_proof)
@@ -5759,7 +5760,7 @@ fn wrap_and_export_mle(
     use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 
     use crate::utils::{
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{export_mle_v2_json, prove_with_mle_v2, setup_mle_vk_v2, verify_mle_proof_v2},
         wrapper::WrapperCircuit,
     };
 
@@ -5771,15 +5772,15 @@ fn wrap_and_export_mle(
         .data
         .verify(wrapped)
         .map_err(|e| WalletError(format!("wrap proof verify failed: {e:?}")))?;
-    let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+    let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
     let mut pw = PartialWitness::new();
     pw.set_proof_with_pis_target(&wrapper.wrap_proof, inner_proof)
         .map_err(|e| WalletError(format!("wrap witness binding failed: {e:?}")))?;
-    let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+    let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)
         .map_err(|e| WalletError(format!("MLE prove failed: {e:?}")))?;
-    verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+    verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)
         .map_err(|e| WalletError(format!("MLE self-verify failed: {e:?}")))?;
-    export_mle_json(&mle.proof, &wrapper.data.common)
+    export_mle_v2_json(&mle.proof, &vk, &wrapper.data)
         .map_err(|e| WalletError(format!("MLE fixture export failed: {e:?}")))
 }
 
@@ -6419,7 +6420,12 @@ impl Default for ChannelWithdrawalParams {
 /// them for the forge/cast steps).
 pub struct ChannelWithdrawalArtifacts {
     pub lifecycle_json: String,
+    /// Proof-free deployment artifact for `validity_mle_json`.
+    pub validity_mle_config_json: String,
     pub validity_mle_json: String,
+    /// Proof-free deployment artifact for `withdrawal_mle_json` (and the optional ERC-20 proof,
+    /// which uses the same circuit and VK).
+    pub withdrawal_mle_config_json: String,
     pub withdrawal_mle_json: String,
     pub payout_json: String,
     /// Multitoken Phase 5b: the ERC-20 lane's wrapped withdrawal MLE proof (its OWN single-leaf
@@ -6445,6 +6451,63 @@ pub struct ChannelWithdrawalArtifacts {
     /// `balance_vd()`), so a consumer can assert its own close/backing circuits were built over the
     /// identical balance VK before spending minutes proving.
     pub balance_vd: VerifierCircuitData<F, C, D>,
+}
+
+/// Deterministic wire-v3 deployment artifacts produced by the MLE V2 implementation for the two
+/// wrapped circuits used by a channel withdrawal. Construction performs circuit setup only: it does
+/// not build a witness or produce any Plonky2/MLE proof, so a verifier can be deployed before its
+/// address is selected as the withdrawal recipient.
+pub struct ChannelWithdrawalMleV2Configs {
+    pub validity_mle_config_json: String,
+    pub withdrawal_mle_config_json: String,
+}
+
+/// Build current wire-v3 channel-withdrawal configurations without a witness or proof.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_channel_withdrawal_mle_v2_configs() -> anyhow::Result<ChannelWithdrawalMleV2Configs> {
+    use crate::{
+        circuits::{
+            balance::{balance_processor::BalanceProcessor, spend_circuit::SpendCircuit},
+            validity::block_hash_chain::{
+                block_hash_chain_processor::BlockHashChainProcessor,
+                validity_circuit::ValidityCircuit,
+            },
+            withdraw::{
+                single_withdrawal_circuit::SingleWithdawalCircuit,
+                withdrawal_processor::WithdrawalProcessor,
+            },
+        },
+        falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
+        utils::{mle_prover::export_mle_v2_config_json, wrapper::WrapperCircuit},
+    };
+
+    let supported_user_counts = vec![2u32];
+    let block_hash_chain_processor =
+        BlockHashChainProcessor::<F, C, D>::new(&supported_user_counts);
+    let block_chain_vd = block_hash_chain_processor.block_chain_vd();
+
+    let spend_circuit = SpendCircuit::<F, C, D>::new();
+    let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
+    let single_withdrawal_circuit =
+        SingleWithdawalCircuit::<F, C, D>::new(&balance_processor.balance_vd());
+    let withdrawal_processor =
+        WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_circuit.data.verifier_data());
+    let withdrawal_wrapper =
+        WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
+    let withdrawal_mle_config_json = export_mle_v2_config_json(&withdrawal_wrapper.data)?;
+
+    let agg_circuit = FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = AggListCircuit::<F, C, D>::new(&agg_circuit.verifier_data());
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
+    let validity_wrapper =
+        WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
+    let validity_mle_config_json = export_mle_v2_config_json(&validity_wrapper.data)?;
+
+    Ok(ChannelWithdrawalMleV2Configs {
+        validity_mle_config_json,
+        withdrawal_mle_config_json,
+    })
 }
 
 // ── Output JSON schemas (moved verbatim from generate_withdrawal_fixture.rs) ──────────────────
@@ -6522,18 +6585,6 @@ struct WithdrawalPayoutFixture {
     ext_commitment: String,
 }
 
-/// Deterministic, dependency-free FNV-1a digest over a byte slice, placed in the low 64 bits of a
-/// bytes32. The value is UNCONSTRAINED on-chain (finalize/fullVerify never re-derive the submission
-/// commitment), so any deterministic value is sound; used only for reproducibility.
-fn fnv1a_bytes32(bytes: &[u8]) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("0x{:064x}", h as u128)
-}
-
 /// Build the full channel-withdrawal artifact set. See the module banner for the security argument.
 ///
 /// `member_keys`: `Some(cli_members)` binds the registration to the channel's REAL co-signing
@@ -6594,7 +6645,11 @@ pub fn build_channel_withdrawal(
         falcon_sig::{agg::FalconAggCircuit, agg_list::AggListCircuit},
         utils::{
             conversion::ToU64,
-            mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+            mle_prover::{
+                export_mle_v2_config_json, export_mle_v2_json, mle_v2_compact_submission_metadata,
+                prove_with_mle_v2, setup_mle_vk_v2, validate_mle_v2_full_against_config_json,
+                verify_mle_proof_v2,
+            },
             poseidon_hash_out::PoseidonHashOut,
             wrapper::WrapperCircuit,
         },
@@ -7082,19 +7137,24 @@ pub fn build_channel_withdrawal(
     // ── Wrap + MLE for BOTH the withdrawal proof and the validity proof ─────────────────────
     let withdrawal_wrapper =
         WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
+    let withdrawal_mle_config_json = export_mle_v2_config_json(&withdrawal_wrapper.data)?;
     let withdrawal_wrapped = withdrawal_wrapper.prove(&withdrawal_proof)?;
     withdrawal_wrapper.data.verify(withdrawal_wrapped.clone())?;
-    let withdrawal_vk = setup_mle_vk::<F, C, D>(&withdrawal_wrapper.data);
+    let withdrawal_vk = setup_mle_vk_v2::<F, C, D>(&withdrawal_wrapper.data);
     let mut wd_pw = PartialWitness::new();
     wd_pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, &withdrawal_proof)?;
-    let withdrawal_mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
-    verify_mle_proof(
+    let withdrawal_mle = prove_with_mle_v2::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
+    verify_mle_proof_v2(
         &withdrawal_wrapper.data,
         &withdrawal_vk,
         &withdrawal_mle.proof,
     )?;
-    let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
+    let withdrawal_mle_json = export_mle_v2_json(
+        &withdrawal_mle.proof,
+        &withdrawal_vk,
+        &withdrawal_wrapper.data,
+    )?;
+    validate_mle_v2_full_against_config_json(&withdrawal_mle_json, &withdrawal_mle_config_json)?;
 
     // Multitoken Phase 5b: wrap + MLE the ERC-20 lane's withdrawal proof (same wrapper circuit —
     // both lanes are WithdrawalCircuit proofs, so the ONE withdrawal VK verifies both on-chain).
@@ -7105,22 +7165,27 @@ pub fn build_channel_withdrawal(
             withdrawal_wrapper.data.verify(wrapped.clone())?;
             let mut pw = PartialWitness::new();
             pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, proof)?;
-            let mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, pw)?;
-            verify_mle_proof(&withdrawal_wrapper.data, &withdrawal_vk, &mle.proof)?;
-            export_mle_json(&mle.proof, &withdrawal_wrapper.data.common)
+            let mle = prove_with_mle_v2::<F, C, D>(&withdrawal_wrapper.data, pw)?;
+            verify_mle_proof_v2(&withdrawal_wrapper.data, &withdrawal_vk, &mle.proof)?;
+            let json = export_mle_v2_json(&mle.proof, &withdrawal_vk, &withdrawal_wrapper.data)?;
+            validate_mle_v2_full_against_config_json(&json, &withdrawal_mle_config_json)?;
+            Ok(json)
         })
         .transpose()?;
 
     let validity_wrapper =
         WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
+    let validity_mle_config_json = export_mle_v2_config_json(&validity_wrapper.data)?;
     let validity_wrapped = validity_wrapper.prove(&validity_proof)?;
     validity_wrapper.data.verify(validity_wrapped.clone())?;
-    let validity_vk = setup_mle_vk::<F, C, D>(&validity_wrapper.data);
+    let validity_vk = setup_mle_vk_v2::<F, C, D>(&validity_wrapper.data);
     let mut val_pw = PartialWitness::new();
     val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof)?;
-    let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
-    verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
+    let validity_mle = prove_with_mle_v2::<F, C, D>(&validity_wrapper.data, val_pw)?;
+    verify_mle_proof_v2(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
+    let validity_mle_json =
+        export_mle_v2_json(&validity_mle.proof, &validity_vk, &validity_wrapper.data)?;
+    validate_mle_v2_full_against_config_json(&validity_mle_json, &validity_mle_config_json)?;
 
     // ── Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs ─────────
     let single_withdrawal_inputs = SingleWithdawalPublicInputs::from_u64_slice(
@@ -7196,6 +7261,11 @@ pub fn build_channel_withdrawal(
         v
     };
 
+    // Bind every post/fraud/Proof-DA consumer to the exact canonical compact-v2 stream. The full
+    // JSON is only a container and must never become an alternative proof commitment.
+    let (proof_hash, proof_length) =
+        mle_v2_compact_submission_metadata(&validity_mle_json, &validity_mle_config_json)?;
+
     let lifecycle = LifecycleFixture {
         genesis_state_root: vpis.initial_ext_commitment.to_string(),
         final_state_root: vpis.final_ext_commitment.to_string(),
@@ -7233,8 +7303,8 @@ pub fn build_channel_withdrawal(
             final_ext_commitment: vpis.final_ext_commitment.to_string(),
             prover: vpis.prover.to_string(),
         },
-        proof_hash: fnv1a_bytes32(validity_mle_json.as_bytes()),
-        proof_length: validity_mle_json.len() as u32,
+        proof_hash,
+        proof_length,
     };
     let lifecycle_json = serde_json::to_string_pretty(&lifecycle)?;
 
@@ -7273,7 +7343,9 @@ pub fn build_channel_withdrawal(
 
     Ok(ChannelWithdrawalArtifacts {
         lifecycle_json,
+        validity_mle_config_json,
         validity_mle_json,
+        withdrawal_mle_config_json,
         withdrawal_mle_json,
         payout_json,
         erc20_withdrawal_mle_json,

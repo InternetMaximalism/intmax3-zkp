@@ -73,7 +73,7 @@ use crate::{
     },
     utils::{
         conversion::ToU64 as _,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{export_mle_v2_json, prove_with_mle_v2, setup_mle_vk_v2, verify_mle_proof_v2},
         poseidon_hash_out::PoseidonHashOut,
         serialize::serialize_verifier_data,
         wrapper::WrapperCircuit,
@@ -2266,7 +2266,7 @@ impl LiveBalanceService {
         wrapper.data.verify(wrapped).map_err(|e| {
             LiveBalanceServiceError::Transition(format!("verify wrapped withdrawal: {e}"))
         })?;
-        let vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
         let mut pw = plonky2::iop::witness::PartialWitness::new();
         plonky2::iop::witness::WitnessWrite::set_proof_with_pis_target(
             &mut pw,
@@ -2274,11 +2274,11 @@ impl LiveBalanceService {
             &proved.proof,
         )
         .map_err(|e| LiveBalanceServiceError::Transition(format!("mle witness: {e}")))?;
-        let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw)
+        let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("mle prove: {e}")))?;
-        verify_mle_proof(&wrapper.data, &vk, &mle.proof)
+        verify_mle_proof_v2(&wrapper.data, &vk, &mle.proof)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("mle verify: {e}")))?;
-        let withdrawal_mle_json = export_mle_json(&mle.proof, &wrapper.data.common)
+        let withdrawal_mle_json = export_mle_v2_json(&mle.proof, &vk, &wrapper.data)
             .map_err(|e| LiveBalanceServiceError::Transition(format!("mle export: {e}")))?;
         let wrap_millis = t_wrap.elapsed().as_millis() as u64;
 
@@ -2422,7 +2422,7 @@ impl LiveBalanceService {
         let single_vd = single_circuit.data.verifier_data();
         let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_vd);
         let wrapper = WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
-        let mle_vk = setup_mle_vk::<F, C, D>(&wrapper.data);
+        let mle_vk = setup_mle_vk_v2::<F, C, D>(&wrapper.data);
         let ext_public_state = proof_producer
             .witness_handle()
             .map_err(|e| LiveBalanceServiceError::ProducerReconciliation(e.to_string()))?
@@ -2586,14 +2586,14 @@ impl LiveBalanceService {
                 &final_proof,
             )
             .map_err(|e| LiveBalanceServiceError::Transition(format!("close MLE witness: {e}")))?;
-            let mle = prove_with_mle::<F, C, D>(&wrapper.data, pw).map_err(|e| {
+            let mle = prove_with_mle_v2::<F, C, D>(&wrapper.data, pw).map_err(|e| {
                 LiveBalanceServiceError::Transition(format!("close MLE prove: {e}"))
             })?;
-            verify_mle_proof(&wrapper.data, &mle_vk, &mle.proof).map_err(|e| {
+            verify_mle_proof_v2(&wrapper.data, &mle_vk, &mle.proof).map_err(|e| {
                 LiveBalanceServiceError::Transition(format!("close MLE verify: {e}"))
             })?;
-            let withdrawal_mle_json =
-                export_mle_json(&mle.proof, &wrapper.data.common).map_err(|e| {
+            let withdrawal_mle_json = export_mle_v2_json(&mle.proof, &mle_vk, &wrapper.data)
+                .map_err(|e| {
                     LiveBalanceServiceError::Transition(format!("close MLE export: {e}"))
                 })?;
             let wrap_mle_millis = started.elapsed().as_millis() as u64;

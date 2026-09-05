@@ -1,42 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Test.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
-import {InvalidMleProof} from "@mle/MleProofErrors.sol";
+import {Test} from "forge-std/Test.sol";
+import {OuterLogupExt3Verifier} from "@mle/OuterLogupExt3Verifier.sol";
+import {MleVerifierV2} from "@mle/MleVerifierV2.sol";
+import {PinnedMleVerifierV2} from "@mle/PinnedMleVerifierV2.sol";
+import {Plonky2GateEvaluatorExt3} from "@mle/Plonky2GateEvaluatorExt3.sol";
+import {PoseidonPublicInputsHash} from "@mle/PoseidonPublicInputsHash.sol";
 import {SpongefishWhirVerify} from "@mle/spongefish/SpongefishWhirVerify.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 
-/// @title Real-verifier acceptance for the three settlement claim statements.
-///
-/// @notice SECURITY / LIVENESS. Until this file existed, NO `.t.sol` read
-///         `withdrawal_claim_mle.json`, `post_close_claim_mle.json` or `cancel_close_mle.json` —
-///         only the deploy scripts did. Every settlement-verifier Foundry test wires
-///         `MockMleVerifier`, which returns true unconditionally, so the one thing that was broken
-///         (does the REAL `MleVerifier` accept a real proof of this statement?) was precisely the
-///         thing the mock stubbed out. `ExponentiationGate` (gate id 8) entered these two claim
-///         fixtures on 2026-07-31 and made `submitWithdrawalClaim` unverifiable on-chain; nothing
-///         signalled it until an ignored Rust E2E reached the claim step on 2026-08-09.
-///         See `doc/audit/why-gate8-was-missed.md` §6 and §8 (recommendation R2).
-///
-/// @dev WHAT THIS PROVES — and, deliberately, what it does not.
-///      PROVES: the deployed `MleVerifier` bytecode, with the deployed `Plonky2GateEvaluator`
-///      dispatcher, ACCEPTS the checked-in real proof for each claim statement. That is exactly the
-///      "the on-chain verifier is capable of verifying the circuits this repo actually builds"
-///      obligation that the audit corpus left unowned by treating the verifier as an oracle. It
-///      covers gate-set support, `degreeBits` / VK-parameter agreement, WHIR parameter agreement and
-///      `gatesDigest` binding.
-///      DOES NOT PROVE: anything about the settlement contracts' use of these proofs — member-set
-///      binding, H1 binding, nullifiers, payout accounting. This test is intentionally DECOUPLED
-///      from the member-set / finalized-H1 co-generation problem that
-///      `CloseLifecycleE2E.t.sol:244-253` correctly declines to fake; it never touches
-///      `ChannelSettlementManager` or `ChannelSettlementVerifier`. "The verifier can verify this
-///      statement's real proof", nothing more.
-///
-///      No proving is required: the fixtures are checked in, and are the same artifacts the deploy
-///      scripts build the on-chain VKs from.
+/// @title Real constructor-pinned V2 verifier acceptance for settlement statements.
+/// @dev Each statement fixture is consumed only when it carries the strict V2 schema. Historical
+///      V1 ABI fixtures self-skip here rather than being reinterpreted as compact bytes; the
+///      non-skipping V2FixtureCompletenessTest and CI anti-skip guard make that a release failure.
 contract ClaimMleVerifyTest is Test {
-    MleVerifier internal verifier;
+    uint256 private constant MAX_PRODUCTION_VERIFY_GAS = 20_000_000;
 
     /// Fixtures searched, in order, for a duplicated final-round query row. WHIR's Fiat-Shamir
     /// queries are fixture-specific, so the duplicate is located from the current WHIR shape
@@ -53,102 +32,148 @@ contract ClaimMleVerifyTest is Test {
         ];
     }
 
-    function setUp() public {
-        verifier = new MleVerifier(block.chainid);
-    }
-
     function _load(string memory name) internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), "/test/data/", name));
     }
 
-    /// @dev Verify-only: parse the fixture, recompute the `gatesDigest` the way the deploy scripts
-    ///      do (`FixtureLib.buildMleVk`), and require `verify` to return true. A revert — e.g.
-    ///      `"unsupported gate with non-zero filter"` from `Plonky2GateEvaluator` — fails the test
-    ///      by propagating, which is the intended signal.
-    function _assertRealVerifierAccepts(string memory fixtureName) internal view {
-        string memory json = _load(fixtureName);
-        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-
-        // Sanity: a fixture with no gate rows would make the gate sumcheck terminal vacuous and
-        // this test meaningless.
-        require(proof.gates.length > 0, "fixture has no gate rows");
-
-        bytes32 gatesDigest = verifier.computeGatesDigest(
-            proof.gates,
-            proof.witnessIndividualEvalsAtRGateV2.length,
-            proof.numSelectors,
-            proof.numGateConstraints,
-            proof.quotientDegreeFactor
-        );
-
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: dd.degreeBits,
-            preprocessedCommitmentRoot: dd.preCommitRoot,
-            numConstants: dd.numConstants,
-            numRoutedWires: dd.numRoutedWires,
-            protocolId: dd.protocolId,
-            sessionId: dd.sessionId,
-            kIs: dd.kIs,
-            subgroupGenPowers: dd.subgroupGenPowers
-        });
-
-        bool ok = verifier.verify(proof, vp, dd.whirParams, gatesDigest);
-        assertTrue(ok, string.concat("real MleVerifier rejected ", fixtureName));
+    function _loadV2OrSkip(string memory name) internal returns (string memory json) {
+        json = _load(name);
+        if (!vm.keyExistsJson(json, ".schemaVersion")) {
+            vm.skip(true);
+            return "";
+        }
     }
 
-    /// @notice `submitWithdrawalClaim`'s statement. This is the exact fixture whose gate id 8 made
-    ///         the claim path unverifiable on-chain between 2026-07-31 and 2026-08-09.
-    function test_realMleVerifier_acceptsWithdrawalClaimProof() public view {
+    function _maxResourceV2() internal view returns (string memory) {
+        return vm.readFile(
+            string.concat(vm.projectRoot(), "/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json")
+        );
+    }
+
+    function _assertRealVerifierAccepts(string memory fixtureName) internal {
+        string memory json = _loadV2OrSkip(fixtureName);
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        assertTrue(adapter.verifyCompact(compactProof), string.concat("real V2 verifier rejected ", fixtureName));
+    }
+
+    function _assertRejected(PinnedMleVerifierV2 adapter, bytes memory compactProof, string memory why) internal view {
+        (bool success, bytes memory result) =
+            address(adapter).staticcall(abi.encodeCall(PinnedMleVerifierV2.verifyCompact, (compactProof)));
+        if (success) assertFalse(abi.decode(result, (bool)), why);
+    }
+
+    function test_realMleVerifier_acceptsTrackedV2ResourceProof() public {
+        string memory json = _maxResourceV2();
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        assertTrue(adapter.verifyCompact(compactProof));
+    }
+
+    function test_realMleVerifier_acceptsWithdrawalClaimProof() public {
         _assertRealVerifierAccepts("withdrawal_claim_mle.json");
     }
 
-    /// @notice `submitPostCloseClaim`'s statement.
-    function test_realMleVerifier_acceptsPostCloseClaimProof() public view {
+    function test_realMleVerifier_acceptsPostCloseClaimProof() public {
         _assertRealVerifierAccepts("post_close_claim_mle.json");
     }
 
-    /// @notice `cancelClose`'s statement — the only on-chain remedy against a stale close.
-    function test_realMleVerifier_acceptsCancelCloseProof() public view {
+    function test_realMleVerifier_acceptsCancelCloseProof() public {
         _assertRealVerifierAccepts("cancel_close_mle.json");
     }
 
-    /// @notice Regression for WHIR's final-opening binding and duplicate-query handling. The real
-    ///         close proof includes an initial index-zero query and a duplicated final query, so it
-    ///         exercises both paths without a synthetic verifier harness.
-    function test_realMleVerifier_acceptsCloseProof() public view {
+    function test_realMleVerifier_acceptsCloseProof() public {
         _assertRealVerifierAccepts("close_intent_mle.json");
     }
 
-    /// @notice The second serialized row for a duplicate query is consumed by Rust but discarded
-    ///         by Merkle deduplication. It must equal the committed representative before dedup.
+    /// @dev Measure the exact production adapter entry point with intrinsic calldata gas. The
+    /// synthetic resource fixture is not a substitute: it has five gate kinds and one PI, whereas
+    /// every live parent circuit has thirteen gate kinds and statement-dependent PI counts.
+    function _assertPublicInputsPathFitsProductionGasEnvelope(string memory fixtureName, uint256 expectedPublicInputs)
+        internal
+    {
+        string memory json = _loadV2OrSkip(fixtureName);
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        bytes memory callData = abi.encodeCall(PinnedMleVerifierV2.verifyCompactPublicInputs, (compactProof));
+
+        // Deployment above warms the downstream accounts and every constructor-written adapter
+        // slot inside this test transaction. Reset all of them, including the core's runtime-linked
+        // libraries. A direct transaction's `to` account is warm by protocol, so cooling the
+        // adapter too is conservative; the core, libraries and adapter storage are genuinely cold.
+        address core = address(adapter.core());
+        vm.cool(core);
+        vm.cool(address(OuterLogupExt3Verifier));
+        vm.cool(address(Plonky2GateEvaluatorExt3));
+        vm.cool(address(PoseidonPublicInputsHash));
+        vm.cool(address(SpongefishWhirVerify));
+        // Keep this last: reading adapter.core() itself performs a STATICCALL that warms adapter.
+        vm.cool(address(adapter));
+
+        // Execute under the actual post-intrinsic 20M budget rather than measuring with unlimited
+        // wrapper gas and checking only afterwards. Nested EIP-150 forwarding is therefore part of
+        // the acceptance condition.
+        uint256 executionBudget = MAX_PRODUCTION_VERIFY_GAS - _calldataIntrinsicGas(callData);
+        uint256 gasBefore = gasleft();
+        (bool success, bytes memory result) = address(adapter).staticcall{gas: executionBudget}(callData);
+        uint256 executionGas = gasBefore - gasleft();
+        uint256 transactionGasUpperBound = executionGas + _calldataIntrinsicGas(callData);
+        assertTrue(success, string.concat(fixtureName, " PI-return call failed inside production gas cap"));
+        uint256[] memory publicInputs = abi.decode(result, (uint256[]));
+
+        emit log_named_string("production V2 gas fixture", fixtureName);
+        emit log_named_uint("compact bytes", compactProof.length);
+        emit log_named_uint("authenticated public inputs", publicInputs.length);
+        emit log_named_uint("PI-return execution gas", executionGas);
+        emit log_named_uint("PI-return transaction gas upper bound", transactionGasUpperBound);
+        assertEq(publicInputs.length, expectedPublicInputs, "public-input shape drift");
+        assertLt(
+            transactionGasUpperBound,
+            MAX_PRODUCTION_VERIFY_GAS,
+            string.concat(fixtureName, " PI-return transaction exceeds production block envelope")
+        );
+    }
+
+    function test_realValidityPublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("mle_fixture.json", 8);
+    }
+
+    function test_realWithdrawalPublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("withdrawal_mle.json", 17);
+    }
+
+    function test_realClosePublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("pw_close_intent_mle.json", 103);
+    }
+
+    function test_realWithdrawalClaimPublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("withdrawal_claim_mle.json", 50);
+    }
+
+    function test_realPostCloseClaimPublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("post_close_claim_mle.json", 57);
+    }
+
+    function test_realCancelClosePublicInputsPathFitsProductionGasEnvelope() public {
+        _assertPublicInputsPathFitsProductionGasEnvelope("cancel_close_mle.json", 29);
+    }
+
+    function _calldataIntrinsicGas(bytes memory callData) private pure returns (uint256 gasCost) {
+        gasCost = 21_000;
+        for (uint256 i = 0; i < callData.length; ++i) {
+            gasCost += callData[i] == bytes1(0) ? 4 : 16;
+        }
+    }
+
     function test_realMleVerifier_rejectsMismatchedFinalDuplicateRow() public {
         string[7] memory candidates = _duplicateRowCandidates();
         for (uint256 c = 0; c < candidates.length; c++) {
-            string memory json = _load(candidates[c]);
-            FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
-            MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-            (bool found, uint256 duplicateOffset) = _findFinalDuplicateRow(proof.whirHints, dd.whirParams);
-            if (!found) continue;
-
-            bytes32 gatesDigest = verifier.computeGatesDigest(
-                proof.gates,
-                proof.witnessIndividualEvalsAtRGateV2.length,
-                proof.numSelectors,
-                proof.numGateConstraints,
-                proof.quotientDegreeFactor
-            );
-            MleVerifier.VerifyParams memory vp = _verifyParams(dd);
-            assertTrue(verifier.verify(proof, vp, dd.whirParams, gatesDigest), "unmodified fixture verifies");
-            // The verifier sorts/hash-deduplicates rows before evaluating the opening. A one-byte
-            // mutation in the repeated row must therefore hit the explicit duplicate-hash equality
-            // check, rather than letting Merkle dedup silently authenticate only the first copy.
-            proof.whirHints[duplicateOffset] = bytes1(uint8(proof.whirHints[duplicateOffset]) ^ 1);
-
-            vm.expectRevert(InvalidMleProof.selector);
-            verifier.verify(proof, vp, dd.whirParams, gatesDigest);
-            emit log_named_string("duplicate final query fixture", candidates[c]);
-            return;
+            // Each ~1 MB V2 artifact is probed in its OWN call frame: Solidity never releases
+            // memory, so scanning all seven fixtures inline exhausts the quadratic memory budget.
+            if (this.probeDuplicateFinalRow(candidates[c])) {
+                emit log_named_string("duplicate final query fixture", candidates[c]);
+                return;
+            }
         }
         // WHIR draws 16 final-round queries from a 2^11 domain, so a checked-in proof carries a
         // duplicated query only with ~6% probability per fixture. Regeneration is not
@@ -156,6 +181,61 @@ contract ClaimMleVerifyTest is Test {
         // real proof when one of the fixtures happens to contain one; report that explicitly
         // instead of failing the suite on fixture luck.
         vm.skip(true, "no checked-in proof carries a duplicated final-round query; regenerate one that does");
+    }
+
+    /// @dev External only so the candidate loop above can drop this frame's memory. Returns false
+    ///      when the fixture is not V2 or carries no duplicated final-round row; otherwise proves
+    ///      the verifier rejects the one-byte mutation of the repeated row (assertions revert on
+    ///      failure, which fails the calling test).
+    function probeDuplicateFinalRow(string calldata fixtureName) external returns (bool found) {
+        require(msg.sender == address(this), "probe is an internal frame");
+        string memory json = _load(fixtureName);
+        // Historical V1 ABI fixtures carry no compact bytes and are never reinterpreted.
+        if (!vm.keyExistsJson(json, ".schemaVersion")) return false;
+        bytes memory hints = vm.parseJsonBytes(json, ".proof.whirHints");
+        uint256 duplicateOffset;
+        (found, duplicateOffset) = _findFinalDuplicateRow(hints, _verificationConfig(json).whir);
+        if (!found) return false;
+
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        assertTrue(adapter.verifyCompact(compactProof), "unmodified fixture verifies");
+        // The verifier sorts/hash-deduplicates rows before evaluating the opening. A one-byte
+        // mutation in the repeated row must therefore hit the explicit duplicate-hash equality
+        // check, rather than letting Merkle dedup silently authenticate only the first copy.
+        uint256 target = _compactWhirHintsOffset(compactProof, json, hints) + duplicateOffset;
+        compactProof[target] = bytes1(uint8(compactProof[target]) ^ 1);
+        _assertRejected(adapter, compactProof, "mismatched duplicate final-round row accepted");
+    }
+
+    /// @dev The exact constructor-pinned configuration the adapter was deployed from. Its WHIR
+    ///      shape (final-round query count / interleaving depth / Merkle depth) locates the rows.
+    function _verificationConfig(string memory json) internal pure returns (MleVerifierV2.VerificationConfig memory) {
+        return abi.decode(
+            vm.parseJsonBytes(json, ".solidityAbiVerificationConfig.bytes"), (MleVerifierV2.VerificationConfig)
+        );
+    }
+
+    /// @dev Byte offset of the opaque `whirHints` stream inside the canonical `MLEWHIR3` compact
+    ///      encoding: magic(8) | protocolVersion(8) | constituentWidth(4) | circuitDigest(4x8) |
+    ///      publicInputs(n x 8) | three roots(3x32) | u32 len + whirTranscript | u32 len + hints.
+    ///      The field lengths come from the fixture's structured proof, and the located window is
+    ///      cross-checked byte-for-byte against the fixture's own `whirHints`, so a codec change
+    ///      cannot silently move the mutation into a different proof field.
+    function _compactWhirHintsOffset(bytes memory compactProof, string memory json, bytes memory hints)
+        internal
+        pure
+        returns (uint256 offset)
+    {
+        uint256 publicInputCount = vm.parseJsonStringArray(json, ".proof.publicInputs").length;
+        uint256 transcriptLength = vm.parseJsonBytes(json, ".proof.whirTranscript").length;
+        offset = 8 + 8 + 4 + 4 * 8 + publicInputCount * 8 + 3 * 32 + 4 + transcriptLength + 4;
+        require(offset + hints.length <= compactProof.length, "compact hints out of range");
+        bytes memory window = new bytes(hints.length);
+        for (uint256 i = 0; i < window.length; i++) {
+            window[i] = compactProof[offset + i];
+        }
+        require(keccak256(window) == keccak256(hints), "compact hints offset drift");
     }
 
     /// Locate the second copy of a duplicated final-round query row. The final intermediate
@@ -171,9 +251,10 @@ contract ClaimMleVerifyTest is Test {
         uint256 rowBytes = finalRound.interleavingDepth * 24;
         uint256 expectedElements = rawQueryCount * finalRound.interleavingDepth;
         if (expectedElements > type(uint64).max) return (false, 0);
-        uint256 prefixOffset = _findUniqueFinalVecPrefix(
+        (bool prefixFound, uint256 prefixOffset) = _findUniqueFinalVecPrefix(
             hints, uint64(expectedElements), rawQueryCount, rowBytes, finalRound.merkleDepth
         );
+        if (!prefixFound) return (false, 0);
         uint256 rowsStart = prefixOffset + 8;
         bytes32[] memory rowHashes = new bytes32[](rawQueryCount);
         for (uint256 i = 0; i < rawQueryCount; i++) {
@@ -187,71 +268,32 @@ contract ClaimMleVerifyTest is Test {
         return (false, 0);
     }
 
-    /// @notice Arkworks' Vec prefix is part of the canonical proof encoding, not padding.
-    function test_realMleVerifier_rejectsWrongWhirVectorLengthPrefix() public {
-        string memory json = _load("close_intent_mle.json");
-        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        require(dd.whirParams.numRounds > 0, "close fixture needs an intermediate WHIR round");
-        require(dd.whirParams.rounds.length == dd.whirParams.numRounds, "close WHIR round count mismatch");
-
-        // `_phaseFinalVectorAndMerkle` opens the final intermediate commitment. Its Arkworks Vec
-        // contains one row of `interleavingDepth` extension-field elements for every transcript-
-        // derived in-domain query, so `_consumeVecPrefix` expects exactly this product. Locate the
-        // unique little-endian u64 prefix in the serialized hints instead of hard-coding its byte
-        // offset: changing the close circuit changes Fiat-Shamir queries/Merkle paths and therefore
-        // moves this prefix without changing the verifier boundary being tested.
-        SpongefishWhirVerify.RoundParams memory finalRound = dd.whirParams.rounds[dd.whirParams.numRounds - 1];
-        uint256 rawQueryCount = finalRound.inDomainSamples;
-        uint256 expectedElements = rawQueryCount * finalRound.interleavingDepth;
-        require(expectedElements <= type(uint64).max, "final Vec length exceeds u64");
-        uint256 finalVecPrefixOffset = _findUniqueFinalVecPrefix(
-            proof.whirHints,
-            uint64(expectedElements),
-            rawQueryCount,
-            finalRound.interleavingDepth * 24,
-            finalRound.merkleDepth
-        );
-
-        bytes32 gatesDigest = verifier.computeGatesDigest(
-            proof.gates,
-            proof.witnessIndividualEvalsAtRGateV2.length,
-            proof.numSelectors,
-            proof.numGateConstraints,
-            proof.quotientDegreeFactor
-        );
-        proof.whirHints[finalVecPrefixOffset] = bytes1(uint8(proof.whirHints[finalVecPrefixOffset]) ^ 1);
-
-        vm.expectRevert(InvalidMleProof.selector);
-        verifier.verify(proof, _verifyParams(dd), dd.whirParams, gatesDigest);
-    }
-
     /// @dev Locate the final canonical Arkworks u64-LE prefix. Besides exact 64-bit matching, the
     ///      candidate must leave exactly the final raw rows followed only by whole Merkle hashes,
     ///      bounded by one sibling per query per tree layer. This ties the dynamic location to the
     ///      final-opening shape instead of accepting an equal 8-byte sequence in arbitrary row data.
+    ///      Returns `found == false` (never reverts) when the stream carries no unique such prefix,
+    ///      so a fixture whose hint grammar differs simply drops out of the candidate search.
     function _findUniqueFinalVecPrefix(
         bytes memory data,
         uint64 needle,
         uint256 rawQueryCount,
         uint256 rowBytes,
         uint256 merkleDepth
-    ) internal pure returns (uint256 offset) {
-        require(data.length >= 8, "WHIR hints too short for Vec prefix");
+    ) internal pure returns (bool found, uint256 offset) {
+        if (data.length < 8) return (false, 0);
         uint256 rowsBytes = rawQueryCount * rowBytes;
         uint256 maxMerkleBytes = rawQueryCount * merkleDepth * 32;
-        bool found;
         for (uint256 i = 0; i <= data.length - 8; i++) {
             if (_readU64LeAt(data, i) != needle) continue;
             uint256 rowsEnd = i + 8 + rowsBytes;
             if (rowsEnd > data.length) continue;
             uint256 merkleBytes = data.length - rowsEnd;
             if (merkleBytes % 32 != 0 || merkleBytes > maxMerkleBytes) continue;
-            require(!found, "ambiguous final Vec prefix");
+            if (found) return (false, 0); // ambiguous
             found = true;
             offset = i;
         }
-        require(found, "final Vec prefix not found");
     }
 
     function _readU64LeAt(bytes memory data, uint256 offset) internal pure returns (uint64 value) {
@@ -263,69 +305,45 @@ contract ClaimMleVerifyTest is Test {
         }
     }
 
-    /// @notice Reject proof-extension malleability: all hint bytes must be consumed.
+    /// @notice Arkworks' Vec prefix is part of the canonical proof encoding, not padding. The final
+    ///         intermediate opening's u64-LE prefix is located from the pinned WHIR shape instead
+    ///         of a hard-coded byte offset, so regeneration cannot silently retarget the flip.
+    function test_realMleVerifier_rejectsWrongWhirVectorLengthPrefix() public {
+        string memory json = _loadV2OrSkip("close_intent_mle.json");
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        bytes memory hints = vm.parseJsonBytes(json, ".proof.whirHints");
+        SpongefishWhirVerify.WhirParams memory whir = _verificationConfig(json).whir;
+        require(whir.numRounds > 0, "close fixture needs an intermediate WHIR round");
+        require(whir.rounds.length == whir.numRounds, "close WHIR round count mismatch");
+        SpongefishWhirVerify.RoundParams memory finalRound = whir.rounds[whir.numRounds - 1];
+        uint256 expectedElements = finalRound.inDomainSamples * finalRound.interleavingDepth;
+        require(expectedElements <= type(uint64).max, "final Vec length exceeds u64");
+        (bool found, uint256 prefixOffset) = _findUniqueFinalVecPrefix(
+            hints,
+            uint64(expectedElements),
+            finalRound.inDomainSamples,
+            finalRound.interleavingDepth * 24,
+            finalRound.merkleDepth
+        );
+        require(found, "final Vec prefix not found in compact WHIR hints");
+        uint256 target = _compactWhirHintsOffset(compactProof, json, hints) + prefixOffset;
+        compactProof[target] = bytes1(uint8(compactProof[target]) ^ 1);
+        _assertRejected(adapter, compactProof, "tampered WHIR Vec length prefix accepted");
+    }
+
     function test_realMleVerifier_rejectsTrailingWhirHints() public {
-        string memory json = _load("close_intent_mle.json");
-        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        bytes32 gatesDigest = verifier.computeGatesDigest(
-            proof.gates,
-            proof.witnessIndividualEvalsAtRGateV2.length,
-            proof.numSelectors,
-            proof.numGateConstraints,
-            proof.quotientDegreeFactor
-        );
-        proof.whirHints = bytes.concat(proof.whirHints, hex"00");
-
-        vm.expectRevert(InvalidMleProof.selector);
-        verifier.verify(proof, _verifyParams(dd), dd.whirParams, gatesDigest);
+        string memory json = _loadV2OrSkip("close_intent_mle.json");
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = bytes.concat(FixtureLib.parseCompactProofV2(json), hex"00");
+        _assertRejected(adapter, compactProof, "trailing compact byte accepted");
     }
 
-    function _verifyParams(FixtureLib.DeployData memory dd) internal pure returns (MleVerifier.VerifyParams memory) {
-        return MleVerifier.VerifyParams({
-            degreeBits: dd.degreeBits,
-            preprocessedCommitmentRoot: dd.preCommitRoot,
-            numConstants: dd.numConstants,
-            numRoutedWires: dd.numRoutedWires,
-            protocolId: dd.protocolId,
-            sessionId: dd.sessionId,
-            kIs: dd.kIs,
-            subgroupGenPowers: dd.subgroupGenPowers
-        });
-    }
-
-    /// @notice SECURITY: anti-vacuity. If `verify` ever degenerated into "returns true for
-    ///         anything", the three acceptance tests above would pass while proving nothing. Flip a
-    ///         single bit of the WHIR Fiat-Shamir transcript — every MLE challenge is bound to it —
-    ///         and require the real verifier to NOT accept. A revert is a rejection; only `true` is
-    ///         a failure.
-    function test_realMleVerifier_rejectsTamperedWithdrawalClaimProof() public view {
-        string memory json = _load("withdrawal_claim_mle.json");
-        FixtureLib.DeployData memory dd = FixtureLib.parseDeployData(json);
-        MleVerifier.MleProof memory proof = FixtureLib.parseProof(json);
-        bytes32 gatesDigest = verifier.computeGatesDigest(
-            proof.gates,
-            proof.witnessIndividualEvalsAtRGateV2.length,
-            proof.numSelectors,
-            proof.numGateConstraints,
-            proof.quotientDegreeFactor
-        );
-        MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
-            degreeBits: dd.degreeBits,
-            preprocessedCommitmentRoot: dd.preCommitRoot,
-            numConstants: dd.numConstants,
-            numRoutedWires: dd.numRoutedWires,
-            protocolId: dd.protocolId,
-            sessionId: dd.sessionId,
-            kIs: dd.kIs,
-            subgroupGenPowers: dd.subgroupGenPowers
-        });
-
-        proof.whirTranscript = hex"deadbeefdeadbeefdeadbeefdeadbeef";
-        try verifier.verify(proof, vp, dd.whirParams, gatesDigest) returns (bool ok) {
-            assertFalse(ok, "tampered withdrawal-claim transcript MUST be rejected");
-        } catch {
-            // revert == rejection: acceptable
-        }
+    function test_realMleVerifier_rejectsTamperedWithdrawalClaimProof() public {
+        string memory json = _loadV2OrSkip("withdrawal_claim_mle.json");
+        (, PinnedMleVerifierV2 adapter) = FixtureLib.deployPinnedMleV2(json);
+        bytes memory compactProof = FixtureLib.parseCompactProofV2(json);
+        compactProof[compactProof.length / 2] = bytes1(uint8(compactProof[compactProof.length / 2]) ^ 1);
+        _assertRejected(adapter, compactProof, "tampered withdrawal proof accepted");
     }
 }

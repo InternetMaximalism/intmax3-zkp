@@ -13,16 +13,20 @@
 //!
 //! Same rail as `generate_withdrawal_fixture` (the shared `build_channel_withdrawal`), so the
 //! validity/withdrawal proofs, block-hash chain and keccak re-fold are validated identically; only
-//! `burn_aux_data` differs. Writes the `burn_` prefixed 4-artifact set under contracts/test/data/.
+//! `burn_aux_data` differs. Writes the `burn_` prefixed six-artifact set (two proof-free configs,
+//! two strict full V2 proofs and two descriptors) under contracts/test/data/.
 //!
-//! Usage:  cargo run --bin generate_burn_withdrawal_fixture --release
+//! Usage:  cargo run --bin generate_burn_withdrawal_fixture --release [-- --mle-config-only]
 
 use std::{fs, path::Path};
 
 use intmax3_zkp::{
     common::{channel::burn_descriptor, channel_id::ChannelId},
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
-    wallet_core::{ChannelWithdrawalParams, build_channel_withdrawal},
+    utils::mle_prover::{mle_v2_config_only_requested, persist_or_validate_mle_v2_config_json},
+    wallet_core::{
+        ChannelWithdrawalParams, build_channel_withdrawal, build_channel_withdrawal_mle_v2_configs,
+    },
 };
 
 fn parse_address_hex(hex: &str) -> Address {
@@ -45,6 +49,29 @@ fn parse_address_hex(hex: &str) -> Address {
 }
 
 fn main() -> anyhow::Result<()> {
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_else(|_| "burn_".to_string());
+    let name = |base: &str| format!("{prefix}{base}");
+
+    if mle_v2_config_only_requested() {
+        let configs = build_channel_withdrawal_mle_v2_configs()?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join(name("withdrawal_mle_config.json")),
+            &configs.withdrawal_mle_config_json,
+        )?;
+        persist_or_validate_mle_v2_config_json(
+            out_dir.join(name("lifecycle_validity_mle_config.json")),
+            &configs.validity_mle_config_json,
+        )?;
+        eprintln!(
+            "[burn-wd] config-only mode: wrote {} and {}; no witness or proof was constructed",
+            name("withdrawal_mle_config.json"),
+            name("lifecycle_validity_mle_config.json")
+        );
+        return Ok(());
+    }
+
     eprintln!("[burn-wd] building BURN channel-withdrawal artifacts (HEAVY proving)…");
 
     let channel_id: u32 = 1;
@@ -116,10 +143,14 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_else(|_| "burn_".to_string());
-    let name = |base: &str| format!("{prefix}{base}");
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("withdrawal_mle_config.json")),
+        &artifacts.withdrawal_mle_config_json,
+    )?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("lifecycle_validity_mle_config.json")),
+        &artifacts.validity_mle_config_json,
+    )?;
 
     fs::write(
         out_dir.join(name("withdrawal_mle.json")),
@@ -139,6 +170,8 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     for f in [
+        "withdrawal_mle_config.json",
+        "lifecycle_validity_mle_config.json",
         "withdrawal_mle.json",
         "lifecycle_validity_mle.json",
         "lifecycle.json",

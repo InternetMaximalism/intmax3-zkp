@@ -125,6 +125,7 @@ use plonky2::{
         proof::ProofWithPublicInputs,
     },
 };
+use plonky2_mle::fixture_v2::MleVerifierV2ConfigFixture;
 use rand010::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -171,6 +172,9 @@ const BALANCE_VD_FILE: &str = "balance_vd.bin"; // cached balance verifier data 
 const PUBLIC_CLOSE_BUNDLE_ENV: &str = "INTMAX_PUBLIC_CLOSE_BUNDLE";
 const STAGED_CLOSE_BACKING_MANIFEST: &str = "close_asset_backing_manifest.json";
 const STAGED_CLOSE_BACKING_MLE: &str = "close_asset_backing_mle.json";
+/// Proof-free wire-v3 deployment config of the CloseAssetBacking wrapper: the exact
+/// `PinnedMleVerifierV2` constructor input `DeployCloseCli` pins into the materializer.
+const STAGED_CLOSE_BACKING_MLE_CONFIG: &str = "close_asset_backing_mle_config.json";
 const STAGED_CLOSE_BACKING_PUBLIC_INPUTS: &str = "close_asset_backing_public_inputs.json";
 // A-3 P3 close artifacts: the descriptor + wrapped-close MLE proof the on-chain
 // `ChannelSettlementManager.submitCloseIntent` consumes (same schema as generate_close_fixture).
@@ -1365,7 +1369,6 @@ fn require_contracts_dir(cmd: &str, scripts: &[&str]) -> std::path::PathBuf {
             missing.join(", ")
         ));
     }
-
     // Observable, not silent: the resolved path is printed BEFORE the heavy work so an operator
     // can see which checkout a live run is about to stage into.
     eprintln!(
@@ -3410,13 +3413,100 @@ fn propose_exit_kit_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == PROPOSE_EXIT_KIT_FLAG)
 }
 
+/// One constructor-pinned `PinnedMleVerifierV2` adapter and its `MleVerifierV2` core, read back
+/// from the chain at `block` in the exact camelCase field set the publisher's deployment manifest
+/// pins (`{label}MleVerifier`, `{label}MleVerifierCore`, the three config digests and the WHIR
+/// protocol/session ids). Both contracts must allow the RPC chain.
+fn observe_mle_v2_pin_at(
+    rpc: &str,
+    chain_id: u64,
+    label: &str,
+    adapter: &str,
+    block: u64,
+) -> serde_json::Map<String, serde_json::Value> {
+    let adapter = Address::from_hex(adapter)
+        .unwrap_or_else(|error| die(format!("{label} MLE adapter address: {error:?}")));
+    if adapter == Address::default() {
+        die(format!("{label} MLE adapter is the zero address"));
+    }
+    let adapter_hex = adapter.to_hex();
+    let core = cast_call_at(rpc, &adapter_hex, "core()(address)", &[], block);
+    let core = Address::from_hex(&core)
+        .unwrap_or_else(|error| die(format!("{label} MLE adapter core(): {error:?}")));
+    if core == Address::default() {
+        die(format!("{label} MLE adapter {adapter_hex} exposes the zero core"));
+    }
+    let core_hex = core.to_hex();
+    for (contract, address) in [("adapter", &adapter_hex), ("core", &core_hex)] {
+        let allowed = cast_call_at(rpc, address, "allowedChainId()(uint256)", &[], block);
+        let allowed: u64 = allowed
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| {
+                die(format!(
+                    "{label} MLE {contract} allowedChainId() is not a u64: {allowed}"
+                ))
+            });
+        if allowed != chain_id {
+            die(format!(
+                "{label} MLE {contract} {address} allows chain {allowed}, RPC chain is {chain_id}"
+            ));
+        }
+    }
+    let word = |signature: &str| {
+        Bytes32::from_hex(&cast_call_at(rpc, &core_hex, signature, &[], block))
+            .unwrap_or_else(|error| die(format!("{label} MLE core {signature}: {error:?}")))
+    };
+    let protocol_first = word("whirProtocolIdFirst()(bytes32)");
+    let protocol_second = word("whirProtocolIdSecond()(bytes32)");
+    let mut fields = serde_json::Map::new();
+    fields.insert(format!("{label}MleVerifier"), serde_json::json!(adapter_hex));
+    fields.insert(
+        format!("{label}MleVerifierRuntimeCodeHash"),
+        serde_json::json!(settlement_runtime_code_hash_at(rpc, &adapter_hex, block)),
+    );
+    fields.insert(format!("{label}MleVerifierCore"), serde_json::json!(core_hex));
+    fields.insert(
+        format!("{label}MleVerifierCoreRuntimeCodeHash"),
+        serde_json::json!(settlement_runtime_code_hash_at(rpc, &core_hex, block)),
+    );
+    fields.insert(
+        format!("{label}MleVerificationConfigDigest"),
+        serde_json::json!(word("verificationConfigDigest()(bytes32)")),
+    );
+    fields.insert(
+        format!("{label}MleCircuitConfigDigest"),
+        serde_json::json!(word("circuitConfigDigest()(bytes32)")),
+    );
+    fields.insert(
+        format!("{label}MleWhirParametersDigest"),
+        serde_json::json!(word("whirParametersDigest()(bytes32)")),
+    );
+    fields.insert(
+        format!("{label}MleWhirProtocolId"),
+        serde_json::json!(format!(
+            "0x{}{}",
+            hex::encode(protocol_first.to_bytes_be()),
+            hex::encode(protocol_second.to_bytes_be())
+        )),
+    );
+    fields.insert(
+        format!("{label}MleWhirSessionId"),
+        serde_json::json!(word("whirSessionId()(bytes32)")),
+    );
+    fields
+}
+
 /// `export-close-deployment-manifest <out.json> <rpc_url>`: emit the release deployment manifest
 /// (`DEPLOYMENT_MANIFEST_VERSION`) that `public_close_publisher` pins, from the ACTIVE settlement
 /// binding. Every address comes from the durable binding, every runtime code hash recorded at
 /// activation is re-read from the chain at the activation checkpoint and must still match, the
-/// MLE verifier is read back through the settlement verifier and its `allowedChainId` must equal
-/// the RPC chain, and the Balance verifier data is hashed from the local canonical bytes. The
-/// printed SHA-256 is the publisher's independent `--deployment-manifest-sha256` pin.
+/// five constructor-pinned compact-v2 adapters (close, withdrawal-claim, post-close-claim and
+/// cancel-close through the settlement verifier; CloseAssetBacking through the materializer) are
+/// read back with their cores, config digests and WHIR identifiers and must allow the RPC chain,
+/// and the Balance verifier data is hashed from the local canonical bytes. The printed SHA-256 is
+/// the publisher's independent `--deployment-manifest-sha256` pin.
 fn cmd_export_close_deployment_manifest(args: &[String]) {
     const USAGE: &str = "export-close-deployment-manifest <out.json> <rpc_url>";
     let out_path = args.get(1).unwrap_or_else(|| die(USAGE));
@@ -3474,23 +3564,36 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
         recorded,
         block,
     );
-    let mle_verifier = cast_call_at(rpc, verifier, "closeMleVerifier()(address)", &[], block);
-    let mle_verifier = Address::from_hex(&mle_verifier)
-        .unwrap_or_else(|error| die(format!("settlement verifier closeMleVerifier(): {error:?}")));
-    let mle_verifier_hex = mle_verifier.to_hex();
-    let mle_runtime_code_hash = settlement_runtime_code_hash_at(rpc, &mle_verifier_hex, block);
-    let allowed_chain =
-        cast_call_at(rpc, &mle_verifier_hex, "allowedChainId()(uint256)", &[], block);
-    let allowed_chain: u64 = allowed_chain
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| die(format!("MLE verifier allowedChainId() is not a u64: {allowed_chain}")));
-    if allowed_chain != chain_id {
-        die(format!(
-            "MLE verifier {mle_verifier_hex} allows chain {allowed_chain}, RPC chain is {chain_id}"
-        ));
+    let mut mle_pins = serde_json::Map::new();
+    let mut pinned_addresses = HashSet::new();
+    for (label, getter) in [
+        ("close", "closeMleVerifier()(address)"),
+        ("withdrawalClaim", "withdrawalClaimMleVerifier()(address)"),
+        ("postCloseClaim", "postCloseClaimMleVerifier()(address)"),
+        ("cancelClose", "cancelCloseMleVerifier()(address)"),
+    ] {
+        let adapter = cast_call_at(rpc, verifier, getter, &[], block);
+        let fields = observe_mle_v2_pin_at(rpc, chain_id, label, &adapter, block);
+        for key in [format!("{label}MleVerifier"), format!("{label}MleVerifierCore")] {
+            let address = fields[&key].as_str().unwrap_or_default().to_ascii_lowercase();
+            if !pinned_addresses.insert(address) {
+                die(format!("{key} reuses another statement's adapter or core"));
+            }
+        }
+        mle_pins.extend(fields);
     }
+    let backing_adapter = cast_call_at(rpc, materializer, "backingMleVerifier()(address)", &[], block);
+    let backing_fields = observe_mle_v2_pin_at(rpc, chain_id, "backing", &backing_adapter, block);
+    for key in ["backingMleVerifier", "backingMleVerifierCore"] {
+        let address = backing_fields[key]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !pinned_addresses.insert(address) {
+            die(format!("{key} reuses a settlement statement's adapter or core"));
+        }
+    }
+    mle_pins.extend(backing_fields);
     let manager_deployment_block = binding
         .deployment
         .as_ref()
@@ -3516,7 +3619,7 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
             .0[..4]
         )
     );
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schemaVersion": intmax3_zkp::public_close_publisher::DEPLOYMENT_MANIFEST_VERSION,
         "chainId": chain_id,
         "rollup": binding.rollup,
@@ -3528,10 +3631,14 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
         "closeFundingMaterializerRuntimeCodeHash": recorded.materializer,
         "settlementVerifier": verifier,
         "settlementVerifierRuntimeCodeHash": recorded.verifier,
-        "mleVerifier": mle_verifier_hex,
-        "mleVerifierRuntimeCodeHash": mle_runtime_code_hash,
         "balanceVerifierDataSha256": format!("0x{}", hex::encode(vd_sha256)),
-        "mleProofAbiVersion": intmax3_zkp::public_close_publisher::MLE_PROOF_ABI_VERSION,
+        "mleFixtureSchema": plonky2_mle::fixture_v2::MLE_VERIFIER_FIXTURE_SCHEMA_V2,
+        "mleProtocolVersion": plonky2_mle::protocol_schema_v2::MLE_PROTOCOL_VERSION_CURRENT,
+        "mleProofAbiSignature": plonky2_mle::protocol_schema_v2::MLE_PROOF_ABI_SIGNATURE_V2,
+        "mleProofLayoutHash": format!("0x{}", hex::encode(plonky2_mle::protocol_schema_v2::MLE_PROOF_LAYOUT_HASH_V2)),
+        "mleCompactLayoutHash": format!("0x{}", hex::encode(plonky2_mle::protocol_schema_v2::COMPACT_LAYOUT_HASH_V2)),
+        "mleCompactProofEncoding": std::str::from_utf8(&plonky2_mle::protocol_schema_v2::COMPACT_MAGIC_V2)
+            .unwrap_or_else(|error| die(format!("compact-v2 encoding label is not UTF-8: {error}"))),
         "attestSignedHeadBackingSelector": intmax3_zkp::public_close_publisher::ATTEST_SIGNED_HEAD_BACKING_SELECTOR,
         "submitCloseIntentSelector": intmax3_zkp::public_close_publisher::SUBMIT_CLOSE_SELECTOR,
         "finalizeCloseGuardedSelector": finalize_selector,
@@ -3541,8 +3648,16 @@ fn cmd_export_close_deployment_manifest(args: &[String]) {
         "signedHeadBackingAttestedTopic": topic(intmax3_zkp::public_close_publisher::SIGNED_HEAD_BACKING_ATTESTED_EVENT),
         "signedHeadExitMaterializedTopic": topic(intmax3_zkp::public_close_publisher::SIGNED_HEAD_EXIT_MATERIALIZED_EVENT),
     });
+    manifest
+        .as_object_mut()
+        .expect("deployment manifest is an object")
+        .extend(mle_pins);
     let bytes = serde_json::to_vec_pretty(&manifest)
         .unwrap_or_else(|error| die(format!("serialize deployment manifest: {error}")));
+    // The publisher parses this file with `deny_unknown_fields`; refuse to write a manifest it
+    // would reject so the operator learns about a schema drift here, not at publication.
+    intmax3_zkp::public_close_publisher::validate_deployment_manifest_shape(&bytes)
+        .unwrap_or_else(|error| die(format!("exported deployment manifest is not consumable: {error}")));
     write_private_bytes_at(Path::new(out_path), &bytes);
     println!(
         "export-close-deployment-manifest OK: {out_path} (chain {chain_id}, checkpoint block {block}) \
@@ -6056,8 +6171,8 @@ fn prepare_run_close_full_withdrawal_step(
     )
 }
 
-/// Materialize the exact `abi.encode(MleProof)` byte stream before any on-chain lifecycle
-/// mutation. `cast send --blob --path` feeds this raw stream to Foundry's SimpleCoder, which adds
+/// Materialize the exact canonical v2 `compactProof.bytes` stream before any on-chain lifecycle
+/// mutation. `cast send --blob --path` feeds these bytes to Foundry's SimpleCoder, which adds
 /// its length header, losslessly packs 31 payload bytes per field element and splits it across
 /// blobs. The Solidity script is the single ABI encoder; Rust independently re-checks its length,
 /// keccak and expected blob count so a stale/malformed output cannot be posted.
@@ -9177,7 +9292,7 @@ fn main() {
         "migrate-state" => cmd_migrate_state(&args),
         _ => {
             eprintln!(
-                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  export-close-deployment-manifest <out.json> <rpc_url>: write the public_close_publisher deployment manifest (schema 3) from the ACTIVE settlement binding, re-reading every runtime code hash and the MLE verifier at the activation checkpoint; prints the manifest SHA-256 pin\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
+                "usage: channel_member <setup-backing|init|gen-contribution|gen-send|send|install-exit-kit|cosign|cosign-batch|cosign-burn-send|sign-close-funding|recover-inter-transfers|publish-snapshot|register-token|refresh|deploy-settlement|verify-settlement-binding|inspect-l1-deposit|cosign-l1-deposit-import|pw-submit|pw-finalize|close|settle|withdraw|claim|cancel-close|post-close-claim|precompute-falcon-aggregate|migrate-state|...> ...\n  install-exit-kit <public_backing_envelope.json>: cryptographically verify and fsync a content-addressed signer-independent kit receipt for the exact current head\n  export-close-deployment-manifest <out.json> <rpc_url>: write the public_close_publisher deployment manifest (schema 4) from the ACTIVE settlement binding, re-reading every runtime code hash and all five pinned compact-v2 adapter/core pairs at the activation checkpoint; prints the manifest SHA-256 pin\n  sign-close-funding <proposal.json> <out_state.json>: verify ACTIVE chain/rollup/manager/verifier binding, then permanently reserve and N-of-N sign the exact terminal child without advancing the head\n  verify-settlement-binding <manager> <rpc> <rollup> <verifier>: keyless read-back of the durable ACTIVE binding after participant and finalized-L1 revalidation\n  precompute-falcon-aggregate: prove + persist the current finalized state's reusable Falcon aggregate artifact\n  recover-inter-transfers: idempotently roll forward any fsynced two-channel PREPARED journal before accepting another mutation\n  publish-snapshot [out.json]: atomically re-publish the authoritative private snapshot without signing or advancing state\n  migrate-state [--i-understand-this-resets-replay-ledgers] [--i-understand-this-resets-anti-equivocation-ledger]: one-time, EXPLICIT repair of a cli_state.json written before a required security ledger existed\n  multi-token (§N): send/gen-send take [token_slot]; claim takes [token_slot]; inspect-l1-deposit emits the canonical producer request; cosign-l1-deposit-import <slot|auto> <tx_hash> <rpc_url> reads amount/depositor/token_index FROM THE CHAIN; register-token <base_token_index> appends a cosigned registry entry; refresh <slot> [token_slot] re-encrypts a CLI member's own position so it can send again after a homomorphic credit"
             );
             exit(2);
         }
@@ -11373,28 +11488,23 @@ fn cmd_refresh(args: &[String]) {
 
 // ─── Wallet testnet UX: settlement deploy + L1 deposit import + partial withdrawal ────────
 
-/// The ONE chain id that may receive a settlement stack wired to an ALWAYS-TRUE mock MLE verifier.
+/// The ONE chain id that may use the wallet-demo deployment manifest.
 ///
-/// SECURITY: 31337 is anvil's default and is not a public network. `DeployWalletSettlement.s.sol`
-/// itself carries the same `require(block.chainid == 31337)`, so the mock stack is gated twice,
-/// independently — this constant is the Rust half.
+/// `DeployWalletSettlement.s.sol` now deploys the same real circuit-specific pinned-v2 verifier
+/// boundary as production. It remains local-only because the surrounding demo workflow and short
+/// challenge window are not a reviewed release manifest, not because proof verification is mocked.
 const DEVNET_CHAIN_ID: u64 = 31337;
 
 /// Which forge script `deploy-settlement` will run, chosen from the chain id the RPC reports.
 ///
-/// SECURITY (why this is a type and not a `&str` picked inline): a mock MLE verifier returns true
-/// for ANY proof, so a settlement stack built on one has a vacuous `_checkCloseProof` — anyone can
-/// close any channel to any state and drain it. Making the mock script name reachable ONLY through
-/// `SettlementDeployPlan::MockDevnet::script()`, and making that variant constructible ONLY by
-/// `settlement_deploy_plan(31337)`, turns "never deploy the mock off-devnet" from a rule someone
-/// has to remember into something the type system enforces: there is no code path that names
-/// `DeployWalletSettlement.s.sol` without first having proved `chain_id == DEVNET_CHAIN_ID`.
+/// Keeping the two manifests as typed variants prevents the demo-only script from becoming an
+/// accidental real-network default while making the security property explicit: both variants use
+/// real pinned-v2 MLE verification; only their operational deployment policy differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettlementDeployPlan {
-    /// anvil only — `DeployWalletSettlement.s.sol`: mock (always-true) MLE verifier, 1-second
-    /// challenge period, placeholder VKs.
-    MockDevnet,
-    /// Every other chain — `DeployCloseCli.s.sol`: real MLE/WHIR verifier data for all four
+    /// anvil only — real pinned-v2 circuit adapters, with the wallet-demo challenge policy.
+    DevnetV2,
+    /// Every other chain — real pinned-v2 MLE/WHIR verifier data for all four
     /// settlement statements, real challenge period, `registerSettlementManager`.
     RealChain,
 }
@@ -11402,11 +11512,10 @@ enum SettlementDeployPlan {
 impl SettlementDeployPlan {
     /// The forge script path, relative to the contracts checkout.
     ///
-    /// SECURITY: this match and `contract()` are the ONLY places in the binary where the mock
-    /// deployer is named. Grep for `DeployWalletSettlement` — two hits, both in a `MockDevnet` arm.
+    /// The wallet-demo script remains reachable only through the chain-id-gated devnet variant.
     fn script(self) -> &'static str {
         match self {
-            Self::MockDevnet => "script/DeployWalletSettlement.s.sol",
+            Self::DevnetV2 => "script/DeployWalletSettlement.s.sol",
             Self::RealChain => "script/DeployCloseCli.s.sol",
         }
     }
@@ -11414,7 +11523,7 @@ impl SettlementDeployPlan {
     /// The `--tc` contract name inside that script.
     fn contract(self) -> &'static str {
         match self {
-            Self::MockDevnet => "DeployWalletSettlement",
+            Self::DevnetV2 => "DeployWalletSettlement",
             Self::RealChain => "DeployCloseCli",
         }
     }
@@ -11422,8 +11531,8 @@ impl SettlementDeployPlan {
     /// Human label for the announcement line the drivers and tests read.
     fn label(self) -> &'static str {
         match self {
-            Self::MockDevnet => "devnet-mock",
-            Self::RealChain => "real-chain",
+            Self::DevnetV2 => "devnet-pinned-v2",
+            Self::RealChain => "real-chain-pinned-v2",
         }
     }
 }
@@ -11431,12 +11540,11 @@ impl SettlementDeployPlan {
 /// THE selection rule. Total, pure, and tested exhaustively-by-property in `deploy_plan_tests`.
 ///
 /// SECURITY: fail-closed by construction — every chain id that is not exactly `DEVNET_CHAIN_ID`
-/// maps to `RealChain`. There is no "unknown chain" arm, no default, and no way to reach
-/// `MockDevnet` from an unreadable or unexpected chain id; an id we cannot read never gets here at
-/// all (`rpc_chain_id` dies first).
+/// maps to `RealChain`. There is no "unknown chain" arm or permissive default; an id we cannot
+/// read never gets here at all (`rpc_chain_id` dies first).
 fn settlement_deploy_plan(chain_id: u64) -> SettlementDeployPlan {
     if chain_id == DEVNET_CHAIN_ID {
-        SettlementDeployPlan::MockDevnet
+        SettlementDeployPlan::DevnetV2
     } else {
         SettlementDeployPlan::RealChain
     }
@@ -11445,16 +11553,15 @@ fn settlement_deploy_plan(chain_id: u64) -> SettlementDeployPlan {
 /// Read the chain id from the RPC the caller named.
 ///
 /// SECURITY: the target chain is read from THE CHAIN, never from a flag or an env var — a
-/// caller-supplied "this is devnet" claim is exactly the input an attacker would forge to get the
-/// mock verifier installed on a real network. Unparseable output is a hard error: guessing (or
-/// defaulting to devnet) would reintroduce the same hole through the error path.
+/// caller-supplied "this is devnet" claim is exactly the input that could route a public RPC to a
+/// demo-only deployment policy. Unparseable output is a hard error: guessing (or defaulting to
+/// devnet) would reintroduce that routing hole through the error path.
 fn rpc_chain_id(rpc: &str) -> u64 {
     let raw = cast(&["chain-id", "--rpc-url", rpc]);
     raw.trim().parse::<u64>().unwrap_or_else(|e| {
         die(format!(
             "cannot read the chain id from {rpc} ({e}; got {:?}) — REFUSING to guess. \
-             `deploy-settlement` picks the deploy script from the chain id, and the wrong pick on \
-             a real chain installs an always-true mock verifier.",
+             `deploy-settlement` picks a chain-policy-specific deploy manifest from this value.",
             raw.trim()
         ))
     })
@@ -11463,8 +11570,8 @@ fn rpc_chain_id(rpc: &str) -> u64 {
 /// Deploy (or refuse to deploy) the settlement stack for this channel on the chain `rpc` points at.
 ///
 /// The script is chosen from the RPC's OWN chain id (`settlement_deploy_plan`), not from an
-/// argument: anvil keeps the mock-verifier stack it has always used, every other chain gets the
-/// real-VK `DeployCloseCli.s.sol` path with a full precondition check. Usage:
+/// argument: anvil uses the local wallet-demo pinned-v2 manifest, every other chain gets the
+/// production `DeployCloseCli.s.sol` path with a full precondition check. Usage:
 ///   channel_member deploy-settlement <rpc_url>
 fn cmd_deploy_settlement(args: &[String]) {
     let rpc = args
@@ -11482,7 +11589,7 @@ fn cmd_deploy_settlement(args: &[String]) {
         plan.script()
     );
     match plan {
-        SettlementDeployPlan::MockDevnet => deploy_settlement_devnet(&rpc, chain_id),
+        SettlementDeployPlan::DevnetV2 => deploy_settlement_devnet(&rpc, chain_id),
         SettlementDeployPlan::RealChain => deploy_settlement_real(&rpc, chain_id),
     }
 }
@@ -11706,7 +11813,7 @@ fn prepare_settlement_binding(state: &mut CliState, reg: &serde_json::Value, rol
             && existing.snapshot_state_digest == expected_digest
             && existing.participant_root == participant_root
             && existing.participant_count == participant_count
-            && strip0x(&existing.rollup) == strip0x(rollup);
+            && strip0x(&existing.rollup).eq_ignore_ascii_case(&strip0x(rollup));
         if !same {
             die(format!(
                 "settlement PREPARED identity mismatch: cli_state freezes root {} / state {} / \
@@ -11755,10 +11862,15 @@ enum RealSettlementDeployMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SettlementBroadcastAddresses {
-    mle_verifier: String,
+    /// The CloseAssetBacking `MleVerifierV2` core / `PinnedMleVerifierV2` adapter the
+    /// materializer's constructor pinned (deployed from the staged bundle config).
+    backing_mle_core: String,
+    backing_mle_adapter: String,
     verifier: String,
     manager: String,
     materializer: String,
+    mle_v2_cores: [String; 4],
+    mle_v2_adapters: [String; 4],
     registration_tx_hash: Bytes32,
     registration_calldata_hash: Bytes32,
     registration_nonce: u64,
@@ -11767,28 +11879,28 @@ struct SettlementBroadcastAddresses {
 const SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const PUBLIC_CLOSE_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
 const CLOSE_BACKING_MLE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const CLOSE_BACKING_MLE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES: u64 = 64 * 1024;
 const CLOSE_BACKING_PUBLIC_INPUTS: usize = 26;
-const CLOSE_BACKING_MLE_PROTOCOL_VERSION: u64 = 1;
-const CLOSE_BACKING_MLE_CONSTITUENT_FIELDS: [&str; 6] = [
-    "preprocessedIndividualEvals",
-    "witnessIndividualEvals",
-    "inverseHelpersEvalsAtRInv",
-    "inverseHelpersEvalsAtRH",
-    "preprocessedIndividualEvalsAtRGateV2",
-    "witnessIndividualEvalsAtRGateV2",
-];
-const CLOSE_BACKING_STAGED_FILES: [&str; 3] = [
+/// Must equal `public_close_prover::PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION` (schema 3: wire-v3
+/// compact artifacts plus the backing deployment config).
+const CLOSE_BACKING_BUNDLE_SCHEMA_VERSION: u64 =
+    intmax3_zkp::public_close_prover::PUBLIC_CLOSE_BUNDLE_SCHEMA_VERSION as u64;
+const CLOSE_BACKING_STAGED_FILES: [&str; 4] = [
     STAGED_CLOSE_BACKING_MANIFEST,
     STAGED_CLOSE_BACKING_MLE,
+    STAGED_CLOSE_BACKING_MLE_CONFIG,
     STAGED_CLOSE_BACKING_PUBLIC_INPUTS,
 ];
-const SETTLEMENT_PLAN_DOMAIN: &[u8] = b"INTMAX_SETTLEMENT_DEPLOY_PLAN_V1";
+/// V3: pinned-v2 adapters for the four settlement statements (V2) AND the constructor-pinned
+/// CloseAssetBacking adapter staged from the public-close bundle.
+const SETTLEMENT_PLAN_DOMAIN: &[u8] = b"INTMAX_SETTLEMENT_DEPLOY_PLAN_V3";
 
 #[derive(Debug)]
 struct ValidatedCloseBackingBundle {
     manifest: Vec<u8>,
     mle: Vec<u8>,
+    mle_config: Vec<u8>,
     public_inputs: Vec<u8>,
 }
 
@@ -11898,40 +12010,60 @@ fn close_backing_limb_bytes32(inputs: &[u64], offset: usize) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// Enforce the same release envelope as the public publisher. These fields are deliberately not
-/// part of Solidity's proof tuple, so the deployment driver must refuse a legacy or width-mismatched
-/// artifact before its VK becomes the materializer's immutable set-once key.
-fn validate_close_backing_mle_release_envelope(
-    mle: &serde_json::Value,
-) -> Result<(), String> {
-    if json_required_u64(mle, "protocolVersion")? != CLOSE_BACKING_MLE_PROTOCOL_VERSION {
-        return Err(format!(
-            "backing MLE protocolVersion is not release version {CLOSE_BACKING_MLE_PROTOCOL_VERSION}"
-        ));
-    }
-    let mut constituent_width = 2usize;
-    for field in CLOSE_BACKING_MLE_CONSTITUENT_FIELDS {
-        let length = mle
-            .get(field)
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| format!("backing MLE `{field}` is missing or not an array"))?
-            .len();
-        constituent_width = constituent_width.max(length);
-    }
-    if json_required_u64(mle, "constituentWidth")?
-        != u64::try_from(constituent_width)
-            .map_err(|_| "backing MLE constituent width does not fit u64".to_string())?
+/// Decode one wire-v3 `proof.publicInputs` limb (`0x` + 16 lowercase hex digits).
+fn close_backing_v2_public_input(value: &str, index: usize) -> Result<u64, String> {
+    let digits = value.strip_prefix("0x").ok_or_else(|| {
+        format!("backing MLE proof.publicInputs[{index}] must have a lowercase 0x prefix")
+    })?;
+    if digits.len() != 16
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(format!(
-            "backing MLE constituentWidth does not equal canonical width {constituent_width}"
+            "backing MLE proof.publicInputs[{index}] is not a canonical 64-bit Goldilocks limb"
         ));
     }
-    Ok(())
+    u64::from_str_radix(digits, 16)
+        .map_err(|error| format!("decode backing MLE proof.publicInputs[{index}]: {error}"))
+}
+
+/// Authenticate the CloseAssetBacking wire-v3 artifact pair exactly as the publisher and the
+/// materializer will: strict canonical full fixture, proof-free config it must match, and one
+/// canonical `.compactProof.bytes`. Returns the 26 raw public-input limbs the proof carries.
+fn validate_close_backing_mle_v2(mle_bytes: &[u8], config_bytes: &[u8]) -> Result<Vec<u64>, String> {
+    let mle_json = std::str::from_utf8(mle_bytes)
+        .map_err(|error| format!("backing_mle.json is not UTF-8: {error}"))?;
+    let config_json = std::str::from_utf8(config_bytes)
+        .map_err(|error| format!("backing_mle_config.json is not UTF-8: {error}"))?;
+    let fixture = plonky2_mle::fixture_v2::MleVerifierV2Fixture::from_canonical_json(mle_json)
+        .map_err(|error| {
+            format!("backing_mle.json is not a strict canonical wire-v3 fixture: {error}")
+        })?;
+    MleVerifierV2ConfigFixture::from_canonical_json(config_json).map_err(|error| {
+        format!("backing_mle_config.json is not a strict canonical wire-v3 config: {error}")
+    })?;
+    let compact = intmax3_zkp::utils::mle_prover::validate_mle_v2_full_against_config_json(
+        mle_json,
+        config_json,
+    )
+    .map_err(|error| format!("backing_mle.json does not match backing_mle_config.json: {error}"))?;
+    if compact.is_empty() {
+        return Err("backing MLE compact proof is empty".to_string());
+    }
+    fixture
+        .proof
+        .public_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, value)| close_backing_v2_public_input(value, index))
+        .collect()
 }
 
 fn validate_close_backing_bundle_bytes(
     manifest_bytes: &[u8],
     mle_bytes: &[u8],
+    mle_config_bytes: &[u8],
     public_input_bytes: &[u8],
     chain_id: u64,
     rollup: &str,
@@ -11943,8 +12075,10 @@ fn validate_close_backing_bundle_bytes(
     if !manifest.is_object() {
         return Err("public-close manifest must be a JSON object".to_string());
     }
-    if json_required_u64(&manifest, "schemaVersion")? != 2 {
-        return Err("public-close manifest schemaVersion must be 2".to_string());
+    if json_required_u64(&manifest, "schemaVersion")? != CLOSE_BACKING_BUNDLE_SCHEMA_VERSION {
+        return Err(format!(
+            "public-close manifest schemaVersion must be {CLOSE_BACKING_BUNDLE_SCHEMA_VERSION}"
+        ));
     }
     if json_required_u64(&manifest, "chainId")? != chain_id {
         return Err("public-close manifest belongs to a different chain".to_string());
@@ -11984,6 +12118,7 @@ fn validate_close_backing_bundle_bytes(
         );
     }
     if json_required_string(&manifest, "backingMleFile")? != "backing_mle.json"
+        || json_required_string(&manifest, "backingMleConfigFile")? != "backing_mle_config.json"
         || json_required_string(&manifest, "backingPublicInputsFile")?
             != "backing_public_inputs.json"
     {
@@ -11997,6 +12132,17 @@ fn validate_close_backing_bundle_bytes(
         )? != close_backing_sha256(mle_bytes)
     {
         return Err("backing_mle.json does not match its manifest length/SHA-256".to_string());
+    }
+    if json_required_u64(&manifest, "backingMleConfigBytes")? != mle_config_bytes.len() as u64
+        || canonical_hex(
+            json_required_string(&manifest, "backingMleConfigSha256")?,
+            32,
+            "manifest backing MLE config SHA-256",
+        )? != close_backing_sha256(mle_config_bytes)
+    {
+        return Err(
+            "backing_mle_config.json does not match its manifest length/SHA-256".to_string(),
+        );
     }
     if canonical_hex(
         json_required_string(&manifest, "backingPublicInputsSha256")?,
@@ -12012,15 +12158,14 @@ fn validate_close_backing_bundle_bytes(
         return Err("manifest does not declare the exact 26-limb backing statement".to_string());
     }
 
-    let mle: serde_json::Value = serde_json::from_slice(mle_bytes)
-        .map_err(|error| format!("parse backing_mle.json: {error}"))?;
-    validate_close_backing_mle_release_envelope(&mle)?;
-    if json_required_u64(&mle, "degreeBits")? == 0 {
-        return Err("backing MLE has a disabled degreeBits=0 VK".to_string());
-    }
+    let mle_inputs = validate_close_backing_mle_v2(mle_bytes, mle_config_bytes)?;
     let mle_inputs = parse_close_backing_public_inputs(
-        mle.get("publicInputs")
-            .ok_or_else(|| "backing MLE has no publicInputs".to_string())?,
+        &serde_json::Value::Array(
+            mle_inputs
+                .into_iter()
+                .map(|value| serde_json::Value::String(value.to_string()))
+                .collect(),
+        ),
         "backing MLE publicInputs",
     )?;
     let public_input_json: serde_json::Value = serde_json::from_slice(public_input_bytes)
@@ -12074,6 +12219,11 @@ fn load_close_backing_bundle(
         CLOSE_BACKING_MLE_MAX_BYTES,
         "CloseAssetBacking MLE artifact",
     )?;
+    let mle_config = read_bounded_regular_file(
+        &bundle_dir.join("backing_mle_config.json"),
+        CLOSE_BACKING_MLE_CONFIG_MAX_BYTES,
+        "CloseAssetBacking MLE deployment config",
+    )?;
     let public_inputs = read_bounded_regular_file(
         &bundle_dir.join("backing_public_inputs.json"),
         CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES,
@@ -12082,6 +12232,7 @@ fn load_close_backing_bundle(
     validate_close_backing_bundle_bytes(
         &manifest,
         &mle,
+        &mle_config,
         &public_inputs,
         chain_id,
         rollup,
@@ -12091,6 +12242,7 @@ fn load_close_backing_bundle(
     Ok(ValidatedCloseBackingBundle {
         manifest,
         mle,
+        mle_config,
         public_inputs,
     })
 }
@@ -12111,14 +12263,15 @@ fn stage_close_backing_bundle(
     let data_dir = contracts_dir.join("test/data");
     let staged_manifest = data_dir.join(STAGED_CLOSE_BACKING_MANIFEST);
     let staged_mle = data_dir.join(STAGED_CLOSE_BACKING_MLE);
+    let staged_mle_config = data_dir.join(STAGED_CLOSE_BACKING_MLE_CONFIG);
     let staged_public_inputs = data_dir.join(STAGED_CLOSE_BACKING_PUBLIC_INPUTS);
 
     if !resume_prepared {
         let bundle = std::env::var(PUBLIC_CLOSE_BUNDLE_ENV).unwrap_or_else(|_| {
             die(format!(
                 "production deploy-settlement requires {PUBLIC_CLOSE_BUNDLE_ENV}=<directory> \
-                 naming a self-verified `public_close_prover --output-dir` bundle. The backing VK \
-                 cannot be inferred from or replaced by close_intent_mle.json."
+                 naming a self-verified `public_close_prover --output-dir` bundle. The backing \
+                 adapter config cannot be inferred from or replaced by close_intent_mle*.json."
             ))
         });
         let bundle = load_close_backing_bundle(
@@ -12132,6 +12285,7 @@ fn stage_close_backing_bundle(
         // Manifest is the commit marker: a crash before it lands leaves no apparently complete
         // staged set, and no PREPARED state has been written yet.
         write_private_bytes_at(&staged_mle, &bundle.mle);
+        write_private_bytes_at(&staged_mle_config, &bundle.mle_config);
         write_private_bytes_at(&staged_public_inputs, &bundle.public_inputs);
         write_private_bytes_at(&staged_manifest, &bundle.manifest);
     }
@@ -12149,6 +12303,12 @@ fn stage_close_backing_bundle(
             "staged CloseAssetBacking MLE artifact",
         )
         .unwrap_or_else(|error| die(error)),
+        mle_config: read_bounded_regular_file(
+            &staged_mle_config,
+            CLOSE_BACKING_MLE_CONFIG_MAX_BYTES,
+            "staged CloseAssetBacking MLE deployment config",
+        )
+        .unwrap_or_else(|error| die(error)),
         public_inputs: read_bounded_regular_file(
             &staged_public_inputs,
             CLOSE_BACKING_PUBLIC_INPUTS_MAX_BYTES,
@@ -12159,6 +12319,7 @@ fn stage_close_backing_bundle(
     validate_close_backing_bundle_bytes(
         &staged.manifest,
         &staged.mle,
+        &staged.mle_config,
         &staged.public_inputs,
         chain_id,
         rollup,
@@ -12189,7 +12350,10 @@ fn settlement_deployment_plan_digest(
     state_digest: Bytes32,
     reg: &serde_json::Value,
 ) -> Result<Bytes32, String> {
-    const PLAN_FILES: [&str; 13] = [
+    // Security-critical repo-owned sources for the existing-rollup attach and its linked v2
+    // verifier libraries. Keeping this explicit makes relevant source changes invalidate --resume;
+    // in particular, no retired v1 verifier source is treated as the production deployment plan.
+    const PLAN_FILES: &[&str] = &[
         "foundry.toml",
         "script/DeployCloseCli.s.sol",
         "script/DeployConfig.sol",
@@ -12199,10 +12363,33 @@ fn settlement_deployment_plan_digest(
         "src/ChannelSettlementManager.sol",
         "src/ChannelSettlementVerifier.sol",
         "src/CloseFundingMaterializer.sol",
+        "src/IPinnedMleVerifierV2.sol",
         "src/IntmaxRollup.sol",
-        "lib/polygon-plonky2/mle/contracts/src/MleVerifier.sol",
-        "lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluator.sol",
+        "src/SafeERC20.sol",
+        "lib/polygon-plonky2/mle/contracts/src/CanonicalWhirProfileV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/CircuitConfigV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/CosetInterpolationConstants.sol",
+        "lib/polygon-plonky2/mle/contracts/src/CosetInterpolationGateExt3.sol",
+        "lib/polygon-plonky2/mle/contracts/src/MleProofErrors.sol",
+        "lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/OuterLogupExt3Verifier.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PackedClaimExt3.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluatorExt3.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PoseidonConstants.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PoseidonGate.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PoseidonGateExt3.sol",
+        "lib/polygon-plonky2/mle/contracts/src/PoseidonPublicInputsHash.sol",
+        "lib/polygon-plonky2/mle/contracts/src/TranscriptV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/generated/MleWhirV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/generated/WhirProfilesV2.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/GoldilocksExt3.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/Keccak256Chain.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishMerkle.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishWhir.sol",
         "lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishWhirVerify.sol",
+        "lib/polygon-plonky2/mle/contracts/src/spongefish/WhirLinearAlgebra.sol",
     ];
 
     let mut preimage = Vec::new();
@@ -12315,7 +12502,7 @@ fn prepare_real_settlement_binding(
             && existing.snapshot_state_digest == state_digest
             && existing.participant_root == participant_root
             && existing.participant_count == participant_count
-            && strip0x(&existing.rollup) == strip0x(rollup);
+            && strip0x(&existing.rollup).eq_ignore_ascii_case(&strip0x(rollup));
         if !same_binding {
             die(
                 "settlement PREPARED identity differs from the live snapshot/rollup; refusing to \
@@ -12479,12 +12666,16 @@ fn cast_encode_settlement_constructor(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn cast_encode_materializer_constructor(rollup: &str) -> Result<String, String> {
-    const SIGNATURE: &str = "constructor(address)";
+fn cast_encode_materializer_constructor(
+    rollup: &str,
+    backing_adapter: &str,
+) -> Result<String, String> {
+    const SIGNATURE: &str = "constructor(address,address)";
     let output = Command::new("cast")
         .arg("abi-encode")
         .arg(SIGNATURE)
         .arg(rollup)
+        .arg(backing_adapter)
         .output()
         .map_err(|e| format!("start `cast abi-encode` for close-funding materializer: {e}"))?;
     if !output.status.success() {
@@ -12496,6 +12687,331 @@ fn cast_encode_materializer_constructor(rollup: &str) -> Result<String, String> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettlementMleV2ConfigPin {
+    label: &'static str,
+    file: &'static str,
+    preprocessed_root: Bytes32,
+    whir_protocol_id: [u8; 64],
+    whir_session_id: Bytes32,
+    circuit_digest: [u64; 4],
+    circuit_config_digest: Bytes32,
+    whir_parameters_digest: Bytes32,
+    verification_config_digest: Bytes32,
+    /// Exact `abi.encode(MleVerifierV2.VerificationConfig)` bytes from the config-only fixture.
+    verification_config_abi: Vec<u8>,
+}
+
+fn settlement_config_string<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+    what: &str,
+) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{what} has no string at {pointer}"))
+}
+
+fn settlement_config_u64(
+    value: &serde_json::Value,
+    pointer: &str,
+    what: &str,
+) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("{what} has no u64 at {pointer}"))
+}
+
+fn settlement_config_canonical_hex(
+    value: &str,
+    byte_len: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let body = value
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("{what} is not canonical 0x-prefixed hex"))?;
+    if body.len() != byte_len.saturating_mul(2)
+        || !body
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{what} is not canonical lowercase hex of exactly {byte_len} bytes"
+        ));
+    }
+    hex::decode(body).map_err(|error| format!("decode {what}: {error}"))
+}
+
+fn settlement_config_bytes32(value: &str, what: &str) -> Result<Bytes32, String> {
+    let bytes = settlement_config_canonical_hex(value, 32, what)?;
+    Bytes32::from_bytes_be(&bytes).map_err(|error| format!("construct {what}: {error:?}"))
+}
+
+fn parse_settlement_mle_v2_config_pin(
+    value: &serde_json::Value,
+    label: &'static str,
+    file: &'static str,
+) -> Result<SettlementMleV2ConfigPin, String> {
+    let what = format!("{label} MLE wire-v3 config fixture {file}");
+    // Fail before constructing any broadcast plan unless every redundant JSON
+    // view describes one canonical current-generation deployment config. The
+    // Solidity FixtureLib repeats these checks, but it may only be reached
+    // after an earlier deployment transaction has already been broadcast.
+    let strict: MleVerifierV2ConfigFixture = serde_json::from_value(value.clone())
+        .map_err(|error| format!("{what} is not the strict config schema: {error}"))?;
+    strict
+        .validate_self_consistency()
+        .map_err(|error| format!("{what} is internally inconsistent: {error}"))?;
+    if settlement_config_string(value, "/schema", &what)? != "plonky2-mle-v3-solidity-config"
+        || settlement_config_u64(value, "/schemaVersion", &what)? != 3
+        || settlement_config_u64(value, "/protocolVersion", &what)? != 3
+        || settlement_config_u64(value, "/whirPowBits", &what)? != 22
+        || settlement_config_string(value, "/compactProofEncoding", &what)? != "MLEWHIR3"
+    {
+        return Err(format!(
+            "{what} is not the canonical PoW-22 protocol-v3 config schema"
+        ));
+    }
+
+    let pinned = |field: &str| format!("/pinnedVerifier/{field}");
+    let preprocessed_root = settlement_config_bytes32(
+        settlement_config_string(value, &pinned("preprocessedCommitmentRoot"), &what)?,
+        &format!("{what} preprocessed commitment root"),
+    )?;
+    let whir_session_id = settlement_config_bytes32(
+        settlement_config_string(value, &pinned("whirSessionId"), &what)?,
+        &format!("{what} WHIR session id"),
+    )?;
+    let circuit_config_digest = settlement_config_bytes32(
+        settlement_config_string(value, &pinned("circuitConfigDigest"), &what)?,
+        &format!("{what} circuit-config digest"),
+    )?;
+    let whir_parameters_digest = settlement_config_bytes32(
+        settlement_config_string(value, &pinned("whirParametersDigest"), &what)?,
+        &format!("{what} WHIR-parameters digest"),
+    )?;
+    let verification_config_digest = settlement_config_bytes32(
+        settlement_config_string(value, &pinned("verificationConfigDigest"), &what)?,
+        &format!("{what} verification-config digest"),
+    )?;
+
+    let protocol_bytes = settlement_config_canonical_hex(
+        settlement_config_string(value, &pinned("whirProtocolId"), &what)?,
+        64,
+        &format!("{what} WHIR protocol id"),
+    )?;
+    let mut whir_protocol_id = [0u8; 64];
+    whir_protocol_id.copy_from_slice(&protocol_bytes);
+
+    let digest_values = value
+        .pointer(&pinned("circuitDigest"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{what} has no pinned four-limb circuit digest"))?;
+    if digest_values.len() != 4 {
+        return Err(format!("{what} circuit digest is not four limbs"));
+    }
+    let mut circuit_digest = [0u64; 4];
+    for (index, encoded) in digest_values.iter().enumerate() {
+        let encoded = encoded
+            .as_str()
+            .ok_or_else(|| format!("{what} circuit digest limb {index} is not a string"))?;
+        let bytes = settlement_config_canonical_hex(
+            encoded,
+            8,
+            &format!("{what} circuit digest limb {index}"),
+        )?;
+        circuit_digest[index] = u64::from_be_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| format!("{what} circuit digest limb {index} is not eight bytes"))?,
+        );
+    }
+
+    if settlement_config_string(value, "/solidityAbiVerificationConfig/encoding", &what)?
+        != "abi.encode(MleVerifierV2.VerificationConfig)"
+    {
+        return Err(format!(
+            "{what} has the wrong verification-config ABI encoding"
+        ));
+    }
+    let recorded_len =
+        settlement_config_u64(value, "/solidityAbiVerificationConfig/byteLength", &what)?;
+    let encoded_config =
+        settlement_config_string(value, "/solidityAbiVerificationConfig/bytes", &what)?;
+    let body = encoded_config
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("{what} config bytes are not 0x-prefixed"))?;
+    let byte_len = body.len() / 2;
+    if body.len() % 2 != 0 || recorded_len != byte_len as u64 {
+        return Err(format!(
+            "{what} verification-config byte length is inconsistent"
+        ));
+    }
+    if byte_len > SETTLEMENT_BROADCAST_ARTIFACT_MAX_BYTES as usize {
+        return Err(format!(
+            "{what} verification config exceeds the local safety limit"
+        ));
+    }
+    let verification_config_abi = settlement_config_canonical_hex(
+        encoded_config,
+        byte_len,
+        &format!("{what} verification-config ABI"),
+    )?;
+    if verification_config_abi.len() < 32
+        || verification_config_abi[..31].iter().any(|byte| *byte != 0)
+        || verification_config_abi[31] != 32
+    {
+        return Err(format!(
+            "{what} is not a canonical abi.encode(dynamic VerificationConfig) value"
+        ));
+    }
+    let observed_digest = Bytes32::from_bytes_be(&keccak_hash::keccak(&verification_config_abi).0)
+        .map_err(|error| format!("construct {what} config digest: {error:?}"))?;
+    let recorded_digest = settlement_config_bytes32(
+        settlement_config_string(value, "/solidityAbiVerificationConfig/keccak256", &what)?,
+        &format!("{what} recorded config digest"),
+    )?;
+    if observed_digest != recorded_digest || observed_digest != verification_config_digest {
+        return Err(format!(
+            "{what} verification-config bytes, recorded hash, and pinned hash disagree"
+        ));
+    }
+
+    Ok(SettlementMleV2ConfigPin {
+        label,
+        file,
+        preprocessed_root,
+        whir_protocol_id,
+        whir_session_id,
+        circuit_digest,
+        circuit_config_digest,
+        whir_parameters_digest,
+        verification_config_digest,
+        verification_config_abi,
+    })
+}
+
+fn load_settlement_mle_v2_config_pins(
+    contracts_dir: &Path,
+) -> Result<[SettlementMleV2ConfigPin; 4], String> {
+    let mut pins = Vec::with_capacity(SETTLEMENT_MLE_V2_CONFIGS.len());
+    for (label, file) in SETTLEMENT_MLE_V2_CONFIGS {
+        pins.push(load_mle_v2_config_pin(contracts_dir, label, file)?);
+    }
+    pins.try_into()
+        .map_err(|_| "internal MLE v2 config pin count mismatch".to_string())
+}
+
+fn load_mle_v2_config_pin(
+    contracts_dir: &Path,
+    label: &'static str,
+    file: &'static str,
+) -> Result<SettlementMleV2ConfigPin, String> {
+    let path = contracts_dir.join("test/data").join(file);
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("read MLE v2 config {}: {error}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("MLE v2 config {} is not UTF-8: {error}", path.display()))?;
+    MleVerifierV2ConfigFixture::from_canonical_json(text).map_err(|error| {
+        format!(
+            "MLE v2 config {} is not canonical or self-consistent: {error}",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse MLE v2 config {}: {error}", path.display()))?;
+    parse_settlement_mle_v2_config_pin(&value, label, file)
+}
+
+fn load_rollup_mle_v2_config_pins(
+    contracts_dir: &Path,
+) -> Result<[SettlementMleV2ConfigPin; 2], String> {
+    let mut pins = Vec::with_capacity(ROLLUP_MLE_V2_CONFIGS.len());
+    for (label, _, file) in ROLLUP_MLE_V2_CONFIGS {
+        pins.push(load_mle_v2_config_pin(contracts_dir, label, file)?);
+    }
+    pins.try_into()
+        .map_err(|_| "internal rollup MLE v2 config pin count mismatch".to_string())
+}
+
+fn push_abi_u64_word(output: &mut Vec<u8>, value: u64) {
+    output.extend_from_slice(&[0u8; 24]);
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_abi_address_word(output: &mut Vec<u8>, value: &str, what: &str) -> Result<(), String> {
+    let address = Address::from_hex(value).map_err(|error| format!("{what}: {error:?}"))?;
+    output.extend_from_slice(&[0u8; 12]);
+    output.extend_from_slice(&address.to_bytes_be());
+    Ok(())
+}
+
+fn expected_mle_v2_core_constructor(chain_id: u64, pin: &SettlementMleV2ConfigPin) -> Vec<u8> {
+    // Static head: chain, root, protocol[2], session, digest[4], dynamic-config offset = 10 words.
+    let mut encoded = Vec::with_capacity(320 + pin.verification_config_abi.len() - 32);
+    push_abi_u64_word(&mut encoded, chain_id);
+    encoded.extend_from_slice(&pin.preprocessed_root.to_bytes_be());
+    encoded.extend_from_slice(&pin.whir_protocol_id);
+    encoded.extend_from_slice(&pin.whir_session_id.to_bytes_be());
+    for limb in pin.circuit_digest {
+        push_abi_u64_word(&mut encoded, limb);
+    }
+    push_abi_u64_word(&mut encoded, 320);
+    encoded.extend_from_slice(&pin.verification_config_abi[32..]);
+    encoded
+}
+
+fn expected_mle_v2_adapter_constructor(
+    core: &str,
+    pin: &SettlementMleV2ConfigPin,
+) -> Result<Vec<u8>, String> {
+    // Static head: core address and dynamic-config offset = 2 words.
+    let mut encoded = Vec::with_capacity(64 + pin.verification_config_abi.len() - 32);
+    push_abi_address_word(&mut encoded, core, "pinned-v2 adapter core")?;
+    push_abi_u64_word(&mut encoded, 64);
+    encoded.extend_from_slice(&pin.verification_config_abi[32..]);
+    Ok(encoded)
+}
+
+fn expected_settlement_verifier_constructor(adapters: &[String; 4]) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::with_capacity(128);
+    for (index, adapter) in adapters.iter().enumerate() {
+        push_abi_address_word(
+            &mut encoded,
+            adapter,
+            &format!("settlement verifier adapter {index}"),
+        )?;
+    }
+    Ok(encoded)
+}
+
+fn validate_settlement_creation_input_suffix(
+    tx: &serde_json::Value,
+    expected: &[u8],
+    what: &str,
+) -> Result<(), String> {
+    let input = tx
+        .get("transaction")
+        .and_then(|value| value.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{what} has no transaction.input"))?;
+    let body = input
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("{what} transaction.input is not 0x-prefixed"))?;
+    if body.len() % 2 != 0 || !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("{what} transaction.input is malformed hex"));
+    }
+    let bytes = hex::decode(body).map_err(|error| format!("decode {what} input: {error}"))?;
+    if bytes.len() < expected.len() || !bytes.ends_with(expected) {
+        return Err(format!(
+            "{what} creation input does not end in the config-pinned constructor ABI"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_settlement_call_input(tx: &serde_json::Value, what: &str) -> Result<(), String> {
     let function = settlement_artifact_string(tx, "function", what)?;
     let args = settlement_artifact_args(tx, what)?;
@@ -12505,7 +13021,7 @@ fn validate_settlement_call_input(tx: &serde_json::Value, what: &str) -> Result<
         .and_then(|value| value.get("input"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("{what} has no transaction.input"))?;
-    if strip0x(actual) != strip0x(&expected) {
+    if !strip0x(actual).eq_ignore_ascii_case(&strip0x(&expected)) {
         return Err(format!(
             "{what} calldata does not encode its inspected function/arguments"
         ));
@@ -12584,7 +13100,9 @@ fn validate_settlement_call_target(
         .ok_or_else(|| format!("{what} has no transaction object"))?;
     let to = settlement_artifact_string(transaction, "to", what)?;
     let annotated = settlement_artifact_string(tx, "contractAddress", what)?;
-    if strip0x(to) != strip0x(expected) || strip0x(annotated) != strip0x(expected) {
+    if !strip0x(to).eq_ignore_ascii_case(&strip0x(expected))
+        || !strip0x(annotated).eq_ignore_ascii_case(&strip0x(expected))
+    {
         return Err(format!(
             "{what} targets to={to}, contractAddress={annotated}; expected {expected}"
         ));
@@ -12592,14 +13110,97 @@ fn validate_settlement_call_target(
     Ok(())
 }
 
+/// Validate one `MleVerifierV2` core CREATE followed by its `PinnedMleVerifierV2` adapter CREATE
+/// against a config-only fixture pin; returns `(core, adapter)`.
+fn validate_settlement_mle_v2_pair(
+    core_tx: &serde_json::Value,
+    adapter_tx: &serde_json::Value,
+    chain_id: u64,
+    pin: &SettlementMleV2ConfigPin,
+) -> Result<(String, String), String> {
+    let core_what = format!("{} MleVerifierV2 core deploy", pin.label);
+    let adapter_what = format!("{} PinnedMleVerifierV2 adapter deploy", pin.label);
+
+    validate_settlement_tx_shape(core_tx, "CREATE", "MleVerifierV2", None, &core_what)?;
+    let core_address = settlement_artifact_contract_address(core_tx, &core_what)?;
+    let core_args = settlement_artifact_args(core_tx, &core_what)?;
+    let expected_protocol = format!(
+        "[0x{},0x{}]",
+        hex::encode(&pin.whir_protocol_id[..32]),
+        hex::encode(&pin.whir_protocol_id[32..])
+    );
+    let expected_circuit_digest = format!(
+        "[{},{},{},{}]",
+        pin.circuit_digest[0], pin.circuit_digest[1], pin.circuit_digest[2], pin.circuit_digest[3]
+    );
+    if core_args.len() != 6
+        || settlement_artifact_quantity(
+            &serde_json::Value::String(core_args.first().copied().unwrap_or_default().into()),
+            &format!("{core_what} chain id"),
+        )? != chain_id
+        || normalize_abi_text(core_args[1]) != normalize_abi_text(&pin.preprocessed_root.to_hex())
+        || normalize_abi_text(core_args[2]) != normalize_abi_text(&expected_protocol)
+        || normalize_abi_text(core_args[3]) != normalize_abi_text(&pin.whir_session_id.to_hex())
+        || normalize_abi_text(core_args[4]) != normalize_abi_text(&expected_circuit_digest)
+    {
+        return Err(format!(
+            "{core_what} constructor metadata does not match {}",
+            pin.file
+        ));
+    }
+    validate_settlement_creation_input_suffix(
+        core_tx,
+        &expected_mle_v2_core_constructor(chain_id, pin),
+        &core_what,
+    )?;
+
+    validate_settlement_tx_shape(
+        adapter_tx,
+        "CREATE",
+        "PinnedMleVerifierV2",
+        None,
+        &adapter_what,
+    )?;
+    let adapter_address = settlement_artifact_contract_address(adapter_tx, &adapter_what)?;
+    let adapter_args = settlement_artifact_args(adapter_tx, &adapter_what)?;
+    if adapter_args.len() != 2
+        || !strip0x(adapter_args[0]).eq_ignore_ascii_case(&strip0x(&core_address))
+        || normalize_abi_text(adapter_args[1]) != normalize_abi_text(core_args[5])
+    {
+        return Err(format!(
+            "{adapter_what} metadata is not bound to its immediately preceding core/config"
+        ));
+    }
+    validate_settlement_creation_input_suffix(
+        adapter_tx,
+        &expected_mle_v2_adapter_constructor(&core_address, pin)?,
+        &adapter_what,
+    )?;
+    Ok((core_address, adapter_address))
+}
+
 /// Validate the complete semantic transaction plan and also re-encode every CALL from Foundry's
 /// inspected metadata.  This closes the dangerous gap where a forged/stale JSON annotation says
 /// "register this channel" while `transaction.input` actually registers another one.
+///
+/// Existing-rollup branch of `DeployCloseCli.s.sol`, exactly (after any CREATE2 library prelude):
+///   0 CloseAssetBacking MleVerifierV2 core        (from the staged bundle config)
+///   1 CloseAssetBacking PinnedMleVerifierV2 adapter
+///   2 CloseFundingMaterializer(rollup, backing adapter)
+///   3..=10 4 x (MleVerifierV2 core, PinnedMleVerifierV2 adapter): close, withdrawal claim,
+///          post-close claim, cancel close
+///   11 ChannelSettlementVerifier(4 adapters)
+///   12 IntmaxRollup.registerChannel
+///   13 ChannelSettlementManager
+///   14 IntmaxRollup.registerSettlementManager
+/// There are no mutable VK initializers: every verifier binding is a constructor argument.
 fn validate_settlement_broadcast_value(
     artifact: &serde_json::Value,
     intent: &SettlementDeploymentIntent,
     reg: &serde_json::Value,
     rollup: &str,
+    mle_v2_pins: &[SettlementMleV2ConfigPin; 4],
+    backing_pin: &SettlementMleV2ConfigPin,
 ) -> Result<SettlementBroadcastAddresses, String> {
     let artifact_chain = artifact
         .get("chain")
@@ -12621,7 +13222,7 @@ fn validate_settlement_broadcast_value(
             .get("transaction")
             .ok_or_else(|| format!("{what} has no transaction object"))?;
         let from = settlement_artifact_string(transaction, "from", &what)?;
-        if strip0x(from) != strip0x(&intent.broadcaster) {
+        if !strip0x(from).eq_ignore_ascii_case(&strip0x(&intent.broadcaster)) {
             return Err(format!(
                 "{what} sender {from} != pinned broadcaster {}",
                 intent.broadcaster
@@ -12658,7 +13259,7 @@ fn validate_settlement_broadcast_value(
     }
 
     // Solidity libraries may already exist at their deterministic CREATE2 addresses, so Foundry
-    // may emit zero, one or both.  No other prelude transaction is permitted.
+    // may emit any subset of the six exact linked libraries. No other prelude is permitted.
     let mut core_start = 0usize;
     let mut libraries = HashSet::new();
     while core_start < transactions.len()
@@ -12667,8 +13268,15 @@ fn validate_settlement_broadcast_value(
         let tx = &transactions[core_start];
         let what = format!("broadcast transaction {core_start}");
         let name = settlement_artifact_string(tx, "contractName", &what)?;
-        if !matches!(name, "Plonky2GateEvaluator" | "SpongefishWhirVerify")
-            || !libraries.insert(name)
+        if !matches!(
+            name,
+            "CanonicalWhirProfileV2"
+                | "CircuitConfigV2"
+                | "OuterLogupExt3Verifier"
+                | "Plonky2GateEvaluatorExt3"
+                | "PoseidonPublicInputsHash"
+                | "SpongefishWhirVerify"
+        ) || !libraries.insert(name)
         {
             return Err(format!(
                 "{what} is an unexpected/duplicate CREATE2 library {name}"
@@ -12686,7 +13294,7 @@ fn validate_settlement_broadcast_value(
         settlement_artifact_contract_address(tx, &what)?;
         core_start += 1;
     }
-    const CORE_TRANSACTION_COUNT: usize = 11;
+    const CORE_TRANSACTION_COUNT: usize = 15;
     if transactions.len() != core_start + CORE_TRANSACTION_COUNT {
         return Err(format!(
             "broadcast artifact has {} core transactions after {core_start} library creates; \
@@ -12696,102 +13304,87 @@ fn validate_settlement_broadcast_value(
     }
     let core = &transactions[core_start..];
 
+    let (backing_mle_core, backing_mle_adapter) =
+        validate_settlement_mle_v2_pair(&core[0], &core[1], intent.chain_id, backing_pin)?;
+
     validate_settlement_tx_shape(
-        &core[0],
-        "CREATE",
-        "MleVerifier",
-        None,
-        "MleVerifier deploy",
-    )?;
-    let mle = settlement_artifact_contract_address(&core[0], "MleVerifier deploy")?;
-    validate_settlement_tx_shape(
-        &core[1],
+        &core[2],
         "CREATE",
         "CloseFundingMaterializer",
         None,
         "close-funding materializer deploy",
     )?;
     let materializer =
-        settlement_artifact_contract_address(&core[1], "close-funding materializer deploy")?;
+        settlement_artifact_contract_address(&core[2], "close-funding materializer deploy")?;
     let materializer_args =
-        settlement_artifact_args(&core[1], "close-funding materializer deploy")?;
-    if materializer_args.len() != 1 || strip0x(materializer_args[0]) != strip0x(rollup) {
+        settlement_artifact_args(&core[2], "close-funding materializer deploy")?;
+    if materializer_args.len() != 2
+        || !strip0x(materializer_args[0]).eq_ignore_ascii_case(&strip0x(rollup))
+        || !strip0x(materializer_args[1]).eq_ignore_ascii_case(&strip0x(&backing_mle_adapter))
+    {
         return Err(
-            "CloseFundingMaterializer constructor is not bound to the existing rollup".to_string(),
+            "close-funding materializer is not bound to the backing rollup and the CloseAssetBacking \
+             adapter created by this run"
+                .to_string(),
         );
     }
-    let encoded_materializer_constructor = cast_encode_materializer_constructor(rollup)?;
-    let materializer_input = core[1]
+    let encoded_materializer_constructor =
+        cast_encode_materializer_constructor(rollup, &backing_mle_adapter)?;
+    let materializer_input = core[2]
         .get("transaction")
         .and_then(|value| value.get("input"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "close-funding materializer deploy has no transaction.input".to_string())?;
     if !strip0x(materializer_input).ends_with(&strip0x(&encoded_materializer_constructor)) {
         return Err(
-            "close-funding materializer creation input does not end in its inspected rollup constructor ABI"
+            "close-funding materializer creation input does not end in its inspected rollup/adapter constructor ABI"
                 .to_string(),
         );
     }
-    let backing_initializer = &core[2];
-    validate_settlement_tx_shape(
-        backing_initializer,
-        "CALL",
-        "CloseFundingMaterializer",
-        Some("initializeBackingVk("),
-        "CloseAssetBacking VK initializer",
-    )?;
-    validate_settlement_call_target(
-        backing_initializer,
-        &materializer,
-        "CloseAssetBacking VK initializer",
-    )?;
-    let backing_args =
-        settlement_artifact_args(backing_initializer, "CloseAssetBacking VK initializer")?;
-    if backing_args
-        .first()
-        .is_none_or(|arg| strip0x(arg) != strip0x(&mle))
-    {
-        return Err(
-            "CloseAssetBacking VK is not bound to the MleVerifier created by this run".to_string(),
-        );
+    let mut mle_v2_cores = Vec::with_capacity(4);
+    let mut mle_v2_adapters = Vec::with_capacity(4);
+    for (index, pin) in mle_v2_pins.iter().enumerate() {
+        let (core_address, adapter_address) = validate_settlement_mle_v2_pair(
+            &core[3 + 2 * index],
+            &core[4 + 2 * index],
+            intent.chain_id,
+            pin,
+        )?;
+        mle_v2_cores.push(core_address);
+        mle_v2_adapters.push(adapter_address);
     }
-    validate_settlement_call_input(backing_initializer, "CloseAssetBacking VK initializer")?;
+    let mle_v2_cores: [String; 4] = mle_v2_cores
+        .try_into()
+        .map_err(|_| "internal MLE v2 core count mismatch".to_string())?;
+    let mle_v2_adapters: [String; 4] = mle_v2_adapters
+        .try_into()
+        .map_err(|_| "internal MLE v2 adapter count mismatch".to_string())?;
+
     validate_settlement_tx_shape(
-        &core[3],
+        &core[11],
         "CREATE",
         "ChannelSettlementVerifier",
         None,
         "settlement verifier deploy",
     )?;
-    let verifier = settlement_artifact_contract_address(&core[3], "settlement verifier deploy")?;
-
-    for (offset, function) in [
-        "initializeCloseVk(",
-        "initializeWithdrawalClaimVk(",
-        "initializePostCloseClaimVk(",
-        "initializeCancelCloseVk(",
-    ]
-    .iter()
-    .enumerate()
+    let verifier = settlement_artifact_contract_address(&core[11], "settlement verifier deploy")?;
+    let verifier_args = settlement_artifact_args(&core[11], "settlement verifier deploy")?;
+    if verifier_args.len() != 4
+        || verifier_args
+            .iter()
+            .zip(&mle_v2_adapters)
+            .any(|(actual, expected)| !strip0x(actual).eq_ignore_ascii_case(&strip0x(expected)))
     {
-        let tx = &core[4 + offset];
-        let what = format!("settlement verifier initializer {function}");
-        validate_settlement_tx_shape(
-            tx,
-            "CALL",
-            "ChannelSettlementVerifier",
-            Some(function),
-            &what,
-        )?;
-        validate_settlement_call_target(tx, &verifier, &what)?;
-        let args = settlement_artifact_args(tx, &what)?;
-        if args.first().is_none_or(|arg| strip0x(arg) != strip0x(&mle)) {
-            return Err(format!(
-                "{what} is not bound to the MleVerifier created by this run"
-            ));
-        }
-        validate_settlement_call_input(tx, &what)?;
+        return Err(
+            "ChannelSettlementVerifier is not bound to the four ordered pinned-v2 adapters"
+                .to_string(),
+        );
     }
+    validate_settlement_creation_input_suffix(
+        &core[11],
+        &expected_settlement_verifier_constructor(&mle_v2_adapters)?,
+        "settlement verifier deploy",
+    )?;
 
     let member_count = reg["member_count"]
         .as_u64()
@@ -12812,7 +13405,7 @@ fn validate_settlement_broadcast_value(
         return Err("staged record has no valid block-proposer member".to_string());
     }
 
-    let register = &core[8];
+    let register = &core[12];
     validate_settlement_tx_shape(
         register,
         "CALL",
@@ -12853,7 +13446,7 @@ fn validate_settlement_broadcast_value(
     }
     validate_settlement_call_input(register, "registerChannel")?;
 
-    let manager_deploy = &core[9];
+    let manager_deploy = &core[13];
     validate_settlement_tx_shape(
         manager_deploy,
         "CREATE",
@@ -12863,6 +13456,22 @@ fn validate_settlement_broadcast_value(
     )?;
     let manager =
         settlement_artifact_contract_address(manager_deploy, "settlement manager deploy")?;
+    let mut deployed_addresses = HashSet::new();
+    for address in [&materializer, &backing_mle_core, &backing_mle_adapter]
+        .into_iter()
+        .chain(mle_v2_cores.iter())
+        .chain(mle_v2_adapters.iter())
+        .chain([&verifier, &manager])
+    {
+        let normalized = strip0x(address).to_ascii_lowercase();
+        if normalized == strip0x(rollup).to_ascii_lowercase()
+            || !deployed_addresses.insert(normalized)
+        {
+            return Err(format!(
+                "created deployment address {address} is reused by the rollup or another contract"
+            ));
+        }
+    }
     let manager_args = settlement_artifact_args(manager_deploy, "settlement manager deploy")?;
     let expected_channel = format!(
         "0x{:08x}",
@@ -12906,9 +13515,9 @@ fn validate_settlement_broadcast_value(
             &serde_json::Value::String(manager_args[7].to_string()),
             "manager initial BP bond",
         )? != 0
-        || strip0x(manager_args[8]) != strip0x(&verifier)
-        || strip0x(manager_args[9]) != strip0x(rollup)
-        || strip0x(manager_args[10]) != strip0x(&materializer)
+        || !strip0x(manager_args[8]).eq_ignore_ascii_case(&strip0x(&verifier))
+        || !strip0x(manager_args[9]).eq_ignore_ascii_case(&strip0x(rollup))
+        || !strip0x(manager_args[10]).eq_ignore_ascii_case(&strip0x(&materializer))
         || normalize_abi_text(manager_args[11]) != normalize_abi_text(&expected_bindings)
     {
         return Err(
@@ -12928,7 +13537,7 @@ fn validate_settlement_broadcast_value(
         );
     }
 
-    let register_manager = &core[10];
+    let register_manager = &core[14];
     validate_settlement_tx_shape(
         register_manager,
         "CALL",
@@ -12939,7 +13548,9 @@ fn validate_settlement_broadcast_value(
     validate_settlement_call_target(register_manager, rollup, "registerSettlementManager")?;
     let register_manager_args =
         settlement_artifact_args(register_manager, "registerSettlementManager")?;
-    if register_manager_args.len() != 1 || strip0x(register_manager_args[0]) != strip0x(&manager) {
+    if register_manager_args.len() != 1
+        || !strip0x(register_manager_args[0]).eq_ignore_ascii_case(&strip0x(&manager))
+    {
         return Err(
             "registerSettlementManager does not register the manager created by this run"
                 .to_string(),
@@ -12975,10 +13586,13 @@ fn validate_settlement_broadcast_value(
     )?;
 
     Ok(SettlementBroadcastAddresses {
-        mle_verifier: mle,
+        backing_mle_core,
+        backing_mle_adapter,
         verifier,
         manager,
         materializer,
+        mle_v2_cores,
+        mle_v2_adapters,
         registration_tx_hash,
         registration_calldata_hash,
         registration_nonce,
@@ -12990,6 +13604,8 @@ fn validate_settlement_broadcast_artifact(
     intent: &SettlementDeploymentIntent,
     reg: &serde_json::Value,
     rollup: &str,
+    mle_v2_pins: &[SettlementMleV2ConfigPin; 4],
+    backing_pin: &SettlementMleV2ConfigPin,
 ) -> Result<SettlementBroadcastAddresses, String> {
     let expected_relative = settlement_broadcast_artifact_relative_path(intent.chain_id);
     if intent.broadcast_artifact_path != expected_relative {
@@ -13019,7 +13635,7 @@ fn validate_settlement_broadcast_artifact(
         fs::read(&path).map_err(|e| format!("read broadcast artifact {}: {e}", path.display()))?;
     let artifact: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("parse broadcast artifact {}: {e}", path.display()))?;
-    validate_settlement_broadcast_value(&artifact, intent, reg, rollup)
+    validate_settlement_broadcast_value(&artifact, intent, reg, rollup, mle_v2_pins, backing_pin)
 }
 
 /// Adopt the exact final transaction from the pinned Foundry artifact only after its receipt is
@@ -13064,14 +13680,37 @@ fn settlement_registration_receipt(
 #[cfg(test)]
 mod settlement_broadcast_recovery_tests {
     use super::*;
+    use plonky2::{
+        field::{goldilocks_field::GoldilocksField, types::Field as _},
+        iop::witness::{PartialWitness, WitnessWrite as _},
+        plonk::{
+            circuit_builder::CircuitBuilder, circuit_data::CircuitConfig,
+            config::PoseidonGoldilocksConfig,
+        },
+        util::timing::TimingTree,
+    };
+    use plonky2_mle::fixture_v2::{MleVerifierV2Fixture, try_prove_and_export_mle_v2};
 
     const CHAIN_ID: u64 = 1;
     const START_NONCE: u64 = 41;
     const BROADCASTER: &str = "0x0000000000000000000000000000000000000055";
     const ROLLUP: &str = "0x0000000000000000000000000000000000000044";
-    const MLE: &str = "0x0000000000000000000000000000000000000011";
-    const VERIFIER: &str = "0x0000000000000000000000000000000000000022";
-    const MANAGER: &str = "0x0000000000000000000000000000000000000033";
+    const MLE_CORES: [&str; 4] = [
+        "0x0000000000000000000000000000000000000011",
+        "0x0000000000000000000000000000000000000012",
+        "0x0000000000000000000000000000000000000013",
+        "0x0000000000000000000000000000000000000014",
+    ];
+    const MLE_ADAPTERS: [&str; 4] = [
+        "0x0000000000000000000000000000000000000021",
+        "0x0000000000000000000000000000000000000022",
+        "0x0000000000000000000000000000000000000023",
+        "0x0000000000000000000000000000000000000024",
+    ];
+    const BACKING_MLE_CORE: &str = "0x0000000000000000000000000000000000000015";
+    const BACKING_MLE_ADAPTER: &str = "0x0000000000000000000000000000000000000025";
+    const VERIFIER: &str = "0x0000000000000000000000000000000000000031";
+    const MANAGER: &str = "0x0000000000000000000000000000000000000032";
     const MATERIALIZER: &str = "0x0000000000000000000000000000000000000088";
 
     fn intent() -> SettlementDeploymentIntent {
@@ -13146,8 +13785,62 @@ mod settlement_broadcast_recovery_tests {
         })
     }
 
-    fn artifact() -> (serde_json::Value, serde_json::Value) {
+    fn test_pin(index: usize, label: &'static str, file: &'static str) -> SettlementMleV2ConfigPin {
+        {
+            let mut protocol_id = [0u8; 64];
+            protocol_id[31] = 0x40 + index as u8;
+            protocol_id[63] = 0x50 + index as u8;
+            // The validator treats this as opaque canonical abi.encode(config) bytes. Solidity
+            // validity is constructor-enforced; this unit fixture only exercises byte binding.
+            let mut verification_config_abi = vec![0u8; 64];
+            verification_config_abi[31] = 32;
+            verification_config_abi[63] = 0x60 + index as u8;
+            SettlementMleV2ConfigPin {
+                label,
+                file,
+                preprocessed_root: Bytes32::from_hex(&format!("0x{:064x}", 0x100 + index)).unwrap(),
+                whir_protocol_id: protocol_id,
+                whir_session_id: Bytes32::from_hex(&format!("0x{:064x}", 0x200 + index)).unwrap(),
+                circuit_digest: [
+                    10 + index as u64,
+                    20 + index as u64,
+                    30 + index as u64,
+                    40 + index as u64,
+                ],
+                circuit_config_digest: Bytes32::from_hex(&format!("0x{:064x}", 0x300 + index))
+                    .unwrap(),
+                whir_parameters_digest: Bytes32::from_hex(&format!("0x{:064x}", 0x400 + index))
+                    .unwrap(),
+                verification_config_digest: Bytes32::from_hex(&format!("0x{:064x}", 0x500 + index))
+                    .unwrap(),
+                verification_config_abi,
+            }
+        }
+    }
+
+    fn mle_v2_pins() -> [SettlementMleV2ConfigPin; 4] {
+        std::array::from_fn(|index| {
+            test_pin(
+                index,
+                SETTLEMENT_MLE_V2_CONFIGS[index].0,
+                SETTLEMENT_MLE_V2_CONFIGS[index].1,
+            )
+        })
+    }
+
+    fn backing_pin() -> SettlementMleV2ConfigPin {
+        test_pin(4, "close asset backing", STAGED_CLOSE_BACKING_MLE_CONFIG)
+    }
+
+    fn artifact() -> (
+        serde_json::Value,
+        serde_json::Value,
+        [SettlementMleV2ConfigPin; 4],
+        SettlementMleV2ConfigPin,
+    ) {
         let reg = reg();
+        let pins = mle_v2_pins();
+        let backing = backing_pin();
         let pk_gs = settlement_reg_string_vec(&reg, "member_pk_gs", 3).unwrap();
         let pk_bs = settlement_reg_string_vec(&reg, "member_pk_bs", 3).unwrap();
         let regev = settlement_reg_string_vec(&reg, "regev_pk_digests", 3).unwrap();
@@ -13174,52 +13867,89 @@ mod settlement_broadcast_recovery_tests {
         let manager_refs = manager_args.iter().map(String::as_str).collect::<Vec<_>>();
         let constructor = cast_encode_settlement_constructor(&manager_refs).unwrap();
         let manager_input = format!("0x60006000{}", strip0x(&constructor));
-        let materializer_constructor = cast_encode_materializer_constructor(ROLLUP).unwrap();
+        let materializer_constructor =
+            cast_encode_materializer_constructor(ROLLUP, BACKING_MLE_ADAPTER).unwrap();
         let materializer_input = format!("0x6002{}", strip0x(&materializer_constructor));
 
-        let mut transactions = vec![
-            create_tx(START_NONCE, "MleVerifier", MLE, None, "0x6000"),
-            create_tx(
-                START_NONCE + 1,
-                "CloseFundingMaterializer",
-                MATERIALIZER,
-                Some(vec![ROLLUP.to_string()]),
-                &materializer_input,
-            ),
-            call_tx(
-                START_NONCE + 2,
-                "CloseFundingMaterializer",
-                MATERIALIZER,
-                "initializeBackingVk(address)",
-                vec![MLE.to_string()],
-            ),
-            create_tx(
-                START_NONCE + 3,
-                "ChannelSettlementVerifier",
-                VERIFIER,
-                None,
-                "0x6001",
-            ),
-        ];
-        for (offset, function) in [
-            "initializeCloseVk(address)",
-            "initializeWithdrawalClaimVk(address)",
-            "initializePostCloseClaimVk(address)",
-            "initializeCancelCloseVk(address)",
-        ]
-        .iter()
-        .enumerate()
-        {
-            transactions.push(call_tx(
-                START_NONCE + 4 + offset as u64,
-                "ChannelSettlementVerifier",
-                VERIFIER,
-                function,
-                vec![MLE.to_string()],
+        // One MleVerifierV2 core CREATE followed by its PinnedMleVerifierV2 adapter CREATE.
+        let pair = |first_nonce: u64,
+                    core: &str,
+                    adapter: &str,
+                    pin: &SettlementMleV2ConfigPin,
+                    annotation: &str|
+         -> [serde_json::Value; 2] {
+            let protocol_id = format!(
+                "[0x{},0x{}]",
+                hex::encode(&pin.whir_protocol_id[..32]),
+                hex::encode(&pin.whir_protocol_id[32..])
+            );
+            let circuit_digest = format!(
+                "[{},{},{},{}]",
+                pin.circuit_digest[0],
+                pin.circuit_digest[1],
+                pin.circuit_digest[2],
+                pin.circuit_digest[3]
+            );
+            let core_args = vec![
+                CHAIN_ID.to_string(),
+                pin.preprocessed_root.to_hex(),
+                protocol_id,
+                pin.whir_session_id.to_hex(),
+                circuit_digest,
+                annotation.to_string(),
+            ];
+            let core_constructor = expected_mle_v2_core_constructor(CHAIN_ID, pin);
+            let core_input = format!("0x6001{}", hex::encode(core_constructor));
+            let adapter_constructor = expected_mle_v2_adapter_constructor(core, pin).unwrap();
+            let adapter_input = format!("0x6002{}", hex::encode(adapter_constructor));
+            [
+                create_tx(first_nonce, "MleVerifierV2", core, Some(core_args), &core_input),
+                create_tx(
+                    first_nonce + 1,
+                    "PinnedMleVerifierV2",
+                    adapter,
+                    Some(vec![core.to_string(), annotation.to_string()]),
+                    &adapter_input,
+                ),
+            ]
+        };
+
+        let mut transactions = Vec::with_capacity(15);
+        transactions.extend(pair(
+            START_NONCE,
+            BACKING_MLE_CORE,
+            BACKING_MLE_ADAPTER,
+            &backing,
+            "fixture-config-backing",
+        ));
+        transactions.push(create_tx(
+            START_NONCE + 2,
+            "CloseFundingMaterializer",
+            MATERIALIZER,
+            Some(vec![ROLLUP.to_string(), BACKING_MLE_ADAPTER.to_string()]),
+            &materializer_input,
+        ));
+        for (index, pin) in pins.iter().enumerate() {
+            transactions.extend(pair(
+                START_NONCE + 3 + 2 * index as u64,
+                MLE_CORES[index],
+                MLE_ADAPTERS[index],
+                pin,
+                &format!("fixture-config-{index}"),
             ));
         }
+        let adapters = MLE_ADAPTERS.map(ToOwned::to_owned);
+        let verifier_constructor = expected_settlement_verifier_constructor(&adapters).unwrap();
+        let verifier_input = format!("0x6003{}", hex::encode(verifier_constructor));
+        transactions.push(create_tx(
+            START_NONCE + 11,
+            "ChannelSettlementVerifier",
+            VERIFIER,
+            Some(adapters.to_vec()),
+            &verifier_input,
+        ));
         transactions.push(call_tx(
-            START_NONCE + 8,
+            START_NONCE + 12,
             "IntmaxRollup",
             ROLLUP,
             "registerChannel(uint32,uint8,uint8,bytes32[],bytes32[],bytes32[],address[])",
@@ -13234,78 +13964,128 @@ mod settlement_broadcast_recovery_tests {
             ],
         ));
         transactions.push(create_tx(
-            START_NONCE + 9,
+            START_NONCE + 13,
             "ChannelSettlementManager",
             MANAGER,
             Some(manager_args),
             &manager_input,
         ));
         transactions.push(call_tx(
-            START_NONCE + 10,
+            START_NONCE + 14,
             "IntmaxRollup",
             ROLLUP,
             "registerSettlementManager(address)",
             vec![MANAGER.to_string()],
         ));
+        assert_eq!(transactions.len(), 15);
         (
             serde_json::json!({"chain": CHAIN_ID, "transactions": transactions}),
             reg,
+            pins,
+            backing,
         )
     }
 
-    fn backing_bundle_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>, String) {
+    /// Prove a tiny circuit registering exactly `public_inputs` and export it as a strict
+    /// canonical wire-v3 fixture (the same shape a real CloseAssetBacking wrapper produces).
+    fn tiny_mle_v2_fixture(public_inputs: &[u64]) -> MleVerifierV2Fixture {
+        let mut builder =
+            CircuitBuilder::<GoldilocksField, 2>::new(CircuitConfig::standard_recursion_config());
+        let targets = (0..public_inputs.len())
+            .map(|_| {
+                let target = builder.add_virtual_target();
+                builder.register_public_input(target);
+                target
+            })
+            .collect::<Vec<_>>();
+        let circuit = builder.build::<PoseidonGoldilocksConfig>();
+        let mut witness = PartialWitness::new();
+        for (target, value) in targets.iter().zip(public_inputs) {
+            witness
+                .set_target(*target, GoldilocksField::from_canonical_u64(*value))
+                .unwrap();
+        }
+        try_prove_and_export_mle_v2(&circuit, witness, &mut TimingTree::default())
+            .unwrap()
+            .fixture
+    }
+
+    fn backing_test_inputs() -> Vec<u64> {
         let mut inputs = vec![0u64; CLOSE_BACKING_PUBLIC_INPUTS];
         inputs[0] = 7;
         for (index, value) in inputs.iter_mut().enumerate().take(25).skip(1) {
             *value = index as u64;
         }
         inputs[25] = 42;
-        let serialized_inputs = inputs
-            .iter()
-            .map(|value| serde_json::Value::String(value.to_string()))
-            .collect::<Vec<_>>();
-        let mle = serde_json::to_vec(&serde_json::json!({
-            "protocolVersion": CLOSE_BACKING_MLE_PROTOCOL_VERSION,
-            "constituentWidth": 3,
-            "degreeBits": 8,
-            "publicInputs": serialized_inputs,
-            "preprocessedIndividualEvals": [1, 2],
-            "witnessIndividualEvals": [1, 2, 3],
-            "inverseHelpersEvalsAtRInv": [],
-            "inverseHelpersEvalsAtRH": [],
-            "preprocessedIndividualEvalsAtRGateV2": [1],
-            "witnessIndividualEvalsAtRGateV2": [1, 2],
-        }))
-        .unwrap();
-        let public_inputs = serde_json::to_vec(&inputs).unwrap();
+        inputs
+    }
+
+    fn backing_fixture_pair() -> &'static (Vec<u8>, Vec<u8>) {
+        static PAIR: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        PAIR.get_or_init(|| {
+            let fixture = tiny_mle_v2_fixture(&backing_test_inputs());
+            (
+                fixture.to_canonical_json().unwrap().into_bytes(),
+                fixture.config_fixture().to_canonical_json().unwrap().into_bytes(),
+            )
+        })
+    }
+
+    /// A close-shaped (103 public inputs) fixture pair: exactly what must never key the backing
+    /// adapter.
+    fn close_shaped_fixture_pair() -> &'static (Vec<u8>, Vec<u8>) {
+        static PAIR: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        PAIR.get_or_init(|| {
+            let fixture = tiny_mle_v2_fixture(&vec![0u64; 103]);
+            (
+                fixture.to_canonical_json().unwrap().into_bytes(),
+                fixture.config_fixture().to_canonical_json().unwrap().into_bytes(),
+            )
+        })
+    }
+
+    fn backing_manifest_bytes(mle: &[u8], config: &[u8], public_inputs: &[u8]) -> (Vec<u8>, String) {
+        let inputs = backing_test_inputs();
         let balance_vd_sha256 = close_backing_sha256(b"pinned balance verifier data");
         let manifest = serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": 2,
+            "schemaVersion": CLOSE_BACKING_BUNDLE_SCHEMA_VERSION,
             "chainId": CHAIN_ID,
             "rollup": ROLLUP,
             "channelId": 7,
             "balanceVerifierDataSha256": balance_vd_sha256,
             "backingMleFile": "backing_mle.json",
             "backingMleBytes": mle.len(),
-            "backingMleSha256": close_backing_sha256(&mle),
+            "backingMleSha256": close_backing_sha256(mle),
+            "backingMleConfigFile": "backing_mle_config.json",
+            "backingMleConfigBytes": config.len(),
+            "backingMleConfigSha256": close_backing_sha256(config),
             "backingPublicInputsFile": "backing_public_inputs.json",
             "backingPublicInputCount": CLOSE_BACKING_PUBLIC_INPUTS,
-            "backingPublicInputsSha256": close_backing_sha256(&public_inputs),
+            "backingPublicInputsSha256": close_backing_sha256(public_inputs),
             "backingFinalizedExtendedStateCommitment": close_backing_limb_bytes32(&inputs, 17),
             "backingAnchorBlockNumber": 42,
             "keyMaterialConsumed": false,
             "selfVerified": true,
         }))
         .unwrap();
-        (manifest, mle, public_inputs, balance_vd_sha256)
+        (manifest, balance_vd_sha256)
+    }
+
+    /// `(manifest, mle, mle_config, public_inputs, balance_vd_sha256)` of one exact bundle.
+    fn backing_bundle_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String) {
+        let (mle, config) = backing_fixture_pair().clone();
+        let public_inputs = serde_json::to_vec(&backing_test_inputs()).unwrap();
+        let (manifest, balance_vd_sha256) = backing_manifest_bytes(&mle, &config, &public_inputs);
+        (manifest, mle, config, public_inputs, balance_vd_sha256)
     }
 
     #[test]
-    fn backing_bundle_is_exactly_bound_and_close_vk_substitution_is_rejected() {
-        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+    fn backing_bundle_is_exactly_bound_and_close_shaped_fixture_is_rejected() {
+        let (manifest, mle, config, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
         validate_close_backing_bundle_bytes(
             &manifest,
             &mle,
+            &config,
             &public_inputs,
             CHAIN_ID,
             ROLLUP,
@@ -13314,18 +14094,16 @@ mod settlement_broadcast_recovery_tests {
         )
         .expect("exact CloseAssetBacking bundle");
 
-        let mut close_mle: serde_json::Value = serde_json::from_slice(&mle).unwrap();
-        close_mle["publicInputs"] = serde_json::json!(vec!["0"; 103]);
-        let close_mle = serde_json::to_vec(&close_mle).unwrap();
-        let mut substituted_manifest: serde_json::Value =
-            serde_json::from_slice(&manifest).unwrap();
-        substituted_manifest["backingMleBytes"] = serde_json::json!(close_mle.len());
-        substituted_manifest["backingMleSha256"] =
-            serde_json::json!(close_backing_sha256(&close_mle));
+        // A self-consistent close-shaped artifact pair (103 limbs) under an otherwise valid
+        // manifest must never become the materializer's backing adapter config.
+        let (close_mle, close_config) = close_shaped_fixture_pair().clone();
+        let (substituted_manifest, _) =
+            backing_manifest_bytes(&close_mle, &close_config, &public_inputs);
         assert!(
             validate_close_backing_bundle_bytes(
-                &serde_json::to_vec(&substituted_manifest).unwrap(),
+                &substituted_manifest,
                 &close_mle,
+                &close_config,
                 &public_inputs,
                 CHAIN_ID,
                 ROLLUP,
@@ -13334,55 +14112,60 @@ mod settlement_broadcast_recovery_tests {
             )
             .unwrap_err()
             .contains("exactly 26"),
-            "a close-proof-shaped MLE must never initialize the backing VK"
+            "a close-proof-shaped MLE must never key the backing adapter"
         );
     }
 
     #[test]
-    fn backing_bundle_rejects_legacy_and_width_mismatched_mle_envelopes() {
-        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
-        for (field, replacement, needle) in [
-            (
-                "protocolVersion",
-                serde_json::json!(0),
-                "protocolVersion",
-            ),
-            (
-                "constituentWidth",
-                serde_json::json!(99),
-                "constituentWidth",
-            ),
-        ] {
-            let mut changed_mle: serde_json::Value = serde_json::from_slice(&mle).unwrap();
-            changed_mle[field] = replacement;
-            let changed_mle = serde_json::to_vec(&changed_mle).unwrap();
-            let mut changed_manifest: serde_json::Value =
-                serde_json::from_slice(&manifest).unwrap();
-            changed_manifest["backingMleBytes"] = serde_json::json!(changed_mle.len());
-            changed_manifest["backingMleSha256"] =
-                serde_json::json!(close_backing_sha256(&changed_mle));
-            let error = validate_close_backing_bundle_bytes(
-                &serde_json::to_vec(&changed_manifest).unwrap(),
-                &changed_mle,
-                &public_inputs,
-                CHAIN_ID,
-                ROLLUP,
-                7,
-                &balance_vd_sha256,
-            )
-            .unwrap_err();
-            assert!(error.contains(needle), "unexpected refusal: {error}");
-        }
+    fn backing_bundle_rejects_non_canonical_fixture_and_config_mismatch() {
+        let (_, mle, config, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+        // Semantically identical JSON with different bytes is not the release artifact.
+        let reserialized: serde_json::Value = serde_json::from_slice(&mle).unwrap();
+        let reserialized = serde_json::to_vec_pretty(&reserialized).unwrap();
+        let (manifest, _) = backing_manifest_bytes(&reserialized, &config, &public_inputs);
+        let error = validate_close_backing_bundle_bytes(
+            &manifest,
+            &reserialized,
+            &config,
+            &public_inputs,
+            CHAIN_ID,
+            ROLLUP,
+            7,
+            &balance_vd_sha256,
+        )
+        .unwrap_err();
+        assert!(error.contains("strict canonical"), "unexpected refusal: {error}");
+
+        // A full fixture whose VK/config differs from the config it ships with is refused: the
+        // adapter deployed from the config could never verify the attested proof.
+        let (_, other_config) = close_shaped_fixture_pair().clone();
+        let (manifest, _) = backing_manifest_bytes(&mle, &other_config, &public_inputs);
+        let error = validate_close_backing_bundle_bytes(
+            &manifest,
+            &mle,
+            &other_config,
+            &public_inputs,
+            CHAIN_ID,
+            ROLLUP,
+            7,
+            &balance_vd_sha256,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("does not match backing_mle_config.json"),
+            "unexpected refusal: {error}"
+        );
     }
 
     #[test]
     fn backing_bundle_rejects_hash_context_and_split_public_input_substitution() {
-        let (manifest, mle, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
+        let (manifest, mle, config, public_inputs, balance_vd_sha256) = backing_bundle_bytes();
         let check =
             |manifest: &[u8], mle: &[u8], public_inputs: &[u8], chain, rollup, channel, vd| {
                 validate_close_backing_bundle_bytes(
                     manifest,
                     mle,
+                    &config,
                     public_inputs,
                     chain,
                     rollup,
@@ -13498,63 +14281,108 @@ mod settlement_broadcast_recovery_tests {
 
     #[test]
     fn artifact_is_bound_to_chain_sender_nonce_rollup_and_snapshot_constructor() {
-        let (artifact, reg) = artifact();
-        let addresses =
-            validate_settlement_broadcast_value(&artifact, &intent(), &reg, ROLLUP).unwrap();
+        let (artifact, reg, pins, backing) = artifact();
+        let addresses = validate_settlement_broadcast_value(
+            &artifact,
+            &intent(),
+            &reg,
+            ROLLUP,
+            &pins,
+            &backing,
+        )
+        .unwrap();
         assert_eq!(strip0x(&addresses.verifier), strip0x(VERIFIER));
-        assert_eq!(strip0x(&addresses.mle_verifier), strip0x(MLE));
+        assert_eq!(strip0x(&addresses.backing_mle_core), strip0x(BACKING_MLE_CORE));
+        assert_eq!(
+            strip0x(&addresses.backing_mle_adapter),
+            strip0x(BACKING_MLE_ADAPTER)
+        );
         assert_eq!(strip0x(&addresses.manager), strip0x(MANAGER));
         assert_eq!(strip0x(&addresses.materializer), strip0x(MATERIALIZER));
-        assert_eq!(addresses.registration_nonce, START_NONCE + 10);
+        assert_eq!(addresses.mle_v2_cores, MLE_CORES.map(ToOwned::to_owned));
+        assert_eq!(
+            addresses.mle_v2_adapters,
+            MLE_ADAPTERS.map(ToOwned::to_owned)
+        );
+        assert_eq!(addresses.registration_nonce, START_NONCE + 14);
         assert_ne!(addresses.registration_tx_hash, Bytes32::default());
         assert_ne!(addresses.registration_calldata_hash, Bytes32::default());
 
-        let mut backing_vk_targets_other_contract = artifact.clone();
-        backing_vk_targets_other_contract["transactions"][2]["transaction"]["to"] =
-            serde_json::json!(VERIFIER);
+        let mut backing_adapter_bound_to_other_core = artifact.clone();
+        backing_adapter_bound_to_other_core["transactions"][1]["arguments"][0] =
+            serde_json::json!(MLE_CORES[0]);
         assert!(
             validate_settlement_broadcast_value(
-                &backing_vk_targets_other_contract,
+                &backing_adapter_bound_to_other_core,
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
-            .is_err()
+            .is_err(),
+            "the backing adapter must bind the backing core created immediately before it"
         );
-        let mut backing_vk_uses_other_mle = artifact.clone();
-        backing_vk_uses_other_mle["transactions"][2]["arguments"][0] =
-            serde_json::json!("0x0000000000000000000000000000000000000099");
+        let mut materializer_bound_to_other_adapter = artifact.clone();
+        materializer_bound_to_other_adapter["transactions"][2]["arguments"][1] =
+            serde_json::json!(MLE_ADAPTERS[0]);
         assert!(
             validate_settlement_broadcast_value(
-                &backing_vk_uses_other_mle,
+                &materializer_bound_to_other_adapter,
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
-            .is_err()
+            .is_err(),
+            "the materializer must be constructor-bound to the CloseAssetBacking adapter"
+        );
+        let mut backing_core_with_close_config = artifact.clone();
+        backing_core_with_close_config["transactions"][0]["transaction"]["input"] =
+            serde_json::json!(format!(
+                "0x6001{}",
+                hex::encode(expected_mle_v2_core_constructor(CHAIN_ID, &pins[0]))
+            ));
+        assert!(
+            validate_settlement_broadcast_value(
+                &backing_core_with_close_config,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+            )
+            .is_err(),
+            "a backing core deployed from the close config must fail the staged-config pin"
         );
 
         let mut wrong_nonce = artifact.clone();
         wrong_nonce["transactions"][5]["transaction"]["nonce"] =
             serde_json::json!(format!("0x{:x}", START_NONCE + 99));
         assert!(
-            validate_settlement_broadcast_value(&wrong_nonce, &intent(), &reg, ROLLUP).is_err()
+            validate_settlement_broadcast_value(&wrong_nonce, &intent(), &reg, ROLLUP, &pins, &backing)
+                .is_err()
         );
 
         let mut wrong_rollup = artifact.clone();
-        wrong_rollup["transactions"][8]["transaction"]["to"] =
+        wrong_rollup["transactions"][12]["transaction"]["to"] =
             serde_json::json!("0x0000000000000000000000000000000000000099");
         assert!(
-            validate_settlement_broadcast_value(&wrong_rollup, &intent(), &reg, ROLLUP).is_err()
+            validate_settlement_broadcast_value(&wrong_rollup, &intent(), &reg, ROLLUP, &pins, &backing)
+                .is_err()
         );
 
         let mut wrong_root = artifact.clone();
-        wrong_root["transactions"][9]["arguments"][4] =
+        wrong_root["transactions"][13]["arguments"][4] =
             serde_json::json!(format!("0x{:064x}", 999));
-        assert!(validate_settlement_broadcast_value(&wrong_root, &intent(), &reg, ROLLUP).is_err());
+        assert!(
+            validate_settlement_broadcast_value(&wrong_root, &intent(), &reg, ROLLUP, &pins, &backing)
+                .is_err()
+        );
 
         let mut forged_materializer_init_code = artifact.clone();
-        forged_materializer_init_code["transactions"][1]["transaction"]["input"] =
+        forged_materializer_init_code["transactions"][2]["transaction"]["input"] =
             serde_json::json!("0x6002");
         assert!(
             validate_settlement_broadcast_value(
@@ -13562,12 +14390,46 @@ mod settlement_broadcast_recovery_tests {
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
             .is_err()
         );
 
+        let mut wrong_core_config_bytes = artifact.clone();
+        wrong_core_config_bytes["transactions"][3]["transaction"]["input"] =
+            serde_json::json!("0x6001");
+        assert!(
+            validate_settlement_broadcast_value(
+                &wrong_core_config_bytes,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+            )
+            .is_err(),
+            "a core whose raw constructor no longer matches the config-only fixture must fail"
+        );
+
+        let mut adapter_bound_to_other_core = artifact.clone();
+        adapter_bound_to_other_core["transactions"][4]["arguments"][0] =
+            serde_json::json!(MLE_CORES[1]);
+        assert!(
+            validate_settlement_broadcast_value(
+                &adapter_bound_to_other_core,
+                &intent(),
+                &reg,
+                ROLLUP,
+                &pins,
+                &backing,
+            )
+            .is_err(),
+            "each adapter must bind its immediately preceding circuit-specific core"
+        );
+
         let mut manager_bound_to_other_materializer = artifact.clone();
-        manager_bound_to_other_materializer["transactions"][9]["arguments"][10] =
+        manager_bound_to_other_materializer["transactions"][13]["arguments"][10] =
             serde_json::json!("0x0000000000000000000000000000000000000099");
         assert!(
             validate_settlement_broadcast_value(
@@ -13575,12 +14437,14 @@ mod settlement_broadcast_recovery_tests {
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
             .is_err()
         );
 
         let mut annotated_call_with_other_input = artifact.clone();
-        annotated_call_with_other_input["transactions"][10]["transaction"]["input"] = serde_json::json!(
+        annotated_call_with_other_input["transactions"][14]["transaction"]["input"] = serde_json::json!(
             "0xa01b29350000000000000000000000000000000000000000000000000000000000000099"
         );
         assert!(
@@ -13589,18 +14453,21 @@ mod settlement_broadcast_recovery_tests {
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
             .is_err()
         );
 
         let mut zero_final_hash = artifact.clone();
-        zero_final_hash["transactions"][10]["hash"] = serde_json::json!(format!("0x{:064x}", 0));
+        zero_final_hash["transactions"][14]["hash"] = serde_json::json!(format!("0x{:064x}", 0));
         assert!(
-            validate_settlement_broadcast_value(&zero_final_hash, &intent(), &reg, ROLLUP).is_err()
+            validate_settlement_broadcast_value(&zero_final_hash, &intent(), &reg, ROLLUP, &pins, &backing)
+                .is_err()
         );
 
         let mut value_bearing_registration = artifact.clone();
-        value_bearing_registration["transactions"][10]["transaction"]["value"] =
+        value_bearing_registration["transactions"][14]["transaction"]["value"] =
             serde_json::json!("0x1");
         assert!(
             validate_settlement_broadcast_value(
@@ -13608,6 +14475,8 @@ mod settlement_broadcast_recovery_tests {
                 &intent(),
                 &reg,
                 ROLLUP,
+                &pins,
+                &backing,
             )
             .is_err()
         );
@@ -13635,7 +14504,7 @@ fn activate_settlement_binding(
         || binding.snapshot_state_digest != state.snapshot.state.digest
         || binding.participant_root != participant_root
         || binding.participant_count != participant_count
-        || strip0x(&binding.rollup) != strip0x(rollup)
+        || !strip0x(&binding.rollup).eq_ignore_ascii_case(&strip0x(rollup))
     {
         die("settlement activation does not match the fsynced PREPARED identity");
     }
@@ -13677,12 +14546,13 @@ fn activate_settlement_binding(
     save_state(state);
 }
 
-/// The anvil path, UNCHANGED: MockMleVerifier + ChannelSettlementVerifier +
-/// ChannelSettlementManager attached to the EXISTING rollup in `channel_backing.json`, with the
-/// LIVE channel member set from the snapshot (including any runtime-joined delegates).
+/// The anvil wallet-demo path: four real circuit-specific pinned-v2 adapters plus
+/// ChannelSettlementVerifier/Manager attached to the EXISTING rollup in
+/// `channel_backing.json`, with the LIVE participant set from the signed snapshot.
 ///
 /// SECURITY: `chain_id` is taken as an argument and re-checked below rather than assumed, so the
-/// mock stack cannot be installed off-devnet even if a future refactor mis-wires the dispatcher.
+/// local-only deployment policy cannot be used off-devnet if a future refactor mis-wires the
+/// dispatcher. This is an operational release-manifest boundary; proof verification is real.
 fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     let mut state = load_state();
     let (_, _, backing) = load_backing();
@@ -13695,7 +14565,7 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     prepare_settlement_binding(&mut state, &reg, rollup);
     // The pattern the five exit commands now share (F4): resolve from the executable, validate,
     // announce. Kept identical here so there is ONE implementation rather than three copies.
-    let plan = SettlementDeployPlan::MockDevnet;
+    let plan = SettlementDeployPlan::DevnetV2;
     let contracts_dir = require_contracts_dir("deploy-settlement", &[plan.script()]);
     let contracts_dir = contracts_dir.to_string_lossy().to_string();
     let data_path = format!("{contracts_dir}/test/data/pw_reg.json");
@@ -13706,19 +14576,15 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     .unwrap_or_else(|e| die(format!("write {data_path}: {e}")));
     eprintln!("deploy-settlement: wrote {data_path}");
 
-    // SECURITY (defence in depth — the LAST gate before the mock stack is broadcast): the plan was
-    // already chosen from the chain id in `cmd_deploy_settlement`, and the script itself reverts
-    // unless `block.chainid == 31337`. This third check exists because the cost of the three being
-    // wrong together is total: `WalletMockMleVerifier.verify` returns true for ANY proof, so the
-    // close-intent verification on a stack deployed here is vacuous and every channel registered
-    // with it can be closed to an arbitrary state by anyone. A dispatcher mis-wired by a future
-    // refactor dies HERE rather than sending the transaction.
+    // Defence in depth: the plan was chosen from the RPC chain id and the Solidity script repeats
+    // the same local-only guard. The script deploys real pinned-v2 verifiers, but its demo policy
+    // must still never be mistaken for the reviewed production manifest.
     if chain_id != DEVNET_CHAIN_ID {
         die(format!(
-            "refusing to deploy the MOCK settlement stack on chain id {chain_id}: \
-             {} installs an always-true MLE verifier and is devnet-only. \
-             This is the in-process backstop; reaching it means the plan selection was bypassed.",
-            SettlementDeployPlan::MockDevnet.script()
+            "refusing to deploy the wallet-demo settlement manifest on chain id {chain_id}: \
+             {} is local-devnet only. This is the in-process backstop; reaching it means the \
+             plan selection was bypassed.",
+            SettlementDeployPlan::DevnetV2.script()
         ));
     }
     let l1_signer = L1Signer::for_chain_id(chain_id);
@@ -13814,23 +14680,46 @@ fn deploy_settlement_devnet(rpc: &str, chain_id: u64) {
     );
 }
 
-/// The checked-in fixtures `DeployCloseCli.s.sol` reads out of `contracts/test/data/`, besides the
-/// `cli_reg_record.json` this command stages itself. They carry the MLE/WHIR VERIFIER DATA of the
-/// validity, withdrawal, close, withdrawal-claim, post-close-claim and cancel-close circuits —
+/// Proof-free configuration fixtures read by the production existing-rollup attach, besides the
+/// `cli_reg_record.json` this command stages itself. They are the wire-v3 deployment configs of
+/// the validity, withdrawal, close, withdrawal-claim, post-close-claim and cancel-close circuits —
 /// channel- and member-independent, which is why a checked-in copy is the right source.
-/// The Balance-VD-dependent CloseAssetBacking VK is intentionally absent: it is staged from the
-/// independently checked `INTMAX_PUBLIC_CLOSE_BUNDLE` and plan-digested separately.
+/// `close_lifecycle.json` is deliberately absent: it is witness/proof-derived and is only an input
+/// to DeployCloseCli's explicit fresh bootstrap. The Balance-VD-dependent CloseAssetBacking config
+/// is intentionally absent too: it is staged from the independently checked
+/// `INTMAX_PUBLIC_CLOSE_BUNDLE` (`close_asset_backing_mle_config.json`) and plan-digested
+/// separately.
 ///
 /// Checked up front so a missing one is an actionable error here, not a `vm.readFile` revert
 /// buried in forge output after the operator has already paid for a broadcast.
-const CLOSE_CLI_FIXTURES: [&str; 7] = [
-    "close_lifecycle_validity_mle.json",
-    "close_lifecycle.json",
-    "close_withdrawal_mle.json",
-    "close_intent_mle.json",
-    "withdrawal_claim_mle.json",
-    "post_close_claim_mle.json",
-    "cancel_close_mle.json",
+const CLOSE_CLI_FIXTURES: [&str; 6] = [
+    "close_lifecycle_validity_mle_config.json",
+    "close_withdrawal_mle_config.json",
+    "close_intent_mle_config.json",
+    "withdrawal_claim_mle_config.json",
+    "post_close_claim_mle_config.json",
+    "cancel_close_mle_config.json",
+];
+
+/// Ordered exactly like ChannelSettlementVerifier's immutable constructor slots.
+const SETTLEMENT_MLE_V2_CONFIGS: [(&str, &str); 4] = [
+    ("close", "close_intent_mle_config.json"),
+    ("withdrawal claim", "withdrawal_claim_mle_config.json"),
+    ("post-close claim", "post_close_claim_mle_config.json"),
+    ("cancel close", "cancel_close_mle_config.json"),
+];
+
+const ROLLUP_MLE_V2_CONFIGS: [(&str, &str, &str); 2] = [
+    (
+        "validity",
+        "validityMleVerifier()(address)",
+        "close_lifecycle_validity_mle_config.json",
+    ),
+    (
+        "withdrawal",
+        "withdrawalMleVerifier()(address)",
+        "close_withdrawal_mle_config.json",
+    ),
 ];
 
 /// `cast call <to> <sig> [args…]`, trimmed. Every read-back below goes through this.
@@ -13907,39 +14796,187 @@ fn require_settlement_runtime_code_hashes_at(
     }
 }
 
-/// Read back ONE boolean latch, refusing anything that is not exactly `true`.
-///
-/// SECURITY / LIVENESS: fail-closed on purpose. `cast` decodes `(bool)` to `true`/`false`; any
-/// other output (an RPC error page, a changed encoder, a wrong address) is treated as NOT set,
-/// because the failure mode we are guarding against — announcing a stack whose latch is missing —
-/// is precisely a user losing an exit path they were told they had.
-fn require_true(rpc: &str, to: &str, sig: &str, what: &str) {
-    let got = cast_call(rpc, to, sig, &[]);
-    if got != "true" {
-        die(format!(
-            "post-deploy check FAILED: {to} `{sig}` returned {got:?}, expected \"true\".\n\
-             {what}\n\
-             The stack just deployed is NOT usable end to end; refusing to record it in \
-             settlement.json (an address recorded here is one an operator would go on to fund)."
-        ));
+fn cast_call_maybe_at(rpc: &str, to: &str, signature: &str, block_number: Option<u64>) -> String {
+    match block_number {
+        Some(block) => cast_call_at(rpc, to, signature, &[], block),
+        None => cast_call(rpc, to, signature, &[]),
     }
 }
 
-fn require_true_at(
+fn cast_code_maybe_at(rpc: &str, address: &str, block_number: Option<u64>) -> String {
+    match block_number {
+        Some(block) => cast_code_at(rpc, address, block),
+        None => cast(&["code", address, "--rpc-url", rpc])
+            .trim()
+            .to_string(),
+    }
+}
+
+fn require_mle_v2_pair_pin(
     rpc: &str,
-    to: &str,
-    sig: &str,
-    what: &str,
+    chain_id: u64,
+    adapter: &str,
+    expected_core: Option<&str>,
+    pin: &SettlementMleV2ConfigPin,
+    block_number: Option<u64>,
+) -> String {
+    let adapter_address = Address::from_hex(adapter)
+        .unwrap_or_else(|error| die(format!("{} adapter address: {error:?}", pin.label)));
+    if adapter_address == Address::default()
+        || strip0x(&cast_code_maybe_at(rpc, adapter, block_number)).is_empty()
+    {
+        die(format!(
+            "post-deploy check FAILED: {} pinned-v2 adapter {adapter} has no code",
+            pin.label
+        ));
+    }
+    let core = cast_call_maybe_at(rpc, adapter, "core()(address)", block_number);
+    let core_address = Address::from_hex(&core)
+        .unwrap_or_else(|error| die(format!("{} core address: {error:?}", pin.label)));
+    if core_address == Address::default()
+        || strip0x(&cast_code_maybe_at(rpc, &core, block_number)).is_empty()
+        || expected_core
+            .is_some_and(|expected| !strip0x(expected).eq_ignore_ascii_case(&strip0x(&core)))
+    {
+        die(format!(
+            "post-deploy check FAILED: {} adapter {adapter} exposes unexpected/unavailable core \
+             {core}",
+            pin.label
+        ));
+    }
+
+    for (contract, address) in [("adapter", adapter), ("core", core.as_str())] {
+        let allowed = cast_call_maybe_at(rpc, address, "allowedChainId()(uint256)", block_number);
+        let allowed = settlement_artifact_quantity(
+            &serde_json::Value::String(allowed),
+            &format!("{} {contract} allowedChainId", pin.label),
+        )
+        .unwrap_or_else(|error| die(error));
+        if allowed != chain_id {
+            die(format!(
+                "post-deploy check FAILED: {} {contract} {address} allows chain {allowed}, \
+                 expected {chain_id}",
+                pin.label
+            ));
+        }
+    }
+
+    for (signature, expected, field) in [
+        (
+            "preprocessedCommitmentRoot()(bytes32)",
+            pin.preprocessed_root.to_hex(),
+            "preprocessed commitment root",
+        ),
+        (
+            "circuitConfigDigest()(bytes32)",
+            pin.circuit_config_digest.to_hex(),
+            "circuit-config digest",
+        ),
+        (
+            "whirParametersDigest()(bytes32)",
+            pin.whir_parameters_digest.to_hex(),
+            "WHIR-parameters digest",
+        ),
+        (
+            "verificationConfigDigest()(bytes32)",
+            pin.verification_config_digest.to_hex(),
+            "verification-config digest",
+        ),
+        (
+            "whirProtocolIdFirst()(bytes32)",
+            format!("0x{}", hex::encode(&pin.whir_protocol_id[..32])),
+            "WHIR protocol-id first word",
+        ),
+        (
+            "whirProtocolIdSecond()(bytes32)",
+            format!("0x{}", hex::encode(&pin.whir_protocol_id[32..])),
+            "WHIR protocol-id second word",
+        ),
+        (
+            "whirSessionId()(bytes32)",
+            pin.whir_session_id.to_hex(),
+            "WHIR session id",
+        ),
+    ] {
+        let observed = cast_call_maybe_at(rpc, &core, signature, block_number);
+        if !observed.eq_ignore_ascii_case(&expected) {
+            die(format!(
+                "post-deploy check FAILED: {} core {field} {observed} != config fixture {} \
+                 value {expected}",
+                pin.label, pin.file
+            ));
+        }
+    }
+    for (limb, expected) in pin.circuit_digest.iter().enumerate() {
+        let signature = format!("circuitDigest{limb}()(uint64)");
+        let observed = cast_call_maybe_at(rpc, &core, &signature, block_number);
+        let observed = settlement_artifact_quantity(
+            &serde_json::Value::String(observed),
+            &format!("{} circuit digest limb {limb}", pin.label),
+        )
+        .unwrap_or_else(|error| die(error));
+        if observed != *expected {
+            die(format!(
+                "post-deploy check FAILED: {} circuit digest limb {limb} {observed} != config \
+                 fixture {} value {expected}",
+                pin.label, pin.file
+            ));
+        }
+    }
+    core
+}
+
+fn require_rollup_mle_v2_bindings(
+    rpc: &str,
+    chain_id: u64,
+    rollup: &str,
+    pins: &[SettlementMleV2ConfigPin; 2],
+    block_number: Option<u64>,
+) {
+    let mut adapters = HashSet::new();
+    for (index, (_, getter, _)) in ROLLUP_MLE_V2_CONFIGS.iter().enumerate() {
+        let adapter = match block_number {
+            Some(block) => cast_call_at(rpc, rollup, getter, &[], block),
+            None => cast_call(rpc, rollup, getter, &[]),
+        };
+        if !adapters.insert(strip0x(&adapter).to_ascii_lowercase()) {
+            die("post-deploy check FAILED: rollup reuses one adapter for validity and withdrawal");
+        }
+        require_mle_v2_pair_pin(rpc, chain_id, &adapter, None, &pins[index], block_number);
+    }
+}
+
+fn require_settlement_mle_v2_bindings_at(
+    rpc: &str,
+    chain_id: u64,
+    settlement_verifier: &str,
+    cores: &[String; 4],
+    adapters: &[String; 4],
+    pins: &[SettlementMleV2ConfigPin; 4],
     checkpoint: &intmax3_zkp::l1_finality::L1FinalizedCheckpoint,
 ) {
-    let got = cast_call_at(rpc, to, sig, &[], checkpoint.block_number);
-    if got != "true" {
-        die(format!(
-            "post-deploy check FAILED at finalized block {} ({}): {to} `{sig}` returned \
-             {got:?}, expected \"true\".\n{what}\nThe stack is NOT usable end to end; \
-             cli_state remains PREPARED.",
-            checkpoint.block_number, checkpoint.block_hash
-        ));
+    let adapter_getters = [
+        "closeMleVerifier()(address)",
+        "withdrawalClaimMleVerifier()(address)",
+        "postCloseClaimMleVerifier()(address)",
+        "cancelCloseMleVerifier()(address)",
+    ];
+    for index in 0..4 {
+        let pin = &pins[index];
+        let adapter = &adapters[index];
+        let core = &cores[index];
+        let block = checkpoint.block_number;
+
+        let parent_binding =
+            cast_call_at(rpc, settlement_verifier, adapter_getters[index], &[], block);
+        if !strip0x(&parent_binding).eq_ignore_ascii_case(&strip0x(adapter)) {
+            die(format!(
+                "post-deploy check FAILED: {} parent adapter is {parent_binding}, expected \
+                 {adapter} from the pinned broadcast artifact",
+                pin.label
+            ));
+        }
+        require_mle_v2_pair_pin(rpc, chain_id, adapter, Some(core), pin, Some(block));
     }
 }
 
@@ -13983,6 +15020,10 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         ));
     }
 
+    let settlement_mle_v2_pins = load_settlement_mle_v2_config_pins(&contracts_dir)
+        .unwrap_or_else(|error| die(format!("preflight settlement MLE v2 configs: {error}")));
+    let rollup_mle_v2_pins = load_rollup_mle_v2_config_pins(&contracts_dir)
+        .unwrap_or_else(|error| die(format!("load existing-rollup MLE v2 configs: {error}")));
     let l1_signer = L1Signer::for_chain_id(chain_id);
 
     // SECURITY: the member set this deploy REGISTERS on L1 is derived from the co-signer key
@@ -14033,7 +15074,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     let broadcaster_is_active = reg["recipients"].as_array().is_some_and(|recipients| {
         recipients.iter().any(|r| {
             r.as_str()
-                .is_some_and(|s| strip0x(s) == strip0x(&broadcaster))
+                .is_some_and(|s| strip0x(s).eq_ignore_ascii_case(&strip0x(&broadcaster)))
         })
     });
     if !broadcaster_is_active {
@@ -14050,18 +15091,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
              registerSettlementManager would revert"
         ));
     }
-    let validity_bypass = cast_call(rpc, &backing_rollup_hex, "allowMleDisabled()(bool)", &[]);
-    if validity_bypass != "false" {
-        die(format!(
-            "backing rollup {backing_rollup_hex} is not production-validity enabled \
-             (allowMleDisabled returned {validity_bypass:?})"
-        ));
-    }
-    require_true(
+    require_rollup_mle_v2_bindings(
         rpc,
+        chain_id,
         &backing_rollup_hex,
-        "withdrawalVkInitialized()(bool)",
-        "The existing rollup must have its real withdrawal VK before a settlement manager is attached.",
+        &rollup_mle_v2_pins,
+        None,
     );
     let kzg = cast_call(rpc, &backing_rollup_hex, "kzgVerifier()(address)", &[]);
     if strip0x(&kzg).trim_matches('0').is_empty() {
@@ -14080,6 +15115,14 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &backing_rollup_hex,
         channel_id,
     );
+    // The staged config is the exact constructor input of the materializer's backing adapter;
+    // pin it like the four checked-in settlement configs so the broadcast can be validated.
+    let backing_mle_v2_pin = load_mle_v2_config_pin(
+        &contracts_dir,
+        "close asset backing",
+        STAGED_CLOSE_BACKING_MLE_CONFIG,
+    )
+    .unwrap_or_else(|error| die(format!("staged CloseAssetBacking MLE v2 config: {error}")));
     let data_dir = contracts_dir.join("test").join("data");
     let reg_path = data_dir.join("cli_reg_record.json");
     fs::write(
@@ -14121,6 +15164,8 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
                 &deployment_intent,
                 &reg,
                 &backing_rollup_hex,
+                &settlement_mle_v2_pins,
+                &backing_mle_v2_pin,
             )
             .unwrap_or_else(|e| {
                 die(format!(
@@ -14192,6 +15237,8 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &deployment_intent,
         &reg,
         &backing_rollup_hex,
+        &settlement_mle_v2_pins,
+        &backing_mle_v2_pin,
     )
     .unwrap_or_else(|e| die(format!("post-broadcast artifact validation failed: {e}")));
     let rollup = backing_rollup_hex;
@@ -14208,10 +15255,14 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         )
     });
     let activation_checkpoint = registration_receipt.finalized_checkpoint;
-    let mle_verifier = addresses.mle_verifier;
+    let backing_mle_core = addresses.backing_mle_core;
+    let backing_mle_adapter = addresses.backing_mle_adapter;
     let verifier = addresses.verifier;
     let manager = addresses.manager;
     let materializer = addresses.materializer;
+    let mle_v2_cores = addresses.mle_v2_cores;
+    let mle_v2_adapters = addresses.mle_v2_adapters;
+    let mle_v2_pins = settlement_mle_v2_pins;
 
     // ── Read the whole exit checklist back FROM THE CHAIN. ──
     //
@@ -14222,7 +15273,17 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     // deploy "succeeded": the withdrawal VK (money in, no money out), `registerSettlementManager`
     // (pw-finalize reverts after the user waited out the challenge period), and the
     // cancel-close / post-close-claim VKs (audit622 A-M4).
-    for address in [&mle_verifier, &verifier, &manager, &materializer] {
+    for address in [
+        &verifier,
+        &manager,
+        &materializer,
+        &backing_mle_core,
+        &backing_mle_adapter,
+    ]
+    .into_iter()
+    .chain(mle_v2_cores.iter())
+    .chain(mle_v2_adapters.iter())
+    {
         if strip0x(&cast_code_at(
             rpc,
             address,
@@ -14250,21 +15311,24 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             activation_checkpoint.block_number,
         ),
     };
-    require_true_at(
+    require_rollup_mle_v2_bindings(
         rpc,
+        chain_id,
         &rollup,
-        "withdrawalVkInitialized()(bool)",
-        "Without the rollup's withdrawal VK, `withdrawNative`/`withdrawERC20` revert \
-         WithdrawalVkNotSet() forever and the rollup can accept deposits it can never pay out.",
-        &activation_checkpoint,
+        &rollup_mle_v2_pins,
+        Some(activation_checkpoint.block_number),
     );
-    require_true_at(
+    require_settlement_mle_v2_bindings_at(
         rpc,
-        &materializer,
-        "backingVkInitialized()(bool)",
-        "Without the distinct CloseAssetBacking VK, an N-of-N signed head can close but its exact whole-token vector can never be materialized into Rollup withdrawals.",
+        chain_id,
+        &verifier,
+        &mle_v2_cores,
+        &mle_v2_adapters,
+        &mle_v2_pins,
         &activation_checkpoint,
     );
+    // Without the distinct CloseAssetBacking adapter, an N-of-N signed head can close but its
+    // exact whole-token vector can never be attested or materialized into Rollup withdrawals.
     let backing_mle_verifier = cast_call_at(
         rpc,
         &materializer,
@@ -14272,12 +15336,21 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &[],
         activation_checkpoint.block_number,
     );
-    if !backing_mle_verifier.eq_ignore_ascii_case(&mle_verifier) {
+    if !strip0x(&backing_mle_verifier).eq_ignore_ascii_case(&strip0x(&backing_mle_adapter)) {
         die(format!(
-            "post-deploy check FAILED: materializer {materializer} is bound to MLE verifier \
-             {backing_mle_verifier}, not the verifier {mle_verifier} created and pinned by this run"
+            "post-deploy check FAILED: materializer {materializer} is bound to backing adapter \
+             {backing_mle_verifier}, not the adapter {backing_mle_adapter} created and pinned by \
+             this run"
         ));
     }
+    require_mle_v2_pair_pin(
+        rpc,
+        chain_id,
+        &backing_mle_adapter,
+        Some(&backing_mle_core),
+        &backing_mle_v2_pin,
+        Some(activation_checkpoint.block_number),
+    );
     let registered = cast_call_at(
         rpc,
         &rollup,
@@ -14310,26 +15383,6 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
              {rollup} (got {commitment:?}) — registerChannel did not take effect for THIS channel \
              id, so no close proof for it could ever verify."
         ));
-    }
-    for (sig, what) in [
-        (
-            "closeVkInitialized()(bool)",
-            "Without the close VK, `submitCloseIntent` reverts CloseVkNotSet(): the channel can never be closed.",
-        ),
-        (
-            "cancelCloseVkInitialized()(bool)",
-            "Without the cancel-close VK, `cancelClose` reverts CancelCloseVkNotSet(): a stale or hostile close intent can never be un-frozen (audit622 A-M4).",
-        ),
-        (
-            "withdrawalClaimVkInitialized()(bool)",
-            "Without the withdrawal-claim VK, `submitWithdrawalClaim` reverts WithdrawalClaimVkNotSet(): members can close the channel and then never collect.",
-        ),
-        (
-            "postCloseClaimVkInitialized()(bool)",
-            "Without the post-close-claim VK, `post-close-claim` reverts PostCloseClaimVkNotSet(): a member who missed the close can never claim.",
-        ),
-    ] {
-        require_true_at(rpc, &verifier, sig, what, &activation_checkpoint);
     }
     let bound_verifier = cast_call_at(
         rpc,
@@ -14470,7 +15523,7 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
             &[&recipients[slot]],
             activation_checkpoint.block_number,
         );
-        if strip0x(&bound_recipient) != strip0x(&recipients[slot])
+        if !strip0x(&bound_recipient).eq_ignore_ascii_case(&strip0x(&recipients[slot]))
             || bound_index != (slot + 1).to_string()
             || recipient_is_member != "true"
         {
@@ -14517,9 +15570,12 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
         &serde_json::json!({
             "manager": manager,
             "verifier": verifier,
-            "mle_verifier": mle_verifier,
             "rollup": rollup,
             "close_funding_materializer": materializer,
+            "backing_mle_core": backing_mle_core,
+            "backing_mle_adapter": backing_mle_adapter,
+            "mle_v2_cores": mle_v2_cores,
+            "mle_v2_adapters": mle_v2_adapters,
             "activation_checkpoint": activation_checkpoint,
             "runtime_code_hashes": runtime_code_hashes,
         }),
@@ -14527,9 +15583,11 @@ fn deploy_settlement_real(rpc: &str, chain_id: u64) {
     println!(
         "deploy-settlement OK (real chain {chain_id}): manager={manager}, verifier={verifier}, \
          materializer={materializer}, rollup={rollup}\n\
-         Verified on-chain: withdrawal VK set, the distinct CloseAssetBacking VK and all four settlement VKs set, channel {channel_id} \
-         registered, manager registered as a settlement authorizer, participant root/count match \
-         the signed live snapshot, and delegate joins are durably frozen in cli_state.json. All \
+         Verified on-chain: rollup validity/withdrawal, all four settlement and the distinct \
+         CloseAssetBacking pinned-v2 adapter/core/config bindings match their proof-free \
+         configs; channel {channel_id} is registered; the manager is an authorized settlement \
+         manager; participant root/count match the signed live snapshot; and delegate joins are \
+         durably frozen in cli_state.json. All \
          activation reads were pinned to finalized block {} ({}).\n\
          The manager is attached to the EXISTING backing rollup {rollup}; no escrow moved and no \
          replacement rollup was created.\n\
@@ -18184,23 +19242,20 @@ mod falcon_identity_tests {
 
 /// THE chain-id selection rule for `deploy-settlement`, pinned.
 ///
-/// WHAT THESE TESTS ARE FOR (security, not mechanics): `DeployWalletSettlement.s.sol` installs a
-/// `WalletMockMleVerifier` whose `verify` returns true for ANY proof. A settlement stack built on
-/// it has a vacuous close-proof check, so anyone can close any channel registered with it to any
-/// state and take the funds. Until now `cmd_deploy_settlement` named that script unconditionally
-/// while `api/routes/*.js` invoked the command with whatever `RPC` the deployment was configured
-/// with — i.e. the product's own API would have installed it on a real network. The tests below
-/// exist to fail if that door is ever reopened, including through an "unknown chain" default.
+/// WHAT THESE TESTS ARE FOR: both manifests now use real circuit-specific pinned-v2 verification.
+/// The wallet-demo manifest nevertheless remains anvil-only because its challenge/workflow policy
+/// is not a release manifest. These tests pin both properties: no public chain can select it, and a
+/// future edit cannot silently put an always-true verifier back into the devnet path.
 #[cfg(test)]
 mod deploy_plan_tests {
     use super::*;
 
-    /// The mock script may be selected for EXACTLY one chain id, and it must be anvil's.
+    /// The wallet-demo script may be selected for exactly one chain id: anvil's.
     #[test]
-    fn only_the_devnet_chain_id_selects_the_mock_deployer() {
+    fn only_the_devnet_chain_id_selects_the_wallet_demo_deployer() {
         assert_eq!(
             settlement_deploy_plan(DEVNET_CHAIN_ID),
-            SettlementDeployPlan::MockDevnet,
+            SettlementDeployPlan::DevnetV2,
             "anvil must keep the devnet stack the local E2Es depend on"
         );
         assert_eq!(DEVNET_CHAIN_ID, 31337, "anvil's chain id");
@@ -18208,7 +19263,7 @@ mod deploy_plan_tests {
 
     /// Boundary + real-network + nonsense chain ids: every one of them must get the REAL-VK
     /// script. `0` and `u64::MAX` are in here deliberately — an id we cannot interpret must fail
-    /// towards the safe stack, never towards the mock one.
+    /// towards the reviewed production manifest, never towards the demo one.
     #[test]
     fn every_other_chain_id_selects_the_real_deployer() {
         let ids = [
@@ -18232,15 +19287,14 @@ mod deploy_plan_tests {
             assert_eq!(
                 settlement_deploy_plan(id),
                 SettlementDeployPlan::RealChain,
-                "chain id {id} must NOT get the mock-verifier stack"
+                "chain id {id} must NOT get the wallet-demo manifest"
             );
         }
     }
 
-    /// Property sweep: no chain id other than 31337 may ever produce the mock script or the mock
-    /// contract name, however the selection is implemented.
+    /// Property sweep: no chain id other than 31337 may produce the demo script or contract name.
     #[test]
-    fn no_non_devnet_chain_id_can_reach_the_mock_script() {
+    fn no_non_devnet_chain_id_can_reach_the_wallet_demo_script() {
         // Deterministic LCG (Numerical Recipes constants) — a fixed, reproducible sweep rather
         // than a random one, so a failure is always reproducible from the test alone.
         let mut x: u64 = 0x1234_5678_9abc_def0;
@@ -18265,23 +19319,228 @@ mod deploy_plan_tests {
             assert!(
                 !plan.script().contains("WalletSettlement")
                     && !plan.contract().contains("WalletSettlement"),
-                "chain id {id} reached the mock deployer"
+                "chain id {id} reached the wallet-demo deployer"
             );
         }
         assert!(sampled > 99_000, "the sweep must actually sample");
     }
 
-    /// The two plans must stay distinguishable: if they ever named the same script, every guard
-    /// above would pass while the mock stack shipped everywhere.
+    /// The local and production operational manifests must remain distinguishable.
     #[test]
     fn the_two_plans_name_different_deployers() {
-        let mock = SettlementDeployPlan::MockDevnet;
+        let devnet = SettlementDeployPlan::DevnetV2;
         let real = SettlementDeployPlan::RealChain;
-        assert_ne!(mock.script(), real.script());
-        assert_ne!(mock.contract(), real.contract());
-        assert_ne!(mock.label(), real.label());
-        assert!(mock.script().contains("DeployWalletSettlement"));
+        assert_ne!(devnet.script(), real.script());
+        assert_ne!(devnet.contract(), real.contract());
+        assert_ne!(devnet.label(), real.label());
+        assert!(devnet.script().contains("DeployWalletSettlement"));
         assert!(real.script().contains("DeployCloseCli"));
+    }
+
+    #[test]
+    fn wallet_demo_manifest_uses_real_pinned_v2_verifiers() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(
+            root.join("contracts")
+                .join(SettlementDeployPlan::DevnetV2.script()),
+        )
+        .expect("read DeployWalletSettlement.s.sol");
+        assert!(script.contains("FixtureLib.deployPinnedMleV2"));
+        assert!(script.contains("PinnedMleVerifierV2"));
+        assert!(script.contains("close_intent_mle_config.json"));
+        assert!(script.contains("withdrawal_claim_mle_config.json"));
+        assert!(script.contains("post_close_claim_mle_config.json"));
+        assert!(script.contains("cancel_close_mle_config.json"));
+        assert!(!script.contains("WalletMockMleVerifier"));
+        assert!(!script.contains("MockMleVerifier"));
+    }
+
+    #[test]
+    fn all_six_attachment_config_fixtures_pass_the_production_parser() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let contracts = root.join("contracts");
+        let rollup = load_rollup_mle_v2_config_pins(&contracts)
+            .expect("parse both proof-free rollup MLE v2 config fixtures");
+        let settlement = load_settlement_mle_v2_config_pins(&contracts)
+            .expect("parse all four proof-free settlement MLE v2 config fixtures");
+
+        let parsed_files = rollup
+            .iter()
+            .chain(settlement.iter())
+            .map(|pin| pin.file)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parsed_files,
+            vec![
+                "close_lifecycle_validity_mle_config.json",
+                "close_withdrawal_mle_config.json",
+                "close_intent_mle_config.json",
+                "withdrawal_claim_mle_config.json",
+                "post_close_claim_mle_config.json",
+                "cancel_close_mle_config.json",
+            ],
+            "the attach must parse exactly its two rollup and four settlement circuit configs"
+        );
+
+        let pins = rollup.iter().chain(settlement.iter()).collect::<Vec<_>>();
+        for (index, pin) in pins.iter().enumerate() {
+            assert!(!pin.verification_config_abi.is_empty(), "{}", pin.file);
+            for other in &pins[index + 1..] {
+                assert!(
+                    pin.preprocessed_root != other.preprocessed_root
+                        || pin.circuit_digest != other.circuit_digest
+                        || pin.verification_config_digest != other.verification_config_digest,
+                    "{} and {} unexpectedly pin the same circuit",
+                    pin.file,
+                    other.file
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_runtime_parser_accepts_current_export_and_rejects_map_drift() {
+        let full = plonky2_mle::fixture_v2::MleVerifierV2Fixture::from_canonical_json(
+            include_str!(
+                "../../contracts/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json"
+            ),
+        )
+        .expect("current strict max-resource fixture");
+        let value = serde_json::to_value(full.config_fixture()).expect("config fixture JSON value");
+        parse_settlement_mle_v2_config_pin(&value, "resource", "v2_max_resource.json")
+            .expect("runtime preflight accepts a current exporter config");
+
+        let mut mismatched_map = value.clone();
+        mismatched_map["verificationConfig"]["publicInputWireMap"] =
+            serde_json::Value::String("0x".to_string());
+        assert!(
+            parse_settlement_mle_v2_config_pin(&mismatched_map, "resource", "v2_max_resource.json")
+                .is_err(),
+            "runtime preflight must reject split JSON map views"
+        );
+
+        let mut out_of_bounds_map = value;
+        let map = out_of_bounds_map["verificationKey"]["publicInputWireMap"]
+            .as_str()
+            .expect("public-input wire map")
+            .to_string();
+        let invalid_first_entry = format!("0xffff{}", &map[6..]);
+        out_of_bounds_map["verificationKey"]["publicInputWireMap"] =
+            serde_json::Value::String(invalid_first_entry.clone());
+        out_of_bounds_map["verificationConfig"]["publicInputWireMap"] =
+            serde_json::Value::String(invalid_first_entry);
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &out_of_bounds_map,
+                "resource",
+                "v2_max_resource.json"
+            )
+            .is_err(),
+            "runtime preflight must reject an exact-length out-of-range PI map"
+        );
+    }
+
+    #[test]
+    fn generated_config_fixture_matches_the_strict_runtime_parser() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("contracts/test/data/close_intent_mle_config.json");
+        let bytes = std::fs::read(&path).expect("read generated close config fixture");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("parse generated close config fixture");
+        let pin =
+            parse_settlement_mle_v2_config_pin(&value, "close", "close_intent_mle_config.json")
+                .expect("strict runtime parser must accept the config-only exporter output");
+        assert!(!pin.verification_config_abi.is_empty());
+        assert_ne!(pin.preprocessed_root, Bytes32::default());
+        assert!(pin.circuit_digest.iter().any(|limb| *limb != 0));
+
+        let mut weak_pow = value.clone();
+        weak_pow["whirPowBits"] = serde_json::Value::from(21);
+        assert!(
+            parse_settlement_mle_v2_config_pin(&weak_pow, "close", "close_intent_mle_config.json")
+                .is_err(),
+            "deployment must reject a fixture that only claims a non-production PoW profile"
+        );
+
+        let mut noncanonical_digest = value.clone();
+        noncanonical_digest["pinnedVerifier"]["circuitDigest"][0] =
+            serde_json::Value::String(pin.circuit_digest[0].to_string());
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &noncanonical_digest,
+                "close",
+                "close_intent_mle_config.json"
+            )
+            .is_err(),
+            "circuit digest limbs must remain fixed-width canonical hex"
+        );
+
+        let mut mismatched_map = value.clone();
+        mismatched_map["verificationConfig"]["publicInputWireMap"] =
+            serde_json::Value::String("0x".to_string());
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &mismatched_map,
+                "close",
+                "close_intent_mle_config.json"
+            )
+            .is_err(),
+            "JSON VK and Solidity config public-input wire maps must match exactly"
+        );
+
+        let mut out_of_bounds_map = value.clone();
+        let map = out_of_bounds_map["verificationKey"]["publicInputWireMap"]
+            .as_str()
+            .expect("public-input wire map")
+            .to_string();
+        assert!(
+            map.len() >= 8,
+            "test fixture has at least one packed PI map entry"
+        );
+        let invalid_first_entry = format!("0xffff{}", &map[6..]);
+        out_of_bounds_map["verificationKey"]["publicInputWireMap"] =
+            serde_json::Value::String(invalid_first_entry.clone());
+        out_of_bounds_map["verificationConfig"]["publicInputWireMap"] =
+            serde_json::Value::String(invalid_first_entry);
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &out_of_bounds_map,
+                "close",
+                "close_intent_mle_config.json"
+            )
+            .is_err(),
+            "an exact-length public-input wire map with an out-of-range row must fail preflight"
+        );
+
+        let mut unknown_field = value.clone();
+        unknown_field["retiredCompatibilityAlias"] = serde_json::Value::Bool(true);
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &unknown_field,
+                "close",
+                "close_intent_mle_config.json"
+            )
+            .is_err(),
+            "unknown compatibility fields must fail before broadcast"
+        );
+
+        let mut changed_config = value;
+        let encoded = changed_config["solidityAbiVerificationConfig"]["bytes"]
+            .as_str()
+            .expect("config ABI bytes")
+            .to_string();
+        let replacement = if encoded.ends_with('0') { '1' } else { '0' };
+        changed_config["solidityAbiVerificationConfig"]["bytes"] =
+            serde_json::Value::String(format!("{}{replacement}", &encoded[..encoded.len() - 1]));
+        assert!(
+            parse_settlement_mle_v2_config_pin(
+                &changed_config,
+                "close",
+                "close_intent_mle_config.json"
+            )
+            .is_err(),
+            "config ABI bytes must match both recorded and pinned digests"
+        );
     }
 
     /// The fixture list must name files that actually exist in this checkout — otherwise the
@@ -18293,6 +19552,10 @@ mod deploy_plan_tests {
         for f in CLOSE_CLI_FIXTURES {
             assert!(data.join(f).is_file(), "missing fixture {f} in {data:?}");
         }
+        assert!(
+            !CLOSE_CLI_FIXTURES.contains(&"close_lifecycle.json"),
+            "production existing-rollup attach must not require a witness-derived proof fixture"
+        );
         let script = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("contracts/script/DeployCloseCli.s.sol"),
@@ -18317,8 +19580,8 @@ mod deploy_plan_tests {
             );
         }
         assert!(
-            script.contains("initializeBackingVk"),
-            "the production script must initialize the distinct CloseAssetBacking VK"
+            !script.contains("initializeBackingVk"),
+            "the CloseAssetBacking adapter is constructor-pinned; no mutable VK latch may remain"
         );
     }
 }

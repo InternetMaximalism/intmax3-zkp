@@ -1,14 +1,54 @@
-# Fixture/VK regeneration + redeploy runbook (#11/#12, multitoken Phase 5b)
+# MLE/WHIR wire-v3 fixture regeneration + clean redeploy runbook
+
+> **RELEASE STATUS (2026-09-03): NO-GO.** The commit-before-challenge MLE/WHIR wire-v3
+> implementation and its compact proof boundary are integrated, but the independent
+> cryptographic review required by `doc/audit/mle-whir-pcs-repair-handoff.md` is not recorded.
+> `IntmaxRollup.releaseRuntime` therefore remains restricted to chain `31337`. Do not open
+> deposits, publish blocks, finalize, withdraw, or move settlement value on a public chain.
+> Passing local tests, a Forge dry-run, or a deployment whose constructors accept a non-31337
+> chain does not override that runtime containment. The separate NO-GO items in
+> `doc/audit/audit30-08-2026-final-security-closure.md` also remain in force.
+>
+> **Clean cutover only.** Wire v3 is a new proof/VK/config identity. The historical `V2` suffixes
+> on Rust APIs, Solidity class names, and test filenames are implementation-generation names; they
+> do not mean that wire-v2 bytes are accepted. Do not reuse a V1/v2 verifier, proof,
+> fixture, deployment manifest, publisher journal, pending submission, pending close, or bond.
+> Resolve/refund/retire old pending state under the exact old deployment before cutover, or deploy
+> a separately audited migration. Old bytes must never be decoded or evaluated as wire v3.
+
+The authoritative wire-v3 order is:
+
+```text
+generate proof-free configs
+  -> deploy/predict six distinct (MleVerifierV2 core, PinnedMleVerifierV2 adapter) pairs
+  -> bind Rollup and settlement parents to those immutable adapters
+  -> obtain the exact Manager address
+  -> regenerate every full proof fixture, with close withdrawal recipient = that Manager
+  -> run the complete Rust/Solidity/DA/gas/size matrix
+  -> independent cryptographic review
+  -> only then make a separate decision about removing releaseRuntime containment
+```
+
+This ordering is security-critical. Deployment consumes `*_mle_config.json`, which contains no
+witness or proof. Full proof fixtures are generated only after the Manager recipient exists. This
+removes the old proof-first circle (proof embeds Manager recipient -> deploy needs proof/VK ->
+Manager address is not yet known). Each of the six statement circuits has a distinct immutable
+adapter and core: validity, withdrawal, close, withdrawal claim, post-close claim, and cancel
+close. There is no mutable `initialize*Vk` step.
 
 Written 2026-07-06; extended 2026-07-27 for the multitoken (§N) regeneration.
 This is the critical path that makes the mainnet-blocker fixes (#1
 block-producer whitelist, #2b `to_hash_out` canonicity) and the §N multi-token
 preimage/PI changes actually effective on-chain. Heavy (hours of real proof
-generation) + needs a target network — a maintainer-run step. Fixtures are NOT
+generation) + currently uses a chain-31337 acceptance network — a maintainer-run step. Fixtures are NOT
 byte-reproducible (MLE/WHIR ZK blinding); verify by MEANING (tests pass), not
 by diff.
 
-## Multitoken (§N) additions — what changed in the flow (2026-07-27)
+## Historical multitoken context (2026-07-27)
+
+The facts below still explain why the descriptor families must be regenerated together, but any
+V1/VK-initializer workflow formerly associated with them is historical. The V2 procedure starts at
+Step 0 below.
 
 - **Every close/claim fixture predating §N is invalid** (close PI 95→103 w/
   `token_funds_digest`; claim PI 48→50 w/ tokenSlot/tokenIndex; post-close PI
@@ -21,13 +61,16 @@ by diff.
   descriptor carries `token_slot`/`token_index`; the post-close descriptor
   carries `token_index`. `RunClose.s.sol` / `CloseLifecycleE2E` parse them
   verbatim (the Phase-3 genesis-token embedding is retired).
-- **Close fixture co-generation.** `generate_close_fixture` now derives its
+- **Close fixture co-generation.** `generate_close_fixture` derives its
   signing keys from `ChannelMemberKeys::deterministic(1)` — the SAME derivation
-  `generate_withdrawal_fixture` registers — and proves a TWO-token final state
-  (registry `[0, 7]`, amounts `[77, 55]`). `CloseLifecycleE2E`'s close-intent
-  section therefore RUNS (member-set commitment matches) and HARD-FAILS on any
-  stale/mixed fixture set: always regenerate the unprefixed set, the `close_`
-  set and the close/claim fixtures in ONE batch.
+  `generate_withdrawal_fixture` registers — and (signer-independent exit, 2026-09)
+  builds the whole close family from ONE `close_` lifecycle (deposit 6 / withdraw 3):
+  the close intent over that lifecycle's finalized root with the single-lane
+  remaining vector `{ETH -> 3}` and the whole-vector `CloseAssetBacking` proof over
+  the same final balance proof. `CloseLifecycleE2E`'s close-intent section
+  therefore RUNS (member-set commitment matches) and HARD-FAILS on any
+  stale/mixed fixture set: always regenerate the unprefixed set, the close family
+  and the claim fixtures in ONE batch.
 - **ERC-20 withdrawal lane.** `build_channel_withdrawal` (and the CLI
   `withdraw`) can add a second, ERC-20 lane: `WD_ERC20_TOKEN` /
   `WD_ERC20_AMOUNT` / `WD_ERC20_TOKEN_ADDR` env → a second deposit in the
@@ -81,73 +124,397 @@ by diff.
   and siblings) before driving any post-TM-16 flow — the v3 reset assumes fresh
   state everywhere.
 - Build native release once: `cargo build --release --locked`.
-- Contracts build: `cd contracts && forge build`.
-- Decide the target network + set `.env` (see `contracts/.env.example` and
+- Contracts build: `cd contracts && forge build --offline`.
+- Before generating any artifact, verify that the hand-maintained protocol source, generated Rust
+  and Solidity constants, canonical WHIR profiles, and proof layout are one generation:
+
+  ```bash
+  ( cd contracts/lib/polygon-plonky2 && \
+    cargo test -p plonky2_mle --test protocol_schema_codegen --locked --offline && \
+    cargo test -p plonky2_mle --test protocol_schema_v2_codegen --locked --offline && \
+    cargo test -p plonky2_mle --test whir_profile_v2_codegen --locked --offline )
+  ```
+
+  If an intentional schema change makes either drift test fail, regenerate only through that
+  test's documented write guard, review the generated diff, and rerun both read-only tests before
+  continuing. Never patch generated constants or profile tables by hand.
+- For the current acceptance run, use chain 31337. A future independently approved public run must
+  set `.env` (see `contracts/.env.example` and
   `api/env.example`): `FRAUD_TREASURY`, `BLOCK_PRODUCER`, `INTMAX_L1_ACCOUNT`,
   `ETH_PASSWORD` (an absolute root-only password-file path, not password text),
   `INTMAX_COSIGNER_KEYFILE`, `INTMAX_API_TOKEN`, `INTMAX_ALLOWED_ORIGINS`.
   On every non-31337 chain the Rust CLI and API reject `INTMAX_DEPOSIT_KEY` and require the named
   encrypted Foundry keystore; only `--account <name>` reaches child argv.
 
-## Step 1 — regenerate fixtures (release; each is minutes of proving)
-Run from repo root. Feature-gated generators un-gate the shared witness builders.
+## Step 1 — atomically stage the complete proof-free wire-v3 config cohort
+
+Run from the repository root with the pinned lockfile. This phase constructs circuits and verifier
+data only; it must not construct a witness or proof. The writer refuses to replace a config with a
+different circuit identity, which catches a mixed build rather than silently continuing.
+
+Configs are create-once/compare-later artifacts: an existing config is accepted only when the
+writer reproduces it byte-for-byte from the current circuit and WHIR profile, and a different
+circuit identity is refused instead of overwritten. The retired target-133 switch
+(`MLE_WHIR_133_CONFIG_CUTOVER`) no longer exists; a WHIR profile change is a fresh cohort (remove
+the retired config artifacts first, in a dedicated clean staging worktree with deployments and
+publishers stopped).
+
+`MLE_ALLOW_WIRE_V3_CONFIG_CUTOVER=1` is the only cutover permission and applies solely to a
+canonical retired wire-v2/PoW-20 -> wire-v3/PoW-22 migration. Per-file atomicity is not cohort
+atomicity: do not deploy, copy, publish, or commit a partial config cohort. Even after the independent
+16-config gate passes, keep the config-only state as an unpublished checkpoint in this staging
+worktree. It must not be merged, pushed, tagged, released, or handed to an operator independently of
+the full cutover cohort defined in Step 4. If any command or gate fails, restore the entire 16-config
+set from the pre-cutover commit and restart this phase; do not retry from a mixed directory.
+
+An absent config is also crash-safe: the writer first writes and fsyncs a unique same-directory
+staging file, then publishes the complete inode with an atomic no-clobber hard link, fsyncs the
+directory, removes the staging name, and fsyncs the directory again. A racing writer is accepted
+only if the already-published target is a regular file with byte-identical canonical contents. A
+crash before publication can leave only a hidden `.*.create-*.tmp` staging file, never a partial
+target. Treat any such residue as evidence of an interrupted run: keep deployment stopped, inspect
+it, remove it, and restart the complete 16-config phase from the pre-cutover commit.
+
+```bash
+set -euo pipefail
+cargo run --release --locked \
+  --bin generate_e2e_fixture -- --mle-config-only
+cargo run --release --locked \
+  --bin generate_withdrawal_fixture -- --mle-config-only
+WD_OUT_PREFIX=sepolia_ cargo run --release --locked \
+  --bin generate_withdrawal_fixture -- --mle-config-only
+cargo run --release --locked \
+  --bin generate_burn_withdrawal_fixture -- --mle-config-only
+cargo run --release --locked \
+  --bin generate_c2c_fixture -- --mle-config-only
+# The close-family co-generator owns four configs: close_intent, close_asset_backing (the
+# materializer's whole-vector statement) and the close_ lifecycle/withdrawal aliases.
+# `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` is refused.
+cargo run --release --locked --features close-fixture-bin \
+  --bin generate_close_fixture -- --mle-config-only
+cargo run --release --locked \
+  --features withdrawal-claim-fixture-bin \
+  --bin generate_withdrawal_claim_fixture -- --mle-config-only
+cargo run --release --locked \
+  --features post-close-claim-fixture-bin \
+  --bin generate_post_close_claim_fixture -- --mle-config-only
+cargo run --release --locked \
+  --features cancel-close-fixture-bin \
+  --bin generate_cancel_close_fixture -- --mle-config-only
+
+# This test intentionally does not parse any full proof. It is the deployment boundary while
+# full proofs are still stale: exact 16-file manifest, strict current schema/version/magic/PoW,
+# complete PI wire maps, alias identity, and seven distinct production statement identities.
+cargo test --release --locked --test mle_v2_fixture_release \
+  all_proof_free_configs_form_one_complete_current_generation_cohort -- --exact --nocapture
 ```
-# Balance/withdrawal + validity (base pipeline)
-cargo run --release --bin generate_e2e_fixture
-cargo run --release --bin generate_withdrawal_fixture
-# Compute the manager CREATE2 address from the JUST-regenerated plain set:
-cd contracts && forge build && \
-  forge test --match-test test_printCloseManagerAddress -vv && cd ..
-# Close family (bake the manager CREATE2 recipient printed above). Signer-independent exit
-# (2026-09): `generate_close_fixture` is now the CO-GENERATOR of the whole family — it builds the
-# `close_` lifecycle itself (deposit 6 / withdraw 3, recipient = WD_RECIPIENT; what
-# `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` used to write), closes THAT lifecycle's final
-# balance proof (`intmax_state_root` = its finalized `final_state_root`, single-lane vector
-# {ETH -> 3}) and proves the whole-vector CloseAssetBacking proof over the same balance proof
-# (`close_asset_backing_{mle,public_inputs,manifest}.json`, anchor block 3). `submitCloseIntent`
-# requires the finalized root AND an attested backing, so the three are only valid together.
-# The printer's cross-check needs `close_lifecycle*.json` present and agreeing with the plain set:
-# seed them from the plain set BEFORE the printer (the generator overwrites them).
+
+The seven production circuit configs used by a full close-capable deployment are:
+
+```text
+mle_fixture_config.json                    validity
+withdrawal_mle_config.json                 withdrawal
+close_intent_mle_config.json               close
+withdrawal_claim_mle_config.json           withdrawal claim
+post_close_claim_mle_config.json           post-close claim
+cancel_close_mle_config.json               cancel close
+close_asset_backing_mle_config.json        whole-vector CloseAssetBacking (materializer)
+```
+
+`close_lifecycle_validity_mle_config.json` and `close_withdrawal_mle_config.json` are the
+close-workflow aliases consumed when attaching the settlement stack. They must describe the same
+validity/withdrawal circuit identities as the base configs; they are not eighth or ninth shared
+verifiers.
+
+Every config must be canonical schema `plonky2-mle-v3-solidity-config`, schema/protocol version 3,
+WHIR PoW 22, compact encoding `MLEWHIR3`, and must contain an exact three-byte-per-public-input
+`verificationKey.publicInputWireMap` plus an exact
+`abi.encode(MleVerifierV2.VerificationConfig)` whose hash equals the pinned verification-config
+digest. Reject a missing field, unknown field, digest mismatch, non-canonical Goldilocks limb, or
+config copied from another statement family.
+
+## Step 2 — deploy/predict immutable V2 identities, then obtain the Manager address
+
+Each config creates exactly one `MleVerifierV2` core and one `PinnedMleVerifierV2` adapter. The
+Rollup constructor receives the distinct validity and withdrawal adapters. The settlement verifier
+constructor receives four further distinct adapters in this order: close, withdrawal claim,
+post-close claim, cancel close. The `CloseFundingMaterializer` constructor receives the
+CloseAssetBacking adapter. Verify all 14 addresses are distinct and every adapter's `core()`,
+`allowedChainId()`, configuration digest, circuit-config digest, WHIR-parameters digest,
+64-byte protocol ID, and session ID against the config artifacts.
+
+For a future approved production attach, `channel_member deploy-settlement <rpc>` runs from the
+channel work directory with `EXISTING_ROLLUP` supplied by the driver. Do not broadcast that path on
+a public chain while this runbook is NO-GO; inspect it locally/dry-run only. The existing-Rollup
+branch reads only the
+seven config files, the staged `close_asset_backing_{manifest,mle,mle_config,public_inputs}.json`
+bundle and the authenticated `cli_reg_record.json`; it does not read
+`close_lifecycle.json` or any witness-derived proof fixture. The accepted broadcast core is:
+
+```text
+(MleVerifierV2 core, PinnedMleVerifierV2 adapter)   CloseAssetBacking
+CloseFundingMaterializer(rollup, backing adapter)
+4 x (MleVerifierV2 core, PinnedMleVerifierV2 adapter)
+ChannelSettlementVerifier
+registerChannel
+ChannelSettlementManager
+registerSettlementManager
+```
+
+That is 15 core transactions after any canonical CREATE2 library prelude. A fresh Rollup has
+already deployed the other two core/adapter pairs in its own constructor plan. There is no
+post-deploy VK initializer, no shared mutable VK, and no proof tuple in any constructor.
+
+Record the exact Manager address from the validated broadcast artifact/finalized read-back. For a
+local lifecycle fixture test, use the address printer in the same test/deployment context; do not
+reuse an address produced by a different script or test contract. Any bytecode, linked-library,
+nonce, constructor, or transaction-order change invalidates the prediction evidence and requires
+this step to be repeated.
+
+On non-31337 chains this is deployment-identity testing only. `IntmaxRollup.releaseRuntime` still
+rejects deposits, posting, finalization, withdrawals, and value movement until the independent
+cryptographic review is recorded and a separate release change is approved.
+
+## Step 3 — regenerate all full wire-v3 proof fixtures after the Manager is fixed
+
+Run the heavy proof phase as one pinned batch. The close withdrawal proof must use the Manager from
+Step 2 as its recipient.
+
+```bash
+# The packed-v1 fixtures below remain an intentionally separate legacy-conformance cohort. They
+# are not wire-v3 deployment artifacts, but their cross-language/golden consumers are part of the
+# same reviewed submodule revision. Regenerate them before their derived transcript trace.
+( cd contracts/lib/polygon-plonky2 && MLE_WRITE_FIXTURES=1 \
+  cargo test -p plonky2_mle --test generate_fixtures --locked --offline \
+  generate_and_verify_all_fixtures -- --exact --nocapture )
+( cd contracts/lib/polygon-plonky2 && MLE_WRITE_TRANSCRIPT_TRACE=1 \
+  cargo test -p plonky2_mle --test transcript_e2e_trace --locked --offline \
+  test_v1_transcript_golden_trace -- --exact --nocapture )
+( cd contracts/lib/polygon-plonky2 && MLE_WRITE_HISTORICAL_PCS_FIXTURE=1 \
+  cargo test -p plonky2_mle --lib --locked --offline \
+  commitment::whir_pcs::tests::test_historical_frozen_triples_reach_packed_v1_pcs_rejection \
+  -- --exact --nocapture )
+
+# Submodule canonical cross-language proof and maximum admitted resource proof. A schema-only
+# mutation is forbidden: both must be freshly proved under the wire-v3 transcript and WHIR profile.
+( cd contracts/lib/polygon-plonky2 && MLE_WRITE_V2_FIXTURE=1 \
+  cargo test -p plonky2_mle --test v2_cross_language_fixture --locked --offline \
+  regenerate_v2_cross_language_fixture -- --ignored --exact --nocapture )
+( cd contracts/lib/polygon-plonky2 && MLE_WRITE_V2_RESOURCE_FIXTURE=1 \
+  cargo test --release -p plonky2_mle --test v2_resource_envelope \
+  generate_real_max_row_profile_fixture --locked --offline -- --ignored --exact --nocapture )
+
+cargo run --release --locked --bin generate_e2e_fixture
+cargo run --release --locked --bin generate_withdrawal_fixture
+# Seed the close_ lifecycle names from the fresh plain set so the printer's cross-check sees one
+# fixture generation (the co-generator below overwrites them).
 cp contracts/test/data/lifecycle.json contracts/test/data/close_lifecycle.json
 cp contracts/test/data/lifecycle_validity_mle.json contracts/test/data/close_lifecycle_validity_mle.json
-# (printer, see above) then:
-WD_RECIPIENT=0x<close-manager-addr> \
-  cargo run --release --features close-fixture-bin          --bin generate_close_fixture
-cargo run --release --features withdrawal-claim-fixture-bin --bin generate_withdrawal_claim_fixture
-cargo run --release --features post-close-claim-fixture-bin --bin generate_post_close_claim_fixture
-cargo run --release --features cancel-close-fixture-bin     --bin generate_cancel_close_fixture
-# Cross-channel + wasm
-cargo run --release --bin generate_c2c_fixture
-cargo run --release --bin generate_wasm_fixtures
 ```
-Outputs land in `contracts/test/data/`. The CLOSE fixtures bake the manager's
-CREATE2 address — compute it with
-`CloseLifecycleE2ETest.test_printCloseManagerAddress` (in
-`CloseLifecycleE2E.t.sol`; moved there in Phase 5b), because the `MleVerifier`
-external-library link differs not only between forge script and test but PER
-TEST CONTRACT — only a printer inside the lifecycle test contract shares its
-linking context (`CloseManagerAddr.t.sol` is now a pointer stub). NOTE the
-ORDER: the plain (unprefixed) set must be regenerated BEFORE the printer runs
-(its prediction reads `lifecycle*.json`, valid because registration/VK/genesis
-are identical between the plain and `close_` sets — both use the deterministic
-channel-1 member keys), and `generate_close_fixture` must run in the SAME batch
-(co-generated member set, see the §N additions above). If
-`CloseLifecycleE2E.t.sol` itself is EDITED after baking, re-run the printer and
-confirm the address is unchanged (library linking can shift with the contract).
 
-## Step 2 — verify by meaning (must be green before deploy)
-```
-# Rust proof-gen E2E (real MLE/WHIR)
-cargo test --release --test e2e                       # e2e_deposit_validity_withdrawal
-cargo test --release --test mle_onchain_e2e           # validity_proof_mle_onchain_e2e
-# Solidity suite against the regenerated fixtures
-cd contracts && forge test
-```
-Expected: the previously-red `CloseLifecycleE2E` now passes (its baked manager
-address matches the freshly regenerated close fixture). All in-module circuit
-tests (`tx_settlement`, `single_withdrawal_circuit`) already pass on this branch.
+The Manager address comes from `forge test --match-test test_printCloseManagerAddress -vv`
+(`CLOSE_MANAGER_ADDRESS`; the same printer also prints `CLOSE_ROLLUP_ADDRESS`). The printer reads
+the committed `close_` set's genesis and registration, which the close family's own proving does
+not touch, so run it before the co-generator; if it rejects a mixed fixture generation because the
+plain set changed shape, the `cp` above (plain → `close_` names) is what fixes it.
 
-## Step 3 — deploy + VK init (target network)
+The close family is co-generated by ONE binary (signer-independent exit, 2026-09):
+`generate_close_fixture` builds the `close_` lifecycle itself (channel 1, deposit 6 / withdraw 3,
+withdrawal recipient = `WD_RECIPIENT`, the four `close_lifecycle*.json` / `close_withdrawal_*.json`
+files that `WD_OUT_PREFIX=close_ generate_withdrawal_fixture` used to write), then closes THAT
+lifecycle's final balance proof (`intmax_state_root` = its finalized `final_state_root`, the
+single-lane vector `{ETH -> 3}`) into `close_intent_mle.json` + `close_intent.json`, and proves the
+whole-vector `CloseAssetBacking` proof over the same balance proof into
+`close_asset_backing_{mle,public_inputs,manifest}.json`. `submitCloseIntent` requires the finalized
+root AND an attested backing proof with the same `(settled_tx_chain, token_funds_digest)`, so the
+three are only valid together, and every cross-binding is asserted inside the generator. The
+generator refuses to run without `WD_RECIPIENT`. There is no separate aux-bound `close_` withdrawal
+pass any more: `pullChannelFunds` no longer checks a close-funding aux value (cooperative close
+funding is retired, `CooperativeCloseFundingDeprecated`); the payout is released by
+`materializeSignedHead` against the attested backing proof instead.
+
+```bash
+WD_OUT_PREFIX=sepolia_ cargo run --release --locked --bin generate_withdrawal_fixture
+cargo run --release --locked --bin generate_burn_withdrawal_fixture
+# The close family (close_ lifecycle + close intent + whole-vector backing proof) in one run.
+WD_RECIPIENT=0x<exact-manager-address> \
+  cargo run --release --locked --features close-fixture-bin --bin generate_close_fixture
+# Require: the printer still reports the same Manager and Rollup addresses, and
+# `forge test --match-contract CloseLifecycleE2ETest` passes against the family.
+cargo run --release --locked --features withdrawal-claim-fixture-bin \
+  --bin generate_withdrawal_claim_fixture
+cargo run --release --locked --features post-close-claim-fixture-bin \
+  --bin generate_post_close_claim_fixture
+cargo run --release --locked --features cancel-close-fixture-bin \
+  --bin generate_cancel_close_fixture
+cargo run --release --locked --bin generate_c2c_fixture
+cargo run --release --locked --bin generate_wasm_fixtures
+
+# Rebuild both distributable WASM packages from the same final protocol source. Never reuse a
+# pre-cutover pkg/ or pkg-node/ directory in release staging. The Node build is intentionally
+# sequential; the browser build is the separate threaded target.
+test ! -e pkg
+test ! -e pkg-node
+bash hosting/build-wallet-node-wasm.sh
+bash hosting/build-wallet-wasm.sh
+
+# Canonical producer for pw_close_intent_mle.json. This is not a fixture binary: the release E2E
+# first deploys from the proof-free configs, then builds a real CloseProver proof, wraps it, proves
+# and self-verifies MLE/WHIR wire v3, writes pw_reg.json / pw_submit.json / pw_close_intent_mle.json,
+# and consumes that exact proof on the fresh anvil chain. Requires anvil, forge and cast on PATH.
+cargo test --release --locked --test partial_withdrawal_e2e \
+  partial_withdrawal_e2e_anvil -- --nocapture
+```
+
+`generate_wasm_fixtures` writes the ignored local circuit-serialization inputs under
+`tests/fixtures/*.bin`. They are neither MLE full proofs nor proof-free verifier configs, so they
+must be regenerated/tested for WASM compatibility but must not be relabelled or admitted to either
+wire-v3 JSON manifest.
+
+Every full MLE fixture must be canonical schema `plonky2-mle-v3-solidity`, protocol version 3, and
+must match its config-only artifact. The only on-chain/proof-DA representation is the exact
+`.compactProof.bytes` stream: nonempty, `MLEWHIR3` magic, exact recorded length/hash, strict shape,
+canonical re-encoding, and within the generated compact cap. `solidityAbiProof` is a redundant
+cross-view checked by tooling; it is never calldata and never a substitute DA payload.
+
+The tracked generator-owned JSON cutover is exactly 53 files. The non-skipping release test scans
+the directory and rejects missing, extra, duplicate-owned, cross-class, unknown-field, or mixed
+artifacts:
+
+```text
+16 configs:
+  mle_fixture_config.json
+  lifecycle_validity_mle_config.json  withdrawal_mle_config.json
+  close_lifecycle_validity_mle_config.json  close_withdrawal_mle_config.json
+  close_asset_backing_mle_config.json
+  sepolia_lifecycle_validity_mle_config.json  sepolia_withdrawal_mle_config.json
+  burn_lifecycle_validity_mle_config.json  burn_withdrawal_mle_config.json
+  c2c_lifecycle_validity_mle_config.json  c2c_withdrawal_mle_config.json
+  close_intent_mle_config.json  withdrawal_claim_mle_config.json
+  post_close_claim_mle_config.json  cancel_close_mle_config.json
+
+17 full proofs:
+  mle_fixture.json
+  lifecycle_validity_mle.json  withdrawal_mle.json
+  close_lifecycle_validity_mle.json  close_withdrawal_mle.json
+  close_asset_backing_mle.json
+  sepolia_lifecycle_validity_mle.json  sepolia_withdrawal_mle.json
+  burn_lifecycle_validity_mle.json  burn_withdrawal_mle.json
+  c2c_lifecycle_validity_mle.json  c2c_withdrawal_mle.json
+  close_intent_mle.json  withdrawal_claim_mle.json
+  post_close_claim_mle.json  cancel_close_mle.json  pw_close_intent_mle.json
+
+20 companions:
+  block_fixture.json  vpi_fixture.json
+  lifecycle.json  withdrawal_payout.json
+  close_lifecycle.json  close_withdrawal_payout.json
+  close_asset_backing_public_inputs.json  close_asset_backing_manifest.json
+  sepolia_lifecycle.json  sepolia_withdrawal_payout.json
+  burn_lifecycle.json  burn_withdrawal_payout.json
+  c2c_lifecycle.json  c2c_withdrawal_payout.json
+  close_intent.json  withdrawal_claim.json  post_close_claim.json  cancel_close.json
+  pw_reg.json  pw_submit.json
+```
+
+The four explicitly non-generator-owned root JSON files
+`cli_reg_record_guard.json`, `e2e_fixture.json`, `e2e_groth16.json`, and `pw_reg_guard.json` are
+separate exceptions, not part of the 53-file cohort. The three WASM circuit binaries
+`spend_circuit.bin`, `balance_processor.bin`, and `single_withdrawal_circuit.bin` are likewise a
+separate binary cohort and must never satisfy or bypass the JSON gate.
+
+The pinned submodule revision has a second, exact conformance/data manifest which the parent
+release gate scans independently of those 53 live files:
+
+```text
+7 packed-v1 Solidity conformance proofs:
+  small_mul.json  medium_mul.json  large_mul.json  huge_mul.json
+  poseidon_hash.json  recursive_verify.json  coset_recursive_verify.json
+
+2 packed-v1 derived records:
+  transcript_v1_trace.json  historical_pcs_triples.json
+
+2 current wire-v3 Solidity proofs:
+  v2_cross_language.json  v2_max_resource.json
+
+2 mle/testdata records:
+  gate_ext3_vectors.json  historical_wire_v2_compact.json
+```
+
+The `V2` filenames in the current pair are implementation-generation names. The seven packed-v1
+proofs and their derived records are deliberately quarantined conformance/history inputs and are
+never deployment fixtures. The retired `xlarge_mul.json` must remain absent; its reappearance, or
+any other missing/extra file in either submodule fixture directory, fails the release gate. Change
+this submodule manifest, its generated protocol outputs, and the top-level 53-file cohort only in
+the same reviewed atomic release unit.
+
+## Step 4 — acceptance before any release decision
+
+```bash
+# Submodule Rust + Solidity
+( cd contracts/lib/polygon-plonky2 && cargo test -p plonky2_mle --all-targets --locked )
+( cd contracts/lib/polygon-plonky2/mle/contracts && forge test --offline )
+
+# Parent differential, full Rust, full Solidity, production sizes
+cargo test --release --locked --test mle_onchain_e2e -- --nocapture
+cargo test --release --locked --test mle_v2_fixture_release -- --nocapture
+cargo check --all-targets --locked
+( cd node && npm ci --ignore-scripts && npm test )
+( cd contracts && forge test --offline --match-contract V2FixtureCompletenessTest )
+# `forge test` exits zero for `vm.skip(true)`. The repository guard preserves offline mode while
+# rejecting every skipped/failed test and pinning the security-critical suite/count floors.
+FORGE_TEST_ARGS="--offline" .github/ci/forge-test-guard.sh
+( cd contracts && forge build --sizes --offline )
+git diff --check
+git submodule status
+```
+
+Only after every gate above passes may the migration become a reviewed release candidate. The
+atomic tracked unit is one top-level commit that pins the exact reviewed submodule commit and also
+contains all 15 proof-free configs, all 16 parent full proofs, both current submodule full fixtures,
+the frozen genuine-wire-v2 negative fixture, all seven packed-v1 Solidity fixtures, the packed-v1
+transcript trace and historical PCS triples, the validated gate-extension-vector snapshot, every
+generator-overwritten DA/lifecycle/payout/claim descriptor, and every updated resource/hash
+snapshot. The packed-v1 files are conformance/history inputs, not deployment-wire aliases; their
+presence does not authorize a v1/v2 proof on a wire-v3 verifier. A standalone submodule commit must
+exist first so the parent can pin it and may have to be pushed so CI can fetch it, but it is never a
+release unit: do not tag, deploy, publish, or hand it to an operator before the complete top-level
+commit pins it. Do not merge, push, tag, deploy, publish, or copy any parent config-only or
+proof-only intermediate. Build `pkg/` and `pkg-node/` from that exact final source, record hashes of
+the emitted JS/WASM files in the deployment evidence, and deploy only those recorded outputs;
+these ignored directories are not substitutes for the tracked atomic cohort.
+
+Also run every statement-family Rust/Solidity E2E, compact proof-DA round trip, gas/resource bound,
+frozen-forgery/generalized-kernel mutation, root/order/shape/limb/point mutation, old/new-version
+rejection, C2C, WASM, close, cancel-close, withdrawal, withdrawal-claim and post-close-claim test.
+Record actual gas and production runtime sizes from this exact build; do not copy historical numbers
+from this document. An aggregate `forge build --sizes` failure caused only by a test harness does not
+replace explicit production-contract size reporting.
+
+The PCS Critical remains NO-GO until an independent cryptographic reviewer approves the complete
+transcript ordering, commitment format, malicious-prover model, written >=128-bit PCS budget, and
+Rust/Solidity parity. Parent recursion also uses the default Goldilocks Poseidon configuration whose
+concrete estimate recorded by this repository is approximately 95-bit security, so do not represent
+the whole system as 128-bit merely because the local PCS work-factor target is 128. Keep all release
+containment and every separate final-audit blocker.
+
+## Historical deployment defects (do not reproduce)
+
+Older deployments used mutable `initialize*Vk` calls and could omit withdrawal, cancel-close, or
+post-close-claim VKs. That design is retired. V2 constructors atomically bind distinct adapters and
+fail when an adapter/core is missing, duplicated, on the wrong chain, or inconsistent with its
+configuration. Never attempt to repair an old deployment by feeding it a V2 config or compact proof.
+
+The challenge-period and settlement-manager-registration fixes remain required: the Manager rejects
+an off-devnet challenge period below 86,400 seconds, and the exact Manager must be registered with
+the bound Rollup. Build/deploy with `--locked`; authorize the intended block producer explicitly.
+
+<details>
+<summary>Historical pre-V2 deployment defects (reference only; do not execute)</summary>
+
+The section below records why the mutable-VK deployment was unsafe. It describes retired V1
+contracts and is not an alternative to Steps 1-4 above.
+
+## Historical: deploy + mutable VK initialization
 Deploy scripts already wire the new guards: they authorize `BLOCK_PRODUCER`
 (#1), require `FRAUD_TREASURY` on non-anvil chains (#6), and set the KZG
 satellite. The per-statement VKs are initialized IN the deploy scripts from the
@@ -204,7 +571,7 @@ address, so the close fixture set must be regenerated** (`close_withdrawal_payou
 Until that is done, `CloseLifecycleE2E.t.sol::test_closeLifecycle_endToEnd` fails with
 `manager CREATE2 address != close payout fixture recipient (stale fixtures -- regenerate)` — the
 intended signal, per Step 2 above. Get the new address from
-`forge test --match-test test_printCloseManagerAddress -vv`, then rerun Step 1's
+`forge test --match-test test_printCloseManagerAddress -vv`, then rerun Step 3's
 `WD_RECIPIENT=<addr> cargo run --release --features close-fixture-bin --bin generate_close_fixture`
 (the close-family co-generator: `close_` lifecycle + close intent + backing proof in one run).
 
@@ -253,7 +620,11 @@ block producer if the posting key differs from the deployer:
 `BLOCK_PRODUCER=0x<poster-addr>` (deploy reads it) — the whitelist is otherwise
 empty (fail-closed).
 
-### Step 3b — register the ERC-20 tokens (AFTER the rollup deploy, BEFORE any ERC-20 deposit)
+</details>
+
+## Post-review network operations (currently blocked by NO-GO)
+
+### Register ERC-20 tokens (after a future approved Rollup deploy, before any ERC-20 deposit)
 
 The base `tokenIndex → ERC-20` registry is **set-once per index** (§N-7 / TM-10b) and
 `deposit()` reverts for an unregistered nonzero index, so this step must run **after** the rollup
@@ -291,10 +662,10 @@ served with `null` metadata and the wallet falls back to the raw base index. A m
 CONTRADICTS the chain (address/chainId/rollup mismatch) is a hard startup failure by design; fix
 the file rather than working around it. See `node/DESIGN.md` §2.5 for the full policy table.
 
-### Step 3c — testnet $ITX faucet (OPTIONAL; anvil + public testnets only)
+### Testnet $ITX faucet (optional; currently anvil-only)
 
 Gives new browser users an in-channel balance of a test ERC-20 (`$ITX`) so they can try a transfer
-without funding anything. Runs **after** 3b (the faucet token is just another registered base
+without funding anything. Runs **after token registration** (the faucet token is just another registered base
 token) and **after** the channel exists (`init`). Skip the whole step on any deployment that should
 not dispense value — the relay endpoint is off unless explicitly enabled.
 
@@ -421,7 +792,7 @@ token with no readable `decimals()` is shown in raw base units rather than a gue
   be pointed at the same work dir. Run one writer per channel; if that ever changes, these ledgers
   need a real file lock BEFORE the faucet or browser deposit import is re-enabled.
 
-## Step 4 — Option B (1024-slot) redeploy (#12)
+## Post-review Option B (1024-slot) redeploy (#12)
 Option B circuits/fixtures are already present on this branch (constants
 `MAX_COSIGNERS=16`, `MAX_CHANNEL_MEMBERS=1024`). The LIVE network still runs
 pre-Option-B params, so a fresh deploy with the regenerated Option-B fixtures/VKs
@@ -429,13 +800,31 @@ is required. Also complete the one-key member-model validity-path registration
 follow-up (tracked with the Option B work).
 
 ## Verification checklist before opening deposits
-- [ ] All fixtures regenerated in the same run (consistent circuit set).
-- [ ] `cargo test --release --test e2e` + `--test mle_onchain_e2e` green.
-- [ ] `forge test` fully green (incl. `CloseLifecycleE2E`).
-- [ ] Deploy used `--locked`; `FRAUD_TREASURY` + `BLOCK_PRODUCER` set explicitly.
-- [ ] Post-deploy: `isBlockProducer[poster] == true`, `allowMleDisabled == false`,
-      all VKs initialized (`degreeBits > 0`).
-- [ ] A real close/withdraw lifecycle passes on the target network.
+
+- [ ] Every old V1/v2 pending submission, close, claim, journal and bond was resolved or retired;
+      no old state is being reinterpreted under wire v3.
+- [ ] All 15 proof-free configs were generated first in an isolated no-deploy window and the
+      config-only cohort gate passed; that intermediate was never merged, pushed, tagged, released,
+      or handed to an operator on its own.
+- [ ] One reviewed top-level cutover commit pins the exact reviewed submodule commit and contains
+      the complete current-generation config, full-proof, DA/lifecycle/claim companion and snapshot
+      cohort; both WASM packages were rebuilt from that exact source and their deployed hashes were
+      recorded.
+- [ ] Six distinct adapter/core pairs and their config/circuit/WHIR/protocol/session identities were
+      checked from constructor inputs and finalized runtime code.
+- [ ] The exact Manager address was fixed before all full fixtures were regenerated in one run.
+- [ ] Every consumer submits the exact strict `.compactProof.bytes`; no tuple/proof-object fallback
+      or alternate proof-DA encoding remains.
+- [ ] The complete Step 4 Rust, Solidity, adversarial, DA, gas and production-size matrix is green.
+- [ ] Deploy used `--locked`; `FRAUD_TREASURY` + `BLOCK_PRODUCER` were set explicitly.
+- [ ] Post-deploy: `isBlockProducer[poster] == true`; Rollup adapters are distinct; settlement
+      adapters are distinct; every adapter's `core()` and immutable digests match its config.
+- [ ] A real close/withdraw lifecycle passes on the target network after public-chain acceptance is
+      authorized.
+- [ ] An independent cryptographic reviewer approved the wire-v3 transcript, commitment, malicious-
+      prover argument, written soundness budget and Rust/Solidity parity.
+- [ ] The separate final-audit NO-GO items are closed and a reviewed change explicitly removes the
+      `releaseRuntime` chain-31337 containment. Until then this checklist cannot authorize deposits.
 - [ ] `RegisterTokens.s.sol` run for every ERC-20 the deployment will accept, BEFORE the first
       ERC-20 deposit; `tokenAddressOf(idx)` reads back the expected address for each.
 - [ ] `tokens.json` shipped alongside `channel_backing.json` into every channel work dir, and the

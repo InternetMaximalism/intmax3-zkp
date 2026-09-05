@@ -6,7 +6,24 @@
 //! correctly into the deployed Solidity contracts (same hash chains, same authDigest, same
 //! encoding).
 //!
-//! Skips gracefully if foundry (anvil/forge/cast) is not installed.
+//! Release-gate execution requires foundry (anvil/forge/cast); missing tooling is a hard failure so
+//! CI cannot silently report an unexecuted payout path as passing.
+//!
+//! KNOWN GAP (signer-independent exit, open since the `requireSignedHeadBacking` admission was
+//! added to `ChannelSettlementManager._checkCloseProof`): `submitPartialWithdrawalIntent` now
+//! requires an ATTESTED whole-vector `CloseAssetBacking` proof for the post-burn head, i.e. a
+//! backing statement whose `finalized_extended_state_commitment` is a root the live Rollup has
+//! finalized and whose anchor is `<= latestFinalizedBlockNumber()`. This E2E only advances the
+//! Rust-side `BlockWitnessGenerator` (deposit / bootstrap / burn blocks) while the anvil Rollup
+//! stays at its genesis root, so no attestable backing statement exists and the submit step fails
+//! with `BackingProofNotAttested()` AFTER `pw_reg.json`, `pw_submit.json` and
+//! `pw_close_intent_mle.json` have been produced and self-verified. Completing it requires
+//! posting the three blocks to anvil (`postBlockAndSubmit` needs EIP-4844 blob transactions plus
+//! `attestProofData` KZG proofs, i.e. the `cast send --blob` machinery of `channel_member withdraw`)
+//! and finalizing them with a 3-block validity MLE proof, then proving the backing statement over
+//! the burn-send balance proof (`CloseAssetBackingWitness::from_full_private_state_and_channel_state`
+//! + `public_close_prover::wrap_and_export_backing_mle`) and calling
+//! `CloseFundingMaterializer.attestSignedHeadBacking(manager, compactProof)` before the submit.
 #![cfg(not(debug_assertions))]
 
 use intmax3_zkp::{
@@ -33,7 +50,7 @@ use intmax3_zkp::{
     },
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     regev::{RegevCiphertext, RegevPk, RegevSecurityLevel, encrypt_amount},
-    utils::conversion::ToU64 as _,
+    utils::{conversion::ToU64 as _, mle_prover::validate_mle_v2_full_against_config_json},
     wallet_core::{
         ChannelBalanceAttestation, CloseProver, MemberInfo, MemberKeys, add_signature,
         assemble_genesis_state_backed, build_burn_send, build_record, burn_withdrawal_leaf,
@@ -60,6 +77,7 @@ type C = PoseidonGoldilocksConfig;
 const LEVEL: RegevSecurityLevel = RegevSecurityLevel::Production;
 const ANVIL0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const PORT: u16 = 8553;
+const PRODUCTION_BLOCK_GAS_LIMIT: u64 = 20_000_000;
 
 fn tool_present(bin: &str) -> bool {
     Command::new(bin)
@@ -87,6 +105,13 @@ fn cast(rpc: &str, args: &[&str], label: &str) -> String {
 }
 fn abi_word(data: &str, i: usize) -> &str {
     &data[i * 64..(i + 1) * 64]
+}
+fn json_hex_quantity(value: &serde_json::Value, label: &str) -> u64 {
+    let raw = value
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must be a JSON hex string, got {value}"));
+    u64::from_str_radix(raw.strip_prefix("0x").unwrap_or(raw), 16)
+        .unwrap_or_else(|e| panic!("invalid {label} hex quantity {raw}: {e}"))
 }
 fn info(slot: u16, k: &MemberKeys) -> MemberInfo {
     MemberInfo {
@@ -178,6 +203,7 @@ fn build_signed_genesis(
     cts: &[RegevCiphertext],
     fund: u64,
     settled_tx_chain: Bytes32,
+    finalized_state_root: Bytes32,
     att: &ChannelBalanceAttestation,
     balance_vd: &VerifierCircuitData<F, C, D>,
 ) -> ChannelState {
@@ -192,7 +218,7 @@ fn build_signed_genesis(
         &test_recipients_b1b(cts.len()),
         fund,
         settled_tx_chain,
-        Bytes32::default(),
+        finalized_state_root,
     )
     .unwrap();
     for (slot, k) in keys.iter().enumerate() {
@@ -218,10 +244,10 @@ fn sign_real(state: &mut ChannelState, keys: &[MemberKeys]) {
 
 #[test]
 fn partial_withdrawal_e2e_anvil() {
-    if !(tool_present("anvil") && tool_present("forge") && tool_present("cast")) {
-        eprintln!("[skip] foundry not found — partial withdrawal E2E needs anvil/forge/cast");
-        return;
-    }
+    assert!(
+        tool_present("anvil") && tool_present("forge") && tool_present("cast"),
+        "partial-withdrawal release E2E requires anvil, forge, and cast"
+    );
 
     use intmax3_zkp::wallet_core::ChannelSnapshot;
     use rand::SeedableRng as _;
@@ -231,10 +257,16 @@ fn partial_withdrawal_e2e_anvil() {
     // Spawns anvil and proves the node answering on PORT is the one we spawned (fresh chain,
     // our own process). See tests/anvil_harness/mod.rs for why a plain `cast block-number` poll
     // is not enough. Killed on drop.
+    let block_gas_limit = PRODUCTION_BLOCK_GAS_LIMIT.to_string();
     let _guard = AnvilNode::spawn(
         "partial_withdrawal_e2e_anvil",
         PORT,
-        &["--code-size-limit", "50000"],
+        &[
+            "--code-size-limit",
+            "50000",
+            "--gas-limit",
+            &block_gas_limit,
+        ],
     );
 
     // ── Phase A: Setup prover + keys ──────────────────────────────────────────────────────────
@@ -305,6 +337,12 @@ fn partial_withdrawal_e2e_anvil() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            // Foundry may batch signed transactions even against an automining Anvil. With the
+            // large verifier deployment set that can leave a tail of otherwise-valid creations
+            // pending while `forge script` waits forever for their receipts. Send each transaction
+            // and await its receipt before advancing so this release E2E is deterministic in CI.
+            "--slow",
+            "--offline",
             "--code-size-limit",
             "50000",
         ]),
@@ -314,6 +352,40 @@ fn partial_withdrawal_e2e_anvil() {
     let manager = find_addr(&deploy, "MANAGER:");
     let verifier_addr = find_addr(&deploy, "SettlementVerifier:");
     eprintln!("[PW E2E] rollup={rollup} manager={manager} verifier={verifier_addr}");
+
+    // The Manager deliberately refuses a close whose ChannelFund anchor is not a state root the
+    // Rollup has finalized. Read the anchor from the LIVE deployment rather than using a fixture
+    // placeholder: the constructor marks its nonzero genesis root finalized, and every member
+    // below signs this exact value into ChannelState/close PIs. This does not weaken the separate
+    // proof-backed payout requirement (withdrawNative still verifies its own finalized root).
+    let finalized_state_root = Bytes32::from_hex(
+        cast(
+            &rpc,
+            &["call", &rollup, "latestFinalizedStateRoot()"],
+            "read live finalized state root",
+        )
+        .trim(),
+    )
+    .expect("parse live latestFinalizedStateRoot");
+    assert_ne!(
+        finalized_state_root,
+        Bytes32::default(),
+        "PW E2E deployment must install a nonzero finalized genesis root"
+    );
+    let finalized_membership = cast(
+        &rpc,
+        &[
+            "call",
+            &rollup,
+            "isFinalizedStateRoot(bytes32)",
+            &finalized_state_root.to_hex(),
+        ],
+        "check live finalized state-root membership",
+    );
+    assert!(
+        finalized_membership.contains("true") || finalized_membership.trim().ends_with("01"),
+        "latestFinalizedStateRoot must be present in isFinalizedStateRoot, got: {finalized_membership}"
+    );
 
     // ── Phase C: Real ETH deposit + deposit-backed genesis ──────────────────────────────────
     let balances = [50u64, 10, 30];
@@ -433,7 +505,16 @@ fn partial_withdrawal_e2e_anvil() {
         .0;
     let cts = [ct0.clone(), ct1, ct2];
 
-    let genesis = build_signed_genesis(&record, &keys, &cts, fund, chain, &att, &balance_vd);
+    let genesis = build_signed_genesis(
+        &record,
+        &keys,
+        &cts,
+        fund,
+        chain,
+        finalized_state_root,
+        &att,
+        &balance_vd,
+    );
     verify_channel_backing(&record, &genesis, Some(&att), &balance_vd).expect("§F-1 backing OK");
     let genesis_chain = genesis.balance_state.settled_tx_chain;
     eprintln!(
@@ -630,7 +711,11 @@ fn partial_withdrawal_e2e_anvil() {
         &close_proof.public_inputs[..CHANNEL_CLOSE_PUBLIC_INPUTS_LEN].to_u64_vec(),
     )
     .expect("decode real close PIs");
-    std::fs::write(data_dir.join("pw_close_intent_mle.json"), close_mle).unwrap();
+    let close_config = std::fs::read_to_string(data_dir.join("close_intent_mle_config.json"))
+        .expect("read proof-free close MLE V2 config");
+    validate_mle_v2_full_against_config_json(&close_mle, &close_config)
+        .expect("PW close full proof must strictly match the deployed config and compact bytes");
+    std::fs::write(data_dir.join("pw_close_intent_mle.json"), &close_mle).unwrap();
 
     // ── Phase E: Write pw_submit.json + on-chain settlement ─────────────────────────────────
     // The Withdrawal struct for authDigest computation.
@@ -707,10 +792,57 @@ fn partial_withdrawal_e2e_anvil() {
             "--private-key",
             ANVIL0,
             "--broadcast",
+            "--slow",
+            "--offline",
         ]),
         "forge submit PW intent",
     );
     eprintln!("[PW E2E] submitPartialWithdrawalIntent succeeded");
+
+    // Pin the operational liveness claim to the actual transaction, not Forge's in-process trace.
+    // The script must bypass Foundry's conservative estimator with its explicit 20M limit, and the
+    // node receipt must show that the real cold transaction consumed no more than that envelope.
+    {
+        let artifact_path = contracts
+            .join("broadcast")
+            .join("SubmitPartialWithdrawal.s.sol")
+            .join("31337")
+            .join("run-latest.json");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&artifact_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", artifact_path.display())),
+        )
+        .unwrap_or_else(|e| panic!("parse {}: {e}", artifact_path.display()));
+        let tx = artifact["transactions"]
+            .as_array()
+            .and_then(|transactions| transactions.first())
+            .expect("submit broadcast must contain one transaction");
+        let receipt = artifact["receipts"]
+            .as_array()
+            .and_then(|receipts| receipts.first())
+            .expect("submit broadcast must contain one receipt");
+        let gas_limit = json_hex_quantity(&tx["transaction"]["gas"], "transaction gas limit");
+        let gas_used = json_hex_quantity(&receipt["gasUsed"], "receipt gasUsed");
+        let receipt_status = json_hex_quantity(&receipt["status"], "receipt status");
+        assert_eq!(
+            tx["isFixedGasLimit"].as_bool(),
+            Some(true),
+            "submit script must retain its explicit gas limit instead of estimator headroom"
+        );
+        assert_eq!(
+            gas_limit, PRODUCTION_BLOCK_GAS_LIMIT,
+            "submit transaction limit must equal the production block envelope"
+        );
+        assert_eq!(receipt_status, 1, "submit transaction reverted");
+        assert!(
+            gas_used <= PRODUCTION_BLOCK_GAS_LIMIT,
+            "submit used {gas_used} gas, above the production envelope"
+        );
+        eprintln!(
+            "[PW E2E] real submit gas: used={gas_used} limit={gas_limit} margin={}",
+            gas_limit - gas_used
+        );
+    }
 
     // Extract on-chain authDigest from the script's console2.logBytes32 output.
     let onchain_auth = submit_out
@@ -837,12 +969,13 @@ fn partial_withdrawal_e2e_anvil() {
         );
     }
 
-    // ── Phase G: same chain is RE-SUBMITTABLE after finalize (single-use chain key removed) ──
+    // ── Phase G: a finalized logical burn is single-use ──────────────────────────────────
     {
-        // The former `usedPartialWithdrawalChains` single-use guard was deleted: it was a fossil of
-        // the removed proof-free payout and let a front-runner permanently strand a burn. Double-
-        // payout is prevented by the proof-side nullifier, so re-submitting the same chain after
-        // finalize must now SUCCEED (re-authorizing an idempotent digest), not revert.
+        // The broad `usedPartialWithdrawalChains[chainKey]` guard remains deleted: the correlation
+        // key is not itself payout authority, and an unfinalized/cancelled burn stays recoverably
+        // re-submittable. Once finalization atomically accounts this exact IMBK logical burn,
+        // however, replay has no recovery purpose and must fail before it can re-enable the
+        // one-shot IPW2 authorization or monopolize the singleton pending slot.
         let out = Command::new("forge")
             .current_dir(&contracts)
             .args([
@@ -853,20 +986,35 @@ fn partial_withdrawal_e2e_anvil() {
                 "--private-key",
                 ANVIL0,
                 "--broadcast",
+                "--slow",
+                "--offline",
             ])
             .output()
             .expect("re-submit spawn");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            out.status.success(),
-            "re-submit of the same chain must now SUCCEED (chain single-use removed), got: {stderr}"
+            !out.status.success() && stderr.contains("PartialWithdrawalAlreadyAccounted()"),
+            "finalized logical-burn replay must fail with PartialWithdrawalAlreadyAccounted; \
+             status={} stderr={stderr}",
+            out.status
         );
-        eprintln!("[PW E2E] same-chain re-submit correctly accepted (no permanent strand)");
+
+        let pending = cast(
+            &rpc,
+            &["call", &manager, "partialWithdrawalPending()(bool)"],
+            "pending state after finalized-burn replay",
+        );
+        assert_eq!(
+            pending.trim(),
+            "false",
+            "rejected finalized-burn replay must not recreate pending state"
+        );
+        eprintln!("[PW E2E] finalized logical-burn replay correctly rejected; state unchanged");
     }
 
     eprintln!(
         "[PW E2E] ALL PASSED: deposit → burn → submit → finalize → authorize, \
-         authDigest cross-boundary parity verified, same-chain re-submit accepted."
+         authDigest cross-boundary parity verified, finalized logical-burn replay rejected."
     );
 }
 

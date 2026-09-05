@@ -2,7 +2,6 @@
 pragma solidity ^0.8.29;
 
 import {ChannelSettlementManager} from "../src/ChannelSettlementManager.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {CloseSettlementBase} from "./CloseSettlementBase.sol";
 import {CloseTestLib} from "./CloseTestLib.sol";
 
@@ -39,7 +38,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     // ── helpers (mirrored from CloseLifecycleHardening.t.sol) ────────────────
 
     function _cancelProof(ChannelSettlementManager.CancelCloseRequest memory request)
-        internal view returns (MleVerifier.MleProof memory)
+        internal view returns (bytes memory)
     {
         ChannelSettlementManager.PendingClose memory pending = manager.getPendingClose();
         uint64 closeFinalStateVersion = pending.active && pending.closeIntentDigest == request.closeIntentDigest
@@ -51,7 +50,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
     function _cancelProofAt(
         ChannelSettlementManager.CancelCloseRequest memory request,
         uint64 closeFinalStateVersion
-    ) internal view returns (MleVerifier.MleProof memory) {
+    ) internal view returns (bytes memory) {
         return CloseTestLib.proofWithLimbs(
             verifier.expectedCancelCloseLimbs(
                 CHANNEL_ID,
@@ -152,7 +151,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         uint8 statusBefore = uint8(manager.channelStatus());
         bool closePendingBefore = manager.getPendingClose().active;
         bool burnPendingBefore = manager.partialWithdrawalPending();
-        MleVerifier.MleProof memory proof = _closeProof(intent);
+        bytes memory proof = _closeProof(intent);
         vm.expectRevert(selector);
         manager.submitCloseIntent(intent, proof);
         assertEq(uint8(manager.channelStatus()), statusBefore, "status unchanged by the refusal");
@@ -186,7 +185,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory honestIntent = _intentAt(9, 20);
         bytes32 digest = manager.computeCloseIntentDigest(honestIntent);
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(digest, 21);
-        MleVerifier.MleProof memory replayedProof = _cancelProofAt(req, honestIntent.finalStateVersion);
+        bytes memory replayedProof = _cancelProofAt(req, honestIntent.finalStateVersion);
 
         // NOTE: read via the cheatcode, not `block.timestamp` — under via-IR the Yul
         // optimizer treats TIMESTAMP as movable and CSEs the two reads to a constant 0 delta.
@@ -257,7 +256,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         ChannelSettlementManager.CloseIntent memory intent = _intentAt(9, 20);
         bytes32 digest = manager.computeCloseIntentDigest(intent);
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(digest, 21);
-        MleVerifier.MleProof memory proof = _cancelProofAt(req, intent.finalStateVersion);
+        bytes memory proof = _cancelProofAt(req, intent.finalStateVersion);
 
         _requestCloseAndElapseGrace();
         manager.submitCloseIntent(intent, _closeProof(intent));
@@ -411,7 +410,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // it cannot extend the fixed horizon+minResponse end.
         vm.warp(uint256(horizon) + 1);
         ChannelSettlementManager.CloseIntent memory tooLate = _intentAt(9, 14);
-        MleVerifier.MleProof memory tooLateProof = _closeProof(tooLate);
+        bytes memory tooLateProof = _closeProof(tooLate);
         manager.submitCloseIntent(tooLate, tooLateProof);
         assertEq(
             manager.getPendingClose().challengeDeadline,
@@ -428,7 +427,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         manager.finalizeCloseGuarded(guardedDigest, guardedGeneration);
         vm.warp(uint256(manager.getPendingClose().challengeDeadline) + 1);
         ChannelSettlementManager.CloseIntent memory afterEnd = _intentAt(9, 15);
-        MleVerifier.MleProof memory afterEndProof = _closeProof(afterEnd);
+        bytes memory afterEndProof = _closeProof(afterEnd);
         vm.expectRevert(ChannelSettlementManager.ChallengeWindowClosed.selector);
         manager.submitCloseIntent(afterEnd, afterEndProof);
         manager.finalizeCloseGuarded(manager.getPendingClose().closeIntentDigest, manager.closeRequestGeneration());
@@ -547,7 +546,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // No pending close: refused at the first guard, BEFORE the decrement.
         ChannelSettlementManager.CancelCloseRequest memory bogus =
             _cancelRequest(bytes32(uint256(1)), 12);
-        MleVerifier.MleProof memory bogusProof = _cancelProof(bogus);
+        bytes memory bogusProof = _cancelProof(bogus);
         vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
         manager.cancelClose(bogus, bogusProof);
 
@@ -563,7 +562,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         assertEq(manager.currentCloseFreezeNonce(), 1, "settled era is NOT unwound");
 
         ChannelSettlementManager.CancelCloseRequest memory late = _cancelRequest(digest, 12);
-        MleVerifier.MleProof memory lateProof = _cancelProof(late);
+        bytes memory lateProof = _cancelProof(late);
         vm.expectRevert(ChannelSettlementManager.CloseNotActive.selector);
         manager.cancelClose(late, lateProof);
         assertEq(
@@ -608,7 +607,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // itself and not on a helper's external view call.)
         ChannelSettlementManager.PostCloseClaim memory early =
             _postCloseClaim(bytes32(0), keccak256("inc"), USER_A, alice, 1);
-        MleVerifier.MleProof memory junk = CloseTestLib.proofWithLimbs(new uint256[](1));
+        bytes memory junk = CloseTestLib.proofWithLimbs(new uint256[](1));
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(early, junk);
 
@@ -617,7 +616,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         // After a real close, with a well-formed claim and a WELL-FORMED, verifier-accepted proof.
         ChannelSettlementManager.PostCloseClaim memory claim =
             _postCloseClaim(closeDigest, keccak256("inc"), USER_B, bob, 1);
-        MleVerifier.MleProof memory good = _postCloseClaimProof(claim);
+        bytes memory good = _postCloseClaimProof(claim);
         vm.expectRevert(ChannelSettlementManager.PostCloseClaimDisabled.selector);
         manager.submitPostCloseClaim(claim, good);
 
@@ -730,7 +729,7 @@ contract CloseLifecycleRedTeamTest is CloseSettlementBase {
         bytes32 pwDigest = manager.pendingPartialWithdrawalCloseIntentDigest();
         bytes32 burnKey = manager.pendingPartialWithdrawalBurnKey();
         ChannelSettlementManager.CancelCloseRequest memory req = _cancelRequest(pwDigest, 20);
-        MleVerifier.MleProof memory replayedProof = _cancelProof(req);
+        bytes memory replayedProof = _cancelProof(req);
 
         vm.prank(eve);
         manager.cancelPartialWithdrawal(req, replayedProof);

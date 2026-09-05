@@ -17,8 +17,10 @@
 //!   4. ch1 -> ch2 transfer block   -> block 4
 //!   5. ch2 withdrawal tx block      -> block 5
 //!
-//! Two proofs are produced and each is wrapped (WrapperCircuit) + committed via
-//! MLE (mirroring `src/bin/generate_withdrawal_fixture.rs`):
+//! Two proof-free configs and two strict full V2 proofs are produced (mirroring
+//! `src/bin/generate_withdrawal_fixture.rs`):
+//!   - contracts/test/data/<prefix>withdrawal_mle_config.json
+//!   - contracts/test/data/<prefix>lifecycle_validity_mle_config.json
 //!   - the ch2 withdrawal proof -> contracts/test/data/<prefix>withdrawal_mle.json
 //!   - the validity proof       -> contracts/test/data/<prefix>lifecycle_validity_mle.json
 //!
@@ -81,7 +83,12 @@ use intmax3_zkp::{
     ethereum_types::{address::Address, bytes32::Bytes32, u32limb_trait::U32LimbTrait, u256::U256},
     utils::{
         conversion::ToU64,
-        mle_prover::{export_mle_json, prove_with_mle, setup_mle_vk, verify_mle_proof},
+        mle_prover::{
+            export_mle_v2_config_json, export_mle_v2_json, mle_v2_compact_submission_metadata,
+            mle_v2_config_only_requested, persist_or_validate_mle_v2_config_json,
+            prove_with_mle_v2, setup_mle_vk_v2, validate_mle_v2_full_against_config_json,
+            verify_mle_proof_v2,
+        },
         poseidon_hash_out::PoseidonHashOut,
         wrapper::WrapperCircuit,
     },
@@ -179,20 +186,6 @@ struct WithdrawalPayoutFixture {
     ext_commitment: String,
 }
 
-/// Deterministic, dependency-free FNV-1a digest over a byte slice, placed in
-/// the low 64 bits of a bytes32. Matches `generate_withdrawal_fixture.rs`. The
-/// value is UNCONSTRAINED on-chain (finalize/fullVerify never re-derive the
-/// submission commitment), so any deterministic value is sound; used only for
-/// reproducibility.
-fn fnv1a_bytes32(bytes: &[u8]) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("0x{:064x}", h as u128)
-}
-
 /// Parse a 20-byte hex address ("0x..." or bare) into an `Address` (5 big-endian u32 limbs).
 fn parse_address_hex(hex: &str) -> Address {
     let s = hex.trim().trim_start_matches("0x");
@@ -272,6 +265,48 @@ fn main() -> anyhow::Result<()> {
     let spend_circuit = SpendCircuit::<F, C, D>::new();
     let balance_processor = BalanceProcessor::<F, C, D>::new(&spend_circuit.data.verifier_data());
     let balance_vd = balance_processor.balance_vd();
+
+    // Build every deployment circuit before any witness/proof work. The two stable config
+    // artifacts can therefore be used to deploy the pinned verifiers before a recipient address
+    // is selected.
+    let single_withdrawal_circuit = SingleWithdawalCircuit::<F, C, D>::new(&balance_vd);
+    let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
+    let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
+    let withdrawal_wrapper =
+        WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
+    let withdrawal_mle_config_json = export_mle_v2_config_json(&withdrawal_wrapper.data)?;
+
+    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
+    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
+        &agg_circuit.verifier_data(),
+    );
+    let validity_circuit =
+        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
+    let validity_wrapper =
+        WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
+    let validity_mle_config_json = export_mle_v2_config_json(&validity_wrapper.data)?;
+
+    let out_dir = Path::new("contracts/test/data");
+    fs::create_dir_all(out_dir)?;
+    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_else(|_| "c2c_".to_string());
+    let name = |base: &str| format!("{prefix}{base}");
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("withdrawal_mle_config.json")),
+        &withdrawal_mle_config_json,
+    )?;
+    persist_or_validate_mle_v2_config_json(
+        out_dir.join(name("lifecycle_validity_mle_config.json")),
+        &validity_mle_config_json,
+    )?;
+    eprintln!(
+        "[c2c] wrote proof-free configs {} and {}",
+        name("withdrawal_mle_config.json"),
+        name("lifecycle_validity_mle_config.json")
+    );
+    if mle_v2_config_only_requested() {
+        eprintln!("[c2c] config-only mode: no witness or proof was constructed");
+        return Ok(());
+    }
 
     let block_witness_generator =
         BlockWitnessGeneratorHandle::new(BlockWitnessGenerator::new(&supported_user_counts));
@@ -632,8 +667,6 @@ fn main() -> anyhow::Result<()> {
     let single_withdrawal_witness = balance_witness_generator2
         .single_withdrawal_witness(&single_withdrawal_data)
         .expect("single withdrawal witness");
-    let single_withdrawal_circuit = SingleWithdawalCircuit::<F, C, D>::new(&balance_vd);
-    let single_withdrawal_vd = single_withdrawal_circuit.data.verifier_data();
     let single_withdrawal_proof = single_withdrawal_circuit
         .prove(&single_withdrawal_witness)
         .expect("single withdrawal proof");
@@ -643,7 +676,6 @@ fn main() -> anyhow::Result<()> {
         .expect("verify single withdrawal proof");
 
     // ----- Withdrawal chain + final proofs -----
-    let withdrawal_processor = WithdrawalProcessor::<F, C, D>::new(&single_withdrawal_vd);
     let withdrawal_chain_vd = withdrawal_processor.withdrawal_chain_vd();
     let step_witness = WithdrawalStepWitness::<F, C, D> {
         prev_withdrawal_chain_proof: None,
@@ -718,16 +750,10 @@ fn main() -> anyhow::Result<()> {
 
     let final_block_chain_proof = last_block_proof.expect("final block hash chain proof");
     // P2b: build + verify the N-of-N signature AggListCircuit proof (decision D3).
-    let agg_circuit = intmax3_zkp::falcon_sig::agg::FalconAggCircuit::<F, C, D>::new();
-    let agg_list_circuit = intmax3_zkp::falcon_sig::agg_list::AggListCircuit::<F, C, D>::new(
-        &agg_circuit.verifier_data(),
-    );
     let list_proof = block_witness_generator
         .borrow()
         .build_agg_sig_list_proof(&agg_circuit, &agg_list_circuit)
         .expect("build bp sig list proof");
-    let validity_circuit =
-        ValidityCircuit::<F, C, D>::new(&block_chain_vd, &agg_list_circuit.verifier_data());
     // FIXED validity prover address.
     let validity_prover = Address::default();
     let validity_proof = validity_circuit
@@ -757,33 +783,35 @@ fn main() -> anyhow::Result<()> {
     // (mirrors generate_withdrawal_fixture.rs).
     // -----------------------------------------------------------------------
     eprintln!("[c2c] Wrap + MLE (withdrawal proof)");
-    let withdrawal_wrapper =
-        WrapperCircuit::<F, C, C, D>::new(&withdrawal_processor.withdrawal_vd());
     let withdrawal_wrapped = withdrawal_wrapper.prove(&withdrawal_proof)?;
     withdrawal_wrapper.data.verify(withdrawal_wrapped.clone())?;
-    let withdrawal_vk = setup_mle_vk::<F, C, D>(&withdrawal_wrapper.data);
+    let withdrawal_vk = setup_mle_vk_v2::<F, C, D>(&withdrawal_wrapper.data);
     let mut wd_pw = PartialWitness::new();
-    wd_pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, &withdrawal_proof);
-    let withdrawal_mle = prove_with_mle::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
-    verify_mle_proof(
+    wd_pw.set_proof_with_pis_target(&withdrawal_wrapper.wrap_proof, &withdrawal_proof)?;
+    let withdrawal_mle = prove_with_mle_v2::<F, C, D>(&withdrawal_wrapper.data, wd_pw)?;
+    verify_mle_proof_v2(
         &withdrawal_wrapper.data,
         &withdrawal_vk,
         &withdrawal_mle.proof,
     )?;
-    let withdrawal_mle_json =
-        export_mle_json(&withdrawal_mle.proof, &withdrawal_wrapper.data.common)?;
+    let withdrawal_mle_json = export_mle_v2_json(
+        &withdrawal_mle.proof,
+        &withdrawal_vk,
+        &withdrawal_wrapper.data,
+    )?;
+    validate_mle_v2_full_against_config_json(&withdrawal_mle_json, &withdrawal_mle_config_json)?;
 
     eprintln!("[c2c] Wrap + MLE (validity proof)");
-    let validity_wrapper =
-        WrapperCircuit::<F, C, C, D>::new(&validity_circuit.data.verifier_data());
     let validity_wrapped = validity_wrapper.prove(&validity_proof)?;
     validity_wrapper.data.verify(validity_wrapped.clone())?;
-    let validity_vk = setup_mle_vk::<F, C, D>(&validity_wrapper.data);
+    let validity_vk = setup_mle_vk_v2::<F, C, D>(&validity_wrapper.data);
     let mut val_pw = PartialWitness::new();
-    val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof);
-    let validity_mle = prove_with_mle::<F, C, D>(&validity_wrapper.data, val_pw)?;
-    verify_mle_proof(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
-    let validity_mle_json = export_mle_json(&validity_mle.proof, &validity_wrapper.data.common)?;
+    val_pw.set_proof_with_pis_target(&validity_wrapper.wrap_proof, &validity_proof)?;
+    let validity_mle = prove_with_mle_v2::<F, C, D>(&validity_wrapper.data, val_pw)?;
+    verify_mle_proof_v2(&validity_wrapper.data, &validity_vk, &validity_mle.proof)?;
+    let validity_mle_json =
+        export_mle_v2_json(&validity_mle.proof, &validity_vk, &validity_wrapper.data)?;
+    validate_mle_v2_full_against_config_json(&validity_mle_json, &validity_mle_config_json)?;
 
     // -----------------------------------------------------------------------
     // Extract the EXACT committed Withdrawal from the single-withdrawal proof PIs.
@@ -823,14 +851,6 @@ fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Write output files.
     // -----------------------------------------------------------------------
-    let out_dir = Path::new("contracts/test/data");
-    fs::create_dir_all(out_dir)?;
-
-    // Output filename prefix: defaults to "c2c_" so this set does NOT overwrite
-    // the plain P2 withdrawal fixtures.
-    let prefix = std::env::var("WD_OUT_PREFIX").unwrap_or_else(|_| "c2c_".to_string());
-    let name = |base: &str| format!("{prefix}{base}");
-
     // 1. <prefix>withdrawal_mle.json
     fs::write(
         out_dir.join(name("withdrawal_mle.json")),
@@ -874,6 +894,11 @@ fn main() -> anyhow::Result<()> {
         v
     };
 
+    // One authoritative proof payload is shared by calldata, Proof-DA, attestation and fraud.
+    // Commit to the strict compact-v2 bytes, never to the surrounding JSON container.
+    let (proof_hash, proof_length) =
+        mle_v2_compact_submission_metadata(&validity_mle_json, &validity_mle_config_json)?;
+
     let lifecycle = LifecycleFixture {
         genesis_state_root: vpis.initial_ext_commitment.to_string(),
         final_state_root: vpis.final_ext_commitment.to_string(),
@@ -896,8 +921,8 @@ fn main() -> anyhow::Result<()> {
             final_ext_commitment: vpis.final_ext_commitment.to_string(),
             prover: vpis.prover.to_string(),
         },
-        proof_hash: fnv1a_bytes32(validity_mle_json.as_bytes()),
-        proof_length: validity_mle_json.len() as u32,
+        proof_hash,
+        proof_length,
     };
     let lifecycle_json = serde_json::to_string_pretty(&lifecycle)?;
     fs::write(out_dir.join(name("lifecycle.json")), &lifecycle_json)?;

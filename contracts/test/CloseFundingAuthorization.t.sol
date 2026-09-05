@@ -7,7 +7,8 @@ import {IERC20} from "../src/SafeERC20.sol";
 import {SimpleERC20} from "./tokens/TestTokens.sol";
 import {CloseFundingMaterializer} from "../src/CloseFundingMaterializer.sol";
 import {IntmaxRollup} from "../src/IntmaxRollup.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
+import {IPinnedMleVerifierV2} from "../src/IPinnedMleVerifierV2.sol";
+import {MockPinnedMleVerifierV2} from "./helpers/MockPinnedMleVerifierV2.sol";
 
 /// @title Close-funding tombstones and mixed-ledger pull tests.
 /// @notice The cooperative terminal-child/IPW2 route (`authorizeCloseFunding`,
@@ -154,11 +155,13 @@ contract CloseFundingAuthorizationTest is CloseSettlementBase {
     /// The immutable materializer's retired terminal-child entry points are tombstones that revert
     /// before validating the manager, the withdrawal vector, or the proof.
     function test_materializerTerminalChildRoutesAreTombstones() external {
-        CloseFundingMaterializer materializer =
-            new CloseFundingMaterializer(IntmaxRollup(payable(address(registry))));
+        CloseFundingMaterializer materializer = new CloseFundingMaterializer(
+            IntmaxRollup(payable(address(registry))),
+            IPinnedMleVerifierV2(address(new MockPinnedMleVerifierV2(block.chainid)))
+        );
         ChannelSettlementManager.CloseIntent memory intent = _finalizeTwoToken(75, 40);
         bytes32 aux = _expectedAux(intent);
-        MleVerifier.MleProof memory proof;
+        bytes memory proof;
 
         IntmaxRollup.Withdrawal[] memory native = new IntmaxRollup.Withdrawal[](1);
         native[0] = IntmaxRollup.Withdrawal({

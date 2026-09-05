@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {BlobKZGVerifierExt} from "../src/BlobKZGVerifier.sol";
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {FixtureLib} from "../script/FixtureLib.sol";
 
 contract BlobKZGVerifierHarness is BlobKZGVerifierExt {
@@ -97,39 +96,23 @@ contract BlobKzgPairingTest is Test {
         assertEq(count, 1);
     }
 
-    function test_castProductionArtifactTwoBlob_standardPointEvaluationProofs() public view {
-        // Reproducible generation:
-        //   forge script script/PrepareProofDa.s.sol:PrepareProofDa --offline
-        //   cast mktx --blob --path ../proof-da-output/validity-proof.bin <signed tx args>
-        //   | cast decode-transaction --json
-        // The payload is regenerated from the tracked source fixture here, not checked in as a
-        // 130 KiB opaque binary. Both c-kzg blob proofs execute against the real 0x0a precompile.
+    function test_currentV2ProductionArtifact_twoBlobCapacityAndCanonicalBytes() public view {
+        // Consume the exact constructor-pinned V2 compact stream. The historical Sepolia KZG
+        // sidecar below was tied to a removed V1 ABI encoding and cannot authenticate V2 bytes.
+        // The independent four-byte golden above still exercises the real 0x0a precompile.
         string memory json = vm.readFile(
-            string.concat(vm.projectRoot(), "/test/data/sepolia_lifecycle_validity_mle.json")
+            string.concat(
+                vm.projectRoot(),
+                "/lib/polygon-plonky2/mle/contracts/test/fixtures/v2_max_resource.json"
+            )
         );
-        MleVerifier.MleProof memory mleProof = FixtureLib.parseProof(json);
-        bytes memory payload = abi.encode(mleProof);
-        assertEq(payload.length, 130_592);
+        bytes memory payload = FixtureLib.parseCompactProofV2(json);
+        assertEq(payload.length, 129_284);
         assertEq(
             keccak256(payload),
-            0x93b18c568e154d895a698da7712cea7f88e195e110501cca65e2f28c1a3d691b
+            0x9bb89a1e4ca4bf9dca4d140eedb8836cbd41982922f2a212cf99861dc9715175
         );
-
-        bytes memory commitment0 =
-            hex"8eb25df2c6262ffa4885ae2bb491a2488c718d6b50ce6bf9be315a3e0bcf6092e33a7120a658f10dc8ec771dca6a6ac2";
-        bytes memory proof0 =
-            hex"b9543e26c5c9d7f94bcf664472e65f242afae1d853269259a51e9d60be873ac2b7e9db72d4520d55769e49cd62131b29";
-        bytes memory commitment1 =
-            hex"abaa69d3c82e25709971900eaa27c2d63bbd159a05f089a8cb299d64436101cafc8470e9e0c56d785a28174bf5e54bbb";
-        bytes memory proof1 =
-            hex"affa4a1516425bbcb59bb07f58499f29cd519bc7decdffbd4cf22fa59280763ebcab82d7d246fb33de2fe34174954c3a";
-
-        (bytes32 blobHash0, bytes32 blobHash1, uint8 count) = verifier.verify(
-            payload, bytes.concat(commitment0, proof0, commitment1, proof1)
-        );
-        assertEq(blobHash0, 0x013aece36c6d6fd1c086a3be3fa73da5bc44b4e8e9b0eef108c58e980ced6681);
-        assertEq(blobHash1, 0x0145cdb30fad5803d3895ef8ef47569b296448f1b6864f3311f02ab3163fbc74);
-        assertEq(count, 2);
+        assertEq(verifier.count(payload.length), 2);
     }
 
     function test_independentChallengeAndBarycentricVector() public view {

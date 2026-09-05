@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {MleVerifier} from "@mle/MleVerifier.sol";
 import {IERC20, SafeERC20Lib} from "./SafeERC20.sol";
+import {IPinnedMleVerifierV2} from "./IPinnedMleVerifierV2.sol";
 
 /// @dev File-scope close-PI field bundle passed across the manager→verifier boundary as ONE
 /// calldata struct. Collapsing the 14 close-intent scalars into a single argument keeps the
@@ -53,12 +53,26 @@ struct CloseProofFields {
 }
 
 interface IChannelSettlementVerifier {
-    /// Phase A: the close intent is verified by a REAL MLE/WHIR proof of the plonky2 close circuit
-    /// (not a stub). The proof is the wrapped close `MleVerifier.MleProof` whose `publicInputs` are
-    /// the 103 raw close limbs the verifier rebinds. `view` (reads the close VK), not `pure`.
-    function verifyCloseIntent(CloseProofFields calldata fields, MleVerifier.MleProof calldata proof)
+    /// @notice The immutable close-statement adapter owned by this settlement verifier.
+    /// @dev Managers cache this exact address in their constructors so the large compact proof is
+    ///      relayed only once (manager -> adapter), while the settlement verifier still owns the
+    ///      canonical 103-limb application binding.
+    function closeMleVerifier() external view returns (IPinnedMleVerifierV2);
+
+    /// Phase A: the close intent is verified by a canonical compact v2 MLE/WHIR proof. The pinned
+    /// circuit adapter returns the 103 authenticated public-input limbs that the verifier rebinds.
+    function verifyCloseIntent(CloseProofFields calldata fields, bytes calldata compactProof)
         external
         view
+        returns (bool);
+
+    /// @notice Bind all authenticated close public inputs to the supplied application fields.
+    /// @dev This stateless entry point has no authority by itself. A caller must first obtain
+    ///      `publicInputs` from this verifier's immutable `closeMleVerifier`; the Manager enforces
+    ///      that composition with its own constructor-pinned adapter.
+    function bindCloseIntentPublicInputs(CloseProofFields calldata fields, uint256[] calldata publicInputs)
+        external
+        pure
         returns (bool);
 
     function verifySpecialClose(
@@ -83,7 +97,7 @@ interface IChannelSettlementVerifier {
         uint8 tokenSlot,
         uint32 tokenIndex,
         bytes32 withdrawalNullifier,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool);
 
     /// Phase C1 (CORRECTED): cancelClose is verified by a REAL MLE/WHIR proof of the plonky2
@@ -97,7 +111,7 @@ interface IChannelSettlementVerifier {
         uint64 closeFinalStateVersion,
         uint64 revivedStateVersion,
         bytes32 revivedChannelStateDigest,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool);
 
     function verifyPostCloseClaim(
@@ -111,7 +125,7 @@ interface IChannelSettlementVerifier {
         bytes32 finalBalanceStateH1,
         bytes32 finalSettledTxAccumulatorRoot,
         uint32 tokenIndex,
-        MleVerifier.MleProof calldata mleProof
+        bytes calldata compactProof
     ) external view returns (bool);
 
     function verifyLateOutgoingDebit(
@@ -196,6 +210,7 @@ uint256 constant SETTLEMENT_LOCAL_DEVNET_CHAIN_ID = 31337;
 
 contract ChannelSettlementManager {
     error ReleaseRuntimeUnavailable();
+    error InvalidSettlementVerifier();
     error InvalidCloseFundingMaterializer();
     error OnlyCloseFundingMaterializer();
     error CooperativeCloseFundingDeprecated();
@@ -696,6 +711,11 @@ contract ChannelSettlementManager {
     uint64 public immutable challengePeriod;
     uint256 public immutable specialClosePenalty;
     IChannelSettlementVerifier public immutable verifier;
+    /// @notice The close adapter derived from `verifier` exactly once during construction.
+    /// @dev The Manager calls it directly so the ~195 KiB compact proof crosses one parent ABI
+    ///      boundary instead of two. Its authenticated 103-limb result is still passed through the
+    ///      settlement verifier's complete canonical/equality binding before any state mutation.
+    IPinnedMleVerifierV2 public immutable closeMleVerifier;
 
     /// @notice Finding E: the rollup registry holding this channel's authoritative member set + bp
     /// (the validity-path registration). The constructor asserts this manager's member set + bp
@@ -995,7 +1015,16 @@ contract ChannelSettlementManager {
         challengePeriod = challengePeriod_;
         specialClosePenalty = specialClosePenalty_;
         bpBondCredits = initialBpBondCredits_;
+        if (address(verifier_).code.length == 0) revert InvalidSettlementVerifier();
+        IPinnedMleVerifierV2 derivedCloseMleVerifier;
+        try verifier_.closeMleVerifier() returns (IPinnedMleVerifierV2 adapter) {
+            derivedCloseMleVerifier = adapter;
+        } catch {
+            revert InvalidSettlementVerifier();
+        }
+        if (address(derivedCloseMleVerifier).code.length == 0) revert InvalidSettlementVerifier();
         verifier = verifier_;
+        closeMleVerifier = derivedCloseMleVerifier;
         registry = registry_;
         if (closeFundingMaterializer_ == address(0) || closeFundingMaterializer_.code.length == 0) {
             revert InvalidCloseFundingMaterializer();
@@ -1194,16 +1223,13 @@ contract ChannelSettlementManager {
     /// @notice Step 2 of the two-step close: record (or challenge-replace) a close intent.
     /// Direct submission from `Active` is disallowed — `requestClose()` must run first
     /// (abstract2 §3.5).
-    function submitCloseIntent(CloseIntent calldata intent, MleVerifier.MleProof calldata proof)
-        external
-        releaseRuntime
-    {
+    function submitCloseIntent(CloseIntent calldata intent, bytes calldata compactProof) external releaseRuntime {
         if (channelStatus == ChannelLifecycleStatus.Closed) revert ChannelClosed();
         // Multi-token: cheap structural bound BEFORE the proof check (defense-in-depth; the
         // strict TFD limb bind would reject an out-of-range count anyway, since the in-circuit
         // token_count is constrained to 1..=10 and keccak is collision-resistant).
         if (intent.tokenCount == 0 || intent.tokenCount > 10) revert TokenCountOutOfRange();
-        _checkCloseProof(intent, proof);
+        _checkCloseProof(intent, compactProof);
 
         bytes32 closeIntentDigest = computeCloseIntentDigest(intent);
         if (authorizedBurnSnapshotActive) {
@@ -1414,10 +1440,7 @@ contract ChannelSettlementManager {
         revert SpecialCloseDisabled();
     }
 
-    function cancelClose(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof)
-        external
-        releaseRuntime
-    {
+    function cancelClose(CancelCloseRequest calldata request, bytes calldata compactProof) external releaseRuntime {
         if (!pendingClose.active) revert CloseNotActive();
         if (request.closeIntentDigest != pendingClose.closeIntentDigest) {
             revert CloseIntentDigestMismatch();
@@ -1495,7 +1518,7 @@ contract ChannelSettlementManager {
                 pendingClose.finalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
-                proof
+                compactProof
             )) revert InvalidCancelProof();
 
         // A1: CONSUME the material. Effect placed after the verify so the floor only ever advances
@@ -1692,7 +1715,7 @@ contract ChannelSettlementManager {
 
     function submitPartialWithdrawalIntent(
         CloseIntent calldata intent,
-        MleVerifier.MleProof calldata proof,
+        bytes calldata compactProof,
         bytes32 prevSettledTxChain,
         AuthorizedWithdrawal calldata withdrawal
     ) external releaseRuntime {
@@ -1700,7 +1723,7 @@ contract ChannelSettlementManager {
             revert ChannelClosed();
         }
 
-        _checkCloseProof(intent, proof);
+        _checkCloseProof(intent, compactProof);
 
         // The close circuit exposes `signedState.close_freeze_nonce + 1`, not the signed state's
         // nonce itself (`close_circuit.rs`, `incremented_close_freeze_nonce`). While the manager is
@@ -2035,7 +2058,7 @@ contract ChannelSettlementManager {
         }
     }
 
-    function cancelPartialWithdrawal(CancelCloseRequest calldata request, MleVerifier.MleProof calldata proof)
+    function cancelPartialWithdrawal(CancelCloseRequest calldata request, bytes calldata compactProof)
         external
         releaseRuntime
     {
@@ -2119,7 +2142,7 @@ contract ChannelSettlementManager {
                 pendingPartialWithdrawalStateVersion,
                 request.revivedStateVersion,
                 request.revivedChannelStateDigest,
-                proof
+                compactProof
             )) revert InvalidCancelProof();
 
         // A4: CONSUME the material against this burn. Written after the verify, and BEFORE the
@@ -2153,7 +2176,7 @@ contract ChannelSettlementManager {
         emit PartialWithdrawalCancelled(authDigest, request.revivedChannelStateDigest, request.revivedStateVersion);
     }
 
-    function submitWithdrawalClaim(WithdrawalClaim calldata claim, MleVerifier.MleProof calldata proof)
+    function submitWithdrawalClaim(WithdrawalClaim calldata claim, bytes calldata compactProof)
         external
         releaseRuntime
     {
@@ -2196,7 +2219,7 @@ contract ChannelSettlementManager {
                 claim.tokenSlot,
                 claim.tokenIndex,
                 claim.withdrawalNullifier,
-                proof
+                compactProof
             )) revert InvalidWithdrawalClaimProof();
 
         // Per-token accrual cap (TM-3): token-t claims accrue ONLY against token-t funds.
@@ -2272,7 +2295,7 @@ contract ChannelSettlementManager {
     ///      left in place but unreachable, ready for whichever of (a)/(b) lands.
     ///      NOTE: `script/RunClose.s.sol:submitPostCloseClaimStep` will now revert at run time; it
     ///      is a manual operator step, referenced by no test.
-    function submitPostCloseClaim(PostCloseClaim calldata, MleVerifier.MleProof calldata) external pure {
+    function submitPostCloseClaim(PostCloseClaim calldata, bytes calldata) external pure {
         revert PostCloseClaimDisabled();
     }
 
@@ -2417,7 +2440,7 @@ contract ChannelSettlementManager {
         );
     }
 
-    function _checkCloseProof(CloseIntent calldata intent, MleVerifier.MleProof calldata proof) internal view {
+    function _checkCloseProof(CloseIntent calldata intent, bytes calldata compactProof) internal view {
         _checkCanonicalCloseMetadata(intent);
         if (!registry.isFinalizedStateRoot(intent.channelFundIntmaxStateRoot)) {
             revert ChannelFundStateRootNotFinalized(intent.channelFundIntmaxStateRoot);
@@ -2443,14 +2466,15 @@ contract ChannelSettlementManager {
         //     payouts stay hard-capped by `finalizedChannelFundAmount` / `receivedChannelFunds`.
         // A later join/membership change must therefore create a new explicitly activated
         // settlement snapshot; it cannot ride this manager's verifier binding.
-        if (!_runCloseVerify(intent, proof)) revert InvalidCloseProof();
-        // `verifyCloseIntent` has just strict-bound PI limbs 95..102 to the verifier's canonical
-        // IMTF recomputation over the complete ten-token vectors. Reusing those authenticated
-        // limbs avoids ABI-encoding both fixed arrays a second time in this size-constrained
-        // Manager; it does not trust an unverified caller field.
+        (bool verified, uint256[] memory publicInputs) = _runCloseVerify(intent, compactProof);
+        if (!verified) revert InvalidCloseProof();
+        // `bindCloseIntentPublicInputs` has just strict-bound PI limbs 95..102 to the verifier's
+        // canonical IMTF recomputation over the complete ten-token vectors. Reusing those
+        // authenticated limbs avoids ABI-encoding both fixed arrays a second time in this
+        // size-constrained Manager; it does not trust an unverified caller field.
         bytes32 fundsDigest;
         for (uint256 i = 95; i < 103; ++i) {
-            fundsDigest = bytes32((uint256(fundsDigest) << 32) | proof.publicInputs[i]);
+            fundsDigest = bytes32((uint256(fundsDigest) << 32) | publicInputs[i]);
         }
         ICloseFundingMaterializerState(closeFundingMaterializer)
             .requireSignedHeadBacking(uint32(channelId), intent.finalSettledTxChain, fundsDigest);
@@ -2468,12 +2492,20 @@ contract ChannelSettlementManager {
         }
     }
 
-    /// @dev Isolated frame for the 17-arg `verifyCloseIntent` marshaling (keeps `_checkCloseProof`
-    /// and `submitCloseIntent` under the via-IR stack limit once `delegateCount` is appended).
-    function _runCloseVerify(CloseIntent calldata intent, MleVerifier.MleProof calldata proof)
+    /// @dev Isolated frame for the close-field marshaling (keeps `_checkCloseProof` and
+    /// `submitCloseIntent` under the via-IR stack limit once `delegateCount` is appended).
+    ///
+    /// The compact proof is intentionally sent straight to the constructor-pinned close adapter.
+    /// Relaying the ~195 KiB blob through `ChannelSettlementVerifier` first duplicated ABI-copy and
+    /// EIP-150 forwarding costs and made the real close transaction exceed a 30M block. The adapter
+    /// still performs the identical immutable-VK MLE/WHIR verification. Only its authenticated,
+    /// small 103-limb result crosses into the settlement verifier, whose strict binder remains the
+    /// single source of truth for application semantics. Calling that stateless binder alone cannot
+    /// reach this function or mutate Manager state: this path always executes the adapter call first.
+    function _runCloseVerify(CloseIntent calldata intent, bytes calldata compactProof)
         internal
         view
-        returns (bool)
+        returns (bool verified, uint256[] memory publicInputs)
     {
         CloseProofFields memory fields = CloseProofFields({
             channelId: channelId,
@@ -2504,7 +2536,8 @@ contract ChannelSettlementManager {
             // verifier requires PI limb 94 to equal it (not merely to meet a floor).
             minDelegateCount: uint32(activeDelegateCount)
         });
-        return verifier.verifyCloseIntent(fields, proof);
+        publicInputs = closeMleVerifier.verifyCompactPublicInputs(compactProof);
+        verified = verifier.bindCloseIntentPublicInputs(fields, publicInputs);
     }
 
     /// @dev Challenge ordering: lexicographic strict `(finalEpoch, finalStateVersion)`.
