@@ -1,0 +1,1660 @@
+{
+  "schema_version": 1,
+  "runtime_base_commit": "05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8",
+  "formalization_base_commit": "acfaa7816d5e9cddeb3f92d488a7093bcd6967b3",
+  "scope_note": "Parent production contracts and circuit Rust sources plus explicitly enumerated supporting Rust/MLE source directories. Test helpers within these directories remain inventoried; only mapped spans distinguish test-only lines. This is not a full Cargo/Plonky2/compiler dependency closure, a semantic coverage percentage, or a source-refinement certificate. Unmapped files are explicitly untranslated in this implementation-oriented phase; historical abstract models do not discharge them.",
+  "files": [
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CanonicalWhirProfileV2.sol",
+      "sha256": "7d2feb276eceea1effce4b99f8305089f8ac70278011a5724f46cb1b24d214bc",
+      "lines": 47,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CircuitConfigV2.sol",
+      "sha256": "39a19068ea3a4e0624a56d195ca9fc1b1db69db00d11d02433fd724f814a0fa9",
+      "lines": 137,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+      "sha256": "a3b7d1050c1896cdac853fac75d89b5591dd3bb6ae1935f9252cbddaba570c38",
+      "lines": 279,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/ConstraintEvaluator.sol",
+      "sha256": "0f10a5b351b6e38c86d63de231487cece67c70f105c7fa967c5fd078e8d67b25",
+      "lines": 103,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CosetInterpolationConstants.sol",
+      "sha256": "c332248b89689976768c27bb07e2427560925706329997d00788f4c3c65f14c9",
+      "lines": 81,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CosetInterpolationGateExt3.sol",
+      "sha256": "5e0ded5a73418f69c18eb57c91622ed44a55e915d8e1ffa5b4dae1f1f78d005a",
+      "lines": 195,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/EqPolyLib.sol",
+      "sha256": "3c7e03ac405328891922886a0da4b823a9cf9a2c5b6df2513369962e4abdaf31",
+      "lines": 47,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/GoldilocksField.sol",
+      "sha256": "1ca69976db4c680aab8b6f171e704b6dc5f3736994c3158808034b7708023e60",
+      "lines": 106,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/MleProofErrors.sol",
+      "sha256": "264ba9987e448e8da0098fff3db58c6f24b48c2693e15334ad48dedc0090a14a",
+      "lines": 34,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifier.sol",
+      "sha256": "d92b34419aa65cba5588792f51b5409b75321becac7145ad1b517a7467214eb2",
+      "lines": 1197,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+      "sha256": "9c2f970e322afc43dd7c52ef44a2f2d7de70e6083e06eeee342d562b1eb85bc4",
+      "lines": 756,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/OuterLogupExt3Verifier.sol",
+      "sha256": "99ed1d1190a0e6857c9379eb1037bd9b167e864687310a80962381c9e3292c8d",
+      "lines": 1008,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PackedClaimExt3.sol",
+      "sha256": "6cbee8a569648711caf61d4572a79bbf3c32a85d1209cd10ed9db28c658129d2",
+      "lines": 289,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PackedClaimLib.sol",
+      "sha256": "0e1645670ac84ef09b6197fb9562cccbccd2d20732bc3d455225265225a31716",
+      "lines": 57,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+      "sha256": "015d4c60abec6a877085cade3ee021e1a395c474f5cb3703015184f88b5a5eb8",
+      "lines": 309,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluator.sol",
+      "sha256": "a8001c0d8d975085a57ea888e372b0b89240af2fbe4ed90f6a2d2189b97f6e98",
+      "lines": 1321,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/Plonky2GateEvaluatorExt3.sol",
+      "sha256": "9b7d2cca7d17206f989bb20c7cf2632d72c111592ecb6c8b64ba161b49392239",
+      "lines": 1002,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PoseidonConstants.sol",
+      "sha256": "92a77037dc6302436b8f23e10df6781506b91fd79ab5ec9073422f0aabe45716",
+      "lines": 69,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PoseidonGate.sol",
+      "sha256": "c7eb506f023dacc136c0045ce891b81b89140c1d124a2fc76021f836b461b89f",
+      "lines": 661,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PoseidonGateExt3.sol",
+      "sha256": "da490da04ec6bba26ba851483995ca084b1bb908c0b8e237483d5750879f72ec",
+      "lines": 533,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PoseidonPublicInputsHash.sol",
+      "sha256": "10e93075c116150c02e3ab4cb4462e2ea4f82cae0ea9c8aa271ae47e910fc738",
+      "lines": 14,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/SumcheckVerifier.sol",
+      "sha256": "7029a9341f38e370067d2b59c4a1c5468c7ba897b2543a4f7e71782a9d3eb702",
+      "lines": 234,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/TranscriptLib.sol",
+      "sha256": "d8b9b49c3002844ad9f5e4994188075e89e4cee503726aa75d48d03bec0bfe6b",
+      "lines": 271,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/TranscriptV2.sol",
+      "sha256": "0278cc068908c27d166a88e018fe3a79c179d79b51b8cd9be4a7ea04d0c0132e",
+      "lines": 326,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/generated/MleWhirV1.sol",
+      "sha256": "44fdc5e9cbe870ebbd88c48ffe3ab3031827a0a7bd033c9b321f67dc61905620",
+      "lines": 32,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/generated/MleWhirV2.sol",
+      "sha256": "43b5ade1faad8247d19583eb6b5122b59db30d25173641293cd30823198fe2eb",
+      "lines": 101,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/generated/WhirProfilesV2.sol",
+      "sha256": "e55b387d0cef720bbb0e22d7b95bb281e6837d5b3b41fd37c73c02366b2126d1",
+      "lines": 12,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/GoldilocksExt3.sol",
+      "sha256": "e1df25e395e5136c3247f591f764187b284c448da2b251b11708715ea4d1f7e6",
+      "lines": 311,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/Keccak256Chain.sol",
+      "sha256": "e2801b40a84f0b6929f4f5f64e56996f5731c3f7dd4fff99f39228529bb0d785",
+      "lines": 116,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishMerkle.sol",
+      "sha256": "a2c53bb9ed3250fc4182ec3576b8523fe1c3898d38d8d1dea39be837b1b1303f",
+      "lines": 143,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishWhir.sol",
+      "sha256": "331623130139b660cb9c135d1e010442c9605d9ede8c30e5b3a71c3037975347",
+      "lines": 508,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/SpongefishWhirVerify.sol",
+      "sha256": "e333383e029171ab223e700a57c37399c41c153db9c2fb0b920285b0af9f6380",
+      "lines": 1575,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/spongefish/WhirLinearAlgebra.sol",
+      "sha256": "f3da8dc815df70b8463ee3d70076d3c05f1b3879341e9c82e71d9af4b0e34424",
+      "lines": 542,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/commitment/merkle_pcs.rs",
+      "sha256": "35bb8910ac1fbbe793482935f7c0f2072fd4e2be8619f5e3afe6a0d14ffccd5f",
+      "lines": 259,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/commitment/mod.rs",
+      "sha256": "4ade1a8cb36434716de6dcca984f8890b6532406b7540b6664608da84e721c7f",
+      "lines": 3,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/commitment/traits.rs",
+      "sha256": "806bd8e0e6c7d9da65aaeafb4467e3547e16974865f383aef77bdfe967ab53c0",
+      "lines": 41,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/commitment/whir_pcs.rs",
+      "sha256": "d24aa89b329ad12bff2417956cd518bff3f2d0424e6810cd2b60d97fcfebfc75",
+      "lines": 3898,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/compact_v2.rs",
+      "sha256": "6192a217ed603e5458206b22f0852ba23e1c01ee58ecadc60712ff2b0f3db4ab",
+      "lines": 822,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/config.rs",
+      "sha256": "65eb3a660c7a31c87abf4f4c25e7cdf7ce39c933e62a58c5a8d844aba7298838",
+      "lines": 95,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/constraint_eval.rs",
+      "sha256": "6ad486f19252b0d2252d334114fa385830a0116907a1e1234d0b8bd11241e481",
+      "lines": 279,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/dense_mle.rs",
+      "sha256": "c1422c795e395ba14efde57e8b7d27e3cd8d8b9d16237e28ad86cba7d94159ae",
+      "lines": 249,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/eq_poly.rs",
+      "sha256": "0400935a7a9d572fea496e36201ef9db3835a5e33e4c0147382619fe6400e11c",
+      "lines": 131,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/fixture.rs",
+      "sha256": "e3b7c4492f44c324dc62fdc69b29e74b3ebbd545879dd5d55df2b5e55646bc80",
+      "lines": 2031,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/fixture_v2.rs",
+      "sha256": "30461b43d533fac1604450cbff9907fb7d71ee52029358644ea4f6f0418fdca3",
+      "lines": 2880,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/gate_ext3.rs",
+      "sha256": "323a52355d64cd72f1bcd3cc1bfa2ac46e1f2e43ebf74a1e63ee31b53d58d066",
+      "lines": 1416,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/generated/mle_whir_v1.rs",
+      "sha256": "4698168cee63be971b8a60d8c568c56c0d92222b1a85aeb93f2d7a3e2a7b25cb",
+      "lines": 80,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/generated/mle_whir_v2.rs",
+      "sha256": "1679a6facceda2b18416f17facc3ffeb82ec0059e28455f0fa1796d4f5164626",
+      "lines": 159,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/lib.rs",
+      "sha256": "280982d8c47fed10804811390c4f42ec38dc7adc8661085cf0c8f4ec1071baef",
+      "lines": 62,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/permutation/logup.rs",
+      "sha256": "b52af2d4293720e1c90d4fd2ce441c72d394ae9f59d9cead3d906b7f6c9dc24a",
+      "lines": 321,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/permutation/lookup.rs",
+      "sha256": "e8cdf964dbfbca67e2add6438fd2b3c657ef6290a8c2cbcc34076168a0e760d3",
+      "lines": 273,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/permutation/mod.rs",
+      "sha256": "62eb666f56863c29034456fcce37f5acacf05d105b5eb7e997cb7fd931de2990",
+      "lines": 3,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/permutation/norm_logup.rs",
+      "sha256": "91ea69dbb98b30213fb163076b3d54bd7ed9436d1c7e1fdf271ae67ca34a1664",
+      "lines": 1573,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/proof.rs",
+      "sha256": "138b9c518bea9c60f1239780c4ddb6a8ce35843a4cfac8966455785038b2b11b",
+      "lines": 253,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/proof_v2.rs",
+      "sha256": "cb6249c58a608342d00c12509bc67ab9e569902453c0e18fd6254569d00ea8cd",
+      "lines": 140,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/prover.rs",
+      "sha256": "64983a1c7e654bfec60a40c1dc6b44ace4c7df44148e6aa638c18ff6f1e2fa3b",
+      "lines": 1459,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/prover_v2.rs",
+      "sha256": "679b8fb7be02c1411cebff5f9ef8f63b4778faa5c6d3b5ffbdacce6bbaa88c5d",
+      "lines": 574,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/coefficients.rs",
+      "sha256": "4990ed995422b5defff35c2cc4f796aa2d9f7441e0f091fde3c91901a07afeb0",
+      "lines": 295,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/ext3.rs",
+      "sha256": "db2f9b1bb7e884e15813162fade6ea51317d666112fd7861864b234270d90458",
+      "lines": 269,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/gate_ext3_v2.rs",
+      "sha256": "b1cc4757f7286a09f6de46123aa312d2a2b0d34ceb1b4b3f674932417287b5e5",
+      "lines": 181,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/mod.rs",
+      "sha256": "33e5633c0d970be26bd7e05d375d180288c07b669aef96bde449a617db6a9b28",
+      "lines": 6,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/prover.rs",
+      "sha256": "fe97ffa809ec7d2e85a446907e5115448b25d0e740d3cc346f47dfefd170c34b",
+      "lines": 612,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/types.rs",
+      "sha256": "c4800070ccd9f3ccc3c8df50a962217d6386e72d9a3d7a834f2611b6eec5550a",
+      "lines": 114,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/sumcheck/verifier.rs",
+      "sha256": "370e5d329b57ee8012c918a85bea7e00f4097190f7e14cde83fb4c514f9eed57",
+      "lines": 159,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/transcript.rs",
+      "sha256": "652d94367b7064815da87cdacb9c25a95f67bd089af96ff8539246865fd75560",
+      "lines": 271,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/transcript_v2.rs",
+      "sha256": "0ce3f8bed6b7db90a590770fc9cd67c899fa6feacf8c536ee7cf97cc18cb2764",
+      "lines": 230,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/verifier.rs",
+      "sha256": "1334d197dbc24f88fda525b901dba35217a91541e8c10161351b0ffafdf82e30",
+      "lines": 1634,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
+      "sha256": "340f59dbc6f2761de4e052ebbb80d11aea58e66fd331ab10a9574b0b3ed057d9",
+      "lines": 437,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/vk_v2.rs",
+      "sha256": "f85900c1d59b380433b97278ac0ad765a70fee3545fac52f881f94ee01dc79b9",
+      "lines": 349,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "contracts/src/BlobKZGVerifier.sol",
+      "sha256": "b9fb050db2c6fcef451f893827fac7fa142d74a4fa45eece555456809e4726ba",
+      "lines": 477,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/blob-journal.json"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementManager.sol",
+      "sha256": "be3d17a1d1bad0e52e8c631969daa5d7a8fce9d3eeb370daa687746d8255ed63",
+      "lines": 2555,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/manager-value.json"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementVerifier.sol",
+      "sha256": "a2fcefa8f762bda6859a38d759151be92eda040cc4db36daa769efd67e031948",
+      "lines": 959,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/settlement-verifier.json"
+    },
+    {
+      "path": "contracts/src/CloseFundingMaterializer.sol",
+      "sha256": "cfb03ed0661ea29c7923ee829f781dc6dcea97a3992d87d9794a816431b3c56e",
+      "lines": 562,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/close-funding.json"
+    },
+    {
+      "path": "contracts/src/IPinnedMleVerifierV2.sol",
+      "sha256": "c8140a09df809bfe64d0502f9a9a54290909e1e24738673178a01130d2082235",
+      "lines": 21,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "contracts/src/IntmaxRollup.sol",
+      "sha256": "9ea16fffad4846b440b1db5066515933d3ee2b54e60330e3f6d2e78649edb6b9",
+      "lines": 2353,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/rollup-value.json"
+    },
+    {
+      "path": "contracts/src/SafeERC20.sol",
+      "sha256": "cf5d479108aba99d7c70bc92de36fc4932ab1cda0e44996844f84c847f2cacb0",
+      "lines": 50,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/safe-erc20.json"
+    },
+    {
+      "path": "src/circuits/balance/balance_circuit.rs",
+      "sha256": "28098c1886a1389beb675b1104351490e706161a53cc3636b6d47408746d227e",
+      "lines": 240,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/balance_pis.rs",
+      "sha256": "ae567ab87d25354673cef70733f4435cfee6352d88f429347598e0b28f31174f",
+      "lines": 356,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/balance_processor.rs",
+      "sha256": "d62285362f097bfeb34b4ad646e00a8f0728510c863b7e7a36f6c9e77d572acc",
+      "lines": 246,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/account_state.rs",
+      "sha256": "2d36a6f004052a2619099581fa77770ddb8272d570f5c803b2aa83e02c34c474",
+      "lines": 163,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/deposit_witness.rs",
+      "sha256": "0cf79c81944bc625ba6411f5595b5add4cbb47301a096a16ba97453402d7a91e",
+      "lines": 150,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/mod.rs",
+      "sha256": "50d92af01caa6a7f82b8c72d76adb2812f57ba5cc1e63a4b3af86b3a6ec659a2",
+      "lines": 7,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/recipient.rs",
+      "sha256": "dd352b2ef2b67ec2905aef571fe74f1cd04d85601264e65a5e44c9c7ba091a24",
+      "lines": 201,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/transfer_witness.rs",
+      "sha256": "d37031de232095b9ebdedb989bb454345cd52131277aaa04d38536b0191b0a60",
+      "lines": 118,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/tx_settlement.rs",
+      "sha256": "21b70de9bac4ef11749eb0caf187fa944c904d616cf08025bb4c07901bfba25e",
+      "lines": 596,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/update_private_state.rs",
+      "sha256": "84a5fa8d4d4a9e09f81c9c606d636cbbe10af0cc12f5f860348c4ea73a6a9c36",
+      "lines": 282,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/common/update_public_state.rs",
+      "sha256": "c19a636d40e777d1fc6fb8983466926aa29fb26d5a4028a0b7a9703c468d2161",
+      "lines": 124,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/mod.rs",
+      "sha256": "9fe232c169e50e496b0d47ae3c99c4f95cd6b908fbdcb2a4c2191e32edf08cc3",
+      "lines": 9,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/receive_deposit_circuit.rs",
+      "sha256": "7f7ca749b601606387a13d3f02b481ac7c62ba8cfc1f9a03d9cd8ab6916d411e",
+      "lines": 733,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/receive_transfer_circuit.rs",
+      "sha256": "ee12486f9db02c5755ab6371cd8ba14072e0334068d724ddb4b46b813bc39fd5",
+      "lines": 1110,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/send_tx_circuit.rs",
+      "sha256": "28e8dea4d6af871616ed4d0abd69ba2a51529c8dbf4e2f4fb5bff89f511b706d",
+      "lines": 709,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/balance/spend_circuit.rs",
+      "sha256": "a1ddfa2e55350ac1d8fb33cff9fe39ddf1cb3cdaedea09e6ba6e38e7fee83b7a",
+      "lines": 569,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/spend.json"
+    },
+    {
+      "path": "src/circuits/balance/switch_board.rs",
+      "sha256": "4567178c5a46cf89800408049bff18d53efbb0fb7720a51a935d64ad834b8b7f",
+      "lines": 837,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/cancel_close_circuit.rs",
+      "sha256": "ab20970c90eb73108ef13fb73799fbe5b70e705ac36791db6fde5110165163f3",
+      "lines": 1252,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/cancel_close_pis.rs",
+      "sha256": "b26c9fbab23feb593bc015c84b0994754f150caf93de8045c5d99f5b845f1580",
+      "lines": 471,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/close_asset_backing_circuit.rs",
+      "sha256": "bd4bb49f55c03e3f7c4b716d335febd031f6c3f07af0ae3c6d82b82a55eb5333",
+      "lines": 914,
+      "category": "core",
+      "line_map": "doc/audit/zkp/line-map/close-asset-backing.json"
+    },
+    {
+      "path": "src/circuits/channel/close_circuit.rs",
+      "sha256": "6239cb91549a771f6f68bcffa8b151e63a6eda0a6fee1da7fac8325fc98625b7",
+      "lines": 2402,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/close_pis.rs",
+      "sha256": "e43f3502121efb39aea65bf6d6b05d6e30744b6d7c87a15a799f439853466914",
+      "lines": 472,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/decryption_gadget.rs",
+      "sha256": "0279ece34b9d8f4fcf3a63134fe367704b733e02adead006c6b8158b7cfbda3e",
+      "lines": 1116,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/e2e_flow.rs",
+      "sha256": "244562fcd68205776d24444570f2ee9e83464c0c2cf78bba3afce1073277c6b3",
+      "lines": 1428,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/h1_gadget.rs",
+      "sha256": "f10fa98b81dd229a9a0250e1c9809275a811e4531b04725f773ac1542a1ad0e1",
+      "lines": 404,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/mod.rs",
+      "sha256": "4b41a3dec32d309ce63f22865a77794b83c5ada7a2107174917596a5028a4ac4",
+      "lines": 14,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/post_close_claim_circuit.rs",
+      "sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
+      "lines": 1221,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/post_close_claim_pis.rs",
+      "sha256": "ccf9f70552e29bee0bc671f8f0b5962d91c303cdab023ebb23d2a6ad1bb65f32",
+      "lines": 447,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/state_update_verifier.rs",
+      "sha256": "e7a782e9814efe76b080c3d35769f04824244d6a735a0b9587ac08683b21338b",
+      "lines": 3676,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/withdrawal_claim_circuit.rs",
+      "sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
+      "lines": 1427,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/channel/withdrawal_claim_pis.rs",
+      "sha256": "c59faebed03c43df60780bad75502856e33d84b165785c4729b13faafb6b25c1",
+      "lines": 584,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/mod.rs",
+      "sha256": "7463689d9b89a2690bc1e97477c89534bc3940b0b97056f992a8a0bd0a4334d4",
+      "lines": 6,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/test_utils/mod.rs",
+      "sha256": "10302b60c53a3867e8cb2af9fd5904ddd3586bd90e37c1463e02bb342ec49876",
+      "lines": 6,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/block_chain_pis.rs",
+      "sha256": "c7de76d6b45682772df5dfc0ab12d5d4649e23bb72da9aa6cc4dc96032c1c3d8",
+      "lines": 204,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/block_hash_chain_circuit.rs",
+      "sha256": "a88690515a8718a0b57d81bf2dd1a7d992b4cb40326842486a2951de7d958adf",
+      "lines": 124,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/block_hash_chain_processor.rs",
+      "sha256": "dd29a6cea8f5df28e372df5286f8f458c78571afbbad842282fc5d455af8fe6a",
+      "lines": 477,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/block_step.rs",
+      "sha256": "e184e457d91501922cd5883e9495e16eaf84383f90b6dc407ce845d07a4d65bd",
+      "lines": 1169,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/channel_state_message.rs",
+      "sha256": "81ae6124b05bf08bc48de86b84b86668466629eb1b451db1f7914166a0999b10",
+      "lines": 707,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/ext_public_state.rs",
+      "sha256": "946f9de0287b941324a8c702566eea1827c517f35b42f83b8f93cf82bc7aaa81",
+      "lines": 324,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/mod.rs",
+      "sha256": "31fd0a39e333487698f334f41e4651044b48e8ff2467a7089425060e4cb76030",
+      "lines": 13,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/nofn_attack.rs",
+      "sha256": "097c911d715de249bf87aca52e2a5ef634c3029f12fef47ed033ec32e3470a91",
+      "lines": 708,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/small_block_message.rs",
+      "sha256": "869ccb7332074beccc329e059297e562b9b294c34ef55ae9961ec71596e9758c",
+      "lines": 234,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/update_channel_tree.rs",
+      "sha256": "bc07c7d1a287a50da2bd40e4b31237df7ad9202a915b10a918859cdf0cb785d8",
+      "lines": 2569,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/block_hash_chain/validity_circuit.rs",
+      "sha256": "7f9e7c8cad10f20707e3a8852dcbf68f8ee5802dffb51b879314637f7b6a71ac",
+      "lines": 453,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_chain_pis.rs",
+      "sha256": "f53c090b36d794c99bdf0e40022132ad6febd69418f7fb91e35f6ba49d387176",
+      "lines": 313,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_chain_processor.rs",
+      "sha256": "b6cbe3a2fa66186cec957555817b15df8b77e8bcc7db5ffe291620746fdc40c9",
+      "lines": 246,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_hash_chain_circuit.rs",
+      "sha256": "3bb0d8c7357a605fa37e8f14423855f7edb0f091d1c734754252b89086668a09",
+      "lines": 126,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_step.rs",
+      "sha256": "5198621137327edd7fd045058a8a0e4d7ea092d42f8a0bfd0d79306d8cbd08ec",
+      "lines": 982,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/channel_reg_hash_chain/mod.rs",
+      "sha256": "1e268be94de6fe95d3baeefb88a460d7bd87e82b5101bfae17d5f4910d57a637",
+      "lines": 4,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/deposit_hash_chain/deposit_chain_pis.rs",
+      "sha256": "1e6947bc35918d1a56fd269012686d010bfafdb63a3e29394a5ddb9b1e8b8186",
+      "lines": 301,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/deposit_hash_chain/deposit_chain_processor.rs",
+      "sha256": "d662900eaf8862b027ce00b2c18b109301dc488b77e639c4ae552ba0a77a1d8c",
+      "lines": 212,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/deposit_hash_chain/deposit_hash_chain_circuit.rs",
+      "sha256": "7be3073f1f34c428eeef13f2130c56acc997b4a61c88335d20133b74ef75839b",
+      "lines": 221,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/deposit_hash_chain/deposit_step.rs",
+      "sha256": "2e84ad4c7138fef0c53fe7fdaf9029b821ac0d6d55ecb3da5440c1efe717d671",
+      "lines": 563,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/deposit_hash_chain/mod.rs",
+      "sha256": "9467f77615960e6574afdf07acfa022890704867a8bb6f38ee3a01c2ff46e45b",
+      "lines": 4,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/validity/mod.rs",
+      "sha256": "fa15f624cc677dba902425bab97a48779f0623ab8ffa3badf6dd56848490e6f3",
+      "lines": 3,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/mod.rs",
+      "sha256": "1f4ffb56029db63e8af19a21cb1536f724a3a72b2df73cfef378dd1ba7a7cd51",
+      "lines": 5,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/single_withdrawal_circuit.rs",
+      "sha256": "18c551ce8794ad4bf717e5c546c90d28060e00258a76ab9c2d0a6fce81815713",
+      "lines": 1037,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/withdrawal_chain_circuit.rs",
+      "sha256": "24ed20d9ed1e0900012d6efa8de42ea7809eca3ef5da89c7fbb9f2369c0d48c8",
+      "lines": 364,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/withdrawal_circuit.rs",
+      "sha256": "f98200ad8c5570555f8134128d1c88a3ae267d89925ef61cbe88e20bed86d345",
+      "lines": 233,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/withdrawal_processor.rs",
+      "sha256": "aa44f71498fa2b6f41ab385d900f19ae98a88c82a960857411d1e19c5bba8923",
+      "lines": 109,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/withdraw/withdrawal_step.rs",
+      "sha256": "1a521d9ba077a69ea364b3a64d2e88ef85e65cad9f7a6267f1be9dc65a79a05f",
+      "lines": 649,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/witness/balance_witness_generator.rs",
+      "sha256": "fcd0e0556d15f57ed77e852cb624687c20507bd290310ae19246abd7a45ba249",
+      "lines": 1083,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/witness/block_witness_generator.rs",
+      "sha256": "9e6d6b747ee9079dc1ecc820d84654d8dcc9e04ce0a6cb09f8b69c7ff582371a",
+      "lines": 2456,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/circuits/witness/mod.rs",
+      "sha256": "de0e07763888d429a02b7a1e76e437d277c690a6c9916cbf53a4e4e0311db612",
+      "lines": 18,
+      "category": "core",
+      "line_map": null
+    },
+    {
+      "path": "src/common/balance_state.rs",
+      "sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
+      "lines": 1797,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/block.rs",
+      "sha256": "7278bb99f67f36cc1d9553339bbda14351ff7114e19b0a25da58e2b0180be58e",
+      "lines": 450,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/channel.rs",
+      "sha256": "1fb8dfef97d0fb9faf975d88986203db075eae9334859f9714e6739fd368d235",
+      "lines": 3005,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/channel_id.rs",
+      "sha256": "3c6ae42c121274821bccb473ac0e289413c4376ad863dcc85ef6f47aef68f8be",
+      "lines": 312,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/channel_message.rs",
+      "sha256": "d6d6093702518c1c5961b0aa8950a1d40d0daa7c8136fc178bb3a1232fd7e357",
+      "lines": 361,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/channel_registration.rs",
+      "sha256": "4ba96dd871c1c72f5228a6e1b42d288e7d004c031539ce25f42d99b0d58115d0",
+      "lines": 421,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/deposit.rs",
+      "sha256": "397513c3a13553df4902041677bf287eccfcdb8f537ff6e74263a2c06a83ce51",
+      "lines": 253,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/error.rs",
+      "sha256": "14c267ee03d16720e671cff129b459921ea01457e285b3649e520cbe4231f506",
+      "lines": 29,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/mod.rs",
+      "sha256": "c161fb07474b28ecff52a4502ca7cb53c497054a0f7cc7cba505bc55b9db80c3",
+      "lines": 16,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/private_state.rs",
+      "sha256": "6591159420d18ecee4557087c87b2099fb2c0514aedf58a7a8cbac134027867d",
+      "lines": 166,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/public_state.rs",
+      "sha256": "dd5468f550eeee2d0027a12fabfe1c55975f9676d113f9fea0e52513ec148925",
+      "lines": 703,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/salt.rs",
+      "sha256": "ab6062c106eda04a08bb9444dc2869fe4bf29e8dc25ce1bf8631cf6b43adec77",
+      "lines": 84,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/transfer.rs",
+      "sha256": "9504f60b348673ccb145eac0db3f28ab186e69d0084fbcac5c475f124646f0e1",
+      "lines": 288,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/asset_tree.rs",
+      "sha256": "673f2c3559c4b6e4838ccc8ab82f739a92af1d0aa66fc65c421955e7bc267947",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/channel_tree.rs",
+      "sha256": "97506bd8355cef6e16b692d1c0c575525ac43244c6d9eb456d1c13bb16845e89",
+      "lines": 295,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/deposit_tree.rs",
+      "sha256": "31dc96e2fb61f0d95004804343292e80e3bb4cc38a24e3acb718d6dab372350b",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/key_tree.rs",
+      "sha256": "a8df3f844b9cf173db9174d74ab9bac95aebfae1b4143ee25a652c7b18ab9577",
+      "lines": 190,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/mod.rs",
+      "sha256": "910c0c1eaa5a427a099a8d4c278b864f4b6f6813e6513ec8c46e0094af49b2b7",
+      "lines": 10,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/nullifier_tree.rs",
+      "sha256": "6f0a2467c6a98d211a2e12e811a9c505b7a2ab2459c310e497f50160b775bd87",
+      "lines": 159,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/public_state_tree.rs",
+      "sha256": "8d5b0652e8bf2e61d272192c5df3ae3b47cae874c8ba7288f50774fb8a4b0e0b",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/sent_tx_tree.rs",
+      "sha256": "a4f2585dd5cc8873b218fb7a354676d41fcc183d1559818b9a833a1f9a2871f9",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/transfer_tree.rs",
+      "sha256": "bb6061dd9b64c13e8292aeedccb6575845ad902ac9f386d2f212801db6f597ed",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/tx_tree.rs",
+      "sha256": "491d462b64c8bd5d84fb4004cd5f43f057ae8687afbbe120f73570199dfe108b",
+      "lines": 17,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/trees/tx_v2_tree.rs",
+      "sha256": "8dcdcf6fd0028e2265543a19e4e5cd42aa272d463c45749d0aea638c1ade6ef9",
+      "lines": 90,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/tx.rs",
+      "sha256": "ff25b5de01aaa6d5426f3d80b773fcd5faa327b3a0ab99e5cc5df2eb77fbd13c",
+      "lines": 582,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/u63.rs",
+      "sha256": "68aaf8eda66740a8c648a62775a5329444841bbaf2843db82347f28372d5c971",
+      "lines": 289,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/common/withdrawal.rs",
+      "sha256": "a1bb3ed40d6d3d8fc51bb948adb93b00e6b73ce7cc1cd85577d34f7926b95c34",
+      "lines": 192,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/constants.rs",
+      "sha256": "b7cdc6258ee67b3726ce13674711f2671a691572e8d19a697749150ba9106fe7",
+      "lines": 522,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/deprecated/member_set_update/circuit.rs",
+      "sha256": "b2b1c786dd58f11784fa540d7409e34039cde96fa3ecf2d319ad8de06e323121",
+      "lines": 597,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/deprecated/member_set_update/generate_fixture.rs",
+      "sha256": "920399e3969ca2f05b591521e53f27a8ca982348ae5d54b06e4408450f01b65f",
+      "lines": 203,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/deprecated/member_set_update/mod.rs",
+      "sha256": "1cc1a23c4f4f9e48ba041bf76cf033d258f6aa70c81e601b67d8bc3d21941271",
+      "lines": 8,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/deprecated/mod.rs",
+      "sha256": "6a2672468fb00f3a903458e5bf60e04c92f9c4691199e0f80858069f645a0240",
+      "lines": 6,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/address.rs",
+      "sha256": "16b607eca4fdd4e43c2eb51ac7cd6f25f44952187feb2e984d347c0d1e3aff0b",
+      "lines": 185,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/bytes16.rs",
+      "sha256": "3a0377f4cfcb2823f7fca2ea0ae6ecad508e47fef0379bbaf53aa3b8d2a702db",
+      "lines": 232,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/bytes32.rs",
+      "sha256": "44aee98cdc11a8a3ebab630ce0161435f858d65b0ec4a07cb6666e91fd1458b9",
+      "lines": 325,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/error.rs",
+      "sha256": "7ff214db2553200ac8059186b3f53514cee807ab61f396a88608b256357160e3",
+      "lines": 107,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/mod.rs",
+      "sha256": "e51c735b40d5e21a99f968f004ec7b3717426954c1b6ff8f1fb4555bd7981034",
+      "lines": 10,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/u256.rs",
+      "sha256": "55ee90c51a90c35d2ab3fd75679374c26e2080627ece931b3b968be591922469",
+      "lines": 452,
+      "category": "dependency",
+      "line_map": "doc/audit/zkp/line-map/u256-arithmetic.json"
+    },
+    {
+      "path": "src/ethereum_types/u32limb_trait.rs",
+      "sha256": "3c7aa778411de5dff1323f277557b93931634e0e295f57369fe180f34cc0492c",
+      "lines": 368,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/ethereum_types/u64.rs",
+      "sha256": "49ce460bf481f1487a4cfd1b8e048c9e78116eadd25769869bca1dd33c887487",
+      "lines": 357,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/agg.rs",
+      "sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
+      "lines": 1201,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/agg_list.rs",
+      "sha256": "f68281dd2ea7f6bbdde2a92cdb9e9733657486af48852baad851d76b32e0232e",
+      "lines": 912,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/batch.rs",
+      "sha256": "a04a278402fea31288431979182bedaf113d268c26734b4316cf9f18fd852a09",
+      "lines": 1170,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/compat.rs",
+      "sha256": "8f27826819c899bfd36e723d5c4c2612883d4fa47bcc3eec7977b3324627e55f",
+      "lines": 212,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/gadget.rs",
+      "sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
+      "lines": 1766,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/list.rs",
+      "sha256": "7560fd10bc072ed4751b6d2fdb9ea3c09c5a7ba09e680d2559547b8ce7975a45",
+      "lines": 528,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/mod.rs",
+      "sha256": "af39be10fb4f11df694a46b5f3e226255e7164c914d89c1fb47bb3a1de9c0f7c",
+      "lines": 1300,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/hash_to_point.rs",
+      "sha256": "d3a0944ec37bb8d2214f2cb9acc92b36638d01751508a7138ff6ba48009915ba",
+      "lines": 101,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/mod.rs",
+      "sha256": "d8d4a83bc1eba3ce0c464ae28d3b4fb58afda14c25050b8d7919d2e0b7dddd38",
+      "lines": 15,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/public_key.rs",
+      "sha256": "427c573daef5fedffeb83d3fc79b8b75f6185abc08fbeb230d229936aa9730a7",
+      "lines": 122,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/keys/secret_key.rs",
+      "sha256": "f4006db53dbf5e89ae81a470511d029e49e376386ca15063245bfb54fff4e4ff",
+      "lines": 457,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/ffsampling.rs",
+      "sha256": "f18b3489c8dab056a54eeaf7a3bdc93fd59b04e92e710159072bca38712e6347",
+      "lines": 329,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/fft.rs",
+      "sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd",
+      "lines": 1917,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/field.rs",
+      "sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20",
+      "lines": 174,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/mod.rs",
+      "sha256": "ff44e7d17138ad4fddc8c3cc1607221a714fd86c1d177fb566a6f97642c59f5c",
+      "lines": 326,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/polynomial.rs",
+      "sha256": "a2616bf7ca36c920b34b471ce37d09dd5336900ab4d3c506888961b3f0c5d82a",
+      "lines": 685,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/math/samplerz.rs",
+      "sha256": "8d738ed329af385159161461c865d4c92a2c1438f267d60595ba9eeb707ac19a",
+      "lines": 172,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/mod.rs",
+      "sha256": "51630877113af960074ae9508fb679067f5fa0ca54dbf4a9441f2ff5b6291058",
+      "lines": 141,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/falcon_sig/vendor/signature.rs",
+      "sha256": "eb8ed7567777196558a96dfee98af0443241191582a750f42e4bb81a2b3f3a7f",
+      "lines": 352,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/poseidon_sig/list.rs",
+      "sha256": "f84a82e9c574b04b10644c803db4b30759741da3fb81f44f3a6ef795c2246db3",
+      "lines": 140,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/poseidon_sig/mod.rs",
+      "sha256": "9971c6a2953957b977cb25ad366cfefe5bb339b1075aa152c844094fb9bc4b9b",
+      "lines": 37,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/encrypt.rs",
+      "sha256": "1257e98bf94edade055a9b8c3a52904a85fe7f99a9c095e865af1db65e906003",
+      "lines": 439,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/hash_sig.rs",
+      "sha256": "1e331db3ad612cdd98512d1c9725f536b9dbdf2115ba54d1cefc2c4988370753",
+      "lines": 1313,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/keys.rs",
+      "sha256": "ce8e44d82ee9c1b496e2f8776c7aa00cd7fad6ff3ccc92a491a9aed2b2eb41ef",
+      "lines": 205,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/mod.rs",
+      "sha256": "d1ec8aecd6cd4b8e4b23b34a41c90faeda3e2e72d7cac1523e932f5766d83d14",
+      "lines": 49,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/params.rs",
+      "sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
+      "lines": 84,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/regev/transfer_stark.rs",
+      "sha256": "497240642178a23e06ddab549411772046d5916f7bec4ea2fdbd67369b25ae08",
+      "lines": 3206,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/conversion.rs",
+      "sha256": "77675761a786d8be90d09480c06757b64d0ac74281bd75a86c9963ad52f2e80c",
+      "lines": 59,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/cyclic.rs",
+      "sha256": "3eb7043a3ff6c25118a22411174d421394f220aab224ccd5d0a4fc8e3cbce0a8",
+      "lines": 295,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/dummy.rs",
+      "sha256": "329ae3ff43dc34159b81f5d6960064f34473f5718caf5a9f9691d6574733af28",
+      "lines": 92,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/error.rs",
+      "sha256": "1fab9e34e948836380b0151c5d78bf3914b8a7514c97ad5b5a1b9a2bbc675146",
+      "lines": 69,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/chain_end_circuit.rs",
+      "sha256": "a13b3564666683588f94322c74b4b6600d2ae5bfa241c0baafc8ed0d61e43355",
+      "lines": 164,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/cyclic_chain_circuit.rs",
+      "sha256": "74c4367d3377e88c0629b52cccd9868e9bfb1729c209320965218052246e4133",
+      "lines": 149,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/error.rs",
+      "sha256": "5b18a2770c54c55c531a3f97c8a74a66f50de18c99f77cc8fd7551cf525ee54c",
+      "lines": 24,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/hash_chain_processor.rs",
+      "sha256": "ed24520a2fbd8a9d844a65b3cbae6d2971ca8656704ef6ddfcd0ce35baa08a5f",
+      "lines": 89,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/hash_inner_circuit.rs",
+      "sha256": "73bcf2c90b32aa6a1a33af877306ee146c61f9b74ddc940f58ebd1d9394e5429",
+      "lines": 70,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/hash_chain/mod.rs",
+      "sha256": "9ed4b4b9871dd955bb3bcd14b1f27da8fd514b732012a06d40313fca80cd6167",
+      "lines": 42,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/leafable.rs",
+      "sha256": "afbb7bcfccc7f729a3e885a645ecb01aa2b00a8d97633cad4413a2428051bd40",
+      "lines": 194,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/leafable_hasher.rs",
+      "sha256": "f416a0ae1b160e66927a816b2ba3ca6f22466c214f1871fea9db222258dd4160",
+      "lines": 262,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/logic.rs",
+      "sha256": "dbadf925ad6681a8893d045fe8502daee95cdb4ef811f200f3ecfe7e85b5b145",
+      "lines": 302,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/mle_prover.rs",
+      "sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
+      "lines": 1399,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/mod.rs",
+      "sha256": "2517b988814a52387a399eaa4f015c7f80cef925207e53ebafb49babe6a0df07",
+      "lines": 18,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/poseidon_hash_out.rs",
+      "sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
+      "lines": 600,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/recursively_verifiable.rs",
+      "sha256": "7c2b8859d5b0084c3014108ff573b9df7ca0c10423fcc19f345c695ab523ce89",
+      "lines": 87,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/serialize.rs",
+      "sha256": "c1f98db406b1b42f86f56847904cb87606f7560cc0366f066fac9f516e43ac8d",
+      "lines": 195,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/serializer.rs",
+      "sha256": "8a37c42aa3419ffefbea072d610d0d46916358a63466816c37785af7042d508a",
+      "lines": 46,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/bit_path.rs",
+      "sha256": "2ab1f51ceaa5056e05f211c1d2a59cbe63175894dcfa8bd584404ea913ee3e7d",
+      "lines": 49,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/error.rs",
+      "sha256": "f48be47b4b28f14ccc7e7ac10f9feee98e6d4f7e046e2cdd78c03b67acff0c10",
+      "lines": 44,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/get_root.rs",
+      "sha256": "b29ed63341f1dbe9b6d47054b365d34e9bf6fdb80751ecf63a23e06d08b6ab6e",
+      "lines": 256,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/incremental_merkle_tree.rs",
+      "sha256": "14d527625d3f362ae6d8d992d8bdbf4206ae5a0f02ba43aaf3efae8613eef495",
+      "lines": 711,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/indexed_merkle_tree/insertion.rs",
+      "sha256": "7a685ddcf6fa8aa00b326976c1f6965627c363593eb1ccbb047128bf16a92d7a",
+      "lines": 559,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/indexed_merkle_tree/leaf.rs",
+      "sha256": "943008511a697c255bc9d4fa30e8e1389e2db7221a1377e97a0049df008b3814",
+      "lines": 159,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/indexed_merkle_tree/mod.rs",
+      "sha256": "1e0e77402c0443c55fde9cd86ac7f5cfb430f2bd463e52f856ffc0766ece0a68",
+      "lines": 109,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/merkle_tree.rs",
+      "sha256": "869188fef8ccbaca49cbf88c3d096d6218ee4bede19f216cd667848b94f9ee32",
+      "lines": 619,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/mod.rs",
+      "sha256": "cb5e31654d63945143ef28aa3be2d3bca1b5cff89a6e572e18148127441f79ad",
+      "lines": 7,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/trees/sparse_merkle_tree.rs",
+      "sha256": "5e93681dc2389a77faee7f1500d6b24be769d12a3f4c687fbf74edc3d0d829ac",
+      "lines": 799,
+      "category": "dependency",
+      "line_map": null
+    },
+    {
+      "path": "src/utils/wrapper.rs",
+      "sha256": "81d36a6b126e0dd3b91c53ea994029895dbcf4b0bc49965c6218b2ff1487d428",
+      "lines": 58,
+      "category": "dependency",
+      "line_map": null
+    }
+  ]
+}

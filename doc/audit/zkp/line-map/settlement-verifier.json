@@ -1,0 +1,1774 @@
+{
+  "schema_version": 1,
+  "source": "contracts/src/ChannelSettlementVerifier.sol",
+  "source_sha256": "a2fcefa8f762bda6859a38d759151be92eda040cc4db36daa769efd67e031948",
+  "source_lines": 959,
+  "module": "Zkp.Implementation.SettlementVerifier",
+  "model": "doc/audit/zkp/Zkp/Implementation/SettlementVerifier.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 2,
+      "end": 2,
+      "status": "dependency-boundary",
+      "label": "compiler / imported ABI",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.CloseFields",
+        "Zkp.Implementation.SettlementVerifier.EvmView"
+      ],
+      "theorems": [],
+      "note": "Solidity0.8.24 and imported Manager/PinnedVerifier ABI/width decoding; compiler refinement not proved."
+    },
+    {
+      "start": 3,
+      "end": 3,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 4,
+      "end": 5,
+      "status": "dependency-boundary",
+      "label": "compiler / imported ABI",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.CloseFields",
+        "Zkp.Implementation.SettlementVerifier.EvmView"
+      ],
+      "theorems": [],
+      "note": "Solidity0.8.24 and imported Manager/PinnedVerifier ABI/width decoding; compiler refinement not proved."
+    },
+    {
+      "start": 6,
+      "end": 15,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 16,
+      "end": 16,
+      "status": "non-executable",
+      "label": "contract syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Contract declaration/braces; no extracted compiler syntax proof."
+    },
+    {
+      "start": 17,
+      "end": 17,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 18,
+      "end": 21,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 22,
+      "end": 23,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 24,
+      "end": 24,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 25,
+      "end": 28,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 29,
+      "end": 29,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 30,
+      "end": 37,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 38,
+      "end": 38,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 39,
+      "end": 40,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 41,
+      "end": 41,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 42,
+      "end": 48,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 49,
+      "end": 49,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 50,
+      "end": 52,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 53,
+      "end": 53,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 54,
+      "end": 54,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 55,
+      "end": 55,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 56,
+      "end": 65,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 66,
+      "end": 67,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 68,
+      "end": 73,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 74,
+      "end": 74,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 75,
+      "end": 75,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 76,
+      "end": 76,
+      "status": "translated",
+      "label": "domains / lengths / capacities",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.limbBound",
+        "Zkp.Implementation.SettlementVerifier.closePiLen",
+        "Zkp.Implementation.SettlementVerifier.withdrawalPiLen",
+        "Zkp.Implementation.SettlementVerifier.cancelPiLen",
+        "Zkp.Implementation.SettlementVerifier.postClosePiLen",
+        "Zkp.Implementation.SettlementVerifier.maxSigCluster",
+        "Zkp.Implementation.SettlementVerifier.maxParticipants",
+        "Zkp.Implementation.SettlementVerifier.maxTokens",
+        "Zkp.Implementation.SettlementVerifier.closeStateDomain",
+        "Zkp.Implementation.SettlementVerifier.specialDomain",
+        "Zkp.Implementation.SettlementVerifier.cancelDomain",
+        "Zkp.Implementation.SettlementVerifier.lateDomain",
+        "Zkp.Implementation.SettlementVerifier.memberDomain",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDomain"
+      ],
+      "theorems": [],
+      "note": "All declared constants represented, including unused legacy cancel domain; comments separately counted."
+    },
+    {
+      "start": 77,
+      "end": 77,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 78,
+      "end": 80,
+      "status": "translated",
+      "label": "revert declarations",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [],
+      "note": "Revert distinctions and offending addresses/chain values preserved; compiler ABI selector bytes are a boundary."
+    },
+    {
+      "start": 81,
+      "end": 83,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 84,
+      "end": 84,
+      "status": "translated",
+      "label": "revert declarations",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [],
+      "note": "Revert distinctions and offending addresses/chain values preserved; compiler ABI selector bytes are a boundary."
+    },
+    {
+      "start": 85,
+      "end": 94,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 95,
+      "end": 95,
+      "status": "translated",
+      "label": "revert declarations",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [],
+      "note": "Revert distinctions and offending addresses/chain values preserved; compiler ABI selector bytes are a boundary."
+    },
+    {
+      "start": 96,
+      "end": 97,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 98,
+      "end": 101,
+      "status": "translated",
+      "label": "immutable adapters",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.Adapters",
+        "Zkp.Implementation.SettlementVerifier.Installed"
+      ],
+      "theorems": [],
+      "note": "Four dedicated adapters installed atomically; compiler-generated getter ABI outside refinement."
+    },
+    {
+      "start": 102,
+      "end": 102,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 103,
+      "end": 117,
+      "status": "translated",
+      "label": "constructor",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.constructor",
+        "Zkp.Implementation.SettlementVerifier.distinctAdapters",
+        "Zkp.Implementation.SettlementVerifier.isolatedPairs",
+        "Zkp.Implementation.SettlementVerifier.finishConstructor",
+        "Zkp.Implementation.SettlementVerifier.Installed"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.constructor_duplicate_adapter_first",
+        "Zkp.Implementation.SettlementVerifier.constructor_success_fields",
+        "Zkp.Implementation.SettlementVerifier.constructor_no_cross_slot"
+      ],
+      "note": "Ordered duplicate-adapter check, four pinned checks, all cross-slot adapter/core comparisons and immutable assignment. Same-slot adapter=core is retained; code/config authenticity remains external."
+    },
+    {
+      "start": 118,
+      "end": 118,
+      "status": "non-executable",
+      "label": "constructor comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 119,
+      "end": 125,
+      "status": "translated",
+      "label": "constructor",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.constructor",
+        "Zkp.Implementation.SettlementVerifier.distinctAdapters",
+        "Zkp.Implementation.SettlementVerifier.isolatedPairs",
+        "Zkp.Implementation.SettlementVerifier.finishConstructor",
+        "Zkp.Implementation.SettlementVerifier.Installed"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.constructor_duplicate_adapter_first",
+        "Zkp.Implementation.SettlementVerifier.constructor_success_fields",
+        "Zkp.Implementation.SettlementVerifier.constructor_no_cross_slot"
+      ],
+      "note": "Ordered duplicate-adapter check, four pinned checks, all cross-slot adapter/core comparisons and immutable assignment. Same-slot adapter=core is retained; code/config authenticity remains external."
+    },
+    {
+      "start": 126,
+      "end": 128,
+      "status": "non-executable",
+      "label": "constructor comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 129,
+      "end": 140,
+      "status": "translated",
+      "label": "constructor",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.constructor",
+        "Zkp.Implementation.SettlementVerifier.distinctAdapters",
+        "Zkp.Implementation.SettlementVerifier.isolatedPairs",
+        "Zkp.Implementation.SettlementVerifier.finishConstructor",
+        "Zkp.Implementation.SettlementVerifier.Installed"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.constructor_duplicate_adapter_first",
+        "Zkp.Implementation.SettlementVerifier.constructor_success_fields",
+        "Zkp.Implementation.SettlementVerifier.constructor_no_cross_slot"
+      ],
+      "note": "Ordered duplicate-adapter check, four pinned checks, all cross-slot adapter/core comparisons and immutable assignment. Same-slot adapter=core is retained; code/config authenticity remains external."
+    },
+    {
+      "start": 141,
+      "end": 141,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 142,
+      "end": 144,
+      "status": "translated",
+      "label": "_requirePinnedVerifier",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier",
+        "Zkp.Implementation.SettlementVerifier.EvmView",
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier_success_iff"
+      ],
+      "note": "Exact extcodesize, allowedChainId, core and core-chain order, with original adapter/core catch-address identities. Static-call observations are an environment boundary."
+    },
+    {
+      "start": 145,
+      "end": 145,
+      "status": "non-executable",
+      "label": "_requirePinnedVerifier comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 146,
+      "end": 160,
+      "status": "translated",
+      "label": "_requirePinnedVerifier",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier",
+        "Zkp.Implementation.SettlementVerifier.EvmView",
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier_success_iff"
+      ],
+      "note": "Exact extcodesize, allowedChainId, core and core-chain order, with original adapter/core catch-address identities. Static-call observations are an environment boundary."
+    },
+    {
+      "start": 161,
+      "end": 161,
+      "status": "non-executable",
+      "label": "_requirePinnedVerifier comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 162,
+      "end": 171,
+      "status": "translated",
+      "label": "_requirePinnedVerifier",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier",
+        "Zkp.Implementation.SettlementVerifier.EvmView",
+        "Zkp.Implementation.SettlementVerifier.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier_success_iff"
+      ],
+      "note": "Exact extcodesize, allowedChainId, core and core-chain order, with original adapter/core catch-address identities. Static-call observations are an environment boundary."
+    },
+    {
+      "start": 172,
+      "end": 196,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 197,
+      "end": 204,
+      "status": "translated",
+      "label": "verifyCloseIntent",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifyCloseIntent"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_verification_has_external_provenance"
+      ],
+      "note": "Dedicated close adapter verifies compact bytes first; then exact application binder. External revert payload propagates. No proof-soundness premise is silently discharged."
+    },
+    {
+      "start": 205,
+      "end": 212,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 213,
+      "end": 219,
+      "status": "translated",
+      "label": "bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Public forwarding wrapper and internal pure binder share one executable definition. Caller-supplied PI alone confers no proof authority."
+    },
+    {
+      "start": 220,
+      "end": 220,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 221,
+      "end": 225,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 226,
+      "end": 229,
+      "status": "non-executable",
+      "label": "_bindCloseIntentPublicInputs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 230,
+      "end": 231,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 232,
+      "end": 236,
+      "status": "non-executable",
+      "label": "_bindCloseIntentPublicInputs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 237,
+      "end": 237,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 238,
+      "end": 242,
+      "status": "non-executable",
+      "label": "_bindCloseIntentPublicInputs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 243,
+      "end": 243,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 244,
+      "end": 249,
+      "status": "non-executable",
+      "label": "_bindCloseIntentPublicInputs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 250,
+      "end": 252,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 253,
+      "end": 257,
+      "status": "non-executable",
+      "label": "_bindCloseIntentPublicInputs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 258,
+      "end": 260,
+      "status": "translated",
+      "label": "_bindCloseIntentPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseIntentPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Length103 before index94; returned delegate limb is canonical before arithmetic, exactly matches uint32 snapshot and member+delegate≤1024; then full expected vector and strict bind."
+    },
+    {
+      "start": 261,
+      "end": 265,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 266,
+      "end": 270,
+      "status": "translated",
+      "label": "_bindCloseLimbsStrict",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseLimbsStrict",
+        "Zkp.Implementation.SettlementVerifier.scanLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseLimbsStrict_success_iff"
+      ],
+      "note": "Both103 lengths; range-before-exact-equality on every unmasked returned word. Error identities preserved."
+    },
+    {
+      "start": 271,
+      "end": 273,
+      "status": "non-executable",
+      "label": "_bindCloseLimbsStrict comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 274,
+      "end": 277,
+      "status": "translated",
+      "label": "_bindCloseLimbsStrict",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseLimbsStrict",
+        "Zkp.Implementation.SettlementVerifier.scanLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.bindCloseLimbsStrict_success_iff"
+      ],
+      "note": "Both103 lengths; range-before-exact-equality on every unmasked returned word. Error identities preserved."
+    },
+    {
+      "start": 278,
+      "end": 287,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 288,
+      "end": 294,
+      "status": "translated",
+      "label": "expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbsPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 295,
+      "end": 303,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 304,
+      "end": 308,
+      "status": "translated",
+      "label": "tokenFundsDigest",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage",
+        "Zkp.Implementation.SettlementVerifier.tenList",
+        "Zkp.Implementation.SettlementVerifier.beBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest_success_iff",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage_length"
+      ],
+      "note": "Count1..10; all ten registry and amount lanes are hashed in fixed368-byte BE preimage, including unused lanes. Actual Keccak and ABI packing equivalence remain boundary obligations."
+    },
+    {
+      "start": 309,
+      "end": 312,
+      "status": "non-executable",
+      "label": "tokenFundsDigest comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 313,
+      "end": 313,
+      "status": "translated",
+      "label": "tokenFundsDigest",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage",
+        "Zkp.Implementation.SettlementVerifier.tenList",
+        "Zkp.Implementation.SettlementVerifier.beBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest_success_iff",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage_length"
+      ],
+      "note": "Count1..10; all ten registry and amount lanes are hashed in fixed368-byte BE preimage, including unused lanes. Actual Keccak and ABI packing equivalence remain boundary obligations."
+    },
+    {
+      "start": 314,
+      "end": 315,
+      "status": "non-executable",
+      "label": "tokenFundsDigest comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 316,
+      "end": 325,
+      "status": "translated",
+      "label": "tokenFundsDigest",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage",
+        "Zkp.Implementation.SettlementVerifier.tenList",
+        "Zkp.Implementation.SettlementVerifier.beBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest_success_iff",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage_length"
+      ],
+      "note": "Count1..10; all ten registry and amount lanes are hashed in fixed368-byte BE preimage, including unused lanes. Actual Keccak and ABI packing equivalence remain boundary obligations."
+    },
+    {
+      "start": 326,
+      "end": 367,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 368,
+      "end": 374,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 375,
+      "end": 375,
+      "status": "non-executable",
+      "label": "_expectedCloseLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 376,
+      "end": 390,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 391,
+      "end": 392,
+      "status": "non-executable",
+      "label": "_expectedCloseLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 393,
+      "end": 394,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 395,
+      "end": 398,
+      "status": "non-executable",
+      "label": "_expectedCloseLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 399,
+      "end": 399,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 400,
+      "end": 400,
+      "status": "non-executable",
+      "label": "_expectedCloseLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 401,
+      "end": 401,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 402,
+      "end": 404,
+      "status": "non-executable",
+      "label": "_expectedCloseLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 405,
+      "end": 407,
+      "status": "translated",
+      "label": "_expectedCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs",
+        "Zkp.Implementation.SettlementVerifier.closeLayout"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success"
+      ],
+      "note": "Explicit complete103-word order with recomputed IMCS and full-vector IMTF. Length theorem discharges source cursor-count assertion; allocated-array writes are represented by produced limb blocks, not compiled memory refinement."
+    },
+    {
+      "start": 408,
+      "end": 409,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 410,
+      "end": 414,
+      "status": "translated",
+      "label": "_putU64",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.putU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.putU64_length",
+        "Zkp.Implementation.SettlementVerifier.putU64_canonical",
+        "Zkp.Implementation.SettlementVerifier.putU64_reconstructs",
+        "Zkp.Implementation.SettlementVerifier.putU64_injective"
+      ],
+      "note": "Produced two-word block models private cursor writes: high u32 then low u32. Canonicality, length, reconstruction and injectivity checked; enclosing array memory/overflow/gas semantics not extracted."
+    },
+    {
+      "start": 415,
+      "end": 416,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 417,
+      "end": 419,
+      "status": "translated",
+      "label": "_putBytes32",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.putBytes32",
+        "Zkp.Implementation.SettlementVerifier.putUint256"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.putBytes32_length",
+        "Zkp.Implementation.SettlementVerifier.putUint256_injective"
+      ],
+      "note": "bytes32 forwarded as uint256 and split into eight BE words. No masking of received PI is introduced."
+    },
+    {
+      "start": 420,
+      "end": 422,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 423,
+      "end": 428,
+      "status": "translated",
+      "label": "_putUint256",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.putUint256",
+        "Zkp.Implementation.SettlementVerifier.word"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.putUint256_length",
+        "Zkp.Implementation.SettlementVerifier.putUint256_canonical",
+        "Zkp.Implementation.SettlementVerifier.putUint256_injective"
+      ],
+      "note": "Eight BE u32 words, exponents7 down to0; division/modulo transcribes shift/mask. Canonicality and injectivity checked."
+    },
+    {
+      "start": 429,
+      "end": 433,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 434,
+      "end": 440,
+      "status": "translated",
+      "label": "_closeIntentDigest",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.closeIntentDigest",
+        "Zkp.Implementation.SettlementVerifier.closeIntentPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.closeIntentPreimage_length"
+      ],
+      "note": "Canonical48-byte IMCS/channel/stateDigest/freezeNonce packing. Coordinator metadata and token vectors are not directly in this hash."
+    },
+    {
+      "start": 441,
+      "end": 441,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 442,
+      "end": 455,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Historical decryption-deferred comment is not an executable or current soundness claim."
+    },
+    {
+      "start": 456,
+      "end": 471,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 472,
+      "end": 489,
+      "status": "translated",
+      "label": "_expectedCancelCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCancelCloseLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_length",
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_field_positions"
+      ],
+      "note": "All29 fields and both high/low u64 versions. No Solidity-side ordering predicate is invented; circuit/Manager enforce that separately."
+    },
+    {
+      "start": 490,
+      "end": 507,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 508,
+      "end": 533,
+      "status": "translated",
+      "label": "_expectedWithdrawalClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedWithdrawalClaimLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_length",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_binds_payout"
+      ],
+      "note": "All50 fields, including recipient25..29, amount46..47, local token48 and base token49. Pure helper/count assertion represented exactly."
+    },
+    {
+      "start": 534,
+      "end": 550,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 551,
+      "end": 571,
+      "status": "translated",
+      "label": "_expectedPostCloseClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedPostCloseClaimLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_length",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_binds_payout"
+      ],
+      "note": "All57 fields, including recipient25..29, amount38..39, H1/root anchors and base token56."
+    },
+    {
+      "start": 572,
+      "end": 572,
+      "status": "non-executable",
+      "label": "_expectedPostCloseClaimLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 573,
+      "end": 574,
+      "status": "translated",
+      "label": "_expectedPostCloseClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedPostCloseClaimLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_length",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_binds_payout"
+      ],
+      "note": "All57 fields, including recipient25..29, amount38..39, H1/root anchors and base token56."
+    },
+    {
+      "start": 575,
+      "end": 575,
+      "status": "non-executable",
+      "label": "_expectedPostCloseClaimLimbs comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 576,
+      "end": 578,
+      "status": "translated",
+      "label": "_expectedPostCloseClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedPostCloseClaimLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_length",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_binds_payout"
+      ],
+      "note": "All57 fields, including recipient25..29, amount38..39, H1/root anchors and base token56."
+    },
+    {
+      "start": 579,
+      "end": 581,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 582,
+      "end": 588,
+      "status": "translated",
+      "label": "_putAddress",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.putAddress",
+        "Zkp.Implementation.SettlementVerifier.word"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.putAddress_length",
+        "Zkp.Implementation.SettlementVerifier.putAddress_canonical",
+        "Zkp.Implementation.SettlementVerifier.putAddress_injective"
+      ],
+      "note": "Typed160-bit recipient split into five BE u32 words; canonicality/injectivity checked."
+    },
+    {
+      "start": 589,
+      "end": 592,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 593,
+      "end": 600,
+      "status": "translated",
+      "label": "_bindLimbsStrict",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.bindLimbsStrict",
+        "Zkp.Implementation.SettlementVerifier.scanLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.bindLimbsStrict_success_iff",
+        "Zkp.Implementation.SettlementVerifier.scanLimbs_success_iff"
+      ],
+      "note": "Same-length guard and recursive range-before-equality loop; malformed PI reverts instead of returning false."
+    },
+    {
+      "start": 601,
+      "end": 601,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 602,
+      "end": 624,
+      "status": "translated",
+      "label": "verifySpecialClose",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifySpecialClose",
+        "Zkp.Implementation.SettlementVerifier.matchesDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.matches_success_iff"
+      ],
+      "note": "Actual ABI Bool digest equality stub, not ZK verification and not a disabled callee. Manager disabled entrypoint is separately required."
+    },
+    {
+      "start": 625,
+      "end": 639,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 640,
+      "end": 670,
+      "status": "translated",
+      "label": "verifyWithdrawalClaim",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifyWithdrawalClaim",
+        "Zkp.Implementation.SettlementVerifier.verifyClaimEndpoint"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.withdrawal_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.withdrawal_same_proof_no_payout_rebinding",
+        "Zkp.Implementation.SettlementVerifier.claim_endpoint_never_returns_false"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 671,
+      "end": 691,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 692,
+      "end": 714,
+      "status": "translated",
+      "label": "verifyCancelClose",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifyCancelClose",
+        "Zkp.Implementation.SettlementVerifier.verifyClaimEndpoint"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.cancel_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.claim_endpoint_never_returns_false"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 715,
+      "end": 718,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 719,
+      "end": 735,
+      "status": "translated",
+      "label": "expectedCancelCloseLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedCancelCloseLimbsPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_length",
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_field_positions"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 736,
+      "end": 752,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 753,
+      "end": 783,
+      "status": "translated",
+      "label": "verifyPostCloseClaim",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifyPostCloseClaim",
+        "Zkp.Implementation.SettlementVerifier.verifyClaimEndpoint"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.postClose_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.postClose_same_proof_no_payout_rebinding",
+        "Zkp.Implementation.SettlementVerifier.claim_endpoint_never_returns_false"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 784,
+      "end": 784,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 785,
+      "end": 807,
+      "status": "translated",
+      "label": "verifyLateOutgoingDebit",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.verifyLateOutgoingDebit",
+        "Zkp.Implementation.SettlementVerifier.matchesDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.matches_success_iff"
+      ],
+      "note": "Actual ABI Bool digest equality stub, not ZK verification and not a disabled callee. Manager disabled entrypoint is separately required."
+    },
+    {
+      "start": 808,
+      "end": 826,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 827,
+      "end": 833,
+      "status": "translated",
+      "label": "closeMemberSetCommitment",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.closeMemberSetCommitment",
+        "Zkp.Implementation.SettlementVerifier.memberSetPreimage",
+        "Zkp.Implementation.SettlementVerifier.eightList"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.memberSetPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.memberSet_inactive_padding_irrelevant"
+      ],
+      "note": "Fixed264-byte IMCM/count/eight hashes with inactive padding zeroed internally. No nonexistent1..8 count check is added."
+    },
+    {
+      "start": 834,
+      "end": 838,
+      "status": "non-executable",
+      "label": "closeMemberSetCommitment comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 839,
+      "end": 843,
+      "status": "translated",
+      "label": "closeMemberSetCommitment",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.closeMemberSetCommitment",
+        "Zkp.Implementation.SettlementVerifier.memberSetPreimage",
+        "Zkp.Implementation.SettlementVerifier.eightList"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.memberSetPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.memberSet_inactive_padding_irrelevant"
+      ],
+      "note": "Fixed264-byte IMCM/count/eight hashes with inactive padding zeroed internally. No nonexistent1..8 count check is added."
+    },
+    {
+      "start": 844,
+      "end": 847,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 848,
+      "end": 869,
+      "status": "translated",
+      "label": "specialClosePIHash",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.specialClosePIHash",
+        "Zkp.Implementation.SettlementVerifier.specialClosePreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.specialClosePreimage_length"
+      ],
+      "note": "Exact100-byte IMSC field order, slot cast uint32 and u64 block fields. Keccak boundary."
+    },
+    {
+      "start": 870,
+      "end": 873,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 874,
+      "end": 898,
+      "status": "translated",
+      "label": "expectedWithdrawalClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedWithdrawalClaimLimbsPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_length",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_field_positions"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 899,
+      "end": 902,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 903,
+      "end": 927,
+      "status": "translated",
+      "label": "expectedPostCloseClaimLimbs",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.expectedPostCloseClaimLimbsPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_length",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_field_positions"
+      ],
+      "note": "Exact typed argument forwarding/layout and dedicated adapter result binding. Successful ABI decoding and proof/Manager authority remain explicit dependencies; pure helpers are not authorization."
+    },
+    {
+      "start": 928,
+      "end": 932,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 933,
+      "end": 954,
+      "status": "translated",
+      "label": "lateOutgoingDebitPIHash",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.lateOutgoingDebitPIHash",
+        "Zkp.Implementation.SettlementVerifier.lateOutgoingDebitPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.lateOutgoingDebitPreimage_length"
+      ],
+      "note": "Exact176-byte IMLD ordering with closeId preceding channelId. Keccak boundary."
+    },
+    {
+      "start": 955,
+      "end": 955,
+      "status": "non-executable",
+      "label": "file comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line, separately counted; no runtime operation."
+    },
+    {
+      "start": 956,
+      "end": 958,
+      "status": "translated",
+      "label": "_matches",
+      "declarations": [
+        "Zkp.Implementation.SettlementVerifier.matchesDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.matches_success_iff"
+      ],
+      "note": "Exact32-byte short-circuit then bytes32 equality, modeled by canonical serialization equality. ABI decode equivalence is explicit boundary."
+    },
+    {
+      "start": 959,
+      "end": 959,
+      "status": "non-executable",
+      "label": "contract syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Contract declaration/braces; no extracted compiler syntax proof."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "solidity_abi_and_memory",
+      "obligation": "Successful Solidity0.8.24 ABI decoding yields modeled bounded arguments. Private output blocks refine fresh allocated array writes/cursor increments and decode(bytes32) on exactly32 bytes matches canonical serialization. Compiler/memory/revert-byte equivalence not proved.",
+      "discharged": false
+    },
+    {
+      "name": "evm_static_calls_and_code",
+      "obligation": "EvmView observations must be actual read-only calls for the indexed adapter/core in the same immutable deployment. Return/revert paths are modeled, not code/config/VK authenticity or underlying staticcall implementation.",
+      "discharged": false
+    },
+    {
+      "name": "keccak_and_packed_encoding",
+      "obligation": "beBytes fixed-width BE packing corresponds to actual Solidity abi.encodePacked and Keccak implements Keccak256. Collision resistance and composite state/statement binding remain external.",
+      "discharged": false
+    },
+    {
+      "name": "proof_and_payout_authority",
+      "obligation": "Dedicated adapters must provide actual proof soundness; Manager injects authentic finalized channel/member/recipient context and composes public close binder with its pinned adapter. Plaintext, registry, nullifier and ownership relations are circuit/Manager dependencies.",
+      "discharged": false
+    },
+    {
+      "name": "disabled_caller_authority",
+      "obligation": "Special/late verifier endpoints are Bool digest stubs; Manager disabled callers must remain unable to use them for value authorization.",
+      "discharged": false
+    },
+    {
+      "name": "resource_and_compiler_refinement",
+      "obligation": "Gas/allocation/OOG, ABI parser internals and compiled-source equivalence are not proved; pure model computations omit resource exhaustion.",
+      "discharged": false
+    }
+  ]
+}

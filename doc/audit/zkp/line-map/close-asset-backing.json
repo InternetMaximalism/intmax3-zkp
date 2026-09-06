@@ -1,0 +1,686 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/close_asset_backing_circuit.rs",
+  "source_sha256": "bd4bb49f55c03e3f7c4b716d335febd031f6c3f07af0ae3c6d82b82a55eb5333",
+  "source_lines": 914,
+  "module": "Zkp.Implementation.CloseAssetBacking",
+  "model": "doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 16,
+      "status": "non-executable",
+      "label": "module documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full. Architecture commentary is not treated as a proof or as checks performed by this callee."
+    },
+    {
+      "start": 17,
+      "end": 63,
+      "status": "dependency-boundary",
+      "label": "imports and external types",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.MerkleContract",
+        "Zkp.Implementation.CloseAssetBacking.CanonicalEmptyRoot",
+        "Zkp.Implementation.CloseAssetBacking.RowPathContracts",
+        "Zkp.Implementation.CloseAssetBacking.RecursiveVerifierContract",
+        "Zkp.Implementation.CloseAssetBacking.HashFunctions",
+        "Zkp.Implementation.CloseAssetBacking.FieldGateLowering"
+      ],
+      "theorems": [],
+      "note": "Imported proof systems, crypto gadgets, serialization, error formatting and generic Rust types are not translated internally. Named contracts delimit their use."
+    },
+    {
+      "start": 64,
+      "end": 65,
+      "status": "non-executable",
+      "label": "public-input layout comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment only; checked layout translation is below."
+    },
+    {
+      "start": 66,
+      "end": 67,
+      "status": "translated",
+      "label": "public-input length",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.publicInputsLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.public_inputs_length"
+      ],
+      "note": "Handwritten constant 2+3*8=26; not compiler extraction."
+    },
+    {
+      "start": 68,
+      "end": 89,
+      "status": "translated",
+      "label": "error enum",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.Error"
+      ],
+      "theorems": [],
+      "note": "All nine error variants retained. Rust derive machinery and human-readable payload strings are erased."
+    },
+    {
+      "start": 90,
+      "end": 102,
+      "status": "translated",
+      "label": "native public-input fields",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs",
+        "Zkp.Implementation.CloseAssetBacking.Words8"
+      ],
+      "theorems": [],
+      "note": "Preserves channel, settled chain, TFD, extended commitment and anchor fields; Serde byte encoding is outside scope."
+    },
+    {
+      "start": 103,
+      "end": 115,
+      "status": "translated",
+      "label": "native to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.public_inputs_length",
+        "Zkp.Implementation.CloseAssetBacking.public_input_encoding_injective"
+      ],
+      "note": "Preserves exact 1/8/8/8/1 ordering and big-endian u32 limb words."
+    },
+    {
+      "start": 116,
+      "end": 139,
+      "status": "translated",
+      "label": "native from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.parsePublicInputs",
+        "Zkp.Implementation.CloseAssetBacking.parseTargets",
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs.Canonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_encode_decode",
+        "Zkp.Implementation.CloseAssetBacking.native_decode_success_is_canonical",
+        "Zkp.Implementation.CloseAssetBacking.target_decode_success_has_exact_26_words"
+      ],
+      "note": "Exact input length; channel nonzero/u32, then anchor u63, then three u32-limb byte fields. Error variant/order retained, error text erased."
+    },
+    {
+      "start": 140,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "from_pis canonical field conversion",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.parseFieldPublicInputs"
+      ],
+      "theorems": [],
+      "note": "List mapping/delegation translated; PrimeField64::to_canonical_u64 supplied as an explicit function, with implementation semantics unresolved."
+    },
+    {
+      "start": 150,
+      "end": 159,
+      "status": "translated",
+      "label": "target public-input structure",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Same semantic layout for raw target values. Range restrictions are NOT silently added to this structure."
+    },
+    {
+      "start": 160,
+      "end": 179,
+      "status": "translated",
+      "label": "target from_pis",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.parseTargets"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.target_encode_decode",
+        "Zkp.Implementation.CloseAssetBacking.target_decode_success_reconstructs_exact_input",
+        "Zkp.Implementation.CloseAssetBacking.target_decode_success_has_exact_26_words"
+      ],
+      "note": "Exact-length parsing reuses target references and does not create range checks. Model uses Option failure instead of Rust assertion panic."
+    },
+    {
+      "start": 180,
+      "end": 190,
+      "status": "translated",
+      "label": "target to_vec",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.public_inputs_length",
+        "Zkp.Implementation.CloseAssetBacking.public_input_encoding_injective"
+      ],
+      "note": "Exact target registration ordering; does not model Plonky2 target identifiers or allocation."
+    },
+    {
+      "start": 191,
+      "end": 215,
+      "status": "dependency-boundary",
+      "label": "generic witness fields",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.Witness",
+        "Zkp.Implementation.CloseAssetBacking.Row",
+        "Zkp.Implementation.CloseAssetBacking.BalanceProofView"
+      ],
+      "theorems": [],
+      "note": "Proof/path/state/vector witness fields projected explicitly. Parallel fixed arrays become a list with width/range premises. Rust generic bounds, derive and binary proof formats not translated."
+    },
+    {
+      "start": 216,
+      "end": 233,
+      "status": "translated",
+      "label": "from_full_private_state_and_channel_state",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.fromFullPrivateStateAndChannelState"
+      ],
+      "theorems": [],
+      "note": "Exact delegation after to_private_state; actual private tree root extraction is an external function, not assumed to verify the caller's signatures."
+    },
+    {
+      "start": 234,
+      "end": 242,
+      "status": "translated",
+      "label": "private constructor signature",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.fromPrivateStateAndChannelState",
+        "Zkp.Implementation.CloseAssetBacking.ChannelStateMirror",
+        "Zkp.Implementation.CloseAssetBacking.ChannelStateMirror.NativeTyped"
+      ],
+      "theorems": [],
+      "note": "Models precisely the inspected ChannelState fields and explicit Rust static input domain; omitted fields are not validated by the callee."
+    },
+    {
+      "start": 243,
+      "end": 270,
+      "status": "dependency-boundary",
+      "label": "native cyclic verification and Balance PI decode",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.BalanceProofView",
+        "Zkp.Implementation.CloseAssetBacking.nativeChecks",
+        "Zkp.Implementation.CloseAssetBacking.RecursiveVerifierContract"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_checks_success_means_every_check_passed"
+      ],
+      "note": "Order and failure variants represented by three results. Correct pinned-VK verification and exact full-PI decoding require dependency semantics; Boolean results are not treated as independently proved crypto."
+    },
+    {
+      "start": 271,
+      "end": 290,
+      "status": "translated",
+      "label": "private/public/channel/settled admission",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.nativeChecks",
+        "Zkp.Implementation.CloseAssetBacking.runNativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_checks_success_means_every_check_passed"
+      ],
+      "note": "Preserves private opening, public inner equality, three ChannelIds, Balance channel and settled chain checks. No N-of-N/latest/finality check is added."
+    },
+    {
+      "start": 291,
+      "end": 309,
+      "status": "translated",
+      "label": "native token count and active uniqueness",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.nativeUniqueKeys",
+        "Zkp.Implementation.CloseAssetBacking.nativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_checks_success_means_every_check_passed"
+      ],
+      "note": "Count 1..10 then all active i<j registry comparisons, in source order. Rust u8/u32/array constraints are input-domain premises."
+    },
+    {
+      "start": 310,
+      "end": 317,
+      "status": "translated",
+      "label": "native zero suffix",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.nativePaddingZero",
+        "Zkp.Implementation.CloseAssetBacking.nativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_checks_success_means_every_check_passed"
+      ],
+      "note": "Every inactive entry has zero registry and all-zero U256. Full ten-entry shape follows the static-domain premise."
+    },
+    {
+      "start": 318,
+      "end": 332,
+      "status": "translated",
+      "label": "native canonical-tree and path construction",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.constructNativeRows",
+        "Zkp.Implementation.CloseAssetBacking.emptyAssets",
+        "Zkp.Implementation.CloseAssetBacking.insertAsset",
+        "Zkp.Implementation.CloseAssetBacking.applyRows"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_tree_builder_matches_sequential_asset_updates"
+      ],
+      "note": "Loops through all entries; creates path before active insertion, inactive path index zero. debug_assert zero-leaf is NOT made a production admission. Sparse Merkle prove/hash implementation is external."
+    },
+    {
+      "start": 333,
+      "end": 346,
+      "status": "translated",
+      "label": "native exact-root comparison and witness return",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.fromPrivateStateAndChannelState",
+        "Zkp.Implementation.CloseAssetBacking.nativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_constructor_checks_exact_canonical_tree_before_success"
+      ],
+      "note": "Checks canonical reconstructed root before returning copied proof/state plus channel-derived vector/paths. Model covers pure success/failure values, not allocation failure or panic/resource semantics."
+    },
+    {
+      "start": 347,
+      "end": 373,
+      "status": "translated",
+      "label": "witness public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.witnessPublicInputs",
+        "Zkp.Implementation.CloseAssetBacking.computedPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.native_public_input_projection_agrees_with_filled_circuit",
+        "Zkp.Implementation.CloseAssetBacking.native_target_public_inputs_agree_under_hash_implementation_contract"
+      ],
+      "note": "Re-decodes only and derives TFD/extended hash/anchor. Does NOT re-run verification or constructor checks. Hash/native-target agreement and decoding remain explicit boundaries."
+    },
+    {
+      "start": 374,
+      "end": 398,
+      "status": "dependency-boundary",
+      "label": "circuit data and target handles",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.Witness",
+        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
+        "Zkp.Implementation.CloseAssetBacking.BuildOp"
+      ],
+      "theorems": [],
+      "note": "Semantic witness/computed values and constructor actions modeled. CircuitData, target-ID allocation, generic circuit type and generated proving key not translated."
+    },
+    {
+      "start": 399,
+      "end": 407,
+      "status": "translated",
+      "label": "constructor shape assertion and ZK builder start",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.newCircuitProgram",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.balancePublicInputsLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.constructor_admits_only_exact_cyclic_balance_shape",
+        "Zkp.Implementation.CloseAssetBacking.constructor_starts_with_pinned_recursive_verification"
+      ],
+      "note": "Exact Balance PI count=29+vd_vec_len before builder creation. vd_vec_len calculation and standard_recursion_zk_config internals remain dependencies."
+    },
+    {
+      "start": 408,
+      "end": 414,
+      "status": "dependency-boundary",
+      "label": "recursive proof target and PI parse",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.RecursiveVerifierContract",
+        "Zkp.Implementation.CloseAssetBacking.BalanceProofView",
+        "Zkp.Implementation.CloseAssetBacking.CircuitConstraints",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.circuit_binds_recursive_statement"
+      ],
+      "note": "Records constant-VK/cyclic verification before use of parsed Balance PIs. Gadget soundness and PI extraction not proved here; certified relation does not assume asset conservation."
+    },
+    {
+      "start": 415,
+      "end": 419,
+      "status": "dependency-boundary",
+      "label": "private-state allocation, hash and connection",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PrivateState",
+        "Zkp.Implementation.CloseAssetBacking.PrivateState.words",
+        "Zkp.Implementation.CloseAssetBacking.HashFunctions",
+        "Zkp.Implementation.CloseAssetBacking.CircuitConstraints",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.PrivateCommitmentBindingAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.private_state_commitment_preimage_has_all_21_fields",
+        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets"
+      ],
+      "note": "All 21 commitment words represented and connection checked. No nonce/salt range checks invented; Poseidon and field representation are unresolved."
+    },
+    {
+      "start": 420,
+      "end": 424,
+      "status": "dependency-boundary",
+      "label": "checked extended-state allocation and inner connection",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.ExtendedPublicState",
+        "Zkp.Implementation.CloseAssetBacking.ExtendedPublicState.Checked",
+        "Zkp.Implementation.CloseAssetBacking.CircuitConstraints",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
+        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state"
+      ],
+      "note": "Checked block/timestamp/bytes/count domains and inner equality modeled. Extra chains are committed but not proven finalized in this circuit."
+    },
+    {
+      "start": 425,
+      "end": 431,
+      "status": "translated",
+      "label": "count and registry allocation/range gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.RangeGates",
+        "Zkp.Implementation.CloseAssetBacking.VectorGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix"
+      ],
+      "note": "Arbitrary count/registry witnesses, u32 checks in original loop order. Boolean/sum constraints later derive the stronger 1..10 count."
+    },
+    {
+      "start": 432,
+      "end": 435,
+      "status": "dependency-boundary",
+      "label": "U256, safe Boolean and path allocations",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.Words8.Checked",
+        "Zkp.Implementation.CloseAssetBacking.Row",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.FieldGateLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.constructor_allocates_exactly_ten_safe_activity_witnesses",
+        "Zkp.Implementation.CloseAssetBacking.checked_eight_big_endian_limbs_fit_u256"
+      ],
+      "note": "Macro allocation order and eight checked amount limbs represented. Safe Boolean, u32 gadget and height-32 path allocation internals require lowering."
+    },
+    {
+      "start": 436,
+      "end": 450,
+      "status": "translated",
+      "label": "prefix, sum and first-active gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.bit",
+        "Zkp.Implementation.CloseAssetBacking.activeCount",
+        "Zkp.Implementation.CloseAssetBacking.NoRise",
+        "Zkp.Implementation.CloseAssetBacking.VectorGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
+        "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector"
+      ],
+      "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
+    },
+    {
+      "start": 451,
+      "end": 459,
+      "status": "translated",
+      "label": "inactive registry and limb gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PaddingGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.inactive_registry_and_amount_zero",
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix"
+      ],
+      "note": "Each inactive product is zero; exact all-limb zero derived by Boolean case analysis under field lowering."
+    },
+    {
+      "start": 460,
+      "end": 467,
+      "status": "translated",
+      "label": "registry equality gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.UniqueGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.constructor_checks_all_45_ordered_registry_pairs",
+        "Zkp.Implementation.CloseAssetBacking.unique_rows_preserve_every_exact_amount"
+      ],
+      "note": "All 45 earlier/later comparisons. Preserves source guard on later active bit only; does not substitute a stronger guard."
+    },
+    {
+      "start": 468,
+      "end": 470,
+      "status": "non-executable",
+      "label": "reconstruction rationale comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Claim is not assumed as a premise: selected reconstruction/no-unlisted theorems are independently derived below."
+    },
+    {
+      "start": 471,
+      "end": 473,
+      "status": "dependency-boundary",
+      "label": "zero leaf and canonical empty root",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.Words8.zero",
+        "Zkp.Implementation.CloseAssetBacking.emptyAssets",
+        "Zkp.Implementation.CloseAssetBacking.MerkleContract",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty"
+      ],
+      "note": "Exact empty-leaf shape and semantic empty map modeled; actual canonical root hashing requires the explicit CanonicalEmptyRoot premise. MerkleContract itself is data-only."
+    },
+    {
+      "start": 474,
+      "end": 494,
+      "status": "translated",
+      "label": "conditional zero opening, root insertion and select loop",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PathGates",
+        "Zkp.Implementation.CloseAssetBacking.pathFold",
+        "Zkp.Implementation.CloseAssetBacking.MerkleContract",
+        "Zkp.Implementation.CloseAssetBacking.PathReplacementAt",
+        "Zkp.Implementation.CloseAssetBacking.RowPathContracts",
+        "Zkp.Implementation.CloseAssetBacking.CircuitConstraints",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.path_fold_reconstructs_exact_tree",
+        "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty",
+        "Zkp.Implementation.CloseAssetBacking.circuit_private_root_is_exact_full_vector",
+        "Zkp.Implementation.CloseAssetBacking.canonical_assets_no_unlisted_balance",
+        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets"
+      ],
+      "note": "Full sequential call-level loop and final root connection translated. Roots are computed for inactive paths too, but equality is active-only. Arbitrary-length induction uses exact-index range plus RowPathContracts for only the finite concrete visited path/tree/key/amount tuples. These dependency premises are separate theorem arguments, not CircuitConstraints or a premise of complete vector safety. No global all-AssetMap opening/update law is assumed."
+    },
+    {
+      "start": 495,
+      "end": 507,
+      "status": "translated",
+      "label": "token-fund preimage construction",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.registryWords",
+        "Zkp.Implementation.CloseAssetBacking.amountWords",
+        "Zkp.Implementation.CloseAssetBacking.tokenFundsPreimage",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.amount_words_length",
+        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_full_width",
+        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_injective_fields"
+      ],
+      "note": "Preserves IMTF domain, ten registry words, count, all 80 big-endian fund limbs; fixed 92-word encoding without per-token aggregation."
+    },
+    {
+      "start": 508,
+      "end": 510,
+      "status": "dependency-boundary",
+      "label": "Keccak and extended-state hash",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.HashFunctions",
+        "Zkp.Implementation.CloseAssetBacking.HashImplementationAgreement",
+        "Zkp.Implementation.CloseAssetBacking.KeccakBindingAt",
+        "Zkp.Implementation.CloseAssetBacking.ExtendedCommitmentBindingAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.token_funds_digest_binds_complete_vector",
+        "Zkp.Implementation.CloseAssetBacking.extended_state_commitment_preimage_has_all_48_fields",
+        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state"
+      ],
+      "note": "Preimage structure proved; Keccak/Poseidon gadget correctness, canonical field-to-Bytes32 conversion and scoped collision resistance remain undischarged."
+    },
+    {
+      "start": 511,
+      "end": 518,
+      "status": "translated",
+      "label": "computed public outputs and registration",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.computedPublicInputs",
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs.words",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.circuit_does_not_mix_channel_or_settled_wires",
+        "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
+        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds"
+      ],
+      "note": "Channel/settled wires come from the same Balance statement; TFD/extended commitment are computed, anchor is the same extended-inner block wire; 26 public inputs in exact order."
+    },
+    {
+      "start": 519,
+      "end": 533,
+      "status": "dependency-boundary",
+      "label": "builder.build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
+        "Zkp.Implementation.CloseAssetBacking.prove"
+      ],
+      "theorems": [],
+      "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
+    },
+    {
+      "start": 534,
+      "end": 546,
+      "status": "translated",
+      "label": "fill_witness proof/state/count assignments",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.fillWitness",
+        "Zkp.Implementation.CloseAssetBacking.Witness"
+      ],
+      "theorems": [],
+      "note": "Copies proof, extended/private state and count before per-row assignments. Actual PartialWitness writes, canonical-u8 conversion, unwrap panics and proof shape validation are dependency/static-domain obligations."
+    },
+    {
+      "start": 547,
+      "end": 565,
+      "status": "translated",
+      "label": "fill_witness per-row assignments",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.fillRows",
+        "Zkp.Implementation.CloseAssetBacking.fillWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_every_registry_word",
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_every_amount_limb",
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_token_funds_preimage"
+      ],
+      "note": "Copies registry/amount/path in loop order and computes activity=position<count. Witness-writer object behavior and canonical casts are not extracted."
+    },
+    {
+      "start": 566,
+      "end": 575,
+      "status": "translated",
+      "label": "prove wrapper",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.prove"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.proving_wrapper_has_no_extra_native_admission"
+      ],
+      "note": "Delegates only to backend(fillWitness), maps backend error to FailedToProve. No native constructor or ChannelState admission is invented; backend proof generation/soundness unresolved."
+    },
+    {
+      "start": 576,
+      "end": 576,
+      "status": "non-executable",
+      "label": "separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 577,
+      "end": 914,
+      "status": "test-only",
+      "label": "Rust unit tests and mock Balance circuit",
+      "declarations": [],
+      "theorems": [],
+      "note": "All test lines read. Fixtures, mock cyclic Balance circuit, positive and refusal tests are not translated as production constraints or run by this task. Lean normal examples are separate kernel-checked examples."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "compiler_refinement",
+      "obligation": "No extraction or simulation of the Rust compiler, Plonky2 target allocator/constraint graph, generated CircuitData, witness writers/panics or proof backend. constructorProgram is an ordered macro transcript; CircuitConstraints is handwritten denotation.",
+      "discharged": false
+    },
+    {
+      "name": "field_gate_lowering",
+      "obligation": "FieldGateLowering must establish canonical u32/u63 ranges, safe Boolean truth values, zero/product/equality/connect/select semantics, and no-wrap active sum for the actual field. Native integer-to-field and field-to-canonical-u64 conversions must agree.",
+      "discharged": false
+    },
+    {
+      "name": "recursive_balance_verifier",
+      "obligation": "Constant supplied Balance VK digest+cap, exact cyclic tail shape/decoding, and recursive proof verification must satisfy RecursiveVerifierContract. The Balance relation itself is not proved economically sound by this module.",
+      "discharged": false
+    },
+    {
+      "name": "native_verification_and_decode",
+      "obligation": "BalanceProofView's cyclicKeyCheck/nativeVerification/nativeDecode and parsed fields must equal actual check_cyclic_proof_verifier_data, VerifierCircuitData.verify, and BalanceFullPublicInputs decode results. The flags are dependency results, not proofs of authenticity.",
+      "discharged": false
+    },
+    {
+      "name": "merkle_path_and_sparse_tree",
+      "obligation": "MerkleContract is data-only. CanonicalEmptyRoot requires the one canonical height-32 empty-root equality. PathReplacementAt and RowPathContracts require exact u32-index, same-path zero-to-amount replacement only for the finite concrete visited tree/path/key/amount tuples of the checked statement; inactive rows need no replacement premise. No global all-AssetMap update, opening or injectivity law is supplied. Actual SparseMerkleTree operations, scoped collision resistance and canonical encode/path representation are unproved. Nat-index semantic maps use the canonical zero extension outside the u32 key space.",
+      "discharged": false
+    },
+    {
+      "name": "hash_codec_agreement",
+      "obligation": "HashImplementationAgreement must connect actual native/target Keccak word-to-byte order, PrivateState Poseidon word order, ExtendedPublicState Poseidon-to-Bytes32 canonical conversion and field encodings. 92/21/48 word layouts are proved, not hash implementations.",
+      "discharged": false
+    },
+    {
+      "name": "scoped_commitment_and_root_binding",
+      "obligation": "KeccakBindingAt, PrivateCommitmentBindingAt, ExtendedCommitmentBindingAt and TreeRootBindingAt are explicit scoped collision/binding premises for compared encodings. They are not global axioms or automatic crypto proofs.",
+      "discharged": false
+    },
+    {
+      "name": "native_static_types_and_full_private_state",
+      "obligation": "ChannelStateMirror.NativeTyped and witness u8/u32/U256/fixed-array/native-state domains correspond to Rust types. FullPrivateState root extraction, private tree ownership, typed field serialization and native path generation must refine the supplied functions.",
+      "discharged": false
+    },
+    {
+      "name": "caller_authentication_finality_and_economics",
+      "obligation": "This file does not verify N-of-N signatures, latest H, whole close-state identity, L1 finality/freeze, encrypted member balances, withdrawal liveness, ledger high-water or send-cursor completeness. Those are independent caller/Balance/close-contract proof obligations, not established by the conditional asset-vector theorems.",
+      "discharged": false
+    }
+  ]
+}

@@ -87,11 +87,17 @@ jobs:
           ./elan-init -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Test Lean guard failure handling
-        run: python3 .github/ci/test-lean-safety-guard.py
+        run: |
+          python3 .github/ci/test-lean-safety-guard.py
+          python3 .github/ci/test-lean-line-coverage.py
       - name: Build every Lean root and audit current-proof dependencies and source pins
         # This is model/build/assumption and reviewed-source drift protection, NOT a
         # machine-checked refinement of Rust/Solidity bytecode into the Lean models.
         run: bash .github/ci/lean-safety-guard.sh
+      - name: Validate source-line inventory and mapped declarations (partial formalization)
+        # A pass records honest partial coverage. It must NOT be treated as an
+        # all-line/source-refinement/whole-system solvency certificate.
+        run: python3 .github/ci/lean-line-coverage.py
       - name: Assert Lean verification did not modify tracked sources
         run: git diff --exit-code
   # ════════════════════════════════════════════════════════════════════════════════════════════════

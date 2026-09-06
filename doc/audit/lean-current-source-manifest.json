@@ -125,22 +125,22 @@
     },
     {
       "path": "doc/audit/lean-current-safety.md",
-      "sha256": "2f4da3b26a0c8410dcdb4abdaf9aba8fbe301a38bb26a6c43b78decddecd9e16",
+      "sha256": "0124cf52c10a1b6aac825d1f9aa730edcc2caaea4acd7ba8383fc7e79345cb67",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/README.md",
-      "sha256": "bb803e7d58ea442c453651be0df34a5e8ef7a1737a3cb8d5c4407b7eb1f112b8",
+      "sha256": "82d953295d8d099b499b29317675c5b825be58ac261fe6fe5adf4636cda73cc3",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/SUMMARY.md",
-      "sha256": "b3b98198887cce3b7661d57739dcf0e14cc908a20d67f3d0e57612b27dbb37b3",
+      "sha256": "1f3113d27e238df246e97f8ba069c6923a8def541d8c781701c00274d09ca495",
       "role": "spec"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "444d543a87d4eb0675298bafe0cdf0e268ec17d78ab17479b3699852d746adc0",
+      "sha256": "662a5e841151e1bbb61d29aaf896d7c9aaa94789258fc91b11edb57d17a05e08",
       "role": "tooling"
     },
     {
@@ -155,7 +155,7 @@
     },
     {
       "path": ".github/ci/lean-safety-guard.py",
-      "sha256": "5f2f1a05492435c18f61168687452ceff67edb04b71ddbe6ceaff1673886a3ac",
+      "sha256": "1f2397ecd8562068ce7b046fff58ab509bd058ab68d6851f76a8a7d5040f1931",
       "role": "tooling"
     },
     {
@@ -185,7 +185,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp.lean",
-      "sha256": "d24ab01ffdc21c37f247bb59d122e6408da04f890f4cc66b98ee7c57d7cf5510",
+      "sha256": "434eaf32065a76bc16b1511d0618a032cd9f3f1079927f8a7e1f10d30025315a",
       "role": "tooling"
     },
     {
@@ -367,6 +367,131 @@
       "path": "src/bin/channel_member/inter_transfer_recovery_codec.rs",
       "sha256": "5a3c047210a9ee8de8cff2cfa95aaac90ceaea3d67dc56a9356bdbf9ca0dddd6",
       "role": "implementation"
+    },
+    {
+      "path": ".github/ci/lean-line-coverage.py",
+      "sha256": "c5d97a5c689f98459459452450033ce4a8b88033de762d88da0cbb6061fc06ae",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/test-lean-line-coverage.py",
+      "sha256": "8e1a572d0d4117a72de0fae3f12c9a69269291d9dd39eebc42290f477a038d31",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/implementation-inventory.json",
+      "sha256": "949d190254975f288eb0b80f22902c48976046c5dc001d94de8b58661aa9d103",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/implementation-linewise-progress.md",
+      "sha256": "470665be1e55ecd6c971a4d66ea2c584fbb87f8171f2f91d57f7ee2a352a386f",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/blob-journal.json",
+      "sha256": "415b8cbf5c920d568d91ddc55338ce1e1dfd96e07d24815bc43be39c37d56822",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/BlobJournal.lean",
+      "sha256": "7f830184d1a24ac05719cc88a53afc2603312c0b24095ea56fd6cdd0d888b681",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/close-asset-backing.json",
+      "sha256": "2d00ef41d97cd9941bdd5aa675e52e2adf2bc6f14767b1afa506b821b0a2d0be",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean",
+      "sha256": "6fbe385466640de1f1c3229784c92eee510d15fa5aef7b9d32f948e032f4bb15",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/close-funding.json",
+      "sha256": "13e2288184ec2a41b76286688577df3ec8ce70b486b9c580a69b49427dfa4668",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CloseFunding.lean",
+      "sha256": "1601cabb73b9e5e4958b489338d6316f510d9731df0466f1bc6d11fe4526f938",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/safe-erc20.json",
+      "sha256": "7dfac479dc33dcd8a353a88e9aba88b0f957ae209f33460124c0d0b0151c0707",
+      "role": "spec"
+    },
+    {
+      "path": "contracts/src/SafeERC20.sol",
+      "sha256": "cf5d479108aba99d7c70bc92de36fc4932ab1cda0e44996844f84c847f2cacb0",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/SafeERC20.lean",
+      "sha256": "8fc3fd3b4344c22a6457b0fca4a9aac57bc513bad790e77a2a53b6dd43bd61be",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/settlement-verifier.json",
+      "sha256": "4bc9bd525382cf5a6927b5c92f4a38b0e110f5493c60b307a1d07551406d70aa",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/SettlementVerifier.lean",
+      "sha256": "f7c6ea95b96c7d9bb52abc5b603e6321ad9037dca950fbc81d0514a3261e42f5",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/u256-arithmetic.json",
+      "sha256": "ca839937cc0178e626f5a7e3f13a7c1b9f97ced791a5bf5baae9c25eb68540fb",
+      "role": "spec"
+    },
+    {
+      "path": "src/ethereum_types/u256.rs",
+      "sha256": "55ee90c51a90c35d2ab3fd75679374c26e2080627ece931b3b968be591922469",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/U256Arithmetic.lean",
+      "sha256": "4ee6cfe0ade2c1c856b6db328421da3d03385a8274247a01f75e8638ba964b86",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/manager-value.json",
+      "sha256": "36eec47e42c82ec833e81a722d68236276947df405f7c8fdd9f9ed02f8f009c5",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/ManagerValue.lean",
+      "sha256": "30e7ee85e768a05969ae72cc4910460679e10b044426a446a120b28848c3e078",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/rollup-value.json",
+      "sha256": "ee0cb65cf6c5445e0ecd91dedd789244e850da5061cb3120464e0b458301bd85",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/RollupValue.lean",
+      "sha256": "2f6dd7dae8cbb4a6b836e26f35d751d3e4fee8ace60913904bf0fb492eb49b86",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/spend.json",
+      "sha256": "cfbd40d56a12e830fb63eac45a2398d33679877c28fd0f0374feed64cc7cdb7c",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/spend_circuit.rs",
+      "sha256": "a1ddfa2e55350ac1d8fb33cff9fe39ddf1cb3cdaedea09e6ba6e38e7fee83b7a",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/Spend.lean",
+      "sha256": "70aa08fa38e319902984cb2b095ca88e691be27aea93b232d40dabf8f35effc6",
+      "role": "model"
     }
   ],
   "theorem_checks": [
@@ -692,6 +817,431 @@
         "doc/architecture-audit/detail2.md",
         "doc/architecture-audit/detail2-implementation-notes.md",
         "doc/audit/lean-current-safety.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.BlobJournal",
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.source_payload_index_roundtrip",
+        "Zkp.Implementation.BlobJournal.payload_addressing_is_lossless",
+        "Zkp.Implementation.BlobJournal.blobCount_only_one_or_two",
+        "Zkp.Implementation.BlobJournal.blobCount_length_bounded",
+        "Zkp.Implementation.BlobJournal.blobCount_empty_rejected",
+        "Zkp.Implementation.BlobJournal.example_one_blob_boundary",
+        "Zkp.Implementation.BlobJournal.example_two_blob_boundary",
+        "Zkp.Implementation.BlobJournal.example_max_blob_boundary",
+        "Zkp.Implementation.BlobJournal.example_oversize_rejected",
+        "Zkp.Implementation.BlobJournal.record_sets_exact_key",
+        "Zkp.Implementation.BlobJournal.record_frames_other_key",
+        "Zkp.Implementation.BlobJournal.nonzero_record_cannot_be_replaced",
+        "Zkp.Implementation.BlobJournal.exact_record_retry_accepted",
+        "Zkp.Implementation.BlobJournal.nonzero_record_survives_trace",
+        "Zkp.Implementation.BlobJournal.lookup_binds_caller_namespace",
+        "Zkp.Implementation.BlobJournal.absent_nonzero_digest_not_attested",
+        "Zkp.Implementation.BlobJournal.point_acceptance_requires_exact_reply",
+        "Zkp.Implementation.BlobJournal.sha_acceptance_requires_exact_reply"
+      ],
+      "sources": [
+        "contracts/src/BlobKZGVerifier.sol",
+        "doc/audit/zkp/line-map/blob-journal.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CloseAssetBacking",
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.words8_length",
+        "Zkp.Implementation.CloseAssetBacking.words8_words_injective",
+        "Zkp.Implementation.CloseAssetBacking.public_inputs_length",
+        "Zkp.Implementation.CloseAssetBacking.target_encode_decode",
+        "Zkp.Implementation.CloseAssetBacking.native_encode_decode",
+        "Zkp.Implementation.CloseAssetBacking.public_input_encoding_injective",
+        "Zkp.Implementation.CloseAssetBacking.active_count_le_length",
+        "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
+        "Zkp.Implementation.CloseAssetBacking.active_count_replicate_false",
+        "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector",
+        "Zkp.Implementation.CloseAssetBacking.inactive_registry_and_amount_zero",
+        "Zkp.Implementation.CloseAssetBacking.apply_rows_unlisted_frame",
+        "Zkp.Implementation.CloseAssetBacking.canonical_assets_no_unlisted_balance",
+        "Zkp.Implementation.CloseAssetBacking.unique_rows_preserve_every_exact_amount",
+        "Zkp.Implementation.CloseAssetBacking.path_fold_reconstructs_exact_tree",
+        "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty",
+        "Zkp.Implementation.CloseAssetBacking.amount_words_length",
+        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_full_width",
+        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_injective_fields",
+        "Zkp.Implementation.CloseAssetBacking.token_funds_digest_binds_complete_vector",
+        "Zkp.Implementation.CloseAssetBacking.circuit_binds_recursive_statement",
+        "Zkp.Implementation.CloseAssetBacking.circuit_private_root_is_exact_full_vector",
+        "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
+        "Zkp.Implementation.CloseAssetBacking.circuit_does_not_mix_channel_or_settled_wires",
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix",
+        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets",
+        "Zkp.Implementation.CloseAssetBacking.lowered_assignment_has_canonical_root",
+        "Zkp.Implementation.CloseAssetBacking.constructor_admits_only_exact_cyclic_balance_shape",
+        "Zkp.Implementation.CloseAssetBacking.constructor_starts_with_pinned_recursive_verification",
+        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds",
+        "Zkp.Implementation.CloseAssetBacking.constructor_allocates_exactly_ten_safe_activity_witnesses",
+        "Zkp.Implementation.CloseAssetBacking.constructor_checks_all_45_ordered_registry_pairs",
+        "Zkp.Implementation.CloseAssetBacking.native_tree_builder_matches_sequential_asset_updates",
+        "Zkp.Implementation.CloseAssetBacking.native_checks_success_means_every_check_passed",
+        "Zkp.Implementation.CloseAssetBacking.native_constructor_checks_exact_canonical_tree_before_success",
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_every_registry_word",
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_every_amount_limb",
+        "Zkp.Implementation.CloseAssetBacking.fill_witness_preserves_token_funds_preimage",
+        "Zkp.Implementation.CloseAssetBacking.native_public_input_projection_agrees_with_filled_circuit",
+        "Zkp.Implementation.CloseAssetBacking.native_target_public_inputs_agree_under_hash_implementation_contract",
+        "Zkp.Implementation.CloseAssetBacking.proving_wrapper_has_no_extra_native_admission",
+        "Zkp.Implementation.CloseAssetBacking.private_state_commitment_preimage_has_all_21_fields",
+        "Zkp.Implementation.CloseAssetBacking.extended_state_commitment_preimage_has_all_48_fields",
+        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state",
+        "Zkp.Implementation.CloseAssetBacking.checked_eight_big_endian_limbs_fit_u256",
+        "Zkp.Implementation.CloseAssetBacking.circuit_each_fund_amount_fits_u256",
+        "Zkp.Implementation.CloseAssetBacking.target_decode_success_reconstructs_exact_input",
+        "Zkp.Implementation.CloseAssetBacking.target_decode_success_has_exact_26_words",
+        "Zkp.Implementation.CloseAssetBacking.native_decode_success_is_canonical",
+        "Zkp.Implementation.CloseAssetBacking.example_three_token_exact_vector_without_aggregation",
+        "Zkp.Implementation.CloseAssetBacking.example_ten_positions_still_hash_92_words",
+        "Zkp.Implementation.CloseAssetBacking.example_native_public_inputs_round_trip",
+        "Zkp.Implementation.CloseAssetBacking.example_normal_prefix_determined_by_gates",
+        "Zkp.Implementation.CloseAssetBacking.example_normal_vector_satisfies_all_local_vector_gates"
+      ],
+      "sources": [
+        "src/circuits/channel/close_asset_backing_circuit.rs",
+        "doc/audit/zkp/line-map/close-asset-backing.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CloseFunding",
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.result_bind_ok",
+        "Zkp.Implementation.CloseFunding.result_bind_error",
+        "Zkp.Implementation.CloseFunding.result_pure",
+        "Zkp.Implementation.CloseFunding.commit_error_atomic",
+        "Zkp.Implementation.CloseFunding.retired_native_rejects",
+        "Zkp.Implementation.CloseFunding.retired_erc20_rejects",
+        "Zkp.Implementation.CloseFunding.statement_key_complete_domain",
+        "Zkp.Implementation.CloseFunding.proof_key_exact_bytes_domain",
+        "Zkp.Implementation.CloseFunding.verifier_failure_rejected",
+        "Zkp.Implementation.CloseFunding.attest_anchor_monotone",
+        "Zkp.Implementation.CloseFunding.attest_anchor_exact_max",
+        "Zkp.Implementation.CloseFunding.attest_records_exact_receipt",
+        "Zkp.Implementation.CloseFunding.attest_other_receipt_unchanged",
+        "Zkp.Implementation.CloseFunding.attest_preserves_post_head",
+        "Zkp.Implementation.CloseFunding.freeze_installs_exact_generation",
+        "Zkp.Implementation.CloseFunding.freeze_preserves_post_head",
+        "Zkp.Implementation.CloseFunding.binding_installs_global_floor",
+        "Zkp.Implementation.CloseFunding.post_journals_predecessor",
+        "Zkp.Implementation.CloseFunding.rollback_restores_exact_predecessor",
+        "Zkp.Implementation.CloseFunding.current_backing_implies_historical",
+        "Zkp.Implementation.CloseFunding.current_backing_checks_live_head",
+        "Zkp.Implementation.CloseFunding.credit_exact_escrow_debit",
+        "Zkp.Implementation.CloseFunding.credit_exact_pending_increment",
+        "Zkp.Implementation.CloseFunding.credit_other_token_framed",
+        "Zkp.Implementation.CloseFunding.credit_other_manager_framed",
+        "Zkp.Implementation.CloseFunding.latch_exact_digest",
+        "Zkp.Implementation.CloseFunding.latch_other_channel_framed",
+        "Zkp.Implementation.CloseFunding.attestation_call_anchor_monotone",
+        "Zkp.Implementation.CloseFunding.prepared_attestation_exact_receipt",
+        "Zkp.Implementation.CloseFunding.attestation_call_records_exact_bytes",
+        "Zkp.Implementation.CloseFunding.frozen_post_rejected",
+        "Zkp.Implementation.CloseFunding.materialized_post_rejected",
+        "Zkp.Implementation.CloseFunding.materialized_cannot_prepare",
+        "Zkp.Implementation.CloseFunding.latched_plan_cannot_prepare_again",
+        "Zkp.Implementation.CloseFunding.read_vector_length",
+        "Zkp.Implementation.CloseFunding.read_vector_avoids_seen",
+        "Zkp.Implementation.CloseFunding.read_vector_tokens_unique",
+        "Zkp.Implementation.CloseFunding.read_vector_amounts_from_manager",
+        "Zkp.Implementation.CloseFunding.successful_credit_accounting",
+        "Zkp.Implementation.CloseFunding.successful_vector_accounting",
+        "Zkp.Implementation.CloseFunding.materialization_call_exact_accounting",
+        "Zkp.Implementation.CloseFunding.failed_materialization_rolls_back_all",
+        "Zkp.Implementation.CloseFunding.signed_head_reverification_failure",
+        "Zkp.Implementation.CloseFunding.validated_pi_has_exact_length",
+        "Zkp.Implementation.CloseFunding.freeze_call_installs_only_matching_generation",
+        "Zkp.Implementation.CloseFunding.unfreeze_call_clears_matching_generation",
+        "Zkp.Implementation.CloseFunding.prepared_materialization_guards",
+        "Zkp.Implementation.CloseFunding.successful_plan_refuses_second_materialization",
+        "Zkp.Implementation.CloseFunding.prepared_signed_head_requires_receipt_and_local_checks",
+        "Zkp.Implementation.CloseFunding.materialization_call_complete_vector",
+        "Zkp.Implementation.CloseFunding.materialization_call_one_shot",
+        "Zkp.Implementation.CloseFunding.zero_vector_skips_all_external_credits",
+        "Zkp.Implementation.CloseFunding.normal_post_then_rollback_restores_head"
+      ],
+      "sources": [
+        "contracts/src/CloseFundingMaterializer.sol",
+        "doc/audit/zkp/line-map/close-funding.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.SafeERC20",
+      "theorems": [
+        "Zkp.Implementation.SafeERC20.transfer_arguments_preserved",
+        "Zkp.Implementation.SafeERC20.transferFrom_arguments_preserved",
+        "Zkp.Implementation.SafeERC20.failed_call_never_decodes",
+        "Zkp.Implementation.SafeERC20.successful_empty_return_accepted",
+        "Zkp.Implementation.SafeERC20.short_nonempty_return_rejected",
+        "Zkp.Implementation.SafeERC20.false_word_rejected",
+        "Zkp.Implementation.SafeERC20.true_word_accepted",
+        "Zkp.Implementation.SafeERC20.noncanonical_bool_reverts",
+        "Zkp.Implementation.SafeERC20.accepted_iff_success_and_empty_or_true",
+        "Zkp.Implementation.SafeERC20.accepted_requires_success",
+        "Zkp.Implementation.SafeERC20.transfer_success_has_exact_call",
+        "Zkp.Implementation.SafeERC20.transferFrom_success_has_exact_call",
+        "Zkp.Implementation.SafeERC20.calldata_kinds_are_distinct",
+        "Zkp.Implementation.SafeERC20.example_canonical_true",
+        "Zkp.Implementation.SafeERC20.example_true_with_trailing_data",
+        "Zkp.Implementation.SafeERC20.example_noncanonical_bool_reverts",
+        "Zkp.Implementation.SafeERC20.example_failed_call_short_circuits_invalid_bool"
+      ],
+      "sources": [
+        "contracts/src/SafeERC20.sol",
+        "doc/audit/zkp/line-map/safe-erc20.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.SettlementVerifier",
+      "theorems": [
+        "Zkp.Implementation.SettlementVerifier.beBytes_length",
+        "Zkp.Implementation.SettlementVerifier.beBytes_canonical",
+        "Zkp.Implementation.SettlementVerifier.word_canonical",
+        "Zkp.Implementation.SettlementVerifier.putU64_length",
+        "Zkp.Implementation.SettlementVerifier.putUint256_length",
+        "Zkp.Implementation.SettlementVerifier.putBytes32_length",
+        "Zkp.Implementation.SettlementVerifier.putAddress_length",
+        "Zkp.Implementation.SettlementVerifier.putU64_reconstructs",
+        "Zkp.Implementation.SettlementVerifier.putU64_canonical",
+        "Zkp.Implementation.SettlementVerifier.putUint256_canonical",
+        "Zkp.Implementation.SettlementVerifier.putAddress_canonical",
+        "Zkp.Implementation.SettlementVerifier.closeLayout_length",
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_length",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_length",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_length",
+        "Zkp.Implementation.SettlementVerifier.scanLimbs_success_iff",
+        "Zkp.Implementation.SettlementVerifier.bindLimbsStrict_success_iff",
+        "Zkp.Implementation.SettlementVerifier.bindCloseLimbsStrict_success_iff",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsDigest_success_iff",
+        "Zkp.Implementation.SettlementVerifier.matches_success_iff",
+        "Zkp.Implementation.SettlementVerifier.requirePinnedVerifier_success_iff",
+        "Zkp.Implementation.SettlementVerifier.constructor_duplicate_adapter_first",
+        "Zkp.Implementation.SettlementVerifier.constructor_success_fields",
+        "Zkp.Implementation.SettlementVerifier.tokenFundsPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.memberSetPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.closeIntentPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.specialClosePreimage_length",
+        "Zkp.Implementation.SettlementVerifier.lateOutgoingDebitPreimage_length",
+        "Zkp.Implementation.SettlementVerifier.memberSet_inactive_padding_irrelevant",
+        "Zkp.Implementation.SettlementVerifier.expectedCloseLimbs_success",
+        "Zkp.Implementation.SettlementVerifier.close_binding_success",
+        "Zkp.Implementation.SettlementVerifier.claim_endpoint_success",
+        "Zkp.Implementation.SettlementVerifier.claim_endpoint_never_returns_false",
+        "Zkp.Implementation.SettlementVerifier.close_verification_has_external_provenance",
+        "Zkp.Implementation.SettlementVerifier.withdrawal_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.cancel_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.postClose_verification_exact_statement",
+        "Zkp.Implementation.SettlementVerifier.isolatedPairs_no_cross_slot",
+        "Zkp.Implementation.SettlementVerifier.constructor_no_cross_slot",
+        "Zkp.Implementation.SettlementVerifier.putU64_injective",
+        "Zkp.Implementation.SettlementVerifier.putAddress_injective",
+        "Zkp.Implementation.SettlementVerifier.putUint256_injective",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.cancelLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_field_positions",
+        "Zkp.Implementation.SettlementVerifier.withdrawalLayout_binds_payout",
+        "Zkp.Implementation.SettlementVerifier.postCloseLayout_binds_payout",
+        "Zkp.Implementation.SettlementVerifier.withdrawal_same_proof_no_payout_rebinding",
+        "Zkp.Implementation.SettlementVerifier.postClose_same_proof_no_payout_rebinding",
+        "Zkp.Implementation.SettlementVerifier.close_wrong_length_reverts_first",
+        "Zkp.Implementation.SettlementVerifier.close_delegate_range_reverts_before_addition",
+        "Zkp.Implementation.SettlementVerifier.close_delegate_addition_cannot_overflow",
+        "Zkp.Implementation.SettlementVerifier.close_binding_never_returns_false",
+        "Zkp.Implementation.SettlementVerifier.close_verification_never_returns_false",
+        "Zkp.Implementation.SettlementVerifier.claim_external_revert_preserved",
+        "Zkp.Implementation.SettlementVerifier.close_external_revert_preserved"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "doc/audit/zkp/line-map/settlement-verifier.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.U256Arithmetic",
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.u256_width_is_exact",
+        "Zkp.Implementation.U256Arithmetic.add_trace_widths",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_widths",
+        "Zkp.Implementation.U256Arithmetic.add_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.checked_value_is_bounded",
+        "Zkp.Implementation.U256Arithmetic.target_add_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_cannot_underflow",
+        "Zkp.Implementation.U256Arithmetic.target_sub_result_is_difference",
+        "Zkp.Implementation.U256Arithmetic.target_add_cannot_wrap",
+        "Zkp.Implementation.U256Arithmetic.target_sub_does_not_increase_balance",
+        "Zkp.Implementation.U256Arithmetic.target_add_committed_result_is_unique",
+        "Zkp.Implementation.U256Arithmetic.target_sub_committed_result_is_unique",
+        "Zkp.Implementation.U256Arithmetic.add_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.sub_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.normal_add_with_inter_limb_carry",
+        "Zkp.Implementation.U256Arithmetic.normal_sub_with_inter_limb_borrow",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_add",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_sub"
+      ],
+      "sources": [
+        "src/ethereum_types/u256.rs",
+        "doc/audit/zkp/line-map/u256-arithmetic.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.ManagerValue",
+      "theorems": [
+        "Zkp.Implementation.ManagerValue.put_same",
+        "Zkp.Implementation.ManagerValue.put_other",
+        "Zkp.Implementation.ManagerValue.runtime_guard_exact",
+        "Zkp.Implementation.ManagerValue.native_receive_exact_sender",
+        "Zkp.Implementation.ManagerValue.reentrant_entry_refused",
+        "Zkp.Implementation.ManagerValue.request_success_generation",
+        "Zkp.Implementation.ManagerValue.equal_burn_coordinate_requires_same_digest",
+        "Zkp.Implementation.ManagerValue.strictly_newer_burn_admitted",
+        "Zkp.Implementation.ManagerValue.metadata_exact",
+        "Zkp.Implementation.ManagerValue.claim_effect_exact_payout",
+        "Zkp.Implementation.ManagerValue.claim_effect_same_token",
+        "Zkp.Implementation.ManagerValue.claim_effect_other_token",
+        "Zkp.Implementation.ManagerValue.submit_success_effects",
+        "Zkp.Implementation.ManagerValue.submit_success_cap",
+        "Zkp.Implementation.ManagerValue.pull_success_exact_cap",
+        "Zkp.Implementation.ManagerValue.pull_success_materialized",
+        "Zkp.Implementation.ManagerValue.payout_deletes_only_own_record",
+        "Zkp.Implementation.ManagerValue.payout_preserves_nullifier_tombstones",
+        "Zkp.Implementation.ManagerValue.payout_exact_debit",
+        "Zkp.Implementation.ManagerValue.transfer_success_preserves_cei_state",
+        "Zkp.Implementation.ManagerValue.payout_success_exact_effects",
+        "Zkp.Implementation.ManagerValue.payout_cannot_repay_deleted_record",
+        "Zkp.Implementation.ManagerValue.payout_success_received_ceiling",
+        "Zkp.Implementation.ManagerValue.normal_claim_then_exact_payment",
+        "Zkp.Implementation.ManagerValue.normal_exact_backing_pull",
+        "Zkp.Implementation.ManagerValue.normal_generation_freeze"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementManager.sol",
+        "doc/audit/zkp/line-map/manager-value.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.RollupValue",
+      "theorems": [
+        "Zkp.Implementation.RollupValue.result_bind_ok",
+        "Zkp.Implementation.RollupValue.result_bind_error",
+        "Zkp.Implementation.RollupValue.result_pure",
+        "Zkp.Implementation.RollupValue.failure_rolls_back_storage_and_logs",
+        "Zkp.Implementation.RollupValue.entered_reentry_rejected",
+        "Zkp.Implementation.RollupValue.guarded_reentry_rejected",
+        "Zkp.Implementation.RollupValue.consumed_nullifier_is_used",
+        "Zkp.Implementation.RollupValue.already_used_withdrawal_rejected",
+        "Zkp.Implementation.RollupValue.same_leaf_cannot_be_consumed_again",
+        "Zkp.Implementation.RollupValue.consumed_auth_is_scoped",
+        "Zkp.Implementation.RollupValue.auth_preimage_excludes_only_nullifier",
+        "Zkp.Implementation.RollupValue.credit_conserves_token_value",
+        "Zkp.Implementation.RollupValue.credit_frames_other_asset",
+        "Zkp.Implementation.RollupValue.credit_frames_other_recipient",
+        "Zkp.Implementation.RollupValue.successful_credit_is_exact",
+        "Zkp.Implementation.RollupValue.successful_credit_characterization",
+        "Zkp.Implementation.RollupValue.successful_close_credit_characterization",
+        "Zkp.Implementation.RollupValue.successful_close_credit_conserves",
+        "Zkp.Implementation.RollupValue.successful_close_credit_frames_other_asset",
+        "Zkp.Implementation.RollupValue.successful_close_credit_frames_other_manager",
+        "Zkp.Implementation.RollupValue.successful_finish_deposit_record",
+        "Zkp.Implementation.RollupValue.record_checkpoint_binds_live_chains",
+        "Zkp.Implementation.RollupValue.deposit_increments_only_selected_escrow",
+        "Zkp.Implementation.RollupValue.deposit_frames_other_asset",
+        "Zkp.Implementation.RollupValue.pull_debits_exact_amount",
+        "Zkp.Implementation.RollupValue.pull_frames_other_recipient",
+        "Zkp.Implementation.RollupValue.pull_frames_other_asset",
+        "Zkp.Implementation.RollupValue.pull_does_not_debit_escrow_again",
+        "Zkp.Implementation.RollupValue.native_and_erc20_zero_are_distinct",
+        "Zkp.Implementation.RollupValue.balance_read_requires_success_and_full_word",
+        "Zkp.Implementation.RollupValue.withdrawal_pi_requires_seventeen_limbs",
+        "Zkp.Implementation.RollupValue.native_pull_with_storage_preserving_callback",
+        "Zkp.Implementation.RollupValue.successful_native_pull_exact_with_callback_frame",
+        "Zkp.Implementation.RollupValue.native_deposit_success_witness",
+        "Zkp.Implementation.RollupValue.valid_credit_example",
+        "Zkp.Implementation.RollupValue.valid_token_credit_example",
+        "Zkp.Implementation.RollupValue.native_leaf_credit_success_witness",
+        "Zkp.Implementation.RollupValue.erc20_leaf_credit_success_witness",
+        "Zkp.Implementation.RollupValue.normal_exact_pull_leaves_unrelated_credit"
+      ],
+      "sources": [
+        "contracts/src/IntmaxRollup.sol",
+        "doc/audit/zkp/line-map/rollup-value.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.Spend",
+      "theorems": [
+        "Zkp.Implementation.Spend.target_encoding_has_exact_14_words",
+        "Zkp.Implementation.Spend.target_parser_round_trip_with_arbitrary_suffix",
+        "Zkp.Implementation.Spend.native_parser_keeps_actual_cast_and_nonzero_semantics",
+        "Zkp.Implementation.Spend.native_public_input_round_trip_on_typed_domain",
+        "Zkp.Implementation.Spend.typed_transfer_preimage_is_25_words",
+        "Zkp.Implementation.Spend.scoped_paths_and_gates_authenticate_each_running_balance",
+        "Zkp.Implementation.Spend.arbitrary_trace_conserves_each_token_exactly",
+        "Zkp.Implementation.Spend.proved_asset_root_encodes_per_token_conservation",
+        "Zkp.Implementation.Spend.aggregate_debits_never_exceed_initial_token_fund",
+        "Zkp.Implementation.Spend.omitted_token_debit_is_zero",
+        "Zkp.Implementation.Spend.absent_token_balance_is_unchanged",
+        "Zkp.Implementation.Spend.same_token_trace_sums_all_deductions",
+        "Zkp.Implementation.Spend.arbitrary_repeated_token_spends_do_not_overwrite_earlier_debits",
+        "Zkp.Implementation.Spend.borrow_chain_exact_integer_equation",
+        "Zkp.Implementation.Spend.final_zero_borrow_proves_exact_nonunderflow_subtraction",
+        "Zkp.Implementation.Spend.concrete_subtraction_trace_derives_no_underflow",
+        "Zkp.Implementation.Spend.concrete_subtraction_output_matches_natural_difference",
+        "Zkp.Implementation.Spend.output_trace_supplies_input_trace_and_exact_result",
+        "Zkp.Implementation.Spend.local_limb_traces_derive_all_sequential_debit_gates",
+        "Zkp.Implementation.Spend.scoped_paths_and_local_limb_traces_prove_conservation",
+        "Zkp.Implementation.Spend.zip_rows_preserves_complete_equal_length_vectors",
+        "Zkp.Implementation.Spend.witness_length_gate_includes_all_64_rows",
+        "Zkp.Implementation.Spend.native_field_nonce_agreement_requires_nonoverflow",
+        "Zkp.Implementation.Spend.raw_constructor_gates_derive_circuit_gates",
+        "Zkp.Implementation.Spend.scoped_sent_path_inserts_only_at_the_opened_empty_nonce",
+        "Zkp.Implementation.Spend.native_debit_fold_success_uses_same_ordered_root_fold",
+        "Zkp.Implementation.Spend.new_private_state_preserves_unrelated_roots_and_salt",
+        "Zkp.Implementation.Spend.validity_bit_is_nonce_equality_not_a_required_true_gate",
+        "Zkp.Implementation.Spend.circuit_output_validity_requires_consumer_check",
+        "Zkp.Implementation.Spend.native_and_target_public_inputs_agree_on_nonoverflow_domain",
+        "Zkp.Implementation.Spend.circuit_value_conservation_under_scoped_path_contracts",
+        "Zkp.Implementation.Spend.raw_constraints_and_scoped_dependencies_prove_per_token_conservation",
+        "Zkp.Implementation.Spend.proving_cannot_bypass_native_admission",
+        "Zkp.Implementation.Spend.constructor_performs_all_64_ordered_asset_updates",
+        "Zkp.Implementation.Spend.constructor_registers_flag_without_asserting_true",
+        "Zkp.Implementation.Spend.witness_write_checks_vector_lengths_before_assignments",
+        "Zkp.Implementation.Spend.serialization_preserves_payload_handles_after_success",
+        "Zkp.Implementation.Spend.example_repeated_token_admission_is_nonempty",
+        "Zkp.Implementation.Spend.example_repeated_token_uses_running_balance",
+        "Zkp.Implementation.Spend.example_normal_public_input_round_trip",
+        "Zkp.Implementation.Spend.example_normal_borrow_chain_matches_subtraction"
+      ],
+      "sources": [
+        "src/circuits/balance/spend_circuit.rs",
+        "doc/audit/zkp/line-map/spend.json",
+        "doc/audit/zkp/implementation-linewise-progress.md"
       ]
     }
   ]

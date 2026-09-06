@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "source": "contracts/src/BlobKZGVerifier.sol",
+  "source_sha256": "b9fb050db2c6fcef451f893827fac7fa142d74a4fa45eece555456809e4726ba",
+  "source_lines": 477,
+  "module": "Zkp.Implementation.BlobJournal",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlobJournal.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 9,
+      "status": "non-executable",
+      "label": "license, pragma and specification",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 10,
+      "end": 38,
+      "status": "dependency-boundary",
+      "label": "contract and constants",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.fieldElements",
+        "Zkp.Implementation.BlobJournal.oneCapacity",
+        "Zkp.Implementation.BlobJournal.twoCapacity",
+        "Zkp.Implementation.BlobJournal.blsModulus",
+        "Zkp.Implementation.BlobJournal.HashInput"
+      ],
+      "theorems": [],
+      "note": "Blob widths/capacities/modulus/domain roles represented; root-of-unity constants, challenge prefix bytes and reverse table are not yet translated."
+    },
+    {
+      "start": 39,
+      "end": 49,
+      "status": "translated",
+      "label": "journal and event fields",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.Journal",
+        "Zkp.Implementation.BlobJournal.emptyJournal",
+        "Zkp.Implementation.BlobJournal.AttestedEvent"
+      ],
+      "theorems": [],
+      "note": "Word-keyed mapping defaults to zero; event fields preserve exact statement identities."
+    },
+    {
+      "start": 50,
+      "end": 64,
+      "status": "translated",
+      "label": "failure declarations",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.Failure"
+      ],
+      "theorems": [],
+      "note": "Source failure constructors retained; generic dependency and ABI decode failures mark unmodeled callee effects."
+    },
+    {
+      "start": 65,
+      "end": 74,
+      "status": "translated",
+      "label": "blobMetadata wrapper",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.blobMetadata"
+      ],
+      "theorems": [],
+      "note": "Calls exact length-controlled metadata policy; BLOBHASH source remains an environment input."
+    },
+    {
+      "start": 75,
+      "end": 91,
+      "status": "translated",
+      "label": "postCommitment",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.postCommitment",
+        "Zkp.Implementation.BlobJournal.commitment"
+      ],
+      "theorems": [],
+      "note": "Posting binds actual transaction blob list, not a producer-supplied proof hash/length."
+    },
+    {
+      "start": 92,
+      "end": 111,
+      "status": "translated",
+      "label": "_postedBlobMetadata",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.postedBlobMetadata"
+      ],
+      "theorems": [],
+      "note": "Actual hash1-empty early return is retained; BLOBHASH contiguity is an EVM premise, not an invented hash2 guard."
+    },
+    {
+      "start": 112,
+      "end": 132,
+      "status": "translated",
+      "label": "_blobMetadata",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.blobMetadata",
+        "Zkp.Implementation.BlobJournal.blobCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.blobCount_only_one_or_two",
+        "Zkp.Implementation.BlobJournal.blobCount_length_bounded"
+      ],
+      "note": "Order: length first, then hash0, then exact required blob presence/absence."
+    },
+    {
+      "start": 133,
+      "end": 149,
+      "status": "translated",
+      "label": "verify sidecar lengths/order",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.verify",
+        "Zkp.Implementation.BlobJournal.sidecarAt"
+      ],
+      "theorems": [],
+      "note": "Exact count*96 length and first/optional second call; polynomial opening is VerifyBlob boundary."
+    },
+    {
+      "start": 150,
+      "end": 167,
+      "status": "translated",
+      "label": "verifyAndCommit wrapper",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.verifyAndCommit"
+      ],
+      "theorems": [],
+      "note": "Same proof/sidecars and submission fields passed through."
+    },
+    {
+      "start": 168,
+      "end": 207,
+      "status": "translated",
+      "label": "attestProofData",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.ContextRequest",
+        "Zkp.Implementation.BlobJournal.GetContext",
+        "Zkp.Implementation.BlobJournal.AttestationResult",
+        "Zkp.Implementation.BlobJournal.readContext",
+        "Zkp.Implementation.BlobJournal.attestProofData",
+        "Zkp.Implementation.BlobJournal.record"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.record_sets_exact_key",
+        "Zkp.Implementation.BlobJournal.record_frames_other_key",
+        "Zkp.Implementation.BlobJournal.nonzero_record_cannot_be_replaced",
+        "Zkp.Implementation.BlobJournal.exact_record_retry_accepted",
+        "Zkp.Implementation.BlobJournal.nonzero_record_survives_trace"
+      ],
+      "note": "Context request binds rollup.getSubmission(id), exact160byte decoding and nonzero/unfinalized checks. Exact opened commitment matches and nonzero conflicting prior is refused. Returned digest and all event fields are explicit, not only a journal projection. Whole-entrypoint refinement still unproved."
+    },
+    {
+      "start": 208,
+      "end": 217,
+      "status": "translated",
+      "label": "isProofDataAttested",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.isProofDataAttested",
+        "Zkp.Implementation.BlobJournal.journalKey",
+        "Zkp.Implementation.BlobJournal.proofDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.lookup_binds_caller_namespace",
+        "Zkp.Implementation.BlobJournal.absent_nonzero_digest_not_attested"
+      ],
+      "note": "Caller/id/commitment key and proof hash/length digest; nonzero digest premise explicit, no ideal-hash assumption hidden."
+    },
+    {
+      "start": 218,
+      "end": 240,
+      "status": "translated",
+      "label": "_verifyAndCommit",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.verifyAndCommit",
+        "Zkp.Implementation.BlobJournal.verify"
+      ],
+      "theorems": [],
+      "note": "Byte-identical proof and sliced sidecars enter verifier dependency; exact submission preimage retained."
+    },
+    {
+      "start": 241,
+      "end": 244,
+      "status": "translated",
+      "label": "_proofDigest",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.proofDigest",
+        "Zkp.Implementation.BlobJournal.HashInput"
+      ],
+      "theorems": [],
+      "note": "Exact domain/proofHash/length record, ABI encoding and Keccak unproved."
+    },
+    {
+      "start": 245,
+      "end": 259,
+      "status": "dependency-boundary",
+      "label": "_verifyBlob",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.VerifyBlob",
+        "Zkp.Implementation.BlobJournal.sidecarAt"
+      ],
+      "theorems": [],
+      "note": "Sidecar slices represented; evaluation plus point precompile is not yet composed from byte-level EVM execution."
+    },
+    {
+      "start": 260,
+      "end": 295,
+      "status": "untranslated",
+      "label": "_blobEvaluation challenge memory and polynomial evaluation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not yet transcribed: memory layout, SHA input, z reduction, polynomial y and versioned commitment composition."
+    },
+    {
+      "start": 296,
+      "end": 329,
+      "status": "dependency-boundary",
+      "label": "_fillSimpleCoderBlob",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.payloadByte",
+        "Zkp.Implementation.BlobJournal.decodedPayloadByte"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.source_payload_index_roundtrip",
+        "Zkp.Implementation.BlobJournal.payload_addressing_is_lossless"
+      ],
+      "note": "Only global31-byte payload addressing is proved; length header, shift/mask/calldata assembly and zero initialization require translation/refinement."
+    },
+    {
+      "start": 330,
+      "end": 376,
+      "status": "untranslated",
+      "label": "_evaluateBlob",
+      "declarations": [],
+      "theorems": [],
+      "note": "4096-root barycentric loops, batch inversion, root-hit branch and field proof remain untranscribed/unproved."
+    },
+    {
+      "start": 377,
+      "end": 409,
+      "status": "dependency-boundary",
+      "label": "_pointEvaluation",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.PointReply",
+        "Zkp.Implementation.BlobJournal.pointEvaluationResult"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.point_acceptance_requires_exact_reply"
+      ],
+      "note": "Exact call-success/64-byte/4096/modulus checks represented;192-byte assembly and50000gas precompile semantics not translated."
+    },
+    {
+      "start": 410,
+      "end": 423,
+      "status": "dependency-boundary",
+      "label": "_versionedHash",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.shaResult"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.sha_acceptance_requires_exact_reply"
+      ],
+      "note": "SHA result size/status guard only; commitment copy and version-mask expression untranscribed."
+    },
+    {
+      "start": 424,
+      "end": 441,
+      "status": "untranslated",
+      "label": "_modexp",
+      "declarations": [],
+      "theorems": [],
+      "note": "EIP198 input encoding, staticcall and return decoder untranscribed."
+    },
+    {
+      "start": 442,
+      "end": 448,
+      "status": "translated",
+      "label": "_blobCount",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.blobCount",
+        "Zkp.Implementation.BlobJournal.oneCapacity",
+        "Zkp.Implementation.BlobJournal.twoCapacity"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlobJournal.blobCount_only_one_or_two",
+        "Zkp.Implementation.BlobJournal.blobCount_length_bounded",
+        "Zkp.Implementation.BlobJournal.blobCount_empty_rejected"
+      ],
+      "note": "Exact zero/one/two/too-large order, capacities126945/253921."
+    },
+    {
+      "start": 449,
+      "end": 469,
+      "status": "translated",
+      "label": "_commitment",
+      "declarations": [
+        "Zkp.Implementation.BlobJournal.commitment",
+        "Zkp.Implementation.BlobJournal.HashInput"
+      ],
+      "theorems": [],
+      "note": "All domain-separated preimage fields retained as typed hash input; ABI/Keccak dependency."
+    },
+    {
+      "start": 470,
+      "end": 476,
+      "status": "untranslated",
+      "label": "_bitReverse12",
+      "declarations": [],
+      "theorems": [],
+      "note": "Nibble table and shifts not yet translated."
+    },
+    {
+      "start": 477,
+      "end": 477,
+      "status": "non-executable",
+      "label": "contract end",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "kzg_and_ceremony",
+      "obligation": "KZG ceremony is accepted; precompile cryptographic soundness and its exact input semantics remain external obligations.",
+      "discharged": false
+    },
+    {
+      "name": "blob_evaluation",
+      "obligation": "VerifyBlob must implement exact SimpleCoder, Fiat-Shamir challenge, correct barycentric polynomial evaluation and point verification; not assumed proved by this module.",
+      "discharged": false
+    },
+    {
+      "name": "abi_and_preimage",
+      "obligation": "Typed domain records must equal Solidity ABI bytes; SHA/Keccak/precompile output decoding remains unproved.",
+      "discharged": false
+    },
+    {
+      "name": "hash_binding",
+      "obligation": "Hash collision resistance, nonzero receipt digests and domain-preimage binding are needed for receipt authenticity; not required for the weaker executable storage lemmas.",
+      "discharged": false
+    },
+    {
+      "name": "evm_and_finality",
+      "obligation": "BLOBHASH contiguity, staticcall/returndata/memory/gas, exact return tuple decoding, transaction rollback and real rollup context are not proved.",
+      "discharged": false
+    }
+  ]
+}

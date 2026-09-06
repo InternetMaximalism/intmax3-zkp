@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "source": "contracts/src/SafeERC20.sol",
+  "source_sha256": "cf5d479108aba99d7c70bc92de36fc4932ab1cda0e44996844f84c847f2cacb0",
+  "source_lines": 50,
+  "module": "Zkp.Implementation.SafeERC20",
+  "model": "doc/audit/zkp/Zkp/Implementation/SafeERC20.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 12,
+      "status": "non-executable",
+      "label": "license, pragma and interface rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 13,
+      "end": 17,
+      "status": "translated",
+      "label": "IERC20 method input/result surface",
+      "declarations": [
+        "Zkp.Implementation.SafeERC20.Address",
+        "Zkp.Implementation.SafeERC20.Amount",
+        "Zkp.Implementation.SafeERC20.TokenRequest",
+        "Zkp.Implementation.SafeERC20.CallResult"
+      ],
+      "theorems": [],
+      "note": "Typed method parameters/observation; ABI byte encoding and returned-value decoding are external compiler obligations."
+    },
+    {
+      "start": 18,
+      "end": 26,
+      "status": "non-executable",
+      "label": "caller responsibilities and registration commentary",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 27,
+      "end": 28,
+      "status": "translated",
+      "label": "library failure type",
+      "declarations": [
+        "Zkp.Implementation.SafeERC20.Result"
+      ],
+      "theorems": [],
+      "note": "Error distinction includes the additional ABI-decoder revert induced by line46."
+    },
+    {
+      "start": 29,
+      "end": 29,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 30,
+      "end": 32,
+      "status": "translated",
+      "label": "safeTransfer wrapper",
+      "declarations": [
+        "Zkp.Implementation.SafeERC20.safeTransferCall",
+        "Zkp.Implementation.SafeERC20.safeTransfer"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SafeERC20.transfer_arguments_preserved",
+        "Zkp.Implementation.SafeERC20.transfer_success_has_exact_call"
+      ],
+      "note": "Exact token/recipient/uint256 value and transfer method are retained; abi.encodeCall remains a dependency."
+    },
+    {
+      "start": 33,
+      "end": 33,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 34,
+      "end": 36,
+      "status": "translated",
+      "label": "safeTransferFrom wrapper",
+      "declarations": [
+        "Zkp.Implementation.SafeERC20.safeTransferFromCall",
+        "Zkp.Implementation.SafeERC20.safeTransferFrom"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SafeERC20.transferFrom_arguments_preserved",
+        "Zkp.Implementation.SafeERC20.transferFrom_success_has_exact_call",
+        "Zkp.Implementation.SafeERC20.calldata_kinds_are_distinct"
+      ],
+      "note": "Exact from/to order retained in the typed ABI request."
+    },
+    {
+      "start": 37,
+      "end": 37,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable proof coverage is claimed for comments or structural syntax."
+    },
+    {
+      "start": 38,
+      "end": 50,
+      "status": "translated",
+      "label": "low-level call and short-circuit optional-bool acceptance",
+      "declarations": [
+        "Zkp.Implementation.SafeERC20.decodeBE",
+        "Zkp.Implementation.SafeERC20.firstWord",
+        "Zkp.Implementation.SafeERC20.callTokenResult"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SafeERC20.failed_call_never_decodes",
+        "Zkp.Implementation.SafeERC20.successful_empty_return_accepted",
+        "Zkp.Implementation.SafeERC20.short_nonempty_return_rejected",
+        "Zkp.Implementation.SafeERC20.false_word_rejected",
+        "Zkp.Implementation.SafeERC20.true_word_accepted",
+        "Zkp.Implementation.SafeERC20.noncanonical_bool_reverts",
+        "Zkp.Implementation.SafeERC20.accepted_iff_success_and_empty_or_true"
+      ],
+      "note": "First32-byte canonical bool and trailing-data policy represented. No balance movement or callback isolation is inferred from helper success."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "abi_encoding",
+      "obligation": "Compiler ABI encodeCall must serialize the exact typed method selector, addresses and amount without alteration.",
+      "discharged": false
+    },
+    {
+      "name": "call_and_memory",
+      "obligation": "CALL return status/bytes and EVM memory behavior must correspond to CallResult; gas, reentrancy and rollback not extracted.",
+      "discharged": false
+    },
+    {
+      "name": "abi_boolean_decoder",
+      "obligation": "Canonical Solidity bool decoding means 32-byte word0/1 only, with later bytes ignored; bytecode decoding equivalence unproved.",
+      "discharged": false
+    },
+    {
+      "name": "caller_asset_checks",
+      "obligation": "Registry/code provenance, exact credited/received deltas, supported token behavior and caller reentrancy defenses require separate proofs.",
+      "discharged": false
+    }
+  ]
+}

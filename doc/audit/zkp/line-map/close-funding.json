@@ -1,0 +1,964 @@
+{
+  "schema_version": 1,
+  "source": "contracts/src/CloseFundingMaterializer.sol",
+  "source_sha256": "cfb03ed0661ea29c7923ee829f781dc6dcea97a3992d87d9794a816431b3c56e",
+  "source_lines": 562,
+  "module": "Zkp.Implementation.CloseFunding",
+  "model": "doc/audit/zkp/Zkp/Implementation/CloseFunding.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 3,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 4,
+      "end": 6,
+      "status": "dependency-boundary",
+      "label": "direct imported interfaces",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.Environment",
+        "Zkp.Implementation.CloseFunding.ManagerView",
+        "Zkp.Implementation.CloseFunding.VerifierView",
+        "Zkp.Implementation.CloseFunding.creditChannelExit"
+      ],
+      "theorems": [],
+      "note": "Manager getters and pinned compact adapter calls are external results; Rollup credit arithmetic is expanded, not the complete imported contracts."
+    },
+    {
+      "start": 7,
+      "end": 23,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 24,
+      "end": 25,
+      "status": "translated",
+      "label": "legacy abstract declaration and token limit",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.maxChannelTokens"
+      ],
+      "theorems": [],
+      "note": "Abstract contract is not deployed by the current constructor; its executable methods are mapped below."
+    },
+    {
+      "start": 26,
+      "end": 26,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 27,
+      "end": 39,
+      "status": "translated",
+      "label": "legacy errors and immutable Rollup",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.Error",
+        "Zkp.Implementation.CloseFunding.Environment",
+        "Zkp.Implementation.CloseFunding.legacyConstructor"
+      ],
+      "theorems": [],
+      "note": "Error labels/arguments and immutable reference; ABI selectors/layout remain a dependency."
+    },
+    {
+      "start": 40,
+      "end": 43,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 44,
+      "end": 46,
+      "status": "translated",
+      "label": "legacy materialization event",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyMaterialize"
+      ],
+      "theorems": [],
+      "note": "Success tuple represents the emitted manager/lane/aux/withdrawal-set digest; logs/ABI encoding are external semantics."
+    },
+    {
+      "start": 47,
+      "end": 47,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 48,
+      "end": 51,
+      "status": "translated",
+      "label": "legacy constructor",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyConstructor"
+      ],
+      "theorems": [],
+      "note": "Code-length rejection and immutable Rollup assignment."
+    },
+    {
+      "start": 52,
+      "end": 52,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 53,
+      "end": 65,
+      "status": "translated",
+      "label": "legacy materializeNative",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyMaterializeNative",
+        "Zkp.Implementation.CloseFunding.legacyMaterialize",
+        "Zkp.Implementation.CloseFunding.legacyAuthorizeAll",
+        "Zkp.Implementation.CloseFunding.LegacyCalls"
+      ],
+      "theorems": [],
+      "note": "Lane validation, sequential authorizations, native withdrawal and emitted tuple. External callee state effects/rollback are not proved."
+    },
+    {
+      "start": 66,
+      "end": 66,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 67,
+      "end": 79,
+      "status": "translated",
+      "label": "legacy materializeERC20",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyMaterializeERC20",
+        "Zkp.Implementation.CloseFunding.legacyMaterialize",
+        "Zkp.Implementation.CloseFunding.legacyAuthorizeAll",
+        "Zkp.Implementation.CloseFunding.LegacyCalls"
+      ],
+      "theorems": [],
+      "note": "ERC20 branch of the same exact control flow; not the deployed tombstone."
+    },
+    {
+      "start": 80,
+      "end": 80,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 81,
+      "end": 101,
+      "status": "translated",
+      "label": "legacy lane authority and expected count",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyValidateCompleteLane",
+        "Zkp.Implementation.CloseFunding.legacyExpectedCount"
+      ],
+      "theorems": [],
+      "note": "Manager/Rollup/materializer checks, nonzero lane count, exact withdrawal length; canonical uint8 count makes loop-counter overflow unreachable."
+    },
+    {
+      "start": 102,
+      "end": 102,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 103,
+      "end": 130,
+      "status": "translated",
+      "label": "legacy lane nested validation",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.legacyValidateWithdrawals",
+        "Zkp.Implementation.CloseFunding.legacyFindSlot"
+      ],
+      "theorems": [],
+      "note": "Recipient/asset class, exact expected token/amount, matched-slot array bound/duplicates, found flag and common auxData."
+    },
+    {
+      "start": 131,
+      "end": 140,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 141,
+      "end": 143,
+      "status": "translated",
+      "label": "live constants",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.maxChannelTokens",
+        "Zkp.Implementation.CloseFunding.backingStatementDomain",
+        "Zkp.Implementation.CloseFunding.backingProofDomain"
+      ],
+      "theorems": [],
+      "note": "Exact maximum and IMBA/IMBP tags."
+    },
+    {
+      "start": 144,
+      "end": 144,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 145,
+      "end": 170,
+      "status": "translated",
+      "label": "live error declarations",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.Error"
+      ],
+      "theorems": [],
+      "note": "Custom error names and payloads modeled; Solidity error-selector encoding is not proved."
+    },
+    {
+      "start": 171,
+      "end": 171,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 172,
+      "end": 177,
+      "status": "translated",
+      "label": "BackingStatement fields",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.BackingStatement"
+      ],
+      "theorems": [],
+      "note": "Settled chain, token-funds digest, backing root, anchor."
+    },
+    {
+      "start": 178,
+      "end": 178,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 179,
+      "end": 184,
+      "status": "translated",
+      "label": "immutable references",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.Immutables",
+        "Zkp.Implementation.CloseFunding.Environment",
+        "Zkp.Implementation.CloseFunding.constructor"
+      ],
+      "theorems": [],
+      "note": "Constructor pinning represented; complete compact-verifier correctness remains a boundary."
+    },
+    {
+      "start": 185,
+      "end": 185,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 186,
+      "end": 198,
+      "status": "translated",
+      "label": "all materializer mappings",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.State",
+        "Zkp.Implementation.CloseFunding.empty"
+      ],
+      "theorems": [],
+      "note": "Includes manager/freeze/post/materialized/anchor/receipt and rollback journal. Source comment 193–195 about avoiding reverification is superseded by actual lines 405–406, which the model executes."
+    },
+    {
+      "start": 199,
+      "end": 199,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 200,
+      "end": 213,
+      "status": "translated",
+      "label": "live events",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.Event"
+      ],
+      "theorems": [],
+      "note": "All event data represented; indexed topics/log ABI/gas are outside refinement."
+    },
+    {
+      "start": 214,
+      "end": 214,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 215,
+      "end": 220,
+      "status": "translated",
+      "label": "live constructor",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.constructor",
+        "Zkp.Implementation.CloseFunding.requirePinnedVerifier"
+      ],
+      "theorems": [],
+      "note": "Code-length check, complete adapter/core chain-pinning checks and immutable result."
+    },
+    {
+      "start": 221,
+      "end": 224,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 225,
+      "end": 253,
+      "status": "translated",
+      "label": "pinned verifier and linked core",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.requirePinnedVerifier",
+        "Zkp.Implementation.CloseFunding.VerifierView"
+      ],
+      "theorems": [],
+      "note": "External getters at read sites, code checks, try/catch remapping and exact chain equality. Getter truth is not cryptographic soundness."
+    },
+    {
+      "start": 254,
+      "end": 255,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 256,
+      "end": 259,
+      "status": "translated",
+      "label": "onlyRollup modifier",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.onlyRollup"
+      ],
+      "theorems": [],
+      "note": "Exact caller equality; no deployer/permission inference."
+    },
+    {
+      "start": 260,
+      "end": 262,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 263,
+      "end": 273,
+      "status": "translated",
+      "label": "binding identity checks",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.bindManager"
+      ],
+      "theorems": [],
+      "note": "Code, nonzero registered channel, Rollup and satellite identity, and conflicting-incumbent rejection."
+    },
+    {
+      "start": 274,
+      "end": 275,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 276,
+      "end": 285,
+      "status": "translated",
+      "label": "global-finality activation and binding floor",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.bindManager",
+        "Zkp.Implementation.CloseFunding.bindState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.binding_installs_global_floor"
+      ],
+      "note": "Requires current global block equal finalized block even for idempotent rebinding; new binding records the global head as its channel floor. Repeated static reads require coherent getters."
+    },
+    {
+      "start": 286,
+      "end": 287,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 288,
+      "end": 300,
+      "status": "translated",
+      "label": "freeze from exact Manager generation",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.freezeFromManager",
+        "Zkp.Implementation.CloseFunding.freezeState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.freeze_call_installs_only_matching_generation",
+        "Zkp.Implementation.CloseFunding.freeze_preserves_post_head"
+      ],
+      "note": "Bound caller, no exit/freeze, matching channel/generation, nonzero generation and ClosePending status; exact event."
+    },
+    {
+      "start": 301,
+      "end": 301,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 302,
+      "end": 311,
+      "status": "translated",
+      "label": "unfreeze exact generation",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.unfreezeFromManager",
+        "Zkp.Implementation.CloseFunding.freezeState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.unfreeze_call_clears_matching_generation"
+      ],
+      "note": "Bound caller, existing/equal generation, no materialization; clears only frozen generation. No extra status getter invented."
+    },
+    {
+      "start": 312,
+      "end": 314,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 315,
+      "end": 322,
+      "status": "translated",
+      "label": "channel posting journal",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.recordPost",
+        "Zkp.Implementation.CloseFunding.recordPostState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.post_journals_predecessor",
+        "Zkp.Implementation.CloseFunding.frozen_post_rejected",
+        "Zkp.Implementation.CloseFunding.materialized_post_rejected"
+      ],
+      "note": "Only Rollup; unbound no-op; exited/frozen refusal; exact prior-head pointer saved. No unsupported monotonic-block-number premise inserted."
+    },
+    {
+      "start": 323,
+      "end": 325,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 326,
+      "end": 333,
+      "status": "translated",
+      "label": "descending rollback pointer",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.rollbackPost",
+        "Zkp.Implementation.CloseFunding.rollbackState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.rollback_restores_exact_predecessor"
+      ],
+      "note": "No journal no-op, exact head match, restore pointer then clear both block records. Descending Rollup invocation is a dependency, not assumed as this function's theorem."
+    },
+    {
+      "start": 334,
+      "end": 339,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 340,
+      "end": 358,
+      "status": "translated",
+      "label": "compact backing attestation",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.attestSignedHeadBacking",
+        "Zkp.Implementation.CloseFunding.prepareAttestation",
+        "Zkp.Implementation.CloseFunding.attestState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.attestation_call_anchor_monotone",
+        "Zkp.Implementation.CloseFunding.attestation_call_records_exact_bytes",
+        "Zkp.Implementation.CloseFunding.prepared_attestation_exact_receipt",
+        "Zkp.Implementation.CloseFunding.attest_anchor_exact_max"
+      ],
+      "note": "Verify/validate, current manager channel read, domain keys, checked anchor+1 maximum and idempotent receipt/event. Rewriting unchanged mapping values has equal storage but does not model SSTORE gas."
+    },
+    {
+      "start": 359,
+      "end": 361,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 362,
+      "end": 370,
+      "status": "translated",
+      "label": "public backing query wrapper",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.hasSignedHeadBacking"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.current_backing_implies_historical"
+      ],
+      "note": "Wrapper and private body share one Lean definition, preserving arguments and Boolean result."
+    },
+    {
+      "start": 371,
+      "end": 373,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 374,
+      "end": 383,
+      "status": "translated",
+      "label": "Manager backing requirement",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.requireSignedHeadBacking"
+      ],
+      "theorems": [],
+      "note": "Getter status Active uses historical policy; all other statuses require current anchor; failure reports BackingProofNotAttested."
+    },
+    {
+      "start": 384,
+      "end": 384,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 385,
+      "end": 396,
+      "status": "translated",
+      "label": "current versus historical receipt policy",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.hasSignedHeadBacking"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.current_backing_checks_live_head",
+        "Zkp.Implementation.CloseFunding.current_backing_implies_historical"
+      ],
+      "note": "Requires exact bound manager and nonzero receipt; current policy compares anchor-1 to live reorg-aware post head."
+    },
+    {
+      "start": 397,
+      "end": 399,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 400,
+      "end": 414,
+      "status": "translated",
+      "label": "materialize signed head entrypoint",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.materializeSignedHead",
+        "Zkp.Implementation.CloseFunding.prepareSignedHead"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.signed_head_reverification_failure",
+        "Zkp.Implementation.CloseFunding.prepared_signed_head_requires_receipt_and_local_checks",
+        "Zkp.Implementation.CloseFunding.materialization_call_complete_vector",
+        "Zkp.Implementation.CloseFunding.materialization_call_one_shot"
+      ],
+      "note": "Reverifies exact compact bytes; validates public inputs; requires exact proof receipt, finalized settled chain/TFD and all local materialization gates. No terminal signature input."
+    },
+    {
+      "start": 415,
+      "end": 417,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 418,
+      "end": 424,
+      "status": "translated",
+      "label": "compact verifier call and failure mapping",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.verifyBackingProof"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.verifier_failure_rejected"
+      ],
+      "note": "Actual call represented by Environment.verifyCompact; any external failure maps to BackingProofInvalid. Verifier/PCS truth remains undischarged."
+    },
+    {
+      "start": 425,
+      "end": 427,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 428,
+      "end": 449,
+      "status": "translated",
+      "label": "complete materialization admission gates",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.prepareMaterialization"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.prepared_materialization_guards",
+        "Zkp.Implementation.CloseFunding.materialized_cannot_prepare",
+        "Zkp.Implementation.CloseFunding.successful_plan_refuses_second_materialization"
+      ],
+      "note": "Checks bound manager, frozen/nonexited/Closed/exact generation, nonzero digest, finalized signed root, current finalized anchor, nonzero bounded token count."
+    },
+    {
+      "start": 450,
+      "end": 459,
+      "status": "translated",
+      "label": "complete Manager-owned vector read",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.readVector"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.read_vector_length",
+        "Zkp.Implementation.CloseFunding.read_vector_tokens_unique",
+        "Zkp.Implementation.CloseFunding.read_vector_amounts_from_manager"
+      ],
+      "note": "Reads all active registry entries and corresponding Manager amounts before any credit; nested duplicate scan represented by visited-token membership."
+    },
+    {
+      "start": 460,
+      "end": 460,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 461,
+      "end": 467,
+      "status": "translated",
+      "label": "latch and exact per-token Rollup credits",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.latchState",
+        "Zkp.Implementation.CloseFunding.creditVector",
+        "Zkp.Implementation.CloseFunding.creditChannelExit",
+        "Zkp.Implementation.CloseFunding.materializeSignedHead",
+        "Zkp.Implementation.CloseFunding.commit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.materialization_call_exact_accounting",
+        "Zkp.Implementation.CloseFunding.materialization_call_complete_vector",
+        "Zkp.Implementation.CloseFunding.materialization_call_one_shot",
+        "Zkp.Implementation.CloseFunding.failed_materialization_rolls_back_all"
+      ],
+      "note": "Latch precedes credit loop; zero amounts skip calls. Expanded Rollup checks caller/runtime chain and checked escrow debit/pending addition. All storage/logs commit together only on success; EVM refinement is explicit."
+    },
+    {
+      "start": 468,
+      "end": 473,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 474,
+      "end": 500,
+      "status": "translated",
+      "label": "26 public-input parsing and finalized anchor",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.validateBackingPublicInputs",
+        "Zkp.Implementation.CloseFunding.checkU32Limbs",
+        "Zkp.Implementation.CloseFunding.limbAt",
+        "Zkp.Implementation.CloseFunding.BackingStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.validated_pi_has_exact_length"
+      ],
+      "note": "Exact length; first 25 canonical u32, final u63; bound channel; offsets 1/9/17; finalized backing root and anchor≤finalized. Does not require backing root equal signed fund root, or current channel anchor at attestation time."
+    },
+    {
+      "start": 501,
+      "end": 501,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 502,
+      "end": 519,
+      "status": "translated",
+      "label": "statement domain key",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.backingStatementInput",
+        "Zkp.Implementation.CloseFunding.backingStatementKey",
+        "Zkp.Implementation.CloseFunding.StatementKeyInput"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.statement_key_complete_domain"
+      ],
+      "note": "Exact ordered IMBA/chain/deployment/Rollup/Manager/channel/settled-chain/TFD preimage; ABI+keccak implemented by external oracle, no injectivity axiom."
+    },
+    {
+      "start": 520,
+      "end": 520,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 521,
+      "end": 525,
+      "status": "translated",
+      "label": "proof receipt domain key",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.backingProofInput",
+        "Zkp.Implementation.CloseFunding.backingProofId",
+        "Zkp.Implementation.CloseFunding.ProofKeyInput"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.proof_key_exact_bytes_domain"
+      ],
+      "note": "Exact ordered IMBP/chain/deployment/Rollup/Manager/hash(exact proof bytes) preimage; hash semantics remain explicit."
+    },
+    {
+      "start": 526,
+      "end": 526,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 527,
+      "end": 533,
+      "status": "translated",
+      "label": "private limb-match helper",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.limbsMatch",
+        "Zkp.Implementation.CloseFunding.limbsMatchLoop",
+        "Zkp.Implementation.CloseFunding.limbAt"
+      ],
+      "theorems": [],
+      "note": "Eight big-endian 32-bit comparisons, early false and indexed array failure. Private helper is unused by live paths; offset arithmetic assumes source-internal bounded offsets."
+    },
+    {
+      "start": 534,
+      "end": 534,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 535,
+      "end": 541,
+      "status": "translated",
+      "label": "limbs to bytes32",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.limbsToBytes32",
+        "Zkp.Implementation.CloseFunding.limbsToBytes32Loop",
+        "Zkp.Implementation.CloseFunding.limbAt"
+      ],
+      "theorems": [],
+      "note": "Eight left shifts and bitwise OR with explicit 256-bit reduction; array access can fail. General shift/bitwise EVM refinement is not proved."
+    },
+    {
+      "start": 542,
+      "end": 543,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 544,
+      "end": 551,
+      "status": "translated",
+      "label": "deployed native tombstone",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.materializeNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.retired_native_rejects"
+      ],
+      "note": "Unconditional explicit deprecation before argument-dependent work."
+    },
+    {
+      "start": 552,
+      "end": 553,
+      "status": "non-executable",
+      "label": "source comments, whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable translation or proof-coverage credit is claimed for these lines."
+    },
+    {
+      "start": 554,
+      "end": 561,
+      "status": "translated",
+      "label": "deployed ERC20 tombstone",
+      "declarations": [
+        "Zkp.Implementation.CloseFunding.materializeERC20"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseFunding.retired_erc20_rejects"
+      ],
+      "note": "Unconditional explicit deprecation before argument-dependent work."
+    },
+    {
+      "start": 562,
+      "end": 562,
+      "status": "non-executable",
+      "label": "closing structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable behavior."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "evm_refinement",
+      "obligation": "Manual translation is not a proof of Solidity compiler/Yul/EVM execution, gas, errors/log ABI or storage layout. The commit operator assumes transaction-wide rollback and storage isolation.",
+      "discharged": false
+    },
+    {
+      "name": "canonical_abi_widths",
+      "obligation": "Nat getters/arguments stand for successfully decoded canonical uint32/uint64/uint256/address fields. Private loop offsets are bounded internal call arguments; ABI decoding and these type correspondences are not extracted.",
+      "discharged": false
+    },
+    {
+      "name": "coherent_static_getters",
+      "obligation": "Environment getters represent exact bound contract getter calls, including failures; repeated static reads in one call must be coherent. Call cost/evaluation trace and adversarial getter internals are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "compact_verifier_soundness",
+      "obligation": "Environment.verifyCompact is the constructor-pinned adapter's exact byte-input call; the model proves local handling, not the MLE/PCS/recursive Balance proof or canonical compact decoder.",
+      "discharged": false
+    },
+    {
+      "name": "hash_and_abi_encoding",
+      "obligation": "StatementKeyInput/ProofKeyInput preserve exact source field order and tags; oracles must implement keccak256/abi.encode and exact proof-byte hashing. Cross-preimage receipt uniqueness needs collision resistance; none is an axiom here.",
+      "discharged": false
+    },
+    {
+      "name": "rollup_registry_finality",
+      "obligation": "Rollup getters for channel registration, global block head, latest finalized block and finalized roots must faithfully reflect its storage/finality rules. Canonical-chain/reorg finality is not proved by this module.",
+      "discharged": false
+    },
+    {
+      "name": "rollup_installation_and_journal",
+      "obligation": "IntmaxRollup.registerSettlementManager installs a set-once materializer and atomically invokes bindManager; postBlock uses increasing global numbers and rollback invokes descending journal entries. Full Rollup caller/refinement invariants are outside this file.",
+      "discharged": false
+    },
+    {
+      "name": "rollup_credit_dependency",
+      "obligation": "creditChannelExit and native/token escrow debit/pending-credit arithmetic are expanded from IntmaxRollup.sol781–802 with runtime chain and installed-caller checks. Integration with all other Rollup ledger operations is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "manager_finalized_vector",
+      "obligation": "Manager getters expose one coherent finalized close and complete registry/amount vector. Local model checks count/uniqueness and exact readings; the proof that those funds belong to signed H, and PW/full-B high-water composition, remains in the external verifier/Manager refinement.",
+      "discharged": false
+    },
+    {
+      "name": "legacy_external_effects",
+      "obligation": "LegacyCalls translates sequential authorizeCloseFunding and withdrawal calls and their failure propagation, but does not model their foreign storage. Current Manager's authorizeCloseFunding is a fail-closed tombstone; legacy successful economics are not certified.",
+      "discharged": false
+    },
+    {
+      "name": "transaction_sequence_composition",
+      "obligation": "Successful-call one-shot theorem fixes coherent Environment getters. Arbitrary intervening EVM calls, receipt finality, adversarial reentrancy/isolation, and system-wide liveness require additional refinement and composition.",
+      "discharged": false
+    }
+  ]
+}

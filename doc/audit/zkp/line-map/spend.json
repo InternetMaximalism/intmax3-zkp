@@ -1,0 +1,1006 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/spend_circuit.rs",
+  "source_sha256": "a1ddfa2e55350ac1d8fb33cff9fe39ddf1cb3cdaedea09e6ba6e38e7fee83b7a",
+  "source_lines": 569,
+  "module": "Zkp.Implementation.Spend",
+  "model": "doc/audit/zkp/Zkp/Implementation/Spend.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 40,
+      "status": "dependency-boundary",
+      "label": "Imported Plonky2, domain, Merkle and serialization dependencies",
+      "declarations": [
+        "Zkp.Implementation.Spend.Environment",
+        "Zkp.Implementation.Spend.AssetMerkle",
+        "Zkp.Implementation.Spend.FieldAndGadgetLowering",
+        "Zkp.Implementation.Spend.SubLimb",
+        "Zkp.Implementation.Spend.BorrowChain",
+        "Zkp.Implementation.Spend.SubtractionOutputTraceAt",
+        "Zkp.Implementation.Spend.PathContractAt",
+        "Zkp.Implementation.Spend.ScopedPathContracts",
+        "Zkp.Implementation.Spend.SentPathContractAt"
+      ],
+      "theorems": [],
+      "note": "Generic field/gadget lowering, hashing, typed codecs, proof backend and serializers are not compiler-extracted. Merkle replacement/opening contracts are supplied only at the finitely visited concrete tuples; no global exact opening or finite-hash injectivity premise."
+    },
+    {
+      "start": 41,
+      "end": 41,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 42,
+      "end": 42,
+      "status": "translated",
+      "label": "SPEND_PUBLIC_INPUTS_LEN",
+      "declarations": [
+        "Zkp.Implementation.Spend.publicInputsLength",
+        "Zkp.Implementation.Spend.txLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.target_encoding_has_exact_14_words"
+      ],
+      "note": "4+4+5+1 =14. Imported widths are explicit model constants."
+    },
+    {
+      "start": 43,
+      "end": 43,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 44,
+      "end": 63,
+      "status": "translated",
+      "label": "SpendError",
+      "declarations": [
+        "Zkp.Implementation.Spend.Error",
+        "Zkp.Implementation.Spend.RunFault"
+      ],
+      "theorems": [],
+      "note": "All six error categories are retained. Diagnostic String formatting is omitted; native nonce and witness assertion panics are separately modeled, not converted into SpendError."
+    },
+    {
+      "start": 64,
+      "end": 64,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 65,
+      "end": 71,
+      "status": "translated",
+      "label": "SpendPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.Spend.PublicInputs",
+        "Zkp.Implementation.Spend.Hash4",
+        "Zkp.Implementation.Spend.Tx"
+      ],
+      "theorems": [],
+      "note": "Field ordering preserved; decoded Nat words overapproximate source u64/hash representations, whose canonical interpretation remains a boundary."
+    },
+    {
+      "start": 72,
+      "end": 72,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 73,
+      "end": 81,
+      "status": "translated",
+      "label": "SpendPublicInputs::from_pis_u64 minimum length",
+      "declarations": [
+        "Zkp.Implementation.Spend.parseNativePublicInputs",
+        "Zkp.Implementation.Spend.parseTargetPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.native_parser_keeps_actual_cast_and_nonzero_semantics"
+      ],
+      "note": "Accepts at least14 words, not exact length. Fixed-length helper slice decoding cannot fail on shape after this guard; representational semantics are a dependency."
+    },
+    {
+      "start": 82,
+      "end": 108,
+      "status": "translated",
+      "label": "SpendPublicInputs::from_pis_u64 ordered fields",
+      "declarations": [
+        "Zkp.Implementation.Spend.parseNativePublicInputs",
+        "Zkp.Implementation.Spend.PublicInputs.targets",
+        "Zkp.Implementation.Spend.PublicInputTargets.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.native_public_input_round_trip_on_typed_domain"
+      ],
+      "note": "Offsets0..3 previous,4..7 new,8..12 Tx,13 flag. Native Tx nonce as u32 is modulo2^32, flag is nonzero; ignored suffix retained in semantics. Native u64 input typing is not an arbitrary Nat range gate."
+    },
+    {
+      "start": 109,
+      "end": 109,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 110,
+      "end": 119,
+      "status": "translated",
+      "label": "SpendWitness fields",
+      "declarations": [
+        "Zkp.Implementation.Spend.Witness",
+        "Zkp.Implementation.Spend.Witness.NativeTyped",
+        "Zkp.Implementation.Spend.witnessRows"
+      ],
+      "theorems": [],
+      "note": "All private witness fields retained. Vec shape and source native domains are distinguished from computed circuit values."
+    },
+    {
+      "start": 120,
+      "end": 120,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 121,
+      "end": 128,
+      "status": "translated",
+      "label": "SpendWitness::to_public_inputs lengths",
+      "declarations": [
+        "Zkp.Implementation.Spend.nativeToPublicInputs",
+        "Zkp.Implementation.Spend.vectorLengthsCorrect",
+        "Zkp.Implementation.Spend.zipRows",
+        "Zkp.Implementation.Spend.witnessRows"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.zip_rows_preserves_complete_equal_length_vectors",
+        "Zkp.Implementation.Spend.witness_length_gate_includes_all_64_rows"
+      ],
+      "note": "All three vectors must have64 entries before indexed iteration; the zip model cannot silently truncate an admitted witness."
+    },
+    {
+      "start": 129,
+      "end": 140,
+      "status": "translated",
+      "label": "Native ordered before-root verification",
+      "declarations": [
+        "Zkp.Implementation.Spend.nativeDebitFold",
+        "Zkp.Implementation.Spend.AssetMerkle",
+        "Zkp.Implementation.Spend.PathContractAt",
+        "Zkp.Implementation.Spend.ScopedPathContracts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.native_debit_fold_success_uses_same_ordered_root_fold"
+      ],
+      "note": "Each path opens the current running root before the balance check. Hash/path semantics are opaque dependency calls, not proven cryptographic soundness."
+    },
+    {
+      "start": 141,
+      "end": 150,
+      "status": "translated",
+      "label": "Native amount check, subtract and next root",
+      "declarations": [
+        "Zkp.Implementation.Spend.nativeDebitFold",
+        "Zkp.Implementation.Spend.afterBalance",
+        "Zkp.Implementation.Spend.debitRootFold",
+        "Zkp.Implementation.Spend.assetUpdates",
+        "Zkp.Implementation.Spend.AdmittedDebits",
+        "Zkp.Implementation.Spend.debitedAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.arbitrary_trace_conserves_each_token_exactly",
+        "Zkp.Implementation.Spend.aggregate_debits_never_exceed_initial_token_fund",
+        "Zkp.Implementation.Spend.arbitrary_repeated_token_spends_do_not_overwrite_earlier_debits"
+      ],
+      "note": "Explicit insufficient-balance rejection precedes U256 subtraction. Current root is updated every iteration, including same-token and zero-amount rows. Exact integer interpretation of native U256 limbs is an imported-code boundary."
+    },
+    {
+      "start": 151,
+      "end": 152,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 153,
+      "end": 160,
+      "status": "translated",
+      "label": "Native transfer root and Tx",
+      "declarations": [
+        "Zkp.Implementation.Spend.nativeToPublicInputs",
+        "Zkp.Implementation.Spend.Environment",
+        "Zkp.Implementation.Spend.Tx",
+        "Zkp.Implementation.Spend.Transfer.words",
+        "Zkp.Implementation.Spend.u256Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.typed_transfer_preimage_is_25_words"
+      ],
+      "note": "Preserves call/error precedence and Tx nonce from witness. Ordered64-leaf root construction and native/target hash correspondence are explicit unresolved dependencies, not replaced by assumed sender authority."
+    },
+    {
+      "start": 161,
+      "end": 162,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 163,
+      "end": 172,
+      "status": "translated",
+      "label": "Native sent-tree empty check and insertion",
+      "declarations": [
+        "Zkp.Implementation.Spend.nativeToPublicInputs",
+        "Zkp.Implementation.Spend.emptyTx",
+        "Zkp.Implementation.Spend.SentMap",
+        "Zkp.Implementation.Spend.putSentTx",
+        "Zkp.Implementation.Spend.SentPathContractAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.scoped_sent_path_inserts_only_at_the_opened_empty_nonce"
+      ],
+      "note": "Empty Tx root is checked at tx_nonce and same path computes inserted root. The theorem uses separately supplied concrete empty-opening/replacement semantics."
+    },
+    {
+      "start": 173,
+      "end": 173,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 174,
+      "end": 181,
+      "status": "translated",
+      "label": "Native next PrivateState and u32 increment",
+      "declarations": [
+        "Zkp.Implementation.Spend.PrivateState",
+        "Zkp.Implementation.Spend.PrivateState.words",
+        "Zkp.Implementation.Spend.nextPrivateState",
+        "Zkp.Implementation.Spend.nativeNonceIncrement",
+        "Zkp.Implementation.Spend.OverflowMode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.new_private_state_preserves_unrelated_roots_and_salt",
+        "Zkp.Implementation.Spend.native_field_nonce_agreement_requires_nonoverflow"
+      ],
+      "note": "Keeps nullifier root and salt, chains previous commitment and updates asset/sent roots. Rust checked versus wrapping u32 addition is a build-mode parameter; field equality is only proved within explicit nonoverflow bounds."
+    },
+    {
+      "start": 182,
+      "end": 182,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 183,
+      "end": 194,
+      "status": "translated",
+      "label": "Native nonce-equality flag and private commitments",
+      "declarations": [
+        "Zkp.Implementation.Spend.assemblePublicInputs",
+        "Zkp.Implementation.Spend.nativeToPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.validity_bit_is_nonce_equality_not_a_required_true_gate",
+        "Zkp.Implementation.Spend.native_and_target_public_inputs_agree_on_nonoverflow_domain"
+      ],
+      "note": "The flag is reported, not asserted true. Private-state hash semantics and native/target helper agreement are dependency assumptions; no caller validity/finality assertion is invented."
+    },
+    {
+      "start": 195,
+      "end": 195,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 196,
+      "end": 202,
+      "status": "translated",
+      "label": "SpendPublicInputsTarget",
+      "declarations": [
+        "Zkp.Implementation.Spend.PublicInputTargets"
+      ],
+      "theorems": [],
+      "note": "A raw validity wire is represented separately from the computed Boolean returned by this constructor."
+    },
+    {
+      "start": 203,
+      "end": 203,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 204,
+      "end": 213,
+      "status": "translated",
+      "label": "Target public-input encoding",
+      "declarations": [
+        "Zkp.Implementation.Spend.PublicInputTargets.words",
+        "Zkp.Implementation.Spend.PublicInputs.targets"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.target_encoding_has_exact_14_words"
+      ],
+      "note": "Ordered4+4+5+1 words and exact encoder length; target identity/allocation is not compiler-refined."
+    },
+    {
+      "start": 214,
+      "end": 214,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 215,
+      "end": 233,
+      "status": "translated",
+      "label": "Target public-input parsing",
+      "declarations": [
+        "Zkp.Implementation.Spend.parseTargetPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.target_parser_round_trip_with_arbitrary_suffix"
+      ],
+      "note": "Minimum14 accepts suffix; raw nonce and BoolTarget::new_unsafe flag are not strengthened with range/Boolean checks."
+    },
+    {
+      "start": 234,
+      "end": 234,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 235,
+      "end": 247,
+      "status": "translated",
+      "label": "Public-input witness assignment",
+      "declarations": [
+        "Zkp.Implementation.Spend.WitnessWriteOp",
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.PublicInputs.targets"
+      ],
+      "theorems": [],
+      "note": "Assignment order previous/new/Tx/Boolean retained. Raw target indices and PartialWitness consistency/conflict behavior remain backend boundaries."
+    },
+    {
+      "start": 248,
+      "end": 248,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 249,
+      "end": 258,
+      "status": "translated",
+      "label": "SpendTarget fields",
+      "declarations": [
+        "Zkp.Implementation.Spend.Witness",
+        "Zkp.Implementation.Spend.RawCircuitGates"
+      ],
+      "theorems": [],
+      "note": "Same decoded fields as Witness; unconstrained allocation versus checked/computed wires is represented by gates and constructorProgram rather than a Rust target-index memory model."
+    },
+    {
+      "start": 259,
+      "end": 259,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 260,
+      "end": 268,
+      "status": "translated",
+      "label": "Allocate/range Tx nonce and private state",
+      "declarations": [
+        "Zkp.Implementation.Spend.BuildOp",
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.RawCircuitGates"
+      ],
+      "theorems": [],
+      "note": "tx_nonce explicitlyrange32; PrivateStateTarget::new does not add a private nonce u32 check. No such fabricated gate appears in the model."
+    },
+    {
+      "start": 269,
+      "end": 275,
+      "status": "translated",
+      "label": "Checked transfer and before-balance allocation",
+      "declarations": [
+        "Zkp.Implementation.Spend.Transfer.AllocationChecks",
+        "Zkp.Implementation.Spend.RawCircuitGates",
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.amountLimit",
+        "Zkp.Implementation.Spend.u256Words"
+      ],
+      "theorems": [],
+      "note": "All64 transfers and64 U256 before balances. TransferTarget::new(true) checks recipient/amount/aux but not token_index directly. Limb/canonical target lowering is unresolved."
+    },
+    {
+      "start": 276,
+      "end": 291,
+      "status": "translated",
+      "label": "Fixed-height path allocations and target return",
+      "declarations": [
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.assetTreeHeight",
+        "Zkp.Implementation.Spend.sentTreeHeight",
+        "Zkp.Implementation.Spend.RawCircuitGates"
+      ],
+      "theorems": [],
+      "note": "64 asset paths height32 and one sent path height32; source path target handle allocation is summarized, not extracted."
+    },
+    {
+      "start": 292,
+      "end": 292,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 293,
+      "end": 308,
+      "status": "translated",
+      "label": "SpendTarget::set_witness length assertions",
+      "declarations": [
+        "Zkp.Implementation.Spend.targetWitnessShapeCorrect",
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.RunFault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.witness_write_checks_vector_lengths_before_assignments"
+      ],
+      "note": "Three exact64 assertions before assignments. Assertion failure is witnessShapePanic; Rust message bytes are not modeled."
+    },
+    {
+      "start": 309,
+      "end": 309,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 310,
+      "end": 312,
+      "status": "translated",
+      "label": "Set Tx nonce and private witness",
+      "declarations": [
+        "Zkp.Implementation.Spend.WitnessWriteOp",
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.Witness.NativeTyped"
+      ],
+      "theorems": [],
+      "note": "Preserves canonical-u32 setter versus unverified private values. Full field conversion and target memory effects remain dependency semantics."
+    },
+    {
+      "start": 313,
+      "end": 313,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 314,
+      "end": 316,
+      "status": "translated",
+      "label": "Set all transfer witnesses",
+      "declarations": [
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.Transfer"
+      ],
+      "theorems": [],
+      "note": "Ordered64 writes on validated shape; setter implementation and byte limb representation remain a named boundary."
+    },
+    {
+      "start": 317,
+      "end": 317,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 318,
+      "end": 324,
+      "status": "translated",
+      "label": "Set all before-balance witnesses",
+      "declarations": [
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.SubLimb",
+        "Zkp.Implementation.Spend.SubtractionOutputTraceAt"
+      ],
+      "theorems": [],
+      "note": "Ordered64 input U256 assignments, distinct from computed subtraction results."
+    },
+    {
+      "start": 325,
+      "end": 325,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 326,
+      "end": 332,
+      "status": "translated",
+      "label": "Set asset proof witnesses",
+      "declarations": [
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.targetWitnessShapeCorrect"
+      ],
+      "theorems": [],
+      "note": "Ordered64 path assignments; dependency setters require path height matching the allocated32."
+    },
+    {
+      "start": 333,
+      "end": 333,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 334,
+      "end": 337,
+      "status": "translated",
+      "label": "Set sent-tree proof witness",
+      "declarations": [
+        "Zkp.Implementation.Spend.witnessWriteProgram",
+        "Zkp.Implementation.Spend.targetWitnessShapeCorrect"
+      ],
+      "theorems": [],
+      "note": "Final private path assignment. Matching height is checked by imported setter semantics; no cryptographic path validity is inferred from assignment."
+    },
+    {
+      "start": 338,
+      "end": 338,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 339,
+      "end": 355,
+      "status": "dependency-boundary",
+      "label": "SpendCircuit generic data and implementation bounds",
+      "declarations": [
+        "Zkp.Implementation.Spend.CircuitImage",
+        "Zkp.Implementation.Spend.Environment",
+        "Zkp.Implementation.Spend.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Generic compiled CircuitData/target/PI payload is abstracted as CircuitImage. RichField/extension/config/AlgebraicHasher traits and CircuitData semantics are not translated or proven by Std-only Lean."
+    },
+    {
+      "start": 356,
+      "end": 359,
+      "status": "translated",
+      "label": "Constructor config and allocation",
+      "declarations": [
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.BuildOp"
+      ],
+      "theorems": [],
+      "note": "Source uses standard_recursion_config; model does not label it a ZK-config constructor."
+    },
+    {
+      "start": 360,
+      "end": 365,
+      "status": "translated",
+      "label": "Ordered64 asset update iteration",
+      "declarations": [
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.RawDebitGates",
+        "Zkp.Implementation.Spend.debitRootFold",
+        "Zkp.Implementation.Spend.assetUpdates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.constructor_performs_all_64_ordered_asset_updates"
+      ],
+      "note": "Loop order retained. Future rows must open the current post-subtraction root; duplicate token indices are allowed."
+    },
+    {
+      "start": 366,
+      "end": 371,
+      "status": "translated",
+      "label": "Asset opening and index dependency",
+      "declarations": [
+        "Zkp.Implementation.Spend.RawDebitGates",
+        "Zkp.Implementation.Spend.PathContractAt",
+        "Zkp.Implementation.Spend.ScopedPathContracts",
+        "Zkp.Implementation.Spend.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.scoped_paths_and_gates_authenticate_each_running_balance"
+      ],
+      "note": "Root equality is an actual gate. token_index<2^32 arises from imported Merkle split_le(height32), not direct transfer allocation. Opening authenticity is scoped to concrete visited tuples."
+    },
+    {
+      "start": 372,
+      "end": 372,
+      "status": "translated",
+      "label": "U256Target subtraction with final borrow zero",
+      "declarations": [
+        "Zkp.Implementation.Spend.SubLimb",
+        "Zkp.Implementation.Spend.BorrowChain",
+        "Zkp.Implementation.Spend.littleValue",
+        "Zkp.Implementation.Spend.SubtractionTraceAt",
+        "Zkp.Implementation.Spend.SubtractionOutputTraceAt",
+        "Zkp.Implementation.Spend.RawDebitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.borrow_chain_exact_integer_equation",
+        "Zkp.Implementation.Spend.final_zero_borrow_proves_exact_nonunderflow_subtraction",
+        "Zkp.Implementation.Spend.concrete_subtraction_trace_derives_no_underflow",
+        "Zkp.Implementation.Spend.concrete_subtraction_output_matches_natural_difference",
+        "Zkp.Implementation.Spend.output_trace_supplies_input_trace_and_exact_result"
+      ],
+      "note": "Imported U256Target::sub is modeled as8 least-significant-first sub_u32 equations with canonical limb/borrow ranges and initial/final borrow0. Integer nonunderflow and exact result are PROVED from local equations, not assumed aggregate safety. Actual Plonky2 gadget-to-equation lowering remains open."
+    },
+    {
+      "start": 373,
+      "end": 375,
+      "status": "translated",
+      "label": "Computed subtraction output feeds next asset root",
+      "declarations": [
+        "Zkp.Implementation.Spend.RawDebitGates",
+        "Zkp.Implementation.Spend.DebitGates",
+        "Zkp.Implementation.Spend.assetUpdates",
+        "Zkp.Implementation.Spend.debitRootFold",
+        "Zkp.Implementation.Spend.debitedAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.local_limb_traces_derive_all_sequential_debit_gates",
+        "Zkp.Implementation.Spend.scoped_paths_and_local_limb_traces_prove_conservation",
+        "Zkp.Implementation.Spend.proved_asset_root_encodes_per_token_conservation",
+        "Zkp.Implementation.Spend.omitted_token_debit_is_zero",
+        "Zkp.Implementation.Spend.absent_token_balance_is_unchanged",
+        "Zkp.Implementation.Spend.same_token_trace_sums_all_deductions"
+      ],
+      "note": "Raw fold uses actual local subtraction output. Proved bridge identifies it with natural subtraction, authenticates each running balance under finite path contracts, then derives arbitrary-trace per-token exact debit and other-token frame."
+    },
+    {
+      "start": 376,
+      "end": 384,
+      "status": "translated",
+      "label": "Circuit transfer tree and Tx",
+      "declarations": [
+        "Zkp.Implementation.Spend.targetPublicInputs",
+        "Zkp.Implementation.Spend.Environment",
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.Tx"
+      ],
+      "theorems": [],
+      "note": "Root covers ordered64 transfers; leaf hash/tree semantics and native/target agreement remain explicit imported dependency obligations."
+    },
+    {
+      "start": 385,
+      "end": 386,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 387,
+      "end": 398,
+      "status": "translated",
+      "label": "Circuit empty sent-tree check and new root",
+      "declarations": [
+        "Zkp.Implementation.Spend.targetPublicInputs",
+        "Zkp.Implementation.Spend.RawCircuitGates",
+        "Zkp.Implementation.Spend.emptyTx",
+        "Zkp.Implementation.Spend.SentPathContractAt",
+        "Zkp.Implementation.Spend.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.scoped_sent_path_inserts_only_at_the_opened_empty_nonce"
+      ],
+      "note": "Actual empty leaf check and insertion preserved; no assertion that tx_nonce equals private nonce is added here. Global replay/finality properties are outside this circuit model."
+    },
+    {
+      "start": 399,
+      "end": 399,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 400,
+      "end": 410,
+      "status": "translated",
+      "label": "Circuit private-state hash and field nonce increment",
+      "declarations": [
+        "Zkp.Implementation.Spend.targetPublicInputs",
+        "Zkp.Implementation.Spend.fieldNonceIncrement",
+        "Zkp.Implementation.Spend.nextPrivateState",
+        "Zkp.Implementation.Spend.PrivateState.words",
+        "Zkp.Implementation.Spend.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.native_field_nonce_agreement_requires_nonoverflow",
+        "Zkp.Implementation.Spend.new_private_state_preserves_unrelated_roots_and_salt"
+      ],
+      "note": "Adds1 in field, not in checked u32. Preserves roots/salt exactly; hash semantics, field decoding and actual private commitment binding remain dependency boundaries."
+    },
+    {
+      "start": 411,
+      "end": 411,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 412,
+      "end": 419,
+      "status": "translated",
+      "label": "Computed equality validity output",
+      "declarations": [
+        "Zkp.Implementation.Spend.assemblePublicInputs",
+        "Zkp.Implementation.Spend.targetPublicInputs",
+        "Zkp.Implementation.Spend.RawCircuitGates",
+        "Zkp.Implementation.Spend.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.circuit_output_validity_requires_consumer_check",
+        "Zkp.Implementation.Spend.constructor_registers_flag_without_asserting_true"
+      ],
+      "note": "Computed Boolean is equality(tx_nonce,private nonce), but constructor never asserts true. Consumer responsibility is explicit; unsafe parser behavior is not confused with computed constructor flag."
+    },
+    {
+      "start": 420,
+      "end": 420,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 421,
+      "end": 429,
+      "status": "translated",
+      "label": "Register14 public inputs and build",
+      "declarations": [
+        "Zkp.Implementation.Spend.constructorProgram",
+        "Zkp.Implementation.Spend.RawCircuitGates",
+        "Zkp.Implementation.Spend.CircuitGates",
+        "Zkp.Implementation.Spend.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.raw_constructor_gates_derive_circuit_gates",
+        "Zkp.Implementation.Spend.circuit_value_conservation_under_scoped_path_contracts",
+        "Zkp.Implementation.Spend.raw_constraints_and_scoped_dependencies_prove_per_token_conservation"
+      ],
+      "note": "Registration order retained. End-to-end theorem from raw constraints requires scoped Merkle and local gadget extraction, then derives nonunderflow and per-token conservation; actual compiled proof verification/PI authenticity and private-state provenance remain unresolved."
+    },
+    {
+      "start": 430,
+      "end": 430,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 431,
+      "end": 442,
+      "status": "translated",
+      "label": "SpendCircuit::prove admission and backend call",
+      "declarations": [
+        "Zkp.Implementation.Spend.prove",
+        "Zkp.Implementation.Spend.nativeToPublicInputs",
+        "Zkp.Implementation.Spend.targetWitnessShapeCorrect",
+        "Zkp.Implementation.Spend.witnessWriteProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.proving_cannot_bypass_native_admission"
+      ],
+      "note": "Native to_public_inputs runs before witness assignment/backend prove; errors/panics distinguished. The wrapper theorem does not prove cryptographic soundness or trusted circuit deserialization."
+    },
+    {
+      "start": 443,
+      "end": 443,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 444,
+      "end": 458,
+      "status": "translated",
+      "label": "Serialize circuit payload",
+      "declarations": [
+        "Zkp.Implementation.Spend.toBytes",
+        "Zkp.Implementation.Spend.CircuitImage",
+        "Zkp.Implementation.Spend.SerializationFailure"
+      ],
+      "theorems": [],
+      "note": "Exact order serialize CircuitData then bincode payload; error stage strings retained, diagnostic contents opaque. AllGateSerializer/AllGeneratorSerializer and bincode byte semantics are not verified."
+    },
+    {
+      "start": 459,
+      "end": 459,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 460,
+      "end": 480,
+      "status": "translated",
+      "label": "Deserialize circuit payload",
+      "declarations": [
+        "Zkp.Implementation.Spend.fromBytes",
+        "Zkp.Implementation.Spend.CircuitImage",
+        "Zkp.Implementation.Spend.SerializationFailure"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Spend.serialization_preserves_payload_handles_after_success"
+      ],
+      "note": "Decode bincode then CircuitData, preserving target and PI handles. Source ignores bincode consumed-byte count and does not independently authenticate serialized circuit; model preserves those facts."
+    },
+    {
+      "start": 481,
+      "end": 481,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 482,
+      "end": 487,
+      "status": "translated",
+      "label": "SpendCircuitBytes payload type",
+      "declarations": [
+        "Zkp.Implementation.Spend.CircuitImage"
+      ],
+      "theorems": [],
+      "note": "Field order data/target/public inputs represented; serde derive and Vec<u8> codec remain opaque."
+    },
+    {
+      "start": 488,
+      "end": 488,
+      "status": "non-executable",
+      "label": "Whitespace or structural delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable statement in this interval."
+    },
+    {
+      "start": 489,
+      "end": 569,
+      "status": "test-only",
+      "label": "Existing test_spend_circuit positive proof test",
+      "declarations": [
+        "Zkp.Implementation.Spend.normalTransfer",
+        "Zkp.Implementation.Spend.normalDebitRows",
+        "Zkp.Implementation.Spend.normalAssets"
+      ],
+      "theorems": [],
+      "note": "All source test lines read, not translated as production and not run here. Named Lean examples separately establish small normal arithmetic/admission non-vacuity; they are not Rust test refinement or proof generation."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_and_compiler_refinement",
+      "obligation": "Handwritten declarations and source intervals have not been proved equivalent to Rust, compiler output, target indices, memory allocation, panic/resource behavior or built CircuitData. Std-only Lean does not execute Plonky2.",
+      "discharged": false
+    },
+    {
+      "name": "native_word_domains_and_codec",
+      "obligation": "Rust u32/u64/U256, PoseidonHashOut, Bytes32, Tx and PrivateState codecs must refine decoded Nat fields with actual field canonicality and ordered BE u32 limbs; native input typing and target allocation checks are distinct. Transfer tokenIndex range is not assumed from allocation.",
+      "discharged": false
+    },
+    {
+      "name": "field_and_local_gadget_lowering",
+      "obligation": "For the concrete built constructor, field equality/is_equal/add_const/range_check, split_le(height32), and sub_u32 gates must extract RawCircuitGates, including8 LSB-first local borrow equations, canonical ranges, initial/final borrow0 and actual output wiring. The Lean bridge proves aggregate no-underflow from those equations; it does not assume it.",
+      "discharged": false
+    },
+    {
+      "name": "scoped_asset_merkle_paths",
+      "obligation": "For each concrete visited tree/path/key/input/output tuple, supply PathContractAt under actual leaf hashing, bit ordering and collision resistance. No global all-AssetMap exact opening or injective finite-root assumption is used. The old authenticated private-state root must encode the initial tree.",
+      "discharged": false
+    },
+    {
+      "name": "scoped_sent_tx_merkle_path",
+      "obligation": "Supply SentPathContractAt only for this concrete nonce, empty leaf, old sent tree and newly formed Tx. Imported path-height, bit ordering and hash semantics must justify the specific equality/replacement premise, not assume arbitrary global replay exclusion.",
+      "discharged": false
+    },
+    {
+      "name": "ordered_transfer_tree_and_private_hash",
+      "obligation": "Imported native/circuit64-leaf transfer roots,25-word leaf codec,21-word PrivateState commitment, padding/default Tx and shared native-target hash semantics need separate source/gadget proofs. Private commitment authenticity is not inferred from a bare Hash4 value.",
+      "discharged": false
+    },
+    {
+      "name": "native_nonce_build_profile",
+      "obligation": "Rust nonce+1 u32 overflow behavior depends on compilation overflow settings; the model explicitly parameterizes checked/wrapping. Correspondence with field add_const is proved only when nonce+1<2^32 and fieldOrder>=2^32; source itself has no extra nonce overflow circuit assertion.",
+      "discharged": false
+    },
+    {
+      "name": "witness_assignment_and_proof_backend",
+      "obligation": "PartialWitness setters, field conversions, generator execution, circuit build/prove/verify and public-input integrity remain external. Wrapper success forces modeled native admission but does not establish trusted verification keys or soundness of a supplied serialized CircuitData.",
+      "discharged": false
+    },
+    {
+      "name": "serialization_codec_and_trust",
+      "obligation": "CircuitData AllGate/AllGenerator serialization and bincode serde implementation are opaque delegated operations. from_bytes ignores consumed byte count and does not add a trust check; no exact-end decoding, canonical serialization, or authenticated circuit provenance is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "consumer_and_protocol_scope",
+      "obligation": "Spend reports is_valid but never requires true. Consumers must establish required validity, source ownership, authenticated prior state, freshness/finality, transfer inclusion, replay/nullifier conditions and recipient rules. The proved per-token debit trace is not whole-protocol or cross-channel economic soundness.",
+      "discharged": false
+    }
+  ]
+}

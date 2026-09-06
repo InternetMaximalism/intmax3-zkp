@@ -1,5 +1,9 @@
 # intmax3-zkp — Lean formalization: audit summary
 
+> **Implementation-oriented phase:** see [current linewise progress](./implementation-linewise-progress.md)
+> for exact current source partitions and remaining obligations. The historical whole-system
+> claims below must not be applied to the new partial implementation models.
+
 > **Current alignment, 2026-09-06:** this file retains a historical audit summary, not a
 > current end-to-end certification. [Current scope and assumptions](../lean-current-safety.md)
 > describe runtime parent `05ec7ae` / submodule `6cefc6ac` and five current transition modules. Current proof

@@ -25,7 +25,15 @@ CURRENT = {
         "ChannelSafetyCurrent", "ChannelSafetyAdmission",
         "ChannelSafetyRecovery", "ChannelSafetyExit",
     ),
-    "doc/audit/zkp": ("Zkp.Contracts.CurrentVerification",),
+    "doc/audit/zkp": (
+        "Zkp.Contracts.CurrentVerification",
+        "Zkp.Implementation.SafeERC20", "Zkp.Implementation.BlobJournal",
+        "Zkp.Implementation.SettlementVerifier", "Zkp.Implementation.CloseFunding",
+        "Zkp.Implementation.CloseAssetBacking",
+        "Zkp.Implementation.U256Arithmetic",
+        "Zkp.Implementation.ManagerValue", "Zkp.Implementation.RollupValue",
+        "Zkp.Implementation.Spend",
+    ),
 }
 ARCH_ROOTS = frozenset({
     "ChannelSafety", "ChannelSafety2", "ChannelSafety21", "ChannelSafetyMT",
@@ -47,6 +55,8 @@ REQUIRED_TOOLING = {
     "doc/audit/zkp/lakefile.toml",
     "doc/audit/zkp/lean-toolchain",
     "doc/audit/zkp/Zkp.lean",
+    ".github/ci/lean-line-coverage.py",
+    ".github/ci/test-lean-line-coverage.py",
 }
 
 

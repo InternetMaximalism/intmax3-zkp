@@ -1,5 +1,11 @@
 # Current design / Lean safety boundary — 2026-09-06
 
+> **Implementation continuation:** the five-module / 219-theorem checkpoint below describes
+> `acfaa78`. The subsequent source-oriented translation, exact line inventory and additional
+> conditional theorems are tracked in
+> [implementation-linewise-progress.md](./zkp/implementation-linewise-progress.md).
+> Neither checkpoint certifies every implementation line or whole-system fund safety.
+
 ## Target, continuation and document precedence
 
 Runtime source base: parent **`05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8`**, including

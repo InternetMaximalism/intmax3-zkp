@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "source": "src/ethereum_types/u256.rs",
+  "source_sha256": "55ee90c51a90c35d2ab3fd75679374c26e2080627ece931b3b968be591922469",
+  "source_lines": 452,
+  "module": "Zkp.Implementation.U256Arithmetic",
+  "model": "doc/audit/zkp/Zkp/Implementation/U256Arithmetic.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "Imported Rust, u32 gates and helper traits",
+      "declarations": [],
+      "theorems": [],
+      "note": "Primitive field/u32 gate implementation and its exact compiled lowering remain unproved."
+    },
+    {
+      "start": 23,
+      "end": 23,
+      "status": "translated",
+      "label": "U256_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.limbCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.u256_width_is_exact"
+      ],
+      "note": "Eight 32-bit words give exact 256-bit width; no Rust layout theorem."
+    },
+    {
+      "start": 24,
+      "end": 26,
+      "status": "non-executable",
+      "label": "Big-endian representation comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments are not proof coverage."
+    },
+    {
+      "start": 27,
+      "end": 35,
+      "status": "dependency-boundary",
+      "label": "Native/target fixed-width representation",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.TargetShape",
+        "Zkp.Implementation.U256Arithmetic.Checked",
+        "Zkp.Implementation.U256Arithmetic.valueBE"
+      ],
+      "theorems": [],
+      "note": "Fixed eight-word shape and big-endian value are modeled; native u32 typing/field target representation require compiler/gadget correspondence."
+    },
+    {
+      "start": 36,
+      "end": 275,
+      "status": "untranslated",
+      "label": "Formatting, serialization, conversion, native arithmetic and target accessors",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read but not translated in this bounded target-arithmetic module. In particular native signed subtraction casts/shifts are not certified by natural-number target equations."
+    },
+    {
+      "start": 276,
+      "end": 276,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::add reverse carry chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 277,
+      "end": 290,
+      "status": "translated",
+      "label": "U256Target::add reverse carry chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.addProgram",
+        "Zkp.Implementation.U256Arithmetic.AddGates",
+        "Zkp.Implementation.U256Arithmetic.AddTrace",
+        "Zkp.Implementation.U256Arithmetic.valueLE"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.add_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.add_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_add_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_add_cannot_wrap",
+        "Zkp.Implementation.U256Arithmetic.target_add_committed_result_is_unique",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_add"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width carry composition; each add_many_u32 equation and result range must be supplied by a future gate lowering proof."
+    },
+    {
+      "start": 291,
+      "end": 291,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::add reverse carry chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 292,
+      "end": 300,
+      "status": "translated",
+      "label": "U256Target::add reverse carry chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.addProgram",
+        "Zkp.Implementation.U256Arithmetic.AddGates",
+        "Zkp.Implementation.U256Arithmetic.AddTrace",
+        "Zkp.Implementation.U256Arithmetic.valueLE"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.add_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.add_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_add_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_add_cannot_wrap",
+        "Zkp.Implementation.U256Arithmetic.target_add_committed_result_is_unique",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_add"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width carry composition; each add_many_u32 equation and result range must be supplied by a future gate lowering proof."
+    },
+    {
+      "start": 301,
+      "end": 303,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::add reverse carry chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 304,
+      "end": 310,
+      "status": "translated",
+      "label": "U256Target::sub reverse borrow chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.subProgram",
+        "Zkp.Implementation.U256Arithmetic.SubGates",
+        "Zkp.Implementation.U256Arithmetic.SubTrace"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.sub_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_sub_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_cannot_underflow",
+        "Zkp.Implementation.U256Arithmetic.target_sub_result_is_difference",
+        "Zkp.Implementation.U256Arithmetic.target_sub_does_not_increase_balance",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_sub"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width borrow composition; equations are local imported sub_u32 contracts, not an assumed whole-U256 safety statement."
+    },
+    {
+      "start": 311,
+      "end": 311,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::sub reverse borrow chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 312,
+      "end": 316,
+      "status": "translated",
+      "label": "U256Target::sub reverse borrow chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.subProgram",
+        "Zkp.Implementation.U256Arithmetic.SubGates",
+        "Zkp.Implementation.U256Arithmetic.SubTrace"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.sub_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_sub_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_cannot_underflow",
+        "Zkp.Implementation.U256Arithmetic.target_sub_result_is_difference",
+        "Zkp.Implementation.U256Arithmetic.target_sub_does_not_increase_balance",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_sub"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width borrow composition; equations are local imported sub_u32 contracts, not an assumed whole-U256 safety statement."
+    },
+    {
+      "start": 317,
+      "end": 319,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::sub reverse borrow chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 320,
+      "end": 321,
+      "status": "translated",
+      "label": "U256Target::sub reverse borrow chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.subProgram",
+        "Zkp.Implementation.U256Arithmetic.SubGates",
+        "Zkp.Implementation.U256Arithmetic.SubTrace"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.sub_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_sub_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_cannot_underflow",
+        "Zkp.Implementation.U256Arithmetic.target_sub_result_is_difference",
+        "Zkp.Implementation.U256Arithmetic.target_sub_does_not_increase_balance",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_sub"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width borrow composition; equations are local imported sub_u32 contracts, not an assumed whole-U256 safety statement."
+    },
+    {
+      "start": 322,
+      "end": 322,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::sub reverse borrow chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 323,
+      "end": 329,
+      "status": "translated",
+      "label": "U256Target::sub reverse borrow chain",
+      "declarations": [
+        "Zkp.Implementation.U256Arithmetic.subProgram",
+        "Zkp.Implementation.U256Arithmetic.SubGates",
+        "Zkp.Implementation.U256Arithmetic.SubTrace"
+      ],
+      "theorems": [
+        "Zkp.Implementation.U256Arithmetic.sub_visits_every_limb_in_reverse",
+        "Zkp.Implementation.U256Arithmetic.sub_trace_integer_equation",
+        "Zkp.Implementation.U256Arithmetic.target_sub_is_exact",
+        "Zkp.Implementation.U256Arithmetic.target_sub_cannot_underflow",
+        "Zkp.Implementation.U256Arithmetic.target_sub_result_is_difference",
+        "Zkp.Implementation.U256Arithmetic.target_sub_does_not_increase_balance",
+        "Zkp.Implementation.U256Arithmetic.normal_u256_sub"
+      ],
+      "note": "Exact loop ordering, initial/final zero and full-width borrow composition; equations are local imported sub_u32 contracts, not an assumed whole-U256 safety statement."
+    },
+    {
+      "start": 330,
+      "end": 331,
+      "status": "non-executable",
+      "label": "Comment, blank or structural delimiter in U256Target::sub reverse borrow chain",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comments, blank lines and structural delimiters carry no executable proof coverage."
+    },
+    {
+      "start": 332,
+      "end": 359,
+      "status": "untranslated",
+      "label": "Target comparison methods and closing syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "list_le_circuit, equality and Boolean composition not translated here."
+    },
+    {
+      "start": 360,
+      "end": 452,
+      "status": "test-only",
+      "label": "Existing Rust tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read for intended usage; no Rust tests or circuit proof generation run by this formalization."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "primitive_u32_gate_lowering",
+      "obligation": "Prove that the exact pinned add_many_u32/sub_u32 field gates, wiring and zero connections imply each AddTrace/SubTrace limb equation with exact borrow convention. This module establishes no evaluator/compiler refinement.",
+      "discharged": false
+    },
+    {
+      "name": "canonical_limb_range",
+      "obligation": "Connect checked allocation and primitive result wires to canonical natural 32-bit limbs; arithmetic over field residues alone is insufficient for the no-wrap theorem.",
+      "discharged": false
+    },
+    {
+      "name": "fixed_shape_and_reverse_zip",
+      "obligation": "Refine Rust arrays, target identities, iter().rev().zip(), output ordering and imported accessors to the lists and expanded builder operations.",
+      "discharged": false
+    },
+    {
+      "name": "native_and_other_helpers_pending",
+      "obligation": "Translate native u64/i64 arithmetic, shifts/casts, panic behavior, conversions/serialization, target comparison and shared traits before claiming the whole U256 implementation or native-target agreement.",
+      "discharged": false
+    }
+  ]
+}

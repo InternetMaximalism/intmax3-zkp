@@ -1,5 +1,10 @@
 # intmax3-zkp — Lean formalization & soundness audit
 
+> **Source-oriented continuation:** [implementation linewise progress](./implementation-linewise-progress.md)
+> and [full source inventory](./implementation-inventory.json) distinguish handwritten translations,
+> unresolved dependencies and untranslated files. Line coverage and compiler-checked declaration
+> links are not source/compiler-refinement or whole-system solvency certificates.
+
 > **Current alignment, 2026-09-06:** [current scope and assumptions](../lean-current-safety.md)
 > target runtime parent `05ec7ae` / submodule `6cefc6ac`. Independent
 > `Zkp.Contracts.CurrentVerification` and architecture `ChannelSafetyCurrent`,
