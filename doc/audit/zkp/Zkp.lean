@@ -52,3 +52,7 @@ import Zkp.Implementation.U256Arithmetic
 import Zkp.Implementation.ManagerValue
 import Zkp.Implementation.RollupValue
 import Zkp.Implementation.Spend
+import Zkp.Implementation.FundFlow
+import Zkp.Implementation.CloseCircuit
+import Zkp.Implementation.ClosePublicInputs
+import Zkp.Implementation.CloseEncodingBridge

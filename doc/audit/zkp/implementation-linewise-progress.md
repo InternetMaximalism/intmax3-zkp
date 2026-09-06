@@ -51,17 +51,57 @@ constants、wrapper_config、および MLE の src / contracts/src です。
 | モデル / 原実装 | 現段階で導出している性質 | 主な未証明境界 |
 |---|---|---|
 | [SafeERC20](./Zkp/Implementation/SafeERC20.lean) / `SafeERC20.sol` | CALL 失敗・短い応答・false・非正規 bool の扱い、引数の同一性、正常な空応答 / true 応答 | ABI/CALL/rollback、実際の残高変化、呼出し元の再入保護 |
-| [BlobJournal](./Zkp/Implementation/BlobJournal.lean) / `BlobKZGVerifier.sol` | blob 数・sidecar サイズ、提出 ID / Rollup / commitment / proof hash / length の journal、非ゼロ記録の不変性、precompile 応答形、payload byte-address 対応 | 多項式評価、assembly、challenge、hash/precompile 本体は未翻訳または依存境界 |
+| [BlobJournal](./Zkp/Implementation/BlobJournal.lean) / `BlobKZGVerifier.sol` | journal、sidecar、payload byte-address、順方向 prefix 積・逆方向 batch inversion・最終 scaling の処理、root 定数の modular identities、全 4096 index の bit-reversal involution | barycentric interpolation の完全な正しさ、SimpleCoder assembly、SHA / modexp / point-evaluation の実装、memory / CALL |
 | [SettlementVerifier](./Zkp/Implementation/SettlementVerifier.lean) / `ChannelSettlementVerifier.sol` | pinned adapter/core 呼出し、厳密な PI 長・u32・各位置の対応、close / withdrawal / cancel / claim の引数との結合 | proof soundness、ABI/staticcall、canonical hash encoding、呼出し元の所有権・最新性 |
 | [CloseFunding](./Zkp/Implementation/CloseFunding.lean) / `CloseFundingMaterializer.sol` | freeze generation、現在 anchor、正確な proof receipt と再検証、全 vector と registry の対応、一度だけの materialization、token ごとの escrow 減額と credit 増額 | Manager getter の同一スナップショット、Rollup 呼出し、認証済み所有権、EVM 原子性 |
 | [CloseAssetBacking](./Zkp/Implementation/CloseAssetBacking.lean) / `close_asset_backing_circuit.rs` | 任意の activity witness から正規 prefix・ゼロ suffix、重複禁止、空木から全額 vector の再構成、列挙外ゼロ、26 PI・92-word digest、private / recursive state の結合 | 有限の経路ごとの Merkle/hash binding、field gate lowering、recursive verifier、Balance 自体の保存性 |
 | [U256Arithmetic](./Zkp/Implementation/U256Arithmetic.lean) / `ethereum_types/u256.rs` の target add/sub | 全 limb の carry/borrow 帰納合成、最終ゼロから厳密な加減算、underflow / wrap の排除、正常な carry/borrow の例 | 輸入 u32 gate の局所方程式・canonical range、native shifts/casts、残りの型変換 |
-| [ManagerValue](./Zkp/Implementation/ManagerValue.lean) / `ChannelSettlementManager.sol` の限定経路 | claim の token 別上限・nullifier 記録、cap と実受取差分が一致する pull、recipient 固定の一件払い、CEI、close 世代と全 state の burn floor | 残りの close / challenge / cancel / partial-withdrawal、proof、ABI、token、callback frame、返り値 / event の投影 |
-| [RollupValue](./Zkp/Implementation/RollupValue.lean) / `IntmaxRollup.sol` の限定経路 | deposit、17 PI の withdrawal set、auth / nullifier 消費、token 別 escrow→credit、指定額だけの pull、別 recipient の credit の保持 | posting / finality / fraud 等の未翻訳関数、proof / hash、実 token 残高、callback による storage 変更・外部 log の順序 |
+| [ManagerValue](./Zkp/Implementation/ManagerValue.lean) / `ChannelSettlementManager.sol` 全明示関数 | close 全 vector の最終化、厳密な期限と絶対 horizon、request / cancel の世代・nonce、PW 認証前の消費・再実行拒否、claim / pull / payout の token 別計数 | proof、ABI、token、callback frame、外部 log の順序、全 entrypoint を含む到達可能状態の不変量、EVM refinement |
+| [RollupValue](./Zkp/Implementation/RollupValue.lean) / `IntmaxRollup.sol` 全関数・modifier 群 | 入出金、投稿、最終化、fraud、逆順 rollback、stake 分割、finalize / rollback trace 上の永久 root の保持、withdrawal-set 全 loop の token 別会計 | proof / hash、実 token 残高、callback frame、全 entrypoint を含む時系列・所有権の証明、EVM refinement |
 | [Spend](./Zkp/Implementation/Spend.lean) / `spend_circuit.rs` | 64 件の順序付き減算、同 token の反復減算の累積保存、局所 borrow 方程式からの非 underflow、native / target の差、PI・proof wrapper・constructor の対応 | 有限 Merkle 経路、field / u32 gadgets、転送木・hash、nonce overflow、消費側での is_valid 要求、送受金全体との接続 |
+| [CloseCircuit](./Zkp/Implementation/CloseCircuit.lean) / `close_circuit.rs` | 任意 witness の member / token prefix、103 PI、IMCH / H1 / TFD の全額 vector binding、署名対象との結合、有限の indexed Merkle insertion による重複拒否 | Falcon aggregate / Balance proof、field lowering、hash binding、fixture 生成部、caller の high-water / backing / finality |
+| [ClosePublicInputs](./Zkp/Implementation/ClosePublicInputs.lean) / `close_pis.rs` | native 103-word codec、型幅・正規形の下での roundtrip、全 intent 比較後の witness 投影、92-word TFD | scalar pair の raw shift / OR と circuit の u32 check の差、CloseIntent::new 本体、Serde / Rust compiler、circuit / Solidity 型間の同値性 |
+| [CloseEncodingBridge](./Zkp/Implementation/CloseEncodingBridge.lean) / native・circuit の型変換 | 全 20 field の双方向変換、全 103 word の同一性、native canonical domain の下で両 parser が同じ statement を読むこと | Solidity / ABI byte 変換、Rust compiler・実 gate 列、Keccak / proof soundness。モデル間の codec 同値性と実言語同値性は別 |
+| [FundFlow](./Zkp/Implementation/FundFlow.lean) / 上記 Manager・Rollup・Materializer の合成 | credit helper 間の成功 / エラー込みの投影同値、対象 accounting trace の token 別総額保存、paid ≤ received、nullifier tombstone・未払い記録の保持、非空の正常 trace | pull の実 dispatch / callback との結合、他 Manager を含む全資金フロー、現物 custody、預入・stake・rollback を含む全 trace の合成 |
 
-Manager と Rollup は**選択した資金経路だけ**で、ファイル全体の翻訳は未完成です。
+Manager と Rollup は、前回の選択経路から全明示関数へ手書きモデルを拡張しました。
+ただし interface / generated getter / assembly / callback の境界は別分類のままで、
+**全関数に定義があることと、全実行の資金安全性を証明したことは別です。**
 各モデルの全行対応状況は上の一覧だけで判断せず、inventory / line-map と検証結果を確認してください。
+
+`IPinnedMleVerifierV2.sol` は関数本体のない interface です。4 つの ABI 署名を
+`SettlementVerifier.PinnedInterface` と [専用対応表](./line-map/pinned-interface.json) に追加しました。
+interface の存在から MLE verifier の安全性を証明したことにはしていません。
+
+### 個別証明から合成へ進めた範囲
+
+`FundFlow` は、既存の Materializer / Rollup / Manager の定義を直接 import します。
+Materializer の Rollup-credit 展開と、Rollup 側の native / ERC20 振分け・guard・エラーを
+同じ ledger へ投影して比較する等式を証明しています。単に似た会計モデルをもう一つ
+作って「どちらも安全」とは扱っていません。
+
+その上で、credit → pull → claim → payout の有限 trace について、token ごとの
+`Rollup escrow + その Manager の pending credit + Manager received` が保存されること、
+`paid ≤ received` が維持されることを証明しています。`received − paid` と既払額への
+分解、消費済み nullifier の永続性、未払い payout 記録の上書き拒否も含みます。
+100 単位の credit / pull 後に 5 単位を払い、95 単位を保持する非空の正常 trace もあります。
+
+ただしこの trace は全 entrypoint を網羅するものではなく、pull の source call を同一の
+Rollup debit へ結び付ける条件が明示されています。native については、実際の modeled
+`withdraw` wrapper から ledger debit を導く補題も追加しましたが、callback の storage frame
+は未証明の環境条件です。**総額が保存されても、別チャネルから盗んでいないことは別問題**です。
+deposit / stake / rollback、全 Manager、資金の所有権、実 token custody、EVM call trace までを
+この定理の対象に読み替えないでください。
+
+相互レビューでは、Manager 最終化の外部 digest 呼出し前に Solidity が行う中間状態の書込みを
+モデルでも見えるようにする修正点が見つかりました。これは手書きモデルの精度の問題であり、
+新たなランタイム脆弱性の実証ではありません。最終値だけでなく呼出し先から見える状態も
+照合対象にしています。
+
+native と circuit の公開入力も、同じ順序であるという目視確認から、
+`CloseEncodingBridge` の field-by-field 変換と 103-word 等式へ進めました。
+native decoder の狭い u8 / u16 count と raw u64 join を消去せず、必要な正規性条件を明示した
+interoperability です。Solidity の再計算 digest や ABI bytes との同値性までは含みません。
 
 ### 境界を過大主張しないための確認
 
@@ -83,6 +123,9 @@ Manager と Rollup は**選択した資金経路だけ**で、ファイル全体
   無衝突性を置いていません。Merkle 更新も、実際に辿る有限の木・経路ごとの局所保証です。
 - 通常の Lean kernel axioms 以外に `sorry`、`admit`、独自 `axiom`、`native_decide` を
   追加していません。ただし定理の引数に明記した暗号・実行環境の前提は未証明です。
+- current module 同士の合成 import は許可しましたが、全モジュールを manifest と
+  theorem inventory に登録して検査します。未登録 / historical import、循環、標準 module 名の
+  ローカル shadowing を拒否する回帰テストを追加しました。
 
 独立レビューで Blob context の呼出し先 / submission ID の明示、返り値 digest の明示、
 Merkle 前提の有限 trace への限定を改善しました。これは形式モデル側の精度改善であり、
@@ -90,7 +133,32 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
-このチェックポイントのローカル実行結果：
+### 今回の追加分を含む統合検証
+
+- **71 Lean モジュール**を build。現行 **18 モジュール・761 named theorems** の実在・
+  theorem 種別・推移的 kernel axioms を確認し、main guard が成功。
+  実装対応・合成は **13 モジュール・542 定理**、前段の仕様側は 5 モジュール・219 定理。
+  前回 `85f243b` から **216 定理を追加**。件数は全実装の証明率ではありません。
+- **106 reviewed-source hashes、1 MLE gitlink、12 source maps** を検証。
+  source map の宣言参照も Lean compiler で確認し、line guard が成功。
+- guard 回帰テスト **51 件**成功（main 29 + line inventory 22）。
+- `git diff --check` 成功。ランタイム基準 `05ec7ae` に対する `src`、`contracts`、
+  `Cargo.toml`、`Cargo.lock` の差分はゼロ。MLE サブモジュールの作業ツリーも clean。
+
+現 inventory の物理行分類は、手書き翻訳 **4,824**、依存境界 **1,124**、
+非実行 **3,686**、テスト専用 **1,530**、未翻訳 **106,033** 行です。
+未対応ファイルのコメント・テストも未翻訳に含みます。これはテストの pass rate や
+脆弱性の残存率ではありません。
+
+**`--require-complete` は引き続き失敗するべき状態です。**
+全行・全資金フローの証明、Rust / Solidity / gate / EVM の refinement、暗号・実行環境の
+前提の検証は未達です。未証明を admission や「acceptance ⇒ safe」の仮定で埋めたり、
+完了チェックを緩めたりしていません。未証明は即座に実在する脆弱性を意味しませんが、
+「盗難・損失が不可能」の認定には使えません。
+
+### 前回 `85f243b` の検証結果（履歴）
+
+以下は前回コミットの結果であり、追加実装を含む最新の件数ではありません。
 
 - 既存を含む **67 Lean モジュール**の build 成功。
 - 現行 **14 モジュール・545 named theorems** の compiler / 推移的 axioms 検査成功。
@@ -100,7 +168,7 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 - guard の回帰テスト **45 件成功**（既存 23 + line inventory 22）。
 - 更新した索引・レポート内のローカルリンク **28 件**を確認。
 
-現 inventory の物理行分類は、手書き翻訳 2,485、依存境界 562、非実行 2,368、
+前回 inventory の物理行分類は、手書き翻訳 2,485、依存境界 562、非実行 2,368、
 テスト専用 512、未翻訳 111,270 行です。未対応ファイルのコメントやテストも未翻訳に
 含む粗い分類であり、67 モジュールや 545 定理がこの全てをカバーするという意味ではありません。
 
@@ -124,8 +192,11 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 
 ## 続きで必要なこと
 
-1. Manager / Rollup の未翻訳関数、close / cancel / withdrawal / post-close claim の回路を
-   順に追加し、全 entrypoint・分岐・外部呼出し・PI の行対応を埋める。
+1. cancel / withdrawal / post-close claim を含む残る回路の手書き翻訳を追加する。
+   Manager / Rollup の関数一覧は埋まったが、ABI・callback・generated getter と全到達可能状態の
+   証明を完了したことにはしない。close の feature-gated fixture 生成も未翻訳として残す。
+   特に `cancel_close_circuit.rs`、`withdrawal_claim_circuit.rs`、
+   `post_close_claim_circuit.rs`、`state_update_verifier.rs`、`decryption_gadget.rs` が残る。
 2. Balance / validity / deposit / transfer / withdrawal の各回路を、native admission と
    arbitrary satisfying witness を分離して翻訳する。Spend だけで送受金全体を証明したことにしない。
 3. U256、Merkle、Keccak/Poseidon、署名 / decryption、recursion / pinned proof verifier の

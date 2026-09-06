@@ -33,6 +33,10 @@ CURRENT = {
         "Zkp.Implementation.U256Arithmetic",
         "Zkp.Implementation.ManagerValue", "Zkp.Implementation.RollupValue",
         "Zkp.Implementation.Spend",
+        "Zkp.Implementation.FundFlow",
+        "Zkp.Implementation.CloseCircuit",
+        "Zkp.Implementation.ClosePublicInputs",
+        "Zkp.Implementation.CloseEncodingBridge",
     ),
 }
 ARCH_ROOTS = frozenset({
@@ -188,6 +192,39 @@ def module_sources(root, project):
     return result
 
 
+def check_current_imports(modules, current_modules):
+    """Allow composition only inside the completely audited current-module set.
+
+    Imported current modules are subject to the same source hashes, complete
+    named-theorem inventory and transitive kernel-axiom check as their callers.
+    Historical/unregistered imports are never a shortcut into that trusted set.
+    """
+    current = set(current_modules)
+    standard = lambda name: (name in {"Init", "Std", "Lean"}
+                             or name.startswith(("Init.", "Std.", "Lean.")))
+    require(not any(standard(name) for name in modules),
+            "local source shadows a standard Lean module")
+    visiting, visited = set(), set()
+
+    def visit(module):
+        require(module in modules, f"current imported source missing: {module}")
+        require(module not in visiting, f"cyclic current-module import: {module}")
+        if module in visited:
+            return
+        visiting.add(module)
+        for name in imports_of(modules[module]):
+            require(standard(name) or name in current,
+                    f"current module imports nonstandard/historical model: {module}: {name}")
+            if name in current:
+                require(name in modules, f"current imported source missing: {name}")
+                visit(name)
+        visiting.remove(module)
+        visited.add(module)
+
+    for module in current_modules:
+        visit(module)
+
+
 def check_coverage(root):
     count = 0
     for project, current_modules in CURRENT.items():
@@ -198,12 +235,7 @@ def check_coverage(root):
             clean = without_comments_and_strings(source)
             admitted = re.findall(r"\b(?:sorry|admit|sorryAx|axiom|native_decide)\b", clean)
             require(not admitted, f"explicit admission/axiom in {project}/{module}: {admitted}")
-        # Current theorems must not import historical model hypotheses by accident.
-        for current in current_modules:
-            for name in imports_of(modules[current]):
-                require(name in {"Init", "Std", "Lean"}
-                        or name.startswith(("Init.", "Std.", "Lean.")),
-                        f"current module imports nonstandard/historical model: {current}: {name}")
+        check_current_imports(modules, current_modules)
         if project == "doc/architecture-audit":
             require(ARCH_ROOTS <= set(modules),
                     f"missing architecture roots: {sorted(ARCH_ROOTS - set(modules))}")

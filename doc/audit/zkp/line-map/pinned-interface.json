@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "source": "contracts/src/IPinnedMleVerifierV2.sol",
+  "source_sha256": "c8140a09df809bfe64d0502f9a9a54290909e1e24738673178a01130d2082235",
+  "source_lines": 21,
+  "module": "Zkp.Implementation.SettlementVerifier",
+  "model": "doc/audit/zkp/Zkp/Implementation/SettlementVerifier.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 6,
+      "status": "non-executable",
+      "label": "license, language directive and interface documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable behavior or proof coverage is claimed for comments."
+    },
+    {
+      "start": 7,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "four external view ABI signatures",
+      "declarations": ["Zkp.Implementation.SettlementVerifier.PinnedInterface"],
+      "theorems": [],
+      "note": "All four signatures and return widths are represented. This Solidity interface has no function implementation and supplies no verifier correctness theorem; ABI decoding/staticcall, target identity and the concrete pinned implementation remain separate obligations."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "interface_is_not_implementation",
+      "obligation": "Concrete MLE verifier soundness, configured circuit identity, ABI decoding and EVM call semantics cannot be inferred from these four signatures.",
+      "discharged": false
+    }
+  ]
+}

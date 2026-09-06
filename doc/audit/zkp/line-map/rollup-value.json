@@ -11,39 +11,74 @@
       "start": 1,
       "end": 3,
       "status": "non-executable",
-      "label": "License and compiler directive",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Build metadata; no proof-coverage claim."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 4,
       "end": 6,
       "status": "dependency-boundary",
-      "label": "Imported verifier and token libraries",
+      "label": "Imported libraries",
       "declarations": [
         "Zkp.Implementation.RollupValue.Environment",
-        "Zkp.Implementation.RollupValue.TokenCall"
+        "Zkp.Implementation.RollupValue.LifecycleEnvironment"
       ],
       "theorems": [],
-      "note": "External token and compact-verifier semantics are supplied by explicit Environment functions. This module does not compose their implementations."
+      "note": "Pinned verifier, SafeERC20 and Blob satellite dependency implementations are not composed into an EVM/source refinement here."
     },
     {
       "start": 7,
       "end": 176,
       "status": "non-executable",
-      "label": "Contract overview, constants and error declarations",
+      "label": "Declarations, documentation and separators",
       "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
         "Zkp.Implementation.RollupValue.Error"
       ],
       "theorems": [],
-      "note": "Comments, compile-time constants, contract/error declarations. Selected error identities are represented; stale blanket security comments are not theorems."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 177,
-      "end": 184,
+      "end": 180,
+      "label": "releaseRuntime",
       "status": "translated",
-      "label": "Runtime deployment-chain guard",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.releaseRuntime"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.successful_close_credit_characterization"
+      ],
+      "note": "Modifier invokes exact deployment-chain guard before body."
+    },
+    {
+      "start": 181,
+      "end": 181,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 182,
+      "end": 184,
+      "label": "_requireReleaseRuntime",
+      "status": "translated",
       "declarations": [
         "Zkp.Implementation.RollupValue.releaseRuntime",
         "Zkp.Implementation.RollupValue.Environment"
@@ -51,123 +86,239 @@
       "theorems": [
         "Zkp.Implementation.RollupValue.successful_close_credit_characterization"
       ],
-      "note": "Actual deployment-chain equality, not a 31337-only guard. ABI/canonical immutable initialization is an explicit boundary."
+      "note": "Runtime chain equals immutable deploymentChainId; not a 31337-only rule."
     },
     {
       "start": 185,
-      "end": 434,
-      "status": "untranslated",
-      "label": "Event, type and storage declarations outside complete layout model",
+      "end": 438,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
       "declarations": [
         "Zkp.Implementation.RollupValue.State",
-        "Zkp.Implementation.RollupValue.Withdrawal",
-        "Zkp.Implementation.RollupValue.DepositRecord",
-        "Zkp.Implementation.RollupValue.Event"
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
       ],
       "theorems": [],
-      "note": "Selected fields/events are projected into the model, but this entire storage layout, all ABI events/types and initialization are not translated. No full-storage refinement claim."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
-      "start": 435,
-      "end": 452,
+      "start": 439,
+      "end": 443,
+      "label": "nonReentrant",
       "status": "translated",
-      "label": "Reentrancy status and modifier",
       "declarations": [
-        "Zkp.Implementation.RollupValue.nonReentrantBefore",
-        "Zkp.Implementation.RollupValue.nonReentrantAfter",
         "Zkp.Implementation.RollupValue.guarded",
-        "Zkp.Implementation.RollupValue.empty"
+        "Zkp.Implementation.RollupValue.guardedResult"
       ],
       "theorems": [
-        "Zkp.Implementation.RollupValue.entered_reentry_rejected",
-        "Zkp.Implementation.RollupValue.guarded_reentry_rejected"
+        "Zkp.Implementation.RollupValue.guarded_reentry_rejected",
+        "Zkp.Implementation.RollupValue.guarded_result_receipt"
       ],
-      "note": "Status 1/2, before/body/after order and rejection of guarded reentry. This does not exclude unguarded callback entrypoints."
+      "note": "Before/body/after order, reset to1 only on normal return; Bool-returning entrypoints preserve returned false."
+    },
+    {
+      "start": 444,
+      "end": 444,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 445,
+      "end": 448,
+      "label": "_nonReentrantBefore",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.nonReentrantBefore"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.entered_reentry_rejected"
+      ],
+      "note": "Status2 rejects; all other statuses set2. Does not exclude unguarded callbacks."
+    },
+    {
+      "start": 449,
+      "end": 449,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 450,
+      "end": 452,
+      "label": "_nonReentrantAfter",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.nonReentrantAfter"
+      ],
+      "theorems": [],
+      "note": "Reset source status to1."
     },
     {
       "start": 453,
       "end": 594,
-      "status": "untranslated",
-      "label": "Remaining channel/deposit/token storage declarations",
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
       "declarations": [
         "Zkp.Implementation.RollupValue.State",
-        "Zkp.Implementation.RollupValue.Asset",
-        "Zkp.Implementation.RollupValue.DepositRecord",
-        "Zkp.Implementation.RollupValue.Checkpoint",
-        "Zkp.Implementation.RollupValue.Event"
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
       ],
       "theorems": [],
-      "note": "Only the selected storage projection is represented. Native escrow is distinct from ERC20 index-zero storage; full getter/layout initialization and channel storage are not translated."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 595,
       "end": 597,
+      "label": "_requireDeployer",
       "status": "translated",
-      "label": "Deployer guard",
       "declarations": [
         "Zkp.Implementation.RollupValue.requireDeployer"
       ],
       "theorems": [],
-      "note": "Caller must equal environment deployer."
+      "note": "Exact msg.sender==immutable deployer."
     },
     {
       "start": 598,
       "end": 603,
       "status": "non-executable",
-      "label": "Token-registration documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Documentation only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 604,
       "end": 612,
+      "label": "registerToken",
       "status": "translated",
-      "label": "Set-once token registration",
       "declarations": [
-        "Zkp.Implementation.RollupValue.registerToken",
-        "Zkp.Implementation.RollupValue.put"
+        "Zkp.Implementation.RollupValue.registerToken"
       ],
       "theorems": [],
-      "note": "Deployer, nonzero index/address, previously unset mapping and code-length guards in order, followed by mapping update and own event. Code-length observation is a dependency."
+      "note": "Deployer; nonzero index/address; previously unset index; contract code; write and exact own event."
     },
     {
       "start": 613,
-      "end": 747,
-      "status": "untranslated",
-      "label": "Submission/finality state, constructor and pinned-verifier validation",
+      "end": 672,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
       "declarations": [
-        "Zkp.Implementation.RollupValue.Environment",
-        "Zkp.Implementation.RollupValue.State"
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
       ],
       "theorems": [],
-      "note": "Constructor adapter pinning, verifier pair identity/code/chain/catch checks and genesis finality initialization are NOT proved here. Environment/state values require explicit initialization and immutable-provenance obligations."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 673,
+      "end": 709,
+      "label": "constructor",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.constructor",
+        "Zkp.Implementation.RollupValue.Deployment",
+        "Zkp.Implementation.RollupValue.requirePinnedVerifier",
+        "Zkp.Implementation.RollupValue.empty",
+        "Zkp.Implementation.RollupValue.recordCheckpoint"
+      ],
+      "theorems": [],
+      "note": "Both adapter identities and returned cores are checked before deployment fields; cross-pair overlaps forbidden, within-pair alias allowed. Genesis root membership only if nonzero; zero block0 snapshot and checkpoint. Linking returned Deployment to later Environment immutables is explicit."
+    },
+    {
+      "start": 710,
+      "end": 710,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 711,
+      "end": 743,
+      "label": "_requirePinnedVerifier",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.requirePinnedVerifier",
+        "Zkp.Implementation.RollupValue.Getter"
+      ],
+      "theorems": [],
+      "note": "Adapter code then try allowedChainId/catch; chain equality; try core/catch; core code; core allowedChainId/catch and equality. Error argument identities represented. ABI/call decoding and code observations remain external."
+    },
+    {
+      "start": 744,
+      "end": 747,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 748,
       "end": 776,
-      "status": "untranslated",
-      "label": "Settlement-manager/materializer registration and binding",
+      "label": "registerSettlementManager",
+      "status": "translated",
       "declarations": [
-        "Zkp.Implementation.RollupValue.State"
+        "Zkp.Implementation.RollupValue.registerSettlementManager",
+        "Zkp.Implementation.RollupValue.LifecycleEnvironment"
       ],
       "theorems": [],
-      "note": "Manager registration, materializer discovery, set-once binding and external bindManager call are not translated. Direct credit caller restriction is modeled separately; registered/materializer authority is not assumed sound merely from an address equality."
+      "note": "Register caller-supplied Manager after deployer gate; getter on post-write state accepts only successful exact32-byte return, low160 address; nonzero materializer code and set-once equality; exact bindManager stateful callback and raw failure propagation; own event after callback. Address cleanup/ABI/EVM assembly are boundaries."
     },
     {
       "start": 777,
       "end": 780,
       "status": "non-executable",
-      "label": "Complete-vector materialization documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "The complete vector is enforced outside Rollup by the materializer; no complete-vector or channel-entitlement theorem is inferred from this comment."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 781,
       "end": 788,
+      "label": "creditChannelExit",
       "status": "translated",
-      "label": "Single-asset channel-exit credit",
       "declarations": [
         "Zkp.Implementation.RollupValue.creditChannelExit",
         "Zkp.Implementation.RollupValue.assetOfToken"
@@ -178,556 +329,1505 @@
         "Zkp.Implementation.RollupValue.successful_close_credit_frames_other_asset",
         "Zkp.Implementation.RollupValue.successful_close_credit_frames_other_manager"
       ],
-      "note": "Runtime-chain and exact installed-materializer caller gates precede native/token dispatch. No invented Manager-registration, token-registration, nonReentrant or channel ownership check is added."
+      "note": "Exact runtime chain/materializer caller guard, native0 or ERC20 dispatch. No added token registration, Manager registration, completevector or channel-entitlement check."
     },
     {
       "start": 789,
       "end": 789,
       "status": "non-executable",
-      "label": "Separator",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Whitespace."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 790,
-      "end": 798,
+      "end": 793,
+      "label": "_creditNativeEscrow",
       "status": "translated",
-      "label": "Internal native and token escrow-to-credit updates",
       "declarations": [
-        "Zkp.Implementation.RollupValue.creditState",
-        "Zkp.Implementation.RollupValue.creditEscrow",
         "Zkp.Implementation.RollupValue.creditNativeEscrow",
-        "Zkp.Implementation.RollupValue.creditTokenEscrow"
+        "Zkp.Implementation.RollupValue.creditEscrow",
+        "Zkp.Implementation.RollupValue.creditState"
       ],
       "theorems": [
-        "Zkp.Implementation.RollupValue.native_and_erc20_zero_are_distinct",
-        "Zkp.Implementation.RollupValue.credit_conserves_token_value",
-        "Zkp.Implementation.RollupValue.credit_frames_other_asset",
-        "Zkp.Implementation.RollupValue.credit_frames_other_recipient",
         "Zkp.Implementation.RollupValue.successful_credit_is_exact",
         "Zkp.Implementation.RollupValue.successful_credit_characterization",
-        "Zkp.Implementation.RollupValue.valid_credit_example",
-        "Zkp.Implementation.RollupValue.valid_token_credit_example"
+        "Zkp.Implementation.RollupValue.credit_conserves_token_value",
+        "Zkp.Implementation.RollupValue.credit_frames_other_recipient",
+        "Zkp.Implementation.RollupValue.valid_credit_example"
       ],
-      "note": "Checked uint256 escrow subtraction then pending-credit addition. The mathematical state update combines writes with no intervening external call; any later error is subject to explicit outer rollback. Pooled escrow is not channel-indexed."
+      "note": "Checked escrow subtraction then checked recipient pending addition; no external call between combined modeled effects."
+    },
+    {
+      "start": 794,
+      "end": 794,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 795,
+      "end": 798,
+      "label": "_creditTokenEscrow",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.creditTokenEscrow",
+        "Zkp.Implementation.RollupValue.creditEscrow",
+        "Zkp.Implementation.RollupValue.creditState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.credit_frames_other_asset",
+        "Zkp.Implementation.RollupValue.valid_token_credit_example",
+        "Zkp.Implementation.RollupValue.native_and_erc20_zero_are_distinct"
+      ],
+      "note": "ERC20 token ledger distinct from native escrow, including distinct ERC20-index0 storage; checked subtraction/addition."
     },
     {
       "start": 799,
-      "end": 844,
-      "status": "untranslated",
-      "label": "Block producer/admin and KZG verifier configuration",
-      "declarations": [],
+      "end": 807,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "All executable governance/configuration functions in this interval remain untranslated."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
-      "start": 845,
+      "start": 808,
+      "end": 814,
+      "label": "setBlockProducer",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.setBlockProducer"
+      ],
+      "theorems": [],
+      "note": "Deployer OR producerAdmin caller; arbitrary address set/revoke and own event, no automatic deployer posting authorization."
+    },
+    {
+      "start": 815,
+      "end": 820,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 821,
+      "end": 825,
+      "label": "setBlockProducerAdmin",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.setBlockProducerAdmin"
+      ],
+      "theorems": [],
+      "note": "Deployer-only; zero can disable admin role; exact own event."
+    },
+    {
+      "start": 826,
+      "end": 837,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 838,
+      "end": 843,
+      "label": "setKzgVerifier",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.setKzgVerifier"
+      ],
+      "theorems": [],
+      "note": "Deployer-only, existing zero and new code present; set-once KZG dependency."
+    },
+    {
+      "start": 844,
       "end": 848,
       "status": "non-executable",
-      "label": "Partial-withdrawal authorization documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Caller protocol assertions in comments are not discharged by this model."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 849,
       "end": 853,
+      "label": "authorizePartialWithdrawal",
       "status": "translated",
-      "label": "Partial-withdrawal authorization write",
       "declarations": [
         "Zkp.Implementation.RollupValue.authorizePartialWithdrawal"
       ],
       "theorems": [],
-      "note": "Exact registered-Manager caller guard, authorization set and own event. No runtime-chain or nonReentrant modifier is invented."
+      "note": "Registered-Manager caller sets exact auth digest true and emits; no invented runtime/nonReentrant guard."
     },
     {
       "start": 854,
       "end": 900,
       "status": "non-executable",
-      "label": "Removed proof-free consumer rationale and pending-pin documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Historical removed-function narrative and comments only; no legacy executable function is hidden in this interval."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 901,
       "end": 911,
+      "label": "pendingChainsPin",
       "status": "dependency-boundary",
-      "label": "Pending-chain pin keccak assembly",
       "declarations": [
         "Zkp.Implementation.RollupValue.pendingChainsPin",
-        "Zkp.Implementation.RollupValue.HashInput"
+        "Zkp.Implementation.RollupValue.hashPreimage"
       ],
       "theorems": [],
-      "note": "Exact ordered pair of 32-byte chain roles is represented by HashInput.pendingPin. Byte serialization, keccak and memory semantics are not proved."
+      "note": "Exact64-byte two-chain preimage represented; Keccak/EVM memory not extracted."
     },
     {
       "start": 912,
       "end": 912,
       "status": "non-executable",
-      "label": "Separator",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Whitespace."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 913,
       "end": 928,
+      "label": "_recordPendingChainsCheckpoint",
       "status": "translated",
-      "label": "Pending-chain checkpoint record",
       "declarations": [
         "Zkp.Implementation.RollupValue.recordCheckpoint",
-        "Zkp.Implementation.RollupValue.Checkpoint",
-        "Zkp.Implementation.RollupValue.put"
+        "Zkp.Implementation.RollupValue.Checkpoint"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.record_checkpoint_binds_live_chains"
       ],
-      "note": "Current two chains and packed 1 | depositCount<<1 | registrationCount<<65 are stored under their pin. Mapping-slot keccak and assembly storage layout are explicit EVM/encoding boundaries."
+      "note": "Store current chains and 1|depositCount<<1|registrationCount<<65 at their pin. Assembly mapping addressing/layout is explicit boundary."
     },
     {
       "start": 929,
-      "end": 1163,
-      "status": "untranslated",
-      "label": "Block posting/submission and batch-state updates",
-      "declarations": [],
+      "end": 936,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "All executable posting/submission bodies and predecessor/checkpoint consumption in this interval remain untranslated; nearby comments are not counted as proof coverage."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 937,
+      "end": 949,
+      "label": "postBlockAndSubmit",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.postBlockAndSubmit"
+      ],
+      "theorems": [],
+      "note": "Legacy selector only: lock then hardcoded31337 check before shared pinned posting; no extra deployment runtime modifier invented."
+    },
+    {
+      "start": 950,
+      "end": 955,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 956,
+      "end": 969,
+      "label": "postBlockAndSubmitGuarded",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.postBlockAndSubmitGuarded"
+      ],
+      "theorems": [],
+      "note": "Deployment runtime then lock then exact predecessor height/hash before checkpoint/stake/body."
+    },
+    {
+      "start": 970,
+      "end": 970,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 971,
+      "end": 1014,
+      "label": "_postBlockAndSubmitPinned",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.postBlockAndSubmitPinned"
+      ],
+      "theorems": [],
+      "note": "Read expected and processed chain checkpoints; nonzero packed counts and both uint64 extracted monotonic count comparisons; pass exact checkpoint chains and deposit count to shared post. Mapping/hash semantics explicit."
+    },
+    {
+      "start": 1015,
+      "end": 1015,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1016,
+      "end": 1035,
+      "label": "_postBlockAndSubmit",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.postBlockAndSubmitInternal"
+      ],
+      "theorems": [],
+      "note": "Producer whitelist OR admin; exact1ETH msg.value; post blocks, then submit, then write stake and batch metadata. Returned callbacks retain mutations except exact later source writes."
+    },
+    {
+      "start": 1036,
+      "end": 1036,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1037,
+      "end": 1153,
+      "label": "_postBlock",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.postBlock",
+        "Zkp.Implementation.RollupValue.postSubBlocks",
+        "Zkp.Implementation.RollupValue.computeBlockHash",
+        "Zkp.Implementation.RollupValue.BatchMetadata"
+      ],
+      "theorems": [],
+      "note": "Nonempty batch, checked uint64 block/round increments, captured snapshots/materializer, ordered recordPost callbacks, prior chains on intermediate blocks and checkpoint chains on last, per-block records/events, final globals/snapshot/processed count and full metadata. Callback/gas/global-log-order semantics remain boundaries."
+    },
+    {
+      "start": 1154,
+      "end": 1163,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1164,
       "end": 1218,
+      "label": "deposit",
       "status": "translated",
-      "label": "Deposit native/ERC20 branches and common record append",
       "declarations": [
         "Zkp.Implementation.RollupValue.deposit",
         "Zkp.Implementation.RollupValue.depositBody",
         "Zkp.Implementation.RollupValue.depositEscrowState",
-        "Zkp.Implementation.RollupValue.finishDeposit",
-        "Zkp.Implementation.RollupValue.recordCheckpoint",
-        "Zkp.Implementation.RollupValue.TokenCall"
+        "Zkp.Implementation.RollupValue.finishDeposit"
       ],
       "theorems": [
+        "Zkp.Implementation.RollupValue.successful_finish_deposit_record",
         "Zkp.Implementation.RollupValue.deposit_increments_only_selected_escrow",
         "Zkp.Implementation.RollupValue.deposit_frames_other_asset",
-        "Zkp.Implementation.RollupValue.successful_finish_deposit_record",
         "Zkp.Implementation.RollupValue.native_deposit_success_witness",
         "Zkp.Implementation.RollupValue.failure_rolls_back_storage_and_logs"
       ],
-      "note": "Runtime guard then lock; exact msg.value branches; registered ERC20; before balance, transferFrom(caller,this,amount), after balance, checked exact delta; checked escrow and uint64 counter additions; hash/record/checkpoint/event. Callback-mutated storage is explicit. Hash bytes, actual custody and external call/rollback semantics are undischarged boundaries."
+      "note": "Exact native msg.value or registered token measured transferFrom branch, full callback-mutated state, checked amount/counter, record/hash/checkpoint and own event. Does not infer honest token custody solely from balance replies."
     },
     {
       "start": 1219,
-      "end": 1627,
-      "status": "untranslated",
-      "label": "Channel registration, validity finality, fraud and submission queries",
-      "declarations": [],
+      "end": 1247,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "All executable bodies in this interval are outside this selected value-path tranche, including finality-root creation and getters."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
-      "start": 1628,
+      "start": 1248,
+      "end": 1328,
+      "label": "registerChannel",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.registerChannel",
+        "Zkp.Implementation.RollupValue.Registration",
+        "Zkp.Implementation.RollupValue.validateMembers",
+        "Zkp.Implementation.RollupValue.channelRegHashChainRaw",
+        "Zkp.Implementation.RollupValue.closeMemberSetCommitment"
+      ],
+      "theorems": [],
+      "note": "Deployer; nonzero/nonburn channel; zero delegates; set-once;2..8 equal-length arrays; BP index; identity shape and pairwise pkG uniqueness in order. General raw registration helper receives explicit48-byte header; writes live chain/member commitment/BP state; uint64 count/event then checkpoint. Exact event excludes pkBs/delegates."
+    },
+    {
+      "start": 1329,
+      "end": 1332,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1333,
+      "end": 1357,
+      "label": "_requireValidIdentities",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.requireValidIdentities",
+        "Zkp.Implementation.RollupValue.canonicalIdentity"
+      ],
+      "theorems": [],
+      "note": "Source shape error for zero pkG/regev/recipient; pkB zero is allowed. Four masked64-bit limbs in each identity strictly below Goldilocks. Assembly ABI canonicality remains boundary."
+    },
+    {
+      "start": 1358,
+      "end": 1364,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1365,
+      "end": 1385,
+      "label": "_closeMemberSetCommitment",
+      "status": "dependency-boundary",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.closeMemberSetCommitment",
+        "Zkp.Implementation.RollupValue.hashPreimage"
+      ],
+      "theorems": [],
+      "note": "Actual registerChannel-validated count2..8/array domain: IMCM4+count4+8 hashes32, zero padded. Standalone malformed counts/calldata physical overread, wraparound-sized CALLDATACOPY and gas/memory behavior outside this private call domain are not represented; no generic helper refinement claim."
+    },
+    {
+      "start": 1386,
+      "end": 1401,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1402,
+      "end": 1426,
+      "label": "_channelRegHashChain",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.channelRegHashChainRaw",
+        "Zkp.Implementation.RollupValue.registrationSlots",
+        "Zkp.Implementation.RollupValue.calldataIndex",
+        "Zkp.Implementation.RollupValue.hashPreimage"
+      ],
+      "theorems": [],
+      "note": "General arbitrary header/activeCount and all arrays: eight slots, checked array indexing when active, exact116-byte active or zero padding slots, final hash. Raw helper is invoked by registerChannel. EVM allocation/ABI encoding/Keccak equivalence is undischarged."
+    },
+    {
+      "start": 1427,
+      "end": 1428,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1429,
+      "end": 1443,
+      "label": "_submit",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.submit",
+        "Zkp.Implementation.RollupValue.Submission"
+      ],
+      "theorems": [],
+      "note": "Checked nextSubmissionId increment BEFORE KZG postCommitment(stateRoot,uint64(block.number),id), exact captured old id and callback state, then submission write and own Submitted event; proofHash/length affect event only here."
+    },
+    {
+      "start": 1444,
+      "end": 1450,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1451,
+      "end": 1536,
+      "label": "finalize",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.finalize",
+        "Zkp.Implementation.RollupValue.finalizeBody",
+        "Zkp.Implementation.RollupValue.acceptFinality",
+        "Zkp.Implementation.RollupValue.refundStake"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.finalize_body_acceptance_receipt",
+        "Zkp.Implementation.RollupValue.successful_finalize_body_monotone_and_historical",
+        "Zkp.Implementation.RollupValue.finalize_body_false_retains_state",
+        "Zkp.Implementation.RollupValue.finalize_preserves_historical_roots_and_height",
+        "Zkp.Implementation.RollupValue.finality_recovery_trace_is_monotone"
+      ],
+      "note": "Lock; existence/finalized/root/batch-end gates produce named false receipts; exact id/commitment/raw-byte hash/length DA lookup (uncaught lookup failure propagates); actual fullVerify code path with caught selector; accepted state/root membership/height then Finalized event and refund. Self-call gas/ABI exceptional aborts remain boundary, not an extraction proof."
+    },
+    {
+      "start": 1537,
+      "end": 1539,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1540,
+      "end": 1543,
+      "label": "_rejectFinalize",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.rejectFinalize"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.finalize_body_false_retains_state"
+      ],
+      "note": "Return false plus own exact id/reason event; no storage mutation."
+    },
+    {
+      "start": 1544,
+      "end": 1569,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1570,
+      "end": 1601,
+      "label": "fraudProof",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.fraudProof",
+        "Zkp.Implementation.RollupValue.fraudProofBody",
+        "Zkp.Implementation.RollupValue.truncateSubmissions"
+      ],
+      "theorems": [],
+      "note": "Lock; absent returns false; finalized or start<=finalized height reverts; checked deadline and strict timeout comparison; timeout skips proof; otherwise verifyFraud; confirmed truncation then own event. No fraud reproduction or off-chain attacker model."
+    },
+    {
+      "start": 1602,
+      "end": 1604,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1605,
+      "end": 1610,
+      "label": "attestProofData",
+      "status": "dependency-boundary",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.attestProofData",
+        "Zkp.Implementation.RollupValue.LifecycleEnvironment"
+      ],
+      "theorems": [],
+      "note": "Exact forwarding target=kzg, explicit Rollup self, id, raw proof and sidecar; returned digest and callback state represented. Satellite/EVM semantics not discharged."
+    },
+    {
+      "start": 1611,
+      "end": 1615,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1616,
+      "end": 1618,
+      "label": "getSubmission",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.getSubmission",
+        "Zkp.Implementation.RollupValue.Submission"
+      ],
+      "theorems": [],
+      "note": "Return exact stored submission projection; generated ABI serialization is external."
+    },
+    {
+      "start": 1619,
+      "end": 1619,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1620,
+      "end": 1622,
+      "label": "getCommitment",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.getCommitment"
+      ],
+      "theorems": [],
+      "note": "Return stored commitment field."
+    },
+    {
+      "start": 1623,
+      "end": 1623,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1624,
+      "end": 1626,
+      "label": "isFinalized",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.isFinalized"
+      ],
+      "theorems": [],
+      "note": "Return stored finalized flag."
+    },
+    {
+      "start": 1627,
       "end": 1631,
       "status": "non-executable",
-      "label": "Exact native-pull documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Recipient-wide pending ledger is not a channel ledger."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1632,
       "end": 1638,
+      "label": "withdraw",
       "status": "translated",
-      "label": "Exact native pending-credit pull",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdraw",
         "Zkp.Implementation.RollupValue.withdrawBody",
         "Zkp.Implementation.RollupValue.pullState"
       ],
       "theorems": [
+        "Zkp.Implementation.RollupValue.native_pull_with_storage_preserving_callback",
+        "Zkp.Implementation.RollupValue.successful_native_pull_exact_with_callback_frame",
         "Zkp.Implementation.RollupValue.pull_debits_exact_amount",
         "Zkp.Implementation.RollupValue.pull_frames_other_recipient",
         "Zkp.Implementation.RollupValue.pull_frames_other_asset",
         "Zkp.Implementation.RollupValue.pull_does_not_debit_escrow_again",
-        "Zkp.Implementation.RollupValue.native_pull_with_storage_preserving_callback",
-        "Zkp.Implementation.RollupValue.successful_native_pull_exact_with_callback_frame",
         "Zkp.Implementation.RollupValue.normal_exact_pull_leaves_unrelated_credit"
       ],
-      "note": "Runtime then lock; positive amount not exceeding caller pending; debit before native call(caller,amount); failure mapped to WithdrawTransferFailed. Full-entrypoint exact accounting requires the explicitly stated callback storage-frame premise, not a blanket harmless-callback assumption."
+      "note": "Runtime and lock, positive bounded own pending amount, debit before exact caller native call, map failure. Full-call conservation explicitly needs callback frame; no sweep of unrelated pending credit."
     },
     {
       "start": 1639,
-      "end": 1726,
-      "status": "untranslated",
-      "label": "Stake reclaim and withdrawal overview",
-      "declarations": [],
+      "end": 1688,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Executable reclaimStake remains untranslated and can credit the SAME native pending ledger. Thus no closed-world whole-Rollup/native-custody invariant is claimed. Historical withdrawal comments are not safety assumptions."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1689,
+      "end": 1703,
+      "label": "reclaimStake",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.reclaimStake",
+        "Zkp.Implementation.RollupValue.deleteStake",
+        "Zkp.Implementation.RollupValue.pendingCredit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.stake_credit_does_not_consume_deposit_escrow",
+        "Zkp.Implementation.RollupValue.stake_credit_exact"
+      ],
+      "note": "Lock; nonzero unspent stake; batch end<=finalized height; delete stake then checked1ETH native pending credit and own event. Interim spent=true followed by delete has no intervening external observation."
+    },
+    {
+      "start": 1704,
+      "end": 1726,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1727,
       "end": 1745,
+      "label": "withdrawNative",
       "status": "translated",
-      "label": "Native proof-backed withdrawal-set credit loop",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdrawNative",
         "Zkp.Implementation.RollupValue.verifyWithdrawalSet",
         "Zkp.Implementation.RollupValue.withdrawLeaves",
-        "Zkp.Implementation.RollupValue.consumeWithdrawalGuard",
-        "Zkp.Implementation.RollupValue.creditNativeEscrow"
+        "Zkp.Implementation.RollupValue.withdrawOne"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.native_leaf_credit_success_witness",
-        "Zkp.Implementation.RollupValue.withdrawal_pi_requires_seventeen_limbs",
-        "Zkp.Implementation.RollupValue.same_leaf_cannot_be_consumed_again",
-        "Zkp.Implementation.RollupValue.successful_credit_is_exact",
-        "Zkp.Implementation.RollupValue.failure_rolls_back_storage_and_logs"
+        "Zkp.Implementation.RollupValue.withdrawal_loop_conserves_each_token",
+        "Zkp.Implementation.RollupValue.withdrawal_loop_no_other_token_consumption",
+        "Zkp.Implementation.RollupValue.withdrawal_loop_no_other_recipient_credit",
+        "Zkp.Implementation.RollupValue.withdrawal_pi_requires_seventeen_limbs"
       ],
-      "note": "Only nonReentrant, then proof verification, each native-token guard, consume guard, checked escrow credit and own event. Loop order is explicit; local per-leaf accounting and rollback are proved, not a composed whole-loop/whole-protocol entitlement theorem."
+      "note": "Only nonReentrant; verify exact proof first; native-token guard, consume, checked credit and own event for each leaf. Complete loop per-token escrow/recipient-credit sums now proved. Loop proof does not establish circuit economics or whole-entrypoint EVM refinement."
     },
     {
       "start": 1746,
       "end": 1763,
       "status": "non-executable",
-      "label": "ERC20 withdrawal-set documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "No pooled-ceiling-to-channel-ownership conclusion is adopted."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1764,
       "end": 1779,
+      "label": "withdrawERC20",
       "status": "translated",
-      "label": "ERC20 proof-backed withdrawal-set credit loop",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdrawERC20",
         "Zkp.Implementation.RollupValue.verifyWithdrawalSet",
         "Zkp.Implementation.RollupValue.withdrawLeaves",
-        "Zkp.Implementation.RollupValue.consumeWithdrawalGuard",
-        "Zkp.Implementation.RollupValue.creditTokenEscrow"
+        "Zkp.Implementation.RollupValue.withdrawOne"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.erc20_leaf_credit_success_witness",
-        "Zkp.Implementation.RollupValue.withdrawal_pi_requires_seventeen_limbs",
-        "Zkp.Implementation.RollupValue.same_leaf_cannot_be_consumed_again",
-        "Zkp.Implementation.RollupValue.successful_credit_is_exact",
-        "Zkp.Implementation.RollupValue.failure_rolls_back_storage_and_logs"
+        "Zkp.Implementation.RollupValue.withdrawal_loop_conserves_each_token",
+        "Zkp.Implementation.RollupValue.withdrawal_loop_no_other_token_consumption",
+        "Zkp.Implementation.RollupValue.withdrawal_loop_no_other_recipient_credit",
+        "Zkp.Implementation.RollupValue.withdraw_one_accounts_exactly"
       ],
-      "note": "Only nonReentrant, then proof verification, each nonzero and registered token guard, consume guard, checked per-token credit and own event. Complete composed loop conservation remains outside the local theorem set."
+      "note": "Only nonReentrant; proof first; per-leaf token!=0 and registered, consume, per-token credit/event. Mathematical per-token loop conservation proved without channel-ownership conclusion."
     },
     {
       "start": 1780,
       "end": 1787,
       "status": "non-executable",
-      "label": "ERC20 exact-pull documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1788,
       "end": 1800,
+      "label": "withdrawToken",
       "status": "translated",
-      "label": "Exact ERC20 pending-credit pull",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdrawToken",
         "Zkp.Implementation.RollupValue.withdrawTokenBody",
-        "Zkp.Implementation.RollupValue.pullState",
-        "Zkp.Implementation.RollupValue.TokenCall"
+        "Zkp.Implementation.RollupValue.pullState"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.pull_debits_exact_amount",
         "Zkp.Implementation.RollupValue.pull_frames_other_recipient",
         "Zkp.Implementation.RollupValue.pull_frames_other_asset",
-        "Zkp.Implementation.RollupValue.pull_does_not_debit_escrow_again",
         "Zkp.Implementation.RollupValue.failure_rolls_back_storage_and_logs"
       ],
-      "note": "Runtime then lock, token lookup, positive bounded caller pending, debit, own event, before recipient balance, transfer(token,caller,amount), after balance and checked exact delta. Returned logs are Rollup-own final-success projection: source event precedes callback, while callback/global event interleaving is NOT modeled."
+      "note": "Runtime/lock, registered token, exact positive bounded own pending, pre-call debit. Own source event precedes recipient balance/transfer/balance exactdelta; output events intentionally omit callback interleaving."
     },
     {
       "start": 1801,
       "end": 1803,
       "status": "non-executable",
-      "label": "Balance-read documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1804,
       "end": 1813,
+      "label": "_tokenBalanceOf",
       "status": "dependency-boundary",
-      "label": "Strict balanceOf staticcall assembly",
       "declarations": [
         "Zkp.Implementation.RollupValue.tokenBalanceOf",
-        "Zkp.Implementation.RollupValue.BalanceReply",
-        "Zkp.Implementation.RollupValue.Environment"
+        "Zkp.Implementation.RollupValue.BalanceReply"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.balance_read_requires_success_and_full_word"
       ],
-      "note": "Models token/account roles, staticcall success, returndata>=32 and first-word result, with empty-data revert on failure. Exact selector 0x70a08231, ABI bytes, EVM STATICCALL/gas/memory semantics are obligations, not assembly extraction."
+      "note": "Exact token/account observation, staticcall success and returndata>=32 guard, first-word result, empty-data error. Selector70a08231, ABI/EVM memory and gas remain dependency."
     },
     {
       "start": 1814,
       "end": 1819,
       "status": "non-executable",
-      "label": "Authorization-digest documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Proof-free consumer is removed; no authorization-only payout is introduced."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1820,
       "end": 1837,
+      "label": "_withdrawalAuthDigest",
       "status": "dependency-boundary",
-      "label": "IPW2 authorization keccak assembly",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdrawalAuthDigest",
-        "Zkp.Implementation.RollupValue.HashInput",
-        "Zkp.Implementation.RollupValue.ipw2Domain"
+        "Zkp.Implementation.RollupValue.hashPreimage"
       ],
       "theorems": [
-        "Zkp.Implementation.RollupValue.auth_preimage_excludes_only_nullifier"
+        "Zkp.Implementation.RollupValue.auth_preimage_excludes_only_nullifier",
+        "Zkp.Implementation.RollupValue.partial_auth_preimage_has_exact_width"
       ],
-      "note": "Typed ordered preimage IPW2(4), recipient(20), token(4), amount(32), auxData(32), total92 bytes; nullifier excluded exactly as source. Serialization, keccak and memory are boundaries."
+      "note": "Concrete92-byte IPW2/recipient20/token4/amount32/aux32 preimage; nullifier absent. Keccak/compiler/assembly link not proved."
     },
     {
       "start": 1838,
       "end": 1842,
       "status": "non-executable",
-      "label": "Consume-guard documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Transaction rollback is explicit rather than inferred from comments."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1843,
       "end": 1851,
+      "label": "_consumeWithdrawalGuard",
       "status": "translated",
-      "label": "Nullifier and optional authorization consumption",
       "declarations": [
         "Zkp.Implementation.RollupValue.consumeWithdrawalGuard",
         "Zkp.Implementation.RollupValue.consumedState"
       ],
       "theorems": [
+        "Zkp.Implementation.RollupValue.consume_success_is_exact",
         "Zkp.Implementation.RollupValue.consumed_nullifier_is_used",
         "Zkp.Implementation.RollupValue.already_used_withdrawal_rejected",
         "Zkp.Implementation.RollupValue.same_leaf_cannot_be_consumed_again",
         "Zkp.Implementation.RollupValue.consumed_auth_is_scoped"
       ],
-      "note": "Reject used nullifier; if aux!=0 require and delete exact authorization; mark nullifier used. Combined final writes have no intervening source external call. No circuit economic soundness follows from these flags."
+      "note": "Used nullifier rejection; nonzero aux requires exact auth then deletes it; used=true. Combined final writes have no intervening call; later failure uses outer rollback model."
     },
     {
       "start": 1852,
       "end": 1857,
       "status": "non-executable",
-      "label": "Withdrawal-verification documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1858,
       "end": 1903,
+      "label": "_verifyWithdrawalSet",
       "status": "translated",
-      "label": "Compact withdrawal proof and returned PI validation",
       "declarations": [
         "Zkp.Implementation.RollupValue.verifyWithdrawalSet",
         "Zkp.Implementation.RollupValue.foldWithdrawalLeaf",
-        "Zkp.Implementation.RollupValue.withdrawalPisHash",
-        "Zkp.Implementation.RollupValue.limbsToBytes32",
-        "Zkp.Implementation.RollupValue.limbsMatchBytes32"
+        "Zkp.Implementation.RollupValue.withdrawalPisHash"
       ],
       "theorems": [
         "Zkp.Implementation.RollupValue.withdrawal_pi_requires_seventeen_limbs"
       ],
-      "note": "Reject empty set; exact pinned-adapter/proof-byte request; catch to WithdrawalProofInvalid; exactly17 PI; masked root; membership in any historical finalized root; explicit uint64 truncation of pi16; complete withdrawal fold and strict first8 PI comparison. No nonexistent Solidity u63/canonical-root-limb guard is added. Helpers are used only at in-bounds offsets after the length guard; adapter/finality/hash semantics are boundaries."
+      "note": "Nonempty; pinned compact request/catch; exactly17 returned PI; root limbs masked; any historical membership; pi16 uint64 truncation (no Solidity u63 guard); complete fold then strict first8 hash words. Adapter/circuit/encoding soundness remains external."
     },
     {
       "start": 1904,
       "end": 1910,
       "status": "non-executable",
-      "label": "Withdrawal-leaf packing documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1911,
       "end": 1930,
+      "label": "_foldWithdrawalLeaf",
       "status": "dependency-boundary",
-      "label": "Withdrawal-leaf keccak assembly",
       "declarations": [
         "Zkp.Implementation.RollupValue.foldWithdrawalLeaf",
-        "Zkp.Implementation.RollupValue.HashInput",
-        "Zkp.Implementation.RollupValue.Withdrawal"
+        "Zkp.Implementation.RollupValue.hashPreimage"
       ],
-      "theorems": [],
-      "note": "Typed152-byte role order: previous32, recipient20, token4, amount32, nullifier32, aux32. Memory/byte serialization and keccak are not proved."
+      "theorems": [
+        "Zkp.Implementation.RollupValue.withdrawal_leaf_preimage_has_exact_width"
+      ],
+      "note": "Concrete152-byte prev32/recipient20/token4/amount32/nullifier32/aux32 preimage; Keccak/EVM memory boundary."
     },
     {
       "start": 1931,
       "end": 1937,
       "status": "non-executable",
-      "label": "Withdrawal PI hash packing documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1938,
       "end": 1954,
+      "label": "_withdrawalPisHash",
       "status": "dependency-boundary",
-      "label": "Withdrawal PI keccak and top-three-bit mask",
       "declarations": [
         "Zkp.Implementation.RollupValue.withdrawalPisHash",
-        "Zkp.Implementation.RollupValue.HashInput"
+        "Zkp.Implementation.RollupValue.hashPreimage"
       ],
       "theorems": [],
-      "note": "Typed92-byte role order: chain32, prover20, root32, blockNumber8. Modulo2^253 models the actual low253-bit mask for canonical uint256 input; byte/assembly/keccak equivalence remains undischarged."
+      "note": "Concrete92-byte chain32/prover20/root32/block8, then modulo2^253 models low253-bit mask. Hash/assembly semantics remain unproved."
     },
     {
       "start": 1955,
       "end": 1958,
       "status": "non-executable",
-      "label": "Limb reconstruction documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1959,
       "end": 1965,
+      "label": "_limbsToBytes32",
       "status": "dependency-boundary",
-      "label": "Eight-limb masked reconstruction",
       "declarations": [
-        "Zkp.Implementation.RollupValue.limbsToBytes32",
-        "Zkp.Implementation.RollupValue.u32Limit"
+        "Zkp.Implementation.RollupValue.limbsToBytes32"
       ],
       "theorems": [],
-      "note": "Eight BE limbs with each limb masked modulo2^32 are represented on the in-bounds call domain used after length17. Generic out-of-bounds checked-array panic and EVM word-shift semantics outside that domain are NOT translated."
+      "note": "Eight BE limbs masked32 on actual length17/offset8 caller domain. Generic malformed offsets and checked-array panic outside this call domain remain unmodeled, explicitly not a generic helper equivalence claim."
     },
     {
       "start": 1966,
       "end": 1968,
       "status": "non-executable",
-      "label": "Strict limb comparison documentation",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Comments only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 1969,
       "end": 1976,
+      "label": "_limbsMatchBytes32",
       "status": "dependency-boundary",
-      "label": "Eight-limb strict comparison",
       "declarations": [
-        "Zkp.Implementation.RollupValue.limbsMatchBytes32",
-        "Zkp.Implementation.RollupValue.u32Limit"
+        "Zkp.Implementation.RollupValue.limbsMatchBytes32"
       ],
       "theorems": [],
-      "note": "Strict unmasked input-limb equality against eight BE32 hash words is represented for the verified in-bounds domain. Generic helper out-of-bounds panic is not modeled; Option lookup false outside the domain is not claimed equivalent to Solidity."
+      "note": "Strict input limbs equal BE32 hash words for actual guarded in-bounds domains (17/offset0 or8/offset0). Total List projection outside domain differs from Solidity checked-array panic; that generic source equivalence remains unproved."
     },
     {
       "start": 1977,
-      "end": 2330,
-      "status": "untranslated",
-      "label": "Full validity/fraud verification, rollback, stake and block hash helpers",
-      "declarations": [],
+      "end": 1987,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "All executable bodies remain untranslated, notably _slashStake/_refundStake writes into native pending credits. No full-source/full-system or source-refinement proof claim."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 1988,
+      "end": 2030,
+      "label": "fullVerify",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.fullVerify",
+        "Zkp.Implementation.RollupValue.computeValidityPIHash",
+        "Zkp.Implementation.RollupValue.mlePublicInputsMatch"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.full_verify_success_height"
+      ],
+      "note": "Actual ordered finalized-height, predecessor root, initial/final chain and final-root guards; exact pinned validity proof/catch; exactly8 strict returned hash limbs; return true only. Validity soundness/staticcall ABI remain dependencies."
+    },
+    {
+      "start": 2031,
+      "end": 2042,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2043,
+      "end": 2111,
+      "label": "_verifyFraud",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.verifyFraud",
+        "Zkp.Implementation.RollupValue.encodedMleVerdict"
+      ],
+      "theorems": [],
+      "note": "DA exactbyte attestation first; initial root/chains/final root preconditions return false; exact PI hash classification; mismatch4 false, starved3 error, >1 unevaluable, only0 confirms. Does not insert finalize-only root/submission/height gates absent in this helper."
+    },
+    {
+      "start": 2112,
+      "end": 2115,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2116,
+      "end": 2129,
+      "label": "_encodedMleVerdict",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.encodedMleVerdict",
+        "Zkp.Implementation.RollupValue.LifecycleEnvironment"
+      ],
+      "theorems": [],
+      "note": "Distinct gas observations for entry/reserve/budget/failure; below25m=>3; gas reserve and checked budget arithmetic; exact adapter call budget and return; catch compares remaining gas threshold =>3 or2. Gas sufficiency calibration/EVM resource proof unproved."
+    },
+    {
+      "start": 2130,
+      "end": 2134,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2135,
+      "end": 2149,
+      "label": "_truncateSubmissions",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.truncateSubmissions",
+        "Zkp.Implementation.RollupValue.truncateLoop",
+        "Zkp.Implementation.RollupValue.deleteSubmission"
+      ],
+      "theorems": [],
+      "note": "Descending captured ids from initial nextId-1 to target; reject finalized; slash then rollback then delete submission/metadata; final nextId=target (including generic target>nextId behavior). All nested errors require transaction rollback. Full truncation closure not yet proved."
+    },
+    {
+      "start": 2150,
+      "end": 2150,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2151,
+      "end": 2207,
+      "label": "_rollbackBatch",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.rollbackBatch",
+        "Zkp.Implementation.RollupValue.rollbackHead",
+        "Zkp.Implementation.RollupValue.rollbackBlocks",
+        "Zkp.Implementation.RollupValue.clearBlockRecords",
+        "Zkp.Implementation.RollupValue.RollbackCallbackFrame"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.rollback_head_preserves_protected_state",
+        "Zkp.Implementation.RollupValue.clear_block_preserves_protected_state",
+        "Zkp.Implementation.RollupValue.rollback_blocks_preserve_protected_state",
+        "Zkp.Implementation.RollupValue.rollback_batch_preserves_protected_state",
+        "Zkp.Implementation.RollupValue.rollback_preserves_later_deposit_chain",
+        "Zkp.Implementation.RollupValue.rollback_preserves_historical_finality"
+      ],
+      "note": "Zero metadata no-op; snapshot rewind, descending inclusive block range with captured materializer callback before deleting three block maps, processed count restore. Does NOT reset live pending chains/deposit records/escrow. Preservation theorem uses explicit local callback frame; root/all-entrypoint closure not silently assumed."
+    },
+    {
+      "start": 2208,
+      "end": 2210,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2211,
+      "end": 2229,
+      "label": "_slashStake",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.slashStake",
+        "Zkp.Implementation.RollupValue.deleteStake",
+        "Zkp.Implementation.RollupValue.pendingCredit",
+        "Zkp.Implementation.RollupValue.fraudReward",
+        "Zkp.Implementation.RollupValue.treasuryShare"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.stake_split_conserves_full_bond",
+        "Zkp.Implementation.RollupValue.slash_alias_recipient_gets_one_bond",
+        "Zkp.Implementation.RollupValue.stake_credit_frames_other_recipient",
+        "Zkp.Implementation.RollupValue.stake_credit_frames_erc20",
+        "Zkp.Implementation.RollupValue.stake_credit_does_not_consume_deposit_escrow"
+      ],
+      "note": "Delete even absent/spent entry; active stake deleted before checked90/10 sequential native credits and exact events. Same reporter/treasury address aliases accumulate correctly. Arithmetic helper properties are proved, not a closed-world physical-stake invariant."
+    },
+    {
+      "start": 2230,
+      "end": 2232,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2233,
+      "end": 2246,
+      "label": "_refundStake",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.refundStake",
+        "Zkp.Implementation.RollupValue.deleteStake",
+        "Zkp.Implementation.RollupValue.pendingCredit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.refund_stake_success_shape",
+        "Zkp.Implementation.RollupValue.refunded_entry_cannot_refund_again",
+        "Zkp.Implementation.RollupValue.stake_credit_exact"
+      ],
+      "note": "Delete absent/spent entry; active captured submitter gets checked1ETH pending credit and event. Successful function removes stake, leaves deposit escrow/finality unchanged; cannot refund same deleted entry again absent a new funded allocation."
+    },
+    {
+      "start": 2247,
+      "end": 2256,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2257,
+      "end": 2273,
+      "label": "_computeValidityPIHash",
+      "status": "dependency-boundary",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.computeValidityPIHash",
+        "Zkp.Implementation.RollupValue.hashPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RollupValue.validity_preimage_has_exact_width"
+      ],
+      "note": "Concrete164-byte seven-field BE preimage (8,32,32,8,32,32,20). No top3-bit mask here. EVM memory/Keccak refinement not proved."
+    },
+    {
+      "start": 2274,
+      "end": 2284,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2285,
+      "end": 2288,
+      "label": "_mlePublicInputsMatch",
+      "status": "translated",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.mlePublicInputsMatch",
+        "Zkp.Implementation.RollupValue.limbsMatchBytes32"
+      ],
+      "theorems": [],
+      "note": "Exactly8 elements then strict unmasked word equality; length guard discharges actual indexing domain."
+    },
+    {
+      "start": 2289,
+      "end": 2293,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
+    },
+    {
+      "start": 2294,
+      "end": 2326,
+      "label": "_computeBlockHash",
+      "status": "dependency-boundary",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.computeBlockHash",
+        "Zkp.Implementation.RollupValue.hashPreimage",
+        "Zkp.Implementation.RollupValue.wordBytes"
+      ],
+      "theorems": [],
+      "note": "Exact previous32/channel4/time8/keyIds each4/no length prefix/tree32/deposit32/registration32. Dynamic bytes encoded; EVM pointer loop/allocator and Keccak equivalence unproved."
+    },
+    {
+      "start": 2327,
+      "end": 2330,
+      "status": "non-executable",
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
+      "theorems": [],
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     },
     {
       "start": 2331,
       "end": 2352,
+      "label": "_computeDepositHash",
       "status": "dependency-boundary",
-      "label": "Deposit hash keccak assembly",
       "declarations": [
         "Zkp.Implementation.RollupValue.HashInput",
-        "Zkp.Implementation.RollupValue.finishDeposit",
-        "Zkp.Implementation.RollupValue.DepositRecord"
+        "Zkp.Implementation.RollupValue.hashPreimage",
+        "Zkp.Implementation.RollupValue.finishDeposit"
       ],
       "theorems": [
+        "Zkp.Implementation.RollupValue.deposit_preimage_has_exact_width",
         "Zkp.Implementation.RollupValue.successful_finish_deposit_record"
       ],
-      "note": "Typed152-byte role order: previous32, depositor20, recipient32, token4, amount32, aux32. Deposit index and block number are absent. Exact assembly bytes, memory and keccak remain boundaries."
+      "note": "Concrete152-byte deposit preimage excludes index/block. Byte packing modeled; compiler/assembly/Keccak link external."
     },
     {
       "start": 2353,
       "end": 2353,
       "status": "non-executable",
-      "label": "Contract closing delimiter",
-      "declarations": [],
+      "label": "Declarations, documentation and separators",
+      "declarations": [
+        "Zkp.Implementation.RollupValue.State",
+        "Zkp.Implementation.RollupValue.ChainState",
+        "Zkp.Implementation.RollupValue.Event",
+        "Zkp.Implementation.RollupValue.Error"
+      ],
       "theorems": [],
-      "note": "Syntax only."
+      "note": "Only declarations/comments/syntax between executable functions; not proof coverage. Storage and ABI names are represented by explicit projections, not an EVM slot/getter refinement."
     }
   ],
   "boundaries": [
     {
       "name": "canonical_abi_and_storage",
-      "obligation": "Nat inputs/observations stand for canonical Solidity address/uint32/uint64/uint256 values and valid projection of reachable storage; no generic arbitrary-Nat source refinement is claimed.",
+      "obligation": "Nat arguments/observations stand for canonical typed Solidity ABI values and reachable storage projection; generated ABI getters, physical slot layout and decoder failures require separate semantics.",
       "discharged": false
     },
     {
-      "name": "constructor_and_authority_provenance",
-      "obligation": "Constructor chain/verifier pinning, immutable deployer/adapter provenance, set-once materializer discovery/binding, registered Manager authority and their callbacks must be established separately; their bodies are untranslated here.",
+      "name": "deployment_environment_link",
+      "obligation": "Constructor validation is modeled, but returned Deployment must be linked to later Environment's immutable deployer/chain/adapters/treasury and code addresses; arbitrary environment replacement is not a valid deployment execution.",
       "discharged": false
     },
     {
       "name": "external_call_and_staticcall_semantics",
-      "obligation": "Environment supplies the exact typed recipient/token/amount and pre-call storage to external calls. Success/failure, EVM call frame isolation, STATICCALL restrictions, and returned callback-mutated storage require independent semantics.",
+      "obligation": "Each stateful dependency receives exact pre-call State and typed target/arguments and can return callback-mutated storage. STATICCALL restrictions, getter/core ABI decoding, low160 assembly address cleanup and EVM call/return behavior are not proved.",
       "discharged": false
     },
     {
       "name": "safe_erc20_and_actual_custody",
-      "obligation": "SafeERC20 acceptance, token code behavior, balanceOf truthfulness, native actual balances/value transfer and conservation of external custody are not inferred from local ledger arithmetic.",
+      "obligation": "Token acceptance, truthful balance observations, native actual balance and transfer of stake/msg.value are not proved from logical escrow/pending entries.",
       "discharged": false
     },
     {
       "name": "callback_storage_frames",
-      "obligation": "Full-call accounting across callbacks requires the stated local storage-frame premise; nonReentrant blocks only guarded reentry and does not prove all callback storage immutable.",
+      "obligation": "Rollback preservation is conditional on the explicit local RollbackCallbackFrame. Other stateful callbacks remain arbitrary. This frame must be discharged against satellite/public-call semantics, not assumed as global protocol safety.",
       "discharged": false
     },
     {
       "name": "outer_transaction_atomicity",
-      "obligation": "commit is an explicit all-or-nothing projected storage/log semantics. EVM rollback of nested materializer complete-vector calls, token balances and callee logs is not proved.",
+      "obligation": "commit models all-or-nothing projected storage/own logs. Nested materializer, token, callback and global EVM rollback requires independent proof; success shape does not establish full-transaction physical conservation.",
       "discharged": false
     },
     {
       "name": "rollup_own_event_projection",
-      "obligation": "Returned events include only final-success Rollup-owned events; callee logs and callback-relative global event order are not modeled. Solidity withdrawToken emits before external balance/transfer calls.",
+      "obligation": "Exact Rollup-owned event fields/order are represented on final success, but callee logs/global callback-relative event interleaving and events discarded by outer failure are not an EVM trace extraction. withdrawToken's event precedes its calls in source.",
       "discharged": false
     },
     {
       "name": "hash_abi_memory_and_storage_layout",
-      "obligation": "Typed hash constructors name exact ordered roles/widths. Actual big-endian serialization, Keccak collision resistance, assembly memory writes, mapping-slot addressing and layout are not proved.",
+      "obligation": "Concrete BE hashPreimage/wordBytes are executable, and key widths have named proofs. HashEncodingAgrees with actual Keccak, assembly pointer/copy/storage layout and compiler lowering remains undischarged; no cryptographic injectivity is assumed by local accounting.",
       "discharged": false
     },
     {
-      "name": "compact_withdrawal_proof_soundness",
-      "obligation": "Pinned compact adapter output authenticates correct circuit public inputs and economic entitlement only under separately proved adapter/circuit/cryptographic assumptions. Length/mask/hash checks alone do not prove soundness.",
+      "name": "compact_proof_and_da_soundness",
+      "obligation": "Validity/withdrawal adapter returns, fraud verdict meaning and Blob exactbyte attestation depend on separately verified code/circuits/configuration/crypto and deployed identities. Guards alone do not establish proof or DA soundness.",
       "discharged": false
     },
     {
-      "name": "historical_finality_provenance",
-      "obligation": "The finalizedRoot membership predicate and its permanence originate in untranslated constructor/finality paths. This module faithfully accepts historical membership but does not establish valid chain finality.",
+      "name": "generic_private_assembly_domains",
+      "obligation": "Eight-limb helpers and close-member assembly are represented on actual guarded caller domains. Generic malformed offsets/counts/raw calldata physical overread and wraparound-sized memory copies outside those domains are not proved equivalent to the total projection.",
       "discharged": false
     },
     {
-      "name": "bounded_limb_helper_domain",
-      "obligation": "Limb helpers are represented for length17, offsets0/8, eight iterations. Solidity generic out-of-bounds panics and arbitrary offsets are not modeled by their total List projections.",
+      "name": "self_call_gas_and_abi",
+      "obligation": "finalize evaluates actual fullVerify code and catches modeled errors, but source this.fullVerify STATICCALL ABI/resource exceptional behavior and first-selector encoding correspondence are not proved.",
       "discharged": false
     },
     {
-      "name": "pooled_escrow_and_selected_transition_scope",
-      "obligation": "Escrow is token-indexed and pooled, pending credits are recipient-indexed. Proven other-token/recipient framing does not establish L2 channel ownership or prevent one authorized channel from claiming another's pooled entitlement. Materializer/Manager vector entitlement, stake paths and full lifecycle composition are outside scope.",
+      "name": "fraud_gas_calibration",
+      "obligation": "encodedMleVerdict represents separate source gas observations and budget/catch classifications, not EVM gas accounting or a calibrated25m proof of availability; unknown ABI verdicts are supplied only after a valid uint8 decode.",
       "discharged": false
     },
     {
-      "name": "resource_and_evm_refinement",
-      "obligation": "Gas exhaustion, integer ABI decoder failures, array allocation, compiler behavior and full EVM small-step refinement are not proved. This manually authored model is not extracted or proven equivalent to Solidity.",
+      "name": "pooled_escrow_and_temporal_scope",
+      "obligation": "All source function families have control-flow models, but all-entrypoint temporal closure and physical custody/source refinement remain unproved. FinalityRecoveryTrace composes only actual finalize and rollbackBatch receipts. Posting/truncation/all-callback closure and channel-level entitlement are not inferred from pooled per-token ceilings.",
+      "discharged": false
+    },
+    {
+      "name": "resource_and_compiler_refinement",
+      "obligation": "Gas/memory exhaustion, arbitrary-size allocations, compiler behavior and EVM small-step semantics are not proved. A full-source line partition and zero untranslated top-level function families are inventories, not whole-source proof coverage.",
       "discharged": false
     }
   ]

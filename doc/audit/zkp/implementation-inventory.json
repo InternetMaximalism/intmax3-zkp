@@ -513,7 +513,7 @@
       "sha256": "c8140a09df809bfe64d0502f9a9a54290909e1e24738673178a01130d2082235",
       "lines": 21,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/pinned-interface.json"
     },
     {
       "path": "contracts/src/IntmaxRollup.sol",
@@ -674,14 +674,14 @@
       "sha256": "6239cb91549a771f6f68bcffa8b151e63a6eda0a6fee1da7fac8325fc98625b7",
       "lines": 2402,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/close-circuit.json"
     },
     {
       "path": "src/circuits/channel/close_pis.rs",
       "sha256": "e43f3502121efb39aea65bf6d6b05d6e30744b6d7c87a15a799f439853466914",
       "lines": 472,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/close-public-inputs.json"
     },
     {
       "path": "src/circuits/channel/decryption_gadget.rs",

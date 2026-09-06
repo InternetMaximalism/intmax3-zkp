@@ -71,6 +71,17 @@ inductive Fault where
 
 abbrev Result := Except Fault
 
+/-- The four signatures of contracts/src/IPinnedMleVerifierV2.sol. The interface
+    itself has no executable implementation or soundness guarantee. ABI decoding,
+    byte-level selectors and EVM STATICCALL are separate dependencies. In
+    particular uint8 fraudVerdict permits all 256 values at the ABI boundary;
+    meanings of those values are imposed by the consuming Rollup, not here. -/
+structure PinnedInterface where
+  allowedChainId : Except Bytes U256
+  core : Except Bytes Address
+  verifyCompactPublicInputs : Bytes → Except Bytes Limbs
+  fraudVerdictCompact : Bytes → U256 → Except Bytes U8
+
 /-- Exact external call results, including failure; no `accepted implies sound` premise. -/
 structure EvmView where
   chainId : U256

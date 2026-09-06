@@ -8,8 +8,10 @@ This source-oriented translation covers the metadata, sidecar length/ordering,
 attestation journal, commitment preimages, point-evaluation/SHA result guards
 and SimpleCoder payload byte addressing. The SHA/Keccak, blob polynomial,
 modexp and EVM memory/CALL/ABI implementation are explicit dependencies.
-The line map marks the untranscribed polynomial/assembly loops UNTRANSLATED;
-their existence is not hidden behind an assumption claiming overall DA safety.
+The evaluation control flow is translated below, including both loops, the
+root-hit branch and precompile request parameters. Barycentric interpolation
+correctness, field inversion, primitive roots, memory and SHA/KZG soundness are
+NOT inferred from translating that control flow.
 
 The accepted KZG ceremony is not challenged here. It does not by itself prove
 that a handwritten SimpleCoder/evaluation implementation follows the ceremony's
@@ -23,6 +25,12 @@ an arbitrary caller-chosen hash implies published or available proof bytes.
 -/
 
 namespace Zkp.Implementation.BlobJournal
+
+@[simp] theorem result_bind_ok {α β : Type} (x : α) (f : α → Except ε β) :
+    ((Except.ok x : Except ε α) >>= f) = f x := rfl
+@[simp] theorem result_bind_error {α β : Type} (e : ε) (f : α → Except ε β) :
+    ((Except.error e : Except ε α) >>= f) = .error e := rfl
+@[simp] theorem result_pure {α : Type} (x : α) : (pure x : Except ε α) = .ok x := rfl
 
 abbrev Word := Fin (2 ^ 256)
 abbrev Address := Fin (2 ^ 160)
@@ -55,6 +63,7 @@ inductive Failure where
   | commitmentMismatch
   | conflictingAttestation
   | dependencyFailed
+  | arithmeticPanic
   deriving DecidableEq, Repr
 
 /-- _blobCount:439–444; Nat is the mathematical value of the source uint256. -/
@@ -352,5 +361,226 @@ theorem sha_acceptance_requires_exact_reply {ok : Bool} {size : Nat} {digest res
   rename_i conditions
   simp only [Bool.and_eq_true, beq_iff_eq] at conditions
   exact ⟨conditions.1, conditions.2, (Except.ok.inj h).symm⟩
+
+/-! ## Evaluation algorithm and typed precompile observations
+
+Nat is used for mathematical EVM words. ADDMOD/MULMOD are unbounded arithmetic
+then modulus, as specified for those opcodes, not wrapped ADD/MUL. Memory loads
+are supplied as an indexed blob; actual mstore/calldataload/shifts and allocation
+remain an assembly refinement obligation. `scalarBlob` below is the intended
+byte-lane content, not a claim that the EVM has already written those lanes.
+-/
+
+def rootOfUnity : Nat :=
+  0x564c0a11a0f704f4fc3e8acfe0f8245f0ad1347b378fbf96e206da11a5d36306
+def rootOfUnityInv : Nat :=
+  0x0391b2856c609b4784ae25ffab9dc59865046d17864183203961a252dd8543362
+def inverseWidth : Nat :=
+  0x73e66878b46ae3705eb6a46a89213de7d3686828bfce5c19400fffff00100001
+def challengePrefix : Nat :=
+  0x4653424c4f425645524946595f56315f00000000000000000000000000001000
+def challengeInputLength : Nat := 0x20050
+def reverseNibbles : Nat := 0xf7b3d591e6a2c480
+def pointGas : Nat := 50000
+def mulmod (a b : Nat) : Nat := (a * b) % blsModulus
+def addmod (a b : Nat) : Nat := (a + b) % blsModulus
+def reverseNibble (x : Nat) : Nat := (reverseNibbles >>> ((x &&& 15) * 4)) &&& 15
+def bitReverse12 (x : Nat) : Nat :=
+  ((reverseNibble x) <<< 8) ||| ((reverseNibble (x >>> 4)) <<< 4) ||| reverseNibble (x >>> 8)
+
+abbrev Blob := Nat → Nat
+
+def scalarBlob (proof : Bytes) (blobIndex localIndex : Nat) : Nat :=
+  if blobIndex = 0 ∧ localIndex = 0 then (proof.length * 2 ^ 184) % 2 ^ 256
+  else (List.range 31).foldl
+    (fun acc lane => acc * 256 + (proof.getD ((blobIndex * 4096 + localIndex - 1) * 31 + lane) zeroByte).val) 0
+
+structure WordReply where
+  ok : Bool
+  size : Nat
+  word : Word
+
+inductive PrecompileRequest where
+  | challengeSha (prefixWord inputLength : Nat) (blob : Blob) (commitment : Bytes)
+  | commitmentSha (commitment : Bytes)
+  | modexp (baseLength exponentLength modulusLength base exponent modulus : Nat)
+
+abbrev WordPrecompile := PrecompileRequest → WordReply
+
+def checkedSha (reply : WordReply) : Except Failure Word :=
+  shaResult reply.ok reply.size reply.word
+
+def modexp (call : WordPrecompile) (base exponent : Nat) : Except Failure Nat :=
+  let reply := call (.modexp 32 32 32 base exponent blsModulus)
+  if reply.ok && reply.size == 32 then .ok reply.word.val else .error .modexpFailed
+
+def versionedHash (call : WordPrecompile) (commitment : Bytes) : Except Failure Word := do
+  let digest ← checkedSha (call (.commitmentSha commitment))
+  let value := (digest.val % 2 ^ 248) + 2 ^ 248
+  pure ⟨value, by have h := Nat.mod_lt digest.val (show 0 < 2 ^ 248 by decide); omega⟩
+
+inductive ScanResult where
+  | atRoot (value : Nat)
+  | denominators (product : Nat) (prefixes : Nat → Nat)
+
+/-- Forward loop: the early root return occurs before reading a prefix or
+    invoking modexp. Prefixes contain products BEFORE the current denominator. -/
+def scanDenominators (blob : Blob) (z : Nat) :
+    Nat → Nat → Nat → Nat → (Nat → Nat) → Except Failure ScanResult
+  | 0, _, product, _, prefixes => .ok (.denominators product prefixes)
+  | fuel + 1, i, product, omega, prefixes =>
+    if z = omega then .ok (.atRoot (blob (bitReverse12 i)))
+    else if blsModulus < omega then .error .arithmeticPanic
+    else scanDenominators blob z fuel (i + 1)
+      (mulmod product (addmod z (blsModulus - omega))) (mulmod omega rootOfUnity)
+      (fun index => if index = i then product else prefixes index)
+
+/-- Reverse loop: decrement precedes array access, inverse-product update
+    follows the summand, and the first omega is ROOT_OF_UNITY_INV. -/
+def sumDenominators (blob : Blob) (z : Nat) (prefixes : Nat → Nat) :
+    Nat → Nat → Nat → Nat → Except Failure Nat
+  | 0, _, _, sum => .ok sum
+  | cursor + 1, inverseProduct, omega, sum =>
+    if blsModulus < omega then .error .arithmeticPanic
+    else
+      let denominator := addmod z (blsModulus - omega)
+      let inverseDenominator := mulmod inverseProduct (prefixes cursor)
+      let value := blob (bitReverse12 cursor)
+      let nextSum := addmod sum (mulmod (mulmod value omega) inverseDenominator)
+      sumDenominators blob z prefixes cursor (mulmod inverseProduct denominator)
+        (mulmod omega rootOfUnityInv) nextSum
+
+def repeatedSquare : Nat → Nat → Nat
+  | 0, z => z
+  | n + 1, z => repeatedSquare n (mulmod z z)
+
+def evaluateBlob (call : WordPrecompile) (blob : Blob) (z : Nat) : Except Failure Nat := do
+  let scan ← scanDenominators blob z 4096 0 1 1 (fun _ => 0)
+  match scan with
+  | .atRoot value => pure value
+  | .denominators product prefixes => do
+    let inverseProduct ← modexp call product (blsModulus - 2)
+    let sum ← sumDenominators blob z prefixes 4096 inverseProduct rootOfUnityInv 0
+    let scale := mulmod (addmod (repeatedSquare 12 z) (blsModulus - 1)) inverseWidth
+    pure (mulmod sum scale)
+
+structure Evaluation where
+  versioned : Word
+  z : Nat
+  y : Nat
+
+def blobEvaluation (call : WordPrecompile) (blob : Blob) (commitment : Bytes) :
+    Except Failure Evaluation := do
+  let digest ← checkedSha (call (.challengeSha challengePrefix challengeInputLength blob commitment))
+  let z := digest.val % blsModulus
+  let y ← evaluateBlob call blob z
+  let versioned ← versionedHash call commitment
+  pure ⟨versioned, z, y⟩
+
+structure PointRequest where
+  gas : Nat
+  address : Nat
+  inputLength : Nat
+  outputLength : Nat
+  versioned : Word
+  z : Nat
+  y : Nat
+  commitment : Bytes
+  proof : Bytes
+
+def verifyBlobBody (call : WordPrecompile) (point : PointRequest → PointReply)
+    (proof : Bytes) (index : Nat) (sidecar : Sidecar) : Except Failure Word := do
+  let e ← blobEvaluation call (scalarBlob proof index) sidecar.commitment
+  let reply := point ⟨pointGas, 10, 192, 64, e.versioned, e.z, e.y, sidecar.commitment, sidecar.proof⟩
+  pointEvaluationResult index reply
+  pure e.versioned
+
+def verifyConcrete (call : WordPrecompile) (point : PointRequest → PointReply)
+    (proof sidecars : Bytes) : Except Failure Metadata :=
+  verify (verifyBlobBody call point) proof sidecars
+
+def attestConcrete (call : WordPrecompile) (point : PointRequest → PointReply)
+    (hash : Hash) (journal : Journal) (rollup : Address) (id : Word)
+    (getContext : GetContext) (proof sidecars : Bytes) : Except Failure AttestationResult :=
+  attestProofData hash (verifyBlobBody call point) journal rollup id getContext proof sidecars
+
+theorem concrete_verifier_uses_evaluation_body (call : WordPrecompile)
+    (point : PointRequest → PointReply) (proof sidecars : Bytes) :
+    verifyConcrete call point proof sidecars = verify (verifyBlobBody call point) proof sidecars := rfl
+
+theorem root_constants_are_canonical :
+    0 < blsModulus ∧ rootOfUnity < blsModulus ∧ rootOfUnityInv < blsModulus ∧
+      inverseWidth < blsModulus := by decide
+
+theorem mulmod_is_canonical (a b : Nat) : mulmod a b < blsModulus :=
+  Nat.mod_lt _ root_constants_are_canonical.1
+
+theorem addmod_is_canonical (a b : Nat) : addmod a b < blsModulus :=
+  Nat.mod_lt _ root_constants_are_canonical.1
+
+theorem root_scan_returns_exact_value (blob : Blob) (fuel i product omega : Nat)
+    (prefixes : Nat → Nat) :
+    scanDenominators blob omega (fuel + 1) i product omega prefixes =
+      .ok (.atRoot (blob (bitReverse12 i))) := by simp [scanDenominators]
+
+theorem evaluation_at_one_skips_precompiles (call : WordPrecompile) (blob : Blob) :
+    evaluateBlob call blob 1 = .ok (blob 0) := by
+  rw [evaluateBlob, root_scan_returns_exact_value]
+  rfl
+
+theorem modexp_exact_call_and_reply (call : WordPrecompile) (base exponent result : Nat)
+    (h : modexp call base exponent = .ok result) :
+    let reply := call (.modexp 32 32 32 base exponent blsModulus)
+    reply.ok = true ∧ reply.size = 32 ∧ result = reply.word.val := by
+  dsimp only [modexp] at h
+  split at h <;> try contradiction
+  rename_i accepted
+  simp only [Bool.and_eq_true, beq_iff_eq] at accepted
+  exact ⟨accepted.1, accepted.2, (Except.ok.inj h).symm⟩
+
+theorem repeated_square_step (n z : Nat) :
+    repeatedSquare (n + 1) z = repeatedSquare n (mulmod z z) := rfl
+
+theorem root_has_power_of_two_order :
+    repeatedSquare 12 rootOfUnity = 1 ∧ repeatedSquare 11 rootOfUnity ≠ 1 := by decide
+
+theorem inverse_constants_check :
+    mulmod rootOfUnity rootOfUnityInv = 1 ∧ mulmod 4096 inverseWidth = 1 := by decide
+
+theorem reverse_nibble_table :
+    (List.range 16).map reverseNibble = [0,8,4,12,2,10,6,14,1,9,5,13,3,11,7,15] := by decide
+
+set_option maxHeartbeats 4000000 in
+theorem bit_reverse_three_nibbles :
+    ∀ high middle low : Fin 16,
+      bitReverse12 (bitReverse12 (high.val * 256 + middle.val * 16 + low.val)) =
+        high.val * 256 + middle.val * 16 + low.val := by decide
+
+theorem bit_reverse_involutive_on_blob_indices (index : Fin 4096) :
+    bitReverse12 (bitReverse12 index.val) = index.val := by
+  have range := index.isLt
+  have highBound : index.val / 256 < 16 := by omega
+  have expansion : index.val / 256 * 256 + index.val / 16 % 16 * 16 + index.val % 16 = index.val := by omega
+  have reversed := bit_reverse_three_nibbles ⟨index.val / 256, highBound⟩
+    ⟨index.val / 16 % 16, Nat.mod_lt _ (by decide)⟩ ⟨index.val % 16, Nat.mod_lt _ (by decide)⟩
+  simpa only [expansion] using reversed
+
+theorem challenge_length_exact : challengeInputLength = 32 + 4096 * 32 + 48 := by decide
+
+theorem simple_coder_header (proof : Bytes) :
+    scalarBlob proof 0 0 = (proof.length * 2 ^ 184) % 2 ^ 256 := by simp [scalarBlob]
+
+theorem versioned_hash_prefix (call : WordPrecompile) (commitment : Bytes) (out : Word)
+    (h : versionedHash call commitment = .ok out) :
+    2 ^ 248 ≤ out.val ∧ out.val < 2 * 2 ^ 248 := by
+  unfold versionedHash at h
+  cases sha : checkedSha (call (.commitmentSha commitment)) with
+  | error e => simp [sha, Except.bind] at h
+  | ok digest =>
+    simp [sha, Except.bind] at h
+    subst out
+    have bound := Nat.mod_lt digest.val (show 0 < 2 ^ 248 by decide)
+    simp only []
+    omega
 
 end Zkp.Implementation.BlobJournal

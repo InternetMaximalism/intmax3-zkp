@@ -1,0 +1,2606 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/close_circuit.rs",
+  "source_sha256": "6239cb91549a771f6f68bcffa8b151e63a6eda0a6fee1da7fac8325fc98625b7",
+  "source_lines": 2402,
+  "module": "Zkp.Implementation.CloseCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/CloseCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 19,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 20,
+      "end": 36,
+      "status": "dependency-boundary",
+      "label": "Module description and imported implementations",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering",
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt",
+        "Zkp.Implementation.CloseCircuit.InsertionContractAt"
+      ],
+      "theorems": [],
+      "note": "Dependency primitives are explicit: canonical field/word conversion, Poseidon/Keccak, pinned recursive verification including cyclic self-key, Falcon aggregate statement and indexed-tree insertion. Source prose about old signature/layout versions does not override current executable behavior."
+    },
+    {
+      "start": 37,
+      "end": 37,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 38,
+      "end": 73,
+      "status": "dependency-boundary",
+      "label": "Module description and imported implementations",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering",
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt",
+        "Zkp.Implementation.CloseCircuit.InsertionContractAt"
+      ],
+      "theorems": [],
+      "note": "Dependency primitives are explicit: canonical field/word conversion, Poseidon/Keccak, pinned recursive verification including cyclic self-key, Falcon aggregate statement and indexed-tree insertion. Source prose about old signature/layout versions does not override current executable behavior."
+    },
+    {
+      "start": 74,
+      "end": 79,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 80,
+      "end": 80,
+      "status": "translated",
+      "label": "Fixture constant and active domain constants",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fixtureNativeAmount",
+        "Zkp.Implementation.CloseCircuit.imchDomain",
+        "Zkp.Implementation.CloseCircuit.imclDomain",
+        "Zkp.Implementation.CloseCircuit.imcsDomain",
+        "Zkp.Implementation.CloseCircuit.imcmDomain"
+      ],
+      "theorems": [],
+      "note": "Fixture77 is not a runtime funding rule. Domain values match current executable constants; H1 uses imported IMB2 Poseidon, not the stale introductory IMBS-keccak narrative."
+    },
+    {
+      "start": 81,
+      "end": 81,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 82,
+      "end": 84,
+      "status": "translated",
+      "label": "Fixture constant and active domain constants",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fixtureNativeAmount",
+        "Zkp.Implementation.CloseCircuit.imchDomain",
+        "Zkp.Implementation.CloseCircuit.imclDomain",
+        "Zkp.Implementation.CloseCircuit.imcsDomain",
+        "Zkp.Implementation.CloseCircuit.imcmDomain"
+      ],
+      "theorems": [],
+      "note": "Fixture77 is not a runtime funding rule. Domain values match current executable constants; H1 uses imported IMB2 Poseidon, not the stale introductory IMBS-keccak narrative."
+    },
+    {
+      "start": 85,
+      "end": 87,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 88,
+      "end": 88,
+      "status": "translated",
+      "label": "Fixture constant and active domain constants",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fixtureNativeAmount",
+        "Zkp.Implementation.CloseCircuit.imchDomain",
+        "Zkp.Implementation.CloseCircuit.imclDomain",
+        "Zkp.Implementation.CloseCircuit.imcsDomain",
+        "Zkp.Implementation.CloseCircuit.imcmDomain"
+      ],
+      "theorems": [],
+      "note": "Fixture77 is not a runtime funding rule. Domain values match current executable constants; H1 uses imported IMB2 Poseidon, not the stale introductory IMBS-keccak narrative."
+    },
+    {
+      "start": 89,
+      "end": 89,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 90,
+      "end": 91,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 92,
+      "end": 92,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 93,
+      "end": 107,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 108,
+      "end": 112,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 113,
+      "end": 113,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 114,
+      "end": 116,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 117,
+      "end": 117,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 118,
+      "end": 121,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 122,
+      "end": 122,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 123,
+      "end": 126,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 127,
+      "end": 127,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 128,
+      "end": 133,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 134,
+      "end": 135,
+      "status": "translated",
+      "label": "ChannelClosePublicInputsTarget raw fields",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs",
+        "Zkp.Implementation.CloseCircuit.Words2",
+        "Zkp.Implementation.CloseCircuit.Words8"
+      ],
+      "theorems": [],
+      "note": "All20 fields and raw word widths preserved. No channel nonzero/delegate total/registered member condition is added merely by modeling the struct."
+    },
+    {
+      "start": 136,
+      "end": 136,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 137,
+      "end": 137,
+      "status": "translated",
+      "label": "Public target checked allocation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs.AllocationChecks",
+        "Zkp.Implementation.CloseCircuit.publicAllocationProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp"
+      ],
+      "theorems": [],
+      "note": "Every103 public limb is range32 by new(true)/explicit range_check. Raw targets are distinct from typed native values and from constructor-computed commitments."
+    },
+    {
+      "start": 138,
+      "end": 141,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 142,
+      "end": 172,
+      "status": "translated",
+      "label": "Public target checked allocation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs.AllocationChecks",
+        "Zkp.Implementation.CloseCircuit.publicAllocationProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp"
+      ],
+      "theorems": [],
+      "note": "Every103 public limb is range32 by new(true)/explicit range_check. Raw targets are distinct from typed native values and from constructor-computed commitments."
+    },
+    {
+      "start": 173,
+      "end": 173,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 174,
+      "end": 200,
+      "status": "translated",
+      "label": "Public-input ordered encoding",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PublicInputs.words",
+        "Zkp.Implementation.CloseCircuit.publicInputsLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.public_input_word_count",
+        "Zkp.Implementation.CloseCircuit.exact_public_input_encoding_is_injective"
+      ],
+      "note": "Exact current103-word layout, not old77/85/87 widths; all fields remain full unmasked words. Compile/target identity refinement remains open."
+    },
+    {
+      "start": 201,
+      "end": 201,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 202,
+      "end": 273,
+      "status": "translated",
+      "label": "Public target exact-length cursor decoder",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.parseTargets",
+        "Zkp.Implementation.CloseCircuit.parseExactTargets",
+        "Zkp.Implementation.CloseCircuit.readTargetFields",
+        "Zkp.Implementation.CloseCircuit.Words2.read",
+        "Zkp.Implementation.CloseCircuit.Words8.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.target_public_input_round_trip",
+        "Zkp.Implementation.CloseCircuit.target_parser_rejects_any_wrong_length",
+        "Zkp.Implementation.CloseCircuit.target_fields_round_trip"
+      ],
+      "note": "Fixed offsets are the evaluated source cursor and preserve all ordered slices behind the exact103 assertion. The inner reader's fallback is unreachable through parseTargets after the length guard. Option.none denotes shape assertion failure; parser itself adds no range gates. Native close_pis parsing is a separate dependency, not strengthened here."
+    },
+    {
+      "start": 274,
+      "end": 274,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 275,
+      "end": 329,
+      "status": "translated",
+      "label": "Public-input native witness writes",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.publicWriteProgram",
+        "Zkp.Implementation.CloseCircuit.WriteOp",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Preserves channel/counters/digests/member u8/delegate u16/TFD assignment order. Canonical field conversions and PartialWitness unwrap/panic behavior are imported and explicitly summarized."
+    },
+    {
+      "start": 330,
+      "end": 330,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 331,
+      "end": 341,
+      "status": "translated",
+      "label": "ChannelCloseCircuitError categories",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.Error",
+        "Zkp.Implementation.CloseCircuit.Fault"
+      ],
+      "theorems": [],
+      "note": "Four source error variants preserved; diagnostic strings erased. Short recursive PI slicing and unwrapped setter panics are separate Fault cases, not returned source errors."
+    },
+    {
+      "start": 342,
+      "end": 353,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 354,
+      "end": 355,
+      "status": "translated",
+      "label": "MemberCloseAuth",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.MemberAuth"
+      ],
+      "theorems": [],
+      "note": "Native mirror contains only pk_g, not a newly verified signature or independent circuit key vector. Actual keys come from aggregate public inputs."
+    },
+    {
+      "start": 356,
+      "end": 359,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 360,
+      "end": 360,
+      "status": "translated",
+      "label": "MemberCloseAuth",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.MemberAuth"
+      ],
+      "theorems": [],
+      "note": "Native mirror contains only pk_g, not a newly verified signature or independent circuit key vector. Actual keys come from aggregate public inputs."
+    },
+    {
+      "start": 361,
+      "end": 361,
+      "status": "translated",
+      "label": "ChannelCloseFullWitness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "Full close trio, final Balance proof, native auth list and aggregate proof represented. Imported ChannelCloseWitness internals are delegated via closeToPublicInputs; no success=>economic safety premise."
+    },
+    {
+      "start": 362,
+      "end": 365,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 366,
+      "end": 372,
+      "status": "translated",
+      "label": "ChannelCloseFullWitness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "Full close trio, final Balance proof, native auth list and aggregate proof represented. Imported ChannelCloseWitness internals are delegated via closeToPublicInputs; no success=>economic safety premise."
+    },
+    {
+      "start": 373,
+      "end": 375,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 376,
+      "end": 376,
+      "status": "translated",
+      "label": "ChannelCloseFullWitness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "Full close trio, final Balance proof, native auth list and aggregate proof represented. Imported ChannelCloseWitness internals are delegated via closeToPublicInputs; no success=>economic safety premise."
+    },
+    {
+      "start": 377,
+      "end": 378,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 379,
+      "end": 379,
+      "status": "translated",
+      "label": "ChannelCloseFullWitness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "Full close trio, final Balance proof, native auth list and aggregate proof represented. Imported ChannelCloseWitness internals are delegated via closeToPublicInputs; no success=>economic safety premise."
+    },
+    {
+      "start": 380,
+      "end": 384,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 385,
+      "end": 386,
+      "status": "translated",
+      "label": "ChannelCloseFullWitness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "Full close trio, final Balance proof, native auth list and aggregate proof represented. Imported ChannelCloseWitness internals are delegated via closeToPublicInputs; no success=>economic safety premise."
+    },
+    {
+      "start": 387,
+      "end": 391,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 392,
+      "end": 396,
+      "status": "translated",
+      "label": "member_set_commitment_for_auth",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.nativeMemberSetPreimage",
+        "Zkp.Implementation.CloseCircuit.flattenAmounts",
+        "Zkp.Implementation.CloseCircuit.MemberAuth"
+      ],
+      "theorems": [],
+      "note": "Exact first8/default-zero array and auth.len() as u8 modulo256. Helper itself does not check floor/count; production prove/fill separately checks them. Keccak native byte codec remains a boundary."
+    },
+    {
+      "start": 397,
+      "end": 397,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 398,
+      "end": 409,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 410,
+      "end": 413,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 414,
+      "end": 414,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 415,
+      "end": 417,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 418,
+      "end": 418,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 419,
+      "end": 420,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 421,
+      "end": 421,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 422,
+      "end": 425,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 426,
+      "end": 426,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 427,
+      "end": 429,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 430,
+      "end": 430,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 431,
+      "end": 431,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 432,
+      "end": 432,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 433,
+      "end": 436,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 437,
+      "end": 437,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 438,
+      "end": 439,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 440,
+      "end": 440,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 441,
+      "end": 444,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 445,
+      "end": 446,
+      "status": "translated",
+      "label": "ChannelCloseCircuit target/data state",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Private targets/proofs/flags/path vectors modeled. slotTreeRoot is witnessed directly; this close never opens individual encrypted balance slots. Concrete CircuitData/Target serialization layout is not modeled."
+    },
+    {
+      "start": 447,
+      "end": 447,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 448,
+      "end": 453,
+      "status": "dependency-boundary",
+      "label": "Generic constructor/verifier dependency contract",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Caller supplies the Balance and aggregate verifier data. Const-pinning prevents substitution relative to those values but does not itself prove they are the canonical deployed families."
+    },
+    {
+      "start": 454,
+      "end": 468,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 469,
+      "end": 472,
+      "status": "translated",
+      "label": "Constructor arity/config/public allocation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.constructorArityAdmitted",
+        "Zkp.Implementation.CloseCircuit.aggregatePublicInputsLength",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width"
+      ],
+      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape."
+    },
+    {
+      "start": 473,
+      "end": 475,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 476,
+      "end": 482,
+      "status": "translated",
+      "label": "Constructor arity/config/public allocation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.constructorArityAdmitted",
+        "Zkp.Implementation.CloseCircuit.aggregatePublicInputsLength",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width"
+      ],
+      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape."
+    },
+    {
+      "start": 483,
+      "end": 487,
+      "status": "translated",
+      "label": "Constructor private/header/vector allocations",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
+    },
+    {
+      "start": 488,
+      "end": 489,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 490,
+      "end": 490,
+      "status": "translated",
+      "label": "Constructor private/header/vector allocations",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
+    },
+    {
+      "start": 491,
+      "end": 494,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 495,
+      "end": 504,
+      "status": "translated",
+      "label": "Constructor private/header/vector allocations",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
+    },
+    {
+      "start": 505,
+      "end": 516,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 517,
+      "end": 521,
+      "status": "translated",
+      "label": "Safe Boolean member unary gates and floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.bit",
+        "Zkp.Implementation.CloseCircuit.activeCount",
+        "Zkp.Implementation.CloseCircuit.NoRise",
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.MemberFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
+        "Zkp.Implementation.CloseCircuit.no_rise_after_padding",
+        "Zkp.Implementation.CloseCircuit.active_count_of_false_suffix",
+        "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
+        "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
+        "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
+    },
+    {
+      "start": 522,
+      "end": 524,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 525,
+      "end": 531,
+      "status": "translated",
+      "label": "Safe Boolean member unary gates and floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.bit",
+        "Zkp.Implementation.CloseCircuit.activeCount",
+        "Zkp.Implementation.CloseCircuit.NoRise",
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.MemberFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
+        "Zkp.Implementation.CloseCircuit.no_rise_after_padding",
+        "Zkp.Implementation.CloseCircuit.active_count_of_false_suffix",
+        "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
+        "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
+        "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
+    },
+    {
+      "start": 532,
+      "end": 532,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 533,
+      "end": 537,
+      "status": "translated",
+      "label": "Safe Boolean member unary gates and floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.bit",
+        "Zkp.Implementation.CloseCircuit.activeCount",
+        "Zkp.Implementation.CloseCircuit.NoRise",
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.MemberFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
+        "Zkp.Implementation.CloseCircuit.no_rise_after_padding",
+        "Zkp.Implementation.CloseCircuit.active_count_of_false_suffix",
+        "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
+        "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
+        "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
+    },
+    {
+      "start": 538,
+      "end": 546,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 547,
+      "end": 547,
+      "status": "translated",
+      "label": "Safe Boolean member unary gates and floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.bit",
+        "Zkp.Implementation.CloseCircuit.activeCount",
+        "Zkp.Implementation.CloseCircuit.NoRise",
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.MemberFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
+        "Zkp.Implementation.CloseCircuit.no_rise_after_padding",
+        "Zkp.Implementation.CloseCircuit.active_count_of_false_suffix",
+        "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
+        "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
+        "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
+    },
+    {
+      "start": 548,
+      "end": 558,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 559,
+      "end": 559,
+      "status": "translated",
+      "label": "Safe Boolean member unary gates and floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.bit",
+        "Zkp.Implementation.CloseCircuit.activeCount",
+        "Zkp.Implementation.CloseCircuit.NoRise",
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.MemberFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
+        "Zkp.Implementation.CloseCircuit.no_rise_after_padding",
+        "Zkp.Implementation.CloseCircuit.active_count_of_false_suffix",
+        "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
+        "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
+        "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
+    },
+    {
+      "start": 560,
+      "end": 568,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 569,
+      "end": 584,
+      "status": "translated",
+      "label": "Token unary activeness and genesis floor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrefixGates",
+        "Zkp.Implementation.CloseCircuit.TokenFloor",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.token_floor_requires_one_active_flag",
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+      ],
+      "note": "Ten safe bits, adjacent monotonicity, count sum and bit0 required. Derives1<=tokenCount<=10. Does not force inactive registry/fund suffix zero."
+    },
+    {
+      "start": 585,
+      "end": 593,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 594,
+      "end": 600,
+      "status": "translated",
+      "label": "Active registry pair comparisons",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.RegistryPairGates",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.constructor_checks_all_45_ordered_token_pairs"
+      ],
+      "note": "For all45 ordered pairs i<j, equality is rejected when later slot j is active; earlier activeness follows unary prefix. Inactive suffix has no new zero assertions here."
+    },
+    {
+      "start": 601,
+      "end": 605,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 606,
+      "end": 606,
+      "status": "translated",
+      "label": "Genesis token amount connection",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "amounts[0] equals genesisFund PI, linking full IMCH/TFD vector to IMCL's legacy amount slot. This is not proof that a live burn took place."
+    },
+    {
+      "start": 607,
+      "end": 607,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 608,
+      "end": 610,
+      "status": "translated",
+      "label": "Checked u64 freeze successor",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.FreezeSuccessorGates",
+        "Zkp.Implementation.CloseCircuit.Words2.value",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.freeze_limb_equations_prove_exact_successor"
+      ],
+      "note": "Imported U64Target.add(1) modeled by local two-limb equations, initial carry0/final carry0 and canonical output bounds. Exact+1/no-wrap is derived, not assumed a whole-u64 safety result."
+    },
+    {
+      "start": 611,
+      "end": 611,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 612,
+      "end": 612,
+      "status": "translated",
+      "label": "Canonical close metadata and zero incoming",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.close_metadata_is_canonical_without_new_signatures"
+      ],
+      "note": "closeNonce=freeze successor; snapshot2, burn hash8 and unallocated8 all forced zero. No fabricated live burn or signed medium-block snapshot."
+    },
+    {
+      "start": 613,
+      "end": 617,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 618,
+      "end": 629,
+      "status": "translated",
+      "label": "Canonical close metadata and zero incoming",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.close_metadata_is_canonical_without_new_signatures"
+      ],
+      "note": "closeNonce=freeze successor; snapshot2, burn hash8 and unallocated8 all forced zero. No fabricated live burn or signed medium-block snapshot."
+    },
+    {
+      "start": 630,
+      "end": 630,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 631,
+      "end": 633,
+      "status": "translated",
+      "label": "Shared H1 recomputation and PI connection",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.h1Preimage",
+        "Zkp.Implementation.CloseCircuit.h1Prefix",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.h1_header_has_current_37_elements",
+        "Zkp.Implementation.CloseCircuit.h1_preimage_binds_registry_and_token_count"
+      ],
+      "note": "Exact37-element IMB2 header: channel/member/delegate/token count,10 registry,4 slot root,8 chain,8 accumulator,2 version. Same targets across commitments; Poseidon/canonical Bytes32 extraction not proven."
+    },
+    {
+      "start": 634,
+      "end": 643,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 644,
+      "end": 656,
+      "status": "translated",
+      "label": "Shared H1 recomputation and PI connection",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.h1Preimage",
+        "Zkp.Implementation.CloseCircuit.h1Prefix",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.h1_header_has_current_37_elements",
+        "Zkp.Implementation.CloseCircuit.h1_preimage_binds_registry_and_token_count"
+      ],
+      "note": "Exact37-element IMB2 header: channel/member/delegate/token count,10 registry,4 slot root,8 chain,8 accumulator,2 version. Same targets across commitments; Poseidon/canonical Bytes32 extraction not proven."
+    },
+    {
+      "start": 657,
+      "end": 664,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 665,
+      "end": 687,
+      "status": "translated",
+      "label": "Full-vector IMCH recomputation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.imchPreimage",
+        "Zkp.Implementation.CloseCircuit.imchPrefix",
+        "Zkp.Implementation.CloseCircuit.imchSuffix",
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.HashBindingAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.imch_has_complete_139_word_preimage",
+        "Zkp.Implementation.CloseCircuit.imch_preimage_exposes_full_amount_vector",
+        "Zkp.Implementation.CloseCircuit.one_signed_digest_binds_the_entire_token_vector",
+        "Zkp.Implementation.CloseCircuit.no_component_mix_under_a_fixed_signed_digest"
+      ],
+      "note": "All80 amount words included at their current positions. Same signed digest binds whole registry/count/amount vector under two concrete Keccak/H1 binding premises. Does not select latest H or establish economic backing."
+    },
+    {
+      "start": 688,
+      "end": 688,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 689,
+      "end": 701,
+      "status": "translated",
+      "label": "IMCL recomputation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.imclPreimage",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.imcl_preimage_has_42_words"
+      ],
+      "note": "Exact42-word metadata commitment from channel/state/H1/fundRoot/burnHash/genesis amount. Zero burn is imposed earlier; no live withdrawal authorization follows from this digest."
+    },
+    {
+      "start": 702,
+      "end": 711,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 712,
+      "end": 720,
+      "status": "translated",
+      "label": "Canonical IMCS recomputation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.imcsPreimage",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.imcs_preimage_has_12_words",
+        "Zkp.Implementation.CloseCircuit.close_metadata_is_canonical_without_new_signatures"
+      ],
+      "note": "Exact12 words: domain/channel/computed signed IMCH/derived freeze nonce. Prior stateDigest connection normalizes computed digest to its public wire. No fresh channel signature request appears in constructor."
+    },
+    {
+      "start": 721,
+      "end": 721,
+      "status": "translated",
+      "label": "Full token funds digest recomputation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.tokenFundsPreimage",
+        "Zkp.Implementation.CloseCircuit.flattenAmounts",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.token_funds_preimage_has_exact_92_words",
+        "Zkp.Implementation.CloseCircuit.flattened_amounts_keep_all_eight_words",
+        "Zkp.Implementation.CloseCircuit.flattened_vectors_are_injective",
+        "Zkp.Implementation.CloseCircuit.token_funds_preimage_binds_count_registry_and_every_amount"
+      ],
+      "note": "Fixed92-word domain/registry10/count/amount80 preimage. Full-width codec injectivity proven independently of crypto binding; caller must still enforce canonical inactive suffix."
+    },
+    {
+      "start": 722,
+      "end": 730,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 731,
+      "end": 741,
+      "status": "translated",
+      "label": "Full token funds digest recomputation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.tokenFundsPreimage",
+        "Zkp.Implementation.CloseCircuit.flattenAmounts",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.token_funds_preimage_has_exact_92_words",
+        "Zkp.Implementation.CloseCircuit.flattened_amounts_keep_all_eight_words",
+        "Zkp.Implementation.CloseCircuit.flattened_vectors_are_injective",
+        "Zkp.Implementation.CloseCircuit.token_funds_preimage_binds_count_registry_and_every_amount"
+      ],
+      "note": "Fixed92-word domain/registry10/count/amount80 preimage. Full-width codec injectivity proven independently of crypto binding; caller must still enforce canonical inactive suffix."
+    },
+    {
+      "start": 742,
+      "end": 743,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 744,
+      "end": 747,
+      "status": "translated",
+      "label": "Pinned cyclic Balance proof and exact two-field bridge",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.BalanceStatement",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.recursive_balance_identity_and_history_are_exact"
+      ],
+      "note": "Constant Balance VK plus embedded cyclic self-key; consumes29 base PIs but connects only channel and settled chain. No private commitment, block_r, root, height or accumulator equality is invented here."
+    },
+    {
+      "start": 748,
+      "end": 749,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 750,
+      "end": 753,
+      "status": "translated",
+      "label": "Pinned cyclic Balance proof and exact two-field bridge",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.BalanceStatement",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.recursive_balance_identity_and_history_are_exact"
+      ],
+      "note": "Constant Balance VK plus embedded cyclic self-key; consumes29 base PIs but connects only channel and settled chain. No private commitment, block_r, root, height or accumulator equality is invented here."
+    },
+    {
+      "start": 754,
+      "end": 805,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 806,
+      "end": 806,
+      "status": "translated",
+      "label": "Pinned aggregate proof verification",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.AggregateStatement",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.aggregate_current_layout_is_73_words"
+      ],
+      "note": "Constant aggregate verifier, not a fresh witnessed key. Actual Falcon proof semantics/ranges/padding are dependency obligations; historical explanatory comments do not replace current pinned implementation."
+    },
+    {
+      "start": 807,
+      "end": 808,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 809,
+      "end": 812,
+      "status": "translated",
+      "label": "Aggregate message and count connections",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members",
+        "Zkp.Implementation.CloseCircuit.every_exposed_active_member_signed_the_exact_imch"
+      ],
+      "note": "Message8 equals recomputed IMCH, count at8 equals memberCount. With scoped aggregate signature semantics every active key signed exactly that message; registration and legal economics remain callers."
+    },
+    {
+      "start": 813,
+      "end": 814,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 815,
+      "end": 818,
+      "status": "translated",
+      "label": "Aggregate message and count connections",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members",
+        "Zkp.Implementation.CloseCircuit.every_exposed_active_member_signed_the_exact_imch"
+      ],
+      "note": "Message8 equals recomputed IMCH, count at8 equals memberCount. With scoped aggregate signature semantics every active key signed exactly that message; registration and legal economics remain callers."
+    },
+    {
+      "start": 819,
+      "end": 820,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 821,
+      "end": 826,
+      "status": "translated",
+      "label": "Verified aggregate key slices",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.AggregateStatement",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members"
+      ],
+      "note": "Eight keys sliced directly from offsets9+8*i through+8. Native member_auth is not an independent freely accepted circuit key list."
+    },
+    {
+      "start": 827,
+      "end": 827,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 828,
+      "end": 831,
+      "status": "translated",
+      "label": "Fixed-width masked member-set preimage",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.selectedKeys",
+        "Zkp.Implementation.CloseCircuit.memberSetPreimage",
+        "Zkp.Implementation.CloseCircuit.activeKeys",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.selected_key_vector_preserves_width",
+        "Zkp.Implementation.CloseCircuit.imcm_current_preimage_is_66_words",
+        "Zkp.Implementation.CloseCircuit.inactive_suffix_adds_no_signers",
+        "Zkp.Implementation.CloseCircuit.active_prefix_selects_exactly_the_first_keys",
+        "Zkp.Implementation.CloseCircuit.close_active_keys_are_exactly_the_verified_signer_prefix"
+      ],
+      "note": "Each of8 verified key slots contributes8 words selected to zero if inactive. Fixed IMCM66 words, delegates excluded. L1 must compare this commitment/count to registered members."
+    },
+    {
+      "start": 832,
+      "end": 835,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 836,
+      "end": 841,
+      "status": "translated",
+      "label": "Fixed-width masked member-set preimage",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.selectedKeys",
+        "Zkp.Implementation.CloseCircuit.memberSetPreimage",
+        "Zkp.Implementation.CloseCircuit.activeKeys",
+        "Zkp.Implementation.CloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.selected_key_vector_preserves_width",
+        "Zkp.Implementation.CloseCircuit.imcm_current_preimage_is_66_words",
+        "Zkp.Implementation.CloseCircuit.inactive_suffix_adds_no_signers",
+        "Zkp.Implementation.CloseCircuit.active_prefix_selects_exactly_the_first_keys",
+        "Zkp.Implementation.CloseCircuit.close_active_keys_are_exactly_the_verified_signer_prefix"
+      ],
+      "note": "Each of8 verified key slots contributes8 words selected to zero if inactive. Fixed IMCM66 words, delegates excluded. L1 must compare this commitment/count to registered members."
+    },
+    {
+      "start": 842,
+      "end": 871,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 872,
+      "end": 895,
+      "status": "translated",
+      "label": "Indexed active member distinctness",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.InsertionGates",
+        "Zkp.Implementation.CloseCircuit.InsertionContractAt",
+        "Zkp.Implementation.CloseCircuit.ScopedInsertionContracts",
+        "Zkp.Implementation.CloseCircuit.FreshInsertions",
+        "Zkp.Implementation.CloseCircuit.NoDuplicates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.scoped_indexed_paths_prove_each_active_insertion_is_fresh",
+        "Zkp.Implementation.CloseCircuit.fresh_insertions_give_distinct_active_keys",
+        "Zkp.Implementation.CloseCircuit.close_distinctness_authenticates_the_same_aggregate_key_vector",
+        "Zkp.Implementation.CloseCircuit.constructor_inserts_all_eight_verified_key_slots_in_order"
+      ],
+      "note": "Height4 checked insertion proofs, empty root, value1, unmasked full256-bit key and same member flag. Concrete finite opening/link/nonmembership contracts derive distinct active prefix. Final root is unused; no final-root commitment is fabricated."
+    },
+    {
+      "start": 896,
+      "end": 896,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 897,
+      "end": 899,
+      "status": "translated",
+      "label": "Member-set hash then public registration/build",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.constructor_registers_only_after_member_set_binding"
+      ],
+      "note": "Computed IMCM equals PI before registration103 and build. Primitive gate-to-Nat/Bool/codec interpretation and actual compiled proof soundness remain unresolved."
+    },
+    {
+      "start": 900,
+      "end": 900,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 901,
+      "end": 902,
+      "status": "translated",
+      "label": "Member-set hash then public registration/build",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.constructor_registers_only_after_member_set_binding"
+      ],
+      "note": "Computed IMCM equals PI before registration103 and build. Primitive gate-to-Nat/Bool/codec interpretation and actual compiled proof soundness remain unresolved."
+    },
+    {
+      "start": 903,
+      "end": 921,
+      "status": "translated",
+      "label": "Return complete circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CloseCircuit.ProofWitness",
+        "Zkp.Implementation.CloseCircuit.Environment",
+        "Zkp.Implementation.CloseCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "All source handles represented semantically, not exact Rust memory/target-index layout."
+    },
+    {
+      "start": 922,
+      "end": 925,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 926,
+      "end": 932,
+      "status": "translated",
+      "label": "Production fill_witness wrapper",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitness",
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_fill_auth_count_and_floor_checked_before_assignment"
+      ],
+      "note": "Production wrapper passes enforceFloor=true. Test-seam false does not alter constructor's independent two-member floor."
+    },
+    {
+      "start": 933,
+      "end": 940,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 941,
+      "end": 960,
+      "status": "translated",
+      "label": "Native member floor/auth count prechecks",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_fill_auth_count_and_floor_checked_before_assignment"
+      ],
+      "note": "member count comes from state, floor2 or test-seam1, upper8 remains fixed; exact auth length checked before writes. Public PI count is not silently trusted as state count."
+    },
+    {
+      "start": 961,
+      "end": 961,
+      "status": "translated",
+      "label": "Initialize native witness and member flags",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.prefixFlags",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "Flags assigned i<stateMemberCount for all8 slots. Setter failure behavior remains explicit native dependency."
+    },
+    {
+      "start": 962,
+      "end": 962,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 963,
+      "end": 965,
+      "status": "translated",
+      "label": "Initialize native witness and member flags",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.prefixFlags",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "Flags assigned i<stateMemberCount for all8 slots. Setter failure behavior remains explicit native dependency."
+    },
+    {
+      "start": 966,
+      "end": 970,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 971,
+      "end": 981,
+      "status": "translated",
+      "label": "Set supplied public/private/header/vector witnesses",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.FilledWitness",
+        "Zkp.Implementation.CloseCircuit.fillProgram",
+        "Zkp.Implementation.CloseCircuit.publicWriteProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_fill_keeps_supplied_public_inputs_not_an_authentication_assumption"
+      ],
+      "note": "Supplied public values are honored; native slot root is computed from state by dependency. Copies state freeze/shared/unallocated/prev/H2, token count/registry/full funds and10 flags. Filling is not raw-proof authentication."
+    },
+    {
+      "start": 982,
+      "end": 983,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 984,
+      "end": 985,
+      "status": "translated",
+      "label": "Set supplied public/private/header/vector witnesses",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.FilledWitness",
+        "Zkp.Implementation.CloseCircuit.fillProgram",
+        "Zkp.Implementation.CloseCircuit.publicWriteProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_fill_keeps_supplied_public_inputs_not_an_authentication_assumption"
+      ],
+      "note": "Supplied public values are honored; native slot root is computed from state by dependency. Copies state freeze/shared/unallocated/prev/H2, token count/registry/full funds and10 flags. Filling is not raw-proof authentication."
+    },
+    {
+      "start": 986,
+      "end": 987,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 988,
+      "end": 1006,
+      "status": "translated",
+      "label": "Set supplied public/private/header/vector witnesses",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.FilledWitness",
+        "Zkp.Implementation.CloseCircuit.fillProgram",
+        "Zkp.Implementation.CloseCircuit.publicWriteProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_fill_keeps_supplied_public_inputs_not_an_authentication_assumption"
+      ],
+      "note": "Supplied public values are honored; native slot root is computed from state by dependency. Copies state freeze/shared/unallocated/prev/H2, token count/registry/full funds and10 flags. Filling is not raw-proof authentication."
+    },
+    {
+      "start": 1007,
+      "end": 1007,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1008,
+      "end": 1013,
+      "status": "translated",
+      "label": "Assign Balance and aggregate proof witnesses",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "set_proof_with_pis failures become FailedToProve; these assignments are not native cryptographic verification. The constructor remains authoritative."
+    },
+    {
+      "start": 1014,
+      "end": 1018,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1019,
+      "end": 1021,
+      "status": "translated",
+      "label": "Assign Balance and aggregate proof witnesses",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "set_proof_with_pis failures become FailedToProve; these assignments are not native cryptographic verification. The constructor remains authoritative."
+    },
+    {
+      "start": 1022,
+      "end": 1030,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1031,
+      "end": 1035,
+      "status": "translated",
+      "label": "Native indexed insertion proof generation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "Fresh indexed tree; each active auth pk inserted in order with constant1, inactive gets dummy, then path setter. Imported generator/state/tree internals and possible setter panic remain an explicit dependency; duplicate insertion errors map InvalidMemberAuth."
+    },
+    {
+      "start": 1036,
+      "end": 1041,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1042,
+      "end": 1054,
+      "status": "translated",
+      "label": "Native indexed insertion proof generation",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CloseCircuit.fillProgram"
+      ],
+      "theorems": [],
+      "note": "Fresh indexed tree; each active auth pk inserted in order with constant1, inactive gets dummy, then path setter. Imported generator/state/tree internals and possible setter panic remain an explicit dependency; duplicate insertion errors map InvalidMemberAuth."
+    },
+    {
+      "start": 1055,
+      "end": 1055,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1056,
+      "end": 1070,
+      "status": "translated",
+      "label": "prove initial auth count guard",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.prove",
+        "Zkp.Implementation.CloseCircuit.NativeWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_prove_preserves_native_admission_and_balance_binding"
+      ],
+      "note": "Checks auth length against native state's memberCount before any closeToPublicInputs call."
+    },
+    {
+      "start": 1071,
+      "end": 1073,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1074,
+      "end": 1076,
+      "status": "translated",
+      "label": "prove close PI derivation and member commitment override",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.prove",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CloseCircuit.nativeMemberSetPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_prove_preserves_native_admission_and_balance_binding"
+      ],
+      "note": "Delegates to actual ChannelCloseWitness::to_public_inputs then overrides only memberSet. CloseIntent equality/native close validation details belong to direct-dependency boundary, not assumed whole asset safety."
+    },
+    {
+      "start": 1077,
+      "end": 1079,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1080,
+      "end": 1096,
+      "status": "translated",
+      "label": "prove native Balance PI mirror",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.prove",
+        "Zkp.Implementation.CloseCircuit.BalanceStatement",
+        "Zkp.Implementation.CloseCircuit.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_prove_preserves_native_admission_and_balance_binding"
+      ],
+      "note": "Source slices first29 PIs (too short can panic), parses native values, checks chain first then channel. Extra cyclic PIs are not dropped from actual recursion; no other Balance field is equated."
+    },
+    {
+      "start": 1097,
+      "end": 1097,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1098,
+      "end": 1103,
+      "status": "translated",
+      "label": "prove fill then proof backend",
+      "declarations": [
+        "Zkp.Implementation.CloseCircuit.prove",
+        "Zkp.Implementation.CloseCircuit.fillWitness",
+        "Zkp.Implementation.CloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.native_prove_preserves_native_admission_and_balance_binding"
+      ],
+      "note": "Ordinary path uses full native fill then CircuitData.prove, mapping backend errors. No fresh signing callback is introduced, but proof generation availability is not proved."
+    },
+    {
+      "start": 1104,
+      "end": 1104,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1105,
+      "end": 1106,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1107,
+      "end": 1109,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1110,
+      "end": 1110,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1111,
+      "end": 1111,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1112,
+      "end": 1114,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1115,
+      "end": 1115,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1116,
+      "end": 1116,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1117,
+      "end": 1117,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1118,
+      "end": 1137,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1138,
+      "end": 1138,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1139,
+      "end": 1141,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1142,
+      "end": 1144,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1145,
+      "end": 1145,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1146,
+      "end": 1146,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1147,
+      "end": 1148,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1149,
+      "end": 1150,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1151,
+      "end": 1153,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1154,
+      "end": 1154,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1155,
+      "end": 1182,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1183,
+      "end": 1185,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1186,
+      "end": 1197,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1198,
+      "end": 1202,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1203,
+      "end": 1209,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1210,
+      "end": 1215,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1216,
+      "end": 1234,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1235,
+      "end": 1236,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1237,
+      "end": 1239,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1240,
+      "end": 1242,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1243,
+      "end": 1249,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1250,
+      "end": 1251,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1252,
+      "end": 1257,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1258,
+      "end": 1267,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1268,
+      "end": 1272,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1273,
+      "end": 1274,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1275,
+      "end": 1285,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1286,
+      "end": 1288,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1289,
+      "end": 1311,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1312,
+      "end": 1312,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1313,
+      "end": 1343,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1344,
+      "end": 1344,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1345,
+      "end": 1361,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1362,
+      "end": 1365,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1366,
+      "end": 1383,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1384,
+      "end": 1394,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1395,
+      "end": 1408,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1409,
+      "end": 1415,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1416,
+      "end": 1445,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1446,
+      "end": 1467,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1468,
+      "end": 1530,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1531,
+      "end": 1531,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1532,
+      "end": 1546,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1547,
+      "end": 1547,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1548,
+      "end": 1556,
+      "status": "untranslated",
+      "label": "Feature-gated close fixture builders and artifacts",
+      "declarations": [],
+      "theorems": [],
+      "note": "All lines read, deliberately NOT labeled test-only: this block is available under test OR close-fixture-bin. OnceLock circuit builds, deterministic key/ciphertext generation, fixture states, caller-supplied Balance/signatures, random salts and proof generation are not translated here. They are not production constructor constraints or release evidence. No fixture/proof generation was executed."
+    },
+    {
+      "start": 1557,
+      "end": 1557,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary/blank line; stale prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 1558,
+      "end": 2402,
+      "status": "test-only",
+      "label": "Unit tests and local fixture helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "All source test lines read, not translated as production and not executed. The module's named normal Lean examples are separately audited, not mapped as proofs of these source tests."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "compiler_and_field_lowering",
+      "obligation": "Handwritten order/data/gates do not prove equivalence to Rust/Plonky2 compiled constraints or bytecode. FieldAndGadgetLowering must justify actual safe Booleans, checked word ranges, integer-lifted counts, equality/select/connection and local U64 carry equations without circular asset-safety premises.",
+      "discharged": false
+    },
+    {
+      "name": "typed_words_and_pis",
+      "obligation": "Native u8/u16/u32/u64/U256 and field encodings, setter canonical conversion, hash limb representation and exact target indices must refine decoded Nat/List structures. Shape failure in target parsing denotes assertion panic. Source target parser does not independently check ranges.",
+      "discharged": false
+    },
+    {
+      "name": "h1_poseidon_and_keccak",
+      "obligation": "Exact37/139/42/12/92/66 preimages are modeled, but Poseidon/Keccak gadgets and native byte agreement are not verified. HashBindingAt applies only to the concrete compared pair, including canonical Poseidon-to-Bytes32 encoding; no globally injective finite hash is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "constant_and_cyclic_verifier_pins",
+      "obligation": "Both verifier data are constructor parameters. Correct supplied/deployed canonical keys, recursive verifier soundness, Balance cyclic embedded-key parsing/connection and aggregate arity/PI integrity must be established separately. Constant pinning and equal arity alone are not canonical-family proofs.",
+      "discharged": false
+    },
+    {
+      "name": "aggregate_falcon_statement",
+      "obligation": "For each actual pinned aggregate proof, supply exact message/count/key-list, active-prefix verified Falcon signatures and canonical key/message limb ranges. AggregateContractAt states only the scoped signature proposition, not member registration, honest economic transition or asset solvency.",
+      "discharged": false
+    },
+    {
+      "name": "finite_indexed_insertion_paths",
+      "obligation": "Each visited concrete indexed-tree path requires valid predecessor links/order, low-leaf and empty-leaf openings, full-key comparisons and same-path replacement/skip semantics. ScopedInsertionContracts supplies per-step nonmembership and root updates; no all-key/global hash injectivity assertion is used.",
+      "discharged": false
+    },
+    {
+      "name": "native_close_and_balance_dependencies",
+      "obligation": "closeToPublicInputs delegates CloseIntent::new plus exact-intent equality; parseBalance delegates current first29 BalancePublicInputs parser. Those native helper bodies, ChannelState/BalanceState native computation and memory/assertion behavior require separate translations. Native success is not a raw circuit soundness premise.",
+      "discharged": false
+    },
+    {
+      "name": "native_witness_and_proof_generation",
+      "obligation": "PartialWitness assignments/unwrap panics, proof-target shape checks, native indexed-tree generators and CircuitData.prove are opaque operations with preserved order/error categories. No assertion that filled witnesses necessarily prove or that a signed exit kit is always available.",
+      "discharged": false
+    },
+    {
+      "name": "l1_and_honest_signer_obligations",
+      "obligation": "L1 must match registered member set/count, active/frozen generation, finality, authorized and pending burn high-water and one exact full-state backing vector. Honest signer admission must enforce intended slot/recipient/ciphertext/delegate and unused-token canonicality rules. Close alone does not open slots, enforce delegate total<=1024, prove asset backing or select latest H.",
+      "discharged": false
+    },
+    {
+      "name": "fixtures_and_tests",
+      "obligation": "Feature-gated fixture helpers1105–1556 remain explicitly untranslated; they are not merely test-only. Unit-test source1558–2402 is read but not mapped to production constraints. No Rust proving/adversarial/fixture regeneration tests were run by this module.",
+      "discharged": false
+    }
+  ]
+}

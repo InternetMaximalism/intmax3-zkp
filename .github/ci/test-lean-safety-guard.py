@@ -190,6 +190,40 @@ class LeanGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(GUARD.GuardFailure, "nonstandard/historical"):
                 GUARD.check_coverage(self.root)
 
+    def test_audited_current_composition_is_allowed(self):
+        modules = {"CurrentA": "import Std\n",
+                   "CurrentB": "import CurrentA Lean\n",
+                   "CurrentC": "import CurrentB\n"}
+        GUARD.check_current_imports(modules, tuple(modules))
+
+    def test_composition_cannot_hide_a_historical_import(self):
+        modules = {"CurrentA": "import CurrentB\n",
+                   "CurrentB": "import Historical\n",
+                   "Historical": "import Std\n"}
+        with self.assertRaisesRegex(GUARD.GuardFailure, "nonstandard/historical"):
+            GUARD.check_current_imports(modules, ("CurrentA", "CurrentB"))
+
+    def test_composition_cannot_import_an_unaudited_module(self):
+        modules = {"CurrentA": "import Unregistered\n",
+                   "Unregistered": "import Std\n"}
+        with self.assertRaisesRegex(GUARD.GuardFailure, "nonstandard/historical"):
+            GUARD.check_current_imports(modules, ("CurrentA",))
+
+    def test_current_import_cycles_are_rejected(self):
+        modules = {"CurrentA": "import CurrentB\n", "CurrentB": "import CurrentA\n"}
+        with self.assertRaisesRegex(GUARD.GuardFailure, "cyclic"):
+            GUARD.check_current_imports(modules, tuple(modules))
+
+    def test_current_composition_cannot_shadow_standard_modules(self):
+        modules = {"CurrentA": "import Std\n", "Std": ""}
+        with self.assertRaisesRegex(GUARD.GuardFailure, "shadows"):
+            GUARD.check_current_imports(modules, ("CurrentA",))
+
+    def test_current_import_requires_its_source(self):
+        with self.assertRaisesRegex(GUARD.GuardFailure, "source missing"):
+            GUARD.check_current_imports({"CurrentA": "import CurrentB\n"},
+                                        ("CurrentA", "CurrentB"))
+
     def test_native_decide_is_not_a_kernel_checked_shortcut(self):
         modules = {name: "import Std\n" for name in GUARD.ARCH_ROOTS}
         modules["ChannelSafetyAdmission"] = "import Std\nexample : True := by native_decide\n"

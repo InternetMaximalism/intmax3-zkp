@@ -1,0 +1,1276 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/close_pis.rs",
+  "source_sha256": "e43f3502121efb39aea65bf6d6b05d6e30744b6d7c87a15a799f439853466914",
+  "source_lines": 472,
+  "module": "Zkp.Implementation.ClosePublicInputs",
+  "model": "doc/audit/zkp/Zkp/Implementation/ClosePublicInputs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 3,
+      "end": 3,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 4,
+      "end": 6,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 7,
+      "end": 7,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 8,
+      "end": 8,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 9,
+      "end": 9,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 10,
+      "end": 46,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 47,
+      "end": 47,
+      "status": "translated",
+      "label": "PI length",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.publicInputLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.exact_word_length"
+      ],
+      "note": "Current fixed length is 103, not the historical lengths in commentary."
+    },
+    {
+      "start": 48,
+      "end": 48,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 49,
+      "end": 50,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 51,
+      "end": 52,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 53,
+      "end": 54,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 55,
+      "end": 62,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 63,
+      "end": 64,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 65,
+      "end": 66,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 67,
+      "end": 68,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 69,
+      "end": 69,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 70,
+      "end": 71,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 72,
+      "end": 72,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 73,
+      "end": 74,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 75,
+      "end": 75,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 76,
+      "end": 77,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 79,
+      "end": 83,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 84,
+      "end": 84,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 85,
+      "end": 90,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 91,
+      "end": 91,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 92,
+      "end": 94,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 95,
+      "end": 95,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 96,
+      "end": 100,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 101,
+      "end": 101,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 102,
+      "end": 107,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 108,
+      "end": 108,
+      "status": "translated",
+      "label": "native PI fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.Words2",
+        "Zkp.Implementation.ClosePublicInputs.Words8",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "All native fields and their two/eight-limb representation are explicit; NativeWidths represents Rust u32/u64/u8/u16 types, not proof validity."
+    },
+    {
+      "start": 109,
+      "end": 109,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 110,
+      "end": 110,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 111,
+      "end": 111,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 112,
+      "end": 114,
+      "status": "translated",
+      "label": "codec error variants",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.Field",
+        "Zkp.Implementation.ClosePublicInputs.Reason"
+      ],
+      "theorems": [],
+      "note": "Length/field failure categories represented; thiserror Display strings and Serde ABI are boundary semantics."
+    },
+    {
+      "start": 115,
+      "end": 115,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 116,
+      "end": 117,
+      "status": "translated",
+      "label": "codec error variants",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.Field",
+        "Zkp.Implementation.ClosePublicInputs.Reason"
+      ],
+      "theorems": [],
+      "note": "Length/field failure categories represented; thiserror Display strings and Serde ABI are boundary semantics."
+    },
+    {
+      "start": 118,
+      "end": 118,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 119,
+      "end": 119,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 120,
+      "end": 120,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 121,
+      "end": 145,
+      "status": "translated",
+      "label": "to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toU64Vec",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs.words",
+        "Zkp.Implementation.ClosePublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.exact_word_length",
+        "Zkp.Implementation.ClosePublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.ClosePublicInputs.accumulator_and_member_tail_positions"
+      ],
+      "note": "Exact source field order, all 103 limbs; native scalar fields are uniquely represented by canonical two-word pairs."
+    },
+    {
+      "start": 146,
+      "end": 146,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 147,
+      "end": 153,
+      "status": "translated",
+      "label": "from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.fromU64Slice",
+        "Zkp.Implementation.ClosePublicInputs.readFields",
+        "Zkp.Implementation.ClosePublicInputs.decodeFields",
+        "Zkp.Implementation.ClosePublicInputs.checkDigest",
+        "Zkp.Implementation.ClosePublicInputs.normalizeFields",
+        "Zkp.Implementation.ClosePublicInputs.joinValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.wrong_length_rejected",
+        "Zkp.Implementation.ClosePublicInputs.decoder_success_has_exact_length",
+        "Zkp.Implementation.ClosePublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.ClosePublicInputs.dummy_channel_rejected",
+        "Zkp.Implementation.ClosePublicInputs.digest_check_exact"
+      ],
+      "note": "Exact length first; actual ChannelId nonzero/u32 and digest u32 checks, raw scalar shift/OR without per-limb range check, u8/u16 count conversions and source-first error sequence. Bounds/default-reader equivalence depends only on exact source slice endpoints, not a proof-validity premise."
+    },
+    {
+      "start": 154,
+      "end": 154,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 155,
+      "end": 199,
+      "status": "translated",
+      "label": "from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.fromU64Slice",
+        "Zkp.Implementation.ClosePublicInputs.readFields",
+        "Zkp.Implementation.ClosePublicInputs.decodeFields",
+        "Zkp.Implementation.ClosePublicInputs.checkDigest",
+        "Zkp.Implementation.ClosePublicInputs.normalizeFields",
+        "Zkp.Implementation.ClosePublicInputs.joinValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.wrong_length_rejected",
+        "Zkp.Implementation.ClosePublicInputs.decoder_success_has_exact_length",
+        "Zkp.Implementation.ClosePublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.ClosePublicInputs.dummy_channel_rejected",
+        "Zkp.Implementation.ClosePublicInputs.digest_check_exact"
+      ],
+      "note": "Exact length first; actual ChannelId nonzero/u32 and digest u32 checks, raw scalar shift/OR without per-limb range check, u8/u16 count conversions and source-first error sequence. Bounds/default-reader equivalence depends only on exact source slice endpoints, not a proof-validity premise."
+    },
+    {
+      "start": 200,
+      "end": 200,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 201,
+      "end": 201,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 202,
+      "end": 203,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 204,
+      "end": 208,
+      "status": "translated",
+      "label": "close witness fields",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Witness",
+        "Zkp.Implementation.ClosePublicInputs.State",
+        "Zkp.Implementation.ClosePublicInputs.Withdrawal",
+        "Zkp.Implementation.ClosePublicInputs.Intent",
+        "Zkp.Implementation.ClosePublicInputs.Fund",
+        "Zkp.Implementation.ClosePublicInputs.Ten"
+      ],
+      "theorems": [],
+      "note": "Witness has complete intent/fund vector and state/withdrawal projection; unused native state is retained as opaque structural identity for the constructor boundary."
+    },
+    {
+      "start": 209,
+      "end": 209,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 210,
+      "end": 210,
+      "status": "dependency-boundary",
+      "label": "imports/derive/serde ABI",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error",
+        "Zkp.Implementation.ClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.HashWords"
+      ],
+      "theorems": [],
+      "note": "Imported native type/hash/constructor behavior is stated explicitly; serde, error Display and compiler representation are not refined."
+    },
+    {
+      "start": 211,
+      "end": 213,
+      "status": "translated",
+      "label": "witness errors",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error"
+      ],
+      "theorems": [],
+      "note": "CloseIntent constructor error and exact intent mismatch are distinct; display-string/compiler semantics remain a boundary."
+    },
+    {
+      "start": 214,
+      "end": 214,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 215,
+      "end": 217,
+      "status": "translated",
+      "label": "witness errors",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.Error"
+      ],
+      "theorems": [],
+      "note": "CloseIntent constructor error and exact intent mismatch are distinct; display-string/compiler semantics remain a boundary."
+    },
+    {
+      "start": 218,
+      "end": 218,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 219,
+      "end": 219,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 220,
+      "end": 221,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 222,
+      "end": 222,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 223,
+      "end": 225,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 226,
+      "end": 226,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 227,
+      "end": 234,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 235,
+      "end": 237,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 238,
+      "end": 248,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 249,
+      "end": 250,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 251,
+      "end": 254,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 255,
+      "end": 257,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 258,
+      "end": 258,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 259,
+      "end": 259,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 260,
+      "end": 260,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 261,
+      "end": 262,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 263,
+      "end": 263,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 264,
+      "end": 267,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 268,
+      "end": 274,
+      "status": "translated",
+      "label": "to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.ClosePublicInputs.projectWitness",
+        "Zkp.Implementation.ClosePublicInputs.NewIntent",
+        "Zkp.Implementation.ClosePublicInputs.closeStatePreimage",
+        "Zkp.Implementation.ClosePublicInputs.tokenFundsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.successful_projection_used_exact_intent",
+        "Zkp.Implementation.ClosePublicInputs.projection_leaves_member_set_unfilled",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_state_accumulator_and_counts",
+        "Zkp.Implementation.ClosePublicInputs.projection_uses_all_funds_and_exact_registry",
+        "Zkp.Implementation.ClosePublicInputs.constructor_error_propagates",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_full_length",
+        "Zkp.Implementation.ClosePublicInputs.token_funds_preimage_all_amount_lanes",
+        "Zkp.Implementation.ClosePublicInputs.close_state_preimage_length"
+      ],
+      "note": "Constructor result is propagated and entire intent compared. All fields projected exactly; genesis lane0 remains distinct from full ten-lane IMTF; state accumulator/counts used; member commitment deliberately zero pending circuit authentication. IMCS/IMTF direct dependency preimages modeled, Keccak not proved."
+    },
+    {
+      "start": 275,
+      "end": 275,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl/structural delimiter outside executable bodies."
+    },
+    {
+      "start": 276,
+      "end": 276,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 277,
+      "end": 279,
+      "status": "translated",
+      "label": "split_u64",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.split_then_join_u64",
+        "Zkp.Implementation.ClosePublicInputs.normalized_canonical_scalar"
+      ],
+      "note": "Native u64 high/low decomposition with canonical input width."
+    },
+    {
+      "start": 280,
+      "end": 280,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 281,
+      "end": 283,
+      "status": "translated",
+      "label": "join_u64",
+      "declarations": [
+        "Zkp.Implementation.ClosePublicInputs.joinU64",
+        "Zkp.Implementation.ClosePublicInputs.joinValue",
+        "Zkp.Implementation.ClosePublicInputs.normalizeScalar"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ClosePublicInputs.short_join_panics",
+        "Zkp.Implementation.ClosePublicInputs.split_then_join_u64",
+        "Zkp.Implementation.ClosePublicInputs.normalized_canonical_scalar"
+      ],
+      "note": "Source two indexed u64 words, fixed-width shift and raw OR, no added u32 checks; too-short direct helper input retains panic."
+    },
+    {
+      "start": 284,
+      "end": 284,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 285,
+      "end": 295,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 296,
+      "end": 296,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 297,
+      "end": 309,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 310,
+      "end": 310,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 311,
+      "end": 320,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 321,
+      "end": 321,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 322,
+      "end": 342,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 343,
+      "end": 343,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 344,
+      "end": 375,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 376,
+      "end": 376,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 377,
+      "end": 394,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 395,
+      "end": 395,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 396,
+      "end": 396,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 397,
+      "end": 398,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 399,
+      "end": 407,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 408,
+      "end": 408,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 409,
+      "end": 430,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 431,
+      "end": 432,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 433,
+      "end": 442,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 443,
+      "end": 444,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 445,
+      "end": 450,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    },
+    {
+      "start": 451,
+      "end": 452,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line; stale layout/security prose is not promoted to executable semantics."
+    },
+    {
+      "start": 453,
+      "end": 472,
+      "status": "test-only",
+      "label": "fixture and roundtrip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source cfg(test) helper/fixture/assertion region read separately; no new malformed inputs or runtime attacks executed, and test assertions are not production constraints."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_representation_and_compiler",
+      "obligation": "Refine source u64/u32/u8/u16 values, fixed arrays, shift/OR, bounds panics, allocation, Serde camelCase and thiserror string construction to native compiler behavior. NativeWidths represents valid native field storage, not circuit acceptance.",
+      "discharged": false
+    },
+    {
+      "name": "close_intent_constructor",
+      "obligation": "NewIntent must be actual CloseIntent::new with complete State/Withdrawal identity, including source fields retained opaquely here; prove its own checks separately. This module only proves error propagation and exact full-intent equality before projection.",
+      "discharged": false
+    },
+    {
+      "name": "hash_and_word_bytes",
+      "obligation": "HashWords must implement native hash_words/Keccak over four-byte big-endian canonical u32 words. IMCS and all 92 IMTF words are represented, but hash collision/preimage resistance and compiled byte equivalence are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "circuit_and_solidity_bridge",
+      "obligation": "Native 103-field order was compared with CloseCircuit.PublicInputs.words and SettlementVerifier.closeLayout and matches; construct and prove cross-module canonical type/word-byte conversions before treating this as a compiler-to-circuit-to-L1 theorem. Native zero placeholder memberSet is later authenticated by circuit member proof, while Solidity also checks protocol count/token bounds and recomputed IMCS/TFD.",
+      "discharged": false
+    }
+  ]
+}
