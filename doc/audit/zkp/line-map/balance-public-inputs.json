@@ -1,0 +1,736 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/balance_pis.rs",
+  "source_sha256": "ae567ab87d25354673cef70733f4435cfee6352d88f429347598e0b28f31174f",
+  "source_lines": 356,
+  "module": "Zkp.Implementation.BalancePublicInputs",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalancePublicInputs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 35,
+      "status": "dependency-boundary",
+      "label": "imports: plonky2 builder/witness/verifier-data API, serde, imported word types and cyclic vd helpers",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.Root",
+        "Zkp.Implementation.BalancePublicInputs.Bytes8",
+        "Zkp.Implementation.BalancePublicInputs.PublicState",
+        "Zkp.Implementation.BalancePublicInputs.VerifierData"
+      ],
+      "theorems": [],
+      "note": "Imported crate/gadget/hash semantics are represented as a call-boundary premise or a hand-transcribed guard; not established by the local proof."
+    },
+    {
+      "start": 36,
+      "end": 36,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 37,
+      "end": 38,
+      "status": "translated",
+      "label": "BALANCE_PUBLIC_INPUTS_LEN = 1 + 15 + 1 + 4 + 8 = 29",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.balanceLength",
+        "Zkp.Implementation.BalancePublicInputs.publicStateLength"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 39,
+      "end": 39,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 40,
+      "end": 49,
+      "status": "translated",
+      "label": "BalancePublicInputsError: invalid length / per-field parse error",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.Fault",
+        "Zkp.Implementation.BalancePublicInputs.Result"
+      ],
+      "theorems": [],
+      "note": "Fault models the two error variants plus the panic outcomes of the target parsers; message strings are not modelled."
+    },
+    {
+      "start": 50,
+      "end": 50,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 51,
+      "end": 58,
+      "status": "translated",
+      "label": "BalancePublicInputs: channel_id and public_state fields",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs",
+        "Zkp.Implementation.BalancePublicInputs.PublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 59,
+      "end": 63,
+      "status": "non-executable",
+      "label": "comment: block_r <= public_state.block_number is a documented invariant",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment only. The documented block_r <= public_state.block_number relation is NOT enforced by any parser or constructor in this file, and the Lean model deliberately does not assume it."
+    },
+    {
+      "start": 64,
+      "end": 68,
+      "status": "translated",
+      "label": "BalancePublicInputs: block_r and private_commitment fields",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs",
+        "Zkp.Implementation.BalancePublicInputs.Root"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 69,
+      "end": 75,
+      "status": "non-executable",
+      "label": "comment: settled_tx_chain hash-chain fold description",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment only. The in-circuit settled_tx_chain_push_circuit update and the off-chain match against BalanceState are outside this file and this model."
+    },
+    {
+      "start": 76,
+      "end": 77,
+      "status": "translated",
+      "label": "BalancePublicInputs: settled_tx_chain field",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs",
+        "Zkp.Implementation.BalancePublicInputs.Bytes8"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 78,
+      "end": 79,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 80,
+      "end": 84,
+      "status": "translated",
+      "label": "BalancePublicInputs::new: channel, default public state, zero block_r",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.GenesisEnvironment",
+        "Zkp.Implementation.BalancePublicInputs.initialPublicState",
+        "Zkp.Implementation.BalancePublicInputs.initialInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.genesis_has_zero_reference_and_settled_chain"
+      ],
+      "note": "PublicState::default() is modelled as block 0 / timestamp 0 with the three initial tree roots supplied by GenesisEnvironment; those roots are not computed here."
+    },
+    {
+      "start": 85,
+      "end": 85,
+      "status": "dependency-boundary",
+      "label": "PrivateState::new(salt).commitment(): initial tree roots and Poseidon commitment",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.GenesisEnvironment",
+        "Zkp.Implementation.BalancePublicInputs.initialPrivateWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.genesis_private_preimage_width",
+        "Zkp.Implementation.BalancePublicInputs.genesis_uses_exact_private_preimage"
+      ],
+      "note": "The 21-word preimage (three empty roots, zero previous commitment, nonce 0, 4-word salt) is transcribed by hand from private_state.rs; the empty roots and the hash are GenesisEnvironment premises."
+    },
+    {
+      "start": 86,
+      "end": 88,
+      "status": "translated",
+      "label": "BalancePublicInputs::new: zero settled_tx_chain and struct return",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.initialInputs",
+        "Zkp.Implementation.BalancePublicInputs.Bytes8"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.genesis_has_zero_reference_and_settled_chain"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 89,
+      "end": 89,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 90,
+      "end": 99,
+      "status": "translated",
+      "label": "BalancePublicInputs::to_u64_vec: 29-word encoding order",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs",
+        "Zkp.Implementation.BalancePublicInputs.PublicState",
+        "Zkp.Implementation.BalancePublicInputs.Root",
+        "Zkp.Implementation.BalancePublicInputs.Bytes8"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.balance_word_count",
+        "Zkp.Implementation.BalancePublicInputs.public_state_word_count",
+        "Zkp.Implementation.BalancePublicInputs.balance_encoding_injective"
+      ],
+      "note": "Handwritten local semantics; the sub-encodings of ChannelId, PublicState, BlockNumber, PoseidonHashOut and Bytes32 are re-modelled locally from their own files, not imported."
+    },
+    {
+      "start": 100,
+      "end": 100,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 101,
+      "end": 108,
+      "status": "translated",
+      "label": "from_u64: exact 29-word length guard",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fromNative",
+        "Zkp.Implementation.BalancePublicInputs.balanceLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.native_length_guard"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 109,
+      "end": 143,
+      "status": "translated",
+      "label": "from_u64: cursor walk and per-field guards (channel nonzero and < 2^32, block numbers < 2^63, 32-bit timestamp and Bytes32 limbs, roots copied unchecked)",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.readFields",
+        "Zkp.Implementation.BalancePublicInputs.PublicState",
+        "Zkp.Implementation.BalancePublicInputs.Root",
+        "Zkp.Implementation.BalancePublicInputs.Bytes8",
+        "Zkp.Implementation.BalancePublicInputs.checkNativeFields",
+        "Zkp.Implementation.BalancePublicInputs.wordBase",
+        "Zkp.Implementation.BalancePublicInputs.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.native_zero_channel_is_rejected",
+        "Zkp.Implementation.BalancePublicInputs.exact_native_guard_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.read_encoded_fields_with_suffix"
+      ],
+      "note": "Handwritten local semantics; the guards of ChannelId::try_from, PublicState::from_u64_slice, BlockNumber::new, PoseidonHashOut::from_u64_slice and Bytes32::from_u64_slice are transcribed by hand from their own files. The .expect on private_commitment cannot fire after the exact length guard and is modelled as an unchecked 4-word copy."
+    },
+    {
+      "start": 144,
+      "end": 152,
+      "status": "translated",
+      "label": "from_u64: assemble Ok(Self)",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fromNative",
+        "Zkp.Implementation.BalancePublicInputs.readFields"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.native_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.normal_native_roundtrip"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 153,
+      "end": 154,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 155,
+      "end": 162,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget: five wire-level fields",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Target and native structs share the representative PublicInputs domain; wire identity is not modelled."
+    },
+    {
+      "start": 163,
+      "end": 164,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 165,
+      "end": 176,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget::new: allocation order with is_checked forwarded to all but the Poseidon root",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.AllocationOp",
+        "Zkp.Implementation.BalancePublicInputs.allocationPlan",
+        "Zkp.Implementation.BalancePublicInputs.AllocationChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.allocation_preserves_checked_argument"
+      ],
+      "note": "The plan (order and checked flags) is modelled; the range-check gadgets behind each constructor are imported and enter only as the AllocationChecks premise. Checked allocation range-checks channel_id to 32 bits but does NOT reject channel 0."
+    },
+    {
+      "start": 177,
+      "end": 177,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 178,
+      "end": 187,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget::to_vec: same 29-word order as native",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.balance_word_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 188,
+      "end": 188,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 189,
+      "end": 216,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget::from_pis: assert len >= 29, wrap wires, ignore suffix, no guards",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fromTarget",
+        "Zkp.Implementation.BalancePublicInputs.readFields",
+        "Zkp.Implementation.BalancePublicInputs.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.target_roundtrip_accepts_suffix",
+        "Zkp.Implementation.BalancePublicInputs.target_short_input_panics",
+        "Zkp.Implementation.BalancePublicInputs.normal_target_suffix_roundtrip"
+      ],
+      "note": "Handwritten local semantics; the assert is modelled as Fault.boundsPanic. The imported from_slice helpers assert exact sub-lengths that always hold here."
+    },
+    {
+      "start": 217,
+      "end": 217,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 218,
+      "end": 230,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget::set_witness: five field writes in order",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.Field",
+        "Zkp.Implementation.BalancePublicInputs.witnessPlan"
+      ],
+      "theorems": [],
+      "note": "Only the write order is modelled; the imported set_witness calls and witness-write failures are not."
+    },
+    {
+      "start": 231,
+      "end": 231,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 232,
+      "end": 244,
+      "status": "translated",
+      "label": "BalancePublicInputsTarget::connect: five field-wise wire equalities",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.connectPlan",
+        "Zkp.Implementation.BalancePublicInputs.Connect"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.connected_inputs_are_equal"
+      ],
+      "note": "Connect is the premise that builder.connect and the imported connect helpers equate every word; under it the two tuples are equal."
+    },
+    {
+      "start": 245,
+      "end": 246,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 247,
+      "end": 257,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs: pis plus VerifierOnlyCircuitData",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.FullInputs",
+        "Zkp.Implementation.BalancePublicInputs.VerifierData"
+      ],
+      "theorems": [],
+      "note": "VerifierOnlyCircuitData is modelled only as a circuit digest plus a list of cap roots."
+    },
+    {
+      "start": 258,
+      "end": 263,
+      "status": "non-executable",
+      "label": "spacing and generic impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 264,
+      "end": 270,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs::to_u64_vec: pis words then digest and the configured number of cap roots",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.FullInputs",
+        "Zkp.Implementation.BalancePublicInputs.VerifierData",
+        "Zkp.Implementation.BalancePublicInputs.rootsWords",
+        "Zkp.Implementation.BalancePublicInputs.verifierLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.configured_encoding_matches_full_shape",
+        "Zkp.Implementation.BalancePublicInputs.short_verifier_cap_panics",
+        "Zkp.Implementation.BalancePublicInputs.verifier_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.roots_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_injective"
+      ],
+      "note": "vd_to_vec (utils/cyclic.rs) is re-modelled by hand: too-short native caps panic on indexing, extra cap roots are ignored."
+    },
+    {
+      "start": 271,
+      "end": 271,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 272,
+      "end": 273,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs::commitment: hash preimage is the full encoding",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.full_commitment_uses_all_words"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 274,
+      "end": 275,
+      "status": "dependency-boundary",
+      "label": "PoseidonHashOut::hash_inputs_u64 native call",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.concrete_commitment_binding"
+      ],
+      "note": "The hash is an opaque callback; binding is assumed only for one concrete compared pair and is not hash injectivity."
+    },
+    {
+      "start": 276,
+      "end": 276,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 277,
+      "end": 290,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs::from_u64_slice: exact 29 + vd_len guard, slice split, native prefix parse",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullFromNative",
+        "Zkp.Implementation.BalancePublicInputs.verifierLength",
+        "Zkp.Implementation.BalancePublicInputs.fromNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.native_full_length_guard"
+      ],
+      "note": "vd_vec_len = 4 + 4 * num_cap_elements is modelled as verifierLength count."
+    },
+    {
+      "start": 291,
+      "end": 296,
+      "status": "dependency-boundary",
+      "label": "to_field_vec conversion and vd_from_pis_slice decode of verifier data",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullFromNative",
+        "Zkp.Implementation.BalancePublicInputs.readVerifier",
+        "Zkp.Implementation.BalancePublicInputs.readRootPrefix",
+        "Zkp.Implementation.BalancePublicInputs.readRoots"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.root_prefix_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.roots_prefix_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.verifier_prefix_roundtrip"
+      ],
+      "note": "ToField::to_field_vec is a possibly-panicking conversion supplied as the convertFields callback; the decoder is re-modelled from utils/cyclic.rs as readVerifier. Canonical-field checks are not proved here."
+    },
+    {
+      "start": 297,
+      "end": 298,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs::from_u64_slice: Ok(Self { pis, vd })",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullFromNative",
+        "Zkp.Implementation.BalancePublicInputs.FullInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.native_full_roundtrip"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 299,
+      "end": 300,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 301,
+      "end": 305,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget: pis plus VerifierCircuitTarget",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.FullInputs",
+        "Zkp.Implementation.BalancePublicInputs.VerifierData"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 306,
+      "end": 307,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 308,
+      "end": 316,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::new: checked pis allocation plus virtual verifier data",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullAllocationPlan",
+        "Zkp.Implementation.BalancePublicInputs.allocationPlan"
+      ],
+      "theorems": [],
+      "note": "Only the plan is modelled: is_checked is hard-wired true and the cap count is carried as a number; builder.add_virtual_verifier_data(cap_height) is an imported plonky2 call."
+    },
+    {
+      "start": 317,
+      "end": 317,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 318,
+      "end": 320,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::to_vec: pis wires then configured verifier-data wires",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.FullInputs",
+        "Zkp.Implementation.BalancePublicInputs.VerifierData"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.configured_encoding_matches_full_shape",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 321,
+      "end": 321,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 322,
+      "end": 327,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::commitment: preimage is the full wire encoding",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.full_commitment_uses_all_words"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Nat is a representative domain for u64 words and field wires."
+    },
+    {
+      "start": 328,
+      "end": 329,
+      "status": "dependency-boundary",
+      "label": "PoseidonHashOutTarget::hash_inputs gadget call",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.concrete_commitment_binding"
+      ],
+      "note": "The Poseidon gadget is an opaque callback; its lowering and binding are not proved here."
+    },
+    {
+      "start": 330,
+      "end": 330,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 331,
+      "end": 339,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::from_pis: assert len >= 29 + vd_len, split, wrap pis and verifier wires",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullFromTarget",
+        "Zkp.Implementation.BalancePublicInputs.fromTarget",
+        "Zkp.Implementation.BalancePublicInputs.readVerifier",
+        "Zkp.Implementation.BalancePublicInputs.verifierLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.full_target_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_injective"
+      ],
+      "note": "Handwritten local semantics; the assert is Fault.boundsPanic and vd_from_pis_slice_target (utils/cyclic.rs) is re-modelled as readVerifier, whose .expect cannot fire after the assert."
+    },
+    {
+      "start": 340,
+      "end": 340,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 341,
+      "end": 355,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::set_witness: pis writes then verifier-data write",
+      "declarations": [
+        "Zkp.Implementation.BalancePublicInputs.fullWitnessPlan",
+        "Zkp.Implementation.BalancePublicInputs.Field"
+      ],
+      "theorems": [],
+      "note": "Only the write order is modelled; witness.set_verifier_data_target is an imported plonky2 witness call."
+    },
+    {
+      "start": 356,
+      "end": 356,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "imported-parser-guards",
+      "obligation": "The per-field guards (ChannelId 32-bit and nonzero, BlockNumber < 2^63, U64 and Bytes32 32-bit limbs, PoseidonHashOut exact length with no canonical-field check) are transcribed by hand from src/common and src/ethereum_types; no refinement links them to those files.",
+      "discharged": false
+    },
+    {
+      "name": "gadget-range-check-lowering",
+      "obligation": "AllocationChecks assumes the imported range_check / U32 limb / Poseidon target constructors constrain wires to the stated widths when is_checked is true; the plonky2 gate lowering and the unchecked (is_checked = false) path are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "hash-binding-and-canonical-field",
+      "obligation": "Poseidon hash_inputs_u64 / hash_inputs are opaque callbacks; concrete_commitment_binding assumes binding for a single compared pair only. Full-input words are not checked to be canonical field elements; ToField::to_field_vec may panic and is a caller callback.",
+      "discharged": false
+    },
+    {
+      "name": "verifier-data-representation",
+      "obligation": "VerifierOnlyCircuitData / VerifierCircuitTarget are modelled as a digest plus cap-root list; vd_to_vec, vd_from_pis_slice and their target versions in utils/cyclic.rs are re-modelled by hand, including the index panic on short native caps and the silent ignoring of extra cap roots.",
+      "discharged": false
+    },
+    {
+      "name": "native-and-target-refinement",
+      "obligation": "Nat stands for both u64 words and field wires; Rust asserts, .expect panics, witness-write failures, serde and error-message formatting, and the equivalence of emitted targets to the native parse are not refined from the source.",
+      "discharged": false
+    },
+    {
+      "name": "caller-invariants",
+      "obligation": "Neither parser enforces block_r <= public_state.block_number, the target parser accepts arbitrary suffix words and does not reject channel 0, and the settled_tx_chain fold, private-state ownership and genesis root correctness are obligations of the calling circuits, not of this file.",
+      "discharged": false
+    }
+  ]
+}

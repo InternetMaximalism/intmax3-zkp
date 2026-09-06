@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/update_private_state.rs",
+  "source_sha256": "84a5fa8d4d4a9e09f81c9c606d636cbbe10af0cc12f5f860348c4ea73a6a9c36",
+  "source_lines": 282,
+  "module": "Zkp.Implementation.UpdatePrivateState",
+  "model": "doc/audit/zkp/Zkp/Implementation/UpdatePrivateState.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "imports and builder/hash/tree/arithmetic dependencies",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Dependencies",
+        "Zkp.Implementation.UpdatePrivateState.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 26,
+      "end": 27,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 28,
+      "end": 31,
+      "status": "translated",
+      "label": "typed Merkle error result",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.MerkleError",
+        "Zkp.Implementation.UpdatePrivateState.NativeResult"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 32,
+      "end": 33,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 34,
+      "end": 43,
+      "status": "translated",
+      "label": "native request and derived state fields",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Inputs",
+        "Zkp.Implementation.UpdatePrivateState.Output",
+        "Zkp.Implementation.UpdatePrivateState.NativeRepresentable"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.amount_has_eight_words"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 44,
+      "end": 44,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 45,
+      "end": 54,
+      "status": "translated",
+      "label": "native constructor signature and inputs",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 55,
+      "end": 58,
+      "status": "dependency-boundary",
+      "label": "previous commitment and nullifier insertion calls",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Dependencies",
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 59,
+      "end": 63,
+      "status": "dependency-boundary",
+      "label": "error formatter and nullifier Result propagation",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.MerkleError",
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.native_nullifier_error_first"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 64,
+      "end": 75,
+      "status": "dependency-boundary",
+      "label": "old asset opening, imported Merkle error formatting",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Dependencies",
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.native_asset_error_before_add"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 76,
+      "end": 77,
+      "status": "dependency-boundary",
+      "label": "native U256 add (panic on overflow) and new leaf root",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Dependencies",
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.native_add_overflow_is_panic"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 78,
+      "end": 95,
+      "status": "translated",
+      "label": "replace roots and full previous commitment, clone all other fields and inputs",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.updatedState",
+        "Zkp.Implementation.UpdatePrivateState.nativeNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.native_success_of_actual_returns",
+        "Zkp.Implementation.UpdatePrivateState.native_success_extracts",
+        "Zkp.Implementation.UpdatePrivateState.native_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.UpdatePrivateState.native_copies_exact_inputs"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 96,
+      "end": 98,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 99,
+      "end": 108,
+      "status": "translated",
+      "label": "raw target state and witness fields",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Inputs",
+        "Zkp.Implementation.UpdatePrivateState.CircuitWitness",
+        "Zkp.Implementation.UpdatePrivateState.Output"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 109,
+      "end": 118,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 119,
+      "end": 136,
+      "status": "translated",
+      "label": "conditional input checks and fixed 32-sibling allocation requests",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Allocation",
+        "Zkp.Implementation.UpdatePrivateState.allocate",
+        "Zkp.Implementation.UpdatePrivateState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.checked_allocation_program",
+        "Zkp.Implementation.UpdatePrivateState.unchecked_allocation_program",
+        "Zkp.Implementation.UpdatePrivateState.enabled_checks_bound_input_words",
+        "Zkp.Implementation.UpdatePrivateState.false_flag_adds_no_direct_range_obligation"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 137,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "commitment, nullifier insertion and old asset opening target calls",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.circuit_links_full_previous_commitment",
+        "Zkp.Implementation.UpdatePrivateState.circuit_invokes_nullifier_gadget_with_incoming_nullifier"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 150,
+      "end": 150,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 151,
+      "end": 153,
+      "status": "dependency-boundary",
+      "label": "U256 per-limb add and asset root calls",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.circuit_credits_exact_amount",
+        "Zkp.Implementation.UpdatePrivateState.circuit_sum_below_u256_when_result_checked",
+        "Zkp.Implementation.UpdatePrivateState.circuit_carries_link_to_existing_arithmetic",
+        "Zkp.Implementation.UpdatePrivateState.circuit_replaces_same_token_same_path"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 154,
+      "end": 154,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 155,
+      "end": 173,
+      "status": "translated",
+      "label": "same selected index/path output, preserved sent root nonce salt and full previous commitment",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.updatedState",
+        "Zkp.Implementation.UpdatePrivateState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.circuit_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.UpdatePrivateState.circuit_links_full_previous_commitment",
+        "Zkp.Implementation.UpdatePrivateState.circuit_credit_does_not_decrease_balance",
+        "Zkp.Implementation.UpdatePrivateState.same_previous_and_amount_give_same_value"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 174,
+      "end": 175,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 176,
+      "end": 193,
+      "status": "translated",
+      "label": "witness assignment order including derived new state",
+      "declarations": [
+        "Zkp.Implementation.UpdatePrivateState.Write",
+        "Zkp.Implementation.UpdatePrivateState.witnessWrites"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.witness_write_count",
+        "Zkp.Implementation.UpdatePrivateState.witness_also_assigns_derived_state",
+        "Zkp.Implementation.UpdatePrivateState.target_witness_of_native_success"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 194,
+      "end": 195,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 196,
+      "end": 282,
+      "status": "test-only",
+      "label": "cfg(test) incoming update proof-generation test",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) body only; no production theorem coverage inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "nullifier-insertion-and-freshness",
+      "obligation": "Derive the actual IndexedInsertionProof target relation, authenticated ordered-set invariant and no-reuse property. A callback return or changed root alone is not freshness.",
+      "discharged": false
+    },
+    {
+      "name": "asset-merkle-binding",
+      "obligation": "Verify leaf hashing, low-endian path index decomposition, sibling-height/field bounds, hash compression and real old asset-tree ownership; source same-path wiring does not itself establish authenticated balances or authorization of the incoming amount.",
+      "discharged": false
+    },
+    {
+      "name": "native-and-target-u256",
+      "obligation": "Native addition is an explicit normal-return/panic dependency. The target sum is derived from imported per-limb integer AddGates, whose field/gate lowering is still unproved. Full-width no-wrap also requires checked result limbs.",
+      "discharged": false
+    },
+    {
+      "name": "runtime-refinement-and-caller-authorization",
+      "obligation": "Compiler/serde/debug/error formatting, dependency panics, witness-write failures and emitted target equivalence remain open. Deposit/transfer legitimacy, L1 finality and privacy-state authorization are caller obligations.",
+      "discharged": false
+    }
+  ]
+}

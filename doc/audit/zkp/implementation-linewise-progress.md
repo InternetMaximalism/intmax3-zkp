@@ -69,6 +69,14 @@ constants、wrapper_config、および MLE の src / contracts/src です。
 | [H1Gadget](./Zkp/Implementation/H1Gadget.lean) / 共通 H1・leaf と選択した native/hash-output helper | header 37要素 / leaf 104要素の全 field、native/target 順序、Goldilocks の比較・乗算・ゼロ制約から正規 32/32 分割を導出、native cast と target encode-back の違い | imported gate の実制約への lowering、Poseidon、native tree 計算、Rust 表現と compiler、残る BalanceState / hash helper |
 | [SettlementCloseBridge](./Zkp/Implementation/SettlementCloseBridge.lean) | 同一 adapter/proof の受理返り値から103語の exact record、IMCS 48 byte / IMTF 368 byte の一致、u32 byte encoding の単射、具体的 hash binding 下で10 token vector 全体の一致 | proof から circuit gates への健全性、実 gate と hash 実装の対応、Manager の資産所有権 / backing |
 | [CancelCloseBridge](./Zkp/Implementation/CancelCloseBridge.lean)・[ClaimSettlementBridge](./Zkp/Implementation/ClaimSettlementBridge.lean) | Solidity の29 / 50 / 57語と circuit の全 field の同値、同一受理返り値による金額・受取先・asset の接続、claim と共通 H1/leaf/正規 root の接続 | 保存済み Manager head / nullifier / generation の caller 配線、proof soundness、実行環境、全経路の資金所有権 |
+| [PrivateState](./Zkp/Implementation/PrivateState.lean) / `common/private_state.rs` | 4 root × 4 語 + nonce + salt の厳密な 21 語 preimage、nonce offset 16 / salt offset 17、layout の単射、native `to_u64_vec` と target `to_vec` を別々に転記した順序一致、FullState → PrivateState の root 投影、genesis の空 root / nonce 0 / salt 保持、target 割当と witness 書込み順 | Poseidon の単射性、`AssetTree::init` と `AssetTree::new(height)` の同一性、木の root 計算、compiler refinement |
+| [UpdatePrivateState](./Zkp/Implementation/UpdatePrivateState.lean) / `balance/common/update_private_state.rs` | nullifier 挿入 → 旧 asset opening → U256 加算 → 新 asset root → 更新状態の処理順、nullifier error 優先、opening 不一致は加算前に返却、native overflow は panic、成功時に更新される 3 field と保持される sent root / nonce / salt、32 sibling、`is_checked` の有無、`AddGates` からの厳密加算と非 wrap、native 成功経路が local gate family を満たす witness の存在 | nullifier の freshness / 非再利用、IndexedInsertionProof の ordered-set soundness、asset Merkle 所有権、Regev / 転送認可、native/target U256 の一致（明示前提）、gate lowering |
+| [UpdatePublicState](./Zkp/Implementation/UpdatePublicState.lean) / `balance/common/update_public_state.rs` | `new == old` なら 63 sibling の dummy proof、異なる state では proof 必須、old block number での Merkle 接続と `new.previousRoot` 比較、target の無条件 path 評価と条件付き最終 root 等式、timestamp hi/lo を含む 5 field 等式、native 検証成功からの target witness | block 増加、timestamp 単調性、canonical L1 chain、finality、reorg、Merkle hash / gate / compiler lowering |
+| [BalancePublicInputs](./Zkp/Implementation/BalancePublicInputs.lean) / `balance/balance_pis.rs` | 29 語 prefix（public state 15、block_r、private commitment 4、settled chain 8）の offset、native の exact-length parser と channel 0 拒否、raw field bounds、target の suffix 受容と channel 0 非拒否の分離、verifier data の digest / cap parsing、余分な native cap root の扱い | 輸入 parser guard（channel_id / u63 / u32limb）の実装、field 変換 callback、Poseidon、`block_r ≤ block_number` の呼出し側での強制 |
+| [SwitchBoard](./Zkp/Implementation/SwitchBoard.lean) / `balance/switch_board.rs` | 4 flag の sum-one からの一意選択、全 public word と verifier-data tail への selector 適用、inactive branch の dummy verifier / active branch の real verifier 結合、missing dummy index の error、genesis candidate の空 root / nonce 0 / virtual salt、prefix でなく full candidate の選択、HashMap 重複・順序の境界の明示 | proof gadget の soundness、carried VD と supplied balance VD の未結合（outer cyclic-key check が別境界）、`select_vec` の実装、cap count の prove-time config、branch proof と実資金の結合 |
+| [BalanceCircuit](./Zkp/Implementation/BalanceCircuit.lean) / `balance/balance_circuit.rs` | 固定 switch verifier 呼出し、full PI parsing と register、common-data 等式と build-success の assertion、cyclic tail の cap → digest 順検査の後に通常検証、serialization で consumed-byte count を捨てる source behavior、deserialize 後に constructor 検査を再実行しない事実 | 再帰 verifier gadget の soundness、`generate_cd` の common data 妥当性、plonky2 `check_cyclic_proof_verifier_data` との一致、`CircuitData::verify`、bincode / gate / generator codec |
+| [ChannelStateUpdate](./Zkp/Implementation/ChannelStateUpdate.lean) / `channel/state_update_verifier.rs` | 7 verifier と helper、state / record / descriptor、Regev envelope、20 PI field（266 語）、channel / member / delegate / token slot guard の順序、same-channel fund、選択 token の ciphertext、pending increment / reset、send の `fundAfter + amount = fundBefore`、import debit、refresh の fund 不変、token-register の全状態再構築、u64 overflow profile と U256 final carry panic、7 field だけを受ける signing digest callee、transport bytes が空に強制されること（source 観察） | Falcon / A11 署名の妥当性（helper は構造検査のみ）、durable replay ledger、L1 backing / finality、wallet frontier、`root != oldRoot` は freshness ではない、gate / compiler refinement |
+| [DecryptionGadget](./Zkp/Implementation/DecryptionGadget.lean) / `channel/decryption_gadget.rs` | ring `N=2048`、`q=2013265921`、Δ / 丸め、signed / unsigned 表現、negacyclic schoolbook reduction、quotient / wrap / carry、ternary / residual / noise bound、digit の一意性、u64 amount の分解、native build の拒否条件、row fill と hash payload の順序、`CoreGates` から各 row の整数方程式への合成、digit-255 境界の gate 非充足性、全ゼロ割当の充足例 | 復号 oracle / plaintext の意味、秘密鍵の一意性、ciphertext authenticity、recipient entitlement、`FieldProducts` 前提、Boolean / range-check lowering、Keccak / Poseidon binding、Rust / gate / compiler / NTT refinement |
 
 Manager と Rollup は、前回の選択経路から全明示関数へ手書きモデルを拡張しました。
 ただし interface / generated getter / assembly / callback の境界は別分類のままで、
@@ -139,7 +147,56 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
-### `9a67d8e` 以降：取消・請求・共通 H1・Solidity 接続の checkpoint
+### `e604a36` 以降：Balance / 状態更新 / 復号 gadget の checkpoint
+
+- **89 モジュール**を build、現行 **36 モジュール・1,273 named theorems** の実在・種別・
+  推移的 kernel axioms を検査して main guard 成功。前回から **278 定理**追加。
+  実装対応は **31 モジュール・1,054 定理**、前段の仕様側は 5 モジュール・219 定理。
+- **156 reviewed-source hashes、1 MLE gitlink、29 source maps** を検証。
+  全対応表の宣言参照を Lean compiler で確認して line guard 成功。
+- guard 回帰テスト **51 件**（main 29 + line 22）。ランタイム基準 `05ec7ae` に対する
+  `src`、`contracts`、`Cargo.toml`、`Cargo.lock` の差分はゼロ。MLE サブモジュールは clean。
+  ベンチマークは実施しておらず、runtime / proof parameter / proof format を変更していません。
+- 物理行分類：手書き翻訳 **9,632**、依存境界 **2,438**、非実行 **5,476**、
+  テスト専用 **6,738**、未翻訳 **92,913**。`state_update_verifier.rs` の `cfg(test)` 1,587 行と
+  `decryption_gadget.rs` の 221 行、`switch_board.rs` の 223 行をテスト専用へ移した分を含むため、
+  未翻訳の減少量を「安全性証明済み実行行数」には換算できません。
+
+今回追加した 8 モジュールは、Balance 側の public input / switch board / 外側回路、
+private / public state 更新、channel state-update verifier、復号 gadget の手書き意味モデルです。
+各モジュールは独立レビューを受け、以下を修正しました。これはモデル精度の修正であり、
+実装に新たな脆弱性を発見したという報告ではありません。
+
+- `ChannelStateUpdate` の 7 つの output 定理は `apply` による bind の剥離に依存していましたが、
+  最後の `apply` 失敗時に unifier が `List.range slotCount`（1024 要素）を展開して
+  無限に近い再帰（19 GB 超のメモリ）に陥っていました。受理仮説を `bind_ok_iff` で
+  連言へ書き換える証明へ置き換え、do-notation の join point（burn / non-burn、receiver の
+  有無）を `split` で扱うようにしました。前回 handoff の「standalone compilation 成功」は
+  再現できず、`first_index_found` などの 3 証明も修正が必要でした。全体の compile は 4 秒です。
+- `ChannelStateUpdate.channelTxDigest` は原実装の `ChannelTx::signing_digest` と同じ
+  7 入力だけを受けるよう狭めました（署名 field を読めない callee）。未使用の
+  `validateRecord` は削除し、`validate_member_signature_slots` 内の `record.validate()` に
+  委ねます。send / fund import の受理から transport envelope の proof bytes が空に強制される
+  事実を定理にしました（source 観察であり、健全性の主張ではありません）。
+- `DecryptionGadget` に `CoreGates` / `Representatives` / `FieldProducts` から各 row の
+  integer 方程式（reduction、key binding、decryption、digit 分解）を導く合成定理
+  `core_row_integer` を追加しました。digit-255 境界は gate として非充足であることを示し、
+  `native_key_halves` の `omega` 失敗は符号で場合分けして解消しました。
+  全ゼロ割当の充足例は production trace ではないことを名前で明示しました。
+- `PrivateState` の native / target 順序一致は同一定義の `rfl` でしたが、
+  `to_u64_vec` と `to_vec` を別々に転記して比較するよう改めました。`AssetTree::init` と
+  `AssetTree::new(height)` の同一性は前提として明記しています。
+- `UpdatePrivateState` は nullifier gadget の呼出し関係を「挿入」と誤読されない名前へ変え、
+  native 成功経路から local gate family を満たす witness を構成する vacuity guard を
+  追加しました。native/target U256 の一致は明示前提のままです。
+- `SwitchBoard` は HashMap の重複（serde が last-wins で潰す）・順序と、prove-time の
+  cap count が constructor config と同一であることを証明していない旨を明記しました。
+
+`--require-complete` は引き続き失敗するべき状態です。復号 oracle の意味、秘密鍵の一意性、
+署名の暗号学的妥当性、replay ledger、L1 finality、Rust / gate / EVM refinement、
+全 entrypoint を含む資産所有権は未証明です。
+
+### 前回 `9a67d8e` 以降：取消・請求・共通 H1・Solidity 接続の checkpoint（履歴）
 
 - **81 モジュール**を build、現行 **28 モジュール・995 named theorems** の実在・種別・
   推移的 kernel axioms を検査して main guard 成功。前回から **234 定理**追加。
@@ -235,11 +292,11 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 
 ## 続きで必要なこと
 
-1. 残る Balance / validity / state-update / decryption 回路の手書き翻訳を追加する。
-   Manager / Rollup の関数一覧は埋まったが、ABI・callback・generated getter と全到達可能状態の
-   証明を完了したことにはしない。close / cancel / withdrawal / post-close の通常関数と
-   native PI は追加済みだが、feature-gated fixture 生成は未翻訳として残す。
-   特に `state_update_verifier.rs` と `decryption_gadget.rs` の本体は残る。
+1. 残る validity / deposit / transfer / withdrawal 回路と、Balance の send / receive 各回路の
+   手書き翻訳を追加する。`state_update_verifier.rs` と `decryption_gadget.rs` の本体、
+   Balance の PI / switch board / 外側回路、private / public state 更新は追加済みだが、
+   Manager / Rollup の ABI・callback・generated getter と全到達可能状態の証明、
+   feature-gated fixture 生成は未翻訳・未証明として残す。
 2. Balance / validity / deposit / transfer / withdrawal の各回路を、native admission と
    arbitrary satisfying witness を分離して翻訳する。Spend だけで送受金全体を証明したことにしない。
 3. U256、Merkle、Keccak/Poseidon、署名 / decryption、recursion / pinned proof verifier の

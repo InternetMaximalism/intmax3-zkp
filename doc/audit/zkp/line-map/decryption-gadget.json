@@ -1,0 +1,1006 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/decryption_gadget.rs",
+  "source_sha256": "0279ece34b9d8f4fcf3a63134fe367704b733e02adead006c6b8158b7cfbda3e",
+  "source_lines": 1116,
+  "module": "Zkp.Implementation.DecryptionGadget",
+  "model": "doc/audit/zkp/Zkp/Implementation/DecryptionGadget.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 91,
+      "status": "non-executable",
+      "label": "module doc: gadget statement, negacyclic reindexing argument, reduction and degeneracy notes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 92,
+      "end": 100,
+      "status": "dependency-boundary",
+      "label": "plonky2 builder/field/target imports and regev ring constants",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.ringN",
+        "Zkp.Implementation.DecryptionGadget.q"
+      ],
+      "theorems": [],
+      "note": "REGEV_N / REGEV_Q / REGEV_PLAIN_BITS are imported crate constants; the model pins ringN = 2048 and q = 2013265921 as premises about the repository invocation, not by reading the crate."
+    },
+    {
+      "start": 101,
+      "end": 118,
+      "status": "translated",
+      "label": "Q_U64, DELTA, HALF_DELTA, DIGIT/NOISE/CARRY/KAPPA bit widths",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.q",
+        "Zkp.Implementation.DecryptionGadget.delta",
+        "Zkp.Implementation.DecryptionGadget.halfDelta",
+        "Zkp.Implementation.DecryptionGadget.kappaBits",
+        "Zkp.Implementation.DecryptionGadget.ringN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.parameters_pinned"
+      ],
+      "note": "Numeric constants restated as Lean definitions; KAPPA_BITS = 13 is asserted as the value of the Rust bit-length expression at n = 2048, not derived from usize::BITS/leading_zeros."
+    },
+    {
+      "start": 119,
+      "end": 140,
+      "status": "translated",
+      "label": "compile-time parameter pins (kappa width, q = 256*Delta+1, Delta = 15*2^19, q-1 < 2^31)",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.q",
+        "Zkp.Implementation.DecryptionGadget.delta",
+        "Zkp.Implementation.DecryptionGadget.halfDelta",
+        "Zkp.Implementation.DecryptionGadget.kappaBits",
+        "Zkp.Implementation.DecryptionGadget.ringN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.parameters_pinned"
+      ],
+      "note": "The const assertions are restated and decided over Nat; the Rust const-eval itself is not modeled."
+    },
+    {
+      "start": 141,
+      "end": 145,
+      "status": "non-executable",
+      "label": "doc comment and derive for DecryptionCoreWitness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 146,
+      "end": 174,
+      "status": "translated",
+      "label": "DecryptionCoreWitness native witness record (field list and widths)",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.NativeWitness",
+        "Zkp.Implementation.DecryptionGadget.NativeMachineDomain"
+      ],
+      "theorems": [],
+      "note": "Fields are modeled over List Int / List Nat; the i8/u8/u32/i64/u16/bool machine widths are recorded only as the NativeMachineDomain predicate, not enforced by the type."
+    },
+    {
+      "start": 175,
+      "end": 179,
+      "status": "non-executable",
+      "label": "doc comment for DecryptionCoreInputs",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 180,
+      "end": 185,
+      "status": "translated",
+      "label": "DecryptionCoreInputs: the four caller-supplied polynomials",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.Inputs",
+        "Zkp.Implementation.DecryptionGadget.InputLengths",
+        "Zkp.Implementation.DecryptionGadget.InputPolys"
+      ],
+      "theorems": [],
+      "note": "Targets are modeled as canonical Nat coefficient lists; the caller-side 32-bit range checks and commitment binding are outside this file."
+    },
+    {
+      "start": 186,
+      "end": 189,
+      "status": "non-executable",
+      "label": "doc comment for DecryptionCoreTargets",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 190,
+      "end": 208,
+      "status": "translated",
+      "label": "DecryptionCoreTargets per-row witness handles (8/19/3/3 bit arrays, bit, carry, wrap, expose flag)",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreRow",
+        "Zkp.Implementation.DecryptionGadget.CoreRow.shape",
+        "Zkp.Implementation.DecryptionGadget.WriteSlot"
+      ],
+      "theorems": [],
+      "note": "One CoreRow per coefficient replaces the column-of-Vec layout; the target handles themselves are not modeled, only their values and shapes."
+    },
+    {
+      "start": 209,
+      "end": 214,
+      "status": "non-executable",
+      "label": "doc comment for decryption_core",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 215,
+      "end": 224,
+      "status": "translated",
+      "label": "decryption_core signature and input length assertions",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreGates",
+        "Zkp.Implementation.DecryptionGadget.InputLengths",
+        "Zkp.Implementation.DecryptionGadget.BuildPhase",
+        "Zkp.Implementation.DecryptionGadget.buildPhases"
+      ],
+      "theorems": [],
+      "note": "Length asserts are the InputLengths conjunct of CoreGates; the Rust panic on mismatch is not modeled as a distinct outcome."
+    },
+    {
+      "start": 225,
+      "end": 229,
+      "status": "dependency-boundary",
+      "label": "builder constant targets q, Delta, Delta/2, zero",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.q",
+        "Zkp.Implementation.DecryptionGadget.delta",
+        "Zkp.Implementation.DecryptionGadget.halfDelta"
+      ],
+      "theorems": [],
+      "note": "builder.constant / builder.zero are plonky2 API; the model uses the literal values directly."
+    },
+    {
+      "start": 230,
+      "end": 235,
+      "status": "non-executable",
+      "label": "comment: canonicality rationale for the four public polynomials",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 236,
+      "end": 240,
+      "status": "translated",
+      "label": "strict < q check on every coefficient of a, b, c1, c2",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreGates",
+        "Zkp.Implementation.DecryptionGadget.InputPolys",
+        "Zkp.Implementation.DecryptionGadget.StrictQGate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.strictQ_from_actual_checks"
+      ],
+      "note": "The per-coefficient assert_lt_q loop is the StrictQGate conjunct of CoreGates; the range_check lowering is a separate boundary."
+    },
+    {
+      "start": 241,
+      "end": 244,
+      "status": "translated",
+      "label": "MUST-FIX #3: reject a == 0 and c1 == 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.polyNonzero",
+        "Zkp.Implementation.DecryptionGadget.CoreGates"
+      ],
+      "theorems": [],
+      "note": "polyNonzero is the AND-of-is_equal fold as a Bool over Nat lists; the is_equal/AND gate lowering is a boundary."
+    },
+    {
+      "start": 245,
+      "end": 287,
+      "status": "dependency-boundary",
+      "label": "virtual target and safe Boolean target allocation for all witness columns",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreRow",
+        "Zkp.Implementation.DecryptionGadget.CoreRow.shape",
+        "Zkp.Implementation.DecryptionGadget.BuildPhase"
+      ],
+      "theorems": [],
+      "note": "add_virtual_target / add_virtual_bool_target_safe are builder API; Boolean wire semantics (b*(b-1)=0) is assumed by modeling bit columns as Bool rather than proved from the gate."
+    },
+    {
+      "start": 288,
+      "end": 290,
+      "status": "non-executable",
+      "label": "comment: smallness ranges, ternary s",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 291,
+      "end": 297,
+      "status": "translated",
+      "label": "ternary secret gate s(s-1)(s+1) = 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.TernaryGate",
+        "Zkp.Implementation.DecryptionGadget.RowGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.ternary_from_cubic"
+      ],
+      "note": "ternary_from_cubic additionally needs the FieldProducts premise and a Centered representative; neither is proved from the gate."
+    },
+    {
+      "start": 298,
+      "end": 307,
+      "status": "translated",
+      "label": "e_pk halves gate x(x-1)(x-2) = 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.ErrorHalfGate",
+        "Zkp.Implementation.DecryptionGadget.RowGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.error_half_from_cubic"
+      ],
+      "note": "error_half_from_cubic additionally needs the FieldProducts premise and a Canonical representative; neither is proved from the gate."
+    },
+    {
+      "start": 308,
+      "end": 318,
+      "status": "non-executable",
+      "label": "comment: kappa range derivation and width security note",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 319,
+      "end": 327,
+      "status": "translated",
+      "label": "bound_kappa: kappa + n and 2n - (kappa + n) both KAPPA_BITS range-checked",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.KappaGate",
+        "Zkp.Implementation.DecryptionGadget.kappaBits",
+        "Zkp.Implementation.DecryptionGadget.RangeGate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.kappa_from_actual_checks"
+      ],
+      "note": "range_check is modeled as the RangeGate predicate on the mod-p representative; the plonky2 split_le lowering is a boundary."
+    },
+    {
+      "start": 328,
+      "end": 339,
+      "status": "translated",
+      "label": "per-coefficient (1): a.s ring coefficient, kappa bound, lo - rem - kappa*q = 0, rem < q",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.RowGates",
+        "Zkp.Implementation.DecryptionGadget.negacyclicCoeff",
+        "Zkp.Implementation.DecryptionGadget.KappaGate",
+        "Zkp.Implementation.DecryptionGadget.StrictQGate",
+        "Zkp.Implementation.DecryptionGadget.BuildPhase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.reduction_gate_integer"
+      ],
+      "note": "reduction_gate_integer lifts the FZero gate to an integer identity only under the proved ring-coefficient bound, kappa bound and rem < q hypotheses."
+    },
+    {
+      "start": 340,
+      "end": 347,
+      "status": "non-executable",
+      "label": "comment: key-binding boundary wrap rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 348,
+      "end": 359,
+      "status": "translated",
+      "label": "wrap w ternary gate and key binding b - e_pk - rem - w*q = 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.RowGates",
+        "Zkp.Implementation.DecryptionGadget.TernaryGate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.key_binding_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.ternary_from_cubic"
+      ],
+      "note": "key_binding_gate_integer assumes b, rem < q, halves <= 2 and a ternary wrap; it states a modular identity, not that s is the unique key behind pk."
+    },
+    {
+      "start": 360,
+      "end": 372,
+      "status": "translated",
+      "label": "per-coefficient (2): c1.s ring coefficient, kappa bound, lo - (c2 - v) - kappa*q = 0, v < q",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.RowGates",
+        "Zkp.Implementation.DecryptionGadget.negacyclicCoeff",
+        "Zkp.Implementation.DecryptionGadget.KappaGate",
+        "Zkp.Implementation.DecryptionGadget.StrictQGate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.decryption_gate_integer"
+      ],
+      "note": "decryption_gate_integer lifts the gate to lo = c2 - v + kappa*q over the integers under the proved bounds; no plaintext/oracle claim."
+    },
+    {
+      "start": 373,
+      "end": 376,
+      "status": "non-executable",
+      "label": "comment: digit extraction statement",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 377,
+      "end": 384,
+      "status": "translated",
+      "label": "digit d and shifted noise ns = lo19 + (u+v)*2^19 from Boolean bit arrays",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreRow.digit",
+        "Zkp.Implementation.DecryptionGadget.CoreRow.noise",
+        "Zkp.Implementation.DecryptionGadget.packBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.row_digit_bound",
+        "Zkp.Implementation.DecryptionGadget.row_noise_bound",
+        "Zkp.Implementation.DecryptionGadget.packBits_bound"
+      ],
+      "note": "bits_to_target is packBits; d < 256 and ns < Delta follow from the array shapes given Boolean wires."
+    },
+    {
+      "start": 385,
+      "end": 396,
+      "status": "non-executable",
+      "label": "comment: dwrap derivation and uniqueness argument",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 397,
+      "end": 404,
+      "status": "translated",
+      "label": "digit gate v + Delta/2 - Delta*d - ns - dwrap*q = 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.RowGates",
+        "Zkp.Implementation.DecryptionGadget.coreDigit",
+        "Zkp.Implementation.DecryptionGadget.coreNoise",
+        "Zkp.Implementation.DecryptionGadget.coreWrap"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.digit_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.digit_solution_unique",
+        "Zkp.Implementation.DecryptionGadget.digit_boundary_gate_unsatisfiable"
+      ],
+      "note": "digit_solution_unique shows (d, ns, dwrap) is pinned by v given the range bounds; it does not relate d to the upstream decrypt rounding (upstreamDigit is deliberately separate). digit_boundary_gate_unsatisfiable shows no in-range (d, ns, dwrap) exists when coreDigit v = 256, the circuit-side counterpart of the native digit refusal."
+    },
+    {
+      "start": 405,
+      "end": 408,
+      "status": "non-executable",
+      "label": "comment: normalization adder statement",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 409,
+      "end": 424,
+      "status": "translated",
+      "label": "carry-chain normalization: c_0 = 0, range_check c_i, d_i + c_i - bit_i = 2 c_{i+1}, final 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CarryGates",
+        "Zkp.Implementation.DecryptionGadget.firstCarry",
+        "Zkp.Implementation.DecryptionGadget.IntegerCarries",
+        "Zkp.Implementation.DecryptionGadget.CoreGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.carry_from_actual_range",
+        "Zkp.Implementation.DecryptionGadget.carry_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.carry_gates_lift",
+        "Zkp.Implementation.DecryptionGadget.carry_telescope",
+        "Zkp.Implementation.DecryptionGadget.carry_tight_bound",
+        "Zkp.Implementation.DecryptionGadget.first_carry_zero",
+        "Zkp.Implementation.DecryptionGadget.core_exact_binary_value",
+        "Zkp.Implementation.DecryptionGadget.core_carries_at_most_254"
+      ],
+      "note": "The list-recursive CarryGates encodes the row loop with the final-row zero as firstCarry [] = 0; core_exact_binary_value needs the Representatives convention as a hypothesis."
+    },
+    {
+      "start": 425,
+      "end": 429,
+      "status": "non-executable",
+      "label": "comment: amount binding statement",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 430,
+      "end": 439,
+      "status": "translated",
+      "label": "expose_amount: pack bit[0..32], bit[32..64], force bit[64..n] = 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.amountLimbs",
+        "Zkp.Implementation.DecryptionGadget.CoreGates",
+        "Zkp.Implementation.DecryptionGadget.packBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.private_mode_no_amount",
+        "Zkp.Implementation.DecryptionGadget.exposed_amount_exact_order",
+        "Zkp.Implementation.DecryptionGadget.exposed_high_bits_zero",
+        "Zkp.Implementation.DecryptionGadget.exposed_value_u64",
+        "Zkp.Implementation.DecryptionGadget.exposed_value_from_lo_hi",
+        "Zkp.Implementation.DecryptionGadget.packBits_append",
+        "Zkp.Implementation.DecryptionGadget.packBits_all_false"
+      ],
+      "note": "The limbs are values, not targets; connecting them to the claim public input is the caller's obligation."
+    },
+    {
+      "start": 440,
+      "end": 460,
+      "status": "translated",
+      "label": "assemble DecryptionCoreTargets and return with the optional amount limbs",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.CoreRow",
+        "Zkp.Implementation.DecryptionGadget.amountLimbs",
+        "Zkp.Implementation.DecryptionGadget.buildPhases",
+        "Zkp.Implementation.DecryptionGadget.CoreGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.core_row_integer",
+        "Zkp.Implementation.DecryptionGadget.zero_padding_dimension_satisfiable"
+      ],
+      "note": "core_row_integer composes the per-row gate lemmas: under Representatives, the assembled CoreGates and the FieldProducts premise, every row satisfies the exact integer key-reduction, key-binding, decrypt-reduction and digit equations with the canonical (d, ns, dwrap). zero_padding_dimension_satisfiable is a kernel-checked satisfiability example of the assembled CoreGates exhibiting the all-zero assignment (not a production trace); it is not a soundness statement."
+    },
+    {
+      "start": 461,
+      "end": 466,
+      "status": "non-executable",
+      "label": "doc comment for negacyclic_coeff",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 467,
+      "end": 492,
+      "status": "translated",
+      "label": "negacyclic_coeff: signed-selection sum with the m <= i sign/index split",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.negacyclicTerm",
+        "Zkp.Implementation.DecryptionGadget.negacyclicCoeff",
+        "Zkp.Implementation.DecryptionGadget.sumZ",
+        "Zkp.Implementation.DecryptionGadget.schoolbookTerm",
+        "Zkp.Implementation.DecryptionGadget.schoolbookCoeff"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.negacyclic_term_schoolbook",
+        "Zkp.Implementation.DecryptionGadget.negacyclic_is_schoolbook_reduction",
+        "Zkp.Implementation.DecryptionGadget.negacyclic_zero_secret",
+        "Zkp.Implementation.DecryptionGadget.sumZ_bounds",
+        "Zkp.Implementation.DecryptionGadget.ring_coefficient_bound",
+        "Zkp.Implementation.DecryptionGadget.ring_intermediate_machine_bound"
+      ],
+      "note": "The builder mul/add/sub accumulation is modeled as an exact integer sum whose magnitude bound (< 2^42) is proved; that the field accumulator equals this integer mod p is the FZero convention, not a gate proof."
+    },
+    {
+      "start": 493,
+      "end": 498,
+      "status": "non-executable",
+      "label": "doc comment for assert_lt_q",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 499,
+      "end": 507,
+      "status": "translated",
+      "label": "assert_lt_q: 31-bit range on x and on q-1-x",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.StrictQGate",
+        "Zkp.Implementation.DecryptionGadget.RangeGate",
+        "Zkp.Implementation.DecryptionGadget.q"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.strictQ_from_actual_checks",
+        "Zkp.Implementation.DecryptionGadget.parameters_pinned"
+      ],
+      "note": "strictQ_from_actual_checks needs the Canonical-representative hypothesis; range_check lowering is a boundary."
+    },
+    {
+      "start": 508,
+      "end": 513,
+      "status": "non-executable",
+      "label": "doc comment for assert_poly_nonzero",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 514,
+      "end": 526,
+      "status": "translated",
+      "label": "assert_poly_nonzero: AND of is_equal(c, 0), assert all_zero == false",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.polyNonzero",
+        "Zkp.Implementation.DecryptionGadget.CoreGates"
+      ],
+      "theorems": [],
+      "note": "Modeled as a Bool fold over canonical Nat coefficients; is_equal/and/assert_zero gate semantics are a boundary."
+    },
+    {
+      "start": 527,
+      "end": 538,
+      "status": "translated",
+      "label": "bits_to_target: little-endian weighted Boolean sum",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.packBits",
+        "Zkp.Implementation.DecryptionGadget.weighted"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.packBits_bound",
+        "Zkp.Implementation.DecryptionGadget.packBits_is_weighted"
+      ],
+      "note": "mul_const_add accumulation modeled as packBits over Bool lists."
+    },
+    {
+      "start": 539,
+      "end": 551,
+      "status": "translated",
+      "label": "pack_bits_le: pack up to 32 Booleans into one u32-valued target",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.packBits",
+        "Zkp.Implementation.DecryptionGadget.amountLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.packBits_append",
+        "Zkp.Implementation.DecryptionGadget.packBits_bound"
+      ],
+      "note": "Same packBits definition; the debug_assert on length is not modeled."
+    },
+    {
+      "start": 552,
+      "end": 564,
+      "status": "non-executable",
+      "label": "section banner and doc comment for regev_ct_digest_gadget",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 565,
+      "end": 581,
+      "status": "dependency-boundary",
+      "label": "regev_ct_digest_gadget signature, GenericConfig/AlgebraicHasher bounds, keccak and Bytes32 imports",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.HashRequest"
+      ],
+      "theorems": [],
+      "note": "Generic hasher configuration and the plonky2_keccak builder trait are imported dependencies."
+    },
+    {
+      "start": 582,
+      "end": 590,
+      "status": "translated",
+      "label": "ct digest payload: length asserts, [IMRC, REGEV_N] ++ c1 ++ c2 word order",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.ciphertextDigestWords",
+        "Zkp.Implementation.DecryptionGadget.ciphertextDigestRequest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.ciphertext_digest_exact_words",
+        "Zkp.Implementation.DecryptionGadget.digest_payload_length"
+      ],
+      "note": "Only the word stream is modeled; the domain constant 0x494d5243 is pinned as a literal premise about REGEV_CT_DOMAIN."
+    },
+    {
+      "start": 591,
+      "end": 592,
+      "status": "dependency-boundary",
+      "label": "keccak256 gadget call and Bytes32Target::from_slice",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.HashRequest",
+        "Zkp.Implementation.DecryptionGadget.ciphertextDigestRequest"
+      ],
+      "theorems": [],
+      "note": "The hash is an explicit request; equal digests are not assumed to imply equal polynomials, and the keccak gadget performs no range checks."
+    },
+    {
+      "start": 593,
+      "end": 608,
+      "status": "non-executable",
+      "label": "section banner and doc comment for regev_pk_poseidon_digest_gadget",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 609,
+      "end": 620,
+      "status": "dependency-boundary",
+      "label": "regev_pk_poseidon_digest_gadget signature and Bytes32/Poseidon imports",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.HashRequest"
+      ],
+      "theorems": [],
+      "note": "PoseidonHashOutTarget and Bytes32Target are imported gadgets."
+    },
+    {
+      "start": 621,
+      "end": 629,
+      "status": "translated",
+      "label": "pk digest payload: length asserts, [IMRP, REGEV_N] ++ a ++ b word order",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.publicKeyDigestWords",
+        "Zkp.Implementation.DecryptionGadget.publicKeyDigestRequest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.public_key_digest_exact_words",
+        "Zkp.Implementation.DecryptionGadget.digest_payload_length"
+      ],
+      "note": "Only the word stream is modeled; the domain constant 0x494d5250 is pinned as a literal premise about REGEV_PK_POSEIDON_DOMAIN."
+    },
+    {
+      "start": 630,
+      "end": 633,
+      "status": "dependency-boundary",
+      "label": "Poseidon hash_inputs and Bytes32 from_hash_out encoding",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.HashRequest",
+        "Zkp.Implementation.DecryptionGadget.publicKeyDigestRequest"
+      ],
+      "theorems": [],
+      "note": "Poseidon collision resistance and the canonical Bytes32 encoding of the hash output are premises; binding to the H1 digest is the caller's connect."
+    },
+    {
+      "start": 634,
+      "end": 641,
+      "status": "non-executable",
+      "label": "section banner and doc comment for reduce_with_quotient",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 642,
+      "end": 651,
+      "status": "translated",
+      "label": "reduce_with_quotient: truncating i64 rem/quotient normalised to [0, q)",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.reduceWithQuotient",
+        "Zkp.Implementation.DecryptionGadget.truncDiv",
+        "Zkp.Implementation.DecryptionGadget.truncRem",
+        "Zkp.Implementation.DecryptionGadget.euclideanReduce"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.truncDiv_q_formula",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_is_euclidean",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_equation",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_canonical",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_quotient_bound"
+      ],
+      "note": "Rust truncating % and / are modeled as truncRem/truncDiv over Int and shown equal to Euclidean reduction; the u32 cast of rem is covered only by the proved rem < q."
+    },
+    {
+      "start": 652,
+      "end": 654,
+      "status": "non-executable",
+      "label": "doc comment for native_negacyclic_unreduced",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 655,
+      "end": 676,
+      "status": "translated",
+      "label": "native_negacyclic_unreduced: i64 per-coefficient signed-selection sum",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.nativeNegacyclic",
+        "Zkp.Implementation.DecryptionGadget.negacyclicCoeff",
+        "Zkp.Implementation.DecryptionGadget.negacyclicTerm",
+        "Zkp.Implementation.DecryptionGadget.coeff",
+        "Zkp.Implementation.DecryptionGadget.signedCoeff"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.ring_coefficient_bound",
+        "Zkp.Implementation.DecryptionGadget.ring_intermediate_machine_bound"
+      ],
+      "note": "Shares negacyclicCoeff with the circuit model; i64 non-overflow is argued only through the proved n*(q-1) < 2^63 bound, not by a machine-integer model."
+    },
+    {
+      "start": 677,
+      "end": 683,
+      "status": "non-executable",
+      "label": "doc comment for build_decryption_core_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 684,
+      "end": 703,
+      "status": "translated",
+      "label": "build_decryption_core_witness signature and guards: lengths, ternary s, degenerate a/c1, non-canonical",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.nativeBuild",
+        "Zkp.Implementation.DecryptionGadget.NativeError",
+        "Zkp.Implementation.DecryptionGadget.InputLengths",
+        "Zkp.Implementation.DecryptionGadget.polyNonzero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.native_build_length_refusal"
+      ],
+      "note": "Guard order and Err outcomes are modeled as NativeError variants; the Rust Err(()) carries no variant, the model distinguishes them."
+    },
+    {
+      "start": 704,
+      "end": 728,
+      "status": "translated",
+      "label": "key rows: reduce a.s, centered e_pk in [-2,2], wrap divisibility, CBD halves",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.buildKeyRow",
+        "Zkp.Implementation.DecryptionGadget.KeyRow",
+        "Zkp.Implementation.DecryptionGadget.centeredDiff",
+        "Zkp.Implementation.DecryptionGadget.reduceWithQuotient",
+        "Zkp.Implementation.DecryptionGadget.nativeNegacyclic",
+        "Zkp.Implementation.DecryptionGadget.mapExcept"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.centered_diff_bound",
+        "Zkp.Implementation.DecryptionGadget.centered_diff_modulo",
+        "Zkp.Implementation.DecryptionGadget.native_key_halves",
+        "Zkp.Implementation.DecryptionGadget.native_key_wrap_constructed"
+      ],
+      "note": "debug_assert_eq is modeled by the debug flag; the constructed wrap is proved ternary and to satisfy the key-binding identity for the constructed row."
+    },
+    {
+      "start": 729,
+      "end": 738,
+      "status": "non-executable",
+      "label": "comment: circuit-vs-canonical kappa completeness rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 739,
+      "end": 752,
+      "status": "translated",
+      "label": "decrypt rows: v = (c2 - rem) mod q, kappa from the circuit's own equation",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.buildDecryptRow",
+        "Zkp.Implementation.DecryptionGadget.DecryptRow",
+        "Zkp.Implementation.DecryptionGadget.nativeV",
+        "Zkp.Implementation.DecryptionGadget.nativeCsKappa"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_constructed_equation",
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_constructed_quotient_bound",
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_uses_noncanonical_difference"
+      ],
+      "note": "The quotient is derived from lo - (c2 - v) as in the source; the shadowed q_i64 rebinding and debug_assert are modeled by the debug flag."
+    },
+    {
+      "start": 753,
+      "end": 769,
+      "status": "translated",
+      "label": "digit/noise rows: raw = v + Delta/2, dwrap = raw >= q, d = (raw mod q)/Delta, ns = (raw mod q) mod Delta",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.buildDigitRow",
+        "Zkp.Implementation.DecryptionGadget.DigitRow",
+        "Zkp.Implementation.DecryptionGadget.coreDigit",
+        "Zkp.Implementation.DecryptionGadget.coreNoise",
+        "Zkp.Implementation.DecryptionGadget.coreWrap"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.native_digit_success_exact",
+        "Zkp.Implementation.DecryptionGadget.native_digit_failure_exact"
+      ],
+      "note": "Exact rounding arithmetic over Nat; the u64/u8/u32 casts are only recorded in NativeMachineDomain."
+    },
+    {
+      "start": 770,
+      "end": 782,
+      "status": "translated",
+      "label": "decode value = sum d_i 2^i, reject digits at i >= 64 and non-u64 values",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.decodeDigits",
+        "Zkp.Implementation.DecryptionGadget.NativeError"
+      ],
+      "theorems": [],
+      "note": "u128 accumulation and u64::try_from are modeled as Nat with a < 2^64 check at the end."
+    },
+    {
+      "start": 783,
+      "end": 784,
+      "status": "dependency-boundary",
+      "label": "crate::regev::encode_amount(value)",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.encodeAmount",
+        "Zkp.Implementation.DecryptionGadget.bitsOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.bitsOf_length"
+      ],
+      "note": "encode_amount is an imported function; encodeAmount (64 little-endian bits then zeros) is a local restatement of its expected behavior, not a proof about the regev module."
+    },
+    {
+      "start": 785,
+      "end": 798,
+      "status": "translated",
+      "label": "normalization carries: t = d_i + c_i - bit_i must be non-negative and even, final carry 0",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.buildCarries",
+        "Zkp.Implementation.DecryptionGadget.truncDiv",
+        "Zkp.Implementation.DecryptionGadget.truncRem"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.normal_positive_native_trace",
+        "Zkp.Implementation.DecryptionGadget.normal_zero_padding_trace"
+      ],
+      "note": "The i32/u16 arithmetic is modeled over Int with a mod 2^16 on the stored carry; the trace theorems are small kernel-checked examples of the row builders, not general statements."
+    },
+    {
+      "start": 799,
+      "end": 816,
+      "status": "translated",
+      "label": "Ok(DecryptionCoreWitness { ... }) assembly",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.nativeBuild",
+        "Zkp.Implementation.DecryptionGadget.NativeWitness",
+        "Zkp.Implementation.DecryptionGadget.NativeMachineDomain"
+      ],
+      "theorems": [],
+      "note": "Field-by-field assembly from the row lists; the projection order matches the source."
+    },
+    {
+      "start": 817,
+      "end": 819,
+      "status": "non-executable",
+      "label": "doc comment for centered_diff",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 820,
+      "end": 827,
+      "status": "translated",
+      "label": "centered_diff: (b - rem) rem_euclid q mapped to the centered interval",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.centeredDiff"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.centered_diff_bound",
+        "Zkp.Implementation.DecryptionGadget.centered_diff_modulo"
+      ],
+      "note": "rem_euclid modeled as Int %, which is Euclidean for a positive modulus."
+    },
+    {
+      "start": 828,
+      "end": 830,
+      "status": "non-executable",
+      "label": "doc comment for fill_decryption_core",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 831,
+      "end": 848,
+      "status": "dependency-boundary",
+      "label": "fill_decryption_core signature, WitnessWrite trait, set_target unwrap, signed-to-field conversion",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.fillDecryptionCore",
+        "Zkp.Implementation.DecryptionGadget.WriteOp",
+        "Zkp.Implementation.DecryptionGadget.FillLengths",
+        "Zkp.Implementation.DecryptionGadget.Centered"
+      ],
+      "theorems": [],
+      "note": "WitnessWrite::set_target and its unwrap are imported; f_i64 maps negative Int to p - |x|, which the model records only as the Centered representative convention."
+    },
+    {
+      "start": 849,
+      "end": 892,
+      "status": "translated",
+      "label": "per-row fill order: s, epk halves, as_rem, kappa, wrap, v, cs_kappa, digit bits, noise lo/u/v bits, bit, carry, dwrap",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.fillRow",
+        "Zkp.Implementation.DecryptionGadget.rowWrites",
+        "Zkp.Implementation.DecryptionGadget.fillWrites",
+        "Zkp.Implementation.DecryptionGadget.WriteSlot",
+        "Zkp.Implementation.DecryptionGadget.bitsOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.fill_ignores_value",
+        "Zkp.Implementation.DecryptionGadget.fill_bit_is_equality_to_one",
+        "Zkp.Implementation.DecryptionGadget.fill_noise_high_halves",
+        "Zkp.Implementation.DecryptionGadget.fill_row_allocation_shape",
+        "Zkp.Implementation.DecryptionGadget.row_write_count",
+        "Zkp.Implementation.DecryptionGadget.noise_native_high_halves_in_range",
+        "Zkp.Implementation.DecryptionGadget.bitsOf_length"
+      ],
+      "note": "Sequential write stream of 44 writes per row with the same value derivations (bit = (bits[i] == 1), nu = min(hi,7), nv = hi - nu); set_bool_target unwrap failures and out-of-bounds indexing are not transactional in the model."
+    },
+    {
+      "start": 893,
+      "end": 894,
+      "status": "translated",
+      "label": "expose_amount ignored by fill; end of function",
+      "declarations": [
+        "Zkp.Implementation.DecryptionGadget.fillDecryptionCore"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.fill_ignores_expose_amount"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no Rust/plonky2 gate/compiler refinement certificate."
+    },
+    {
+      "start": 895,
+      "end": 895,
+      "status": "non-executable",
+      "label": "spacing before test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 896,
+      "end": 1116,
+      "status": "test-only",
+      "label": "cfg(test): schoolbook differential, property vs native oracle, adversarial and digest golden tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) body only; the randomized differential and prove/verify property tests are not theorem coverage."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "field-products-and-representatives",
+      "obligation": "FieldProducts (x*y = 0 mod p implies a zero factor) and the Centered/Canonical representative convention are hypotheses of every gate-to-integer lemma; derive them from Goldilocks primality and actual wire values instead of assuming them.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-and-range-check-lowering",
+      "obligation": "Show that builder.range_check, add_virtual_bool_target_safe, is_equal/and/assert_zero, mul/add/sub/connect and the constant targets lower to the RangeGate/Bool/FZero predicates the model uses; no split_le or compiler refinement is proved.",
+      "discharged": false
+    },
+    {
+      "name": "hash-digest-binding",
+      "obligation": "keccak256 and Poseidon are explicit HashRequests over exact word streams; collision resistance, the Bytes32 output encodings, and that equal digests imply equal (a, b, c1, c2) are not proved, nor is the caller connect to the committed H1/ciphertext digests.",
+      "discharged": false
+    },
+    {
+      "name": "native-machine-refinement",
+      "obligation": "Refine the Int/Nat native model to Rust i64/i32/u128/u64/u32/u16/u8 arithmetic, casts, indexing, debug_assert, unwrap and the imported encode_amount; NativeMachineDomain only records the widths.",
+      "discharged": false
+    },
+    {
+      "name": "decryption-oracle-soundness-and-key-uniqueness",
+      "obligation": "The gates are modular equations; no proof that a satisfying (s, v, d) equals the plaintext produced by the upstream decrypt rounding (upstreamDigit is deliberately unrelated), that the ternary s satisfying key binding is unique, or that the noise budget makes the decoded digits the encrypted amount.",
+      "discharged": false
+    },
+    {
+      "name": "ciphertext-authenticity-and-recipient-entitlement",
+      "obligation": "The gadget receives a, b, c1, c2 as witnessed targets; that they are the committed public key and ciphertext of the entitled recipient, and that the exposed amount limbs are connected to the claim public input, are caller obligations outside this file.",
+      "discharged": false
+    },
+    {
+      "name": "rust-source-and-circuit-refinement",
+      "obligation": "No certificate links decryption_core, the native builder or fill_decryption_core as compiled Rust/plonky2 to the Lean definitions; the model is a handwritten restatement and the build-phase order is asserted, not extracted.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,3088 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/state_update_verifier.rs",
+  "source_sha256": "e7a782e9814efe76b080c3d35769f04824244d6a735a0b9587ac08683b21338b",
+  "source_lines": 3676,
+  "module": "Zkp.Implementation.ChannelStateUpdate",
+  "model": "doc/audit/zkp/Zkp/Implementation/ChannelStateUpdate.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 9,
+      "status": "non-executable",
+      "label": "module doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 10,
+      "end": 12,
+      "status": "dependency-boundary",
+      "label": "external crate imports (keccak, serde, thiserror)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.Fault"
+      ],
+      "theorems": [],
+      "note": "solidity_keccak256 is the Environment.hashWords callback; serde/thiserror derive output is not modeled."
+    },
+    {
+      "start": 13,
+      "end": 13,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 14,
+      "end": 31,
+      "status": "dependency-boundary",
+      "label": "crate imports: state/record/tx/balance layouts, constants, U256, Regev primitives",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.Fund",
+        "Zkp.Implementation.ChannelStateUpdate.Balance",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.Signature",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey",
+        "Zkp.Implementation.ChannelStateUpdate.SecretKey",
+        "Zkp.Implementation.ChannelStateUpdate.Ciphertext",
+        "Zkp.Implementation.ChannelStateUpdate.ChannelTx",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx",
+        "Zkp.Implementation.ChannelStateUpdate.SmallBlockMessage",
+        "Zkp.Implementation.ChannelStateUpdate.SignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.Delta",
+        "Zkp.Implementation.ChannelStateUpdate.Inclusion",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope",
+        "Zkp.Implementation.ChannelStateUpdate.Role",
+        "Zkp.Implementation.ChannelStateUpdate.Backend",
+        "Zkp.Implementation.ChannelStateUpdate.Kind",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose",
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement",
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.StateWidth",
+        "Zkp.Implementation.ChannelStateUpdate.BalanceWidth",
+        "Zkp.Implementation.ChannelStateUpdate.SignatureWidth",
+        "Zkp.Implementation.ChannelStateUpdate.KeyWidth",
+        "Zkp.Implementation.ChannelStateUpdate.CiphertextWidth",
+        "Zkp.Implementation.ChannelStateUpdate.HashWidth",
+        "Zkp.Implementation.ChannelStateUpdate.WordsWidth",
+        "Zkp.Implementation.ChannelStateUpdate.Amount",
+        "Zkp.Implementation.ChannelStateUpdate.Hash",
+        "Zkp.Implementation.ChannelStateUpdate.Ten",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth",
+        "Zkp.Implementation.ChannelStateUpdate.addBudget",
+        "Zkp.Implementation.ChannelStateUpdate.burnChannel",
+        "Zkp.Implementation.ChannelStateUpdate.regevN",
+        "Zkp.Implementation.ChannelStateUpdate.regevQ"
+      ],
+      "theorems": [],
+      "note": "Imported types are re-declared as Lean layouts (State/Balance/Record/InterTx/...); their validate()/hash/builder behavior is an opaque Environment callback. Width predicates are representation domains, not admission checks."
+    },
+    {
+      "start": 32,
+      "end": 34,
+      "status": "non-executable",
+      "label": "spacing and derive/serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 35,
+      "end": 64,
+      "status": "translated",
+      "label": "ChannelStateUpdatePublicInputs: 20 PI fields incl. full 10-wide fund vectors",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.NativeWidths",
+        "Zkp.Implementation.ChannelStateUpdate.Kind",
+        "Zkp.Implementation.ChannelStateUpdate.Kind.code",
+        "Zkp.Implementation.ChannelStateUpdate.Amount",
+        "Zkp.Implementation.ChannelStateUpdate.Ten",
+        "Zkp.Implementation.ChannelStateUpdate.Hash"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 65,
+      "end": 66,
+      "status": "non-executable",
+      "label": "closing brace / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 67,
+      "end": 73,
+      "status": "non-executable",
+      "label": "digest() layout doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 74,
+      "end": 103,
+      "status": "translated",
+      "label": "digest(): fixed-width PI word stream (2+8+8+2+2+2+8+8+8+2+8+8+80+80+8+8+8+8+8 = 266 limbs)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.publicWords",
+        "Zkp.Implementation.ChannelStateUpdate.splitU64",
+        "Zkp.Implementation.ChannelStateUpdate.amountWords",
+        "Zkp.Implementation.ChannelStateUpdate.fundWords",
+        "Zkp.Implementation.ChannelStateUpdate.digest",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind.code"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.public_words_length",
+        "Zkp.Implementation.ChannelStateUpdate.amount_words_length",
+        "Zkp.Implementation.ChannelStateUpdate.fund_words_length"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 104,
+      "end": 104,
+      "status": "dependency-boundary",
+      "label": "keccak over the PI word stream",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.digest",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "solidity_keccak256 and Bytes32::from_u32_slice are the opaque Environment.hashWords callback; no injectivity/collision property is proved."
+    },
+    {
+      "start": 105,
+      "end": 109,
+      "status": "non-executable",
+      "label": "closing braces and ChannelProofVerifier doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 110,
+      "end": 116,
+      "status": "dependency-boundary",
+      "label": "ChannelProofVerifier trait (transport-proof interface)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.TransportVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Modeled as the opaque TransportVerifier callback type; arbitrary implementations authenticate nothing in the model."
+    },
+    {
+      "start": 117,
+      "end": 121,
+      "status": "non-executable",
+      "label": "RegevProofVerifier doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 122,
+      "end": 129,
+      "status": "dependency-boundary",
+      "label": "RegevProofVerifier trait (Regev STARK interface)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose",
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement"
+      ],
+      "theorems": [],
+      "note": "Modeled as the opaque RegevVerifier callback type over the typed RegevStatement rebuilt by the verifier."
+    },
+    {
+      "start": 130,
+      "end": 130,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 131,
+      "end": 151,
+      "status": "translated",
+      "label": "RealRegevProofVerifier: (ChannelStateUpdate, Plonky3) envelope gate before STARK verify",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.realRegevVerify",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope",
+        "Zkp.Implementation.ChannelStateUpdate.Role",
+        "Zkp.Implementation.ChannelStateUpdate.Backend",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.real_regev_exact_call"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 152,
+      "end": 154,
+      "status": "dependency-boundary",
+      "label": "RealRegevProofVerifier::verify STARK call and error-string mapping",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.realRegevVerify",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected",
+        "Zkp.Implementation.ChannelStateUpdate.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.map_rejected_ok_iff"
+      ],
+      "note": "The STARK verifier is the opaque `real` callback; map_err(to_string) is modeled as category re-labeling (mapRejected) with the exact message unmodeled."
+    },
+    {
+      "start": 155,
+      "end": 157,
+      "status": "non-executable",
+      "label": "closing braces / derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 158,
+      "end": 218,
+      "status": "translated",
+      "label": "ChannelStateUpdateError variants (error category enumeration)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Category",
+        "Zkp.Implementation.ChannelStateUpdate.Fault",
+        "Zkp.Implementation.ChannelStateUpdate.Result"
+      ],
+      "theorems": [],
+      "note": "Error variants are modeled as Category tags; exact format!/Display strings and thiserror output are not modeled."
+    },
+    {
+      "start": 219,
+      "end": 225,
+      "status": "non-executable",
+      "label": "witness-struct section comment, doc and derive",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 226,
+      "end": 241,
+      "status": "translated",
+      "label": "InChannelTransferUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.InChannelWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.ChannelTx",
+        "Zkp.Implementation.ChannelStateUpdate.SecretKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 242,
+      "end": 244,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 245,
+      "end": 258,
+      "status": "translated",
+      "label": "InterChannelSendUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.SendWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 259,
+      "end": 261,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 262,
+      "end": 270,
+      "status": "translated",
+      "label": "InterChannelFundImportUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.FundImportWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 271,
+      "end": 275,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 276,
+      "end": 286,
+      "status": "translated",
+      "label": "L1DepositImportUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.DepositWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.Hash"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 287,
+      "end": 289,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 290,
+      "end": 314,
+      "status": "translated",
+      "label": "ReceiverBundleApplyUpdateWitness fields (incl. off-chain sender before/after ciphertexts)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.BundleWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey",
+        "Zkp.Implementation.ChannelStateUpdate.Ciphertext",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx",
+        "Zkp.Implementation.ChannelStateUpdate.SecretKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 315,
+      "end": 318,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 319,
+      "end": 331,
+      "status": "translated",
+      "label": "BalanceRefreshUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RefreshWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey",
+        "Zkp.Implementation.ChannelStateUpdate.State",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 332,
+      "end": 341,
+      "status": "non-executable",
+      "label": "TokenRegister doc comment / derive / serde",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 342,
+      "end": 348,
+      "status": "translated",
+      "label": "TokenRegisterUpdateWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.TokenRegisterWitness",
+        "Zkp.Implementation.ChannelStateUpdate.Record",
+        "Zkp.Implementation.ChannelStateUpdate.State"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 349,
+      "end": 353,
+      "status": "non-executable",
+      "label": "verify() section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 354,
+      "end": 419,
+      "status": "translated",
+      "label": "in-channel verify: pk-root, linkage, common balance, small-block/h2/chain/accumulator freeze, fund/unallocated/nullifier freeze, signatures, party keys, distinct parties, hash-sig presence",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyInChannel",
+        "Zkp.Implementation.ChannelStateUpdate.InChannelWitness",
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.requireSmallBlockUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameChannelFund",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameU256",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.memberIndexKey"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.in_channel_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.in_channel_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. The hash-sig check is presence-only (non-empty); Falcon/hash-sig validity and A11 membership are not modeled."
+    },
+    {
+      "start": 420,
+      "end": 428,
+      "status": "dependency-boundary",
+      "label": "ChannelTx::signing_digest (transition digest)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.ChannelTx"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.channelTxDigest callback over (channel_id, prev digest, tx); the preimage layout is not modeled here."
+    },
+    {
+      "start": 429,
+      "end": 433,
+      "status": "non-executable",
+      "label": "TM-8 rationale comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 434,
+      "end": 450,
+      "status": "translated",
+      "label": "signed token_slot layout bound then active token_count bound",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyInChannel",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 451,
+      "end": 454,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 455,
+      "end": 459,
+      "status": "dependency-boundary",
+      "label": "add_ciphertexts homomorphic add (recipient position)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientAdd"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.ciphertextAdd callback; no modulo-q/canonical ciphertext semantics is modeled."
+    },
+    {
+      "start": 460,
+      "end": 484,
+      "status": "translated",
+      "label": "recipient position equality, both rows frozen except token_slot, all uninvolved slots frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientAdd",
+        "Zkp.Implementation.ChannelStateUpdate.ensureRowUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount",
+        "Zkp.Implementation.ChannelStateUpdate.ciphertextAt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 485,
+      "end": 487,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 488,
+      "end": 510,
+      "status": "translated",
+      "label": "pending_adds: recipient +1 under budget, sender reset to 0, other positions/rows frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingIncrement",
+        "Zkp.Implementation.ChannelStateUpdate.pendingReset",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.addBudget",
+        "Zkp.Implementation.ChannelStateUpdate.pendingAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.pending_increment_budget"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 511,
+      "end": 512,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 513,
+      "end": 521,
+      "status": "translated",
+      "label": "E-1 ChannelTx statement rebuilt from checked keys and the token_slot-selected ciphertexts",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement",
+        "Zkp.Implementation.ChannelStateUpdate.verifyInChannel",
+        "Zkp.Implementation.ChannelStateUpdate.ciphertextAt",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 522,
+      "end": 526,
+      "status": "dependency-boundary",
+      "label": "Regev E-1 STARK verify callback",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose"
+      ],
+      "theorems": [],
+      "note": "The proof verifier is an opaque callback; STARK soundness is a premise, not a proved property."
+    },
+    {
+      "start": 527,
+      "end": 527,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 528,
+      "end": 533,
+      "status": "translated",
+      "label": "recipient decryption gate: sk requires expected_amount",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 534,
+      "end": 535,
+      "status": "dependency-boundary",
+      "label": "decrypt_amount(enc_amount)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.decrypt callback."
+    },
+    {
+      "start": 536,
+      "end": 540,
+      "status": "translated",
+      "label": "decrypted delta must equal expected",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 541,
+      "end": 549,
+      "status": "dependency-boundary",
+      "label": "decrypt_amount(next recipient position) must succeed",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.decrypt callback; only success is required."
+    },
+    {
+      "start": 550,
+      "end": 551,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 552,
+      "end": 564,
+      "status": "translated",
+      "label": "in-channel public inputs: kind/channel/digests/amount=0/versions/h2/chains/count=1",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.base_inputs_full_fund_vectors",
+        "Zkp.Implementation.ChannelStateUpdate.base_context"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 565,
+      "end": 566,
+      "status": "dependency-boundary",
+      "label": "hash_member (keccak of member key) for sender/receiver ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 567,
+      "end": 576,
+      "status": "translated",
+      "label": "in-channel public inputs: full fund vectors, unallocated, nullifier roots, transition digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 577,
+      "end": 580,
+      "status": "non-executable",
+      "label": "closing braces / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 581,
+      "end": 617,
+      "status": "translated",
+      "label": "send verify: pk-root, linkage, common balance, signatures, signed small block, source channel id, nonzero tx_tree_root h2 target",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifySend",
+        "Zkp.Implementation.ChannelStateUpdate.SendWitness",
+        "Zkp.Implementation.ChannelStateUpdate.TransportVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.validateSignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.zero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.send_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.send_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 618,
+      "end": 619,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 620,
+      "end": 624,
+      "status": "dependency-boundary",
+      "label": "small block state_commitment_root == next balance H1",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.verifySend"
+      ],
+      "theorems": [],
+      "note": "BalanceState::h1 is the opaque Environment.balanceH1 callback; the equality check is modeled around it."
+    },
+    {
+      "start": 625,
+      "end": 625,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 626,
+      "end": 634,
+      "status": "translated",
+      "label": "exactly one receiver delta",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifySend",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 635,
+      "end": 639,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 640,
+      "end": 643,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::tx_leaf_hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.txLeaf callback."
+    },
+    {
+      "start": 644,
+      "end": 646,
+      "status": "translated",
+      "label": "burn-channel destination selector",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifySend",
+        "Zkp.Implementation.ChannelStateUpdate.burnChannel"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 647,
+      "end": 654,
+      "status": "dependency-boundary",
+      "label": "burn_descriptor (IMD2) leaf for burns",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.u64ToU256"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.burnDescriptor callback over the u64->U256 embedded amount."
+    },
+    {
+      "start": 655,
+      "end": 658,
+      "status": "translated",
+      "label": "else tx_leaf; settled_tx_chain push check",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifySend",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 659,
+      "end": 670,
+      "status": "non-executable",
+      "label": "Stage-3 accumulator / TM-6 rationale comments",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 671,
+      "end": 674,
+      "status": "translated",
+      "label": "resolve base token_index against the source channel registry (fail-closed)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.resolveTokenSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 675,
+      "end": 676,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 677,
+      "end": 677,
+      "status": "translated",
+      "label": "token-bearing tx_hash recompute check",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireTokenBearingHash"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 678,
+      "end": 685,
+      "status": "translated",
+      "label": "fund decreases by amount at the resolved token (native U256 add, panics on final carry)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.debitFundAt",
+        "Zkp.Implementation.ChannelStateUpdate.u64ToU256",
+        "Zkp.Implementation.ChannelStateUpdate.addAmount",
+        "Zkp.Implementation.ChannelStateUpdate.fundAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.debit_fund_exact",
+        "Zkp.Implementation.ChannelStateUpdate.native_amount_add_success",
+        "Zkp.Implementation.ChannelStateUpdate.native_amount_add_no_wrap",
+        "Zkp.Implementation.ChannelStateUpdate.u64_embedding_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 686,
+      "end": 696,
+      "status": "translated",
+      "label": "other fund positions frozen, unallocated unchanged, nullifier root must differ",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureFundsUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameU256",
+        "Zkp.Implementation.ChannelStateUpdate.ensureDifferentRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.other_fund_positions_frozen",
+        "Zkp.Implementation.ChannelStateUpdate.unequal_root_is_only_inequality"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. Root inequality is only inequality: it does not establish a valid fresh nullifier insertion."
+    },
+    {
+      "start": 697,
+      "end": 698,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 699,
+      "end": 700,
+      "status": "translated",
+      "label": "sender slot located by pubkey hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.memberSlotIndex",
+        "Zkp.Implementation.ChannelStateUpdate.firstIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 701,
+      "end": 703,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 704,
+      "end": 722,
+      "status": "translated",
+      "label": "uninvolved slots/counters frozen, sender row frozen except token_slot, sender counter reset",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureRowUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.pendingReset",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 723,
+      "end": 734,
+      "status": "translated",
+      "label": "E-2 ChannelUpdate statement rebuilt (sender/destination keys, before/after, deltas, amount, token_index)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement",
+        "Zkp.Implementation.ChannelStateUpdate.verifySend",
+        "Zkp.Implementation.ChannelStateUpdate.ciphertextAt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 735,
+      "end": 739,
+      "status": "dependency-boundary",
+      "label": "Regev E-2 STARK verify callback",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose"
+      ],
+      "theorems": [],
+      "note": "Opaque callback; STARK soundness is a premise."
+    },
+    {
+      "start": 740,
+      "end": 744,
+      "status": "translated",
+      "label": "transport proof bytes must equal envelope proof (forced empty by validate_signed_small_block)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifySend"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.send_transport_bytes_empty"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. Because line 1983 already required inter_channel_tx.transport_proof to be empty, acceptance forces the transport envelope's proof bytes to be empty (send_transport_bytes_empty)."
+    },
+    {
+      "start": 745,
+      "end": 756,
+      "status": "translated",
+      "label": "send public inputs: kind/channel/digests/amount/versions/h2/chains/count=1",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 757,
+      "end": 758,
+      "status": "dependency-boundary",
+      "label": "hash_member for sender/receiver ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 759,
+      "end": 766,
+      "status": "translated",
+      "label": "send public inputs: fund vectors, unallocated, nullifier roots",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 767,
+      "end": 767,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::signing_digest as transition digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.interSigningDigest callback."
+    },
+    {
+      "start": 768,
+      "end": 768,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 769,
+      "end": 776,
+      "status": "translated",
+      "label": "transport proof role/backend gate then verifier call; return public inputs",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyProof",
+        "Zkp.Implementation.ChannelStateUpdate.Role",
+        "Zkp.Implementation.ChannelStateUpdate.Backend"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.transport_exact_call"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. The verifier.verify call inside verifyProof is the opaque TransportVerifier callback."
+    },
+    {
+      "start": 777,
+      "end": 780,
+      "status": "non-executable",
+      "label": "closing braces / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 781,
+      "end": 809,
+      "status": "translated",
+      "label": "fund-import verify: linkage, common balance (receiver record), signatures, signed small block (source record, message nonce), destination id, h2 zero",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyFundImport",
+        "Zkp.Implementation.ChannelStateUpdate.FundImportWitness",
+        "Zkp.Implementation.ChannelStateUpdate.TransportVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.validateSignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. The close nonce passed is the message's own nonce (self-referential), which the model preserves."
+    },
+    {
+      "start": 810,
+      "end": 812,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 813,
+      "end": 816,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::tx_leaf_hash settle tag",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.txLeaf callback."
+    },
+    {
+      "start": 817,
+      "end": 817,
+      "status": "translated",
+      "label": "settled_tx_chain push check",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 818,
+      "end": 827,
+      "status": "non-executable",
+      "label": "Stage-3 / TM-6 rationale comments",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 828,
+      "end": 831,
+      "status": "translated",
+      "label": "resolve base token_index against the destination registry",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.resolveTokenSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 832,
+      "end": 835,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 836,
+      "end": 852,
+      "status": "translated",
+      "label": "token-bearing tx_hash check, fund and unallocated increase by amount at resolved token, other positions frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireTokenBearingHash",
+        "Zkp.Implementation.ChannelStateUpdate.creditFundAt",
+        "Zkp.Implementation.ChannelStateUpdate.ensureFundsUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.creditUnallocated",
+        "Zkp.Implementation.ChannelStateUpdate.u64ToU256",
+        "Zkp.Implementation.ChannelStateUpdate.addAmount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.credit_fund_exact",
+        "Zkp.Implementation.ChannelStateUpdate.credit_unallocated_exact",
+        "Zkp.Implementation.ChannelStateUpdate.other_fund_positions_frozen"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 853,
+      "end": 853,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 854,
+      "end": 867,
+      "status": "translated",
+      "label": "all slots/counters frozen, nullifier root must differ, transport bytes equality",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureDifferentRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyFundImport",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.unequal_root_is_only_inequality",
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_transport_bytes_empty"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. Root inequality is only inequality. The transport-bytes equality at 863-867 combines with line 1983 to force the transport envelope proof to be empty (fund_import_transport_bytes_empty)."
+    },
+    {
+      "start": 868,
+      "end": 877,
+      "status": "translated",
+      "label": "receiver id from first receiver delta (required)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyFundImport"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 878,
+      "end": 889,
+      "status": "translated",
+      "label": "fund-import public inputs (receiver_entry_count = receivers.len)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind",
+        "Zkp.Implementation.ChannelStateUpdate.scalarLimit"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 890,
+      "end": 891,
+      "status": "dependency-boundary",
+      "label": "hash_member for sender/receiver ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 892,
+      "end": 899,
+      "status": "translated",
+      "label": "fund-import public inputs: fund vectors, unallocated, nullifier roots",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 900,
+      "end": 900,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::signing_digest as transition digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.interSigningDigest callback."
+    },
+    {
+      "start": 901,
+      "end": 901,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 902,
+      "end": 909,
+      "status": "translated",
+      "label": "transport proof gate and return",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyProof",
+        "Zkp.Implementation.ChannelStateUpdate.Role",
+        "Zkp.Implementation.ChannelStateUpdate.Backend"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.transport_exact_call"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 910,
+      "end": 913,
+      "status": "non-executable",
+      "label": "closing braces / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 914,
+      "end": 919,
+      "status": "translated",
+      "label": "deposit verify: linkage, common balance, signatures, h2 zero, chain push of deposit nullifier",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyDeposit",
+        "Zkp.Implementation.ChannelStateUpdate.DepositWitness",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.deposit_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.deposit_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 920,
+      "end": 928,
+      "status": "non-executable",
+      "label": "TM-7 rationale comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 929,
+      "end": 954,
+      "status": "translated",
+      "label": "registry resolution, fund/unallocated increase, other positions frozen, all slots/counters frozen, nullifier root must differ",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.resolveTokenSlot",
+        "Zkp.Implementation.ChannelStateUpdate.creditFundAt",
+        "Zkp.Implementation.ChannelStateUpdate.ensureFundsUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.creditUnallocated",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureDifferentRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact",
+        "Zkp.Implementation.ChannelStateUpdate.credit_fund_exact",
+        "Zkp.Implementation.ChannelStateUpdate.credit_unallocated_exact",
+        "Zkp.Implementation.ChannelStateUpdate.unequal_root_is_only_inequality"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 955,
+      "end": 955,
+      "status": "translated",
+      "label": "depositor key by direct array indexing (panics out of range; not the checked helper)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyDeposit",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.at_index_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 956,
+      "end": 962,
+      "status": "dependency-boundary",
+      "label": "l1_deposit_import_digest (IMLD-v2) with depositor_slot truncated to u16",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.verifyDeposit"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.depositDigest callback; the `as u16` truncation is modeled as % 65536."
+    },
+    {
+      "start": 963,
+      "end": 974,
+      "status": "translated",
+      "label": "deposit public inputs (receiver_entry_count = 0)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 975,
+      "end": 976,
+      "status": "dependency-boundary",
+      "label": "hash_member of the depositor for both ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 977,
+      "end": 987,
+      "status": "translated",
+      "label": "deposit public inputs: fund vectors, unallocated, nullifier roots, transition digest; return",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 988,
+      "end": 991,
+      "status": "non-executable",
+      "label": "closing braces / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 992,
+      "end": 1013,
+      "status": "translated",
+      "label": "bundle verify: pk-root, linkage, common balance, signatures, destination id, h2 zero, fund unchanged",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBundle",
+        "Zkp.Implementation.ChannelStateUpdate.BundleWitness",
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameChannelFund"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.bundle_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.bundle_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1014,
+      "end": 1020,
+      "status": "translated",
+      "label": "unallocated decreases by bundle amount (native U256 add)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.debitUnallocated",
+        "Zkp.Implementation.ChannelStateUpdate.u64ToU256",
+        "Zkp.Implementation.ChannelStateUpdate.addAmount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.debit_unallocated_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1021,
+      "end": 1044,
+      "status": "translated",
+      "label": "nullifier root unchanged, exactly one receiver delta, recipient key matches member index",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBundle",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex",
+        "Zkp.Implementation.ChannelStateUpdate.memberIndexKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1045,
+      "end": 1047,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1048,
+      "end": 1052,
+      "status": "translated",
+      "label": "chain and accumulator unchanged",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireChainUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorUnchanged"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.chain_unchanged_success",
+        "Zkp.Implementation.ChannelStateUpdate.accumulator_unchanged_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1053,
+      "end": 1060,
+      "status": "non-executable",
+      "label": "TM-6 rationale comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1061,
+      "end": 1064,
+      "status": "translated",
+      "label": "registry resolution on the destination",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.resolveTokenSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1065,
+      "end": 1066,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1067,
+      "end": 1067,
+      "status": "translated",
+      "label": "token-bearing tx_hash recheck",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireTokenBearingHash"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1068,
+      "end": 1072,
+      "status": "dependency-boundary",
+      "label": "add_ciphertexts (recipient position)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientAdd"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.ciphertextAdd callback."
+    },
+    {
+      "start": 1073,
+      "end": 1098,
+      "status": "translated",
+      "label": "recipient position equality, row frozen except token_slot, other slots/counters frozen, recipient counter +1",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientAdd",
+        "Zkp.Implementation.ChannelStateUpdate.ensureRowUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingIncrement",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.pending_increment_budget"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1099,
+      "end": 1101,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1102,
+      "end": 1113,
+      "status": "translated",
+      "label": "E-2 statement rebuilt from off-chain sender ciphertexts and checked recipient key",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBundle",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1114,
+      "end": 1118,
+      "status": "dependency-boundary",
+      "label": "Regev E-2 STARK verify callback",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose"
+      ],
+      "theorems": [],
+      "note": "Opaque callback; STARK soundness is a premise."
+    },
+    {
+      "start": 1119,
+      "end": 1119,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1120,
+      "end": 1125,
+      "status": "translated",
+      "label": "recipient decryption gate: sk requires expected_amount",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1126,
+      "end": 1127,
+      "status": "dependency-boundary",
+      "label": "decrypt_amount(receiver delta)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.decrypt callback."
+    },
+    {
+      "start": 1128,
+      "end": 1132,
+      "status": "translated",
+      "label": "decrypted delta must equal expected",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1133,
+      "end": 1141,
+      "status": "dependency-boundary",
+      "label": "decrypt_amount(next recipient position) must succeed",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.recipientDecrypt"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.decrypt callback."
+    },
+    {
+      "start": 1142,
+      "end": 1143,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1144,
+      "end": 1155,
+      "status": "translated",
+      "label": "bundle public inputs (count = 1)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1156,
+      "end": 1157,
+      "status": "dependency-boundary",
+      "label": "hash_member for sender/receiver ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 1158,
+      "end": 1165,
+      "status": "translated",
+      "label": "bundle public inputs: fund vectors, unallocated, nullifier roots",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1166,
+      "end": 1166,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::signing_digest as transition digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.interSigningDigest callback."
+    },
+    {
+      "start": 1167,
+      "end": 1171,
+      "status": "non-executable",
+      "label": "closing braces / impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1172,
+      "end": 1202,
+      "status": "translated",
+      "label": "refresh verify: pk-root, linkage, common balance, small block/h2/chain/accumulator/fund/unallocated/nullifier freeze, signatures, member key",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyRefresh",
+        "Zkp.Implementation.ChannelStateUpdate.RefreshWitness",
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon",
+        "Zkp.Implementation.ChannelStateUpdate.requireSmallBlockUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameChannelFund",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameU256",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameRoot",
+        "Zkp.Implementation.ChannelStateUpdate.memberIndexKey"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.refresh_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.refresh_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1203,
+      "end": 1203,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1204,
+      "end": 1209,
+      "status": "translated",
+      "label": "all other slots/counters frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.slotCount"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1210,
+      "end": 1213,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1214,
+      "end": 1247,
+      "status": "translated",
+      "label": "token_slot layout/active bounds, counter reset, other counters and ciphertexts of the row frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyRefresh",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth",
+        "Zkp.Implementation.ChannelStateUpdate.pendingReset",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.ensureRowUnchangedExcept"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1248,
+      "end": 1254,
+      "status": "translated",
+      "label": "old/new ciphertext selection and BalanceRefresh statement",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ciphertextAt",
+        "Zkp.Implementation.ChannelStateUpdate.RegevStatement",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1255,
+      "end": 1259,
+      "status": "dependency-boundary",
+      "label": "Regev refresh STARK verify callback",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.RegevVerifier",
+        "Zkp.Implementation.ChannelStateUpdate.Purpose"
+      ],
+      "theorems": [],
+      "note": "Opaque callback; STARK soundness is a premise."
+    },
+    {
+      "start": 1260,
+      "end": 1265,
+      "status": "non-executable",
+      "label": "transition-digest preimage comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1266,
+      "end": 1267,
+      "status": "dependency-boundary",
+      "label": "keccak over the refresh preimage",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.verifyRefresh"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.hashWords callback."
+    },
+    {
+      "start": 1268,
+      "end": 1272,
+      "status": "translated",
+      "label": "refresh preimage: IMRF domain word, member_index, token_slot as own u32 limbs",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.refreshPreimage",
+        "Zkp.Implementation.ChannelStateUpdate.refreshDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.refresh_preimage_length"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1273,
+      "end": 1278,
+      "status": "dependency-boundary",
+      "label": "ciphertext digests appended; keccak finish",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.refreshPreimage"
+      ],
+      "theorems": [],
+      "note": "RegevCiphertext::digest is the opaque Environment.ciphertextDigest callback; the 8+8 word append is modeled in refreshPreimage."
+    },
+    {
+      "start": 1279,
+      "end": 1290,
+      "status": "translated",
+      "label": "refresh public inputs (amount = 0, count = 0)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1291,
+      "end": 1292,
+      "status": "dependency-boundary",
+      "label": "hash_member of the refreshed member for both ids",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Keccak is the opaque Environment.hashWords callback."
+    },
+    {
+      "start": 1293,
+      "end": 1301,
+      "status": "translated",
+      "label": "refresh public inputs: fund vectors, unallocated, nullifier roots, transition digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1302,
+      "end": 1324,
+      "status": "non-executable",
+      "label": "closing braces, section comment, impl header, TokenRegister doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1325,
+      "end": 1331,
+      "status": "translated",
+      "label": "token-register verify: linkage and registry-agnostic shared balance checks",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyTokenRegister",
+        "Zkp.Implementation.ChannelStateUpdate.TokenRegisterWitness",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceShared"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.token_register_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.token_register_output"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1332,
+      "end": 1335,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1336,
+      "end": 1341,
+      "status": "dependency-boundary",
+      "label": "BalanceState::verify_token_register_transition (append/injectivity/count+1 rebuild)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.tokenRegisterBalance callback; append semantics and registry injectivity are premises."
+    },
+    {
+      "start": 1342,
+      "end": 1343,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1344,
+      "end": 1372,
+      "status": "translated",
+      "label": "full freeze: h2 zero, chain, accumulator, fund, unallocated, nullifier, small block, close nonce",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameChannelFund",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameU256",
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameRoot",
+        "Zkp.Implementation.ChannelStateUpdate.requireSmallBlockUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.verifyTokenRegister"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.h2_zero_success",
+        "Zkp.Implementation.ChannelStateUpdate.chain_unchanged_success",
+        "Zkp.Implementation.ChannelStateUpdate.accumulator_unchanged_success",
+        "Zkp.Implementation.ChannelStateUpdate.unchanged_whole_fund"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1373,
+      "end": 1376,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1377,
+      "end": 1378,
+      "status": "dependency-boundary",
+      "label": "token_register_next_state canonical builder",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.tokenRegisterState callback."
+    },
+    {
+      "start": 1379,
+      "end": 1386,
+      "status": "translated",
+      "label": "signatures substituted then whole-ChannelState rebuild-equality",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyTokenRegister",
+        "Zkp.Implementation.ChannelStateUpdate.State"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1387,
+      "end": 1388,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1389,
+      "end": 1389,
+      "status": "translated",
+      "label": "member signature structure check",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1390,
+      "end": 1390,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1391,
+      "end": 1410,
+      "status": "translated",
+      "label": "token-register public inputs (zero sender/receiver ids)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs",
+        "Zkp.Implementation.ChannelStateUpdate.PublicInputs",
+        "Zkp.Implementation.ChannelStateUpdate.Kind",
+        "Zkp.Implementation.ChannelStateUpdate.zero"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1411,
+      "end": 1414,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1415,
+      "end": 1415,
+      "status": "translated",
+      "label": "transition digest = signed next-state digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyTokenRegister",
+        "Zkp.Implementation.ChannelStateUpdate.baseInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1416,
+      "end": 1419,
+      "status": "non-executable",
+      "label": "closing braces",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1420,
+      "end": 1438,
+      "status": "translated",
+      "label": "verify_state_linkage: channel id, epoch+1 (u64 profile-dependent), prev_digest chaining",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage",
+        "Zkp.Implementation.ChannelStateUpdate.addScalarOne",
+        "Zkp.Implementation.ChannelStateUpdate.OverflowMode",
+        "Zkp.Implementation.ChannelStateUpdate.scalarLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.scalar_checked_success",
+        "Zkp.Implementation.ChannelStateUpdate.scalar_wrapping_no_overflow"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. `prev.epoch + 1` wraps in release and panics in overflow-checked builds; both profiles are modeled via OverflowMode."
+    },
+    {
+      "start": 1439,
+      "end": 1448,
+      "status": "dependency-boundary",
+      "label": "ChannelState::signing_digest self-consistency on both sides",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.verifyStateLinkage"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.stateDigest callback; the equality checks are modeled around it, hash injectivity is not."
+    },
+    {
+      "start": 1449,
+      "end": 1455,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1456,
+      "end": 1474,
+      "status": "translated",
+      "label": "verify_ordinary_state_metadata: member/delegate counts vs record on both sides, close era preserved",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyOrdinaryStateMetadata",
+        "Zkp.Implementation.ChannelStateUpdate.forEach"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.ordinary_metadata_success",
+        "Zkp.Implementation.ChannelStateUpdate.for_each_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1475,
+      "end": 1480,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1481,
+      "end": 1491,
+      "status": "translated",
+      "label": "require_small_block_unchanged",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireSmallBlockUnchanged"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1492,
+      "end": 1499,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1500,
+      "end": 1505,
+      "status": "translated",
+      "label": "verify_balance_state_shared: signature and ordinary metadata",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceShared",
+        "Zkp.Implementation.ChannelStateUpdate.verifyOrdinaryStateMetadata"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.balance_shared_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1506,
+      "end": 1513,
+      "status": "dependency-boundary",
+      "label": "BalanceState::validate on both sides",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.validateBalance callback; canonical ciphertexts, D3 budgets and registry injectivity are premises."
+    },
+    {
+      "start": 1514,
+      "end": 1527,
+      "status": "translated",
+      "label": "balance channel-id consistency and strict state_version+1 (u64 profile-dependent)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceShared",
+        "Zkp.Implementation.ChannelStateUpdate.addScalarOne",
+        "Zkp.Implementation.ChannelStateUpdate.OverflowMode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.scalar_checked_success",
+        "Zkp.Implementation.ChannelStateUpdate.scalar_wrapping_no_overflow"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1528,
+      "end": 1535,
+      "status": "non-executable",
+      "label": "B-1b security comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1536,
+      "end": 1542,
+      "status": "translated",
+      "label": "recipients immutable",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceShared"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1543,
+      "end": 1560,
+      "status": "non-executable",
+      "label": "H-2 security comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1561,
+      "end": 1568,
+      "status": "translated",
+      "label": "regev_pk_digests immutable",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceShared"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1569,
+      "end": 1587,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, TM-1/TM-9 doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1588,
+      "end": 1603,
+      "status": "translated",
+      "label": "verify_balance_state_common: shared checks plus registry/token_count immutability",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyBalanceCommon"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.balance_common_registry_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1604,
+      "end": 1605,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1606,
+      "end": 1609,
+      "status": "translated",
+      "label": "verify_regev_pk_root signature",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot",
+        "Zkp.Implementation.ChannelStateUpdate.Slots",
+        "Zkp.Implementation.ChannelStateUpdate.PublicKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1610,
+      "end": 1617,
+      "status": "dependency-boundary",
+      "label": "RegevPk::validate per slot and regev_pk_root computation",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.forEach",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.validatePublicKey and keyRoot callbacks."
+    },
+    {
+      "start": 1618,
+      "end": 1623,
+      "status": "translated",
+      "label": "computed root must equal record.regev_pk_root",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyRegevPkRoot"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1624,
+      "end": 1626,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1627,
+      "end": 1633,
+      "status": "translated",
+      "label": "require_h2_zero",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireH2Zero",
+        "Zkp.Implementation.ChannelStateUpdate.zero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.h2_zero_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1634,
+      "end": 1635,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1636,
+      "end": 1645,
+      "status": "translated",
+      "label": "require_chain_unchanged",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireChainUnchanged"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.chain_unchanged_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1646,
+      "end": 1647,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1648,
+      "end": 1652,
+      "status": "translated",
+      "label": "require_chain_push signature",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1653,
+      "end": 1653,
+      "status": "dependency-boundary",
+      "label": "settled_tx_chain_push",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.chainPush callback."
+    },
+    {
+      "start": 1654,
+      "end": 1659,
+      "status": "translated",
+      "label": "next chain must equal the pushed value",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireChainPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1660,
+      "end": 1686,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, Stage-3 accumulator comments",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1687,
+      "end": 1691,
+      "status": "translated",
+      "label": "require_accumulator_push signature (native co-signer check; NOT called by any witness verify here)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. The source never invokes this from the witness verifiers; the accumulator frontier is a wallet boundary."
+    },
+    {
+      "start": 1692,
+      "end": 1694,
+      "status": "dependency-boundary",
+      "label": "IncrementalMerkleTree clone/push/get_root",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorPush"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.accumulatorPush/accumulatorRoot callbacks; capacity assert is a premise."
+    },
+    {
+      "start": 1695,
+      "end": 1700,
+      "status": "translated",
+      "label": "expected root must equal next_root",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorPush"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1701,
+      "end": 1706,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1707,
+      "end": 1716,
+      "status": "translated",
+      "label": "require_accumulator_unchanged",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireAccumulatorUnchanged"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.accumulator_unchanged_success"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1717,
+      "end": 1722,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1723,
+      "end": 1733,
+      "status": "translated",
+      "label": "ensure_slot_unchanged: whole 10-wide row equality",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSlotUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1734,
+      "end": 1740,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1741,
+      "end": 1759,
+      "status": "translated",
+      "label": "ensure_row_unchanged_except: every token position but token_slot",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureRowUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth",
+        "Zkp.Implementation.ChannelStateUpdate.forEach"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1760,
+      "end": 1766,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1767,
+      "end": 1787,
+      "status": "translated",
+      "label": "require_pending_add_increment: before < budget, after = before+1, rest of row frozen",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingIncrement",
+        "Zkp.Implementation.ChannelStateUpdate.addBudget",
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchangedExcept"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.pending_increment_budget"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1788,
+      "end": 1790,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1791,
+      "end": 1801,
+      "status": "translated",
+      "label": "require_pending_adds_unchanged: whole counter row",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchanged",
+        "Zkp.Implementation.ChannelStateUpdate.atIndex"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1802,
+      "end": 1805,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1806,
+      "end": 1822,
+      "status": "translated",
+      "label": "require_pending_adds_unchanged_except",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requirePendingUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth",
+        "Zkp.Implementation.ChannelStateUpdate.forEach"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1823,
+      "end": 1835,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, TM-16 doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1836,
+      "end": 1838,
+      "status": "translated",
+      "label": "require_token_bearing_tx_hash signature",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireTokenBearingHash",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1839,
+      "end": 1841,
+      "status": "dependency-boundary",
+      "label": "InterChannelTx::compute_tx_hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.txHash callback."
+    },
+    {
+      "start": 1842,
+      "end": 1848,
+      "status": "translated",
+      "label": "recomputed tx_hash must equal descriptor tx_hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.requireTokenBearingHash"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1849,
+      "end": 1856,
+      "status": "non-executable",
+      "label": "Ok(()), closing brace, TM-6/TM-7 doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1857,
+      "end": 1870,
+      "status": "translated",
+      "label": "resolve_token_slot: first active registry position equal to token_index (fail-closed)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.resolveTokenSlot",
+        "Zkp.Implementation.ChannelStateUpdate.firstIndex",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact",
+        "Zkp.Implementation.ChannelStateUpdate.first_index_found"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1871,
+      "end": 1875,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1876,
+      "end": 1890,
+      "status": "translated",
+      "label": "ensure_funds_unchanged_except",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureFundsUnchangedExcept",
+        "Zkp.Implementation.ChannelStateUpdate.tokenWidth",
+        "Zkp.Implementation.ChannelStateUpdate.forEach"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.other_fund_positions_frozen"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1891,
+      "end": 1894,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1895,
+      "end": 1907,
+      "status": "translated",
+      "label": "member_slot_index: position of pubkey hash among member keys",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.memberSlotIndex",
+        "Zkp.Implementation.ChannelStateUpdate.firstIndex"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.first_index_found"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1908,
+      "end": 1910,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1911,
+      "end": 1919,
+      "status": "translated",
+      "label": "member_index_pubkey_hash: checked get",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.memberIndexKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1920,
+      "end": 1921,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1922,
+      "end": 1927,
+      "status": "dependency-boundary",
+      "label": "verify_next_state_signatures: validate_all_member_signatures (structure only)",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyNextStateSignatures",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.signature_check_is_structural"
+      ],
+      "note": "Opaque Environment.validateStateSignatureStructure callback; this is slot/key/blob structure, NOT Falcon signature validity."
+    },
+    {
+      "start": 1928,
+      "end": 1929,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1930,
+      "end": 1962,
+      "status": "translated",
+      "label": "validate_signed_small_block: source/message channel, BP slot+key (short-circuit), close nonce",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.validateSignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.SignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.SmallBlockMessage",
+        "Zkp.Implementation.ChannelStateUpdate.InterTx",
+        "Zkp.Implementation.ChannelStateUpdate.memberIndexKey"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 1963,
+      "end": 1965,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1966,
+      "end": 1994,
+      "status": "translated",
+      "label": "retired medium numbers/proofs zero-or-empty, retired inter fields canonical, nonzero transfer commitment",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.validateSignedSmallBlock",
+        "Zkp.Implementation.ChannelStateUpdate.Inclusion",
+        "Zkp.Implementation.ChannelStateUpdate.zero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.signed_small_block_transport_empty"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. Line 1983 requires inter_channel_tx.transport_proof to be empty; with the later equality against the envelope proof this means the transport verifier is always handed empty proof bytes."
+    },
+    {
+      "start": 1995,
+      "end": 1997,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 1998,
+      "end": 1999,
+      "status": "dependency-boundary",
+      "label": "validate_member_signature_slots on the small-block signatures",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.Environment",
+        "Zkp.Implementation.ChannelStateUpdate.mapRejected"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.validateSignatureSlots callback; structural only, not Falcon validity."
+    },
+    {
+      "start": 2000,
+      "end": 2001,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2002,
+      "end": 2010,
+      "status": "translated",
+      "label": "ensure_same_channel_fund: whole ChannelFund equality",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameChannelFund",
+        "Zkp.Implementation.ChannelStateUpdate.Fund"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.unchanged_whole_fund"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2011,
+      "end": 2013,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2014,
+      "end": 2023,
+      "status": "translated",
+      "label": "ensure_same_root",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameRoot"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2024,
+      "end": 2026,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2027,
+      "end": 2036,
+      "status": "translated",
+      "label": "ensure_different_root: inequality only",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureDifferentRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.unequal_root_is_only_inequality"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved. Inequality is not freshness: no nullifier-tree insertion is verified here."
+    },
+    {
+      "start": 2037,
+      "end": 2039,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2040,
+      "end": 2045,
+      "status": "translated",
+      "label": "ensure_same_u256",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.ensureSameU256"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2046,
+      "end": 2048,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2049,
+      "end": 2070,
+      "status": "translated",
+      "label": "verify_proof: role and backend gate",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.verifyProof",
+        "Zkp.Implementation.ChannelStateUpdate.Role",
+        "Zkp.Implementation.ChannelStateUpdate.Backend",
+        "Zkp.Implementation.ChannelStateUpdate.Envelope"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.transport_exact_call"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2071,
+      "end": 2071,
+      "status": "dependency-boundary",
+      "label": "transport verifier callback",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.TransportVerifier"
+      ],
+      "theorems": [],
+      "note": "Opaque callback; transport proof soundness is a premise."
+    },
+    {
+      "start": 2072,
+      "end": 2075,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2076,
+      "end": 2079,
+      "status": "dependency-boundary",
+      "label": "hash_member: keccak over 8 pubkey-hash limbs",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.hashMember",
+        "Zkp.Implementation.ChannelStateUpdate.Environment"
+      ],
+      "theorems": [],
+      "note": "Opaque Environment.hashWords callback over key.words."
+    },
+    {
+      "start": 2080,
+      "end": 2080,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2081,
+      "end": 2083,
+      "status": "translated",
+      "label": "split_u64 into (hi, lo) u32 limbs",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.splitU64",
+        "Zkp.Implementation.ChannelStateUpdate.wordBase"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2084,
+      "end": 2084,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2085,
+      "end": 2088,
+      "status": "translated",
+      "label": "u64_to_u256 via two low u32 limbs",
+      "declarations": [
+        "Zkp.Implementation.ChannelStateUpdate.u64ToU256",
+        "Zkp.Implementation.ChannelStateUpdate.Amount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.u64_embedding_exact"
+      ],
+      "note": "Handwritten local semantics of these lines in the Lean module; no Rust-compiler/source refinement is proved."
+    },
+    {
+      "start": 2089,
+      "end": 2089,
+      "status": "non-executable",
+      "label": "comments / attributes / structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments, attributes, or structural braces."
+    },
+    {
+      "start": 2090,
+      "end": 3676,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: fixtures, real-ZKP happy paths and rejection tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test-only code; fixtures and assertions are not part of the modeled production semantics."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "falcon-a11-signature-validity",
+      "obligation": "validate_all_member_signatures / validate_member_signature_slots and the non-empty sender_hash_sig check are structural (slot/key/blob shape) only; Falcon N-of-N signature validity over the next-state digest, the BabyBear sender hash-sig proof and the A11 two-key membership binding are discharged by the wallet acceptance path and the close circuit, never by this file or the model.",
+      "discharged": false
+    },
+    {
+      "name": "durable-replay-ledger-and-root-freshness",
+      "obligation": "ensure_different_root only proves the nullifier root changed (unequal_root_is_only_inequality); neither the source nor the model verifies a valid nullifier-tree insertion, uniqueness of the inserted nullifier, or a durable signer/replay ledger across transitions. Root inequality must not be read as freshness.",
+      "discharged": false
+    },
+    {
+      "name": "l1-backing-and-finality",
+      "obligation": "L1 deposit backing (verify_channel_backing / receive_deposit proof), base-layer transfer finality, source/destination channel agreement and the burn escrow are external premises; the deposit and fund-import verifiers only check local arithmetic and digests.",
+      "discharged": false
+    },
+    {
+      "name": "accumulator-frontier",
+      "obligation": "require_accumulator_push is defined here but never invoked by any witness verify; the settled-tx accumulator insertion for sends/imports is checked by the wallet co-signer with the persisted IncrementalMerkleTree. The model treats push/get_root as opaque callbacks and does not supply the frontier.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-and-digest-helpers",
+      "obligation": "solidity_keccak256, ChannelState::signing_digest, BalanceState::h1, ChannelTx::signing_digest, InterChannelTx::{signing_digest,tx_leaf_hash,compute_tx_hash}, burn_descriptor, l1_deposit_import_digest, RegevCiphertext::digest, regev_pk_root and settled_tx_chain_push are opaque Environment callbacks; collision resistance / injectivity of every digest is assumed, not proved.",
+      "discharged": false
+    },
+    {
+      "name": "regev-stark-and-transport-proof-soundness",
+      "obligation": "RegevProofVerifier (E-1 ChannelTx, E-2 ChannelUpdate, BalanceRefresh) and ChannelProofVerifier (Plonky2 intmax transport) are opaque callbacks; only the envelope role/backend gate and the exact rebuilt statement/PI are modeled. Soundness of the STARK/SNARK and correct wiring of the statement inside the prover are premises.",
+      "discharged": false
+    },
+    {
+      "name": "balance-record-validation-and-canonical-builders",
+      "obligation": "BalanceState::validate (canonical ciphertexts, D3 budgets, active-registry injectivity), RegevPk::validate, add_ciphertexts, decrypt_amount, BalanceState::verify_token_register_transition and token_register_next_state are opaque; resolve_token_slot uniqueness relies on validate() having run, which the model does not re-derive.",
+      "discharged": false
+    },
+    {
+      "name": "native-integer-profile-and-host",
+      "obligation": "u64 `+ 1` on epoch/state_version wraps in release and panics under overflow-checks (modeled by OverflowMode, neither profile is pinned); U256 `+` panics on final carry; direct array indexing (enc_balances[i][t], pending_adds[i][t], member_pk_gs[depositor_slot]) panics out of range; usize is taken as 64-bit. Panic vs Err is distinguished in the model but the host panic strategy, allocation failure and serde are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "gate-compiler-and-source-refinement",
+      "obligation": "The Lean definitions are a handwritten translation of the Rust control flow; no rustc/MIR refinement, no plonky2/plonky3 gate lowering, and no equivalence between these native checks and any in-circuit statement is proved. Exact error strings and check ordering inside opaque callees are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "cross-channel-authorization",
+      "obligation": "All-cluster consistency inside one channel does not authorize anything about a different channel: destination_recipient_pk, source_sender_pk and the off-chain sender before/after ciphertexts are taken as claimed; their authenticity is the other channel's regev_pk_root / STARK-transcript concern.",
+      "discharged": false
+    }
+  ]
+}

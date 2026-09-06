@@ -47,6 +47,14 @@ CURRENT = {
         "Zkp.Implementation.PostCloseClaimCircuit",
         "Zkp.Implementation.PostCloseClaimPublicInputs",
         "Zkp.Implementation.ClaimSettlementBridge",
+        "Zkp.Implementation.PrivateState",
+        "Zkp.Implementation.UpdatePrivateState",
+        "Zkp.Implementation.UpdatePublicState",
+        "Zkp.Implementation.BalancePublicInputs",
+        "Zkp.Implementation.SwitchBoard",
+        "Zkp.Implementation.BalanceCircuit",
+        "Zkp.Implementation.ChannelStateUpdate",
+        "Zkp.Implementation.DecryptionGadget",
     ),
 }
 ARCH_ROOTS = frozenset({

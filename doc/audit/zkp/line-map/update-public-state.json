@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/update_public_state.rs",
+  "source_sha256": "c19a636d40e777d1fc6fb8983466926aa29fb26d5a4028a0b7a9703c468d2161",
+  "source_lines": 124,
+  "module": "Zkp.Implementation.UpdatePublicState",
+  "model": "doc/audit/zkp/Zkp/Implementation/UpdatePublicState.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "imports and public-state/hash/path interfaces",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.State",
+        "Zkp.Implementation.UpdatePublicState.Proof",
+        "Zkp.Implementation.UpdatePublicState.RootCall"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 18,
+      "end": 19,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 20,
+      "end": 23,
+      "status": "translated",
+      "label": "structured local failure variants",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 24,
+      "end": 25,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 26,
+      "end": 30,
+      "status": "translated",
+      "label": "native new/old state and proof fields",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Update"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 31,
+      "end": 32,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 33,
+      "end": 37,
+      "status": "translated",
+      "label": "target new/old state and proof fields",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Update",
+        "Zkp.Implementation.UpdatePublicState.Witness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 38,
+      "end": 38,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 39,
+      "end": 54,
+      "status": "translated",
+      "label": "native constructor identity branch, fixed dummy and missing-proof error",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.nativeNew",
+        "Zkp.Implementation.UpdatePublicState.dummyProof"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.native_equal_constructor_uses_dummy",
+        "Zkp.Implementation.UpdatePublicState.dummy_has_63_siblings",
+        "Zkp.Implementation.UpdatePublicState.changed_state_needs_proof"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 55,
+      "end": 55,
+      "status": "dependency-boundary",
+      "label": "old-state leaf/path root at old block index",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.RootCall",
+        "Zkp.Implementation.UpdatePublicState.expectedOldRoot"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 56,
+      "end": 60,
+      "status": "dependency-boundary",
+      "label": "root mismatch comparison and imported hash display formatter",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Error",
+        "Zkp.Implementation.UpdatePublicState.nativeNew"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 61,
+      "end": 67,
+      "status": "translated",
+      "label": "native changed-state result",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.nativeNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.native_changed_success",
+        "Zkp.Implementation.UpdatePublicState.native_new_success_preserves_requested_states",
+        "Zkp.Implementation.UpdatePublicState.native_new_success_is_locally_verified"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 68,
+      "end": 68,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 69,
+      "end": 72,
+      "status": "translated",
+      "label": "native verify identity branch",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.nativeVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.native_equal_verify_needs_no_root"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 73,
+      "end": 80,
+      "status": "dependency-boundary",
+      "label": "Merkle root call and mismatch display formatter",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.RootCall",
+        "Zkp.Implementation.UpdatePublicState.nativeVerify"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 81,
+      "end": 84,
+      "status": "translated",
+      "label": "native verify result",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.nativeVerify",
+        "Zkp.Implementation.UpdatePublicState.ValidUpdate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.native_verify_iff_local_history",
+        "Zkp.Implementation.UpdatePublicState.native_verify_changed_binds_old_state_and_index"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 85,
+      "end": 85,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 86,
+      "end": 95,
+      "status": "translated",
+      "label": "unchecked public-state allocations and fixed-height path",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Allocation",
+        "Zkp.Implementation.UpdatePublicState.allocation"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.constructor_uses_unchecked_state_allocations"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 96,
+      "end": 96,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 97,
+      "end": 98,
+      "status": "translated",
+      "label": "all-field equality and its negation",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.statesEqual",
+        "Zkp.Implementation.UpdatePublicState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.equality_flag_iff_all_fields",
+        "Zkp.Implementation.UpdatePublicState.equality_flag_false_iff_different",
+        "Zkp.Implementation.UpdatePublicState.target_changed_enables_verification",
+        "Zkp.Implementation.UpdatePublicState.target_equal_disables_only_final_comparison"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 99,
+      "end": 99,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 100,
+      "end": 106,
+      "status": "dependency-boundary",
+      "label": "unconditional path evaluation with conditional final equality",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.target_always_evaluates_old_merkle_path",
+        "Zkp.Implementation.UpdatePublicState.target_changed_binds_old_opening"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 107,
+      "end": 107,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 108,
+      "end": 113,
+      "status": "translated",
+      "label": "target result wiring",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Update",
+        "Zkp.Implementation.UpdatePublicState.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.target_implies_native_local_verification",
+        "Zkp.Implementation.UpdatePublicState.target_witness_of_native_local_verification"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 114,
+      "end": 114,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 115,
+      "end": 123,
+      "status": "translated",
+      "label": "new then old then proof witness request order",
+      "declarations": [
+        "Zkp.Implementation.UpdatePublicState.Write",
+        "Zkp.Implementation.UpdatePublicState.witnessWrites"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.witness_write_order"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 124,
+      "end": 124,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "public-state-field-and-equality",
+      "obligation": "Uses shared current 15-word PublicState; derive actual field equality/AND/NOT gates and native raw-u64/target representation agreement.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-path-and-history-binding",
+      "obligation": "The 63-step Merkle hash/path gadget executes even for equal states; its index-range and field/hash lowering remain unproved. A correct local opening does not establish canonical L1 history, finalized roots, strict block increase or timestamp monotonicity.",
+      "discharged": false
+    },
+    {
+      "name": "native-witness-and-compiler-refinement",
+      "obligation": "Dependency panics, fixed sibling witness-length assertions, formatting/serde and emitted circuit/witness execution must be related to the model; the normal-return correspondence is not whole-program liveness or compiler equivalence.",
+      "discharged": false
+    }
+  ]
+}

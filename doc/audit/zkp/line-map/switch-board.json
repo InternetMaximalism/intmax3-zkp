@@ -1,0 +1,1170 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/switch_board.rs",
+  "source_sha256": "4567178c5a46cf89800408049bff18d53efbb0fb7720a51a935d64ad834b8b7f",
+  "source_lines": 837,
+  "module": "Zkp.Implementation.SwitchBoard",
+  "model": "doc/audit/zkp/Zkp/Implementation/SwitchBoard.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 43,
+      "status": "dependency-boundary",
+      "label": "imports: plonky2 builder/witness/verifier API, balance_pis parser, common targets, dummy/recursive-verify/select utilities, serializers",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment",
+        "Zkp.Implementation.SwitchBoard.BuildEnvironment",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 44,
+      "end": 45,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 46,
+      "end": 64,
+      "status": "translated",
+      "label": "BalanceSwitchBoardError categories (interleaved #[error] attributes)",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.Error",
+        "Zkp.Implementation.SwitchBoard.Result",
+        "Zkp.Implementation.SwitchBoard.liftPublic"
+      ],
+      "theorems": [],
+      "note": "Error labels modeled as constructors; the #[from] BalancePublicInputsError conversion is liftPublic. Formatted message strings are not modeled."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 66,
+      "end": 77,
+      "status": "translated",
+      "label": "BalanceSwichBoard native witness: optional genesis value and three optional branch proofs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeWitness",
+        "Zkp.Implementation.SwitchBoard.NativeWitness.flags",
+        "Zkp.Implementation.SwitchBoard.NativeWitness.proof",
+        "Zkp.Implementation.SwitchBoard.Proof"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 78,
+      "end": 83,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 84,
+      "end": 90,
+      "status": "translated",
+      "label": "to_public_inputs signature: independent balance VD plus three fixed branch VDs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment.verifyBranch"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 91,
+      "end": 100,
+      "status": "translated",
+      "label": "native cardinality count and InvalidInput rejection",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeWitness.flags",
+        "Zkp.Implementation.SwitchBoard.Flags.total",
+        "Zkp.Implementation.SwitchBoard.bit",
+        "Zkp.Implementation.SwitchBoard.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.invalid_native_cardinality_stops_admission"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 101,
+      "end": 101,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 102,
+      "end": 109,
+      "status": "translated",
+      "label": "genesis branch: BalancePublicInputs::new(channel, salt) with the supplied balance verifier_only",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.genesis_native_admission"
+      ],
+      "note": "The genesis public inputs themselves are BalancePublicInputs.initialInputs from the imported Lean module; this module only models that the genesis candidate carries the independently supplied balance VD."
+    },
+    {
+      "start": 110,
+      "end": 110,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 111,
+      "end": 112,
+      "status": "translated",
+      "label": "receive-transfer branch selection order",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.Flags.choose"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.transfer_native_admission_calls_only_transfer",
+        "Zkp.Implementation.SwitchBoard.only_mode_is_chosen"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 113,
+      "end": 118,
+      "status": "dependency-boundary",
+      "label": "receive_transfer_vd.verify call and InvalidBalanceProof mapping",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment.verifyBranch",
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.admitted_proof_call_succeeded"
+      ],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 119,
+      "end": 123,
+      "status": "translated",
+      "label": "decode transfer public inputs via from_u64_slice with balance_vd.common.config, then return",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode",
+        "Zkp.Implementation.SwitchBoard.liftPublic"
+      ],
+      "theorems": [],
+      "note": "Decoding delegates to BalancePublicInputs.fullFromNative (imported Lean module); to_u64_vec is the opaque convertFields callback. Cap count is one shared capCount in the model, whereas the source reads it from the prove-time balance_vd argument."
+    },
+    {
+      "start": 124,
+      "end": 125,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 126,
+      "end": 127,
+      "status": "translated",
+      "label": "receive-deposit branch selection order",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.Flags.choose"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.only_mode_is_chosen"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 128,
+      "end": 133,
+      "status": "dependency-boundary",
+      "label": "receive_deposit_vd.verify call and InvalidBalanceProof mapping",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment.verifyBranch",
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.admitted_proof_call_succeeded"
+      ],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 134,
+      "end": 138,
+      "status": "translated",
+      "label": "decode deposit public inputs, then return",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode",
+        "Zkp.Implementation.SwitchBoard.liftPublic"
+      ],
+      "theorems": [],
+      "note": "Decoding delegates to BalancePublicInputs.fullFromNative (imported Lean module); to_u64_vec is the opaque convertFields callback."
+    },
+    {
+      "start": 139,
+      "end": 140,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 141,
+      "end": 142,
+      "status": "translated",
+      "label": "send-tx branch selection order",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.Flags.choose"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.only_mode_is_chosen"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 143,
+      "end": 148,
+      "status": "dependency-boundary",
+      "label": "send_tx_vd.verify call and InvalidBalanceProof mapping",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment.verifyBranch",
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.admitted_proof_call_succeeded"
+      ],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 149,
+      "end": 153,
+      "status": "translated",
+      "label": "decode send public inputs, then return",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.verifyAndDecode",
+        "Zkp.Implementation.SwitchBoard.liftPublic"
+      ],
+      "theorems": [],
+      "note": "Decoding delegates to BalancePublicInputs.fullFromNative (imported Lean module); to_u64_vec is the opaque convertFields callback."
+    },
+    {
+      "start": 154,
+      "end": 155,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 156,
+      "end": 156,
+      "status": "translated",
+      "label": "unreachable!() after the exactly-one guard",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.toPublicInputs",
+        "Zkp.Implementation.SwitchBoard.Error"
+      ],
+      "theorems": [],
+      "note": "Modeled as the explicit unreachablePanic error value rather than a Rust panic; the guard on lines 91-100 makes it dead."
+    },
+    {
+      "start": 157,
+      "end": 160,
+      "status": "non-executable",
+      "label": "closing braces, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 161,
+      "end": 171,
+      "status": "translated",
+      "label": "BalanceSwichBoardTarget fields: one-hot flags, genesis targets, three proof targets, virtual balance VD, new_pis",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.TargetWitness",
+        "Zkp.Implementation.SwitchBoard.Flags",
+        "Zkp.Implementation.SwitchBoard.Mode",
+        "Zkp.Implementation.SwitchBoard.Mode.index"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 172,
+      "end": 173,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 174,
+      "end": 185,
+      "status": "translated",
+      "label": "target constructor signature: balance config and three fixed branch verifier data",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.targetBuildPlan",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 186,
+      "end": 188,
+      "status": "dependency-boundary",
+      "label": "add_virtual_verifier_data for the carried balance VD",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.targetBuildPlan",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "Builder allocation is recorded as a build step; the virtual VD target is otherwise unconstrained by this file (only the genesis candidate reads it)."
+    },
+    {
+      "start": 189,
+      "end": 200,
+      "status": "translated",
+      "label": "four safe Boolean flags, field sum, assert_one (one-hot)",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.Flags",
+        "Zkp.Implementation.SwitchBoard.Flags.total",
+        "Zkp.Implementation.SwitchBoard.bit",
+        "Zkp.Implementation.SwitchBoard.Flags.get",
+        "Zkp.Implementation.SwitchBoard.Flags.choose",
+        "Zkp.Implementation.SwitchBoard.ModularSelectorGates",
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.safe_flag_sum_is_small",
+        "Zkp.Implementation.SwitchBoard.field_sum_one_yields_integer_one",
+        "Zkp.Implementation.SwitchBoard.one_hot_has_exact_selected_mode",
+        "Zkp.Implementation.SwitchBoard.only_mode_is_one_hot"
+      ],
+      "note": "Modeled as the modular flag equation (sum = 1 mod p with p > 4) lifted to an integer one-hot; the safe Boolean gadget and the add/assert_one gates are lowering premises."
+    },
+    {
+      "start": 201,
+      "end": 201,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 202,
+      "end": 204,
+      "status": "dependency-boundary",
+      "label": "checked ChannelIdTarget and virtual SaltTarget allocation",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "ChannelIdTarget::new(builder, true) is modeled only as the premise initialChannel < wordBase; the gadget itself is imported."
+    },
+    {
+      "start": 205,
+      "end": 226,
+      "status": "dependency-boundary",
+      "label": "genesis PrivateState constants (empty tree roots, zero prev commitment, nonce) and Poseidon commitment",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.targetBuildPlan",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment"
+      ],
+      "theorems": [],
+      "note": "Empty-tree roots and the Poseidon commitment are dependency values of BalancePublicInputs.GenesisEnvironment (imported module); the model exposes the 21-word preimage but does not compute the hash."
+    },
+    {
+      "start": 227,
+      "end": 239,
+      "status": "translated",
+      "label": "genesis public-state constants, zero settled chain, genesis candidate bound to the virtual balance VD",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.targetBuildPlan",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.genesis_output_is_exact"
+      ],
+      "note": "genesisCandidate premise equates candidate 0 with initialInputs (imported module) paired with the virtual balance VD; constant gadgets are lowering premises."
+    },
+    {
+      "start": 240,
+      "end": 240,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 241,
+      "end": 243,
+      "status": "dependency-boundary",
+      "label": "receive-transfer proof target with conditional verification (real VD when flag set, dummy VD otherwise)",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.GateEnvironment",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyReal",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyDummy",
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.selected_noninitial_proof_uses_real_key",
+        "Zkp.Implementation.SwitchBoard.inactive_proof_uses_dummy_key"
+      ],
+      "note": "add_proof_target_and_conditionally_verify lives in utils::recursively_verifiable; the model states which fixed VD each call is made under, not that the verifier gadget is sound."
+    },
+    {
+      "start": 244,
+      "end": 247,
+      "status": "translated",
+      "label": "parse transfer candidate from the proof public-input targets",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "parsedCandidates premise delegates to BalancePublicInputs.fullFromTarget (imported module); shape failure denotes panic, no range checks."
+    },
+    {
+      "start": 248,
+      "end": 251,
+      "status": "dependency-boundary",
+      "label": "receive-deposit proof target with conditional verification",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.GateEnvironment",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyReal",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyDummy",
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.selected_noninitial_proof_uses_real_key",
+        "Zkp.Implementation.SwitchBoard.inactive_proof_uses_dummy_key"
+      ],
+      "note": "add_proof_target_and_conditionally_verify lives in utils::recursively_verifiable; the model states which fixed VD each call is made under, not that the verifier gadget is sound."
+    },
+    {
+      "start": 252,
+      "end": 255,
+      "status": "translated",
+      "label": "parse deposit candidate from the proof public-input targets",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "parsedCandidates premise delegates to BalancePublicInputs.fullFromTarget (imported module); shape failure denotes panic, no range checks."
+    },
+    {
+      "start": 256,
+      "end": 259,
+      "status": "dependency-boundary",
+      "label": "send-tx proof target with conditional verification",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.GateEnvironment",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyReal",
+        "Zkp.Implementation.SwitchBoard.GateEnvironment.verifyDummy",
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.selected_noninitial_proof_uses_real_key",
+        "Zkp.Implementation.SwitchBoard.inactive_proof_uses_dummy_key"
+      ],
+      "note": "add_proof_target_and_conditionally_verify lives in utils::recursively_verifiable; the model states which fixed VD each call is made under, not that the verifier gadget is sound."
+    },
+    {
+      "start": 260,
+      "end": 261,
+      "status": "translated",
+      "label": "parse send candidate from the proof public-input targets",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "parsedCandidates premise delegates to BalancePublicInputs.fullFromTarget (imported module); shape failure denotes panic, no range checks."
+    },
+    {
+      "start": 262,
+      "end": 263,
+      "status": "non-executable",
+      "label": "spacing and selection comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 264,
+      "end": 269,
+      "status": "translated",
+      "label": "four candidate word vectors (pis words plus carried VD words) at the configured cap count",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.TargetWitness",
+        "Zkp.Implementation.SwitchBoard.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "candidateShape premise fixes every candidate's cap length to capCount so all four vectors have equal length; to_vec encoding is the imported FullInputs.words."
+    },
+    {
+      "start": 270,
+      "end": 270,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 271,
+      "end": 276,
+      "status": "translated",
+      "label": "select_vec four-product sum over every word, checked new_pis allocation, connect each selected word",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.weightedCell",
+        "Zkp.Implementation.SwitchBoard.ModularSelectorGates",
+        "Zkp.Implementation.SwitchBoard.CircuitGates",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.targetBuildPlan",
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.weighted_sum_is_exact_selected_cell",
+        "Zkp.Implementation.SwitchBoard.modular_gates_determine_unique_whole_selection",
+        "Zkp.Implementation.SwitchBoard.selected_output_is_whole_candidate",
+        "Zkp.Implementation.SwitchBoard.selected_output_preserves_every_identity",
+        "Zkp.Implementation.SwitchBoard.selected_output_key_matches_branch_predecessor",
+        "Zkp.Implementation.SwitchBoard.normal_transfer_mode_selects_whole_word"
+      ],
+      "note": "The four-product sum semantics of BuilderLogic::select_vec (utils::logic) is asserted by weightedCell, not derived from that file; BalanceFullPublicInputsTarget::new checked allocation is the checkedOutput premise. Injectivity of the output back to a whole candidate uses BalancePublicInputs.full_encoding_injective."
+    },
+    {
+      "start": 277,
+      "end": 277,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 278,
+      "end": 286,
+      "status": "translated",
+      "label": "returned target bundle",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.TargetWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 287,
+      "end": 288,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 289,
+      "end": 302,
+      "status": "translated",
+      "label": "set_witness signature: value, independent balance VD, new full pis, dummy proof map",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.setWitness",
+        "Zkp.Implementation.SwitchBoard.DummyMap",
+        "Zkp.Implementation.SwitchBoard.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 303,
+      "end": 314,
+      "status": "translated",
+      "label": "native flag array, exactly-one count and InvalidInput rejection before any write",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.NativeWitness.flags",
+        "Zkp.Implementation.SwitchBoard.Flags.total",
+        "Zkp.Implementation.SwitchBoard.Flags.only",
+        "Zkp.Implementation.SwitchBoard.setWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.invalid_native_cardinality_writes_nothing",
+        "Zkp.Implementation.SwitchBoard.only_mode_is_one_hot"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 315,
+      "end": 315,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 316,
+      "end": 318,
+      "status": "translated",
+      "label": "write the four one-hot Boolean targets",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.fillRequests",
+        "Zkp.Implementation.SwitchBoard.Assignment",
+        "Zkp.Implementation.SwitchBoard.Request",
+        "Zkp.Implementation.SwitchBoard.Flags.get"
+      ],
+      "theorems": [],
+      "note": "set_bool_target is an opaque witness write; only the ordered assignment list is modeled."
+    },
+    {
+      "start": 319,
+      "end": 319,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 320,
+      "end": 328,
+      "status": "translated",
+      "label": "genesis channel/salt write, or dummy channel and default salt when not genesis",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.fillRequests",
+        "Zkp.Implementation.SwitchBoard.Assignment"
+      ],
+      "theorems": [],
+      "note": "ChannelId::dummy() and Salt::default() are modeled as channel 0 and Root.zero; the setter gadgets are opaque writes."
+    },
+    {
+      "start": 329,
+      "end": 329,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 330,
+      "end": 342,
+      "status": "translated",
+      "label": "get_dummy_proof: HashMap lookup or DummyProofNotProvided(index)",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.resolveRequest",
+        "Zkp.Implementation.SwitchBoard.DummyMap",
+        "Zkp.Implementation.SwitchBoard.Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.missing_dummy_stops_remaining_assignments"
+      ],
+      "note": "HashMap::get is modeled as the total map Nat -> Option Proof."
+    },
+    {
+      "start": 343,
+      "end": 343,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 344,
+      "end": 365,
+      "status": "translated",
+      "label": "write real branch proof when present, otherwise the dummy proof at index 1/2/3; missing dummy aborts",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.fillRequests",
+        "Zkp.Implementation.SwitchBoard.executeRequests",
+        "Zkp.Implementation.SwitchBoard.resolveRequest",
+        "Zkp.Implementation.SwitchBoard.Request",
+        "Zkp.Implementation.SwitchBoard.Assignment",
+        "Zkp.Implementation.SwitchBoard.NativeWitness.proof",
+        "Zkp.Implementation.SwitchBoard.FillResult"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.missing_dummy_stops_remaining_assignments",
+        "Zkp.Implementation.SwitchBoard.earlier_assignment_survives_later_failure"
+      ],
+      "note": "set_proof_with_pis_target is an opaque witness write; the model records assignment order and the early-return on a missing dummy, with earlier writes already performed."
+    },
+    {
+      "start": 366,
+      "end": 366,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 367,
+      "end": 370,
+      "status": "translated",
+      "label": "write the balance verifier_only data and new full public inputs, return Ok",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.fillRequests",
+        "Zkp.Implementation.SwitchBoard.executeRequests",
+        "Zkp.Implementation.SwitchBoard.FillResult",
+        "Zkp.Implementation.SwitchBoard.Assignment"
+      ],
+      "theorems": [],
+      "note": "set_verifier_data_target and new_pis.set_witness are opaque writes recorded as the final two assignments."
+    },
+    {
+      "start": 371,
+      "end": 374,
+      "status": "non-executable",
+      "label": "closing braces, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 375,
+      "end": 388,
+      "status": "translated",
+      "label": "BalanceSwichBoardCircuit: data, three fixed branch VDs, dummy proof map, target, public_inputs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.Circuit"
+      ],
+      "theorems": [],
+      "note": "CircuitData, VerifierCircuitData and target values are opaque Nat handles; HashMap<usize, proof> is a list of index/proof pairs."
+    },
+    {
+      "start": 389,
+      "end": 395,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 396,
+      "end": 401,
+      "status": "translated",
+      "label": "circuit constructor signature",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.new",
+        "Zkp.Implementation.SwitchBoard.BuildEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 402,
+      "end": 412,
+      "status": "dependency-boundary",
+      "label": "CircuitBuilder::new, target construction, register_public_inputs(new_pis), build",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.BuildEnvironment",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.circuitBuildPlan"
+      ],
+      "theorems": [],
+      "note": "At this level the model abstracts target+data construction as buildTargetAndData; the target-level steps are separately listed in targetBuildPlan. The registered public inputs are exactly new_pis words in source; the model only records the step."
+    },
+    {
+      "start": 413,
+      "end": 414,
+      "status": "non-executable",
+      "label": "spacing and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 415,
+      "end": 429,
+      "status": "translated",
+      "label": "dummy proof generation for indices 1..3 (transfer, deposit, send) from each branch common data",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.new",
+        "Zkp.Implementation.SwitchBoard.BuildEnvironment",
+        "Zkp.Implementation.SwitchBoard.BuildOp",
+        "Zkp.Implementation.SwitchBoard.circuitBuildPlan"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.constructor_builds_all_three_dummy_slots"
+      ],
+      "note": "DummyProof::new is the opaque makeDummy callback; the index enumeration with None at slot 0 is modeled exactly."
+    },
+    {
+      "start": 430,
+      "end": 430,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 431,
+      "end": 439,
+      "status": "translated",
+      "label": "returned circuit retains the three constructor VDs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.new",
+        "Zkp.Implementation.SwitchBoard.Circuit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.constructor_retains_fixed_verifiers"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 440,
+      "end": 441,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 442,
+      "end": 452,
+      "status": "translated",
+      "label": "prove: native admission (to_public_inputs) runs first with the stored branch VDs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.prove",
+        "Zkp.Implementation.SwitchBoard.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.native_prove_runs_admission_first"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 453,
+      "end": 453,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 454,
+      "end": 462,
+      "status": "translated",
+      "label": "fresh PartialWitness, target set_witness, then public_inputs set_witness again",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.prove",
+        "Zkp.Implementation.SwitchBoard.setWitness"
+      ],
+      "theorems": [],
+      "note": "PartialWitness::new and the duplicate public_inputs.set_witness are modeled as the assignment list plus a trailing newPublicInputs write."
+    },
+    {
+      "start": 463,
+      "end": 463,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 464,
+      "end": 466,
+      "status": "dependency-boundary",
+      "label": "CircuitData::prove and FailedToProve mapping",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.prove",
+        "Zkp.Implementation.SwitchBoard.Error"
+      ],
+      "theorems": [],
+      "note": "Proof generation is the opaque proveData callback; success of a filled witness is not asserted."
+    },
+    {
+      "start": 467,
+      "end": 468,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 469,
+      "end": 471,
+      "status": "translated",
+      "label": "to_bytes entry: gate and generator serializers",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.serialize",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Serializer objects are opaque; only the ordered effect sequence is modeled."
+    },
+    {
+      "start": 472,
+      "end": 501,
+      "status": "dependency-boundary",
+      "label": "circuit data and three verifier data to_bytes calls with labeled serialization errors",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.serialize",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Byte content is opaque; call order (data, transfer, deposit, send) and short-circuit on the first failure are modeled. Source failure labels other than the dummy-index label are not literal in the model."
+    },
+    {
+      "start": 502,
+      "end": 515,
+      "status": "translated",
+      "label": "dummy proof byte map and payload assembly",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.serialize",
+        "Zkp.Implementation.SwitchBoard.Payload",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "proof.to_bytes is the opaque proofBytes callback; HashMap iteration order is an unspecified enumeration in the model list."
+    },
+    {
+      "start": 516,
+      "end": 518,
+      "status": "dependency-boundary",
+      "label": "bincode encode of the payload",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.serialize",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 519,
+      "end": 520,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 521,
+      "end": 521,
+      "status": "translated",
+      "label": "from_bytes signature",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserialize"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 522,
+      "end": 531,
+      "status": "dependency-boundary",
+      "label": "bincode decode of the payload and serializer objects",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserialize",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 532,
+      "end": 567,
+      "status": "dependency-boundary",
+      "label": "CircuitData::from_bytes and three VerifierCircuitData::from_bytes with labeled errors",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserialize",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Decoded data/VD values are opaque handles; order and short-circuit are modeled."
+    },
+    {
+      "start": 568,
+      "end": 568,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 569,
+      "end": 581,
+      "status": "translated",
+      "label": "dummy proof index dispatch 1/2/3 to the matching branch common data; other indices rejected",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserializeDummies",
+        "Zkp.Implementation.SwitchBoard.Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.unsupported_dummy_index_rejected"
+      ],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 582,
+      "end": 588,
+      "status": "dependency-boundary",
+      "label": "ProofWithPublicInputs::from_bytes against the selected common data",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserializeDummies",
+        "Zkp.Implementation.SwitchBoard.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Imported gadget/verifier/hash/serializer/builder operation; the model keeps only the call order, the interface premise or the returned value as an opaque callback. Nothing about its internal soundness is proved here."
+    },
+    {
+      "start": 589,
+      "end": 591,
+      "status": "translated",
+      "label": "insert decoded dummy proof and continue the loop",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserializeDummies"
+      ],
+      "theorems": [],
+      "note": "Modeled as list cons; a duplicate index in the payload would overwrite in the HashMap but is kept twice in the model list."
+    },
+    {
+      "start": 592,
+      "end": 600,
+      "status": "translated",
+      "label": "rebuilt circuit from decoded parts and the deserialized target/public_inputs",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.deserialize",
+        "Zkp.Implementation.SwitchBoard.Circuit"
+      ],
+      "theorems": [],
+      "note": "No consistency validation between payload.target/public_inputs and the decoded circuit data exists in source and none is invented."
+    },
+    {
+      "start": 601,
+      "end": 604,
+      "status": "non-executable",
+      "label": "closing braces, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 605,
+      "end": 613,
+      "status": "translated",
+      "label": "BalanceSwichBoardCircuitBytes payload layout",
+      "declarations": [
+        "Zkp.Implementation.SwitchBoard.Payload"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of these lines; no Rust/plonky2 compiler or recursive-verifier refinement certificate."
+    },
+    {
+      "start": 614,
+      "end": 614,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 615,
+      "end": 837,
+      "status": "test-only",
+      "label": "cfg(test) module: balance-shaped stub circuit and four-scenario switch board prove/verify test",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) body only; no production constraint and no theorem coverage inferred. The test uses one stub balance circuit for all three branch VDs."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proof-gadget-and-dummy-verification",
+      "obligation": "add_proof_target_and_conditionally_verify (utils::recursively_verifiable / dummy::conditionally_verify_proof) must actually verify the active proof under the fixed real branch VD and the inactive proofs under the fixed dummy VD; recursive verifier soundness and dummy-proof existence for every branch common data are not proved here.",
+      "discharged": false
+    },
+    {
+      "name": "field-boolean-and-select-lowering",
+      "obligation": "Derive ModularSelectorGates from the actual safe Boolean gadget, add/assert_one gates, BuilderLogic::select_vec (utils::logic) four-product sum and connect gates; the model asserts that arithmetic on integer representatives and proves the bridge only from those premises.",
+      "discharged": false
+    },
+    {
+      "name": "balance-public-input-parsing-and-genesis-values",
+      "obligation": "from_pis/from_u64_slice/to_vec/new(checked) are modeled in Zkp.Implementation.BalancePublicInputs; their refinement of balance_pis.rs, the empty-tree roots, PrivateState::new and the Poseidon commitment (GenesisEnvironment.hashInputs) are separate obligations. Inactive-branch candidates are parsed without range checks.",
+      "discharged": false
+    },
+    {
+      "name": "carried-verifier-data-and-cyclic-key",
+      "obligation": "Only the genesis candidate uses the virtual balance VD; non-genesis candidates carry the VD found in their own proof public inputs and nothing in this file connects either to the independently supplied balance_vd. The outer BalanceCircuit cyclic-key check and the virtual VD target's freedom for genesis proofs are external obligations.",
+      "discharged": false
+    },
+    {
+      "name": "native-witness-proving-and-cap-count",
+      "obligation": "PartialWitness writes, HashMap lookups, CircuitData::prove and native VerifierCircuitData::verify are opaque with preserved order and error categories. Native decoding uses the prove-time balance_vd.common.config cap height while the circuit uses the constructor balance_config; the model uses one shared capCount.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-and-deserialized-consistency",
+      "obligation": "bincode/serde/AllGateSerializer/proof byte codecs are opaque callbacks; only call order, short-circuit and the dummy-index dispatch are modeled. from_bytes performs no consistency check between payload target/public_inputs and the decoded circuit data, and HashMap duplicate-index overwrite is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "tests-and-fund-safety-scope",
+      "obligation": "The cfg(test) module is read but not mapped to production constraints. Branch acceptance implies nothing about conservation of money, spend validity (SendTx), L1 finality or channel authorization; KeyTrace is a provenance abstraction, not a source translation.",
+      "discharged": false
+    }
+  ]
+}

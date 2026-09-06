@@ -534,14 +534,14 @@
       "sha256": "28098c1886a1389beb675b1104351490e706161a53cc3636b6d47408746d227e",
       "lines": 240,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-circuit.json"
     },
     {
       "path": "src/circuits/balance/balance_pis.rs",
       "sha256": "ae567ab87d25354673cef70733f4435cfee6352d88f429347598e0b28f31174f",
       "lines": 356,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-public-inputs.json"
     },
     {
       "path": "src/circuits/balance/balance_processor.rs",
@@ -597,14 +597,14 @@
       "sha256": "84a5fa8d4d4a9e09f81c9c606d636cbbe10af0cc12f5f860348c4ea73a6a9c36",
       "lines": 282,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/update-private-state.json"
     },
     {
       "path": "src/circuits/balance/common/update_public_state.rs",
       "sha256": "c19a636d40e777d1fc6fb8983466926aa29fb26d5a4028a0b7a9703c468d2161",
       "lines": 124,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/update-public-state.json"
     },
     {
       "path": "src/circuits/balance/mod.rs",
@@ -646,7 +646,7 @@
       "sha256": "4567178c5a46cf89800408049bff18d53efbb0fb7720a51a935d64ad834b8b7f",
       "lines": 837,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/switch-board.json"
     },
     {
       "path": "src/circuits/channel/cancel_close_circuit.rs",
@@ -688,7 +688,7 @@
       "sha256": "0279ece34b9d8f4fcf3a63134fe367704b733e02adead006c6b8158b7cfbda3e",
       "lines": 1116,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/decryption-gadget.json"
     },
     {
       "path": "src/circuits/channel/e2e_flow.rs",
@@ -730,7 +730,7 @@
       "sha256": "e7a782e9814efe76b080c3d35769f04824244d6a735a0b9587ac08683b21338b",
       "lines": 3676,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-state-update.json"
     },
     {
       "path": "src/circuits/channel/withdrawal_claim_circuit.rs",
@@ -1045,7 +1045,7 @@
       "sha256": "6591159420d18ecee4557087c87b2099fb2c0514aedf58a7a8cbac134027867d",
       "lines": 166,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/private-state.json"
     },
     {
       "path": "src/common/public_state.rs",

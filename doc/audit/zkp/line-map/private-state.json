@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "source": "src/common/private_state.rs",
+  "source_sha256": "6591159420d18ecee4557087c87b2099fb2c0514aedf58a7a8cbac134027867d",
+  "source_lines": 166,
+  "module": "Zkp.Implementation.PrivateState",
+  "model": "doc/audit/zkp/Zkp/Implementation/PrivateState.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 18,
+      "status": "dependency-boundary",
+      "label": "imports and field / hash / tree interfaces",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.State",
+        "Zkp.Implementation.PrivateState.TreeEnvironment"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 19,
+      "end": 22,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 23,
+      "end": 41,
+      "status": "translated",
+      "label": "native private-state fields",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.State",
+        "Zkp.Implementation.PrivateState.NativeRepresentable"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.private_state_has_21_field_elements"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 42,
+      "end": 44,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 45,
+      "end": 52,
+      "status": "translated",
+      "label": "full-state tree handles and metadata",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.FullState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 53,
+      "end": 53,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 54,
+      "end": 64,
+      "status": "translated",
+      "label": "FullPrivateState::new local construction",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.fullNew",
+        "Zkp.Implementation.PrivateState.TreeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.genesis_nonce_zero",
+        "Zkp.Implementation.PrivateState.genesis_previous_commitment_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 66,
+      "end": 75,
+      "status": "translated",
+      "label": "FullPrivateState::to_private_state root projection",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.toPrivate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.full_projection_uses_actual_roots",
+        "Zkp.Implementation.PrivateState.full_new_projects_to_new"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 76,
+      "end": 78,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 79,
+      "end": 86,
+      "status": "translated",
+      "label": "raw target fields without implicit nonce range",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.State",
+        "Zkp.Implementation.PrivateState.allocate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.allocation_order_is_source_order"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 88,
+      "end": 89,
+      "status": "translated",
+      "label": "PrivateState::new entry",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.newState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 90,
+      "end": 93,
+      "status": "dependency-boundary",
+      "label": "tree initialization/root calls and default hash",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.TreeEnvironment",
+        "Zkp.Implementation.PrivateState.zeroHash"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 94,
+      "end": 102,
+      "status": "translated",
+      "label": "initial state construction",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.newState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.genesis_preserves_salt",
+        "Zkp.Implementation.PrivateState.genesis_nonce_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 103,
+      "end": 103,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 104,
+      "end": 114,
+      "status": "translated",
+      "label": "native exact 21-element hash preimage",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.words",
+        "Zkp.Implementation.PrivateState.nativeWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.private_state_has_21_field_elements",
+        "Zkp.Implementation.PrivateState.layout_injective",
+        "Zkp.Implementation.PrivateState.nonce_at_offset_16",
+        "Zkp.Implementation.PrivateState.salt_at_offset_17",
+        "Zkp.Implementation.PrivateState.native_words_are_commitment_preimage"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 115,
+      "end": 115,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 116,
+      "end": 118,
+      "status": "dependency-boundary",
+      "label": "native Poseidon call",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.commitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.commitment_binds_this_pair"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 119,
+      "end": 120,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 121,
+      "end": 132,
+      "status": "translated",
+      "label": "target exact 21-element preimage",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.targetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 133,
+      "end": 133,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 134,
+      "end": 139,
+      "status": "dependency-boundary",
+      "label": "target Poseidon call",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.commitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.target_hash_agrees_when_hash_calls_agree"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 140,
+      "end": 140,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 141,
+      "end": 152,
+      "status": "translated",
+      "label": "target allocation request order",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.Allocation",
+        "Zkp.Implementation.PrivateState.allocate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.allocation_order_is_source_order"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 153,
+      "end": 153,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 154,
+      "end": 165,
+      "status": "translated",
+      "label": "native-to-target witness request order and values",
+      "declarations": [
+        "Zkp.Implementation.PrivateState.Field",
+        "Zkp.Implementation.PrivateState.witnessWrites"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PrivateState.witness_order_is_source_order",
+        "Zkp.Implementation.PrivateState.witness_flatten_is_commitment_preimage"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 166,
+      "end": 166,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "tree-initialization-and-root-calculation",
+      "obligation": "Actual asset/nullifier/sent tree initial root computation, mutation semantics and authenticated openings are parameterized, not proved by the local record projection.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-and-field-representation",
+      "obligation": "Native u64 inputs, field reduction and target Poseidon gates must be related; exact tuple injectivity is not unconditional hash injectivity. Pair binding is explicit and does not apply automatically to noncanonical aliasing.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-and-compiler-refinement",
+      "obligation": "Rust ownership/cloning, serde/debug/error derivations, field conversions, witness-write behavior and actual builder allocation require implementation refinement. NativeRepresentable is a premise, not a target nonce range gate.",
+      "discharged": false
+    }
+  ]
+}

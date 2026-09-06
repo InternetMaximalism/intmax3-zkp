@@ -1,0 +1,473 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/balance_circuit.rs",
+  "source_sha256": "28098c1886a1389beb675b1104351490e706161a53cc3636b6d47408746d227e",
+  "source_lines": 240,
+  "module": "Zkp.Implementation.BalanceCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalanceCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "imports: plonky2 builder/witness/proof/cyclic APIs, balance_pis, cyclic and serialization utils, serde",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.Proof",
+        "Zkp.Implementation.BalanceCircuit.FullInputs",
+        "Zkp.Implementation.BalanceCircuit.VerifierData",
+        "Zkp.Implementation.BalanceCircuit.GateEnvironment",
+        "Zkp.Implementation.BalanceCircuit.ProveEnvironment",
+        "Zkp.Implementation.BalanceCircuit.VerifyEnvironment",
+        "Zkp.Implementation.BalanceCircuit.CodecEnvironment"
+      ],
+      "theorems": [],
+      "note": "Imported types are modeled only through the environment records (opaque callbacks) and the imported BalancePublicInputs/SwitchBoard models; no plonky2 refinement."
+    },
+    {
+      "start": 27,
+      "end": 27,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 28,
+      "end": 35,
+      "status": "translated",
+      "label": "BalanceCircuitError: FailedToProve / ProofVerificationError variants",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.Fault",
+        "Zkp.Implementation.BalanceCircuit.Result"
+      ],
+      "theorems": [],
+      "note": "Fault models both source error variants (plus explicit panic and serialization stages that the source expresses as assert!/CircuitSerializationError); string payloads kept as detail. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 36,
+      "end": 36,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 37,
+      "end": 46,
+      "status": "translated",
+      "label": "BalanceCircuit struct: circuit data and switch proof target",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.Circuit",
+        "Zkp.Implementation.BalanceCircuit.CommonData"
+      ],
+      "theorems": [],
+      "note": "CircuitData is abstracted to an identity plus common data and own verifier key; ProofWithPublicInputsTarget is a target identity. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 47,
+      "end": 53,
+      "status": "non-executable",
+      "label": "spacing and impl header with trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 54,
+      "end": 57,
+      "status": "translated",
+      "label": "new: constructor signature (balance common data, switch verifier data)",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.new",
+        "Zkp.Implementation.BalanceCircuit.ConstructorEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 58,
+      "end": 64,
+      "status": "dependency-boundary",
+      "label": "builder with balance config, add_proof_target_and_verify under constant switch VD, from_pis parse, register public inputs",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.BuildOp",
+        "Zkp.Implementation.BalanceCircuit.buildPlan",
+        "Zkp.Implementation.BalanceCircuit.GateEnvironment",
+        "Zkp.Implementation.BalanceCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.target_verifies_exact_fixed_switch_key",
+        "Zkp.Implementation.BalanceCircuit.target_forwards_exact_parsed_statement"
+      ],
+      "note": "The gadget sequence is recorded as buildPlan; its constraint meaning is only the CircuitGates premise (fixed-key recursive verification plus fullFromTarget parse). Both linked theorems are projections of that premise, not a proof that plonky2 emits it. Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 66,
+      "end": 66,
+      "status": "dependency-boundary",
+      "label": "try_build_with_options::<C>(true) compiler call",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.BuildResult",
+        "Zkp.Implementation.BalanceCircuit.ConstructorEnvironment",
+        "Zkp.Implementation.BalanceCircuit.BuildOp"
+      ],
+      "theorems": [],
+      "note": "The plonky2 compiler is the opaque ConstructorEnvironment.build returning (circuit, success). Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 67,
+      "end": 74,
+      "status": "translated",
+      "label": "assert common-data equality, then build success, then construct Self",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.finishBuild",
+        "Zkp.Implementation.BalanceCircuit.new",
+        "Zkp.Implementation.BalanceCircuit.BuildResult",
+        "Zkp.Implementation.BalanceCircuit.normalCommon",
+        "Zkp.Implementation.BalanceCircuit.normalCircuit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.constructor_checks_common_before_success",
+        "Zkp.Implementation.BalanceCircuit.constructor_success_has_exact_common",
+        "Zkp.Implementation.BalanceCircuit.normal_constructor_finishes"
+      ],
+      "note": "Both assert! panics are modeled as Fault values in source order; common-data equality is structural equality of the abstract CommonData record. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 75,
+      "end": 76,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 77,
+      "end": 88,
+      "status": "dependency-boundary",
+      "label": "generate_cd: simple recursion data, default builder, virtual proof, virtual verifier cap/digest, verify_proof, 4096 noop pad, build",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.GenerateOp",
+        "Zkp.Implementation.BalanceCircuit.generatePlan"
+      ],
+      "theorems": [],
+      "note": "Only the op sequence is recorded (generatePlan); the resulting common data is an opaque CommonData value. The virtual (not fixed) verifier is deliberately kept. Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 89,
+      "end": 90,
+      "status": "translated",
+      "label": "override num_public_inputs = BALANCE_PUBLIC_INPUTS_LEN + vd_vec_len(config) and return",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.generatedCommon"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.generated_common_has_exact_public_width",
+        "Zkp.Implementation.BalanceCircuit.generated_common_preserves_configuration"
+      ],
+      "note": "vd_vec_len is modeled as BalancePublicInputs.verifierLength of the cap count. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 91,
+      "end": 92,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 93,
+      "end": 96,
+      "status": "translated",
+      "label": "prove: signature taking the switch-board proof",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.prove",
+        "Zkp.Implementation.BalanceCircuit.ProveEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 97,
+      "end": 101,
+      "status": "dependency-boundary",
+      "label": "PartialWitness, set_proof_with_pis_target, CircuitData::prove",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.ProveEnvironment",
+        "Zkp.Implementation.BalanceCircuit.prove"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.prove_assigns_the_supplied_switch_proof"
+      ],
+      "note": "Witness assignment and proving are the opaque proveData callback invoked with the stored target and the supplied proof; the theorem states only that call/forwarding. Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 102,
+      "end": 102,
+      "status": "translated",
+      "label": "map prover error to FailedToProve",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.prove",
+        "Zkp.Implementation.BalanceCircuit.Fault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 103,
+      "end": 104,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 105,
+      "end": 108,
+      "status": "translated",
+      "label": "verify: native entry point signature",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.verify",
+        "Zkp.Implementation.BalanceCircuit.VerifyEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.accepted_exact_statement_carries_actual_balance_key",
+        "Zkp.Implementation.BalanceCircuit.selector_then_outer_verification_binds_selected_key"
+      ],
+      "note": "Linked theorems are whole-function consequences of native verify acceptance (carried VD equals own VD; composed with the SwitchBoard selector). Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 109,
+      "end": 115,
+      "status": "translated",
+      "label": "check_cyclic_proof_verifier_data on the proof tail versus own verifier_only, mapped to ProofVerificationError",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.readCyclicTail",
+        "Zkp.Implementation.BalanceCircuit.checkCyclic",
+        "Zkp.Implementation.BalanceCircuit.normalVd"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.cyclic_check_binds_cap_and_digest",
+        "Zkp.Implementation.BalanceCircuit.cyclic_tail_of_full_encoding",
+        "Zkp.Implementation.BalanceCircuit.normal_encoding_checks_its_own_cyclic_key"
+      ],
+      "note": "The upstream plonky2 helper body (read last cap+digest words, compare cap then digest) is re-expressed by hand as checkCyclic; that is a model of the imported function, not a refinement of it. Error strings are not preserved verbatim. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 116,
+      "end": 118,
+      "status": "dependency-boundary",
+      "label": "CircuitData::verify with ProofVerificationError mapping",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.VerifyEnvironment",
+        "Zkp.Implementation.BalanceCircuit.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.cyclic_failure_precedes_ordinary_verification",
+        "Zkp.Implementation.BalanceCircuit.accepted_native_verification_checks_both_layers"
+      ],
+      "note": "Ordinary proof verification is the opaque verifyData callback; the theorems state only that it is reached after, and required in addition to, the cyclic check. Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 119,
+      "end": 120,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 121,
+      "end": 121,
+      "status": "translated",
+      "label": "to_bytes signature",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.toBytes"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 122,
+      "end": 127,
+      "status": "dependency-boundary",
+      "label": "gate/generator serializers and CircuitData::to_bytes with stage label",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.CodecEnvironment",
+        "Zkp.Implementation.BalanceCircuit.toBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.serialized_data_failure_precedes_payload"
+      ],
+      "note": "encodeCircuitData is opaque; the theorem states only stage ordering of the failure label. Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 128,
+      "end": 131,
+      "status": "translated",
+      "label": "BalanceCircuitBytes payload from data bytes and cloned switch proof target",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.Payload",
+        "Zkp.Implementation.BalanceCircuit.toBytes"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 132,
+      "end": 133,
+      "status": "dependency-boundary",
+      "label": "bincode encode of payload with stage label",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.CodecEnvironment",
+        "Zkp.Implementation.BalanceCircuit.toBytes"
+      ],
+      "theorems": [],
+      "note": "Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 134,
+      "end": 135,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 136,
+      "end": 136,
+      "status": "translated",
+      "label": "from_bytes signature",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.fromBytes"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 137,
+      "end": 141,
+      "status": "dependency-boundary",
+      "label": "bincode decode of payload; consumed byte count discarded",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.CodecEnvironment",
+        "Zkp.Implementation.BalanceCircuit.fromBytes"
+      ],
+      "theorems": [],
+      "note": "decodePayload is opaque; the discarded consumed-length is retained in the model (no trailing-byte check). Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 142,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "serializers and CircuitData::from_bytes with stage label",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.CodecEnvironment",
+        "Zkp.Implementation.BalanceCircuit.fromBytes"
+      ],
+      "theorems": [],
+      "note": "Imported plonky2/crate operation treated as an opaque callback or premise; its soundness is an undischarged boundary, not established by the local proof."
+    },
+    {
+      "start": 150,
+      "end": 153,
+      "status": "translated",
+      "label": "construct Self from decoded data and payload switch proof target, without constructor assertions",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.fromBytes",
+        "Zkp.Implementation.BalanceCircuit.Payload"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.decoded_payload_keeps_target_without_constructor_check"
+      ],
+      "note": "Deserialization does not re-run the common-data/build-success checks; the theorem records that the decoded target is taken as-is. Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 154,
+      "end": 156,
+      "status": "non-executable",
+      "label": "closing braces and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 157,
+      "end": 234,
+      "status": "test-only",
+      "label": "cfg(test) end-to-end balance circuit test",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) body only; no production theorem coverage inferred."
+    },
+    {
+      "start": 235,
+      "end": 236,
+      "status": "non-executable",
+      "label": "spacing and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 237,
+      "end": 240,
+      "status": "translated",
+      "label": "BalanceCircuitBytes: serialized circuit data and switch proof target",
+      "declarations": [
+        "Zkp.Implementation.BalanceCircuit.Payload"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "recursive-verification-soundness",
+      "obligation": "add_proof_target_and_verify under the constant switch verifier data is assumed (CircuitGates.fixedVerifierCall) to enforce a valid switch-board proof; plonky2 recursive verifier soundness, the exact public-input length and the algebraic meaning of the emitted gates are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-and-common-data",
+      "obligation": "try_build_with_options, common-data equality as an identity comparison, generate_cd's virtual verifier, the 4096-gate noop pad and vd_vec_len are opaque; no proof that the generated common data is the one the switch board and cyclic recursion actually require.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-helper-semantics",
+      "obligation": "checkCyclic is a handwritten re-expression of plonky2's check_cyclic_proof_verifier_data (tail layout, cap_height word count, cap-then-digest comparison); its agreement with the upstream implementation and with the in-circuit carried-VD wiring is not refined.",
+      "discharged": false
+    },
+    {
+      "name": "witness-and-native-verifier",
+      "obligation": "PartialWitness assignment, CircuitData::prove and CircuitData::verify are opaque callbacks; ordinary proof verification soundness and exact error strings are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-codec-and-restored-circuit-trust",
+      "obligation": "bincode and gate/generator serializers are opaque; from_bytes discards the consumed byte count and never re-runs constructor consistency checks, so a restored circuit's data/target coherence is a caller trust assumption.",
+      "discharged": false
+    },
+    {
+      "name": "balance-public-input-interface",
+      "obligation": "BalanceFullPublicInputsTarget::from_pis/to_vec and BALANCE_PUBLIC_INPUTS_LEN come from the imported BalancePublicInputs/SwitchBoard models (fullFromTarget, verifierLength); their refinement to balance_pis.rs is a separate line-map obligation.",
+      "discharged": false
+    }
+  ]
+}

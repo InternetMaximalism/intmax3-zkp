@@ -155,7 +155,7 @@
     },
     {
       "path": ".github/ci/lean-safety-guard.py",
-      "sha256": "91fe02b5e7027d09dca17c9951febbd5894661eb44719ef2b70ab8c6fa16c1c0",
+      "sha256": "077ea8322436bd387b38239a43380f44cd01543f1aa5d7a7b6f891b2b310efc8",
       "role": "tooling"
     },
     {
@@ -185,7 +185,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp.lean",
-      "sha256": "c69d44952c7dd138242ae20a3713144362ad680853b537a72a04d0e0fca0411d",
+      "sha256": "4d691134526305e8d9e4f16ab9e56522043b9734498989dd37b202377fcb5c20",
       "role": "tooling"
     },
     {
@@ -380,12 +380,12 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "041e1fb9292d37e1d6d88fc3a354316ee1bbfbc126c92a625e4416dfb33d299d",
+      "sha256": "7bba5b32f0c05ee32f2e6213492772d96008b00a0dbd1ac4094f570c3c64b445",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "a310594646ba1cf240761dbbf7980c351b03ba00ebefec65fb5b7ab693269d55",
+      "sha256": "ea84b840f68129925608faf3232c0146881f3708dffe192f0d7a1ea524a96ad4",
       "role": "spec"
     },
     {
@@ -672,6 +672,121 @@
       "path": "doc/audit/zkp/Zkp/Implementation/ClaimSettlementBridge.lean",
       "sha256": "694bca358c4e7a504e35dbe18c161d102efc66aa5b9b9984463dc270c594e4c2",
       "role": "model"
+    },
+    {
+      "path": "src/common/private_state.rs",
+      "sha256": "6591159420d18ecee4557087c87b2099fb2c0514aedf58a7a8cbac134027867d",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/PrivateState.lean",
+      "sha256": "09f115ea728d52a7e2bbf82df799db3ae0ef63f77364871a87e12e4a2938dc64",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/private-state.json",
+      "sha256": "87e16af201198bd3b26605eced13f073cd3492548fd1b68f2ed3faed0b827c48",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/common/update_private_state.rs",
+      "sha256": "84a5fa8d4d4a9e09f81c9c606d636cbbe10af0cc12f5f860348c4ea73a6a9c36",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/UpdatePrivateState.lean",
+      "sha256": "c9dacf5bf196bc28323f26a42d0e146aff94e1eb4e30489dc5e9f65653c6bc8e",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/update-private-state.json",
+      "sha256": "8c17baa8ef7a88e7cba7bd69fde6296e4644d471154967587b293118ce702716",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/common/update_public_state.rs",
+      "sha256": "c19a636d40e777d1fc6fb8983466926aa29fb26d5a4028a0b7a9703c468d2161",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/UpdatePublicState.lean",
+      "sha256": "876c14cd92f0a55291240e2d542e3902c376d8b3524c1f830dff715fe89af87d",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/update-public-state.json",
+      "sha256": "c770411af32d85361a2eb6a9d0fa0eeae6501b2405b809b02d9d82f4b8e38dcc",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/balance_pis.rs",
+      "sha256": "ae567ab87d25354673cef70733f4435cfee6352d88f429347598e0b28f31174f",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/BalancePublicInputs.lean",
+      "sha256": "3db469bbb13fb262d0bbc5bcee080275f6f0355f9dcf517a16995c4ff5cd61ad",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/balance-public-inputs.json",
+      "sha256": "9a552ab09e26459798e5e230a31bc758de66d7faae1e46f8440d69e95bb67535",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/switch_board.rs",
+      "sha256": "4567178c5a46cf89800408049bff18d53efbb0fb7720a51a935d64ad834b8b7f",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/SwitchBoard.lean",
+      "sha256": "d31242023b301b91c2968633e2dbb67fcb384531cde7467658fe9980ed6e36cc",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/switch-board.json",
+      "sha256": "899cd32003cd568e2379902c58bd609265c1302a1efbe6035be6ecfdaa3f3535",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/balance/balance_circuit.rs",
+      "sha256": "28098c1886a1389beb675b1104351490e706161a53cc3636b6d47408746d227e",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/BalanceCircuit.lean",
+      "sha256": "096e2ce7435229c3c51cfab26344857f160131a10dba44e86584bea39ac5f830",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/balance-circuit.json",
+      "sha256": "9d317d00e3aa09ad7534d14c841e1f4a8ea456dab32173154bf4b6aa22858652",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/ChannelStateUpdate.lean",
+      "sha256": "d9dd6782676fab284e262383803aa6c221ceb438b36ef634dd8f708ceba0d284",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/channel-state-update.json",
+      "sha256": "f24cf7fb4f5f88b475daa1d9986318262ffe75c481bb10b2fdc5f4f0a7abb3ad",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/decryption_gadget.rs",
+      "sha256": "0279ece34b9d8f4fcf3a63134fe367704b733e02adead006c6b8158b7cfbda3e",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/DecryptionGadget.lean",
+      "sha256": "56aca1ab07febc2b87785d78f0b06c0af713eeb4e0cb4a6cc18bd258375f4cf0",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/decryption-gadget.json",
+      "sha256": "07a94a5bbded725b0ec581d70acf263a5a88e1f0de8d8d59a72a649e40713b5d",
+      "role": "spec"
     }
   ],
   "theorem_checks": [
@@ -2029,6 +2144,364 @@
         "src/circuits/channel/h1_gadget.rs",
         "src/utils/poseidon_hash_out.rs",
         "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.PrivateState",
+      "theorems": [
+        "Zkp.Implementation.PrivateState.private_state_has_21_field_elements",
+        "Zkp.Implementation.PrivateState.native_target_layout_agrees",
+        "Zkp.Implementation.PrivateState.native_words_are_commitment_preimage",
+        "Zkp.Implementation.PrivateState.nonce_at_offset_16",
+        "Zkp.Implementation.PrivateState.salt_at_offset_17",
+        "Zkp.Implementation.PrivateState.layout_injective",
+        "Zkp.Implementation.PrivateState.commitment_binds_this_pair",
+        "Zkp.Implementation.PrivateState.full_new_projects_to_new",
+        "Zkp.Implementation.PrivateState.genesis_preserves_salt",
+        "Zkp.Implementation.PrivateState.genesis_nonce_zero",
+        "Zkp.Implementation.PrivateState.genesis_previous_commitment_zero",
+        "Zkp.Implementation.PrivateState.full_projection_uses_actual_roots",
+        "Zkp.Implementation.PrivateState.allocation_order_is_source_order",
+        "Zkp.Implementation.PrivateState.witness_order_is_source_order",
+        "Zkp.Implementation.PrivateState.witness_flatten_is_commitment_preimage",
+        "Zkp.Implementation.PrivateState.target_hash_agrees_when_hash_calls_agree"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/private-state.json",
+        "src/common/private_state.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.UpdatePrivateState",
+      "theorems": [
+        "Zkp.Implementation.UpdatePrivateState.amount_has_eight_words",
+        "Zkp.Implementation.UpdatePrivateState.small_amount_value",
+        "Zkp.Implementation.UpdatePrivateState.native_nullifier_error_first",
+        "Zkp.Implementation.UpdatePrivateState.native_asset_error_before_add",
+        "Zkp.Implementation.UpdatePrivateState.native_add_overflow_is_panic",
+        "Zkp.Implementation.UpdatePrivateState.native_success_of_actual_returns",
+        "Zkp.Implementation.UpdatePrivateState.native_success_extracts",
+        "Zkp.Implementation.UpdatePrivateState.circuit_credits_exact_amount",
+        "Zkp.Implementation.UpdatePrivateState.circuit_credit_does_not_decrease_balance",
+        "Zkp.Implementation.UpdatePrivateState.circuit_sum_below_u256_when_result_checked",
+        "Zkp.Implementation.UpdatePrivateState.circuit_carries_link_to_existing_arithmetic",
+        "Zkp.Implementation.UpdatePrivateState.circuit_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.UpdatePrivateState.circuit_links_full_previous_commitment",
+        "Zkp.Implementation.UpdatePrivateState.circuit_replaces_same_token_same_path",
+        "Zkp.Implementation.UpdatePrivateState.circuit_invokes_nullifier_gadget_with_incoming_nullifier",
+        "Zkp.Implementation.UpdatePrivateState.enabled_checks_bound_input_words",
+        "Zkp.Implementation.UpdatePrivateState.false_flag_adds_no_direct_range_obligation",
+        "Zkp.Implementation.UpdatePrivateState.target_witness_of_native_success",
+        "Zkp.Implementation.UpdatePrivateState.same_previous_and_amount_give_same_value",
+        "Zkp.Implementation.UpdatePrivateState.native_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.UpdatePrivateState.native_copies_exact_inputs",
+        "Zkp.Implementation.UpdatePrivateState.checked_allocation_program",
+        "Zkp.Implementation.UpdatePrivateState.unchecked_allocation_program",
+        "Zkp.Implementation.UpdatePrivateState.witness_write_count",
+        "Zkp.Implementation.UpdatePrivateState.witness_also_assigns_derived_state",
+        "Zkp.Implementation.UpdatePrivateState.normal_credit_7_plus_2",
+        "Zkp.Implementation.UpdatePrivateState.normal_credit_value_9"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/update-private-state.json",
+        "src/circuits/balance/common/update_private_state.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.UpdatePublicState",
+      "theorems": [
+        "Zkp.Implementation.UpdatePublicState.native_equal_constructor_uses_dummy",
+        "Zkp.Implementation.UpdatePublicState.dummy_has_63_siblings",
+        "Zkp.Implementation.UpdatePublicState.native_equal_verify_needs_no_root",
+        "Zkp.Implementation.UpdatePublicState.changed_state_needs_proof",
+        "Zkp.Implementation.UpdatePublicState.native_changed_success",
+        "Zkp.Implementation.UpdatePublicState.native_verify_iff_local_history",
+        "Zkp.Implementation.UpdatePublicState.native_verify_changed_binds_old_state_and_index",
+        "Zkp.Implementation.UpdatePublicState.native_new_success_preserves_requested_states",
+        "Zkp.Implementation.UpdatePublicState.native_new_success_is_locally_verified",
+        "Zkp.Implementation.UpdatePublicState.equality_flag_iff_all_fields",
+        "Zkp.Implementation.UpdatePublicState.equality_flag_false_iff_different",
+        "Zkp.Implementation.UpdatePublicState.target_always_evaluates_old_merkle_path",
+        "Zkp.Implementation.UpdatePublicState.target_changed_enables_verification",
+        "Zkp.Implementation.UpdatePublicState.target_changed_binds_old_opening",
+        "Zkp.Implementation.UpdatePublicState.target_equal_disables_only_final_comparison",
+        "Zkp.Implementation.UpdatePublicState.target_implies_native_local_verification",
+        "Zkp.Implementation.UpdatePublicState.target_witness_of_native_local_verification",
+        "Zkp.Implementation.UpdatePublicState.constructor_uses_unchecked_state_allocations",
+        "Zkp.Implementation.UpdatePublicState.witness_write_order"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/update-public-state.json",
+        "src/circuits/balance/common/update_public_state.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.BalancePublicInputs",
+      "theorems": [
+        "Zkp.Implementation.BalancePublicInputs.public_state_word_count",
+        "Zkp.Implementation.BalancePublicInputs.balance_word_count",
+        "Zkp.Implementation.BalancePublicInputs.read_encoded_fields_with_suffix",
+        "Zkp.Implementation.BalancePublicInputs.target_roundtrip_accepts_suffix",
+        "Zkp.Implementation.BalancePublicInputs.exact_native_guard_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.native_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.native_length_guard",
+        "Zkp.Implementation.BalancePublicInputs.native_zero_channel_is_rejected",
+        "Zkp.Implementation.BalancePublicInputs.target_short_input_panics",
+        "Zkp.Implementation.BalancePublicInputs.balance_encoding_injective",
+        "Zkp.Implementation.BalancePublicInputs.connected_inputs_are_equal",
+        "Zkp.Implementation.BalancePublicInputs.allocation_preserves_checked_argument",
+        "Zkp.Implementation.BalancePublicInputs.genesis_private_preimage_width",
+        "Zkp.Implementation.BalancePublicInputs.genesis_has_zero_reference_and_settled_chain",
+        "Zkp.Implementation.BalancePublicInputs.genesis_uses_exact_private_preimage",
+        "Zkp.Implementation.BalancePublicInputs.roots_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.verifier_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_length",
+        "Zkp.Implementation.BalancePublicInputs.configured_encoding_matches_full_shape",
+        "Zkp.Implementation.BalancePublicInputs.short_verifier_cap_panics",
+        "Zkp.Implementation.BalancePublicInputs.root_prefix_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.roots_prefix_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.verifier_prefix_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.full_target_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.full_encoding_injective",
+        "Zkp.Implementation.BalancePublicInputs.native_full_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.native_full_length_guard",
+        "Zkp.Implementation.BalancePublicInputs.full_commitment_uses_all_words",
+        "Zkp.Implementation.BalancePublicInputs.concrete_commitment_binding",
+        "Zkp.Implementation.BalancePublicInputs.normal_native_roundtrip",
+        "Zkp.Implementation.BalancePublicInputs.normal_target_suffix_roundtrip"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/balance-public-inputs.json",
+        "src/circuits/balance/balance_pis.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.SwitchBoard",
+      "theorems": [
+        "Zkp.Implementation.SwitchBoard.safe_flag_sum_is_small",
+        "Zkp.Implementation.SwitchBoard.field_sum_one_yields_integer_one",
+        "Zkp.Implementation.SwitchBoard.one_hot_has_exact_selected_mode",
+        "Zkp.Implementation.SwitchBoard.only_mode_is_one_hot",
+        "Zkp.Implementation.SwitchBoard.only_mode_is_chosen",
+        "Zkp.Implementation.SwitchBoard.constructor_retains_fixed_verifiers",
+        "Zkp.Implementation.SwitchBoard.constructor_builds_all_three_dummy_slots",
+        "Zkp.Implementation.SwitchBoard.weighted_sum_is_exact_selected_cell",
+        "Zkp.Implementation.SwitchBoard.modular_gates_determine_unique_whole_selection",
+        "Zkp.Implementation.SwitchBoard.selected_output_is_whole_candidate",
+        "Zkp.Implementation.SwitchBoard.selected_output_preserves_every_identity",
+        "Zkp.Implementation.SwitchBoard.selected_noninitial_proof_uses_real_key",
+        "Zkp.Implementation.SwitchBoard.inactive_proof_uses_dummy_key",
+        "Zkp.Implementation.SwitchBoard.genesis_output_is_exact",
+        "Zkp.Implementation.SwitchBoard.invalid_native_cardinality_stops_admission",
+        "Zkp.Implementation.SwitchBoard.invalid_native_cardinality_writes_nothing",
+        "Zkp.Implementation.SwitchBoard.admitted_proof_call_succeeded",
+        "Zkp.Implementation.SwitchBoard.genesis_native_admission",
+        "Zkp.Implementation.SwitchBoard.transfer_native_admission_calls_only_transfer",
+        "Zkp.Implementation.SwitchBoard.missing_dummy_stops_remaining_assignments",
+        "Zkp.Implementation.SwitchBoard.earlier_assignment_survives_later_failure",
+        "Zkp.Implementation.SwitchBoard.native_prove_runs_admission_first",
+        "Zkp.Implementation.SwitchBoard.unsupported_dummy_index_rejected",
+        "Zkp.Implementation.SwitchBoard.key_trace_preserves_original_key",
+        "Zkp.Implementation.SwitchBoard.selected_output_key_matches_branch_predecessor",
+        "Zkp.Implementation.SwitchBoard.normal_transfer_mode_selects_whole_word",
+        "Zkp.Implementation.SwitchBoard.normal_key_trace"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/switch-board.json",
+        "src/circuits/balance/switch_board.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.BalanceCircuit",
+      "theorems": [
+        "Zkp.Implementation.BalanceCircuit.constructor_checks_common_before_success",
+        "Zkp.Implementation.BalanceCircuit.constructor_success_has_exact_common",
+        "Zkp.Implementation.BalanceCircuit.generated_common_has_exact_public_width",
+        "Zkp.Implementation.BalanceCircuit.generated_common_preserves_configuration",
+        "Zkp.Implementation.BalanceCircuit.target_verifies_exact_fixed_switch_key",
+        "Zkp.Implementation.BalanceCircuit.target_forwards_exact_parsed_statement",
+        "Zkp.Implementation.BalanceCircuit.prove_assigns_the_supplied_switch_proof",
+        "Zkp.Implementation.BalanceCircuit.cyclic_failure_precedes_ordinary_verification",
+        "Zkp.Implementation.BalanceCircuit.accepted_native_verification_checks_both_layers",
+        "Zkp.Implementation.BalanceCircuit.cyclic_check_binds_cap_and_digest",
+        "Zkp.Implementation.BalanceCircuit.cyclic_tail_of_full_encoding",
+        "Zkp.Implementation.BalanceCircuit.accepted_exact_statement_carries_actual_balance_key",
+        "Zkp.Implementation.BalanceCircuit.selector_then_outer_verification_binds_selected_key",
+        "Zkp.Implementation.BalanceCircuit.decoded_payload_keeps_target_without_constructor_check",
+        "Zkp.Implementation.BalanceCircuit.serialized_data_failure_precedes_payload",
+        "Zkp.Implementation.BalanceCircuit.normal_constructor_finishes",
+        "Zkp.Implementation.BalanceCircuit.normal_encoding_checks_its_own_cyclic_key"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/balance-circuit.json",
+        "src/circuits/balance/balance_circuit.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.ChannelStateUpdate",
+      "theorems": [
+        "Zkp.Implementation.ChannelStateUpdate.check_ok_iff",
+        "Zkp.Implementation.ChannelStateUpdate.bind_ok_iff",
+        "Zkp.Implementation.ChannelStateUpdate.unit_bind_ok_iff",
+        "Zkp.Implementation.ChannelStateUpdate.exists_unit",
+        "Zkp.Implementation.ChannelStateUpdate.map_rejected_ok_iff",
+        "Zkp.Implementation.ChannelStateUpdate.for_each_success",
+        "Zkp.Implementation.ChannelStateUpdate.scalar_checked_success",
+        "Zkp.Implementation.ChannelStateUpdate.scalar_wrapping_no_overflow",
+        "Zkp.Implementation.ChannelStateUpdate.native_amount_add_success",
+        "Zkp.Implementation.ChannelStateUpdate.native_amount_add_no_wrap",
+        "Zkp.Implementation.ChannelStateUpdate.u64_embedding_exact",
+        "Zkp.Implementation.ChannelStateUpdate.amount_words_length",
+        "Zkp.Implementation.ChannelStateUpdate.fund_words_length",
+        "Zkp.Implementation.ChannelStateUpdate.public_words_length",
+        "Zkp.Implementation.ChannelStateUpdate.refresh_preimage_length",
+        "Zkp.Implementation.ChannelStateUpdate.base_inputs_full_fund_vectors",
+        "Zkp.Implementation.ChannelStateUpdate.ordinary_metadata_success",
+        "Zkp.Implementation.ChannelStateUpdate.balance_shared_success",
+        "Zkp.Implementation.ChannelStateUpdate.balance_common_registry_success",
+        "Zkp.Implementation.ChannelStateUpdate.unchanged_whole_fund",
+        "Zkp.Implementation.ChannelStateUpdate.h2_zero_success",
+        "Zkp.Implementation.ChannelStateUpdate.chain_unchanged_success",
+        "Zkp.Implementation.ChannelStateUpdate.accumulator_unchanged_success",
+        "Zkp.Implementation.ChannelStateUpdate.unequal_root_is_only_inequality",
+        "Zkp.Implementation.ChannelStateUpdate.transport_exact_call",
+        "Zkp.Implementation.ChannelStateUpdate.real_regev_exact_call",
+        "Zkp.Implementation.ChannelStateUpdate.signature_check_is_structural",
+        "Zkp.Implementation.ChannelStateUpdate.at_index_success",
+        "Zkp.Implementation.ChannelStateUpdate.first_index_found",
+        "Zkp.Implementation.ChannelStateUpdate.registry_resolution_exact",
+        "Zkp.Implementation.ChannelStateUpdate.other_fund_positions_frozen",
+        "Zkp.Implementation.ChannelStateUpdate.debit_fund_exact",
+        "Zkp.Implementation.ChannelStateUpdate.credit_fund_exact",
+        "Zkp.Implementation.ChannelStateUpdate.credit_unallocated_exact",
+        "Zkp.Implementation.ChannelStateUpdate.debit_unallocated_exact",
+        "Zkp.Implementation.ChannelStateUpdate.pending_increment_budget",
+        "Zkp.Implementation.ChannelStateUpdate.every_bind",
+        "Zkp.Implementation.ChannelStateUpdate.base_context",
+        "Zkp.Implementation.ChannelStateUpdate.throw_ok_iff_false",
+        "Zkp.Implementation.ChannelStateUpdate.pure_ok_iff",
+        "Zkp.Implementation.ChannelStateUpdate.in_channel_output",
+        "Zkp.Implementation.ChannelStateUpdate.send_output",
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_output",
+        "Zkp.Implementation.ChannelStateUpdate.deposit_output",
+        "Zkp.Implementation.ChannelStateUpdate.bundle_output",
+        "Zkp.Implementation.ChannelStateUpdate.refresh_output",
+        "Zkp.Implementation.ChannelStateUpdate.token_register_output",
+        "Zkp.Implementation.ChannelStateUpdate.in_channel_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.send_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.deposit_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.bundle_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.refresh_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.token_register_checked_guards",
+        "Zkp.Implementation.ChannelStateUpdate.is_empty_eq_nil",
+        "Zkp.Implementation.ChannelStateUpdate.throw_ne_ok",
+        "Zkp.Implementation.ChannelStateUpdate.signed_small_block_transport_empty",
+        "Zkp.Implementation.ChannelStateUpdate.send_transport_bytes_empty",
+        "Zkp.Implementation.ChannelStateUpdate.fund_import_transport_bytes_empty"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/channel-state-update.json",
+        "src/circuits/channel/state_update_verifier.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.DecryptionGadget",
+      "theorems": [
+        "Zkp.Implementation.DecryptionGadget.parameters_pinned",
+        "Zkp.Implementation.DecryptionGadget.boolNat_bound",
+        "Zkp.Implementation.DecryptionGadget.packBits_bound",
+        "Zkp.Implementation.DecryptionGadget.packBits_is_weighted",
+        "Zkp.Implementation.DecryptionGadget.row_digit_bound",
+        "Zkp.Implementation.DecryptionGadget.row_noise_bound",
+        "Zkp.Implementation.DecryptionGadget.bounded_modular_zero",
+        "Zkp.Implementation.DecryptionGadget.strictQ_from_actual_checks",
+        "Zkp.Implementation.DecryptionGadget.kappa_from_actual_checks",
+        "Zkp.Implementation.DecryptionGadget.carry_from_actual_range",
+        "Zkp.Implementation.DecryptionGadget.ternary_from_cubic",
+        "Zkp.Implementation.DecryptionGadget.error_half_from_cubic",
+        "Zkp.Implementation.DecryptionGadget.sumZ_congr",
+        "Zkp.Implementation.DecryptionGadget.sumZ_sub",
+        "Zkp.Implementation.DecryptionGadget.negacyclic_term_schoolbook",
+        "Zkp.Implementation.DecryptionGadget.negacyclic_is_schoolbook_reduction",
+        "Zkp.Implementation.DecryptionGadget.negacyclic_zero_secret",
+        "Zkp.Implementation.DecryptionGadget.sumZ_bounds",
+        "Zkp.Implementation.DecryptionGadget.ring_coefficient_bound",
+        "Zkp.Implementation.DecryptionGadget.ring_intermediate_machine_bound",
+        "Zkp.Implementation.DecryptionGadget.reduction_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.decryption_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.key_binding_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.digit_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.digit_solution_unique",
+        "Zkp.Implementation.DecryptionGadget.digit_boundary_gate_unsatisfiable",
+        "Zkp.Implementation.DecryptionGadget.upstream_rounding_definition",
+        "Zkp.Implementation.DecryptionGadget.carry_gate_integer",
+        "Zkp.Implementation.DecryptionGadget.carry_gates_lift",
+        "Zkp.Implementation.DecryptionGadget.carry_telescope",
+        "Zkp.Implementation.DecryptionGadget.carry_tight_bound",
+        "Zkp.Implementation.DecryptionGadget.private_mode_no_amount",
+        "Zkp.Implementation.DecryptionGadget.exposed_amount_exact_order",
+        "Zkp.Implementation.DecryptionGadget.packBits_append",
+        "Zkp.Implementation.DecryptionGadget.packBits_all_false",
+        "Zkp.Implementation.DecryptionGadget.first_carry_zero",
+        "Zkp.Implementation.DecryptionGadget.core_exact_binary_value",
+        "Zkp.Implementation.DecryptionGadget.core_carries_at_most_254",
+        "Zkp.Implementation.DecryptionGadget.row_lookup",
+        "Zkp.Implementation.DecryptionGadget.getD_mem_of_lt",
+        "Zkp.Implementation.DecryptionGadget.index_lt_of_lookup",
+        "Zkp.Implementation.DecryptionGadget.input_coeff_bound",
+        "Zkp.Implementation.DecryptionGadget.core_secret_ternary",
+        "Zkp.Implementation.DecryptionGadget.core_row_integer",
+        "Zkp.Implementation.DecryptionGadget.exposed_high_bits_zero",
+        "Zkp.Implementation.DecryptionGadget.exposed_value_u64",
+        "Zkp.Implementation.DecryptionGadget.exposed_value_from_lo_hi",
+        "Zkp.Implementation.DecryptionGadget.truncDiv_q_formula",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_is_euclidean",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_equation",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_canonical",
+        "Zkp.Implementation.DecryptionGadget.native_reduction_quotient_bound",
+        "Zkp.Implementation.DecryptionGadget.centered_diff_bound",
+        "Zkp.Implementation.DecryptionGadget.centered_diff_modulo",
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_constructed_equation",
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_constructed_quotient_bound",
+        "Zkp.Implementation.DecryptionGadget.native_key_halves",
+        "Zkp.Implementation.DecryptionGadget.native_key_wrap_constructed",
+        "Zkp.Implementation.DecryptionGadget.ciphertext_digest_exact_words",
+        "Zkp.Implementation.DecryptionGadget.public_key_digest_exact_words",
+        "Zkp.Implementation.DecryptionGadget.digest_payload_length",
+        "Zkp.Implementation.DecryptionGadget.fill_ignores_value",
+        "Zkp.Implementation.DecryptionGadget.fill_bit_is_equality_to_one",
+        "Zkp.Implementation.DecryptionGadget.fill_noise_high_halves",
+        "Zkp.Implementation.DecryptionGadget.fill_ignores_expose_amount",
+        "Zkp.Implementation.DecryptionGadget.bitsOf_length",
+        "Zkp.Implementation.DecryptionGadget.fill_row_allocation_shape",
+        "Zkp.Implementation.DecryptionGadget.row_write_count",
+        "Zkp.Implementation.DecryptionGadget.native_build_length_refusal",
+        "Zkp.Implementation.DecryptionGadget.native_digit_success_exact",
+        "Zkp.Implementation.DecryptionGadget.native_digit_failure_exact",
+        "Zkp.Implementation.DecryptionGadget.truncRem_multiple_q",
+        "Zkp.Implementation.DecryptionGadget.native_decrypt_uses_noncanonical_difference",
+        "Zkp.Implementation.DecryptionGadget.noise_native_high_halves_in_range",
+        "Zkp.Implementation.DecryptionGadget.normal_positive_native_trace",
+        "Zkp.Implementation.DecryptionGadget.normal_zero_padding_trace",
+        "Zkp.Implementation.DecryptionGadget.normal_zero_row_numeric",
+        "Zkp.Implementation.DecryptionGadget.replicate_zero_lookup",
+        "Zkp.Implementation.DecryptionGadget.normal_secret_is_zero",
+        "Zkp.Implementation.DecryptionGadget.normal_rows_carries",
+        "Zkp.Implementation.DecryptionGadget.normal_row_gates",
+        "Zkp.Implementation.DecryptionGadget.zero_padding_dimension_satisfiable"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/decryption-gadget.json",
+        "src/circuits/channel/decryption_gadget.rs"
       ]
     }
   ]
