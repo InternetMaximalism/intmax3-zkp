@@ -1,0 +1,698 @@
+{
+  "schema_version": 1,
+  "audit_base_commit": "05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8",
+  "submodules": [
+    {
+      "path": "contracts/lib/polygon-plonky2",
+      "commit": "6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78"
+    }
+  ],
+  "files": [
+    {
+      "path": "contracts/src/IntmaxRollup.sol",
+      "sha256": "9ea16fffad4846b440b1db5066515933d3ee2b54e60330e3f6d2e78649edb6b9",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementManager.sol",
+      "sha256": "be3d17a1d1bad0e52e8c631969daa5d7a8fce9d3eeb370daa687746d8255ed63",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/ChannelSettlementVerifier.sol",
+      "sha256": "a2fcefa8f762bda6859a38d759151be92eda040cc4db36daa769efd67e031948",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/CloseFundingMaterializer.sol",
+      "sha256": "cfb03ed0661ea29c7923ee829f781dc6dcea97a3992d87d9794a816431b3c56e",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/src/BlobKZGVerifier.sol",
+      "sha256": "b9fb050db2c6fcef451f893827fac7fa142d74a4fa45eece555456809e4726ba",
+      "role": "implementation"
+    },
+    {
+      "path": "src/constants.rs",
+      "sha256": "b7cdc6258ee67b3726ce13674711f2671a691572e8d19a697749150ba9106fe7",
+      "role": "implementation"
+    },
+    {
+      "path": "src/utils/mle_prover.rs",
+      "sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
+      "role": "implementation"
+    },
+    {
+      "path": "src/circuits/channel/close_pis.rs",
+      "sha256": "e43f3502121efb39aea65bf6d6b05d6e30744b6d7c87a15a799f439853466914",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+      "sha256": "015d4c60abec6a877085cade3ee021e1a395c474f5cb3703015184f88b5a5eb8",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+      "sha256": "9c2f970e322afc43dd7c52ef44a2f2d7de70e6083e06eeee342d562b1eb85bc4",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+      "sha256": "a3b7d1050c1896cdac853fac75d89b5591dd3bb6ae1935f9252cbddaba570c38",
+      "role": "implementation"
+    },
+    {
+      "path": "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
+      "sha256": "340f59dbc6f2761de4e052ebbb80d11aea58e66fd331ab10a9574b0b3ed057d9",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyCurrent.lean",
+      "sha256": "1dc02ab9db0ec18c68098db474695d9f1e6eae471090b4152bd0158d0b66793f",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Contracts/CurrentVerification.lean",
+      "sha256": "4e58adb968dd56269c6dd359d895ad959e2f10e2a380c7a68d9c081c9c3ae23c",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyQ.lean",
+      "sha256": "75fefb43a000cf5eb275b8da7a2f9203d5600444debef186829f19227c9590e8",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyClose.lean",
+      "sha256": "1e87a250ac05134d58618dad0e775202f72746c5b611ac2f50972221701612fa",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyPW.lean",
+      "sha256": "cc793588d8f9f7996e4b4f82c1b78200df1d3d494a98e7803d21c21f4575d787",
+      "role": "model"
+    },
+    {
+      "path": "doc/architecture-audit/abstract2.md",
+      "sha256": "5bfcfefc21a315ec7403c193b1c13ae34e65b99d33a4dfafb7fec4d7f456640e",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/abstract2-1.md",
+      "sha256": "1c63882d66e1ad8ca9c7599af009916233689594f48a9a283771b1ef0fb1c097",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/detail2.md",
+      "sha256": "e8ae871d27af7ded7b0dd75477fab1009a919aaf340f57d68ad017ebee93a5f8",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/detail2-implementation-notes.md",
+      "sha256": "9a79e55c7b667092db3cb2c14411a6f15ebd73b2735e6b2e962c3c1939f29061",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/lean-safety-proof2.md",
+      "sha256": "fa68011e246950cc09bad1cadb93cdd5344d168bd52d6a9650eac5d53a727739",
+      "role": "spec"
+    },
+    {
+      "path": "doc/architecture-audit/lean-safety-proof21.md",
+      "sha256": "3b08b26464bf773fa2981241d01bf233c4f617d9ccde25a363bfb7fa9af61054",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/lean-current-safety.md",
+      "sha256": "2f4da3b26a0c8410dcdb4abdaf9aba8fbe301a38bb26a6c43b78decddecd9e16",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/README.md",
+      "sha256": "bb803e7d58ea442c453651be0df34a5e8ef7a1737a3cb8d5c4407b7eb1f112b8",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/SUMMARY.md",
+      "sha256": "b3b98198887cce3b7661d57739dcf0e14cc908a20d67f3d0e57612b27dbb37b3",
+      "role": "spec"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "444d543a87d4eb0675298bafe0cdf0e268ec17d78ab17479b3699852d746adc0",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/verify-pinned-inputs.sh",
+      "sha256": "ddf761539a494bc446ae2d74a5de48f5ab3b9abc5e43c50c20fa5579f27a0086",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/lean-safety-guard.sh",
+      "sha256": "9a49d7753791a94a399cb94b4814f1d3346cc899730cc053b462b73313379119",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/lean-safety-guard.py",
+      "sha256": "5f2f1a05492435c18f61168687452ceff67edb04b71ddbe6ceaff1673886a3ac",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/test-lean-safety-guard.py",
+      "sha256": "99ae4033b873d50dc4871d32b19430e5ba22a90c8f468d6ab661fd5c7d174d96",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/architecture-audit/lakefile.lean",
+      "sha256": "841ef9f3d0530d39a4aaf3e60acd0bcfe4f0309cb1e40f9ecb55e00636fd1c30",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/architecture-audit/lean-toolchain",
+      "sha256": "f3ea78fdd417d39483583b721709727c225eeea0c0e9d29283de43f577411095",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/lakefile.toml",
+      "sha256": "d4a61a9e97f647fd9e8f90962d535b67142c7c5d6b68dee408fd6722f6c4c618",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/lean-toolchain",
+      "sha256": "f3ea78fdd417d39483583b721709727c225eeea0c0e9d29283de43f577411095",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp.lean",
+      "sha256": "d24ab01ffdc21c37f247bb59d122e6408da04f890f4cc66b98ee7c57d7cf5510",
+      "role": "tooling"
+    },
+    {
+      "path": ".github/ci/forge-test-guard.sh",
+      "sha256": "b87324466e49c8f8b4b620b129a54102c479d60ec7ab45f6cdee58cc57f3d322",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/CloseFundingAuthorization.t.sol",
+      "sha256": "63471e92c159f716225a04c9683d51a82e4a3cbe7b88f872fe1e03c48dee1083",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/RollupFraudHardening.t.sol",
+      "sha256": "e7cfc33e4932ee7c47e5ea63fb103ef82baa67f280405336e6be87510092f744",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/MleFinalizeE2E.t.sol",
+      "sha256": "7ac86f454aa835111fa5ae287278d2743eaee111383a04d8d163796273835256",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/RollupFinalizeDiagnostics.t.sol",
+      "sha256": "051edf17b59b35af518675c27f4979b778415487202950aa2173f70f2887531e",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/GenesisFinalizedRoot.t.sol",
+      "sha256": "e801def093eb39695473679b699e8c36bbd55fcea7ff80f78143ba9b71d0a141",
+      "role": "tooling"
+    },
+    {
+      "path": "contracts/test/CloseLifecycleHardening.t.sol",
+      "sha256": "059f2f0ca3e4c7d916ee29066c99f7301d5746923035b29f59ff00bf23aeaa89",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyAdmission.lean",
+      "sha256": "8b1aa744c4c7681fa6e236ed7ff07ec62086704b78412d987ea3e065787c2163",
+      "role": "model"
+    },
+    {
+      "path": "src/channel_credit_safety.rs",
+      "sha256": "eb5fd9e2f0e0f4d182598ce5888ae058b5623fa40b6bf06a620fb24a582b371a",
+      "role": "implementation"
+    },
+    {
+      "path": "src/bin/channel_member.rs",
+      "sha256": "996e85cfab19fdafdf5327d6c838d7d9c89446ddb8cd333689946d91277fa671",
+      "role": "implementation"
+    },
+    {
+      "path": "src/bin/channel_member/deposit_capacity.rs",
+      "sha256": "f6680b0819002c2cf336a36600cef95dcf4593b977e574f27dd6e4bb5454dad4",
+      "role": "implementation"
+    },
+    {
+      "path": "src/circuits/channel/state_update_verifier.rs",
+      "sha256": "e7a782e9814efe76b080c3d35769f04824244d6a735a0b9587ac08683b21338b",
+      "role": "implementation"
+    },
+    {
+      "path": "src/wallet_core.rs",
+      "sha256": "f02a1c608da688ce8e6b95ce44b09aed093ac30aa8c3e54e9923d7160d935889",
+      "role": "implementation"
+    },
+    {
+      "path": "src/common/channel.rs",
+      "sha256": "1fb8dfef97d0fb9faf975d88986203db075eae9334859f9714e6739fd368d235",
+      "role": "implementation"
+    },
+    {
+      "path": "src/common/balance_state.rs",
+      "sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
+      "role": "implementation"
+    },
+    {
+      "path": "src/regev/params.rs",
+      "sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyRecovery.lean",
+      "sha256": "77464122a8a532a62575f426c8b51d76d8004917383e317f2b0a1a9621d64646",
+      "role": "model"
+    },
+    {
+      "path": "api/lib/deposit-spend.js",
+      "sha256": "05ce7d9d3c7fac09ee96c76c8c5a7eae5252b90818e4bdd47fad6b8e01cbcc14",
+      "role": "implementation"
+    },
+    {
+      "path": "api/lib/cli.js",
+      "sha256": "39d07168147c625505538cfad88fea4a40c4b0ef28974f3d41fff252dbd959d4",
+      "role": "implementation"
+    },
+    {
+      "path": "node/delegate/signed-transaction-outbox.js",
+      "sha256": "6aceaedcc1f755c3f37ce922e4c3a263c575a6865b70fc23ecddcae7426a1217",
+      "role": "implementation"
+    },
+    {
+      "path": "node/common/l1-deposit-outbox.js",
+      "sha256": "b8ad9009be772811aab318f231d6d9ddcede53377e86061fe930058aa92cbc98",
+      "role": "implementation"
+    },
+    {
+      "path": "hosting/wallet/signature-release-ledger.mjs",
+      "sha256": "2648d117d0ded3380e1eece0429a5ae8a0fd55d850d39e01aba3f5b502cd8ff0",
+      "role": "implementation"
+    },
+    {
+      "path": "hosting/wallet/wallet-worker.js",
+      "sha256": "2cff87891d1f1cf5fa069796bd20b49bc95c78ffde7c143b0aa6d68bf43b3d46",
+      "role": "implementation"
+    },
+    {
+      "path": "src/bin/channel_member/deposit_recovery.rs",
+      "sha256": "aad7476047f29630b494d21d6962d63a4fda8d504f3f28915a1b231acbb24425",
+      "role": "implementation"
+    },
+    {
+      "path": "src/bin/channel_member/burn_recovery.rs",
+      "sha256": "047099cacd78a076d7bce0e1870918d5f6d0fd5b67fbe626d23ba1d5f7375bb6",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/architecture-audit/ChannelSafetyExit.lean",
+      "sha256": "db4e38bf23a4a70b4957e3e2af489e5fe7d97315ebd0540b5d90982a5b2265d9",
+      "role": "model"
+    },
+    {
+      "path": "src/circuits/channel/close_asset_backing_circuit.rs",
+      "sha256": "bd4bb49f55c03e3f7c4b716d335febd031f6c3f07af0ae3c6d82b82a55eb5333",
+      "role": "implementation"
+    },
+    {
+      "path": "src/public_close_prover.rs",
+      "sha256": "ab9555d2a8fdcc23ec6ce9ea43ad84270366792187356b8ac645ed1d699edad4",
+      "role": "implementation"
+    },
+    {
+      "path": "src/live_balance_service.rs",
+      "sha256": "1fe6f6f9a5eee15c23f7a4169501e474886ee589cc428831893f7415b123310b",
+      "role": "implementation"
+    },
+    {
+      "path": "src/public_close_publisher.rs",
+      "sha256": "1387f348b046ffc19ad6088d2cfd98cd541adaf3c903a9cfb1adbe2a174356fd",
+      "role": "implementation"
+    },
+    {
+      "path": "node/delegate/participant-close.js",
+      "sha256": "11c9e1333324eec693de345db241b1d073fdbbaef2d7ed2afc68c729db655971",
+      "role": "implementation"
+    },
+    {
+      "path": "node/delegate/public-close-publisher.js",
+      "sha256": "4906cfb9b2f65a192c65d78ae24d1414b3bfd682e277d9f225a1f132931d338f",
+      "role": "implementation"
+    },
+    {
+      "path": "src/wasm_wallet.rs",
+      "sha256": "9f53f0fd6c1b0d193f5c524b8739e675b5bbb8ff1c742ea0526f49132986ce75",
+      "role": "implementation"
+    },
+    {
+      "path": "api/lib/deposit-preflight.js",
+      "sha256": "1e5a35995d2e9887f9573022c2fa286aebdc169966d874d405d15483bea26cb2",
+      "role": "implementation"
+    },
+    {
+      "path": "api/lib/deposit-pipeline.js",
+      "sha256": "018c47f534b8606812d3e410787ca2c64d310199b17078c3f5c95dc9b3d612a3",
+      "role": "implementation"
+    },
+    {
+      "path": "src/bin/channel_member/inter_transfer_recovery_codec.rs",
+      "sha256": "5a3c047210a9ee8de8cff2cfa95aaac90ceaea3d67dc56a9356bdbf9ca0dddd6",
+      "role": "implementation"
+    }
+  ],
+  "theorem_checks": [
+    {
+      "project": "doc/architecture-audit",
+      "module": "ChannelSafetyCurrent",
+      "sources": [
+        "contracts/src/ChannelSettlementManager.sol",
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "contracts/src/CloseFundingMaterializer.sol",
+        "contracts/src/IntmaxRollup.sol",
+        "src/circuits/channel/close_pis.rs",
+        "src/constants.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/audit/lean-current-safety.md"
+      ],
+      "theorems": [
+        "ChannelSafetyCurrent.empty_safe",
+        "ChannelSafetyCurrent.step_preserves_safety",
+        "ChannelSafetyCurrent.trace_preserves_safety",
+        "ChannelSafetyCurrent.trace_caps",
+        "ChannelSafetyCurrent.step_credit_conservation",
+        "ChannelSafetyCurrent.step_token_conservation",
+        "ChannelSafetyCurrent.trace_credit_conservation",
+        "ChannelSafetyCurrent.trace_token_conservation",
+        "ChannelSafetyCurrent.trace_backing_conservation",
+        "ChannelSafetyCurrent.trace_recipient_conservation",
+        "ChannelSafetyCurrent.trace_total_paid_bounded",
+        "ChannelSafetyCurrent.trace_total_credited_bounded",
+        "ChannelSafetyCurrent.step_used_monotone",
+        "ChannelSafetyCurrent.trace_used_monotone",
+        "ChannelSafetyCurrent.step_spent_preserved",
+        "ChannelSafetyCurrent.step_no_payout_of_spent",
+        "ChannelSafetyCurrent.trace_no_payout_of_spent",
+        "ChannelSafetyCurrent.successful_payment_spent",
+        "ChannelSafetyCurrent.trace_payout_at_most_once",
+        "ChannelSafetyCurrent.registered_nullifier_cannot_be_registered_again",
+        "ChannelSafetyCurrent.empty_trace_payout_at_most_once",
+        "ChannelSafetyCurrent.failed_transfer_no_state_change",
+        "ChannelSafetyCurrent.pay_other_token_frame",
+        "ChannelSafetyCurrent.register_other_token_frame",
+        "ChannelSafetyCurrent.fund_other_token_frame",
+        "ChannelSafetyCurrent.pay_other_recipient_frame",
+        "ChannelSafetyCurrent.register_other_recipient_frame",
+        "ChannelSafetyCurrent.pay_other_nullifier_frame",
+        "ChannelSafetyCurrent.register_exact_record",
+        "ChannelSafetyCurrent.register_other_nullifier_frame",
+        "ChannelSafetyCurrent.pay_exact_record_and_amount",
+        "ChannelSafetyCurrent.funded_token_cannot_be_funded_again",
+        "ChannelSafetyCurrent.positive_fund_register_pay",
+        "ChannelSafetyCurrent.positive_accounting_result",
+        "ChannelSafetyCurrent.positive_two_records_failure_then_payment",
+        "ChannelSafetyCurrent.positive_other_record_survives",
+        "ChannelSafetyCurrent.lifecycle_request_success",
+        "ChannelSafetyCurrent.lifecycle_request_increments_counters",
+        "ChannelSafetyCurrent.lifecycle_submit_preserves_fences",
+        "ChannelSafetyCurrent.lifecycle_cancel_success",
+        "ChannelSafetyCurrent.lifecycle_cancel_advances_floor_preserves_generation",
+        "ChannelSafetyCurrent.lifecycle_cancel_strictly_decreases_nonce",
+        "ChannelSafetyCurrent.lifecycle_finalize_success",
+        "ChannelSafetyCurrent.lifecycle_finalize_preserves_fences",
+        "ChannelSafetyCurrent.lifecycle_call_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_step_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_run_fences_monotone",
+        "ChannelSafetyCurrent.lifecycle_failed_call_preserves_state",
+        "ChannelSafetyCurrent.lifecycle_request_rejects_stale_floor",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_stale_generation",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_stale_digest",
+        "ChannelSafetyCurrent.lifecycle_finalize_rejects_deadline_equality",
+        "ChannelSafetyCurrent.lifecycle_finalize_failed_tail_rolls_back",
+        "ChannelSafetyCurrent.lifecycle_cancel_rejects_consumed_version",
+        "ChannelSafetyCurrent.lifecycle_cancel_replay_rejected_after_trace",
+        "ChannelSafetyCurrent.lifecycle_old_request_rejected_after_cancel_trace",
+        "ChannelSafetyCurrent.lifecycle_old_finalize_rejected_after_new_request_trace",
+        "ChannelSafetyCurrent.lifecycle_newer_is_strict_lexicographic",
+        "ChannelSafetyCurrent.lifecycle_same_key_not_newer",
+        "ChannelSafetyCurrent.lifecycle_newer_transitive",
+        "ChannelSafetyCurrent.lifecycle_newer_asymmetric",
+        "ChannelSafetyCurrent.lifecycle_replacement_requires_newer",
+        "ChannelSafetyCurrent.lifecycle_closed_calls_reject",
+        "ChannelSafetyCurrent.lifecycle_closed_trace_unchanged",
+        "ChannelSafetyCurrent.lifecycle_finalized_state_unchanged_after_trace",
+        "ChannelSafetyCurrent.lifecycle_positive_request_cancel_request",
+        "ChannelSafetyCurrent.lifecycle_positive_nonce_restored_generation_advances",
+        "ChannelSafetyCurrent.lifecycle_positive_strict_replay_and_deadline_gates"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Contracts.CurrentVerification",
+      "sources": [
+        "contracts/src/IntmaxRollup.sol",
+        "contracts/src/BlobKZGVerifier.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/MleVerifierV2.sol",
+        "contracts/lib/polygon-plonky2/mle/contracts/src/CompactMleProofV2.sol",
+        "contracts/lib/polygon-plonky2/mle/src/verifier_v2.rs",
+        "src/utils/mle_prover.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/audit/lean-current-safety.md",
+        "doc/audit/zkp/README.md",
+        "doc/audit/zkp/SUMMARY.md"
+      ],
+      "theorems": [
+        "Zkp.Contracts.CurrentVerification.hashLimbs_length",
+        "Zkp.Contracts.CurrentVerification.hashLimbs_each_lt_u32",
+        "Zkp.Contracts.CurrentVerification.returned_pi_requires_full_core",
+        "Zkp.Contracts.CurrentVerification.fullVerify_requires_bound_authenticated_pi",
+        "Zkp.Contracts.CurrentVerification.finalize_success_checks",
+        "Zkp.Contracts.CurrentVerification.finalize_requires_da_and_full_verification",
+        "Zkp.Contracts.CurrentVerification.finalize_authenticated_pi_are_u32",
+        "Zkp.Contracts.CurrentVerification.no_finalize_without_fullVerify",
+        "Zkp.Contracts.CurrentVerification.proof_conviction_requires_exact_invalid_code",
+        "Zkp.Contracts.CurrentVerification.unknown_code_never_convicts",
+        "Zkp.Contracts.CurrentVerification.starved_and_piMismatch_never_convict",
+        "Zkp.Contracts.CurrentVerification.compact_body_invalid_requires_exact_failure",
+        "Zkp.Contracts.CurrentVerification.compact_body_never_returns_invalid",
+        "Zkp.Contracts.CurrentVerification.compact_invalid_requires_exact_failure",
+        "Zkp.Contracts.CurrentVerification.valid_proof_wrong_pi_is_nonconvicting",
+        "Zkp.Contracts.CurrentVerification.parent_invalid_requires_adapter_invalid",
+        "Zkp.Contracts.CurrentVerification.verifyFraud_conviction_requires_attested_invalid",
+        "Zkp.Contracts.CurrentVerification.proof_removal_requires_typed_conviction",
+        "Zkp.Contracts.CurrentVerification.step_height_nondecreasing",
+        "Zkp.Contracts.CurrentVerification.run_height_nondecreasing",
+        "Zkp.Contracts.CurrentVerification.step_finalized_roots_persist",
+        "Zkp.Contracts.CurrentVerification.run_finalized_roots_persist",
+        "Zkp.Contracts.CurrentVerification.step_receipt_success",
+        "Zkp.Contracts.CurrentVerification.run_receipt_success",
+        "Zkp.Contracts.CurrentVerification.step_root_provenance",
+        "Zkp.Contracts.CurrentVerification.run_root_provenance",
+        "Zkp.Contracts.CurrentVerification.newly_finalized_requires_verified_receipt",
+        "Zkp.Contracts.CurrentVerification.finalized_from_genesis_requires_verified_receipt",
+        "Zkp.Contracts.CurrentVerification.newly_finalized_requires_pinned_core",
+        "Zkp.Contracts.CurrentVerification.accepted_witness_only_conditionally",
+        "Zkp.Contracts.CurrentVerification.ordinary_finalization_is_possible",
+        "Zkp.Contracts.CurrentVerification.empty_trace_has_no_receipt",
+        "Zkp.Contracts.CurrentVerification.trusted_initial_root_needs_no_receipt",
+        "Zkp.Contracts.CurrentVerification.ordinary_valid_proof_is_not_fraud",
+        "Zkp.Contracts.CurrentVerification.timeout_removal_is_separate_policy"
+      ]
+    },
+    {
+      "project": "doc/architecture-audit",
+      "module": "ChannelSafetyAdmission",
+      "theorems": [
+        "ChannelSafetyAdmission.clip_sound",
+        "ChannelSafetyAdmission.evidence_not_zero",
+        "ChannelSafetyAdmission.sound_mono",
+        "ChannelSafetyAdmission.addBounds_sound",
+        "ChannelSafetyAdmission.tighter_sound",
+        "ChannelSafetyAdmission.chooseOwned_sound",
+        "ChannelSafetyAdmission.owned_exact_admitted",
+        "ChannelSafetyAdmission.admitted_bound_sound",
+        "ChannelSafetyAdmission.changed_admission_is_u64",
+        "ChannelSafetyAdmission.all_cells_range_preserved",
+        "ChannelSafetyAdmission.unknown_unchanged_not_blocked",
+        "ChannelSafetyAdmission.unknown_changed_requires_evidence",
+        "ChannelSafetyAdmission.small_fund_fastpath",
+        "ChannelSafetyAdmission.known_bound_no_global_cap",
+        "ChannelSafetyAdmission.sumBounds_sound",
+        "ChannelSafetyAdmission.token_accounting_pool",
+        "ChannelSafetyAdmission.pooled_evidence_sound",
+        "ChannelSafetyAdmission.accounted_changed_cell_is_u64",
+        "ChannelSafetyAdmission.bootstrap_sound",
+        "ChannelSafetyAdmission.public_credit_preflight_safe",
+        "ChannelSafetyAdmission.reserve_from_public_preflight",
+        "ChannelSafetyAdmission.update_from_reserved_preflight",
+        "ChannelSafetyAdmission.import_converts_reserved_capacity",
+        "ChannelSafetyAdmission.unused_release_requires_committed_exact_wal",
+        "ChannelSafetyAdmission.unused_release_blocked_before_completion",
+        "ChannelSafetyAdmission.unused_release_preserves_all_balances",
+        "ChannelSafetyAdmission.unused_release_removes_exact_reserved_amount",
+        "ChannelSafetyAdmission.capacity_step_preserves",
+        "ChannelSafetyAdmission.capacity_trace_preserves",
+        "ChannelSafetyAdmission.from_empty_every_cell_has_room",
+        "ChannelSafetyAdmission.spend_does_not_release",
+        "ChannelSafetyAdmission.other_cell_framed",
+        "ChannelSafetyAdmission.other_token_framed",
+        "ChannelSafetyAdmission.example_inclusive_u64_limit",
+        "ChannelSafetyAdmission.example_checked_add_above_limit",
+        "ChannelSafetyAdmission.example_known_bound_with_wide_fund",
+        "ChannelSafetyAdmission.example_unknown_unchanged_with_wide_fund",
+        "ChannelSafetyAdmission.example_owned_opening_with_wide_fund",
+        "ChannelSafetyAdmission.example_second_phase_allocation",
+        "ChannelSafetyAdmission.example_public_credit_with_wide_fund",
+        "ChannelSafetyAdmission.example_public_credit_exceeds_cell_capacity",
+        "ChannelSafetyAdmission.example_reserve_spend_import_trace",
+        "ChannelSafetyAdmission.example_selected_import_then_unused_release",
+        "ChannelSafetyAdmission.example_unused_candidate_is_uncredited_and_unreserved"
+      ],
+      "sources": [
+        "src/channel_credit_safety.rs",
+        "src/bin/channel_member.rs",
+        "src/bin/channel_member/deposit_capacity.rs",
+        "src/circuits/channel/state_update_verifier.rs",
+        "src/wallet_core.rs",
+        "src/constants.rs",
+        "src/common/channel.rs",
+        "src/common/balance_state.rs",
+        "src/regev/params.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/audit/lean-current-safety.md"
+      ]
+    },
+    {
+      "project": "doc/architecture-audit",
+      "module": "ChannelSafetyRecovery",
+      "theorems": [
+        "ChannelSafetyRecovery.put_retains",
+        "ChannelSafetyRecovery.outbox_step_extends",
+        "ChannelSafetyRecovery.outbox_trace_extends",
+        "ChannelSafetyRecovery.empty_outbox_safe",
+        "ChannelSafetyRecovery.outbox_step_safe",
+        "ChannelSafetyRecovery.outbox_trace_safe",
+        "ChannelSafetyRecovery.broadcast_record_survives_trace",
+        "ChannelSafetyRecovery.automatic_rebroadcast_is_byte_identical",
+        "ChannelSafetyRecovery.broadcast_has_exact_durable_intent",
+        "ChannelSafetyRecovery.terminal_tombstone_survives_restart_and_retry",
+        "ChannelSafetyRecovery.raw_backed_intent_survives_trace",
+        "ChannelSafetyRecovery.raw_backed_reservation_cannot_be_abandoned",
+        "ChannelSafetyRecovery.terminal_cannot_broadcast",
+        "ChannelSafetyRecovery.retry_requires_original_intent",
+        "ChannelSafetyRecovery.crash_retains_all_outbox_durable_records",
+        "ChannelSafetyRecovery.signature_retry_returns_original_bytes",
+        "ChannelSafetyRecovery.signature_conflicting_intent_refused",
+        "ChannelSafetyRecovery.signature_remember_records_and_retains",
+        "ChannelSafetyRecovery.signature_step_safe_and_monotone",
+        "ChannelSafetyRecovery.signature_trace_release_is_durable",
+        "ChannelSafetyRecovery.released_signatures_cannot_equivocate",
+        "ChannelSafetyRecovery.crash_retains_signature_ledger",
+        "ChannelSafetyRecovery.initial_publication_safe",
+        "ChannelSafetyRecovery.publication_step_safe",
+        "ChannelSafetyRecovery.publication_trace_retains_recovery_until_outputs_durable",
+        "ChannelSafetyRecovery.recovery_finishes_exact_outputs",
+        "ChannelSafetyRecovery.recovery_is_idempotent",
+        "ChannelSafetyRecovery.unrelated_head_cannot_be_overwritten_by_recovery",
+        "ChannelSafetyRecovery.example_outbox_crash_retry_and_completion",
+        "ChannelSafetyRecovery.example_initial_reservation_abandon_then_completion",
+        "ChannelSafetyRecovery.example_signature_restart_reuses_original_bytes",
+        "ChannelSafetyRecovery.example_publication_crash_then_completion",
+        "ChannelSafetyRecovery.example_before_and_after_head_recover_to_same_outputs"
+      ],
+      "sources": [
+        "api/lib/deposit-spend.js",
+        "api/lib/cli.js",
+        "node/delegate/signed-transaction-outbox.js",
+        "node/common/l1-deposit-outbox.js",
+        "hosting/wallet/signature-release-ledger.mjs",
+        "hosting/wallet/wallet-worker.js",
+        "src/bin/channel_member.rs",
+        "src/bin/channel_member/deposit_recovery.rs",
+        "src/bin/channel_member/burn_recovery.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/audit/lean-current-safety.md"
+      ]
+    },
+    {
+      "project": "doc/architecture-audit",
+      "module": "ChannelSafetyExit",
+      "theorems": [
+        "ChannelSafetyExit.put_at",
+        "ChannelSafetyExit.put_other",
+        "ChannelSafetyExit.put_restore",
+        "ChannelSafetyExit.both_burn_floors_are_enforced",
+        "ChannelSafetyExit.same_coordinate_requires_exact_identity",
+        "ChannelSafetyExit.same_coordinate_has_one_whole_vector",
+        "ChannelSafetyExit.strictly_newer_clears_floor",
+        "ChannelSafetyExit.finalization_never_splices_components",
+        "ChannelSafetyExit.admitted_finalization_keeps_both_floors",
+        "ChannelSafetyExit.post_frames_other_channel",
+        "ChannelSafetyExit.unjournaled_rollback_is_stutter",
+        "ChannelSafetyExit.rollback_requires_channel_tip",
+        "ChannelSafetyExit.post_then_rollback_exact",
+        "ChannelSafetyExit.rollbackMany_append",
+        "ChannelSafetyExit.descending_rollback_restores_journal",
+        "ChannelSafetyExit.frozen_bound_channel_cannot_post",
+        "ChannelSafetyExit.exited_bound_channel_cannot_post",
+        "ChannelSafetyExit.freeze_then_exact_thaw",
+        "ChannelSafetyExit.old_generation_cannot_thaw",
+        "ChannelSafetyExit.failed_outer_call_restores_everything",
+        "ChannelSafetyExit.atomic_failure_discards_partial_vector",
+        "ChannelSafetyExit.materialization_uses_exact_finalized_vector",
+        "ChannelSafetyExit.materialization_frames_other_manager",
+        "ChannelSafetyExit.materialization_frames_other_channel",
+        "ChannelSafetyExit.escrow_to_credit_conserved",
+        "ChannelSafetyExit.materialized_identity_is_exact",
+        "ChannelSafetyExit.exit_identity_preserved_by_step",
+        "ChannelSafetyExit.exit_identity_preserved_by_trace",
+        "ChannelSafetyExit.materialized_event_is_fresh",
+        "ChannelSafetyExit.successful_materialization_is_fresh",
+        "ChannelSafetyExit.no_second_materialization_after_any_trace",
+        "ChannelSafetyExit.example_exact_both_burn_floors",
+        "ChannelSafetyExit.example_newer_whole_state_admitted",
+        "ChannelSafetyExit.example_finalize_two_token_vector",
+        "ChannelSafetyExit.example_interleaved_post_trace",
+        "ChannelSafetyExit.example_interleaved_reverse_rollback",
+        "ChannelSafetyExit.example_whole_vector_materialization_admitted",
+        "ChannelSafetyExit.example_whole_vector_credit_and_escrow",
+        "ChannelSafetyExit.example_successful_materialization_trace"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementManager.sol",
+        "contracts/src/CloseFundingMaterializer.sol",
+        "contracts/src/IntmaxRollup.sol",
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "src/circuits/channel/close_asset_backing_circuit.rs",
+        "src/common/channel.rs",
+        "src/public_close_prover.rs",
+        "src/live_balance_service.rs",
+        "doc/architecture-audit/abstract2.md",
+        "doc/architecture-audit/abstract2-1.md",
+        "doc/architecture-audit/detail2.md",
+        "doc/architecture-audit/detail2-implementation-notes.md",
+        "doc/audit/lean-current-safety.md"
+      ]
+    }
+  ]
+}

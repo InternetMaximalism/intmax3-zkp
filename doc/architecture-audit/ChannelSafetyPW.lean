@@ -1,6 +1,12 @@
 /-
 # ChannelSafetyPW.lean — partial withdrawal, channel-state side (audit25-08-2026 Part 3 V3)
 
+HISTORICAL ABSTRACT LIFECYCLE (2026-09-05 alignment): cancel-as-fund-restoration
+and the unconditional abstract burn/finalize/claim witness below are not a
+translation of current Manager burn high-water accounting or proof-backed
+terminal funding. They do not establish current exit availability. See
+`doc/audit/lean-current-safety.md`; the current payout slice is separate.
+
 The implementation Lean models partial withdrawal ONLY as an L1 gate
 (`Contracts/ChannelSettlementManager.lean:125-166`: submit requires a close-shaped proof, finalize
 mints only pending, chain-key single-use) — and its `cancelPartial` is DEFINED WITHOUT A THEOREM.

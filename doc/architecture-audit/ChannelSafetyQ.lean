@@ -1,6 +1,11 @@
 /-
 # ChannelSafetyQ.lean — Machine-checked safety for detail2 §Q (dynamic co-signer membership)
 
+HISTORICAL ONLY (2026-09-05 alignment): direct MSU was retired on 2026-09-02.
+The current Manager has no direct-MSU entry point. The positive theorems below
+describe the retired prototype, not a supported production capability; see
+`doc/audit/lean-current-safety.md`. Definitions are retained for historical review.
+
 Formalizes `detail2.md §Q`: adding a co-signer and rotating one's own signing key on a live
 channel, authorized by the PREVIOUS set's N-of-N over the IMMS digest plus the affected party's
 own consent (IMKR for rotation, IMJC for a joiner). This is the channel-layer (stage Q1) model —

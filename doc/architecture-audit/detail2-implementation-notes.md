@@ -1,17 +1,154 @@
-# detail2.md Implementation Notes — Approved Deviations & Outcomes
+# detail2.md Implementation Notes — Current dispositions and historical outcomes
 
-Status: implementation of the detail2.md (SIS → Regev) migration is complete on branch
-`enshrined-paymentchannel` (phases P0–P9). This document records every approved deviation
-from the detail2.md spec text, the rationale, and the concrete implementation outcomes,
-with section references into `doc/architecture-audit/detail2.md`.
+> **Current alignment: 2026-09-06.** Runtime parent `05ec7ae` includes the node/pre-sign repairs
+> `b5bafb7` and uses MLE submodule `6cefc6ac` (wire v3, target 105 / inverse-rate 6). This is a
+> documentation/source alignment, not release approval. The earlier Lean baseline `3e2d45c` is
+> extended by `ChannelSafetyAdmission`, `ChannelSafetyRecovery` and `ChannelSafetyExit`;
+> [the current Lean scope](../audit/lean-current-safety.md) records their conditional results.
 
-All deviations below were surfaced during implementation, reviewed adversarially, and
-approved before merging. The spec file itself (`doc/architecture-audit/detail2.md`) is kept
-as-written; this file is the authoritative delta.
+## Current dispositions (2026-09-06)
+
+The [current implementation contract in detail2.md](./detail2.md#current-implementation-contract-2026-09-06)
+is the current reference. The following table resolves the major stale claims in the D1–D16
+history without erasing why those changes were originally made. “Approved,” “SOUND,” “GO,”
+“complete,” and the pass counts in the archive are reports about their dated revisions, not
+current whole-system security evidence. A historical source path or line number is not an API.
+
+| Historical narrative | Current disposition / inspected source |
+|---|---|
+| D1/D3: n=128, single-token balance rows, approximately-120× noise margin | [`regev/params.rs`](../../src/regev/params.rs): n=2048, eta=2, BabyBear q, binary encoding of 64-bit amounts, 64-add policy, approximately-7.5× worst-case noise margin. [`BalanceState`](../../src/common/balance_state.rs): 1024 rows × 10 tokens, with separate per-cell u64 admission. Old noise figures do not apply to the new n |
+| D4/D5/D8: SPHINCS+ then Goldilocks preimage signatures | [`wallet_core.rs`](../../src/wallet_core.rs): native Falcon/Poseidon-H2P signatures; [`FalconBatchAggCircuit`](../../src/falcon_sig/batch.rs) is the current close proving context. BabyBear `pk_b` transaction authorization remains separate. Old primitive-strength claims are not inherited |
+| D6/D11–D13: sixteen close signers / one membership tree | [`constants.rs`](../../src/constants.rs): sig-cluster cap 8; registered tree height 3; live wallet and balance trees height 10; distinctness height 4; fixed IMCM width 66 u32 words. These different roots must not be conflated |
+| D9/D12: `delegate_count: u8`, deployer-supplied delegate payout maps | [`BalanceState`](../../src/common/balance_state.rs) and [`ChannelRecord`](../../src/common/channel.rs): u16 delegate count, u8 member count, active total ≤1024. The claim opens the signed leaf-bound recipient and Regev digest. A Manager binds the frozen live settlement snapshot/count; it is not a mutable delegate registry |
+| D14: single-token 26-element H1 / 18-element leaf | Current multi-token domains IMB2/IMS2 use a 37-element header / 104-element leaf. The recipient occupies five u32 limbs; ten ciphertext digests and counters are committed even when some tokens are unused |
+| D16: multi-token pending; close 103, claim 50, post-close 56 | Multi-token representation is present. Current lengths are close 103, claim 50, cancel 29, backing 26; retained historical post-close PI is 57, but its extra-credit entry point is disabled. Fixed ten-token U256 funds are not ten u64 channel-fund caps |
+| D10: no finalized-root check needed; terminal burn supplies close funding | [`ChannelSettlementManager._checkCloseProof`](../../contracts/src/ChannelSettlementManager.sol) checks the signed fund root is finalized and requires exact whole-vector backing attestation. [`CloseFundingMaterializer.materializeSignedHead`](../../contracts/src/CloseFundingMaterializer.sol) consumes existing H plus backing without a new terminal child. Cooperative close funding stays retired |
+| Earlier per-token V/B reconciliation | Finalize one complete admissible signed state and require one matching full-B vector; do not splice per-token values across V/B or burn generations. [`close_asset_backing_circuit.rs`](../../src/circuits/channel/close_asset_backing_circuit.rs) reconstructs the complete asset tree and exposes the exact channel/chain/TFD/root/anchor statement |
+| D6: legacy tuple MLE / historical regenerated fixtures certify the current wrapper | [`mle_prover.rs`](../../src/utils/mle_prover.rs) and the [current submodule guide](../../contracts/lib/polygon-plonky2/mle/README.md): wire v3 / MLEWHIR3, target105/rate6/PoW22/fold4. Current pinned adapters store their immutable configuration in code. Regenerate and pin the entire proof/VK/config/compact/deployment cohort; old target133/rate4 fixtures are not current evidence |
+| Older close handoffs: runtime is chain31337-only | [`IntmaxRollup.releaseRuntime`](../../contracts/src/IntmaxRollup.sol) pins runtime to its deployment chain and the constructor-pinned verifier chain IDs. 31337-only finality/short-window exceptions and devnet-only convenience APIs are narrower, separate policies. Public-chain opt-in is not release approval |
+| Direct member-set mutation / historical `ChannelSafetyQ` | `deprecated-msu` is historical only; production CLI/service reject direct MSU and the Manager has no direct mutation selector. [Channel-change MSU](../tasks/channel-change-msu.md) is an unimplemented migration design, not permission to reactivate the old route |
+
+### Admission and recovery added after D16
+
+The [node remediation record](../audit/audit05-09-2026-node-presign-remediation.md) documents the
+bounded repair cohort; the implementations below, not old “full stack green” statements, define
+the current behavior.
+
+- **Before initial funds:** [`channel_member`](../../src/bin/channel_member.rs) requires an explicit
+  recoverable `CLI_RECIPIENT_SLOT_<slot>` for every controlled production cosigner before
+  `setup-backing`/genesis. Only insecure test-key mode permits synthetic defaults. The
+  [setup procedure](../tasks/node-presign-recipient-setup.md) requires operational EOA/smart-wallet
+  recovery checks; configuration does not establish private-key possession and does not repair an
+  already-signed recipient.
+- **Before signing:** [`wallet_core`](../../src/wallet_core.rs) builders return unsigned state
+  proposals while retaining A11 transaction authorization. Trusted transition verification checks
+  identity, metadata, canonical exit keys/ciphertexts and counters; private
+  [`ChannelCreditBounds`](../../src/channel_credit_safety.rs) then establishes changed-cell u64
+  bounds under authenticated conservation. Unknown is not zero, refresh is not itself range
+  evidence, and an unrelated unknown cell need not freeze the whole channel. No extra proof or
+  public input is introduced by these host checks.
+- **No signature before durable exit material:** native ordinary H2=0 value-preserving successors
+  may reuse a verified durable predecessor kit only when the complete channel/settled-chain/TFD
+  key is unchanged. Asset/composition changes prepare and fsync the successor kit before signature
+  release. Pure destination credits are the explicit exception: the old head's kit remains current
+  because no destination block was posted; the new destination head stays kit-pending until its
+  exact kit is installed, blocking further H2=0 signatures. See
+  [`enforce_exit_kit_before_signature_release`](../../src/bin/channel_member.rs) and
+  [pre-sign exit kits](../docs/pre-sign-exit-kit.md); that runbook's old schema-5 note is superseded
+  by current private schema **6**.
+- **Signature replay:** native predecessor decisions bind exact successor/purpose/identity and
+  replay exact Falcon bytes. The [browser worker ledger](../../hosting/wallet/signature-release-ledger.mjs)
+  holds an own member signature inside the worker until strict IndexedDB `readwrite` completion,
+  refuses a sibling, and returns the saved exact result on retry. It preserves lossless u64 state
+  text and does not require a database for unsigned delegate sends. Same-origin/profile durable
+  storage is an assumption; deleted/rolled-back history and independent profiles are not repaired.
+- **Before an API L1 deposit:** [preflight](../../api/lib/deposit-preflight.js) resolves a rejoin's
+  exact original pkG/pkB/Regev/recipient slot and uses native amount/token/add-count/range admission.
+  [Capacity reservations](../../src/bin/channel_member/deposit_capacity.rs) retain room for all
+  pending candidate credits. The trusted service's rotating deposit recipient is journal-bound,
+  distinct from the leaf's exit address, and available to native import only through the private
+  exact-hash reservation. Request ID reuse with changed intent is refused.
+- **Deposit retry:** [operation journal](../../api/lib/deposit-spend.js) and
+  [L1 outbox](../../node/common/l1-deposit-outbox.js) preserve one intent/raw transaction/hash.
+  Broadcast follows raw-byte fsync; ambiguous failure does not mean “not sent.” The
+  [import WAL](../../src/bin/channel_member/deposit_recovery.rs) records both signed successor
+  states and the result before adoption; completion receipts/tombstones prevent a second credit.
+  A same-amount new payment requires a new request ID.
+- **Burn and inter-channel retry:** [burn WAL](../../src/bin/channel_member/burn_recovery.rs) binds
+  the head and both burn result files; APIs recover before reading those files. Inter-channel
+  commits hold both channel locks, refuse unrecovered destination work before source signing, and
+  use B's own kit/VD/backing directory. Writer **v2** of the
+  [inter WAL codec](../../src/bin/channel_member/inter_transfer_recovery_codec.rs) hashes stored
+  JSON before typed decoding; v1 requires its original compact bytes/checksum. The destination
+  `incoming_inter_transfer_recovery.json` preserves immutable source inputs so a later source
+  operation cannot remove the information required to finish the already-signed credit.
+- **Before a new close freeze:** [Node publisher](../../node/delegate/public-close-publisher.js)
+  `checkReadiness` reuses `advance`'s prepared bundle; the
+  [native read-only check](../../src/public_close_publisher.rs) verifies exact head, independently
+  pinned deployment/materializer/config, roots, anchor, finality and active era without signing or
+  creating a transaction journal. Existing raw-request recovery does not demand a new readiness
+  check. Attest/submit/finalize/materialize and semantic race adoption remain journaled; readiness
+  is not an atomic reservation against intervening L1 transactions.
+
+### Proving location: policy versus implemented export
+
+[The server-only policy](../docs/proving-boundaries.md) applies to Plonky2 and derived MLE/WHIR
+proofs, including withdrawal claims. Browser/participant-side Regev Plonky3 proofs and native
+Falcon signing are different operations. The old detail2 statement that members never sign in a
+browser is not current: explicit `wallet_sign_state`/`wallet_cosign` exist under the worker ledger.
+They still reject unsupported asset/composition-changing browser co-signs without native kit
+admission.
+
+**Open implementation-policy mismatch:** [`wasm_wallet::wallet_withdrawal_claim`](../../src/wasm_wallet.rs)
+still constructs `WithdrawalClaimProver`, calls `prove` and `prove_mle`, and is exposed by
+[`wallet-worker.js`](../../hosting/wallet/wallet-worker.js). This must be moved behind the intended
+server/delegate boundary with an appropriate private-witness interface; this documentation sync
+does not remove it, expose the Regev secret, or assert that the shipped browser already satisfies
+the no-Plonky2-proving policy.
+
+### Current proof and release scope
+
+The current finalization/fraud model and `ChannelSafetyCurrent` accounting/lifecycle slices remain
+conditional interface models. `ChannelSafetyAdmission`, `ChannelSafetyRecovery` and
+`ChannelSafetyExit` extend this to admission, durable recovery and exact-vector exit/history;
+their names alone are not claims of proved runtime refinement or unconditional exit.
+The dated scope report records actual validation separately. In particular, cryptographic
+soundness, correct trusted VK/setup, honest-member checking, private-store nonrollback, exact
+external transfer observations and canonical chain/finality remain explicit assumptions or
+separate review obligations. The archived D1–D16 Lean/test claims do not discharge them for `05ec7ae`
+and `6cefc6ac`.
+
+Do **not** mark these as complete:
+
+- ordinary PW automatically arranging/reusing exact backing attestation before submit;
+- watcher classification of required / proven-unrelated / unresolved deposits across current and
+  historical recipient authority; no generic handler-error or RPC/reorg-based cursor skipping;
+- full browser durability + real daemon + L1 posting/finality + latest-H exit/claim acceptance,
+  including multi-token and interrupted recovery, and current host/persistence performance;
+- the browser proving-policy mismatch above, external cryptographic/Fiat–Shamir/composition review,
+  actual source-to-model refinement and complete protocol composition, and runtime acceptance evidence.
+
+Existing bad recipients, over-range balances, duplicate exit keys or missing historical kits are
+not silently repaired. Preserve security ledgers, signed-state history, exit-kit archives,
+reservations, raw outboxes and recovery sidecars consistently; do not reset/expire them to turn a
+refusal into apparent success. The new checks may conservatively refuse a valid credit when its
+private range evidence is unavailable. No whole-system 128-bit security or unconditional exit
+liveness claim follows from target105/rate6 or this documentation update.
+
+## Historical D1–D16 engineering record (non-normative)
+
+The remaining text records the original SIS→Regev migration and its later approved deviations
+on the branches and dates named there. The original P0–P9 completion and subsequent phase results
+are historical outcomes. They are preserved for rationale; this archive is no longer an
+authoritative delta over the current section of detail2.md. Old commands, fixed fixtures, status
+lists and numeric schemas must be checked against the current source before use.
 
 ---
 
 ## D1 — Amount encoding: 1 bit/coefficient, not §B-1's "8 bits × 8 coefficients"
+
+> Binary amount encoding survives; the n=128 parameter and noise-margin figures in this dated
+> record do not. Current n=2048 and independent per-cell u64 admission are specified above.
 
 **Spec (§B-1):** encode a 64-bit amount as 8 base-256 digits across 8 polynomial
 coefficients (8 bits per coefficient, plaintext modulus t = 256).
@@ -475,6 +612,9 @@ airtight.
 
 ## D8 — SPHINCS+ → two-key Poseidon-preimage ZK signature (branch `paymentchannel-delegate`, 2026-06-15)
 
+> Historical Goldilocks scheme: superseded by Falcon/Poseidon-H2P. Its old 256-bit-preimage /
+> quantum-strength discussion is not a current system-security claim. The BabyBear A11 role remains.
+
 **Context (user directive):** replace the SPHINCS+ (Poseidon) member signatures — which §B-4 lists as
 "Existing / No change" and which D4/D5 use — with a ZK-friendly **Poseidon-preimage signature**
 verified only inside ZK proofs, and remove SPHINCS+ entirely. This **supersedes** the SPHINCS+ parts of
@@ -567,6 +707,9 @@ production verification must use `default_config` (84 queries), not `test_config
 
 ## D9 — Delegate account (send-only participant; branch `real-delegate-paymentchannel`, 2026-06-16)
 
+> Historical layout/registry checkpoint. Current delegate count is u16; current payout authority
+> is the signed H1 leaf, not the constructor-asserted delegate binding discussed below.
+
 **Spec:** detail2.md §L. **Threat model + adversarial review:** `doc/tasks/delegate-account-threat-model.md`
 (DA1–DA6) — independent security-review agent: **GO**, no CRITICAL/HIGH; all DA1–DA6 blocked or
 accepted-as-designed. **abstract2.md needs a new section** (the original is fixed at 3 co-signing members).
@@ -624,6 +767,10 @@ Demo: 3 CLI co-signing members + browsers as send-only delegates (`channel_membe
 `wallet-live.html`).
 
 ## D10 — A-3 close lifecycle (close / settle / withdraw / claim) + C2/C3 disable (2026-06)
+
+> Historical rationale. The no-root-check and terminal-burn assumptions below are superseded by
+> current finalized-root admission, exact backing attestation and signer-independent full-B
+> materialization. C2/C3 and the extra-credit post-close entry remain disabled.
 
 Master: `doc/tasks/a3-close-lifecycle-spec.md` / `doc/tasks/a3-impl-todo.md`. The L1 exit lifecycle is now wired
 end to end from the CLI (`channel_member close|settle|withdraw|claim`) + relay (`/api/close|settle|withdraw|claim`).

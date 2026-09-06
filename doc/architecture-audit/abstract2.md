@@ -1,4 +1,141 @@
-# abstract2 — Minimal Specification and Security Mechanisms (Lattice version)
+# abstract2 — Current confidential-channel specification and design history
+
+> **Synchronized 2026-09-06:** runtime parent `05ec7ae` (node fixes `b5bafb7`),
+> MLE submodule `6cefc6ac`, wire v3 / target 105 / inverse-rate 6.
+> The current sections here, in [abstract2-1](./abstract2-1.md), and in
+> [detail2](./detail2.md) supersede the explicitly historical sections below.
+> This is a reviewed specification, not certification of an on-chain deployment.
+
+## Current specification (2026-09-06)
+
+### Trust and the property to protect
+
+A channel's sig-cluster has **2–8 co-signers**; delegates do not co-sign channel states.
+Members plus delegates occupy at most **1024 balance slots**, with at most **10 registered
+tokens**. N-of-N means all registered sig-cluster members, not all balance participants.
+At least one honest co-signer must authenticate and validate each proposed transition before
+releasing its signature. Fully colluding co-signers redistributing their **own channel's**
+funds is an accepted trust assumption, not a violation of the intended model. Authority over
+one channel does not authorize taking another channel's backing.
+
+Protect against unauthorized transitions, repeated spending, accidental overflow or loss of
+claimability, recipient substitution, and crash/retry causing a second payment or conflicting
+signature. Distinguish safety from availability: refusing an uncheckable transition protects
+funds but does not establish eventual service. An honest signer may itself refuse conservatively
+when private range evidence or required exit material is unavailable.
+
+Sources: [constants](../../src/constants.rs), [channel types](../../src/common/channel.rs),
+[balance state](../../src/common/balance_state.rs),
+[admission implementation](../../src/channel_credit_safety.rs).
+
+### Current state and authentication
+
+Each cell is a Regev ciphertext representing a **u64** amount. The aggregate token-fund vector
+uses **U256[10]**, not a global u64 cap. The signed state authenticates the registry, participants'
+leaf-bound recipients/exit keys, ciphertexts, per-cell refresh counters, settled transaction
+chain, epoch/version, and operation metadata. The IMCH signing preimage binds H1 and H2 with its
+channel context; `hash(H1,H2)` in historical diagrams is shorthand, not the actual wire format.
+H2 is zero for an intra-channel update and nonzero for the sender small-block commitment.
+
+Signing identity is native Falcon-512/Poseidon-H2P (`pk_g`); BabyBear `pk_b` sender authorization
+and Regev balance/exit keys are distinct. An Ethereum exit recipient is not a synonym for a
+Falcon public key. A delegate's exit recipient is authenticated by its signed balance leaf.
+Current production setup requires an explicit usable recipient for every controlled member,
+including zero-funded members. Configuration validity does not prove possession of its key.
+
+Regev uses n=2048, q=2,013,265,921, eta=2 and binary encoding of the 64-bit amount under plaintext
+modulus 256. The **64 homomorphic-credit** budget and the **u64 cumulative amount** limit are
+different checks; neither replaces the other. Spend/refresh proofs and checked operations
+must follow [the current transition implementation](../../src/wallet_core.rs), not the archived
+negative-ciphertext-delta sketches. Exact schemas and widths are in [detail2](./detail2.md).
+
+### Admission and durable release
+
+Proposal construction is not permission to sign or spend. Authenticate the trusted predecessor,
+record, operation proof/authorization, counters, slot/key/recipient structure and token registry;
+then validate affected-cell range and reserved deposit capacity. Signer-private conservative
+bounds may be unknown. Unknown is not zero, and an unchanged unknown cell need not prevent an
+unrelated valid update. An affected unknown cell requires enough authenticated evidence or an
+exact own-key opening to establish safety.
+
+Before an externally funded deposit, reserve capacity for the exact intent and candidate
+recipient slots, then durably record the exact signed L1 transaction before broadcast. An exact
+retry must recover the same operation/bytes; it must not pay again under a fresh nonce merely
+because the caller timed out. Completed operation records remain replay tombstones.
+
+Persist the channel signature decision before releasing it externally. The same predecessor
+and intent may return the saved signature; a sibling successor is refused. Native persistence
+and the browser worker's strict IndexedDB release fence are distinct implementations of this
+boundary. Recovery must preserve the head, signing/replay ledger, exit kit, raw outbox and
+reservation consistently. Storage rollback, key-only recovery or a second uncoordinated signer
+instance is not made safe by the local ledger.
+
+Sources: [native member](../../src/bin/channel_member.rs),
+[deposit capacity](../../src/bin/channel_member/deposit_capacity.rs),
+[deposit spending](../../api/lib/deposit-spend.js),
+[browser signature release](../../hosting/wallet/signature-release-ledger.mjs).
+
+### Exit requirement: the last signed head, no new channel signature
+
+Let H be the latest available N-of-N signed state. **H plus its retained matching exit kit must
+support L1 exit without collecting an additional channel signature.** The kit provides the
+Balance and full-vector CloseAssetBacking proof material and exact deployment/config linkage.
+The public producer uses the pinned compact-proof route; it does not create a fresh terminal
+N-of-N child. Public transaction publication still requires gas and a transaction signer.
+
+Request the participant-authorized freeze, attest the exact backing proof, submit the whole
+signed close head, finalize after the guarded deadline, materialize its complete fund vector,
+and register/pay proof-bound claims. Request generation, canonical close identity, finalized
+anchors and both authorized/pending burn high-water marks are rechecked on chain. Cancellation
+restores the freeze era only for the matching generation; it does not reset the replay fences.
+
+If B is an authenticated burn high-water head, an older candidate V cannot be selected. Use
+**B as a whole** (same ordering key requires the same close identity), or one strictly newer
+complete admissible head. Never choose per-token min/max of V and B. Backing binds
+`(channel_id, settled_tx_chain, token_funds_digest)` for the complete canonical registry/vector.
+The proof's finalized backing root may be later than H's finalized fund root; they are not
+interchangeable. Channel-scoped freeze/history and one-shot materialization constrain use of
+pooled escrow. A pooled balance check by itself is not proof of rightful channel ownership.
+
+Claims bind participant/recipient, token, amount and nullifier. One successful claim consumes
+only that claim record; another record for the same recipient must remain payable. Backing
+pulls and ERC-20 payouts require exact observed balance deltas; native payouts require a
+successful call transferring the recorded amount. Failures revert the transaction. These
+guarantees depend on supported token semantics and EVM atomicity.
+
+Sources: [public close producer](../../src/public_close_prover.rs),
+[close backing circuit](../../src/circuits/channel/close_asset_backing_circuit.rs),
+[Manager](../../contracts/src/ChannelSettlementManager.sol),
+[materializer](../../contracts/src/CloseFundingMaterializer.sol).
+
+### Current exclusions and proof boundary
+
+Direct MSU is retired. The future task is unanimous close, creation of a new channel, and
+explicit transfer of all assets/commitments; no partially atomic live-membership replacement
+may be advertised as safe. Historical late-balance and extra post-close-credit lanes are not
+current recovery guarantees. Runtime verification/value boundaries use the deployment's pinned
+chain ID, not a universal 31337-only rule; legacy test-only paths remain separately restricted.
+KZG ceremony is an accepted trust assumption.
+
+The current Lean models prove **conditional transition/trace properties**, including per-token
+payout conservation, close replay fences, pre-sign range/reservation admission, durable retry
+and signature release, whole-head selection and channel-history rollback. They do not prove
+Falcon/Regev/PCS cryptographic soundness, EVM/Rust/JS refinement, storage durability, honest
+RPC/finality, or availability of every user's latest kit. See the exact
+[proof scope and checked results](../audit/lean-current-safety.md).
+
+Remaining integration obligations include automatic exact backing attestation for ordinary
+partial withdrawal, authoritative watcher deposit classification, real browser/daemon/L1
+exit-and-claim E2E, and the browser withdrawal-proving policy mismatch documented in
+[implementation notes](./detail2-implementation-notes.md). Neither this synchronization nor
+the historical proofs are a release approval.
+
+## Historical v2 specification (non-normative)
+
+The remaining text preserves the original hypothetical design and its rationale. Its fixed
+three-member, SPHINCS+, negative-delta, terminal-funding and liveness statements are historical,
+not current API/security claims. References to “this specification” below mean this archive;
+current requirements above and current implementation dispositions take precedence.
 
 This document is a **hypothetical minimal specification** for defining a "secure and confidential transfer function." Each piece of data is given a variable name, and each operation is given a function name.
 No extraneous data or structures are added whatsoever (everything is enumerated in this document).
@@ -441,11 +578,17 @@ This shows which of the **5 properties of §0** each mechanism guards.
 - **Both-wing binding of deltas**: because `TxLeafHash` binds the sending-side `senderDelta` (negative) and the receiving-side `recipientDelta` (positive) into the same hash structure,
   and `channelUpdateZKP` proves equal quantity, the tampering of "decreasing the sending side by a little and increasing the receiving side by a lot" is impossible.
 
-### 4.4 Exit / liveness exit-liveness
-- **Order and challenge of the close game**: `requestClose` → 10 minutes → `startProcess` → 1-day challenge → close.
-  During the challenge period one can replace with **a state of a newer version**, and the final state is finalized (preventing close with an old state).
-- **`GRACE_BEFORE_PROCESS` (10 minutes)**: signatures or communication lag immediately before/after the request can be regarded as "all nonexistent".
-- **`SIGN_TIMEOUT` (3 minutes)**: if signatures are half-assembled and incomplete, it is regarded as a protocol violation, and exit is possible via close (liveness assurance).
+### 4.4 Exit safety / conditional liveness
+- **Order and challenge of the close game**: the abstract sequence is `requestClose` → 10 minutes →
+  `startProcess` → challenge → close. The current Manager uses `submitCloseIntent` for the first
+  intent, a configured challenge period and a bounded replacement deadline.
+  An acceptable **strictly newer `(epoch, version)`** state can replace the pending intent while
+  the replacement window is open. This only protects against stale closure if the required state,
+  proofs and transaction inclusion are available in time; it is not a globally-latest-state theorem.
+- **`GRACE_BEFORE_PROCESS` (10 minutes)** delays first-intent submission. Waiting alone does not
+  erase delayed signatures or prove that all in-flight transfers have been reconciled.
+- **`SIGN_TIMEOUT` (3 minutes)** is an operational violation/exit trigger in the design, not a
+  proof that current terminal funding can complete without the required cooperation below.
 - **Close-request confirmation of both channels (`flowSend1`)**: do not transfer to a channel that has a close request.
 - **`withdrawClaimZKP`**: even if balances are encrypted, each member can generate the proof of
   their own share without another member's decryption help. Claim generation and submission are
@@ -470,3 +613,5 @@ This shows which of the **5 properties of §0** each mechanism guards.
     What is kept confidential is **the per-individual balances and breakdown within the channel**.
   - The channel total balance is visible as a public input of `balanceProof` (needed for determining the close cap).
   - The recipient of an intra-channel transfer naturally knows the amount addressed to them (they can decrypt it).
+  - A current on-chain withdrawal claim exposes its recipient, token and claimed amount in
+    calldata; confidentiality during channel operation does not hide that explicit L1 disclosure.

@@ -42,3 +42,4 @@ import Zkp.Contracts.ChannelSettlementManager
 import Zkp.Contracts.ChannelSettlementManagerMT
 import Zkp.Contracts.Coverage
 import Zkp.EndToEnd
+import Zkp.Contracts.CurrentVerification

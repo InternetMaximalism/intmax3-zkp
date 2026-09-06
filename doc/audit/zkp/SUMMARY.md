@@ -1,9 +1,15 @@
 # intmax3-zkp — Lean formalization: audit summary
 
+> **Current alignment, 2026-09-06:** this file retains a historical audit summary, not a
+> current end-to-end certification. [Current scope and assumptions](../lean-current-safety.md)
+> describe runtime parent `05ec7ae` / submodule `6cefc6ac` and five current transition modules. Current proof
+> dependencies and source bindings are machine-checked separately. Historical `EndToEnd`
+> includes removed operations and must not be quoted as a proof of the entire current system.
+
 > ## ⚠ STALENESS / TARGET-COMMIT BANNER (added 2026-08-26)
 >
-> A Lean model verifies THE CODE IT WAS WRITTEN AGAINST, not the working
-> tree. This corpus was audited against the codebase up to commit
+> A Lean proof verifies its mathematical MODEL, not automatically the source code or working
+> tree. This historical corpus was manually aligned against the codebase up to commit
 > `2c358ae` (2026-08-20). Production has moved since — notably `fd467ea`
 > (2026-08-24, sig-cluster: member cap 16 → 8, IMCM close-commitment
 > re-layout) and the now-retired detail2 §Q direct member-set-update prototype. Divergences
@@ -72,9 +78,10 @@ suite — is now covered at DESIGN level in `doc/architecture-audit/`
 honest_partial_withdraw_pays, `ChannelSafetyIC` honest_window_accepted,
 `ChannelSafetyQ` honest_member_can_rotate / honest_join_accepted); an
 implementation-level honest-exit pass over the contract models remains open.
-For the current protocol audit (sig-cluster 8, §Q member-set updates, §P
-aggregated windows) see `doc/audit/audit25-08-2026.md` — the report of record
-since this summary's target commit.
+For the historical 2026-08-26 audit (sig-cluster 8, then-active §Q member-set updates, §P
+aggregated windows) see `doc/audit/audit25-08-2026.md`. Direct MSU and the late-proof/post-close
+extra-credit lanes are not current exit mechanisms; the old positive design witnesses do not
+establish today's exit liveness. Use the dated current alignment above for the new bounded scope.
 
 ## Soundness theorems (selected)
 

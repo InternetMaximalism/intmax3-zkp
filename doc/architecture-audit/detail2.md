@@ -1,13 +1,284 @@
-# detail2 — Detailed implementation spec for abstract2.md (data structures / file layout / numerics)
+# detail2 — Current implementation reference and historical design rationale
 
-This document treats [abstract2.md](./abstract2.md) (v2 = the minimal spec of the Lattice/Regev confidential version) as a **necessary condition**, and
-describes the **updated spec** of the current implementation (the enshrined-paymentchannel branch) at the level of data structures, file
-layout, and numeric constants. abstract2.md defines "what must be satisfied," and this document defines "how the current
-implementation's types and files satisfy it."
+> **Implementation alignment: 2026-09-06.** This reference describes runtime parent `05ec7ae`
+> (including node/admission repairs `b5bafb7`) with MLE submodule `6cefc6ac`, wire v3,
+> target 105 / inverse-rate 6. It is not a deployment approval or an unconditional asset-safety
+> proof. The earlier Lean baseline `3e2d45c` is extended by `ChannelSafetyAdmission`,
+> `ChannelSafetyRecovery` and `ChannelSafetyExit`. Their conditional results and validation
+> are recorded in [the current Lean scope](../audit/lean-current-safety.md), not release approval.
 
-**Normativity**: When abstract2.md and this document conflict, abstract2.md takes precedence except for the items enumerated in §A (intentional differences).
+## Current implementation contract (2026-09-06)
 
-## A. Intentional differences from abstract2.md (2 points)
+This section and the dated current section of
+[the implementation notes](./detail2-implementation-notes.md) supersede the evolutionary
+§A–R text below. [abstract2.md](./abstract2.md) and [abstract2-1.md](./abstract2-1.md) describe the
+design requirements; this section records how the inspected implementation satisfies them,
+where it is deliberately different, and where work remains. A requirement or historical
+completion statement must not be mistaken for implemented behavior. Exact source definitions
+and generated protocol constants govern serialization; the old Rust sketches are not schemas.
+The [Lean scope](../audit/lean-current-safety.md) and its source manifest must be read with their
+own revision: a prior manifest does not certify this runtime or its MLE cohort.
+
+### Current types, widths, and commitments
+
+| Item | Current representation / constraint | Source |
+|---|---|---|
+| Sig-cluster | `member_count: u8`, `2..=MAX_SIG_CLUSTER`, cap **8**; only these members co-sign | [`constants.rs`](../../src/constants.rs), [`ChannelRecord`](../../src/common/channel.rs) |
+| Balance participants | `delegate_count: u16`; members followed by delegates, total at most **1024**; participant slots use `u16` | [`BalanceState`](../../src/common/balance_state.rs), [`ChannelRecord`](../../src/common/channel.rs) |
+| Registered / live membership | Registered sig-cluster tree height **3**; wallet live-member tree height **10**; these are different roots, not interchangeable | [`constants.rs`](../../src/constants.rs) |
+| Balance storage | `Vec<TokenCiphertexts>` and `Vec<TokenPendingAdds>` with exactly 1024 rows; each row is 10-wide; recipient and Regev-digest arrays remain 1024-wide | [`BalanceState`](../../src/common/balance_state.rs) |
+| Token registry | `[u32; 10]`, `token_count: u8` in `1..=10`; unique active base-token indices, canonical zero suffix, append-only local mapping | [`BalanceState`](../../src/common/balance_state.rs) |
+| Money | Each encrypted cell / transfer plaintext is **u64**; aggregate `ChannelFund.amounts` is **`[U256; 10]`**. There is no global u64 channel-fund cap | [`channel.rs`](../../src/common/channel.rs), [`channel_credit_safety.rs`](../../src/channel_credit_safety.rs) |
+| Other integers | `ChannelId` is u32; base transaction nonce is u32; state version, epoch and close-era counters are u64; `BlockNumber` is u63 | [`channel.rs`](../../src/common/channel.rs), [`u63.rs`](../../src/common/u63.rs), [`channel_id.rs`](../../src/common/channel_id.rs) |
+| Regev | `n = 2048`, `q = 2,013,265,921`, `eta = 2`, plaintext modulus 256; a fresh u64 amount occupies 64 binary coefficients | [`params.rs`](../../src/regev/params.rs) |
+| Homomorphic credits | Per-cell `pending_adds: u32`, maximum **64** before a verified refresh/fresh re-encryption. This digit/noise budget is separate from the u64 amount bound | [`params.rs`](../../src/regev/params.rs), [`channel_credit_safety.rs`](../../src/channel_credit_safety.rs) |
+| H1 | Height-10 balance-slot tree; **104-element** `IMS2` leaf and **37-element** `IMB2` header. The leaf commits all 10 ciphertext digests/counters plus Regev digest and **5-limb** recipient | [`balance_state.rs`](../../src/common/balance_state.rs) |
+| Fund commitment | `token_funds_digest` is the fixed **92-u32-word** IMTF preimage over the full registry, token count, and ten U256 amounts | [`channel.rs`](../../src/common/channel.rs) |
+| Close-family public inputs | Close **103**, withdrawal claim **50**, cancel-close **29**, backing **26**; historical post-close claim **57**, but its extra-credit entry point is disabled | [`close_pis.rs`](../../src/circuits/channel/close_pis.rs), [`withdrawal_claim_pis.rs`](../../src/circuits/channel/withdrawal_claim_pis.rs), [`cancel_close_pis.rs`](../../src/circuits/channel/cancel_close_pis.rs), [`close_asset_backing_circuit.rs`](../../src/circuits/channel/close_asset_backing_circuit.rs), [`post_close_claim_pis.rs`](../../src/circuits/channel/post_close_claim_pis.rs) |
+
+`pk_g` is the Falcon-512/Poseidon-H2P identity `Poseidon(IMFK || encode(h))`; `pk_b` is the
+separate BabyBear sender-authorization key. The close/cancel/PW producer context uses
+[`FalconBatchAggCircuit`](../../src/falcon_sig/batch.rs) through the current
+[`wallet_core` proving contexts](../../src/wallet_core.rs), not the historical preimage-signature
+scheme or its 16-leaf aggregation tree. `IMCM` is the fixed eight-slot, **66-u32-word** cosigner
+commitment; delegates are excluded. The current distinctness tree has height **4**. Delegates
+remain protected by the honest-sig-cluster transition checks, not by a close proof that independently
+proves every historical delegate debit. Fully colluding members of a channel remain inside the
+accepted within-channel trust model; this is not permission to spend another channel's backing.
+
+### Admission before money movement or state-signature release
+
+Production `setup-backing` and genesis require `CLI_RECIPIENT_SLOT_<slot>` for **every controlled
+cosigner**, including initially zero-funded slots. The resolver rejects missing, malformed, zero,
+and known synthetic test recipients before initial L1 spending. Only explicit insecure test-key
+mode may use synthetic defaults. Configuration is not proof of key possession: the operator must
+check that the participant can call the claim path from that EOA/smart wallet. Existing signed
+recipients are never rewritten by changing environment variables. The claim recipient is opened
+from the signed H1 balance leaf, including for delegates; the old deployer-asserted delegate
+recipient-map description is not the current payout authority. See
+[`resolve_cosigner_leaf_recipient`](../../src/bin/channel_member.rs) and
+[the recipient setup procedure](../tasks/node-presign-recipient-setup.md).
+
+Proposal builders for send, refresh, inter-channel debit/credit, deposit and token registration
+return **unsigned channel-state proposals**. A11 sender authorization remains a separate transaction
+authorization. Native explicit signing verifies the transition against its trusted predecessor and
+record, including counts, preserved close-freeze era and operation-specific counters, before
+releasing a state signature. Fresh/joined exit keys must be nondegenerate, nonpadding and distinct;
+changed ciphertext cells must satisfy the existing withdrawal-claim shape. See
+[`wallet_core.rs`](../../src/wallet_core.rs),
+[`state_update_verifier.rs`](../../src/circuits/channel/state_update_verifier.rs), and
+[`ledgered_state_signature_with`](../../src/bin/channel_member.rs).
+
+After transition authentication, private [`ChannelCreditBounds`](../../src/channel_credit_safety.rs)
+uses established nonnegative conservation, the token fund, known conservative bounds, and exact
+own-key decryption to establish each changed cell's u64 bound. `None` means **unknown**, never zero.
+These bounds are signer-private state, not peer assertions or new proof public inputs. Unknown
+unchanged cells need not stop an unrelated operation. An affected cell can be conservatively
+refused even when the intended credit is valid; a hidden-message refresh alone does not establish
+the missing amount range. Neither ciphertext well-formedness nor a 64-add counter substitutes for
+this cumulative range check.
+
+The native signing ledger records `(channel, predecessor, controlled member slot)` together with
+successor, purpose, optional plan, and exact signature bytes. An exact retry returns the recorded
+signature; a sibling/purpose change is refused. Local state, key identity, ledgers and exit-kit
+archive are trusted, rollback-protected storage assumptions, not adversarially editable evidence.
+The browser's explicit `wallet_sign_state` / `wallet_cosign` exports have the corresponding worker
+release fence: [`signature-release-ledger.mjs`](../../hosting/wallet/signature-release-ledger.mjs)
+waits for strict IndexedDB `readwrite` **`oncomplete`** before returning the own member signature,
+using `(pk_g, channelId, prevDigest)` as its key. Same-successor recovery returns exact saved bytes;
+another successor is refused. Ordinary unsigned delegate proposals do not require this ledger.
+Clearing browser storage, rolling it back, or using one key in another browser profile is not made
+safe by this mechanism; a custom raw-WASM host needs an equivalent release boundary.
+
+Host numeric input checks must precede WASM coercion: use exact decimal text / bigint for amounts
+above JS's safe-integer range, and reject fractional, out-of-range or unsafe numeric slot/token/
+channel/nonce values. Preserve the serialized u64 state text when substituting a saved browser
+signature; parsing and reserializing the whole state through JS numbers is not lossless. Sources:
+[`node/common/wallet.js`](../../node/common/wallet.js),
+[`wasm_wallet.rs`](../../src/wasm_wallet.rs), and the browser release ledger.
+
+### Deposit admission and durable recovery
+
+Before an API-funded L1 deposit, resolve a rejoining contribution to its **exact original slot**
+using pkG, pkB, Regev key and signed recipient; do not assume the newest/last slot. Validate amount
+`1..=u64::MAX`, base token, candidate slot, add-count budget and cumulative recipient capacity.
+Reserve capacity for the exact intent and all admitted candidate slots before signing the L1
+transaction; concurrent local signatures must preserve that reserved room. A new reservation
+invalidates cached admission of unsigned future heads. Only the deposit's own admission excludes
+its reservation from double counting; it is not released while signatures are incomplete.
+
+The trusted local live service supplies and persists the channel's one-time **deposit recipient**.
+This bytes32 base-layer recipient is distinct from the participant's 20-byte **exit recipient**.
+The operation journal and native reservation bind it; later native inspect/import may use it only
+through that reservation's exact transaction hash. An arbitrary request recipient or a matching
+tag is not channel ownership evidence. The unreserved legacy entrance retains its configured
+backing-recipient check.
+
+The ordering is: private-head admission → durable operation/reservation → sign and fsync exact
+raw L1 bytes → broadcast/retry the same transaction → bind exact hash → verify canonical receipt
+and exact deposited fields → durable producer/live receive → prepare import exit kit → verify and
+N-of-N-sign both import successors → journal and roll forward the head/result/receipt together.
+The completed reservation remains a tombstone, not reusable credit. The per-deposit completion
+receipt permits result recovery without a second import. A timeout never authorizes a new payment;
+an identical new payment needs a new request ID. Sources:
+[`deposit-preflight.js`](../../api/lib/deposit-preflight.js),
+[`deposit-spend.js`](../../api/lib/deposit-spend.js),
+[`deposit-pipeline.js`](../../api/lib/deposit-pipeline.js),
+[`deposit_capacity.rs`](../../src/bin/channel_member/deposit_capacity.rs),
+[`deposit_recovery.rs`](../../src/bin/channel_member/deposit_recovery.rs), and
+[`l1-deposit-outbox.js`](../../node/common/l1-deposit-outbox.js).
+
+### Signer-independent exact-vector close
+
+Let `H` be one authenticated N-of-N signed head and `funds(H)` its complete registry/fund vector.
+Its exit kit carries a recursively verified Balance proof and the **whole-vector**
+`CloseAssetBacking` proof/statement. The producer uses a private-state opening to construct that
+proof; the opening is not public kit material. The backing circuit rebuilds the entire canonical
+asset tree from the empty root and that one ten-token
+vector: a scalar Balance commitment or an individually valid token opening is insufficient.
+The composition key is exactly `(channel_id, settled_tx_chain, token_funds_digest)`.
+**Full-B is the whole-state rule:** when `B` is the authenticated authorized-burn high-water state,
+an older close candidate `V` cannot be installed. Use B itself (the exact identity at that ordering
+key) or one strictly newer whole state, with a matching complete backing statement. No per-token
+V/B mixing, min/max selection, or splicing amounts from different state generations is permitted.
+
+The backing proof's finalized extended-state root can be later than, and different from, H's
+signed channel-fund root. They are separately authenticated/finalized dependencies, not roots to
+equate or freely substitute. The backing anchor is a canonical **u63** block number and must cover
+the channel's current relevant post history before exit. Sources:
+[`CloseAssetBackingCircuit`](../../src/circuits/channel/close_asset_backing_circuit.rs),
+[`validate_signed_head_backing_composition`](../../src/public_close_prover.rs),
+[`verify_close_asset_vector`](../../src/live_balance_service.rs), and
+[`CloseFundingMaterializer`](../../contracts/src/CloseFundingMaterializer.sol).
+
+From H plus the durable kit, the public prover/publisher requires **no new Falcon channel
+signature or terminal child**. A participant first requests the guarded freeze; backing attestation,
+close submission, guarded finalization and materialization are permissionless transactions with an
+L1 gas signer. `attestSignedHeadBacking` verifies and records the exact compact backing proof before
+close/PW admission; `materializeSignedHead` checks the finalized whole-vector statement, frozen
+generation and current anchor, and atomically consumes the channel-exit latch before crediting the
+vector. The old cooperative `CloseFunding` path remains refused. Keyless proving is not gasless
+publication, and signature independence does not imply unconditional proof/data availability or
+eventual inclusion.
+
+Before a **new** participant close freeze, Node's `checkReadiness` prepares/reuses the same immutable
+bundle as `advance`, then invokes the native read-only readiness check. It checks independent exact
+H and deployment pins, both roots, anchor/finality, runtime/config linkage and the active era;
+there is no L1 account, transaction journal or signing in this native check. An existing raw request
+is recovered without imposing fresh readiness. The check and later transaction are not atomic:
+contract rechecks remain necessary. The publisher journals attest/submit/finalize/materialize,
+adopts an exact finalized permissionless winner when appropriate, and retains superseded local raw
+transactions until their nonce outcome is reconciled. Sources:
+[`public_close_publisher.rs`](../../src/public_close_publisher.rs),
+[`public-close-publisher.js`](../../node/delegate/public-close-publisher.js), and
+[`participant-close.js`](../../node/delegate/participant-close.js).
+
+Manager finalization chooses one complete admissible head after the authorized-burn high-water
+checks; it does not merge per-token caps from different heads. Replacement is strictly newer in
+`(epoch, stateVersion)`; guarded finalization binds digest and lifetime request generation and
+requires `now > deadline`. Cancellation can restore the freeze nonce, but not the lifetime request
+generation or cancellation-version floor. After closure, `submitWithdrawalClaim` registers a
+proof/nullifier-scoped per-token claim; exact backing pull and claim registration may occur in
+either order. `claimWithdrawalCredit(bytes32)` pays only that recipient/token/amount record.
+Lifetime accepted claims, live credit, recognized backing and actual payments are different counters.
+`submitPostCloseClaim`, special close, and late outgoing debit correction are disabled, not extra
+spendable credit paths. Sources:
+[`ChannelSettlementManager.sol`](../../contracts/src/ChannelSettlementManager.sol) and
+[`CloseFundingMaterializer.sol`](../../contracts/src/CloseFundingMaterializer.sol).
+
+### Crash consistency and stored protocol versions
+
+[`channel_member`](../../src/bin/channel_member.rs) writes private state schema **6**; the live
+service snapshot is **4**, signed-head kit **1**, public backing/bundle **3**, deployment manifest
+**4**, public publisher journal **6**, and completion result **3**. These are separate schemas,
+not synonyms for MLE wire v3. Readiness has its own schema **1**. Required historical security
+ledgers must remain present; missing range evidence is not invented during migration.
+
+Deposit completion uses `.pending-deposit-import.json` plus `.deposit-import-receipts/`.
+Burn publication uses [`.pending-burn-publication.json`](../../src/bin/channel_member/burn_recovery.rs)
+to bind the signed head to `last_burn.json` / `burn_cosigned.json`; APIs run native recovery before
+reading those results, so recovery does not sign another burn. Inter-channel operations hold both
+channel process locks and refuse unresolved destination deposit/burn/inter WALs before source
+signing. Their two-channel `.inter-transfer-journal` commits heads, results, and destination
+`incoming_inter_transfer_recovery.json` before retirement. Destination recovery uses its saved
+source input, producer receipt and live artifact, not the source's later-overwritten convenience
+files. Destination kit verification resolves B's own archive/VD/backing directory, never A's cwd.
+
+The [inter WAL codec](../../src/bin/channel_member/inter_transfer_recovery_codec.rs) writes version
+**2**, checking the stored JSON value before typed decoding so HashSet iteration does not change
+the checksum. Version 1 is read-only compatible only with its original compact journal bytes and
+matching checksum. A checksum is corruption detection, not authority to replace signed state.
+The L1 outboxes fsync exact decoded raw bytes before broadcast; uncertain outcomes preserve the
+same intent/hash/nonce rather than signing anew. Preserve state, security ledgers, kits, journals,
+recovery sidecars and browser ledger consistently; do not delete them or expire signing decisions
+to restore availability. The
+[node remediation handoff](../audit/audit05-09-2026-node-presign-remediation.md) records the repair
+scope and migration precautions, not completion of the acceptance matrix.
+
+### Deployment, proving policy, and remaining obligations
+
+The runtime is **deployment-chain pinned, not 31337-only**:
+[`IntmaxRollup.releaseRuntime`](../../contracts/src/IntmaxRollup.sol) requires
+`block.chainid == deploymentChainId`, established with constructor-pinned verifier chain IDs.
+The current [`PinnedMleVerifierV2`](../../contracts/lib/polygon-plonky2/mle/contracts/src/PinnedMleVerifierV2.sol)
+uses immutable code-resident configuration and `allowedChainId`. Public publishers also bind the
+SHA-pinned deployment's Manager, materializer, adapter/core code, configuration, protocol and session.
+Chain 31337 is a local-development exception for explicitly permitted finality/short-window behavior,
+not proof that a public deployment is release-ready. Some convenience API routes remain devnet-only;
+the native pinned public publisher is the relevant public-chain interface.
+
+The MLE cohort is **wire v3 / `MLEWHIR3`, target 105, inverse-rate 6 (`2^-6`), PoW 22, fold 4**.
+Historical `V2` filenames/types do not mean wire v2. Old target-133/rate-4 proofs/configuration,
+pre-repair fixtures and old deployments are not current acceptance evidence: regenerate and pin
+the complete circuit/VK/config/proof/compact/deployment cohort together. The submodule describes
+about 101.535 bits of aggregate generic work, not a literal unconditional failure probability or a
+whole-system 128-bit claim; parent default Poseidon remains a separate approximately-95-bit bound.
+External cryptographic and Fiat–Shamir/composition review remains required. See the
+[current MLE guide](../../contracts/lib/polygon-plonky2/mle/README.md).
+
+[Server-only Plonky2/MLE proving](../docs/proving-boundaries.md) is the deployment policy.
+Client-side Regev/BabyBear Plonky3 proofs and native Falcon signing are distinct from that producer
+work. **Implementation-policy mismatch still open:**
+[`wasm_wallet::wallet_withdrawal_claim`](../../src/wasm_wallet.rs) constructs `WithdrawalClaimProver`
+and calls `prove` / `prove_mle`, exposed as `withdrawalClaim` by
+[`wallet-worker.js`](../../hosting/wallet/wallet-worker.js). Thus the shipped source cannot yet be
+described as fully enforcing “no browser Plonky2 proving.” Move that work behind the intended
+server/delegate boundary with its required private-witness design; do not fix the document by
+claiming the export is absent. Browser member Falcon signing is supported under the durable
+release fence above; the old “never signs in browser” rule is also not a description of this source.
+
+Direct MSU remains retired: [`deprecated-msu`](../../Cargo.toml) isolates historical construction,
+the production CLI/service refuse it, and the Manager exposes no direct mutation selector.
+[Channel-change MSU](../tasks/channel-change-msu.md) is a TODO, not implemented migration authority.
+The following likewise remain open:
+
+- ordinary PW's automatic exact backing attestation/reuse integration; contract refusal when the
+  attestation is absent is not an automatic successful PW workflow;
+- authoritative watcher deposit classification across current **and historical** live recipients:
+  distinguish required, proven unrelated, and unresolved. Handler errors, RPC ambiguity, reorgs or
+  a mismatch with only the current rotating recipient do not authorize cursor advancement;
+- full browser durability, real daemon, L1 posting/finality, multi-token and interrupted-recovery
+  acceptance through latest-H exit and claim; plus measurement of the added host/persistence costs;
+- actual source-to-model refinement and composition of admission/recovery/exit with the rest
+  of the protocol. The [current Lean results](../audit/lean-current-safety.md), including
+  finalization/fraud, replay fences and per-token payouts, do not prove all circuits,
+  cryptographic primitives, durable-storage implementations, or unconditional liveness.
+
+Trust in the configured local service/private store, the established setup/VK ceremony and KZG
+setup, authenticated proof observations, honest-member admission and external transfer/finality
+observations must remain explicit. This sync does not discharge them or rescue an already-signed
+bad recipient, out-of-range balance, duplicate exit key, or unavailable historical kit.
+
+## Historical implementation evolution — non-normative archive
+
+Sections A–R below preserve the original migration rationale and dated checkpoints. Within this
+archive, “current,” “authoritative,” “approved,” “implemented,” “GO,” and test counts refer only to
+the stage being narrated. They do not override the current contract above, certify the present
+code, reopen retired capabilities, or close today's release obligations. Old type sketches,
+constants, proof layouts, selectors and machine-specific paths must not be copied into a current
+integration. The companion notes retain the same historical status.
+
+## A. Intentional differences from abstract2.md (historical migration)
 
 ### A-1. SIS commitment → Regev encryption (form change)
 
@@ -124,6 +395,10 @@ pub struct RegevCiphertext {
 
 ### B-3. Homomorphic addition and noise budget (A5)
 
+> Historical parameter rationale. The n=128 / approximately-120× noise-margin figures below are
+> retired. Current n=2048 retains the 64-add policy with the bound documented in `regev/params.rs`
+> (approximately 7.5× worst-case noise margin); cumulative u64 admission is a separate host check.
+
 - `ct_a + ct_b` (component-wise mod q addition) corresponds to plaintext addition. Applying a delta to the recipient-side balance
   (abstract2.md §3.2 step 3 "add `encAmount` to the recipient's ct") uses this.
 - **The sender's own balance update is fresh re-encryption, not homomorphic**: the sender **re-encrypts** the updated balance
@@ -169,6 +444,10 @@ Legend: **[New]** = new type / **[Chg]** = change to existing type / **[Keep]** 
   renamed and retyped to the `RegevProofVerifier` trait (§E-4).
 
 ### C-2. [New] BalanceState (the core of abstract2.md §2.1)
+
+> Historical single-token sketch, not a current Rust/JSON schema. Current `delegate_count` is u16,
+> token matrices are heap-backed 1024×10, and the leaf-bound recipient is mandatory; see the
+> current types table above. The old `MAX_COSIGNERS = 16` text below records D12, not today's cap.
 
 ```rust
 /// abstract2.md: BalanceState { encBalances, settledTxChain, stateVersion }
@@ -434,6 +713,10 @@ deposit_nullifier])`.
 
 ## D. Unification of signing targets (abstract2.md §3.1 / §3.3.2)
 
+> Historical signing-target table. Its signature-free `deposit / closeBurnTx` row does not
+> authorize an unsigned channel-state import or the retired cooperative terminal child. Current
+> imports have verified N-of-N successors; full close consumes existing H plus its backing kit.
+
 | Update kind | Signing target | H2 | Implementation signing digest |
 |---|---|---|---|
 | Intra-channel transfer (`ChannelTx`) | `hash(H1', 0)` | `0x00…00` | `ChannelState::signing_digest()` (h2_tag = 0, §C-3) |
@@ -562,26 +845,30 @@ state↔proof correspondence can be mechanically verified by the
 
 ### F-3. ChannelClosePublicInputs (`close_pis.rs`)
 
+> Historical D14 layout/aggregation checkpoint. The current lengths are close 103, claim 50,
+> cancel 29 and backing 26; current close proving uses the eight-signer Falcon batch context.
+> The 95/48/27 and sixteen-slot tables below are preserved to explain the migration, not as ABI.
+
 Added fields: `final_state_version: u64` (2 limbs), `final_settled_tx_chain: Bytes32` (8 limbs),
 **`member_set_commitment: Bytes32` (8 limbs, §C-8) + `member_count` (1 limb, D6)**.
 `final_channel_balance_root` is renamed to `final_balance_state_h1`.
-**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` = 77 → 86 (D6) → 87 (D9) → 95 (current)**: the Stage-3
+**`CHANNEL_CLOSE_PUBLIC_INPUTS_LEN` = 77 → 86 (D6) → 87 (D9) → 95 (D14 checkpoint)**: the Stage-3
 `final_settled_tx_accumulator_root` (8 limbs, §C-2) sits at limbs 77..85, shifting
 `member_set_commitment` to 85..93; `member_count` is limb 93 and `delegate_count` limb 94
 (code: `close_pis.rs:37 = 95`). The original 77-limb prefix is unchanged.
 
 Other close PIs. (The D5 values — withdrawal claim 42→48, post-close 34→40, cancel 41 — were further
-changed by the subsequent close-game hardening / Stage-3 work; the table shows the CURRENT pinned
-constants in `src/circuits/channel/*_pis.rs`.)
+changed by the subsequent close-game hardening / Stage-3 work; the table shows that historical
+checkpoint, before the current lengths listed above.)
 
-| Circuit | PI length (current) | Note |
+| Circuit | PI length (D14 checkpoint) | Note |
 |---|---|---|
 | close (`close_pis.rs`) | **95** | 77-limb legacy prefix + `final_settled_tx_accumulator_root` (8) + `member_set_commitment` (8) + `member_count` (1) + `delegate_count` (1) |
 | withdrawal claim (`withdrawal_claim_pis.rs`) | **48** | member identifier is the 8-limb `pk_g` (DA → D8); claimant slot opened via a height-10 Merkle inclusion against the H1 slot-tree root (D14) |
 | post-close claim (`post_close_claim_pis.rs`) | **56** | 40 (D5) + Stage-3 accumulator-anchored source-tx binding; claimed slot opened via the same height-10 inclusion (D14) |
 | cancel close (`cancel_close_pis.rs`) | **27** | CORRECTED C1 statement: `channelId(1) \| closeIntentDigest(8) \| memberSetCommitment(8) \| revivedStateVersion(2) \| revivedChannelStateDigest(8)` (replaces the forgeable legacy 41-limb revived-tx layout) |
 
-**Close/cancel-circuit machinery (current, D11–D14):** the close and cancel-close circuits each
+**Close/cancel-circuit machinery (historical D11–D14):** the close and cancel-close circuits each
 recursively verify **one level-`AGG_LEVELS` (16-slot) aggregated sign-zkp proof** (§D D-4, D13) at a
 constant baked VK (`const`-asserted `MAX_COSIGNERS == MAX_AGG_SIGNERS`); the cosigner `pk_g` vector
 is **wired from the verified proof's PI signer list** (the former per-slot signature verification /
@@ -603,6 +890,10 @@ vectors + flat keccak are deleted.
 ---
 
 ## G. List of numeric constants
+
+> Historical constants inventory. Use the current types/widths table at the start of this file;
+> in particular n=128, sixteen signers, registered tree height 10, and four aggregation levels
+> below are old values. Domain entries also include retired protocol generations explicitly.
 
 ### G-1. Newly established
 
@@ -711,7 +1002,7 @@ and `IMKR` (`KEY_RECORD_DOMAIN`) and the threshold / num_keys constants (DA/DC, 
 | §3.5.1 `requestClose` | **[New] `requestClose(uint64,uint64)`**: binds the signed transaction to the durable freeze/cancel era, immediately makes `channelStatus` `ClosePending`, increments the monotone request generation, and records `closeRequestedAt = block.timestamp` (the signal to stop signing. `isNativeSendAllowed` becomes false) | Since the current contract does not separate request/startProcess, **a function is added** |
 | §3.5.2 `startProcess` | Add **`require(block.timestamp ≥ closeRequestedAt + GRACE_BEFORE_PROCESS_SECS)`** to `submitCloseIntent(CloseIntent, proof)` (`ChannelSettlementManager.sol:submitCloseIntent` :558; GRACE check :587). Add to L1 verification: **(new) "the PI `settled_tx_chain` of `finalBalanceProof` == `CloseIntent.final_settled_tx_chain`" "all member signatures are over a `hash(H1,H2)`-family digest"** | Adding chain reconciliation is the core of v2 |
 | §3.5.3 `challenge` | Existing "replacement by a newer close intent within the challenge period" (the ClosePending branch inside `submitCloseIntent`). Change the replacement order from `(final_epoch, closeNonce)` to **`(final_epoch, final_state_version)`**. Perform chain reconciliation for each submission | To `final_state_version` comparison |
-| §3.5.4 `closeAndWithdraw` | `finalizeCloseGuarded(bytes32,uint64)` → each member's `submitWithdrawalClaim` (`:785`, claim_proof = withdrawClaimZKP §E-3) → `claimWithdrawalCredit(bytes32 withdrawalNullifier)` (`:905`). The historical no-arg finalize and aggregate payout selectors are removed from the production ABI. **Σ(withdrawals) ≤ withdrawCap** is enforced by the existing `totalWithdrawn + amount ≤ finalizedChannelFundAmount`. `closeBurnTx` is submitted to L1 as `burn_tx_hash` + L2 burn processing (no signature required, §D table row 4) | The contents of claim_proof become Regev-based |
+| §3.5.4 `closeAndWithdraw` | After `finalizeCloseGuarded(bytes32,uint64)`, `submitWithdrawalClaim` records individual claims; `materializeSignedHead` verifies the exact already-attested whole-vector backing proof and backing pull funds the Manager. Claim registration and backing pull may occur in either order; `claimWithdrawalCredit(bytes32 withdrawalNullifier)` requires both. Lifetime accepted claims are capped by `totalWithdrawn + amount ≤ finalizedChannelFundAmount`; actual payments are separately capped by recognized backing. **The former fresh terminal-child requirement is retired:** the current path consumes existing N-of-N H plus its durable kit without another channel signature. | Current disposition; conditional on exact kit, finalized dependencies and the deployment/transfer assumptions above |
 | §3.5.5 `claimLateTx` | **Disabled:** `submitPostCloseClaim` reverts unconditionally because the old statement can double-credit a delta already absorbed by the closing balance. Re-enable only with an explicit unapplied-incoming commitment. | [Do not expose] |
 
 ### H-3. Implementation-specific additional defenses (outside the scope of abstract2.md)
@@ -892,6 +1183,12 @@ Thereby "the all-signed state of the highest version is uniquely determined" (co
 ---
 
 ## L. Delegate account (added feature, 2026-06; D9)
+
+> Historical enrollment/account evolution. Current counts are u8 members (2..8) and u16 delegates
+> (total at most 1024). The registered eight-leaf sig-cluster root differs from the live 1024-leaf
+> wallet root. Current delegate payout authority is the signed balance-slot recipient/Regev leaf,
+> not the old constructor-supplied delegate map in L-5. Settlement activation freezes its live
+> participant snapshot; the Manager's exact delegate-count binding is not a mutable join registry.
 
 A **delegate account** is a channel participant that has a lattice (Regev) balance and SENDs / RECEIVEs /
 WITHDRAWs with the **identical proofs** a co-signing member uses, but does **NOT** participate in the
@@ -1137,7 +1434,11 @@ coalesces requests into windows and the channel co-signs ONE state transition pe
 
 ---
 
-## N. Multi-token channels: up to 10 currencies per channel (2026-07-27; design fixed, implementation pending)
+## N. Multi-token channels: historical migration to up to 10 currencies (2026-07-27)
+
+> Multi-token representation and per-token settlement are now implemented as described in the
+> current contract above. Phase status and regeneration notes in this section belong to the July
+> migration; they do not describe current release acceptance or an unimplemented scalar-to-vector change.
 
 Extends the channel layer from one balance scalar per slot to up to `MAX_CHANNEL_TOKENS = 10`
 independent per-token balances, funded by and settled against the base layer's existing
@@ -1260,8 +1561,16 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
   `totalCreditedOut[t]`, `withdrawalCredits[t][addr]` — with per-token CapInv
   `totalCreditedOut[t] + amount <= receivedChannelFunds[t]` and payout dispatch by t
   (t == 0 → ETH; else ERC-20 at the L1-registered address). Token-t claims are paid ONLY from
-  token-t funds (TM-3). Post-close claims gain the same token dimension.
-- **Post-close claim token binding (TM-16, Phase 5a):** the inter-channel `tx_hash` fold — the
+  token-t funds (TM-3). Current `claimWithdrawalCredit(bytes32)` pays one proof/nullifier-scoped
+  record and subtracts only its amount from aggregate credit. `totalWithdrawn` is the lifetime
+  accepted-claim amount; `totalCreditedOut` is the actual paid amount. Funding pulls exactly the
+  remaining finalized cap after the terminal authorization is issued and consumed, and rejects
+  a mismatched native/ERC-20 balance delta. Unrelated recipient-wide Rollup credit alone is not
+  evidence that this channel's terminal proof was materialized.
+- **Historical post-close claim token binding (TM-16, Phase 5a; current entry point disabled):**
+  the following describes the retained historical circuit/PI format, not an active extra-credit
+  path. `submitPostCloseClaim` unconditionally reverts; ordinary slot-balance claims already include
+  absorbed incoming value. The inter-channel `tx_hash` fold — the
   settled-tx-accumulator leaf and the only artifact of an absorbed incoming tx that the closed
   channel's signed final state anchors — gains the descriptor's BASE `token_index` as its own
   canonical limb in the IMTC ids word: `ids = [0,0,0,0,0, token_index, dest_id, src_id]`
@@ -1295,15 +1604,21 @@ leaf_i = Poseidon([ SLOT_LEAF_DOMAIN_V2,
 ### N-8. Privacy deviation (ACCEPTED, TM-12)
 
 `token_slot` travels in cleartext (IMPA-v2, slim wire), and per-(member, token) close claims
-reveal each member's holdings DISTRIBUTION at close. Amounts remain hidden; asset identity does
-not. Accepted for v1; revisit only if a future version encrypts the token selector.
+reveal each claimant's recipient, token and claimed amount on chain: `WithdrawalClaim.amount`
+is public calldata. The confidentiality of balances during channel operation does not extend to
+amounts explicitly claimed on L1. Asset identity is also public. This is an interface boundary,
+not a cryptographic confidentiality theorem.
 
 ### N-9. Formal model + security summary
 
-- Lean: `EncBalanceState` generalizes `Member → Ct` to `Member → Fin 10 → Ct`; `ValidEncState`,
-  `TransferProven`/`BulkUpdateProven`, and all conservation theorems become per-token
-  (`ChannelSafety2/21.lean`); the Manager's `CapInv` is re-proven PER BASE TOKEN (not per local
-  slot — TM-1).
+- Lean: the historical multi-token design extension is in `ChannelSafetyMT.lean`; the frozen
+  `ChannelSafety2/21.lean` modules are not silently replaced by a current multi-token contract model.
+  `ChannelSafetyCurrent.lean` covers the current fixed-channel, finalized-cap, per-base-token
+  claim/pull/payout slice, including lifetime claim allocation and nullifier-scoped payments.
+  A separate slice in that module covers current close replay fences and strict deadlines;
+  its composition with finalized accounting remains an explicit open obligation.
+  `Zkp.Contracts.CurrentVerification` covers the current compact verification/finalization/fraud
+  boundary. [The dated scope](../audit/lean-current-safety.md) lists assumptions and exclusions.
 - Domain constants: every changed preimage gets a NEW constant (slot leaf, H1 header, IMPA, IMLD,
   IMCW, E-2 PI, TFD), registered in §G-2 with the non-collision check at implementation time;
   new fields always occupy their own canonical limb (TM-15).
@@ -1692,9 +2007,14 @@ design); sub-N thresholds.
   contracts redeployed before any fixture-backed Forge test or deployment is meaningful again.
   Channel capacity beyond 8 signers is delegates' job (`MAX_CHANNEL_MEMBERS = 1024` unchanged).
 
-## R. Proving-locus invariants: what proves where (2026-08-24)
+## R. Proving-locus history: what was intended to prove where (2026-08-24)
 
-Two invariants, verified against the code and now normative:
+> Superseded by the current deployment-policy/implementation distinction above and
+> [proving-boundaries.md](../docs/proving-boundaries.md). The browser has explicit durable Falcon
+> member signing, and its withdrawal-claim export still invokes a Plonky2/MLE prover contrary to
+> server-only policy. Neither historical assertion below is a current source-conformance claim.
+
+Two invariants recorded at that stage (not current normative text):
 
 ### R-1. The sig-cluster never proves (or signs) in the browser
 

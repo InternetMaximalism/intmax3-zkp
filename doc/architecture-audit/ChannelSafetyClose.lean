@@ -1,6 +1,14 @@
 /-
 # ChannelSafetyClose.lean — the close LIFECYCLE as a status machine (audit25-08-2026 Part 3 V2)
 
+HISTORICAL SIMPLIFICATION (2026-09-05 alignment): this model increments the
+nonce on cancel and allows finalization at deadline equality. Current Manager
+instead increments the freeze nonce on request, restores it on cancel, uses
+request-generation/cancelled-version replay fences, and finalizes STRICTLY
+after the deadline. The theorems below are about this historical model, not
+the current state machine. The replay-fence slice in `ChannelSafetyCurrent`
+models the current rules; see `doc/audit/lean-current-safety.md` for scope.
+
 The existing corpus models close only as a version-max fold (`ChannelSafety.finalize`,
 `challenge_latest_wins`) with an abstract `CloseGame` payout cap. It has NO intent / cancel /
 finalize / deadline STATE MACHINE — `audit25-08-2026` Part 1(a) flagged exactly this, and the

@@ -1,4 +1,121 @@
-# abstract2-1 — Minimal Specification (Small-Block + Bulk Inter-Channel)
+# abstract2-1 — Current small-block/admission requirements and design history
+
+> **Synchronized 2026-09-06:** runtime parent `05ec7ae`, MLE `6cefc6ac` (wire v3,
+> target 105 / inverse-rate 6). Read the current [abstract2](./abstract2.md) trust/exit contract
+> together with [detail2](./detail2.md). The archived v2.1 sketches below do not certify a live
+> batch implementation, deployed circuit, or unconditional service availability.
+
+## Current protocol and engineering boundary (2026-09-06)
+
+### Small blocks and separate authorization layers
+
+`SmallBlockRootMessage` and `SignedSmallBlock` remain the native sender-channel posting
+objects. The record's `bp_member_slot` is a **u8 index below member_count ≤ 8**, not a fixed
+choice among three users. The 1024 balance participants include delegates; delegates do not
+become sig-cluster members or acquire a posting member signature merely by joining.
+Channel-state IMCH, small-block IMSB and transaction sender authorization are domain-separated
+objects, not aliases for one signature. A11 sender authorization is preserved even though
+builders now return unsigned channel-state proposals.
+
+H2 binds the sending channel's own small-block transaction commitment. Intra-channel updates
+use zero; an inter-channel transition must authenticate its nonzero commitment and exact
+predecessor/counters. The concrete transaction schema, nonce, token and recipient serialization
+are defined by [channel.rs](../../src/common/channel.rs) and the
+[state-update verifier](../../src/circuits/channel/state_update_verifier.rs), not the hypothetical
+`BulkInterChannelTx` Rust sketches in the archive.
+
+The local sending member and global posting/validation services have different responsibilities.
+An independently valid sender proof or signature is not, by itself, permission for the
+receiver to install an arbitrary successor. The receiving transition still needs authenticated
+settlement evidence, recipient/key binding, range admission and its own sig-cluster agreement.
+Source boundaries: [wallet core](../../src/wallet_core.rs),
+[small-block circuit message](../../src/circuits/validity/block_hash_chain/small_block_message.rs),
+[Rollup](../../contracts/src/IntmaxRollup.sol).
+
+### Multiple transfers and token separation
+
+Batch/bulk safety is a requirement on every actually supported operation, not an inference from
+an abstract fold. Preserve per-token conservation and ordering; never sum amounts from different
+token registries as though they were one currency. Do not reuse one sender's range evidence to
+approve another debit. Authenticate the exact source/destination channel, sender authorization,
+base/local token mapping, nonce and recipient before accepting each transition.
+
+The current private admission implementation tracks a u64 upper bound per affected cell, exact
+owned openings when available, and the separate homomorphic-add budget. It uses authenticated
+nonnegative accounting before deriving pooled bounds. An unknown unchanged cell can be carried;
+an unknown changed cell cannot pass without sufficient evidence. Reserving a future deposit must
+also constrain concurrent local updates so its already-promised capacity remains available.
+See [credit admission](../../src/channel_credit_safety.rs) and
+[deposit reservations](../../src/bin/channel_member/deposit_capacity.rs).
+
+The old `ChannelSafety21` single-debit/debit-then-credit batch theorem remains a theorem of that
+archived model. It is **not** an end-to-end proof of all native batch producers or receiver paths.
+The current admission module derives range preservation from checked bounds and explicit
+accounting premises; it does not introduce a new range circuit or modify proof bytes.
+
+### External spending, publication and crash recovery
+
+Before an L1 spend, bind the exact intent and reserve channel capacity durably. Sign and persist
+exact raw bytes before broadcast. Retry those bytes under the same intent and keep completion
+tombstones; a timeout is not authorization for a second deposit. A rejoining contribution resolves
+the original slot from the complete signed identity, not “the newest member.”
+
+Before exposing a state signature, persist its predecessor/successor decision. Native journals
+and the browser worker's strict IndexedDB fence enforce local release ordering. WAL recovery
+must validate the exact before/after state and finish head plus output/metadata publication
+before removing its recovery record. Inter-channel multi-file publication is not atomic merely
+because individual files use atomic rename. The inspected native two-phase recovery path and
+its ledger retention are recorded in [detail2](./detail2.md); current Lean recovery proofs cover
+the specified outbox/release/publication slices, not an extracted model of every 2PC call.
+
+Sources: [deposit pipeline](../../api/lib/deposit-pipeline.js),
+[signed transaction outbox](../../node/delegate/signed-transaction-outbox.js),
+[deposit WAL](../../src/bin/channel_member/deposit_recovery.rs),
+[burn WAL](../../src/bin/channel_member/burn_recovery.rs),
+[browser release ledger](../../hosting/wallet/signature-release-ledger.mjs).
+
+### Partial withdrawal versus whole-channel close
+
+A normal partial withdrawal remains an authorized burn operation while the channel stays open;
+non-cooperative exit instead uses the latest retained N-of-N signed head and its matching kit,
+without a fresh channel signature. Ordinary PW automatic arrangement of exact backing
+attestation remains an integration task; an already-attested path must not be described as that
+automation being complete.
+
+Both authorized and pending burn high-water marks restrict close candidates. At an equal
+`(epoch, version)`, require the same canonical close identity; otherwise require a strictly
+newer whole head. Finalization and materialization use one complete registry/fund vector, never
+per-token V/B blending. Freeze, exact-generation thaw, post-history rollback and one-shot
+materialization are separate channel-scoped fences. Latest-H availability, a finalized backing
+anchor and actual claim production/publication remain operational prerequisites.
+
+Direct MSU is disabled/retired. The planned replacement requires unanimous close and recreation
+with explicit asset/commitment migration, not a hidden intermediate member-set update.
+
+### Proof cohort and evidence
+
+Current deployment routes use pinned compact verifiers with the deployment chain ID. MLE/WHIR
+is a submodule, not another independently interchangeable verifier configuration. Any changed
+circuit/VK/config must follow [the regeneration/redeployment runbook](../tasks/regen-and-redeploy-runbook.md);
+do not mix regenerated artifacts across statement purposes or cohorts.
+
+The browser may perform supported Regev/Plonky3 work and native Falcon signing through the
+durable release boundary. The intended no-client-Plonky2/MLE proving policy is **not yet fully
+implemented**: the exposed WASM withdrawal-claim producer still performs that proving.
+See [implementation notes](./detail2-implementation-notes.md) for this and the remaining watcher
+and real E2E obligations.
+
+The [current Lean scope](../audit/lean-current-safety.md) separates verified model properties
+from cryptographic, storage, token, finality and implementation-correspondence assumptions.
+Positive recovery examples establish executable finite paths under supplied conditions, not
+unconditional liveness or an assertion that an honest signer never conservatively refuses.
+
+## Historical v2.1 specification (non-normative)
+
+The remaining design sketches and the `ChannelSafety21` proofs are preserved as history.
+Their local “Normativity” statements govern that archived model only. Fixed three-member
+roles, negative encrypted deltas, old funding paths, batch pseudocode and completion claims
+are superseded by the current sections above and in detail2.
 
 This document is a **hypothetical minimal specification** for defining a "secure and confidential transfer function." Each piece of data is given a variable name, and each operation is given a function name.
 No extraneous data or structures are added whatsoever (everything is enumerated in this document).
@@ -36,7 +153,8 @@ Security is divided into the following 5 properties (described later in §4):
 1. **Authorization** authorization (all-member signature. Signature target = `hash(H1, H2)`)
 2. **Double-spend / illicit mint prevention** no-double-spend (`commonState` + `validityProof`)
 3. **Solvency** solvency (`balanceProof` + `rangeProof` = `channelUpdateZKP` verification)
-4. **Exit / liveness** exit-liveness (close game + timeout + `lateBalanceProof` + withdrawal ZKP)
+4. **Exit safety / conditional liveness** (close game + timeout + withdrawal ZKP; the historical
+   late-proof lane is disabled, and current terminal funding needs the required signatures/proofs)
 5. **Balance confidentiality** confidentiality (Regev encryption + ZK range proofs)
 
 ---
@@ -445,9 +563,10 @@ debit-before-credit fold order is normative and the invariant is proven directly
 5. **Nothing else moves:** step §3.2b.3-4 pins every uninvolved slot bit-identical, and
    `settledTxChain`/`H2 = 0` keep the batch invisible to close/settlement accounting.
 
-Consequently the five properties of §0 are unaffected: authorization is the unchanged all-member
-signature over `hash(H1', 0)` (§4.1); solvency and confidentiality arguments are per-tx and carry
-over verbatim (§4.3, §4.5); exit/liveness is untouched (§4.4). Formal statement + proof:
+Within the frozen abstract model, authorization is the unchanged all-member signature over
+`hash(H1', 0)` (§4.1), and the solvency and confidentiality arguments remain per-tx (§4.3, §4.5).
+The batch preservation theorem does not discharge current exit-availability obligations (§4.4).
+Formal statement + proof:
 `ChannelSafety21.lean` §8 (`batch_step_eq_seq`, `batch_preserves_validity`).
 
 ### 4.3 Solvency
@@ -458,19 +577,25 @@ over verbatim (§4.3, §4.5); exit/liveness is untouched (§4.4). Formal stateme
 - Receive path: credit only entry wings **Merkle-proven inside `TxLeafHash`**.
 
 ### 4.4 Exit / liveness
-Unchanged from abstract2 §4.4 (close game, timeouts, `withdrawClaimZKP`, `lateBalanceProof`).
+Follow the current qualification in abstract2 §4.4: close-game safety is separate from the
+availability of terminal funding and withdrawal proofs. The historical `lateBalanceProof` lane is
+not active. No unconditional unilateral exit theorem is claimed for the current implementation.
 
 ### 4.5 Balance confidentiality
 Unchanged boundary from abstract2 §4.5: per-leg `amount` plaintext at base layer; intra-channel amounts encrypted; channel total visible via `balanceProof` PI.
 
 ### 4.6 Mid-channel deposit safety (§3.3.2c)
 
-All five properties (§4.1–§4.5) are preserved by mid-channel L1 deposit import:
+Mid-channel L1 deposit import has the following abstract safety arguments and current exit caveat;
+the accounting theorem alone does not prove all five end-to-end properties (§4.1–§4.5):
 
 1. **Authorization (§4.1):** The post-deposit channel state is N-of-N co-signed; no unilateral fund injection.
 2. **No double-spend (§4.2):** `Deposit::nullifier()` + nullifier tree insertion (C15 circuit constraint) prevents double-fold. `settledTxChain` advances by the deposit nullifier, making the chain unique.
 3. **Solvency (§4.3):** `channelFund.amount` increases by the deposited amount; `encBalances[recipient]` increases by the same. `provenTotal` in the Lean model tracks `Σ encBal`; both increase equally. On-chain `receivedChannelFunds` (authoritative ceiling) tracks real ETH pulled from `IntmaxRollup`.
-4. **Exit / liveness (§4.4):** The close game captures the post-deposit state; `channelFundAmount` in `CloseIntent` reflects the total (genesis + deposits). If a close races a deposit, the deposited ETH is escrowed in `IntmaxRollup` and recoverable via `submitPostCloseClaim`.
+4. **Exit / liveness (§4.4):** The close game captures the post-deposit state; `channelFundAmount`
+   in `CloseIntent` reflects the total (genesis + deposits). `submitPostCloseClaim` is disabled in
+   the current Manager, so it is not a recovery mechanism for a deposit/close race. Recovery needs
+   a supported proof-backed route and is not established by the accounting lemma below.
 5. **Confidentiality (§4.5):** The deposit `amount` is plaintext at the base layer (an L1 escrow is public by nature); per-member channel balances remain Regev-encrypted.
 
 Formal proof: `ChannelSafety21.lean` §7a — `l1_deposit_preserves_validity` shows `ValidEncState21` is maintained; `end_to_end_close_safety21` (§7) is unchanged because `L1CloseRule` operates on `provenTotal` (which correctly includes deposits).
@@ -485,8 +610,8 @@ Formal proof: `ChannelSafety21.lean` §7a — `l1_deposit_preserves_validity` sh
 | `bp_member_slot` | §2.1, §3.3.1 | §A-2 consequence 3 | Aligned |
 | Cross-channel bulk | §2.3 `transfer_entries[]` | Single `receiver_deltas[0]` only | **abstract2-1 ahead of implementation** |
 | Intra-channel batch | §2.2b `ChannelTxBatch`, §3.2b | `SlimSendPayload` + manifest `cosign-batch` (detail2 §M): fold recompute, R1, D3 post-fold, bounded-parallel E-1 verification, verifier-side member set. Browser uploads slim too (client-side projection of the wasm solo payload, `/api/cosign2`) | **Aligned** on the wire (CLI, relay, browser). Residual purity gap: the wasm `buildChannelTx` still constructs the solo next state internally before projection (no wire effect); anchor binding is exact (stricter than §2.2 retry-friendly — detail2 §M-3) |
-| Member count | 3 fixed | N ≤ 16 (D6) | detail2 extension; see detail2 |
-| Signatures | `SpxSigWitness` abstract | Poseidon ZK two-key (§A-3, D8) | detail2 extension |
+| Member count | 3 fixed in the frozen abstract model | Current close cosigner cap 8; balance-slot capacity is separate | Later implementation extension, not proved by the three-member model |
+| Signatures | `SpxSigWitness` abstract | Falcon-512/Poseidon for `pk_g` (§O); the `pk_b` role is separate | Later implementation extension; primitive security is an assumption |
 | Delegates / refresh | Out of scope here | §L, §B-3, D2/D3 | detail2 extensions |
 
 When implementing bulk cross-channel, extend `InterChannelTx`, `channelUpdateZKP` (E-2), `tx_leaf_hash`, and validity settlement loop per this document.

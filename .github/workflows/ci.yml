@@ -74,17 +74,26 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Verify pinned inputs (including the implementation modeled by Lean)
+        env:
+          PINNED_INPUTS_REQUIRE_FULL_HISTORY: "1"
+        run: .github/ci/verify-pinned-inputs.sh
       - name: Install elan (pinned toolchain resolves from lean-toolchain files)
         run: |
           curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
           ./elan-init -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Build the spec-model corpus (ChannelSafety*, Q, Close, PW, IC)
-        working-directory: doc/architecture-audit
-        run: lake build
-      - name: Build the implementation-model corpus (doc/audit/zkp)
-        working-directory: doc/audit/zkp
-        run: lake build
+      - name: Test Lean guard failure handling
+        run: python3 .github/ci/test-lean-safety-guard.py
+      - name: Build every Lean root and audit current-proof dependencies and source pins
+        # This is model/build/assumption and reviewed-source drift protection, NOT a
+        # machine-checked refinement of Rust/Solidity bytecode into the Lean models.
+        run: bash .github/ci/lean-safety-guard.sh
+      - name: Assert Lean verification did not modify tracked sources
+        run: git diff --exit-code
   # ════════════════════════════════════════════════════════════════════════════════════════════════
   #  CONTRACTS — the declaration-vs-reality job. ~5 min. This is the fast feedback loop; it is
   #  first because it is where every fund-impacting defect of the last month actually lived.
