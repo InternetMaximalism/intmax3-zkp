@@ -155,7 +155,7 @@
     },
     {
       "path": ".github/ci/lean-safety-guard.py",
-      "sha256": "cdf9b035841221983d0220ffc2434564e84ea82b80203906314e6caf19c1c4cd",
+      "sha256": "91fe02b5e7027d09dca17c9951febbd5894661eb44719ef2b70ab8c6fa16c1c0",
       "role": "tooling"
     },
     {
@@ -185,7 +185,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp.lean",
-      "sha256": "ef8c9ce9c3a528f5bd1b5d4ebfc7e87c9caade8ff8b03580cb7f1c6b74d4ee98",
+      "sha256": "c69d44952c7dd138242ae20a3713144362ad680853b537a72a04d0e0fca0411d",
       "role": "tooling"
     },
     {
@@ -380,12 +380,12 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "23a26b1204fb5c1d1e51ecb7f51b5e35ec5ab3e27c73932d636f2a6d8f26c8f8",
+      "sha256": "041e1fb9292d37e1d6d88fc3a354316ee1bbfbc126c92a625e4416dfb33d299d",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "e6ab0ca55e10dea87988e73c344da011b1d23c812f903a836ee40a7056dcd06f",
+      "sha256": "a310594646ba1cf240761dbbf7980c351b03ba00ebefec65fb5b7ab693269d55",
       "role": "spec"
     },
     {
@@ -495,7 +495,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/close-circuit.json",
-      "sha256": "f8bd0f674b832ec072d5e05ba70b71466b6fd5a1b41f43553e8f63b6adb4961f",
+      "sha256": "a4a2f9a8d8fe72cb26513b8222a88613fef239bdb2ac87e300978f57e10581ad",
       "role": "spec"
     },
     {
@@ -520,7 +520,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/CloseCircuit.lean",
-      "sha256": "1bd57c6189ad9e4fd4d21c94cad63bffcba5ddf2cea1c1c2429752b5daba7295",
+      "sha256": "858ae1fb8e1c2479785cae2ee5a08fb1d3ffe961fcc3289e324986cfa1171550",
       "role": "model"
     },
     {
@@ -536,6 +536,141 @@
     {
       "path": "doc/audit/zkp/Zkp/Implementation/CloseEncodingBridge.lean",
       "sha256": "ad12e7e7af71ef8cb41f99711e3537709c7391af255e3254e835daa2a973b684",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/balance-state-hash-helpers.json",
+      "sha256": "99a516ded9e276e7afac5042918b83bca3427492e5c8a88c5c16218b7c81233c",
+      "role": "spec"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/H1Gadget.lean",
+      "sha256": "e352675181905ccb199279db2d865338e9829e6f005bfd130e95d2679ca20121",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/cancel-close-circuit.json",
+      "sha256": "2580b7525c5318035978343f3cf70cdc85e372336f0e3ca5ead5bf23571c881e",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/cancel_close_circuit.rs",
+      "sha256": "ab20970c90eb73108ef13fb73799fbe5b70e705ac36791db6fde5110165163f3",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CancelCloseCircuit.lean",
+      "sha256": "82268b1b7e58ffe25124648a4054447ce7e29a0ca9dd1b927a66b1110f594ac4",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/cancel-close-public-inputs.json",
+      "sha256": "47bc3f65c5eecde1132e7b9fc19b0b75aac1970f8466339775a5b73cab13a604",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/cancel_close_pis.rs",
+      "sha256": "b26c9fbab23feb593bc015c84b0994754f150caf93de8045c5d99f5b845f1580",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CancelClosePublicInputs.lean",
+      "sha256": "9f446fc2fa3de8817af370ff6a87dc5820def079c636f4ad84d698e01c720932",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/h1-gadget.json",
+      "sha256": "c21130d34815ab6302ca7d8a8a458dec94b33de11984a1004a786a577061baaa",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/h1_gadget.rs",
+      "sha256": "f10fa98b81dd229a9a0250e1c9809275a811e4531b04725f773ac1542a1ad0e1",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/poseidon-output-encoding.json",
+      "sha256": "949d3620852bec2345e97d2958bfcb6a71929da2f134617174556fbfb4e954eb",
+      "role": "spec"
+    },
+    {
+      "path": "src/utils/poseidon_hash_out.rs",
+      "sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/post-close-claim-circuit.json",
+      "sha256": "7961cfc62bb6b9ea3ac837acafbfaac9aa0deeba482bd2be577beff968580c75",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/post_close_claim_circuit.rs",
+      "sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/PostCloseClaimCircuit.lean",
+      "sha256": "2c8fec5ca2a0803a4f68f7ba16f6f5986a5fd2dd039c7726e7c5f0e00d1eae23",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/post-close-claim-public-inputs.json",
+      "sha256": "5c3c619a39bdc80e71fde15ac1172815264ad3a23ed0db0b12016028df40d4c9",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/post_close_claim_pis.rs",
+      "sha256": "ccf9f70552e29bee0bc671f8f0b5962d91c303cdab023ebb23d2a6ad1bb65f32",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/PostCloseClaimPublicInputs.lean",
+      "sha256": "282d94dd479ffd518770f2535b75c230d974619ab7276563e3e8cbe382a58e26",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/withdrawal-claim-circuit.json",
+      "sha256": "3637a015f00641b282bffcfe07916fc2312f17b435c60304e76d71db1ac127ea",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/withdrawal_claim_circuit.rs",
+      "sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimCircuit.lean",
+      "sha256": "eabcbc03ed44b42b2b55d0155b73ec82baa656e7c18958e98d3c3fc93c57f55e",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/line-map/withdrawal-claim-public-inputs.json",
+      "sha256": "a5013fdd819ce5f5585c58dcb90bb1ed0af1380c0571224d94659a3f967e94ef",
+      "role": "spec"
+    },
+    {
+      "path": "src/circuits/channel/withdrawal_claim_pis.rs",
+      "sha256": "c59faebed03c43df60780bad75502856e33d84b165785c4729b13faafb6b25c1",
+      "role": "implementation"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimPublicInputs.lean",
+      "sha256": "9ac22b678c9b1316e459e21b301b4b9ce4c152c6d7df220879263573c4cb9e21",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/SettlementCloseBridge.lean",
+      "sha256": "f1b14d8109c5b276c464a1c563ed580e87a9f78d64e7bf67d573298d183508ec",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/CancelCloseBridge.lean",
+      "sha256": "817ccb779bbdea0be488ef86cdb4e0ea4eec25019a2b0c59f58cc8a2699d84df",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/ClaimSettlementBridge.lean",
+      "sha256": "694bca358c4e7a504e35dbe18c161d102efc66aa5b9b9984463dc270c594e4c2",
       "role": "model"
     }
   ],
@@ -1547,6 +1682,352 @@
       "sources": [
         "src/circuits/channel/close_pis.rs",
         "src/circuits/channel/close_circuit.rs",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.SettlementCloseBridge",
+      "theorems": [
+        "Zkp.Implementation.SettlementCloseBridge.scalar_words_exact",
+        "Zkp.Implementation.SettlementCloseBridge.digest_words_exact",
+        "Zkp.Implementation.SettlementCloseBridge.scalar_conversion_injective",
+        "Zkp.Implementation.SettlementCloseBridge.digest_conversion_injective",
+        "Zkp.Implementation.SettlementCloseBridge.scalar_recovers_original_integer",
+        "Zkp.Implementation.SettlementCloseBridge.scalar_has_canonical_words",
+        "Zkp.Implementation.SettlementCloseBridge.digest_has_canonical_words",
+        "Zkp.Implementation.SettlementCloseBridge.solidity_layout_is_exact_circuit_encoding",
+        "Zkp.Implementation.SettlementCloseBridge.solidity_layout_reads_as_exact_circuit_statement",
+        "Zkp.Implementation.SettlementCloseBridge.native_fields_read_encoded_circuit",
+        "Zkp.Implementation.SettlementCloseBridge.solidity_layout_reads_as_exact_native_fields",
+        "Zkp.Implementation.SettlementCloseBridge.accepted_binding_is_exact_statement",
+        "Zkp.Implementation.SettlementCloseBridge.accepted_binding_constrains_delegate_snapshot_and_capacity",
+        "Zkp.Implementation.SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt",
+        "Zkp.Implementation.SettlementCloseBridge.accepted_verification_parses_same_circuit_record",
+        "Zkp.Implementation.SettlementCloseBridge.accepted_verification_binds_every_circuit_field",
+        "Zkp.Implementation.SettlementCloseBridge.successful_binding_supplies_all_target_allocation_ranges",
+        "Zkp.Implementation.SettlementCloseBridge.word_bytes_append",
+        "Zkp.Implementation.SettlementCloseBridge.four_bytes_ignore_upper_bits",
+        "Zkp.Implementation.SettlementCloseBridge.scalar_words_pack_as_eight_bytes",
+        "Zkp.Implementation.SettlementCloseBridge.digest_words_pack_as_thirty_two_bytes",
+        "Zkp.Implementation.SettlementCloseBridge.circuit_digest_words_pack_as_solidity_bytes",
+        "Zkp.Implementation.SettlementCloseBridge.circuit_scalar_words_pack_as_solidity_bytes",
+        "Zkp.Implementation.SettlementCloseBridge.encoded_imcs_preimage_matches_solidity",
+        "Zkp.Implementation.SettlementCloseBridge.encoded_whole_token_vector_matches_solidity",
+        "Zkp.Implementation.SettlementCloseBridge.imcs_hash_call_has_identical_preimage",
+        "Zkp.Implementation.SettlementCloseBridge.token_hash_call_has_identical_whole_vector",
+        "Zkp.Implementation.SettlementCloseBridge.actual_witness_token_preimage_matches_settlement",
+        "Zkp.Implementation.SettlementCloseBridge.four_byte_encoding_injective_on_u32",
+        "Zkp.Implementation.SettlementCloseBridge.word_byte_encoding_injective_on_checked_words",
+        "Zkp.Implementation.SettlementCloseBridge.token_words_are_checked",
+        "Zkp.Implementation.SettlementCloseBridge.witness_token_preimage_is_checked",
+        "Zkp.Implementation.SettlementCloseBridge.bound_close_preserves_entire_settlement_vector"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "src/circuits/channel/close_circuit.rs",
+        "src/circuits/channel/close_pis.rs",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.H1Gadget",
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.header_has_exactly_37_field_elements",
+        "Zkp.Implementation.H1Gadget.leaf_has_exactly_104_field_elements",
+        "Zkp.Implementation.H1Gadget.header_reader_recovers_every_field",
+        "Zkp.Implementation.H1Gadget.leaf_reader_recovers_every_field",
+        "Zkp.Implementation.H1Gadget.exact_header_encoding_is_injective",
+        "Zkp.Implementation.H1Gadget.exact_leaf_encoding_is_injective",
+        "Zkp.Implementation.H1Gadget.header_and_leaf_inputs_cannot_alias",
+        "Zkp.Implementation.H1Gadget.header_keeps_full_registry",
+        "Zkp.Implementation.H1Gadget.header_keeps_raw_four_element_root",
+        "Zkp.Implementation.H1Gadget.leaf_keeps_signed_exit_recipient",
+        "Zkp.Implementation.H1Gadget.primitive_split_gates_imply_safe_split",
+        "Zkp.Implementation.H1Gadget.safe_split_combined_value_is_canonical",
+        "Zkp.Implementation.H1Gadget.safe_split_is_integer_equality",
+        "Zkp.Implementation.H1Gadget.safe_split_unique_parts",
+        "Zkp.Implementation.H1Gadget.primitive_split_results_are_uniquely_canonical",
+        "Zkp.Implementation.H1Gadget.split_join_value",
+        "Zkp.Implementation.H1Gadget.canonical_split_satisfies_all_gates",
+        "Zkp.Implementation.H1Gadget.canonical_hash_fits_native_u64_cast",
+        "Zkp.Implementation.H1Gadget.native_casts_equal_canonical_encoding_on_field_outputs",
+        "Zkp.Implementation.H1Gadget.from_hash_out_gates_force_unique_encoding",
+        "Zkp.Implementation.H1Gadget.every_canonical_hash_has_satisfying_output",
+        "Zkp.Implementation.H1Gadget.raw_pair_recovery_after_mathematical_encoding",
+        "Zkp.Implementation.H1Gadget.native_field_output_encoding_recovers_original",
+        "Zkp.Implementation.H1Gadget.native_cast_output_words_are_u32",
+        "Zkp.Implementation.H1Gadget.native_checked_pair_roundtrip",
+        "Zkp.Implementation.H1Gadget.native_reencoding_checked_bytes_is_identity",
+        "Zkp.Implementation.H1Gadget.native_try_from_checks_byte_roundtrip_only",
+        "Zkp.Implementation.H1Gadget.canonical_output_encoding_is_injective",
+        "Zkp.Implementation.H1Gadget.target_reduce_is_field_canonical",
+        "Zkp.Implementation.H1Gadget.to_hash_out_connect_excludes_noncanonical_pairs",
+        "Zkp.Implementation.H1Gadget.native_and_target_header_order_are_identical",
+        "Zkp.Implementation.H1Gadget.native_and_target_leaf_order_are_identical",
+        "Zkp.Implementation.H1Gadget.native_and_target_h1_same_on_field_outputs",
+        "Zkp.Implementation.H1Gadget.equal_h1_binds_every_header_field",
+        "Zkp.Implementation.H1Gadget.equal_slot_hash_binds_exit_recipient_and_all_token_rows",
+        "Zkp.Implementation.H1Gadget.maximum_field_element_has_valid_zero_low_split"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/balance-state-hash-helpers.json",
+        "doc/audit/zkp/line-map/h1-gadget.json",
+        "doc/audit/zkp/line-map/poseidon-output-encoding.json",
+        "src/common/balance_state.rs",
+        "src/circuits/channel/h1_gadget.rs",
+        "src/utils/poseidon_hash_out.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CancelCloseCircuit",
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.target_word_count",
+        "Zkp.Implementation.CancelCloseCircuit.native_target_order_matches",
+        "Zkp.Implementation.CancelCloseCircuit.target_fields_round_trip",
+        "Zkp.Implementation.CancelCloseCircuit.public_encoding_is_injective",
+        "Zkp.Implementation.CancelCloseCircuit.constructor_pins_exact_key",
+        "Zkp.Implementation.CancelCloseCircuit.h1_uses_current_37_elements",
+        "Zkp.Implementation.CancelCloseCircuit.imch_uses_all_139_words",
+        "Zkp.Implementation.CancelCloseCircuit.imcs_has_exact_12_words",
+        "Zkp.Implementation.CancelCloseCircuit.cancel_requires_two_through_eight_members",
+        "Zkp.Implementation.CancelCloseCircuit.cancel_has_strict_version_and_exact_era",
+        "Zkp.Implementation.CancelCloseCircuit.every_active_member_signed_revived_imch",
+        "Zkp.Implementation.CancelCloseCircuit.active_keys_are_distinct_under_visited_path_contracts",
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys",
+        "Zkp.Implementation.CancelCloseCircuit.cancel_orders_the_exact_injected_pending_version",
+        "Zkp.Implementation.CancelCloseCircuit.close_version_is_not_rehashed_inside_imcs",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order",
+        "Zkp.Implementation.CancelCloseCircuit.native_insertions_have_exact_width",
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_checks_count_and_auth",
+        "Zkp.Implementation.CancelCloseCircuit.imch_preimage_exposes_full_vector",
+        "Zkp.Implementation.CancelCloseCircuit.h1_preimage_binds_registry_and_count",
+        "Zkp.Implementation.CancelCloseCircuit.one_revived_digest_binds_full_token_vector",
+        "Zkp.Implementation.CancelCloseCircuit.successful_producer_trace",
+        "Zkp.Implementation.CancelCloseCircuit.producer_returns_when_all_operations_succeed",
+        "Zkp.Implementation.CancelCloseCircuit.normal_native_producer_finishes"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/cancel-close-circuit.json",
+        "src/circuits/channel/cancel_close_circuit.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CancelClosePublicInputs",
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.scalar_split_join",
+        "Zkp.Implementation.CancelClosePublicInputs.word_length",
+        "Zkp.Implementation.CancelClosePublicInputs.checked_digest_exact",
+        "Zkp.Implementation.CancelClosePublicInputs.read_encoded",
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.CancelClosePublicInputs.wrong_length_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length",
+        "Zkp.Implementation.CancelClosePublicInputs.normal_codec_roundtrip"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/cancel-close-public-inputs.json",
+        "src/circuits/channel/cancel_close_pis.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.CancelCloseBridge",
+      "theorems": [
+        "Zkp.Implementation.CancelCloseBridge.scalar_preserves_value",
+        "Zkp.Implementation.CancelCloseBridge.solidity_layout_is_exact_circuit_encoding",
+        "Zkp.Implementation.CancelCloseBridge.native_codec_uses_the_same_twenty_nine_words",
+        "Zkp.Implementation.CancelCloseBridge.accepted_cancel_has_exact_adapter_receipt",
+        "Zkp.Implementation.CancelCloseBridge.accepted_cancel_supplies_every_public_limb_range",
+        "Zkp.Implementation.CancelCloseBridge.accepted_cancel_binds_every_circuit_field",
+        "Zkp.Implementation.CancelCloseBridge.accepted_constrained_cancel_has_exact_version_and_era",
+        "Zkp.Implementation.CancelCloseBridge.accepted_constrained_members_signed_exact_solidity_revived_digest"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "src/circuits/channel/cancel_close_circuit.rs",
+        "src/circuits/channel/cancel_close_pis.rs",
+        "doc/audit/zkp/implementation-linewise-progress.md"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.WithdrawalClaimCircuit",
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50",
+        "Zkp.Implementation.WithdrawalClaimCircuit.read_public_encoding",
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_encoding_injective",
+        "Zkp.Implementation.WithdrawalClaimCircuit.header_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.full_slot_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.equality_flag_sum",
+        "Zkp.Implementation.WithdrawalClaimCircuit.one_hot_connection_forces_exact_slot_range",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
+        "Zkp.Implementation.WithdrawalClaimCircuit.token_slot_is_active_and_local",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64",
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_equals_the_core_output",
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_uses_same_selected_slot_and_leaf_key",
+        "Zkp.Implementation.WithdrawalClaimCircuit.same_nullifier_inputs_have_same_output",
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_preimage_binds_close_key_and_token",
+        "Zkp.Implementation.WithdrawalClaimCircuit.h1_connection_authenticates_the_compared_header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.header_preimage_binds_identity_registry_and_root",
+        "Zkp.Implementation.WithdrawalClaimCircuit.equal_nullifiers_bind_exact_claim_domain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.informational_member_key_not_in_nullifier_preimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.slot_preimage_binds_full_ciphertext_row",
+        "Zkp.Implementation.WithdrawalClaimCircuit.opened_leaf_hash_is_the_committed_position",
+        "Zkp.Implementation.WithdrawalClaimCircuit.slot_preimage_binds_recipient",
+        "Zkp.Implementation.WithdrawalClaimCircuit.recipient_matches_the_concrete_committed_leaf",
+        "Zkp.Implementation.WithdrawalClaimCircuit.all_leaf_fields_match_the_concrete_committed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_out_of_capacity_stops_before_assignment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_success_requires_member_index_capacity",
+        "Zkp.Implementation.WithdrawalClaimCircuit.polynomial_assignment_count",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_prove_uses_the_filled_witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.default_uses_exact_constructor",
+        "Zkp.Implementation.WithdrawalClaimCircuit.normal_token_selection",
+        "Zkp.Implementation.WithdrawalClaimCircuit.normal_active_delegate_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.normal_per_token_nullifier_preimage"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/withdrawal-claim-circuit.json",
+        "src/circuits/channel/withdrawal_claim_circuit.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.WithdrawalClaimPublicInputs",
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.encoded_native_fields_read_exactly",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalized_canonical_amount",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.word_check_exact",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.decode_fields_round_trip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.incorrect_length_fails_before_field_decoding",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.native_statement_encoding_injective",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.projection_uses_derived_asset_and_bound_fields",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.in_circuit_route_still_runs_all_structural_checks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.in_circuit_route_does_not_consult_external_proof",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.standard_route_requires_external_verification",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_intent_guard_precedes_remaining_checks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_identity_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_withdrawal_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.ordinary_native_codec_roundtrip"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/withdrawal-claim-public-inputs.json",
+        "src/circuits/channel/withdrawal_claim_pis.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.PostCloseClaimCircuit",
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimCircuit.public_input_tail_positions",
+        "Zkp.Implementation.PostCloseClaimCircuit.exact_public_input_count",
+        "Zkp.Implementation.PostCloseClaimCircuit.header_has_exact_37_elements",
+        "Zkp.Implementation.PostCloseClaimCircuit.slot_has_exact_104_elements",
+        "Zkp.Implementation.PostCloseClaimCircuit.nullifier_preimage_has_exact_25_words",
+        "Zkp.Implementation.PostCloseClaimCircuit.tx_wing_has_exact_17_words",
+        "Zkp.Implementation.PostCloseClaimCircuit.chain_push_has_exact_17_words",
+        "Zkp.Implementation.PostCloseClaimCircuit.token_and_channel_are_the_same_ids_wires",
+        "Zkp.Implementation.PostCloseClaimCircuit.a_fixed_tx_digest_fixes_token_and_channel_under_local_binding",
+        "Zkp.Implementation.PostCloseClaimCircuit.slot_recipient_is_exact_public_recipient",
+        "Zkp.Implementation.PostCloseClaimCircuit.header_uses_exact_public_channel_and_accumulator",
+        "Zkp.Implementation.PostCloseClaimCircuit.less_than_helper_exact_on_u32",
+        "Zkp.Implementation.PostCloseClaimCircuit.active_gate_bounds_full_member_delegate_region",
+        "Zkp.Implementation.PostCloseClaimCircuit.opened_slot_is_active_member_or_delegate",
+        "Zkp.Implementation.PostCloseClaimCircuit.member_or_delegate_classification",
+        "Zkp.Implementation.PostCloseClaimCircuit.amount_is_exact_core_output",
+        "Zkp.Implementation.PostCloseClaimCircuit.circuit_amount_and_token_are_u32_limbed",
+        "Zkp.Implementation.PostCloseClaimCircuit.claimed_amount_value_below_u64",
+        "Zkp.Implementation.PostCloseClaimCircuit.incoming_tx_is_anchored_at_a_20_bit_position",
+        "Zkp.Implementation.PostCloseClaimCircuit.anchored_ciphertext_is_the_decryption_ciphertext",
+        "Zkp.Implementation.PostCloseClaimCircuit.nullifier_is_derived_not_free",
+        "Zkp.Implementation.PostCloseClaimCircuit.amount_matches_plaintext_under_decryption_contract",
+        "Zkp.Implementation.PostCloseClaimCircuit.reference_slot_fixes_recipient_and_regev_key",
+        "Zkp.Implementation.PostCloseClaimCircuit.exact_consumer_head_pins_both_opening_roots",
+        "Zkp.Implementation.PostCloseClaimCircuit.native_range_failure_precedes_all_writes",
+        "Zkp.Implementation.PostCloseClaimCircuit.prove_preserves_member_index_error",
+        "Zkp.Implementation.PostCloseClaimCircuit.polynomial_zip_does_not_invent_missing_coefficients",
+        "Zkp.Implementation.PostCloseClaimCircuit.default_uses_identical_constructor",
+        "Zkp.Implementation.PostCloseClaimCircuit.constructor_finishes_with_exact_registration",
+        "Zkp.Implementation.PostCloseClaimCircuit.native_success_uses_supplied_public_inputs",
+        "Zkp.Implementation.PostCloseClaimCircuit.merkle_zero_stub",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_active_delegate_claim_is_locally_satisfiable"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/post-close-claim-circuit.json",
+        "src/circuits/channel/post_close_claim_circuit.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.PostCloseClaimPublicInputs",
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.split_then_join_u64",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.normalized_canonical_scalar",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.public_input_word_count",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.read_encoded_fields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.all_source_slice_endpoints_fit",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.check_words_exact",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.codec_roundtrip",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.decoder_success_has_exact_length",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.public_input_encoding_is_injective",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.exact_tail_positions",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.projection_copies_exact_token_and_nullifier",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.projection_copies_exact_close_state",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.successful_path_executes",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_binds_recipient_and_active_slot",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.normal_codec_roundtrip",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.normal_native_delegate_path"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/post-close-claim-public-inputs.json",
+        "src/circuits/channel/post_close_claim_pis.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.ClaimSettlementBridge",
+      "theorems": [
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_recipient_preserves_all_five_address_words",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_recipient_preserves_all_five_address_words",
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_layout_is_exact_50_word_statement",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_layout_is_exact_57_word_statement",
+        "Zkp.Implementation.ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt",
+        "Zkp.Implementation.ClaimSettlementBridge.accepted_post_close_has_exact_adapter_receipt",
+        "Zkp.Implementation.ClaimSettlementBridge.accepted_withdrawal_binds_all_ten_fields",
+        "Zkp.Implementation.ClaimSettlementBridge.accepted_post_close_binds_all_ten_fields",
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_verified_asset_is_same_header_registry_slot",
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_core_receives_exact_solidity_amount",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_core_receives_exact_solidity_amount",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_source_hash_uses_exact_solidity_token_and_channel",
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_uses_same_shared_h1_header",
+        "Zkp.Implementation.ClaimSettlementBridge.withdrawal_uses_same_shared_full_slot_leaf",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_uses_same_shared_h1_header",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_uses_same_shared_full_slot_leaf",
+        "Zkp.Implementation.ClaimSettlementBridge.post_close_canonical_root_uses_same_safe_encode_back"
+      ],
+      "sources": [
+        "contracts/src/ChannelSettlementVerifier.sol",
+        "src/circuits/channel/withdrawal_claim_circuit.rs",
+        "src/circuits/channel/post_close_claim_circuit.rs",
+        "src/circuits/channel/h1_gadget.rs",
+        "src/utils/poseidon_hash_out.rs",
         "doc/audit/zkp/implementation-linewise-progress.md"
       ]
     }

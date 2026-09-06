@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "source": "src/common/balance_state.rs",
+  "source_sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
+  "source_lines": 1797,
+  "module": "Zkp.Implementation.H1Gadget",
+  "model": "doc/audit/zkp/Zkp/Implementation/H1Gadget.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 500,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 501,
+      "end": 501,
+      "status": "translated",
+      "label": "native header function",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeHeaderWords"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 502,
+      "end": 502,
+      "status": "dependency-boundary",
+      "label": "slot_tree_root calculation (not assumed authenticated here)",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.Header"
+      ],
+      "theorems": [],
+      "note": "Poseidon/imported primitive/type or compiler operation is not established by the local proof."
+    },
+    {
+      "start": 503,
+      "end": 532,
+      "status": "translated",
+      "label": "native field header push/extend order",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeHeaderWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.native_and_target_header_order_are_identical"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 533,
+      "end": 549,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 550,
+      "end": 552,
+      "status": "translated",
+      "label": "native H1 hash and output cast composition",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeH1",
+        "Zkp.Implementation.H1Gadget.HashEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.native_and_target_h1_same_on_field_outputs"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 553,
+      "end": 793,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 794,
+      "end": 810,
+      "status": "translated",
+      "label": "native leaf preimage full tuple",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeLeafWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.native_and_target_leaf_order_are_identical",
+        "Zkp.Implementation.H1Gadget.leaf_has_exactly_104_field_elements"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 811,
+      "end": 834,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 835,
+      "end": 848,
+      "status": "translated",
+      "label": "native slot leaf Poseidon call",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.hashSlotLeaf",
+        "Zkp.Implementation.H1Gadget.HashEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 849,
+      "end": 935,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 936,
+      "end": 1797,
+      "status": "test-only",
+      "label": "cfg(test) test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not production constraints and no theorem coverage claimed for tests."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "hash-security-and-canonical-field",
+      "obligation": "Poseidon compression soundness, canonical field outputs and concrete compared-input collision binding are not proved here; encoded tuple injectivity is not hash injectivity.",
+      "discharged": false
+    },
+    {
+      "name": "imported-gate-lowering",
+      "obligation": "Derive SplitGates from actual Goldilocks split_low_high/is_equal/mul/assert_zero gates and compiler; local modular arithmetic uniqueness alone is not this lowering proof.",
+      "discharged": false
+    },
+    {
+      "name": "native-and-target-representation",
+      "obligation": "Rust fixed-width/cast/vector behavior and emitted targets require source refinement; the model retains u32 casts and raw-native vs modular-target distinctions.",
+      "discharged": false
+    },
+    {
+      "name": "caller-authentication-and-fund-ownership",
+      "obligation": "The helper accepts a header root and full rows, does not authenticate a channel, verify a signature/opening, validate counts/registry/suffixes, decrypt balances or prove resource custody.",
+      "discharged": false
+    }
+  ]
+}

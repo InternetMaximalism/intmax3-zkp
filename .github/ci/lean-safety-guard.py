@@ -37,6 +37,16 @@ CURRENT = {
         "Zkp.Implementation.CloseCircuit",
         "Zkp.Implementation.ClosePublicInputs",
         "Zkp.Implementation.CloseEncodingBridge",
+        "Zkp.Implementation.SettlementCloseBridge",
+        "Zkp.Implementation.H1Gadget",
+        "Zkp.Implementation.CancelCloseCircuit",
+        "Zkp.Implementation.CancelClosePublicInputs",
+        "Zkp.Implementation.CancelCloseBridge",
+        "Zkp.Implementation.WithdrawalClaimCircuit",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs",
+        "Zkp.Implementation.PostCloseClaimCircuit",
+        "Zkp.Implementation.PostCloseClaimPublicInputs",
+        "Zkp.Implementation.ClaimSettlementBridge",
     ),
 }
 ARCH_ROOTS = frozenset({

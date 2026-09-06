@@ -1,0 +1,2005 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/cancel_close_circuit.rs",
+  "source_sha256": "ab20970c90eb73108ef13fb73799fbe5b70e705ac36791db6fde5110165163f3",
+  "source_lines": 1252,
+  "module": "Zkp.Implementation.CancelCloseCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/CancelCloseCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 23,
+      "end": 38,
+      "status": "dependency-boundary",
+      "label": "imported circuit/native primitives",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Environment",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "External Plonky2/Falcon/Keccak/H1/indexed-tree/types semantics and compiler lowering are explicit boundaries."
+    },
+    {
+      "start": 39,
+      "end": 39,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 40,
+      "end": 68,
+      "status": "dependency-boundary",
+      "label": "imported circuit/native primitives",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Environment",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "External Plonky2/Falcon/Keccak/H1/indexed-tree/types semantics and compiler lowering are explicit boundaries."
+    },
+    {
+      "start": 69,
+      "end": 70,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 71,
+      "end": 73,
+      "status": "translated",
+      "label": "domain constants",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.h1Preimage",
+        "Zkp.Implementation.CancelCloseCircuit.imchPreimage",
+        "Zkp.Implementation.CancelCloseCircuit.imcsPreimage",
+        "Zkp.Implementation.CancelCloseCircuit.nativeMemberSetPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.imcs_has_exact_12_words"
+      ],
+      "note": "Exact IMCH, IMCS and IMCM domain words; IMB2 enters shared H1."
+    },
+    {
+      "start": 74,
+      "end": 77,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "dependency-boundary",
+      "label": "derived native representation",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Generated Clone/Debug/Eq/serde and exact Rust representation are not refined by the manual field-layout model."
+    },
+    {
+      "start": 79,
+      "end": 86,
+      "status": "translated",
+      "label": "public target fields",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.target_word_count"
+      ],
+      "note": "Exact six field groups; target allocation represented separately."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 88,
+      "end": 88,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural declaration delimiter/type bound outside executable operation."
+    },
+    {
+      "start": 89,
+      "end": 105,
+      "status": "dependency-boundary",
+      "label": "CancelClosePublicInputsTarget::new",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs.AllocationChecks",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Each of29 target limbs has32-bit range check; exact builder wire allocation/range gadget correctness not proved."
+    },
+    {
+      "start": 106,
+      "end": 106,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 107,
+      "end": 119,
+      "status": "translated",
+      "label": "CancelClosePublicInputsTarget::to_vec",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.target_word_count",
+        "Zkp.Implementation.CancelCloseCircuit.native_target_order_matches"
+      ],
+      "note": "Exact order and29-word debug assertion; target/compiler representation boundary."
+    },
+    {
+      "start": 120,
+      "end": 120,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 121,
+      "end": 142,
+      "status": "translated",
+      "label": "CancelClosePublicInputsTarget::set_witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Six ordered assignments. Execution and unwrap panic modeled via assignment boundary; no proof authentication in setter."
+    },
+    {
+      "start": 143,
+      "end": 143,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural declaration delimiter/type bound outside executable operation."
+    },
+    {
+      "start": 144,
+      "end": 144,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 145,
+      "end": 153,
+      "status": "dependency-boundary",
+      "label": "error enum/Display",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Fault"
+      ],
+      "theorems": [],
+      "note": "Witness/auth/proving/panic outcomes distinguished; exact strings/derive not modeled."
+    },
+    {
+      "start": 154,
+      "end": 157,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 158,
+      "end": 158,
+      "status": "dependency-boundary",
+      "label": "derived native representation",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Generated Clone/Debug/Eq/serde and exact Rust representation are not refined by the manual field-layout model."
+    },
+    {
+      "start": 159,
+      "end": 161,
+      "status": "translated",
+      "label": "native authentication/full witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Native auth vector and aggregate proof remain separate; native auth is not the circuit's proof-key authority."
+    },
+    {
+      "start": 162,
+      "end": 165,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 166,
+      "end": 166,
+      "status": "dependency-boundary",
+      "label": "derived native representation",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Generated Clone/Debug/Eq/serde and exact Rust representation are not refined by the manual field-layout model."
+    },
+    {
+      "start": 167,
+      "end": 172,
+      "status": "translated",
+      "label": "native authentication/full witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Native auth vector and aggregate proof remain separate; native auth is not the circuit's proof-key authority."
+    },
+    {
+      "start": 173,
+      "end": 174,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 175,
+      "end": 175,
+      "status": "translated",
+      "label": "native authentication/full witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Native auth vector and aggregate proof remain separate; native auth is not the circuit's proof-key authority."
+    },
+    {
+      "start": 176,
+      "end": 180,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 181,
+      "end": 182,
+      "status": "translated",
+      "label": "native authentication/full witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Native auth vector and aggregate proof remain separate; native auth is not the circuit's proof-key authority."
+    },
+    {
+      "start": 183,
+      "end": 185,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 186,
+      "end": 190,
+      "status": "translated",
+      "label": "member_set_commitment_for_auth",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.nativeMemberSetPreimage",
+        "Zkp.Implementation.CancelCloseCircuit.memberSetForAuth"
+      ],
+      "theorems": [],
+      "note": "Pad/read8 native keys; cast auth.len modulo256 before common helper's active masking; hash is explicit external observation."
+    },
+    {
+      "start": 191,
+      "end": 191,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 192,
+      "end": 198,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 199,
+      "end": 200,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 201,
+      "end": 202,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 203,
+      "end": 204,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 205,
+      "end": 209,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 210,
+      "end": 212,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 213,
+      "end": 221,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 222,
+      "end": 225,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 226,
+      "end": 226,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 227,
+      "end": 228,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 229,
+      "end": 230,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 231,
+      "end": 234,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 235,
+      "end": 236,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 237,
+      "end": 239,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 240,
+      "end": 241,
+      "status": "translated",
+      "label": "circuit stored targets",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness",
+        "Zkp.Implementation.CancelCloseCircuit.ProofWitness"
+      ],
+      "theorems": [],
+      "note": "All semantically used stored targets represented; CircuitData/compiler handles abstracted. Derived H1 is not independent witness."
+    },
+    {
+      "start": 242,
+      "end": 242,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 243,
+      "end": 248,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural declaration delimiter/type bound outside executable operation."
+    },
+    {
+      "start": 249,
+      "end": 252,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 253,
+      "end": 253,
+      "status": "translated",
+      "label": "new: pinned verifier/configuration",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.newCircuit",
+        "Zkp.Implementation.CancelCloseCircuit.ConstructorBinding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.constructor_pins_exact_key"
+      ],
+      "note": "73-PI assertion; exact supplied aggregate VK fixed as constant, zk config. Compilation/allocation remains dependency."
+    },
+    {
+      "start": 254,
+      "end": 255,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 256,
+      "end": 262,
+      "status": "translated",
+      "label": "new: pinned verifier/configuration",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.newCircuit",
+        "Zkp.Implementation.CancelCloseCircuit.ConstructorBinding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.constructor_pins_exact_key"
+      ],
+      "note": "73-PI assertion; exact supplied aggregate VK fixed as constant, zk config. Compilation/allocation remains dependency."
+    },
+    {
+      "start": 263,
+      "end": 267,
+      "status": "dependency-boundary",
+      "label": "new: private target allocations",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Fixed10 token lanes; all allocated integer limbs32-bit checked, four slot-root fields deliberately raw. Exact field/type lowering unproved."
+    },
+    {
+      "start": 268,
+      "end": 269,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 270,
+      "end": 271,
+      "status": "dependency-boundary",
+      "label": "new: private target allocations",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Fixed10 token lanes; all allocated integer limbs32-bit checked, four slot-root fields deliberately raw. Exact field/type lowering unproved."
+    },
+    {
+      "start": 272,
+      "end": 274,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 275,
+      "end": 289,
+      "status": "dependency-boundary",
+      "label": "new: private target allocations",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Fixed10 token lanes; all allocated integer limbs32-bit checked, four slot-root fields deliberately raw. Exact field/type lowering unproved."
+    },
+    {
+      "start": 290,
+      "end": 291,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 292,
+      "end": 292,
+      "status": "dependency-boundary",
+      "label": "new: private target allocations",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Fixed10 token lanes; all allocated integer limbs32-bit checked, four slot-root fields deliberately raw. Exact field/type lowering unproved."
+    },
+    {
+      "start": 293,
+      "end": 294,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 295,
+      "end": 296,
+      "status": "dependency-boundary",
+      "label": "new: private target allocations",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Shape",
+        "Zkp.Implementation.CancelCloseCircuit.PrivateWitness.Checked",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Fixed10 token lanes; all allocated integer limbs32-bit checked, four slot-root fields deliberately raw. Exact field/type lowering unproved."
+    },
+    {
+      "start": 297,
+      "end": 297,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 298,
+      "end": 299,
+      "status": "translated",
+      "label": "new: member-prefix constraints",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_requires_two_through_eight_members"
+      ],
+      "note": "Eight safe booleans, no-rise products, count sum, flags0and1 asserted. No token bounds or combined capacity guards inferred."
+    },
+    {
+      "start": 300,
+      "end": 303,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 304,
+      "end": 318,
+      "status": "translated",
+      "label": "new: member-prefix constraints",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_requires_two_through_eight_members"
+      ],
+      "note": "Eight safe booleans, no-rise products, count sum, flags0and1 asserted. No token bounds or combined capacity guards inferred."
+    },
+    {
+      "start": 319,
+      "end": 324,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 325,
+      "end": 325,
+      "status": "translated",
+      "label": "new: member-prefix constraints",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_requires_two_through_eight_members"
+      ],
+      "note": "Eight safe booleans, no-rise products, count sum, flags0and1 asserted. No token bounds or combined capacity guards inferred."
+    },
+    {
+      "start": 326,
+      "end": 332,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 333,
+      "end": 333,
+      "status": "translated",
+      "label": "new: member-prefix constraints",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_requires_two_through_eight_members"
+      ],
+      "note": "Eight safe booleans, no-rise products, count sum, flags0and1 asserted. No token bounds or combined capacity guards inferred."
+    },
+    {
+      "start": 334,
+      "end": 338,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 339,
+      "end": 340,
+      "status": "translated",
+      "label": "new: hash domains",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.imchPreimage",
+        "Zkp.Implementation.CancelCloseCircuit.imcsPreimage"
+      ],
+      "theorems": [],
+      "note": "Exact constant-domain operands."
+    },
+    {
+      "start": 341,
+      "end": 349,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 350,
+      "end": 361,
+      "status": "dependency-boundary",
+      "label": "new: shared H1 gadget call",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.h1Preimage",
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.h1_uses_current_37_elements",
+        "Zkp.Implementation.CancelCloseCircuit.h1_preimage_binds_registry_and_count"
+      ],
+      "note": "Exact37-field argument order, full registry, raw slot root and same revived-version PI. Poseidon/canonical conversion primitive boundary."
+    },
+    {
+      "start": 362,
+      "end": 366,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 367,
+      "end": 386,
+      "status": "translated",
+      "label": "new: revived IMCH preimage",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.imchPrefix",
+        "Zkp.Implementation.CancelCloseCircuit.imchSuffix",
+        "Zkp.Implementation.CancelCloseCircuit.imchPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.imch_uses_all_139_words",
+        "Zkp.Implementation.CancelCloseCircuit.imch_preimage_exposes_full_vector",
+        "Zkp.Implementation.CancelCloseCircuit.one_revived_digest_binds_full_token_vector"
+      ],
+      "note": "Full10x8 amounts and both channel occurrences; includes all auxiliary fields, nonzero unallocated permitted; exact139 words."
+    },
+    {
+      "start": 387,
+      "end": 390,
+      "status": "dependency-boundary",
+      "label": "new: IMCH Keccak/connect",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.every_active_member_signed_revived_imch",
+        "Zkp.Implementation.CancelCloseCircuit.one_revived_digest_binds_full_token_vector"
+      ],
+      "note": "Exact recomputation/equality observation; Keccak/Bytes32 gadget lowering not proved, hash-binding only for concrete compared inputs."
+    },
+    {
+      "start": 391,
+      "end": 397,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 398,
+      "end": 405,
+      "status": "translated",
+      "label": "new: canonical IMCS preimage",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.imcsPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.imcs_has_exact_12_words",
+        "Zkp.Implementation.CancelCloseCircuit.close_version_is_not_rehashed_inside_imcs"
+      ],
+      "note": "Channel+opaque closing IMCH+freeze nonce. Closing version is NOT decoded from closing IMCH."
+    },
+    {
+      "start": 406,
+      "end": 407,
+      "status": "dependency-boundary",
+      "label": "new: IMCS Keccak/connect",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_orders_the_exact_injected_pending_version"
+      ],
+      "note": "Exact hash observation bound to closeId PI; current-close authority belongs to caller."
+    },
+    {
+      "start": 408,
+      "end": 412,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 413,
+      "end": 416,
+      "status": "dependency-boundary",
+      "label": "new: strict u64 version comparator",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_has_strict_version_and_exact_era"
+      ],
+      "note": "Actual is_lt closing→revived and assert-one; comparator field lowering is explicit dependency."
+    },
+    {
+      "start": 417,
+      "end": 418,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 419,
+      "end": 421,
+      "status": "dependency-boundary",
+      "label": "new: checked u64 successor",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.cancel_has_strict_version_and_exact_era"
+      ],
+      "note": "Checked limb add1 with no overflow followed by exact closeNonce connect; imported U64 gadget contract."
+    },
+    {
+      "start": 422,
+      "end": 433,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 434,
+      "end": 434,
+      "status": "dependency-boundary",
+      "label": "new: fixed-VK recursive verification",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.ConstructorBinding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.every_active_member_signed_revived_imch"
+      ],
+      "note": "Exact aggregate proof and fixed supplied VK; signature soundness local to concrete proof+statement, not arity alone."
+    },
+    {
+      "start": 435,
+      "end": 436,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 437,
+      "end": 440,
+      "status": "translated",
+      "label": "new: aggregate message/count/keys and IMCM selection",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "Message and count connects; eight raw verified key slices directly used for IMCM with same active flags, no masking of key limbs beyond padding."
+    },
+    {
+      "start": 441,
+      "end": 443,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 444,
+      "end": 447,
+      "status": "translated",
+      "label": "new: aggregate message/count/keys and IMCM selection",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "Message and count connects; eight raw verified key slices directly used for IMCM with same active flags, no masking of key limbs beyond padding."
+    },
+    {
+      "start": 448,
+      "end": 449,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 450,
+      "end": 455,
+      "status": "translated",
+      "label": "new: aggregate message/count/keys and IMCM selection",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "Message and count connects; eight raw verified key slices directly used for IMCM with same active flags, no masking of key limbs beyond padding."
+    },
+    {
+      "start": 456,
+      "end": 456,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 457,
+      "end": 458,
+      "status": "translated",
+      "label": "new: aggregate message/count/keys and IMCM selection",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "Message and count connects; eight raw verified key slices directly used for IMCM with same active flags, no masking of key limbs beyond padding."
+    },
+    {
+      "start": 459,
+      "end": 459,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 460,
+      "end": 465,
+      "status": "translated",
+      "label": "new: aggregate message/count/keys and IMCM selection",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.PublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "Message and count connects; eight raw verified key slices directly used for IMCM with same active flags, no masking of key limbs beyond padding."
+    },
+    {
+      "start": 466,
+      "end": 480,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 481,
+      "end": 504,
+      "status": "dependency-boundary",
+      "label": "new: conditional indexed insertion chain",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.active_keys_are_distinct_under_visited_path_contracts"
+      ],
+      "note": "Eight checked height4 paths, constant empty root, exact keys, value1, same active flags. Local visited-path nonmembership/update contracts required; final root discarded."
+    },
+    {
+      "start": 505,
+      "end": 505,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 506,
+      "end": 508,
+      "status": "dependency-boundary",
+      "label": "new: member commitment hash/connect",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.member_commitment_uses_same_verified_keys"
+      ],
+      "note": "IMCM equality to PI; exact Keccak lowering remains boundary."
+    },
+    {
+      "start": 509,
+      "end": 509,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 510,
+      "end": 538,
+      "status": "dependency-boundary",
+      "label": "new: register/build/store",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.newCircuit",
+        "Zkp.Implementation.CancelCloseCircuit.Constructor",
+        "Zkp.Implementation.CancelCloseCircuit.CircuitGates",
+        "Zkp.Implementation.CancelCloseCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.target_word_count"
+      ],
+      "note": "29-word registered PI order and exact stored semantic data; backend/compiler construction/wire allocation not refined."
+    },
+    {
+      "start": 539,
+      "end": 541,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 542,
+      "end": 548,
+      "status": "translated",
+      "label": "fill_witness",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_checks_count_and_auth"
+      ],
+      "note": "Normal entry enforces native cosigner floor; no proof soundness inferred from fill."
+    },
+    {
+      "start": 549,
+      "end": 554,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 555,
+      "end": 575,
+      "status": "translated",
+      "label": "fill_witness_inner: native count/auth guards",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_checks_count_and_auth"
+      ],
+      "note": "Native floor flag true2/false1; fixed max8 and exact auth length. False is a private test seam, not public prove path."
+    },
+    {
+      "start": 576,
+      "end": 579,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 580,
+      "end": 581,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 582,
+      "end": 582,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 583,
+      "end": 584,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 585,
+      "end": 602,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 603,
+      "end": 604,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 605,
+      "end": 634,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 635,
+      "end": 636,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 637,
+      "end": 637,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 638,
+      "end": 639,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 640,
+      "end": 641,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 642,
+      "end": 644,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 645,
+      "end": 648,
+      "status": "translated",
+      "label": "fill_witness_inner: ordered assignments",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.assignmentPlan",
+        "Zkp.Implementation.CancelCloseCircuit.setPublicPlan",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_fill_preserves_supplied_pis",
+        "Zkp.Implementation.CancelCloseCircuit.native_public_assignment_order"
+      ],
+      "note": "Exact native field projection and ordered assignment plan, full registry/amounts, computed slot root not derived H1 assignment; native helper/unwrap operations remain explicit boundary."
+    },
+    {
+      "start": 649,
+      "end": 652,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 653,
+      "end": 655,
+      "status": "dependency-boundary",
+      "label": "fill_witness_inner: aggregate proof assignment",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Actual supplied proof assignment, FailedToProve conversion on failure; no native proof verification here."
+    },
+    {
+      "start": 656,
+      "end": 663,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 664,
+      "end": 668,
+      "status": "translated",
+      "label": "fill_witness_inner: fresh tree insertion loop",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.buildInsertions",
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_insertions_have_exact_width"
+      ],
+      "note": "Exactly8 iterations, active key insertion at value1, padding dummy, ordered setInsertion, error/panic propagation; native tree helper semantics remain boundary."
+    },
+    {
+      "start": 669,
+      "end": 672,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 673,
+      "end": 685,
+      "status": "translated",
+      "label": "fill_witness_inner: fresh tree insertion loop",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.buildInsertions",
+        "Zkp.Implementation.CancelCloseCircuit.fillWitnessInner",
+        "Zkp.Implementation.CancelCloseCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.native_insertions_have_exact_width"
+      ],
+      "note": "Exactly8 iterations, active key insertion at value1, padding dummy, ordered setInsertion, error/panic propagation; native tree helper semantics remain boundary."
+    },
+    {
+      "start": 686,
+      "end": 686,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 687,
+      "end": 702,
+      "status": "translated",
+      "label": "prove: native PI, member commitment, fill, backend",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.prove",
+        "Zkp.Implementation.CancelCloseCircuit.memberSetForAuth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.successful_producer_trace",
+        "Zkp.Implementation.CancelCloseCircuit.producer_returns_when_all_operations_succeed",
+        "Zkp.Implementation.CancelCloseCircuit.normal_native_producer_finishes"
+      ],
+      "note": "Exact count guard, native PI errors, auth-derived commitment, fill, backend error mapping. Positive model example uses explicit operation-success mocks, not a cryptographic proof."
+    },
+    {
+      "start": 703,
+      "end": 704,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 705,
+      "end": 706,
+      "status": "translated",
+      "label": "prove: native PI, member commitment, fill, backend",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.prove",
+        "Zkp.Implementation.CancelCloseCircuit.memberSetForAuth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.successful_producer_trace",
+        "Zkp.Implementation.CancelCloseCircuit.producer_returns_when_all_operations_succeed",
+        "Zkp.Implementation.CancelCloseCircuit.normal_native_producer_finishes"
+      ],
+      "note": "Exact count guard, native PI errors, auth-derived commitment, fill, backend error mapping. Positive model example uses explicit operation-success mocks, not a cryptographic proof."
+    },
+    {
+      "start": 707,
+      "end": 707,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 708,
+      "end": 712,
+      "status": "translated",
+      "label": "prove: native PI, member commitment, fill, backend",
+      "declarations": [
+        "Zkp.Implementation.CancelCloseCircuit.prove",
+        "Zkp.Implementation.CancelCloseCircuit.memberSetForAuth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelCloseCircuit.successful_producer_trace",
+        "Zkp.Implementation.CancelCloseCircuit.producer_returns_when_all_operations_succeed",
+        "Zkp.Implementation.CancelCloseCircuit.normal_native_producer_finishes"
+      ],
+      "note": "Exact count guard, native PI errors, auth-derived commitment, fill, backend error mapping. Positive model example uses explicit operation-success mocks, not a cryptographic proof."
+    },
+    {
+      "start": 713,
+      "end": 713,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural declaration delimiter/type bound outside executable operation."
+    },
+    {
+      "start": 714,
+      "end": 714,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 715,
+      "end": 716,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 717,
+      "end": 719,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 720,
+      "end": 720,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 721,
+      "end": 721,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 722,
+      "end": 725,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 726,
+      "end": 726,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 727,
+      "end": 742,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 743,
+      "end": 743,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 744,
+      "end": 746,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 747,
+      "end": 748,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 749,
+      "end": 749,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 750,
+      "end": 750,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 751,
+      "end": 751,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 752,
+      "end": 753,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 754,
+      "end": 756,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 757,
+      "end": 757,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 758,
+      "end": 768,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 769,
+      "end": 771,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 772,
+      "end": 774,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 775,
+      "end": 778,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 779,
+      "end": 785,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 786,
+      "end": 786,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 787,
+      "end": 796,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 797,
+      "end": 802,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 803,
+      "end": 821,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 822,
+      "end": 823,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 824,
+      "end": 826,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 827,
+      "end": 829,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 830,
+      "end": 836,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 837,
+      "end": 843,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 844,
+      "end": 852,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 853,
+      "end": 855,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 856,
+      "end": 875,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 876,
+      "end": 876,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 877,
+      "end": 905,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 906,
+      "end": 908,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 909,
+      "end": 928,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 929,
+      "end": 929,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 930,
+      "end": 931,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 932,
+      "end": 932,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 933,
+      "end": 941,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 942,
+      "end": 942,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 943,
+      "end": 945,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 946,
+      "end": 948,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 949,
+      "end": 952,
+      "status": "untranslated",
+      "label": "optional fixture-feature code",
+      "declarations": [],
+      "theorems": [],
+      "note": "Enabled by cancel-close-fixture-bin outside cfg(test); no formalized helper implementation or linked theorem. Excluded from default production constraint guarantees."
+    },
+    {
+      "start": 953,
+      "end": 953,
+      "status": "non-executable",
+      "label": "fixture-feature comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment or blank line inside optional cfg(any(test, feature=cancel-close-fixture-bin)) helper region."
+    },
+    {
+      "start": 954,
+      "end": 1252,
+      "status": "test-only",
+      "label": "source tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) fixture/assertions; not translated, executed or linked to theorem evidence."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_plonky2_compiler",
+      "obligation": "Prove actual Rust builder and witness code refines the listed manual definitions, exact wire allocation/assignment/unwrap behavior and final registered circuit; source-line partition is inventory, not compiler certification.",
+      "discharged": false
+    },
+    {
+      "name": "field_ranges_boolean_u64",
+      "obligation": "Justify CircuitGates from source field constraints: canonical32-bit limbs, boolean prefix/sum field↔Nat lowering, strict u64 comparator, checked two-limb add and no overflow.",
+      "discharged": false
+    },
+    {
+      "name": "keccak_poseidon_native_encoding",
+      "obligation": "Justify exact Keccak and H1 Poseidon/canonical-byte encoding at listed preimages; any collision-binding premises apply only to two concrete compared inputs, never globally injective finite hashes.",
+      "discharged": false
+    },
+    {
+      "name": "fixed_recursive_falcon_verifier",
+      "obligation": "Authenticate the supplied fixed aggregate verifier as the intended Falcon circuit; arity73 is not identity. Prove local AggregateContractAt for the exact proof/statement, including key limb provenance and padding.",
+      "discharged": false
+    },
+    {
+      "name": "indexed_member_distinctness",
+      "obligation": "Justify local visited path insertion contracts at height4, empty root and exact key/value1 arguments. No global Merkle injectivity or security premise is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "native_projection_and_partial_witness",
+      "obligation": "NativeEnvironment.stateData must project the exact typed revived state, fixed arrays/u8-u16 counts, slot_tree_root computation and checked setters; setAssignments must execute the list in order, stopping on first panic.",
+      "discharged": false
+    },
+    {
+      "name": "proof_backend",
+      "obligation": "Backend returning a proof is an observation, not an assumed valid Cancel proof. Actual prover/verifier and recursion soundness remain unproved.",
+      "discharged": false
+    },
+    {
+      "name": "manager_pending_authority_and_replay",
+      "obligation": "MatchesPending must be justified by exact Manager/SettlementVerifier field injection and deployment pins. Generation/cancellation floors are absent from the circuit; replay resistance requires actual L1 history guards.",
+      "discharged": false
+    },
+    {
+      "name": "fixture_feature_scope",
+      "obligation": "Lines715–953 are cfg(any(test, feature=cancel-close-fixture-bin)) helpers, explicitly untranslated when executable; lines954+ are test-only. No source test/fixture is executed or promoted to a theorem.",
+      "discharged": false
+    }
+  ]
+}

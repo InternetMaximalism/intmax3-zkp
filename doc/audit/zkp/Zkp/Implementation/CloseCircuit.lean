@@ -303,11 +303,15 @@ def selectedKeys : List Bool → List Words8 → List Words8
 def memberSetPreimage (count : Nat) (flags : List Bool) (keys : List Words8) : List Nat :=
   [imcmDomain,count] ++ flattenAmounts (selectedKeys flags keys)
 
-/-- Native helper truncates/pads to8 and casts len to u8. Production prove/fill
-    validates auth length/count, but the helper itself does not. -/
+/-- Native helper truncates/pads to8, casts len to u8, then the called
+    close_member_set_commitment masks every index >= that CAST count.
+    Production prove/fill validates auth length/count, but this total helper
+    does not silently assume the production bound. -/
 def nativeMemberSetPreimage (auth : List MemberAuth) : List Nat :=
   let keys := (auth.map MemberAuth.pk ++ List.replicate maxMembers Words8.zero).take maxMembers
-  [imcmDomain,auth.length % 256] ++ flattenAmounts keys
+  let count := auth.length % 256
+  let flags := (List.range maxMembers).map (fun i => decide (i < count))
+  memberSetPreimage count flags keys
 
 theorem flattened_amounts_keep_all_eight_words (amounts : List Words8) :
     (flattenAmounts amounts).length = amounts.length * 8 := by

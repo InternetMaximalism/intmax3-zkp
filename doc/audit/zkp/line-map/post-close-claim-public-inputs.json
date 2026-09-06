@@ -1,0 +1,420 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/post_close_claim_pis.rs",
+  "source_sha256": "ccf9f70552e29bee0bc671f8f0b5962d91c303cdab023ebb23d2a6ad1bb65f32",
+  "source_lines": 447,
+  "module": "Zkp.Implementation.PostCloseClaimPublicInputs",
+  "model": "doc/audit/zkp/Zkp/Implementation/PostCloseClaimPublicInputs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 6,
+      "status": "non-executable",
+      "label": "module rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Historical source comments are not additional native checks."
+    },
+    {
+      "start": 7,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "imported native types serialization and verifier interfaces",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeEnvironment",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "Native codecs, serde, error derives, keys/ciphertexts and E3 verification are dependencies; local helper control flow is separate."
+    },
+    {
+      "start": 18,
+      "end": 35,
+      "status": "non-executable",
+      "label": "public input layout rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Layout commentary is not executable validation; exact word layout is proved at the production codec."
+    },
+    {
+      "start": 36,
+      "end": 37,
+      "status": "translated",
+      "label": "57-word constant",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.publicInputLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.public_input_word_count"
+      ],
+      "note": "Exact full current public statement length."
+    },
+    {
+      "start": 38,
+      "end": 68,
+      "status": "translated",
+      "label": "native PI record",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.PublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.exact_tail_positions"
+      ],
+      "note": "All fields, amount split into unique native Words2 representation; address five and hashes eight ordered u32 words."
+    },
+    {
+      "start": 69,
+      "end": 89,
+      "status": "translated",
+      "label": "typed witness errors",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Error"
+      ],
+      "theorems": [],
+      "note": "Source error categories retained; modeled dependency panic explicitly distinct; exact display strings are not modeled."
+    },
+    {
+      "start": 90,
+      "end": 114,
+      "status": "translated",
+      "label": "native witness fields",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Witness",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SourceTx",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Claim",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Key",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.BalanceState"
+      ],
+      "theorems": [],
+      "note": "Complete directly consumed state fields, full arrays represented as lists, ten-token lanes, additional source descriptor payload retained."
+    },
+    {
+      "start": 115,
+      "end": 127,
+      "status": "translated",
+      "label": "initial close tx and destination equality guards",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SuccessfulPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Ordered equality guards with exact source error categories; no final-state channel equality invented."
+    },
+    {
+      "start": 128,
+      "end": 140,
+      "status": "dependency-boundary",
+      "label": "compute_tx_hash invocation",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeEnvironment",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.mapCall",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SuccessfulPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Complete source descriptor passed to external compute; ordinary failure mapped TxHashRecomputeMismatch, panic separate. Equality to carried hash checked; helper internals not re-proved."
+    },
+    {
+      "start": 141,
+      "end": 149,
+      "status": "translated",
+      "label": "any matching receiver delta",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.matchingDelta",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SuccessfulPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Literal ANY receiver pkG/ciphertext equality; does not silently impose one receiver or first receiver equality."
+    },
+    {
+      "start": 150,
+      "end": 159,
+      "status": "dependency-boundary",
+      "label": "E3 native verifier call",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeEnvironment",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.mapCall",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Exact level,key,ciphertext,amount,proof arguments, error mapping; no acceptance implies plaintext claim without external proof semantics."
+    },
+    {
+      "start": 160,
+      "end": 168,
+      "status": "translated",
+      "label": "active member plus delegate index guard",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SuccessfulPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_binds_recipient_and_active_slot"
+      ],
+      "note": "Index<memberCount+delegateCount only; source adds no active<=1024 check here."
+    },
+    {
+      "start": 169,
+      "end": 170,
+      "status": "translated",
+      "label": "direct committed key array indexing",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Index access represented by get? with separate panic outcome; ordinary Rust array has1024 entries."
+    },
+    {
+      "start": 171,
+      "end": 173,
+      "status": "dependency-boundary",
+      "label": "receiver key digest and equality",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeEnvironment",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.infallibleCall",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_has_actual_path"
+      ],
+      "note": "Actual key passed to poseidon_digest; output equality checked, key validation/hash implementation and panic remain boundary."
+    },
+    {
+      "start": 174,
+      "end": 183,
+      "status": "translated",
+      "label": "recipient array indexing and equality",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.SuccessfulPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.native_success_binds_recipient_and_active_slot"
+      ],
+      "note": "Literal claim address equality with indexed slot; member/delegate same rule, separate array panic preserved."
+    },
+    {
+      "start": 184,
+      "end": 191,
+      "status": "translated",
+      "label": "public projection prefix",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.project"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.projection_copies_exact_token_and_nullifier"
+      ],
+      "note": "Close digest, source carried tx hash, receiver pkG/address, SUPPLIED nullifier and split native amount are copied."
+    },
+    {
+      "start": 192,
+      "end": 192,
+      "status": "dependency-boundary",
+      "label": "final balance state H1 call",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.NativeEnvironment",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.project",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.projection_copies_exact_close_state"
+      ],
+      "note": "H1 dependency consumes full represented BalanceState, including channel and all rows; does not authenticate latest state or compare its channel here."
+    },
+    {
+      "start": 193,
+      "end": 199,
+      "status": "translated",
+      "label": "accumulator token tail and successful return",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.project",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.projection_copies_exact_token_and_nullifier",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.successful_path_executes"
+      ],
+      "note": "Accumulator copied from supplied final state; BASE token copied from source descriptor only after earlier guards."
+    },
+    {
+      "start": 200,
+      "end": 219,
+      "status": "translated",
+      "label": "to_u64_vec field ordering",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.toU64Vec",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.public_input_word_count",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.read_encoded_fields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.exact_tail_positions",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.public_input_encoding_is_injective"
+      ],
+      "note": "Exact57 words, amount[hi,lo], finalH1 at40, accumulator48, token56; no token-local conversion."
+    },
+    {
+      "start": 220,
+      "end": 226,
+      "status": "translated",
+      "label": "from_u64_slice length guard",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.fromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.decoder_success_has_exact_length",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.all_source_slice_endpoints_fit"
+      ],
+      "note": "Exact total length before indexing; all endpoints fit57."
+    },
+    {
+      "start": 227,
+      "end": 236,
+      "status": "translated",
+      "label": "decoder prefix checked limbs",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.readFields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.decodeFields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.checkWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.check_words_exact",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.codec_roundtrip"
+      ],
+      "note": "Ordered hashes/channel/receiver/address/nullifier checks, u32 widths; ChannelId additionally rejects zero; error display strings abstracted."
+    },
+    {
+      "start": 237,
+      "end": 238,
+      "status": "translated",
+      "label": "amount raw join",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.joinU64",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.joinValue",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.normalizeScalar"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.split_then_join_u64",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.normalized_canonical_scalar"
+      ],
+      "note": "Actual wrapping u64 shift and raw bitwise OR; no invented u32 bound on these two decoder words. Nat inputs restricted to Rust u64 representation domain."
+    },
+    {
+      "start": 239,
+      "end": 242,
+      "status": "translated",
+      "label": "decoder H1 and accumulator",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.readFields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.decodeFields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.checkWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.codec_roundtrip"
+      ],
+      "note": "Eight u32 limbs each; no native Goldilocks canonical-root check added."
+    },
+    {
+      "start": 243,
+      "end": 249,
+      "status": "translated",
+      "label": "decoder strict token cast and return",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.decodeFields",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.fromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.codec_roundtrip"
+      ],
+      "note": "Token uses checked u32 conversion, does not require registry membership."
+    },
+    {
+      "start": 250,
+      "end": 253,
+      "status": "translated",
+      "label": "split_u64",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.split_then_join_u64"
+      ],
+      "note": "High=value>>32, low=value as u32; imported exact helper model on native u64 domain."
+    },
+    {
+      "start": 254,
+      "end": 257,
+      "status": "translated",
+      "label": "join_u64",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.joinU64",
+        "Zkp.Implementation.PostCloseClaimPublicInputs.joinValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimPublicInputs.split_then_join_u64"
+      ],
+      "note": "Standalone short slice has separate panic outcome; decoder uses exact two-word slice."
+    },
+    {
+      "start": 258,
+      "end": 447,
+      "status": "test-only",
+      "label": "unit fixtures and tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read completely; not run or linked as proof coverage. Model's normal dependency-stub path is separately named and not real cryptographic acceptance."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_data_and_execution",
+      "obligation": "Handwritten native schema/control flow is not a Rust/serde/derive/compiler refinement; integer widths are explicit representation domains, allocation and exact error strings not proved.",
+      "discharged": false
+    },
+    {
+      "name": "source_transaction_recompute",
+      "obligation": "compute_tx_hash is an exact-argument dependency: actual source helper uses first receiver and ciphertext digests; this wrapper itself searches ANY matching delta and performs no accumulator or source-signature verification.",
+      "discharged": false
+    },
+    {
+      "name": "native_e3_verifier",
+      "obligation": "verify_withdraw_claim proof parsing, configured security level and semantic decryption correctness are not proved here; only exact argument/error wiring.",
+      "discharged": false
+    },
+    {
+      "name": "native_key_and_h1",
+      "obligation": "RegevPk validation/Poseidon digest and full BalanceState H1 computation are opaque dependency calls with panic possible; no native Bytes32-to-field canonicality assertion is introduced.",
+      "discharged": false
+    },
+    {
+      "name": "native_fixed_arrays",
+      "obligation": "BalanceState source fixed1024 arrays are represented as lists; caller representation domain requires those lengths. Direct indexing panic is retained, not silently converted into protocol rejection or assumed impossible.",
+      "discharged": false
+    },
+    {
+      "name": "codec_and_input_widths",
+      "obligation": "Native Nat inputs stand for Rust u64/u32 values; exact join shift truncation and OR are inherited from proved codec helper but FFI/serde and compiler refinement remain unproved.",
+      "discharged": false
+    },
+    {
+      "name": "separate_circuit_and_consumer",
+      "obligation": "This helper's success is not proof acceptance and does not derive nullifier, authenticate accumulator/latest final state, prove token registry membership, replay freshness or funds safety.",
+      "discharged": false
+    }
+  ]
+}

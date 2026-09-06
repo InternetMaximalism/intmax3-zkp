@@ -63,6 +63,12 @@ constants、wrapper_config、および MLE の src / contracts/src です。
 | [ClosePublicInputs](./Zkp/Implementation/ClosePublicInputs.lean) / `close_pis.rs` | native 103-word codec、型幅・正規形の下での roundtrip、全 intent 比較後の witness 投影、92-word TFD | scalar pair の raw shift / OR と circuit の u32 check の差、CloseIntent::new 本体、Serde / Rust compiler、circuit / Solidity 型間の同値性 |
 | [CloseEncodingBridge](./Zkp/Implementation/CloseEncodingBridge.lean) / native・circuit の型変換 | 全 20 field の双方向変換、全 103 word の同一性、native canonical domain の下で両 parser が同じ statement を読むこと | Solidity / ABI byte 変換、Rust compiler・実 gate 列、Keccak / proof soundness。モデル間の codec 同値性と実言語同値性は別 |
 | [FundFlow](./Zkp/Implementation/FundFlow.lean) / 上記 Manager・Rollup・Materializer の合成 | credit helper 間の成功 / エラー込みの投影同値、対象 accounting trace の token 別総額保存、paid ≤ received、nullifier tombstone・未払い記録の保持、非空の正常 trace | pull の実 dispatch / callback との結合、他 Manager を含む全資金フロー、現物 custody、預入・stake・rollback を含む全 trace の合成 |
+| [CancelCloseCircuit](./Zkp/Implementation/CancelCloseCircuit.lean)・[native PI](./Zkp/Implementation/CancelClosePublicInputs.lean) | 取消の厳密な version 増加、freeze nonce の非 wrap 後継、登録 member commitment・署名対象の結合、29語の codec、native admission と任意 witness の分離 | aggregate / Merkle / hash / gate の意味、Manager の取消履歴と pending generation、任意 feature の fixture |
+| [WithdrawalClaimCircuit](./Zkp/Implementation/WithdrawalClaimCircuit.lean)・[native PI](./Zkp/Implementation/WithdrawalClaimPublicInputs.lean) | 50語、active member/delegate slot、one-hot token 選択と registry・ciphertext の同一位置、leaf 内 recipient、同じ復号 core 入力・金額、IMW2 nullifier、native 事前検査 | 復号多項式・Merkle・署名済み head の認証、backing、高水位、replay ledger、proof / compiler / gate、任意 feature の fixture |
+| [PostCloseClaimCircuit](./Zkp/Implementation/PostCloseClaimCircuit.lean)・[native PI](./Zkp/Implementation/PostCloseClaimPublicInputs.lean) | 57語、token を含む source tx、height20 accumulator / height10 slot の呼出し、member/delegate 共通の recipient、復号 core 金額、IMCK nullifier | 復号・木の参照 root の認証、最新 head・finality・残額・replay、proof / compiler / gate、任意 feature の fixture |
+| [H1Gadget](./Zkp/Implementation/H1Gadget.lean) / 共通 H1・leaf と選択した native/hash-output helper | header 37要素 / leaf 104要素の全 field、native/target 順序、Goldilocks の比較・乗算・ゼロ制約から正規 32/32 分割を導出、native cast と target encode-back の違い | imported gate の実制約への lowering、Poseidon、native tree 計算、Rust 表現と compiler、残る BalanceState / hash helper |
+| [SettlementCloseBridge](./Zkp/Implementation/SettlementCloseBridge.lean) | 同一 adapter/proof の受理返り値から103語の exact record、IMCS 48 byte / IMTF 368 byte の一致、u32 byte encoding の単射、具体的 hash binding 下で10 token vector 全体の一致 | proof から circuit gates への健全性、実 gate と hash 実装の対応、Manager の資産所有権 / backing |
+| [CancelCloseBridge](./Zkp/Implementation/CancelCloseBridge.lean)・[ClaimSettlementBridge](./Zkp/Implementation/ClaimSettlementBridge.lean) | Solidity の29 / 50 / 57語と circuit の全 field の同値、同一受理返り値による金額・受取先・asset の接続、claim と共通 H1/leaf/正規 root の接続 | 保存済み Manager head / nullifier / generation の caller 配線、proof soundness、実行環境、全経路の資金所有権 |
 
 Manager と Rollup は、前回の選択経路から全明示関数へ手書きモデルを拡張しました。
 ただし interface / generated getter / assembly / callback の境界は別分類のままで、
@@ -133,7 +139,44 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
-### 今回の追加分を含む統合検証
+### `9a67d8e` 以降：取消・請求・共通 H1・Solidity 接続の checkpoint
+
+- **81 モジュール**を build、現行 **28 モジュール・995 named theorems** の実在・種別・
+  推移的 kernel axioms を検査して main guard 成功。前回から **234 定理**追加。
+  実装対応は **23 モジュール・776 定理**、前段の仕様側は 5 モジュール・219 定理。
+- **133 reviewed-source hashes、1 MLE gitlink、21 source maps** を検証。
+  全対応表の宣言参照を Lean compiler で確認して line guard 成功。
+- guard 回帰テスト **51 件**（main 29 + line 22）。ランタイム基準 `05ec7ae` に対する
+  `src`、`contracts`、`Cargo.toml`、`Cargo.lock` の差分はゼロ。証明サイズ・時間の比較測定は
+  実施しておらず、ベンチマーク対象コード・proof parameter を変更していません。
+- 物理行分類：手書き翻訳 **6,686**、依存境界 **1,666**、非実行 **4,593**、
+  テスト専用 **4,542**、未翻訳 **99,710**。テスト・コメントの分類変更も含むため、
+  この減少量を「安全性証明済み実行行数」には換算できません。
+
+今回の合成は、**同一の adapter・proof・返り値**の照合を起点とします。Solidity の
+close / cancel / withdrawal / post-close の 103 / 29 / 50 / 57 語を、各回路の全 field と
+結びました。IMCS の48 byte、全 token vector の IMTF の368 byte については、単に
+「同じはず」と仮定せず、整数分解と byte encoding の単射から一致を導いています。
+`CircuitGates` は adapter 受理から自動的に取り出せるとは仮定せず、まだ別の前提です。
+従ってこれは **暗号 verifier を含む end-to-end 証明ではありません**。
+
+H1 では37要素 header と104要素 leaf の並びを共通 helper と各 claim 呼出し側で接続し、
+Goldilocks の split / equality indicator / multiplication / assert-zero の局所方程式から
+32/32分割の正規性と一意性を導きました。native `TryFrom<Bytes32>` は raw u64 の復元・
+byte roundtrip であり、target `to_hash_out` の modular reduction + canonical encode-back と
+同じ検査ではありません。この違いを消して証明していません。
+
+相互レビューで、前回 CloseCircuit の native member helper に u8 cast **後**の padding mask を
+反映する修正を加えました。通常の admission で許されない巨大リストについても、補助関数の
+定義を原実装に合わせたものです。runtime の修正・盗難経路の実証ではありません。
+対応表の別 module への直接参照、import / derive の扱い、feature fixture と `cfg(test)` の
+混同も修正し、strict guard を緩めず再検証しています。
+
+未達の中心は、復号と state-update の実処理、Balance / validity 全経路、proof 受理から実 gate
+制約への健全性、Rust/Solidity/EVM refinement、および全 Manager と全 entrypoint を含む
+資産所有権・現物 custody・正常退出到達性の合成です。全体の完了・リリース承認ではありません。
+
+### 前回 `9a67d8e` の統合検証（履歴）
 
 - **71 Lean モジュール**を build。現行 **18 モジュール・761 named theorems** の実在・
   theorem 種別・推移的 kernel axioms を確認し、main guard が成功。
@@ -192,15 +235,16 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 
 ## 続きで必要なこと
 
-1. cancel / withdrawal / post-close claim を含む残る回路の手書き翻訳を追加する。
+1. 残る Balance / validity / state-update / decryption 回路の手書き翻訳を追加する。
    Manager / Rollup の関数一覧は埋まったが、ABI・callback・generated getter と全到達可能状態の
-   証明を完了したことにはしない。close の feature-gated fixture 生成も未翻訳として残す。
-   特に `cancel_close_circuit.rs`、`withdrawal_claim_circuit.rs`、
-   `post_close_claim_circuit.rs`、`state_update_verifier.rs`、`decryption_gadget.rs` が残る。
+   証明を完了したことにはしない。close / cancel / withdrawal / post-close の通常関数と
+   native PI は追加済みだが、feature-gated fixture 生成は未翻訳として残す。
+   特に `state_update_verifier.rs` と `decryption_gadget.rs` の本体は残る。
 2. Balance / validity / deposit / transfer / withdrawal の各回路を、native admission と
    arbitrary satisfying witness を分離して翻訳する。Spend だけで送受金全体を証明したことにしない。
 3. U256、Merkle、Keccak/Poseidon、署名 / decryption、recursion / pinned proof verifier の
-   局所保証を実装から導き、今の theorem 引数のまま放置しない。
+   局所保証を実装から導き、今の theorem 引数のまま放置しない。H1 の正規分割は局所
+   modular equations から導出済みだが、primitive gate 実装の証明まで完了していない。
 4. calldata / ABI / revert / reentrancy / checked arithmetic を含む Solidity 実行と、Rust builder
    の実 gate 列について、手書き Lean モデルへの refinement を構築する。
 5. 各 slice を一つの状態遷移系に接続し、token ごとの「預入原資 = 未使用原資 + 退出済み額」

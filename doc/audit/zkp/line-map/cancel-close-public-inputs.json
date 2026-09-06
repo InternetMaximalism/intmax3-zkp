@@ -1,0 +1,608 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/cancel_close_pis.rs",
+  "source_sha256": "b26c9fbab23feb593bc015c84b0994754f150caf93de8045c5d99f5b845f1580",
+  "source_lines": 471,
+  "module": "Zkp.Implementation.CancelClosePublicInputs",
+  "model": "doc/audit/zkp/Zkp/Implementation/CancelClosePublicInputs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "dependency-boundary",
+      "label": "native types, serde and errors",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Native u32/u64 types and canonical limb conversion, serde and Display remain source/compiler dependencies."
+    },
+    {
+      "start": 3,
+      "end": 3,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 4,
+      "end": 7,
+      "status": "dependency-boundary",
+      "label": "native types, serde and errors",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Native u32/u64 types and canonical limb conversion, serde and Display remain source/compiler dependencies."
+    },
+    {
+      "start": 8,
+      "end": 39,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 40,
+      "end": 40,
+      "status": "translated",
+      "label": "public input width",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.publicInputLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.word_length"
+      ],
+      "note": "Exactly29 words."
+    },
+    {
+      "start": 41,
+      "end": 41,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 42,
+      "end": 43,
+      "status": "dependency-boundary",
+      "label": "derived native representation",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [],
+      "note": "Generated Clone/Debug/Eq/serde and exact Rust representation are not refined by the manual field-layout model."
+    },
+    {
+      "start": 44,
+      "end": 44,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 45,
+      "end": 47,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 48,
+      "end": 48,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 49,
+      "end": 50,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 51,
+      "end": 51,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 52,
+      "end": 56,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 57,
+      "end": 57,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 58,
+      "end": 60,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 62,
+      "end": 63,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 64,
+      "end": 64,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 65,
+      "end": 66,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 67,
+      "end": 68,
+      "status": "translated",
+      "label": "native public input fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.PublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip"
+      ],
+      "note": "All six fields; native-width premises explicitly scope total Nat representation."
+    },
+    {
+      "start": 69,
+      "end": 69,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 70,
+      "end": 86,
+      "status": "dependency-boundary",
+      "label": "error type and formatting",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.Error"
+      ],
+      "theorems": [],
+      "note": "Distinct error branches represented; exact formatted strings and derive expansion not modeled."
+    },
+    {
+      "start": 87,
+      "end": 91,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 92,
+      "end": 93,
+      "status": "dependency-boundary",
+      "label": "derived native representation",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.Witness",
+        "Zkp.Implementation.CancelClosePublicInputs.Revived",
+        "Zkp.Implementation.CancelClosePublicInputs.Close"
+      ],
+      "theorems": [],
+      "note": "Generated Clone/Debug/Eq/serde and exact Rust representation are not refined by the manual field-layout model."
+    },
+    {
+      "start": 94,
+      "end": 97,
+      "status": "translated",
+      "label": "native witness fields",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.Witness",
+        "Zkp.Implementation.CancelClosePublicInputs.Revived",
+        "Zkp.Implementation.CancelClosePublicInputs.Close"
+      ],
+      "theorems": [],
+      "note": "Locally read fields plus opaque identity of remaining complete native object; signer validity not presumed."
+    },
+    {
+      "start": 98,
+      "end": 98,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 99,
+      "end": 99,
+      "status": "non-executable",
+      "label": "declaration delimiter",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural declaration delimiter/type bound outside executable operation."
+    },
+    {
+      "start": 100,
+      "end": 100,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 101,
+      "end": 102,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 103,
+      "end": 105,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 106,
+      "end": 107,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 108,
+      "end": 111,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 112,
+      "end": 112,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 113,
+      "end": 118,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 119,
+      "end": 122,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 123,
+      "end": 136,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 137,
+      "end": 137,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 138,
+      "end": 144,
+      "status": "translated",
+      "label": "CancelCloseWitness::to_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toPublicInputs",
+        "Zkp.Implementation.CancelClosePublicInputs.closePreimage",
+        "Zkp.Implementation.CancelClosePublicInputs.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.successful_native_witness",
+        "Zkp.Implementation.CancelClosePublicInputs.native_revived_version_is_strictly_newer",
+        "Zkp.Implementation.CancelClosePublicInputs.native_nonce_successor_does_not_wrap",
+        "Zkp.Implementation.CancelClosePublicInputs.native_channel_mismatch_rejected",
+        "Zkp.Implementation.CancelClosePublicInputs.close_identity_preimage_length"
+      ],
+      "note": "Ordered same-channel, stored signing-digest, strict version, checked nonce, exact era checks; IMCS and native signing digest calls indexed by exact input. Member set placeholder zero. Hash implementation remains boundary."
+    },
+    {
+      "start": 145,
+      "end": 145,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 146,
+      "end": 148,
+      "status": "translated",
+      "label": "split_u64",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.scalar_split_join"
+      ],
+      "note": "High/low limb split, canonical u64 domain."
+    },
+    {
+      "start": 149,
+      "end": 149,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 150,
+      "end": 152,
+      "status": "translated",
+      "label": "join_u64",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.joinValue",
+        "Zkp.Implementation.CancelClosePublicInputs.joinU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.scalar_split_join"
+      ],
+      "note": "Exact unsigned64 shift/OR behavior, not added limb checks; short direct helper inputs modeled as panic error."
+    },
+    {
+      "start": 153,
+      "end": 153,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 154,
+      "end": 165,
+      "status": "translated",
+      "label": "CancelClosePublicInputs::to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.toU64Vec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.word_length",
+        "Zkp.Implementation.CancelClosePublicInputs.read_encoded",
+        "Zkp.Implementation.CancelClosePublicInputs.normal_codec_roundtrip"
+      ],
+      "note": "Exact29-word field order and full digests."
+    },
+    {
+      "start": 166,
+      "end": 166,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 167,
+      "end": 186,
+      "status": "translated",
+      "label": "CancelClosePublicInputs::from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.CancelClosePublicInputs.fromU64Slice",
+        "Zkp.Implementation.CancelClosePublicInputs.readFields",
+        "Zkp.Implementation.CancelClosePublicInputs.checkDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CancelClosePublicInputs.checked_digest_exact",
+        "Zkp.Implementation.CancelClosePublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.CancelClosePublicInputs.wrong_length_rejected"
+      ],
+      "note": "Exact length then nonzero/ranged ChannelId and digest limb conversion; scalar pairs deliberately not independently range checked; String formatting boundary."
+    },
+    {
+      "start": 187,
+      "end": 187,
+      "status": "non-executable",
+      "label": "comments/spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment/blank line; security prose is not an executable premise."
+    },
+    {
+      "start": 188,
+      "end": 471,
+      "status": "test-only",
+      "label": "source tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) fixture/assertions; not translated, executed or linked to theorem evidence."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_compiler_and_native_types",
+      "obligation": "Prove Rust↔Lean refinement, allocation/panic and serde/Display behavior; justify Nat projections from fixed native u32/u64 and Bytes32 types.",
+      "discharged": false
+    },
+    {
+      "name": "native_signing_digest_and_imcs",
+      "obligation": "NativeEnvironment.signingDigest must be actual ChannelState::signing_digest over complete Revived+opaqueRest; hashWords must be actual Keccak over exact IMCS preimage, without assuming hash injectivity.",
+      "discharged": false
+    },
+    {
+      "name": "primitive_codec",
+      "obligation": "Imported ChannelId and U32LimbTrait errors/canonical encodings and bitwise unsigned64 shift/OR semantics must match this manual model.",
+      "discharged": false
+    },
+    {
+      "name": "l1_current_close_and_generation",
+      "obligation": "Current registered members, pending close digest/version, request generation and consumed cancellation floors are Manager obligations, absent from this source's public statement.",
+      "discharged": false
+    }
+  ]
+}

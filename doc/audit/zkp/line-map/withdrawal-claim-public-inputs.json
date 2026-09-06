@@ -1,0 +1,971 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/withdrawal_claim_pis.rs",
+  "source_sha256": "c59faebed03c43df60780bad75502856e33d84b165785c4729b13faafb6b25c1",
+  "source_lines": 584,
+  "module": "Zkp.Implementation.WithdrawalClaimPublicInputs",
+  "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimPublicInputs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 9,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 10,
+      "end": 11,
+      "status": "dependency-boundary",
+      "label": "Imports",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Environment"
+      ],
+      "theorems": [],
+      "note": "Rust types, serde/errors, Regev E3 and digest operations are explicit dependency contracts, not proved implementations here."
+    },
+    {
+      "start": 12,
+      "end": 12,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 13,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "Imports",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Environment"
+      ],
+      "theorems": [],
+      "note": "Rust types, serde/errors, Regev E3 and digest operations are explicit dependency contracts, not proved implementations here."
+    },
+    {
+      "start": 22,
+      "end": 26,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 27,
+      "end": 27,
+      "status": "translated",
+      "label": "Public statement length",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.publicInputLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding"
+      ],
+      "note": "Literal 50-word length; comments are classified separately."
+    },
+    {
+      "start": 28,
+      "end": 28,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 29,
+      "end": 30,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 31,
+      "end": 38,
+      "status": "translated",
+      "label": "Native public statement type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding"
+      ],
+      "note": "Shares the circuit record with exact field order. Nat limbs represent Rust domains only under NativeWidths; native u64 amount is split into two canonical words, token slot is u8. Serde/derive expansion is separate."
+    },
+    {
+      "start": 39,
+      "end": 40,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 41,
+      "end": 41,
+      "status": "translated",
+      "label": "Native public statement type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding"
+      ],
+      "note": "Shares the circuit record with exact field order. Nat limbs represent Rust domains only under NativeWidths; native u64 amount is split into two canonical words, token slot is u8. Serde/derive expansion is separate."
+    },
+    {
+      "start": 42,
+      "end": 44,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 45,
+      "end": 45,
+      "status": "translated",
+      "label": "Native public statement type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding"
+      ],
+      "note": "Shares the circuit record with exact field order. Nat limbs represent Rust domains only under NativeWidths; native u64 amount is split into two canonical words, token slot is u8. Serde/derive expansion is separate."
+    },
+    {
+      "start": 46,
+      "end": 48,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 49,
+      "end": 50,
+      "status": "translated",
+      "label": "Native public statement type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding"
+      ],
+      "note": "Shares the circuit record with exact field order. Nat limbs represent Rust domains only under NativeWidths; native u64 amount is split into two canonical words, token slot is u8. Serde/derive expansion is separate."
+    },
+    {
+      "start": 51,
+      "end": 51,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 52,
+      "end": 52,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 53,
+      "end": 53,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 54,
+      "end": 54,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 55,
+      "end": 55,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 56,
+      "end": 56,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 57,
+      "end": 57,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 58,
+      "end": 58,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 59,
+      "end": 59,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 60,
+      "end": 60,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 62,
+      "end": 62,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 63,
+      "end": 63,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 64,
+      "end": 64,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 66,
+      "end": 66,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 67,
+      "end": 68,
+      "status": "translated",
+      "label": "Witness errors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Error",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Fault",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fail"
+      ],
+      "theorems": [],
+      "note": "Preserves error category and return/panic distinction. String formatting and generated trait implementations are not translated."
+    },
+    {
+      "start": 69,
+      "end": 69,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 70,
+      "end": 71,
+      "status": "dependency-boundary",
+      "label": "Generated Rust attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serde/derive/error attribute expansion is not translated; source data fields/error categories are modeled separately."
+    },
+    {
+      "start": 72,
+      "end": 76,
+      "status": "translated",
+      "label": "Native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Witness",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Intent",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.CloseWithdrawal",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Member",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Claim",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Key"
+      ],
+      "theorems": [],
+      "note": "Models all fields read by this source. State includes complete H1 data and fixed 1024 key/recipient and 10-token arrays; ciphertext/counter rows remain Vec/List. Other imported-field internals and Rust integer representation remain dependency obligations, not extra admission checks."
+    },
+    {
+      "start": 77,
+      "end": 77,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "translated",
+      "label": "Native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Witness",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Intent",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.CloseWithdrawal",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Member",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Claim",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Key"
+      ],
+      "theorems": [],
+      "note": "Models all fields read by this source. State includes complete H1 data and fixed 1024 key/recipient and 10-token arrays; ciphertext/counter rows remain Vec/List. Other imported-field internals and Rust integer representation remain dependency obligations, not extra admission checks."
+    },
+    {
+      "start": 79,
+      "end": 79,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 80,
+      "end": 80,
+      "status": "translated",
+      "label": "Native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Witness",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Intent",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.CloseWithdrawal",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Member",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Claim",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Key"
+      ],
+      "theorems": [],
+      "note": "Models all fields read by this source. State includes complete H1 data and fixed 1024 key/recipient and 10-token arrays; ciphertext/counter rows remain Vec/List. Other imported-field internals and Rust integer representation remain dependency obligations, not extra admission checks."
+    },
+    {
+      "start": 81,
+      "end": 82,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 83,
+      "end": 83,
+      "status": "translated",
+      "label": "Native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Witness",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Intent",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.CloseWithdrawal",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Member",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Claim",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Key"
+      ],
+      "theorems": [],
+      "note": "Models all fields read by this source. State includes complete H1 data and fixed 1024 key/recipient and 10-token arrays; ciphertext/counter rows remain Vec/List. Other imported-field internals and Rust integer representation remain dependency obligations, not extra admission checks."
+    },
+    {
+      "start": 84,
+      "end": 84,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 85,
+      "end": 86,
+      "status": "translated",
+      "label": "Native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Witness",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Intent",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.CloseWithdrawal",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Member",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Claim",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Ciphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Key"
+      ],
+      "theorems": [],
+      "note": "Models all fields read by this source. State includes complete H1 data and fixed 1024 key/recipient and 10-token arrays; ciphertext/counter rows remain Vec/List. Other imported-field internals and Rust integer representation remain dependency obligations, not extra admission checks."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 88,
+      "end": 94,
+      "status": "translated",
+      "label": "Standard admission wrapper",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.standard_route_requires_external_verification"
+      ],
+      "note": "Passes true to the same inner routine; successful return requires structural checks and successful external E3 callback."
+    },
+    {
+      "start": 95,
+      "end": 100,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 101,
+      "end": 106,
+      "status": "translated",
+      "label": "In-circuit decryption admission wrapper",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputsForInCircuitDecryption"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.in_circuit_route_still_runs_all_structural_checks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.in_circuit_route_does_not_consult_external_proof"
+      ],
+      "note": "Passes false, skips only external E3, not structural checks. Actual later circuit decryption is a separate obligation; this helper is not automatically called by circuit.fill_witness."
+    },
+    {
+      "start": 107,
+      "end": 107,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 108,
+      "end": 126,
+      "status": "translated",
+      "label": "Ordered close/member guards",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputsInner",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.expectedCloseId",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.closeIntentPreimage",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.closeWithdrawalPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_intent_guard_precedes_remaining_checks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_identity_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.close_withdrawal_preimage_width"
+      ],
+      "note": "Direct early-return ordering for intent, close withdrawal digest/H1/channel, and member key/recipient comparisons. Digest helper preimages are modeled; hash implementation and their complete native representation remain dependencies."
+    },
+    {
+      "start": 127,
+      "end": 130,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 131,
+      "end": 139,
+      "status": "translated",
+      "label": "Per-close Regev-key token nullifier guard",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.expectedNullifier",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Calls the explicit key-digest callback and IMW2 preimage from the circuit model; equality checked before state validation. No native key-digest-equals-state-slot check or memberSlot equality is invented."
+    },
+    {
+      "start": 140,
+      "end": 141,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 142,
+      "end": 147,
+      "status": "translated",
+      "label": "Active token guard",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Rejects token_slot at or beyond signed state's token_count; the fixed array length and actual state validation semantics remain separate."
+    },
+    {
+      "start": 148,
+      "end": 149,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 150,
+      "end": 162,
+      "status": "translated",
+      "label": "Full state validation and H1/channel guards",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Environment",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.State"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Calls validate then H1 comparison then channel equality, preserving error order. validate/full H1 internals are explicit callback boundaries, not assumed asset safety conclusions."
+    },
+    {
+      "start": 163,
+      "end": 171,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 172,
+      "end": 185,
+      "status": "translated",
+      "label": "Capacity and active member/delegate guards",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Actual two comparisons: memberIndex below 1024 then below memberCount+delegateCount; no independent native memberCount floor is invented."
+    },
+    {
+      "start": 186,
+      "end": 187,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 188,
+      "end": 197,
+      "status": "translated",
+      "label": "Exact selected ciphertext guard",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.selectedCiphertext",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Reads the exact (memberIndex, tokenSlot) cell and compares the entire ciphertext. Bounds-panic fallback is explicit when real validate semantics are not supplied."
+    },
+    {
+      "start": 198,
+      "end": 201,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 202,
+      "end": 206,
+      "status": "translated",
+      "label": "Exact selected recipient guard",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.selectedRecipient",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.structuralChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.successful_structural_checks_expose_actual_guards"
+      ],
+      "note": "Compares member recipient with the signed state's fixed 1024-slot recipient array, not an arbitrary destination."
+    },
+    {
+      "start": 207,
+      "end": 208,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 209,
+      "end": 218,
+      "status": "translated",
+      "label": "Conditional external E3 verification",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputsInner",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.standard_route_requires_external_verification",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.in_circuit_route_does_not_consult_external_proof"
+      ],
+      "note": "Preserves callback inputs and error mapping; no semantics of external proof validity are assumed from an empty proof or callback success alone."
+    },
+    {
+      "start": 219,
+      "end": 219,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 220,
+      "end": 229,
+      "status": "translated",
+      "label": "Public statement construction",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.project",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.selectedTokenIndex",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputsInner"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.projection_uses_derived_asset_and_bound_fields"
+      ],
+      "note": "Exact ten fields; base token is derived from state registry after all preceding checks. Native u64 input amount is represented by canonical high/low words; supplied Nat values outside Rust widths are outside native representation refinement."
+    },
+    {
+      "start": 230,
+      "end": 232,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 233,
+      "end": 236,
+      "status": "translated",
+      "label": "Public statement construction",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.project",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.selectedTokenIndex",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toPublicInputsInner"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.projection_uses_derived_asset_and_bound_fields"
+      ],
+      "note": "Exact ten fields; base token is derived from state registry after all preceding checks. Native u64 input amount is represented by canonical high/low words; supplied Nat values outside Rust widths are outside native representation refinement."
+    },
+    {
+      "start": 237,
+      "end": 237,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 238,
+      "end": 253,
+      "status": "translated",
+      "label": "Native to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.toU64Vec",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.public_width_and_circuit_encoding",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.encoded_native_fields_read_exactly",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.native_statement_encoding_injective"
+      ],
+      "note": "Source-identical 50-word order shares the circuit record, yielding a real layout bridge. The circuit readPublicFields is a proof-only decoder, not an invented source target parser."
+    },
+    {
+      "start": 254,
+      "end": 254,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 255,
+      "end": 261,
+      "status": "translated",
+      "label": "Native from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fromU64Slice",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.decodeFields",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.checkWords",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalizeAmount",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.word_check_exact",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.decode_fields_round_trip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.incorrect_length_fails_before_field_decoding"
+      ],
+      "note": "Exact length guard, fixed offsets, u32 hash/address/channel ranges and nonzero ChannelId, u8 token slot/u32 base token. Raw u64 amount shift/OR is not individually range checked; canonical roundtrip states required widths. Exact error-string text is abstracted, not the failure order."
+    },
+    {
+      "start": 262,
+      "end": 262,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 263,
+      "end": 283,
+      "status": "translated",
+      "label": "Native from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.fromU64Slice",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.decodeFields",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.checkWords",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalizeAmount",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.NativeWidths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.word_check_exact",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.decode_fields_round_trip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.native_codec_roundtrip",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.incorrect_length_fails_before_field_decoding"
+      ],
+      "note": "Exact length guard, fixed offsets, u32 hash/address/channel ranges and nonzero ChannelId, u8 token slot/u32 base token. Raw u64 amount shift/OR is not individually range checked; canonical roundtrip states required widths. Exact error-string text is abstracted, not the failure order."
+    },
+    {
+      "start": 284,
+      "end": 284,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 285,
+      "end": 287,
+      "status": "translated",
+      "label": "split_u64",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalized_canonical_amount"
+      ],
+      "note": "Native u64 domain uses high quotient and low remainder; source cast/shift are represented on that domain, not on arbitrary unbounded amounts."
+    },
+    {
+      "start": 288,
+      "end": 288,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 289,
+      "end": 291,
+      "status": "translated",
+      "label": "join_u64",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.joinValue",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.joinU64",
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalizeAmount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimPublicInputs.normalized_canonical_amount"
+      ],
+      "note": "Reuses explicit u64 shift/OR semantics, including width truncation. Direct short input models bounds panic; no extra per-limb u32 checks are invented."
+    },
+    {
+      "start": 292,
+      "end": 292,
+      "status": "non-executable",
+      "label": "Comment/whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source comment or whitespace; not an executable constraint or proof premise."
+    },
+    {
+      "start": 293,
+      "end": 584,
+      "status": "test-only",
+      "label": "Native claim and delegate tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "All test source read as non-production coverage; no test execution or proof fixture generation, and no production theorem links."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_native_representation",
+      "obligation": "Rust Bytes32/Address/ChannelId/u8/u16/u32/u64/usize and polynomial/proof-byte domains must be related to Nat records, including nonzero native ChannelId and native amount below 2^64. NativeWidths is a PI representation predicate, not an extra witness validation step. Serde/derive implementations and exact diagnostic text are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "full_balance_state_validate_h1",
+      "obligation": "Environment.validateState and stateH1 must refine real BalanceState.validate/h1 over complete ciphertext, key, counter, recipient, registry, counts, accumulator, settled-chain and version state. No validate-success-implies-asset-safety axiom is supplied.",
+      "discharged": false
+    },
+    {
+      "name": "digest_helper_representation",
+      "obligation": "IMCS/IMCL/IMW2 preimages and imported key/ciphertext digest calls must refine canonical bytes/field representations and actual cryptographic helper computations. This model supplies no globally injective finite hash assumption.",
+      "discharged": false
+    },
+    {
+      "name": "external_e3",
+      "obligation": "For the standard wrapper, Environment.verifyExternal must refine verify_withdraw_claim with the chosen Regev security level, key, entire ciphertext, u64 amount and proof bytes. Callback success itself is not a decryption theorem here.",
+      "discharged": false
+    },
+    {
+      "name": "in_circuit_decryption_consumer",
+      "obligation": "For the wrapper skipping E3, the caller must subsequently bind this exact statement and witness to the real withdrawal circuit's decryption, H1/Merkle and nullifier constraints and verify the produced proof; this helper is not automatically invoked by fill_witness.",
+      "discharged": false
+    },
+    {
+      "name": "l1_close_claim_ledger",
+      "obligation": "Authenticated finalized close identity, one-shot nullifier consumption, recipient/token payout and funded entitlement are L1/caller obligations, not enforced by this native helper. No whole-protocol fund conservation claim is made.",
+      "discharged": false
+    },
+    {
+      "name": "compiled_source_refinement",
+      "obligation": "Handwritten Lean control-flow and codecs are not a proof of Rust compiler behavior, allocation/panic resource behavior, generated code or a complete project refinement. Test bodies are not translated as production.",
+      "discharged": false
+    }
+  ]
+}

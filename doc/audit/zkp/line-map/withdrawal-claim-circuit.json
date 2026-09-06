@@ -1,0 +1,2186 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/withdrawal_claim_circuit.rs",
+  "source_sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
+  "source_lines": 1427,
+  "module": "Zkp.Implementation.WithdrawalClaimCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 42,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 43,
+      "end": 58,
+      "status": "dependency-boundary",
+      "label": "Imports and primitive interfaces",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FieldLowering"
+      ],
+      "theorems": [],
+      "note": "Rust generic field/configuration, imported gadgets, target/witness types and keccak/Poseidon lowering remain dependencies."
+    },
+    {
+      "start": 59,
+      "end": 59,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 60,
+      "end": 85,
+      "status": "dependency-boundary",
+      "label": "Imports and primitive interfaces",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FieldLowering"
+      ],
+      "theorems": [],
+      "note": "Rust generic field/configuration, imported gadgets, target/witness types and keccak/Poseidon lowering remain dependencies."
+    },
+    {
+      "start": 86,
+      "end": 86,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "dependency-boundary",
+      "label": "Rust derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generated Clone/Debug trait implementations are not translated; the following source type is modeled separately."
+    },
+    {
+      "start": 88,
+      "end": 96,
+      "status": "translated",
+      "label": "WithdrawalClaimPublicInputsTarget type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Address",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Exact10 fields and50 words, including5-word recipient and2-word high/low amount. Nat representatives require explicit allocation checks."
+    },
+    {
+      "start": 97,
+      "end": 99,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 100,
+      "end": 100,
+      "status": "translated",
+      "label": "WithdrawalClaimPublicInputsTarget type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Address",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Exact10 fields and50 words, including5-word recipient and2-word high/low amount. Nat representatives require explicit allocation checks."
+    },
+    {
+      "start": 101,
+      "end": 104,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 105,
+      "end": 106,
+      "status": "translated",
+      "label": "WithdrawalClaimPublicInputsTarget type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Address",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Exact10 fields and50 words, including5-word recipient and2-word high/low amount. Nat representatives require explicit allocation checks."
+    },
+    {
+      "start": 107,
+      "end": 107,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 108,
+      "end": 108,
+      "status": "translated",
+      "label": "Public target allocation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.AllocationChecks",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Checked",
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
+      ],
+      "note": "All public limbs have32-bit range gates in source allocation order. No signature, protocol token/count limits or close authentication inferred."
+    },
+    {
+      "start": 109,
+      "end": 110,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 111,
+      "end": 131,
+      "status": "translated",
+      "label": "Public target allocation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.AllocationChecks",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Checked",
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
+      ],
+      "note": "All public limbs have32-bit range gates in source allocation order. No signature, protocol token/count limits or close authentication inferred."
+    },
+    {
+      "start": 132,
+      "end": 134,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 135,
+      "end": 135,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 136,
+      "end": 152,
+      "status": "translated",
+      "label": "Public target to_vec",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50",
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_encoding_injective"
+      ],
+      "note": "Exact50-element ordered concatenation. readPublicFields is proof-only utility, not an invented source from_slice method."
+    },
+    {
+      "start": 153,
+      "end": 153,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 154,
+      "end": 186,
+      "status": "translated",
+      "label": "Public target set_witness",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicWitnessAssignments",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FillOp",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Fault"
+      ],
+      "theorems": [],
+      "note": "Same ordered values assigned to source fields; canonical native width/casts and WitnessWrite/panic behavior remain explicit value/assignment boundaries."
+    },
+    {
+      "start": 187,
+      "end": 187,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 188,
+      "end": 188,
+      "status": "dependency-boundary",
+      "label": "Rust derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generated Debug/Error trait implementations are not translated; the following error variants are modeled separately."
+    },
+    {
+      "start": 189,
+      "end": 194,
+      "status": "translated",
+      "label": "Circuit error variants",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Error",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Fault"
+      ],
+      "theorems": [],
+      "note": "Retains member-index and failed-to-prove variants; panic is separate, display formatting is not modeled."
+    },
+    {
+      "start": 195,
+      "end": 196,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 197,
+      "end": 198,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 199,
+      "end": 199,
+      "status": "dependency-boundary",
+      "label": "Rust derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generated Clone/Debug trait implementations are not translated; the following witness fields are modeled separately."
+    },
+    {
+      "start": 200,
+      "end": 201,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 202,
+      "end": 203,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 204,
+      "end": 204,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 205,
+      "end": 206,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 207,
+      "end": 207,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 208,
+      "end": 211,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 212,
+      "end": 212,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 213,
+      "end": 214,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 215,
+      "end": 215,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 216,
+      "end": 216,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 217,
+      "end": 217,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 218,
+      "end": 219,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 220,
+      "end": 221,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 222,
+      "end": 222,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 223,
+      "end": 224,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 225,
+      "end": 225,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 226,
+      "end": 226,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 227,
+      "end": 227,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 228,
+      "end": 228,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 229,
+      "end": 229,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 230,
+      "end": 230,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 231,
+      "end": 234,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 235,
+      "end": 236,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 237,
+      "end": 238,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 239,
+      "end": 240,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 241,
+      "end": 242,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 243,
+      "end": 244,
+      "status": "translated",
+      "label": "Full native witness type",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FullWitness.NativeWidths",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Ten"
+      ],
+      "theorems": [],
+      "note": "Finite10 rows preserve fixed arrays; native Rust widths are representation domain, distinct from arbitrary target witness. Path/core internals opaque."
+    },
+    {
+      "start": 245,
+      "end": 245,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 246,
+      "end": 251,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 252,
+      "end": 252,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 253,
+      "end": 253,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 254,
+      "end": 254,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 255,
+      "end": 258,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 259,
+      "end": 260,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 261,
+      "end": 264,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 265,
+      "end": 266,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 267,
+      "end": 267,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 268,
+      "end": 269,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 270,
+      "end": 270,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 271,
+      "end": 272,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 273,
+      "end": 273,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 274,
+      "end": 275,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 276,
+      "end": 276,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 277,
+      "end": 277,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 278,
+      "end": 278,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 279,
+      "end": 279,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 280,
+      "end": 280,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 281,
+      "end": 282,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 283,
+      "end": 288,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 289,
+      "end": 289,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 290,
+      "end": 290,
+      "status": "dependency-boundary",
+      "label": "Rust derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generated Clone/Debug trait implementations are not translated; the following observation fields are modeled separately."
+    },
+    {
+      "start": 291,
+      "end": 298,
+      "status": "translated",
+      "label": "Circuit profile",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Profile"
+      ],
+      "theorems": [],
+      "note": "Observation positions retained; no benchmark values fabricated. beforePadding additionally represents circuit's separate counter field."
+    },
+    {
+      "start": 299,
+      "end": 299,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 300,
+      "end": 314,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 315,
+      "end": 315,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 316,
+      "end": 317,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 318,
+      "end": 320,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 321,
+      "end": 323,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 324,
+      "end": 326,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 327,
+      "end": 330,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 331,
+      "end": 332,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 333,
+      "end": 333,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 334,
+      "end": 336,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 337,
+      "end": 341,
+      "status": "translated",
+      "label": "Constructor config and private allocations",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+    },
+    {
+      "start": 342,
+      "end": 342,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 343,
+      "end": 343,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 344,
+      "end": 356,
+      "status": "translated",
+      "label": "H1 header recompute/connect",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.headerPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.header_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.h1_connection_authenticates_the_compared_header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.header_preimage_binds_identity_registry_and_root"
+      ],
+      "note": "Exact37-word IMB2 preimage and PI equality; Poseidon+canonical representation binding scoped to compared inputs. Finalized H1 provenance remains caller obligation."
+    },
+    {
+      "start": 357,
+      "end": 360,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 361,
+      "end": 362,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 363,
+      "end": 364,
+      "status": "translated",
+      "label": "Participant activity and capacity gates",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
+    },
+    {
+      "start": 365,
+      "end": 371,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 372,
+      "end": 373,
+      "status": "translated",
+      "label": "Participant activity and capacity gates",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
+    },
+    {
+      "start": 374,
+      "end": 378,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 379,
+      "end": 385,
+      "status": "translated",
+      "label": "Participant activity and capacity gates",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
+    },
+    {
+      "start": 386,
+      "end": 386,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 387,
+      "end": 394,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 395,
+      "end": 404,
+      "status": "translated",
+      "label": "Canonical one-hot token slot",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.oneHotSum",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.equality_flag_sum",
+        "Zkp.Implementation.WithdrawalClaimCircuit.one_hot_connection_forces_exact_slot_range"
+      ],
+      "note": "Flags are equality computations on exact PI slot; arithmetic loop sum=1 derives slot<10, not assumed."
+    },
+    {
+      "start": 405,
+      "end": 409,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 410,
+      "end": 411,
+      "status": "translated",
+      "label": "Active token comparison",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.token_slot_is_active_and_local"
+      ],
+      "note": "Actual slot<token_count comparison; no unstated token_count<=10/registry-uniqueness/zero-suffix gate."
+    },
+    {
+      "start": 412,
+      "end": 412,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 413,
+      "end": 417,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 418,
+      "end": 426,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 427,
+      "end": 430,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 431,
+      "end": 436,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 437,
+      "end": 450,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 451,
+      "end": 454,
+      "status": "translated",
+      "label": "Regev allocations and digest calls",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
+    },
+    {
+      "start": 455,
+      "end": 456,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 457,
+      "end": 457,
+      "status": "translated",
+      "label": "Regev allocations and digest calls",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
+    },
+    {
+      "start": 458,
+      "end": 459,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 460,
+      "end": 462,
+      "status": "translated",
+      "label": "Regev allocations and digest calls",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
+    },
+    {
+      "start": 463,
+      "end": 481,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 482,
+      "end": 494,
+      "status": "translated",
+      "label": "Full slot leaf and Merkle inclusion",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.slotPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.OpeningAt",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.full_slot_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.slot_preimage_binds_full_ciphertext_row",
+        "Zkp.Implementation.WithdrawalClaimCircuit.opened_leaf_hash_is_the_committed_position",
+        "Zkp.Implementation.WithdrawalClaimCircuit.recipient_matches_the_concrete_committed_leaf",
+        "Zkp.Implementation.WithdrawalClaimCircuit.all_leaf_fields_match_the_concrete_committed_slot"
+      ],
+      "note": "Exact104-word IMS2 leaf includes PIrecipient and all10rows/counters; source height10 path. Concrete opening and compared leaf-hash binding explicit, no global finite-hash injectivity or assumed payment equality."
+    },
+    {
+      "start": 495,
+      "end": 495,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 496,
+      "end": 496,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 497,
+      "end": 505,
+      "status": "translated",
+      "label": "Decryption call and amount connections",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CoreOutputAt",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_equals_the_core_output",
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
+      ],
+      "note": "Calls imported core with expose_amount=true, binds returnedlo/hi to PIhi/lo correctly. Full ring/digit/decrypt semantics are NOT discharged; only caller connection to specified core output."
+    },
+    {
+      "start": 506,
+      "end": 506,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 507,
+      "end": 510,
+      "status": "translated",
+      "label": "Decryption call and amount connections",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CoreOutputAt",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_equals_the_core_output",
+        "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
+      ],
+      "note": "Calls imported core with expose_amount=true, binds returnedlo/hi to PIhi/lo correctly. Full ring/digit/decrypt semantics are NOT discharged; only caller connection to specified core output."
+    },
+    {
+      "start": 511,
+      "end": 511,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 512,
+      "end": 527,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 528,
+      "end": 539,
+      "status": "translated",
+      "label": "IMW2 nullifier derivation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifierPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_preimage_width",
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_uses_same_selected_slot_and_leaf_key",
+        "Zkp.Implementation.WithdrawalClaimCircuit.same_nullifier_inputs_have_same_output",
+        "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_preimage_binds_close_key_and_token",
+        "Zkp.Implementation.WithdrawalClaimCircuit.equal_nullifiers_bind_exact_claim_domain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.informational_member_key_not_in_nullifier_preimage"
+      ],
+      "note": "Exact18-word closeId/keyDigest/tokenSlot domain. Same inputs give same output unconditionally; inverse requires concrete collision-binding premise. No slot-index or member_pk_g key fabricated."
+    },
+    {
+      "start": 540,
+      "end": 540,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 541,
+      "end": 546,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 547,
+      "end": 581,
+      "status": "translated",
+      "label": "Public registration build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Profile",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Registers50 original PI words and records observation boundaries; proof/compiler implementation remains external."
+    },
+    {
+      "start": 582,
+      "end": 582,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 583,
+      "end": 606,
+      "status": "translated",
+      "label": "Native fill initial guard and assignments",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_out_of_capacity_stops_before_assignment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_success_requires_member_index_capacity"
+      ],
+      "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
+    },
+    {
+      "start": 607,
+      "end": 608,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 609,
+      "end": 618,
+      "status": "translated",
+      "label": "Native fill initial guard and assignments",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_out_of_capacity_stops_before_assignment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_success_requires_member_index_capacity"
+      ],
+      "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
+    },
+    {
+      "start": 619,
+      "end": 620,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 621,
+      "end": 645,
+      "status": "translated",
+      "label": "Native fill initial guard and assignments",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.NativeEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_out_of_capacity_stops_before_assignment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_success_requires_member_index_capacity"
+      ],
+      "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
+    },
+    {
+      "start": 646,
+      "end": 647,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 648,
+      "end": 670,
+      "status": "translated",
+      "label": "Native polynomial zip and decryption witness",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.polyAssignments",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.NativeEnvironment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.polynomial_assignment_count"
+      ],
+      "note": "Zip preserves min length; same four polynomials+secret go to buildCore, error mapped verbatim, then fillCore. Imported builder's detailed ring/noise/length checks remain dependency."
+    },
+    {
+      "start": 671,
+      "end": 671,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 672,
+      "end": 673,
+      "status": "translated",
+      "label": "Native polynomial zip and decryption witness",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.polyAssignments",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.NativeEnvironment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.fillProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.polynomial_assignment_count"
+      ],
+      "note": "Zip preserves min length; same four polynomials+secret go to buildCore, error mapped verbatim, then fillCore. Imported builder's detailed ring/noise/length checks remain dependency."
+    },
+    {
+      "start": 674,
+      "end": 674,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 675,
+      "end": 684,
+      "status": "translated",
+      "label": "Native prove",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.prove"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.native_prove_uses_the_filled_witness"
+      ],
+      "note": "Actual fill-then-data.prove sequencing/error propagation. Does not prove backend proof soundness or finalization."
+    },
+    {
+      "start": 685,
+      "end": 685,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 686,
+      "end": 695,
+      "status": "translated",
+      "label": "Default constructor",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.defaultConstructor"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.default_uses_exact_constructor"
+      ],
+      "note": "Default delegates exactly to constructor, not a separate configuration."
+    },
+    {
+      "start": 696,
+      "end": 696,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 697,
+      "end": 700,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 701,
+      "end": 705,
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
+    },
+    {
+      "start": 706,
+      "end": 708,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 709,
+      "end": 713,
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
+    },
+    {
+      "start": 714,
+      "end": 714,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 715,
+      "end": 721,
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
+    },
+    {
+      "start": 722,
+      "end": 725,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 726,
+      "end": 728,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 729,
+      "end": 729,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 730,
+      "end": 733,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 734,
+      "end": 734,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 735,
+      "end": 751,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 752,
+      "end": 752,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 753,
+      "end": 755,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 756,
+      "end": 756,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 757,
+      "end": 760,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 761,
+      "end": 765,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 766,
+      "end": 768,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 769,
+      "end": 771,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 772,
+      "end": 777,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 778,
+      "end": 778,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 779,
+      "end": 787,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 788,
+      "end": 789,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 790,
+      "end": 794,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 795,
+      "end": 796,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 797,
+      "end": 873,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 874,
+      "end": 875,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 876,
+      "end": 877,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 878,
+      "end": 878,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 879,
+      "end": 882,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 883,
+      "end": 884,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 885,
+      "end": 896,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 897,
+      "end": 897,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 898,
+      "end": 905,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 906,
+      "end": 908,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 909,
+      "end": 909,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 910,
+      "end": 910,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 911,
+      "end": 911,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 912,
+      "end": 919,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 920,
+      "end": 929,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 930,
+      "end": 930,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 931,
+      "end": 1035,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 1036,
+      "end": 1036,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 1037,
+      "end": 1063,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 1064,
+      "end": 1064,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 1065,
+      "end": 1427,
+      "status": "test-only",
+      "label": "Unit tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only. No proof tests executed and no test assertions are treated as production gates or linked property proofs."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_plonky2_refinement",
+      "obligation": "Handwritten fields, control flow and operation program must be linked to actual Rust/Plonky2 compilation and proof verification; FieldLowering is not discharged.",
+      "discharged": false
+    },
+    {
+      "name": "field_arithmetic",
+      "obligation": "Canonical Goldilocks representatives, all32-bit range gadgets, equality/select/sum,33-bit shifted subtraction, boolean tests and index split must lower to these integer equations.",
+      "discharged": false
+    },
+    {
+      "name": "hash_and_encoding",
+      "obligation": "PoseidonRoot/PoseidonBytes32/Keccak algorithms and canonical word/byte conversions, with only concrete compared-input binding assumptions.",
+      "discharged": false
+    },
+    {
+      "name": "merkle_path",
+      "obligation": "Height10 incremental proof construction, hash identity for Root leaf and swapped two-to-one path; concrete visited-tree opening obligation remains explicit.",
+      "discharged": false
+    },
+    {
+      "name": "decryption_core",
+      "obligation": "Full decryption_gadget ring/key-binding/digit normalization/amount-output soundness, canonical coefficients and a/c1 nonzero checks remain a dependency. Caller only proves exact output connection.",
+      "discharged": false
+    },
+    {
+      "name": "native_witness_effects",
+      "obligation": "WitnessWrite canonical conversions/unwrapped panic behavior, dynamic polynomial zip assignment, native core builder and fill effects require refinement; no admission checks are invented.",
+      "discharged": false
+    },
+    {
+      "name": "native_pis_helper",
+      "obligation": "WithdrawalClaimWitness::to_public_inputs and the native decoder are separate source file, not invoked by this fill/prove. Its stronger state/E3 checks are not assumed in raw gates.",
+      "discharged": false
+    },
+    {
+      "name": "l1_context",
+      "obligation": "Manager/SettlementVerifier must supply finalized closeId/H1/channel and exact payout/token, enforce backing/highwater and consume nullifiers. This callee has no such state/ledger.",
+      "discharged": false
+    },
+    {
+      "name": "participant_key_policy",
+      "obligation": "Nullifier is per(closeId,leaf Regev digest,tokenSlot), not literally member-index. Cross-slot Regev uniqueness/authorization is an external registration/admission policy.",
+      "discharged": false
+    },
+    {
+      "name": "fixtures",
+      "obligation": "Feature-only witness generation and unit tests were read, not translated/executed; no runtime or performance changes.",
+      "discharged": false
+    }
+  ]
+}

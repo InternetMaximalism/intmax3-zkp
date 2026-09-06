@@ -653,14 +653,14 @@
       "sha256": "ab20970c90eb73108ef13fb73799fbe5b70e705ac36791db6fde5110165163f3",
       "lines": 1252,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/cancel-close-circuit.json"
     },
     {
       "path": "src/circuits/channel/cancel_close_pis.rs",
       "sha256": "b26c9fbab23feb593bc015c84b0994754f150caf93de8045c5d99f5b845f1580",
       "lines": 471,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/cancel-close-public-inputs.json"
     },
     {
       "path": "src/circuits/channel/close_asset_backing_circuit.rs",
@@ -702,7 +702,7 @@
       "sha256": "f10fa98b81dd229a9a0250e1c9809275a811e4531b04725f773ac1542a1ad0e1",
       "lines": 404,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/h1-gadget.json"
     },
     {
       "path": "src/circuits/channel/mod.rs",
@@ -716,14 +716,14 @@
       "sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
       "lines": 1221,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/post-close-claim-circuit.json"
     },
     {
       "path": "src/circuits/channel/post_close_claim_pis.rs",
       "sha256": "ccf9f70552e29bee0bc671f8f0b5962d91c303cdab023ebb23d2a6ad1bb65f32",
       "lines": 447,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/post-close-claim-public-inputs.json"
     },
     {
       "path": "src/circuits/channel/state_update_verifier.rs",
@@ -737,14 +737,14 @@
       "sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
       "lines": 1427,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-claim-circuit.json"
     },
     {
       "path": "src/circuits/channel/withdrawal_claim_pis.rs",
       "sha256": "c59faebed03c43df60780bad75502856e33d84b165785c4729b13faafb6b25c1",
       "lines": 584,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-claim-public-inputs.json"
     },
     {
       "path": "src/circuits/mod.rs",
@@ -982,7 +982,7 @@
       "sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
       "lines": 1797,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-state-hash-helpers.json"
     },
     {
       "path": "src/common/block.rs",
@@ -1556,7 +1556,7 @@
       "sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
       "lines": 600,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/poseidon-output-encoding.json"
     },
     {
       "path": "src/utils/recursively_verifiable.rs",

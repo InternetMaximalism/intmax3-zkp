@@ -576,7 +576,7 @@
         "Zkp.Implementation.CloseCircuit.MemberAuth"
       ],
       "theorems": [],
-      "note": "Exact first8/default-zero array and auth.len() as u8 modulo256. Helper itself does not check floor/count; production prove/fill separately checks them. Keccak native byte codec remains a boundary."
+      "note": "Exact first8/default-zero array, auth.len() as u8 modulo256, then the called close_member_set_commitment masks every index at or above that cast count. No auth<=8 assumption is hidden in this total helper. Production prove/fill separately checks floor/count. Keccak native byte codec remains a boundary."
     },
     {
       "start": 397,
