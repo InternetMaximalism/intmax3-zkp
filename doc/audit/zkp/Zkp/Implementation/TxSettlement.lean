@@ -111,6 +111,15 @@ structure Bytes32 where
 def Bytes32.limbs (x : Bytes32) : List Nat := [x.a, x.b, x.c, x.d, x.e, x.f, x.g, x.h]
 def Bytes32.Typed (x : Bytes32) : Prop := ∀ n ∈ x.limbs, n < wordBase
 
+theorem bytes32_typed_iff (x : Bytes32) :
+    x.Typed ↔ x.a < wordBase ∧ x.b < wordBase ∧ x.c < wordBase ∧ x.d < wordBase ∧
+      x.e < wordBase ∧ x.f < wordBase ∧ x.g < wordBase ∧ x.h < wordBase := by
+  cases x
+  simp only [Bytes32.Typed, Bytes32.limbs, List.mem_cons, List.mem_nil_iff, or_false,
+    forall_eq_or_imp, forall_eq]
+
+instance (x : Bytes32) : Decidable x.Typed := decidable_of_iff _ (bytes32_typed_iff x).symm
+
 /-- Native `Bytes32::reduce_to_hash_out`: u64 `high << 32 + low` per pair, no field reduction. -/
 def Bytes32.reduceNative (x : Bytes32) : Hash4 :=
   ⟨x.a * wordBase + x.b, x.c * wordBase + x.d, x.e * wordBase + x.f, x.g * wordBase + x.h⟩
@@ -148,7 +157,8 @@ theorem typed_canonical_pair_passes_gate (a b : Nat) (ha : a < wordBase) (hb : b
     a = (a * wordBase + b) % goldilocks / wordBase ∧
       b = (a * wordBase + b) % goldilocks % wordBase ∧
       (a * wordBase + b) % goldilocks = a * wordBase + b := by
-  simp only [wordBase, goldilocks] at *
+  rw [Nat.mod_eq_of_lt canon]
+  simp only [wordBase] at *
   omega
 
 /-- The canonical gate forces u32 limbs, a canonical element and agreement
@@ -201,7 +211,6 @@ theorem bare_reduction_aliases_noncanonical_bytes :
       modulusBytes.reduceNative ≠ zeroBytes.reduceNative := by
   refine ⟨by decide, ?_, by decide⟩
   simp only [Bytes32.fieldReduce, modulusBytes, zeroBytes, wordBase, goldilocks]
-  decide
 
 theorem canonical_gate_rejects_the_modulus_encoding : ¬ ToHashOutGates modulusBytes := by
   intro gate
@@ -230,7 +239,6 @@ theorem modulus_encoding_passes_native_try_from :
     modulusBytes.tryToHashOut = some ⟨goldilocks, 0, 0, 0⟩ := by
   rw [native_try_from_never_rejects_u32_limbs modulusBytes (by decide)]
   simp only [Bytes32.reduceNative, modulusBytes, wordBase, goldilocks]
-  decide
 
 theorem noncanonical_native_hash_never_equals_a_canonical_root (r : Hash4)
     (canon : hashCanonical r) : modulusBytes.reduceNative ≠ r := by
@@ -439,6 +447,8 @@ theorem throw_ok_iff_false {α : Type} (fault : Fault) (value : α) :
   · intro h; exact h.elim
 theorem error_bind {α β : Type} (fault : Fault) (f : α → Result β) :
     ((.error fault : Result α) >>= f) = .error fault := rfl
+theorem ok_bind {α β : Type} (a : α) (f : α → Result β) :
+    ((.ok a : Result α) >>= f) = f a := rfl
 
 /-! ## Facts derived from native acceptance -/
 
@@ -474,7 +484,8 @@ theorem verify_tx_inclusion_ok_iff {Path Proof : Type} (env : Environment Path P
       cases v2 with
       | mk cls root nonce action =>
         simp only [verifyTxInclusion, TxInclusionFacts, unit_bind_ok_iff, check_ok_iff, beq_iff_eq,
-          userTransferTxV2, Option.some.injEq, TxV2.mk.injEq, reduceCtorEq, false_and, false_or]
+          userTransferTxV2, Option.some.injEq, TxV2.mk.injEq, Option.some_ne_none, false_and,
+          false_or]
         constructor
         · rintro ⟨hr, hc, ha, ht, hn⟩
           subst hc ha ht hn
@@ -622,7 +633,8 @@ theorem account_state_is_checked_before_channel_id {Path Proof : Type} (env : En
       accountState.sendMerkleProof ≠ accountState.channelLeaf.sendTreeRoot) :
     acceptSettlement env channelId tx publicState accountState txMerkleProof txV2MerkleProof txV2
       spendProof = .error .invalidSendMerkleProof := by
-  simp [acceptSettlement, verifyAccountState, verified, badSend, check, check_false, error_bind]
+  simp [acceptSettlement, verifyAccountState, verified, badSend, check, check_false, error_bind,
+    ok_bind]
 
 theorem mixed_tx_v2_witness_is_never_accepted {Path Proof : Type} (env : Environment Path Proof)
     (channelId : Nat) (tx : Tx) (publicState : PublicState) (accountState : AccountState Path)
@@ -913,6 +925,21 @@ def examplePublicState : PublicState :=
 def exampleSettlement : Settlement Unit Unit :=
   ⟨1, Spend.emptyTx, examplePublicState, exampleAccountState, (), none, none, ()⟩
 
+theorem example_tx_tree_root_is_canonical : hashCanonical exampleTxTreeRoot := by decide
+
+theorem example_env_roots_are_canonical : CanonicalRoots exampleEnv :=
+  ⟨fun _ _ _ => example_tx_tree_root_is_canonical, fun _ _ _ => example_tx_tree_root_is_canonical⟩
+
+theorem example_spend_nonce_word_is_typed : SpendNonceWordTyped exampleEnv () := by
+  intro p h
+  have e : Spend.parseTargetPublicInputs
+      (Spend.PublicInputTargets.words ⟨Spend.zeroHash, Spend.zeroHash, Spend.emptyTx, 1⟩) =
+      some ⟨Spend.zeroHash, Spend.zeroHash, Spend.emptyTx, 1⟩ := rfl
+  have hp : some (⟨Spend.zeroHash, Spend.zeroHash, Spend.emptyTx, 1⟩ : Spend.PublicInputTargets) =
+      some p := e.symm.trans h
+  cases Option.some.inj hp
+  decide
+
 theorem example_legacy_settlement_is_accepted :
     acceptLegacy exampleEnv 1 Spend.emptyTx examplePublicState exampleAccountState () () =
       .ok exampleSettlement := by
@@ -920,14 +947,11 @@ theorem example_legacy_settlement_is_accepted :
 
 theorem example_settlement_fills_a_satisfying_witness :
     CircuitGates exampleEnv true (fillWitness () exampleSettlement) := by
-  refine native_acceptance_fills_a_satisfying_witness exampleEnv ?_ () 1 Spend.emptyTx examplePublicState
-    exampleAccountState () none none () exampleSettlement example_legacy_settlement_is_accepted ?_ ?_
-  · exact ⟨fun _ _ _ => by decide, fun _ _ _ => by decide⟩
-  · exact ⟨⟨by decide, by decide, by decide⟩, by decide, ⟨by decide, by decide, by decide⟩, by decide,
-      ⟨by decide, by decide⟩⟩
-  · intro p h
-    simp [exampleEnv, Spend.target_parser_round_trip_with_arbitrary_suffix] at h
-    subst h; decide
+  refine native_acceptance_fills_a_satisfying_witness exampleEnv example_env_roots_are_canonical ()
+    1 Spend.emptyTx examplePublicState exampleAccountState () none none () exampleSettlement
+    example_legacy_settlement_is_accepted ?_ example_spend_nonce_word_is_typed
+  exact ⟨⟨by decide, by decide, by decide⟩, by decide, ⟨by decide, by decide, by decide⟩, by decide,
+    ⟨by decide, by decide⟩⟩
 
 theorem example_mixed_witness_is_rejected (s : Settlement Unit Unit) :
     acceptSettlement exampleEnv 1 Spend.emptyTx examplePublicState exampleAccountState () (some ())

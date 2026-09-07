@@ -1,0 +1,694 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/send_tx_circuit.rs",
+  "source_sha256": "28e8dea4d6af871616ed4d0abd69ba2a51529c8dbf4e2f4fb5bff89f511b706d",
+  "source_lines": 709,
+  "module": "Zkp.Implementation.SendTxCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/SendTxCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 11,
+      "status": "dependency-boundary",
+      "label": "plonky2 imports: builder, witness, circuit data, recursive proof targets",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitEnvironment"
+      ],
+      "theorems": [],
+      "note": "plonky2 builder/verifier/witness API is opaque; the model only exposes the recursive verifier as the `balanceProofAccepted` callback of CircuitEnvironment."
+    },
+    {
+      "start": 12,
+      "end": 12,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 13,
+      "end": 40,
+      "status": "dependency-boundary",
+      "label": "crate imports: balance PI codec, TxSettlement, TransferWitness, UpdatePublicState, settled_tx_chain_push, U63, Bytes32, serializers, serde",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Environment",
+        "Zkp.Implementation.SendTxCircuit.CircuitEnvironment",
+        "Zkp.Implementation.SendTxCircuit.TxSettlement",
+        "Zkp.Implementation.SendTxCircuit.TransferWitness"
+      ],
+      "theorems": [],
+      "note": "Imported semantics are represented as opaque callbacks/premises: keccak and transfer Merkle inclusion (Environment), TxSettlementTarget acceptance / UpdatePublicState root call (CircuitEnvironment); TxSettlement/TransferWitness record only the fields this file reads. The balance PI codec and spend PI parsing come from the imported Lean modules BalancePublicInputs and Spend, not from this module."
+    },
+    {
+      "start": 41,
+      "end": 42,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line and #[derive]; no executable content."
+    },
+    {
+      "start": 43,
+      "end": 64,
+      "status": "translated",
+      "label": "SendTxError variants",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. All seven variants are mirrored; InvalidBalanceProof / InvalidBalanceVd are declared but never produced by this file. Error strings are abbreviated, not the exact format! text."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 66,
+      "end": 80,
+      "status": "translated",
+      "label": "SendTxWitness: previous balance proof, update_public_state, tx_settlement",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Witness",
+        "Zkp.Implementation.SendTxCircuit.TxSettlement"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The previous proof is represented only by its public-input words (`prevBalanceWords`); TxSettlement keeps channel_id, tx, public_state, send_leaf.prev/cur block numbers and the spend proof's public words. The two-line invariants in comments are the checks modeled at lines 104-115, not assumed here."
+    },
+    {
+      "start": 81,
+      "end": 84,
+      "status": "non-executable",
+      "label": "comment: outgoing transfer at leaf 0 (detail2 A-2)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source commentary; the pin to leaf 0 is modeled where enforced (lines 148-159 / 276-279)."
+    },
+    {
+      "start": 85,
+      "end": 86,
+      "status": "translated",
+      "label": "SendTxWitness.transfer_witness field",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Witness",
+        "Zkp.Implementation.SendTxCircuit.TransferWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. TransferWitness carries root, transfer, index and an opaque Merkle path type."
+    },
+    {
+      "start": 87,
+      "end": 92,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generic impl header; no executable content."
+    },
+    {
+      "start": 93,
+      "end": 102,
+      "status": "translated",
+      "label": "to_public_inputs: parse previous full PIs, split carried vd / pis",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.toPublicInputs",
+        "Zkp.Implementation.SendTxCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.native_balance_parse_failure_is_reported_first",
+        "Zkp.Implementation.SendTxCircuit.example_previous_parses_natively"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Parsing is `BalancePublicInputs.fullFromNative` (imported module) applied to the previous proof's words with the balance_cd cap count and the field-conversion callback of Environment; a parse fault is the first error reported."
+    },
+    {
+      "start": 103,
+      "end": 103,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 104,
+      "end": 122,
+      "status": "translated",
+      "label": "connection checks: prev.public_state == update.old, update.new == settlement.public_state, channel_id",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.preChecks",
+        "Zkp.Implementation.SendTxCircuit.Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.pre_checks_ok_iff",
+        "Zkp.Implementation.SendTxCircuit.native_output_public_state_is_updated_state"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Three equality checks in source order returning ConnectionError; pre_checks_ok_iff is the exact acceptance characterization."
+    },
+    {
+      "start": 123,
+      "end": 126,
+      "status": "translated",
+      "label": "spend_pis() extraction with SpendPisError mapping",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.toPublicInputs",
+        "Zkp.Implementation.SendTxCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Modeled as `Spend.parseNativePublicInputs` over the settlement's spend public words, error mapped to Error.spendPis. TxSettlement::spend_pis itself (tx_settlement.rs) and its parser semantics are the imported Spend module's, not this file's."
+    },
+    {
+      "start": 127,
+      "end": 132,
+      "status": "translated",
+      "label": "prev private commitment must equal spend_pis.prev_private_commitment",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.postChecks",
+        "Zkp.Implementation.SendTxCircuit.rootOfHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.post_checks_ok_iff",
+        "Zkp.Implementation.SendTxCircuit.native_binds_previous_private_commitment_to_spend"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Comparison across the PoseidonHashOut representations is the word-preserving cast rootOfHash. post_checks_ok_iff characterizes lines 127-162 as a whole."
+    },
+    {
+      "start": 133,
+      "end": 146,
+      "status": "translated",
+      "label": "native block order: block_r >= send_block_number_before_tx and tx_block_number >= block_r (non-strict)",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.postChecks",
+        "Zkp.Implementation.SendTxCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.native_block_order_is_non_strict",
+        "Zkp.Implementation.SendTxCircuit.native_accepts_equal_tx_block_and_block_r"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The NATIVE second check is non-strict (`<` rejection, i.e. `>=` accepted); the circuit at lines 254-257 uses strict enforce_gt. native_accepts_equal_tx_block_and_block_r exhibits tx_block_number == block_r passing this builder. send_block_number_before_tx()/tx_block_number() are the settlement's send_leaf.prev/.cur fields, taken as data."
+    },
+    {
+      "start": 147,
+      "end": 159,
+      "status": "translated",
+      "label": "outgoing transfer pinned to index 0 and to tx.transfer_tree_root",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.postChecks",
+        "Zkp.Implementation.SendTxCircuit.outgoingTransferIndex"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.native_pins_outgoing_transfer_to_leaf_zero_of_settled_tx",
+        "Zkp.Implementation.SendTxCircuit.outgoing_transfer_index_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Index-zero and root-equality checks in source order."
+    },
+    {
+      "start": 160,
+      "end": 162,
+      "status": "dependency-boundary",
+      "label": "transfer_witness.verify(): Merkle inclusion of (transfer, index) under transfer_tree_root",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "Inclusion is the opaque `transferInclusion` callback of Environment (transfer_witness.rs / Merkle gadget not modeled here); the model only records that the callback must return true."
+    },
+    {
+      "start": 163,
+      "end": 163,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 164,
+      "end": 174,
+      "status": "translated",
+      "label": "validity-selected new block_r / private_commitment",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.nextInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.next_inputs_valid_spend_advances_reference_and_commitment",
+        "Zkp.Implementation.SendTxCircuit.next_inputs_invalid_spend_carries_everything_but_public_state",
+        "Zkp.Implementation.SendTxCircuit.native_valid_spend_advances_reference_and_commitment",
+        "Zkp.Implementation.SendTxCircuit.native_invalid_spend_keeps_reference_commitment_and_chain"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. is_valid selects (tx_block_number, new_private_commitment) else the previous values; an invalid spend is carried, not rejected."
+    },
+    {
+      "start": 175,
+      "end": 177,
+      "status": "non-executable",
+      "label": "comment: chain fold rationale (detail2 C-6 / F-1)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source commentary."
+    },
+    {
+      "start": 178,
+      "end": 183,
+      "status": "translated",
+      "label": "settled_tx_chain fold gated on is_valid && aux_data != 0",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.nextInputs",
+        "Zkp.Implementation.SendTxCircuit.settledTxChainPush",
+        "Zkp.Implementation.SendTxCircuit.chainPreimage",
+        "Zkp.Implementation.SendTxCircuit.zeroAux",
+        "Zkp.Implementation.SendTxCircuit.settledTxChainDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.next_inputs_folds_chain_only_for_valid_nonzero_aux",
+        "Zkp.Implementation.SendTxCircuit.next_inputs_zero_aux_never_folds",
+        "Zkp.Implementation.SendTxCircuit.native_chain_fold_is_exact_imtc_keccak",
+        "Zkp.Implementation.SendTxCircuit.example_chain_was_folded_with_17_word_preimage"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The gate is modeled exactly; settled_tx_chain_push's preimage layout [IMTC] ++ chain(8) ++ aux(8) is handwritten from balance_state.rs with keccak an opaque callback (no injectivity/collision assumption)."
+    },
+    {
+      "start": 184,
+      "end": 195,
+      "status": "translated",
+      "label": "assemble new BalancePublicInputs (channel carried, new public state) and BalanceFullPublicInputs with carried vd",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.nextInputs",
+        "Zkp.Implementation.SendTxCircuit.toPublicInputs",
+        "Zkp.Implementation.SendTxCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.native_admission_characterized",
+        "Zkp.Implementation.SendTxCircuit.native_admission_of_checks",
+        "Zkp.Implementation.SendTxCircuit.native_output_carries_previous_verifier_data",
+        "Zkp.Implementation.SendTxCircuit.next_inputs_keep_channel_identity",
+        "Zkp.Implementation.SendTxCircuit.next_inputs_public_state_is_the_updated_state",
+        "Zkp.Implementation.SendTxCircuit.example_valid_send_is_accepted_natively"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. native_admission_characterized / _of_checks give the exact iff between a successful return and NativeChecks plus the nextInputs output; the verifier data is copied from the previous statement unchanged."
+    },
+    {
+      "start": 196,
+      "end": 198,
+      "status": "non-executable",
+      "label": "closing braces, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 199,
+      "end": 206,
+      "status": "translated",
+      "label": "SendTxTarget fields",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitWitness enumerates the target's wires plus the intermediate wires introduced in `new` (select outputs, aux flags, pushed chain, registered words)."
+    },
+    {
+      "start": 207,
+      "end": 218,
+      "status": "non-executable",
+      "label": "spacing, impl header and SendTxTarget::new signature",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generic signature; balance_cd and spend_vd are the constructor's pinned inputs, modeled through the callbacks of CircuitEnvironment in the body spans below."
+    },
+    {
+      "start": 219,
+      "end": 229,
+      "status": "dependency-boundary",
+      "label": "allocate previous balance proof target, parse its PIs (from_pis), verify_proof under the CARRIED vd",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitWitness",
+        "Zkp.Implementation.SendTxCircuit.CircuitEnvironment",
+        "Zkp.Implementation.SendTxCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.constructor_verifies_previous_proof_before_any_connection",
+        "Zkp.Implementation.SendTxCircuit.example_previous_parses_as_target"
+      ],
+      "note": "Recursive verification is the opaque `balanceProofAccepted` callback (gate prevProofVerified) applied to the vd parsed from the previous proof's own public inputs; that this vd equals the balance circuit's cyclic key is the balance circuit's obligation, not this file's. from_pis is the imported target codec (`fullFromTarget`)."
+    },
+    {
+      "start": 230,
+      "end": 232,
+      "status": "dependency-boundary",
+      "label": "allocate UpdatePublicStateTarget, TxSettlementTarget (spend vd pinned, verify=true), TransferWitnessTarget (inclusion=true)",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitEnvironment",
+        "Zkp.Implementation.SendTxCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Sub-gadgets are premises: updateGates (imported UpdatePublicState.CircuitGates), txSettlementAccepted (spend proof under pinned vd, account state, tx inclusion, spend tx == settled tx) and transferIncluded callbacks. None of their internals are modeled here."
+    },
+    {
+      "start": 233,
+      "end": 248,
+      "status": "translated",
+      "label": "connect old/new public state, channel id, previous private commitment to spend_pis",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.circuit_public_state_is_the_verified_update",
+        "Zkp.Implementation.SendTxCircuit.circuit_preserves_channel_identity",
+        "Zkp.Implementation.SendTxCircuit.circuit_previous_commitment_is_the_spend_input"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Four equality gates (oldStateConnected, newStateConnected, channelConnected, previousCommitmentConnected). spend_pis() at line 246 is `Spend.parseTargetPublicInputs` of the imported module (gate spendParsed)."
+    },
+    {
+      "start": 249,
+      "end": 258,
+      "status": "translated",
+      "label": "enforce_ge(block_r, send_block_number_before_tx) and enforce_gt(tx_block_number, block_r)",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitGates",
+        "Zkp.Implementation.SendTxCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.circuit_enforces_strict_tx_block_increase",
+        "Zkp.Implementation.SendTxCircuit.circuit_block_order_implies_native_block_order",
+        "Zkp.Implementation.SendTxCircuit.circuit_rejects_equal_tx_block_and_block_r"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Gates blockReferenceGe (non-strict) and txBlockGt (STRICT) over Nat; the U63 range-check lowering of enforce_ge/enforce_gt is the FieldAndGadgetLowering premise. Strictness here vs the native `>=` at lines 140-146 is stated explicitly."
+    },
+    {
+      "start": 259,
+      "end": 270,
+      "status": "translated",
+      "label": "select new block_r and new private commitment on spend_pis.is_valid",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.Selected",
+        "Zkp.Implementation.SendTxCircuit.CircuitGates",
+        "Zkp.Implementation.SendTxCircuit.FlagBoolean"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.flag_boolean_cases",
+        "Zkp.Implementation.SendTxCircuit.circuit_invalid_spend_is_carried_not_rejected",
+        "Zkp.Implementation.SendTxCircuit.constructor_never_asserts_spend_validity"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. select gates are determined only when the flag wire is 0/1; Booleanity of is_valid (a BoolTarget::new_unsafe wrapper) is the explicit FlagBoolean premise supplied by the verified spend proof, not a gate of this file. No gate asserts is_valid."
+    },
+    {
+      "start": 271,
+      "end": 275,
+      "status": "non-executable",
+      "label": "comment: transfer root/index pinning rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source commentary."
+    },
+    {
+      "start": 276,
+      "end": 279,
+      "status": "translated",
+      "label": "connect transfer_tree_root to tx.transfer_tree_root; assert transfer_index == 0",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.circuit_binds_transfer_leaf_zero_of_settled_tx",
+        "Zkp.Implementation.SendTxCircuit.constructor_pins_transfer_root_and_index_after_inclusion_allocation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Gates transferRootConnected and transferIndexZero; combined with the inclusion premise of line 232 they bind the leaf-0 transfer of the settled tx."
+    },
+    {
+      "start": 280,
+      "end": 289,
+      "status": "non-executable",
+      "label": "comment: chain fold and SECURITY note on aux_data semantics",
+      "declarations": [],
+      "theorems": [],
+      "note": "Source commentary. The claim that aux_data == tx_leaf_hash is enforced off-circuit at co-sign time is NOT modeled anywhere in this module."
+    },
+    {
+      "start": 290,
+      "end": 297,
+      "status": "translated",
+      "label": "aux_data is_zero, not, and(is_valid), settled_tx_chain_push_circuit, select",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitGates",
+        "Zkp.Implementation.SendTxCircuit.bit",
+        "Zkp.Implementation.SendTxCircuit.Selected",
+        "Zkp.Implementation.SendTxCircuit.settledTxChainPush",
+        "Zkp.Implementation.SendTxCircuit.zeroAux",
+        "Zkp.Implementation.SendTxCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.circuit_do_push_is_valid_and_nonzero_aux",
+        "Zkp.Implementation.SendTxCircuit.circuit_chain_fold_requires_valid_spend_and_nonzero_aux"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Gates auxZeroGate, doPushGate (= valid * (1 - aux_is_zero)), chainPushGate and chainSelect. The keccak gadget inside settled_tx_chain_push_circuit and the is_zero/limb lowering are opaque (FieldAndGadgetLowering premise)."
+    },
+    {
+      "start": 298,
+      "end": 298,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 299,
+      "end": 317,
+      "status": "translated",
+      "label": "assemble new BalancePublicInputsTarget / BalanceFullPublicInputsTarget (carried vd) and return SendTxTarget",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitGates",
+        "Zkp.Implementation.SendTxCircuit.CircuitWitness",
+        "Zkp.Implementation.SendTxCircuit.targetProgram",
+        "Zkp.Implementation.SendTxCircuit.BuildOp"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.circuit_output_is_next_inputs",
+        "Zkp.Implementation.SendTxCircuit.circuit_binds_carried_verifier_data",
+        "Zkp.Implementation.SendTxCircuit.example_valid_send_satisfies_circuit_gates",
+        "Zkp.Implementation.SendTxCircuit.example_circuit_and_native_statements_agree"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Gate outputAssembled; circuit_output_is_next_inputs shows any gate-satisfying witness with a Boolean flag yields the same statement as the native nextInputs. targetProgram records the constructor's operation order."
+    },
+    {
+      "start": 318,
+      "end": 318,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 319,
+      "end": 338,
+      "status": "translated",
+      "label": "SendTxTarget::set_witness: proof, update, settlement, transfer witness, new_full_pis",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.witnessWriteProgram",
+        "Zkp.Implementation.SendTxCircuit.WriteOp"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the write order is modeled; plonky2 witness writes and sub-target set_witness bodies are opaque."
+    },
+    {
+      "start": 339,
+      "end": 341,
+      "status": "non-executable",
+      "label": "closing braces, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 342,
+      "end": 352,
+      "status": "translated",
+      "label": "SendTxCircuit fields",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitImage"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitImage is polymorphic in data/common/target/public-input types; no plonky2 CircuitData semantics."
+    },
+    {
+      "start": 353,
+      "end": 359,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generic impl header; no executable content."
+    },
+    {
+      "start": 360,
+      "end": 381,
+      "status": "translated",
+      "label": "SendTxCircuit::new: standard recursion config, build target, register public inputs, add_const_gate, build",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.constructorProgram",
+        "Zkp.Implementation.SendTxCircuit.CircuitOp",
+        "Zkp.Implementation.SendTxCircuit.CircuitGates",
+        "Zkp.Implementation.SendTxCircuit.balanceLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.constructor_registers_public_inputs_before_const_gate_and_build",
+        "Zkp.Implementation.SendTxCircuit.circuit_registers_29_balance_words_plus_verifier_data",
+        "Zkp.Implementation.SendTxCircuit.balance_length_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. constructorProgram records the operation order; the registered-word gate models to_vec(&balance_cd.config) via the imported configured codec (29 balance words + carried vd). CircuitConfig, add_const_gate and builder.build are opaque plonky2 steps."
+    },
+    {
+      "start": 382,
+      "end": 382,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 383,
+      "end": 397,
+      "status": "translated",
+      "label": "prove: native to_public_inputs first, then set_witness twice and data.prove",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.prove",
+        "Zkp.Implementation.SendTxCircuit.witnessWriteProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.proving_cannot_bypass_native_admission",
+        "Zkp.Implementation.SendTxCircuit.witness_writes_new_public_inputs_twice_from_native_value"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Proving is an opaque backend callback; the model fixes that a proof exists only if the native builder accepted the witness, and that new_full_pis is written twice from the same native value."
+    },
+    {
+      "start": 398,
+      "end": 398,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 399,
+      "end": 417,
+      "status": "translated",
+      "label": "to_bytes: serialize data, balance_cd, wrap targets, bincode encode",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.toBytes",
+        "Zkp.Implementation.SendTxCircuit.CircuitImage",
+        "Zkp.Implementation.SendTxCircuit.SerializationFailure"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Stage-labelled failure propagation in source order; the serializers and bincode are opaque callbacks."
+    },
+    {
+      "start": 418,
+      "end": 418,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 419,
+      "end": 443,
+      "status": "translated",
+      "label": "from_bytes: bincode decode, CircuitData/CommonCircuitData from_bytes, keep payload targets",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.fromBytes",
+        "Zkp.Implementation.SendTxCircuit.CircuitImage",
+        "Zkp.Implementation.SendTxCircuit.SerializationFailure"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SendTxCircuit.deserialization_keeps_payload_targets_without_reconstruction"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Targets and public-input targets are taken from the payload without re-running the constructor; the deserializers are opaque callbacks."
+    },
+    {
+      "start": 444,
+      "end": 446,
+      "status": "non-executable",
+      "label": "closing brace, spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 447,
+      "end": 452,
+      "status": "translated",
+      "label": "SendTxCircuitBytes payload",
+      "declarations": [
+        "Zkp.Implementation.SendTxCircuit.CircuitImage"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitImage instantiated at byte lists for data/balance_cd."
+    },
+    {
+      "start": 453,
+      "end": 453,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line."
+    },
+    {
+      "start": 454,
+      "end": 709,
+      "status": "test-only",
+      "label": "#[cfg(test)] test_send_tx_circuit",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test module read in full but not promoted to a constraint; the example trace in the Lean module (examplePrevious block_r=2, tx block 3, prev chain 5..5) mirrors its shape only."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "previous-balance-recursive-verification",
+      "obligation": "Derive that builder.verify_proof (line 226) under the verifier data carried inside the previous proof's own public inputs accepts only proofs of the balance circuit whose cyclic key equals that vd; the model takes acceptance as the opaque balanceProofAccepted callback and does not pin the vd.",
+      "discharged": false
+    },
+    {
+      "name": "tx-settlement-and-spend-proof",
+      "obligation": "TxSettlementTarget::new (spend proof verified under the pinned spend vd, account state, tx-tree inclusion, spend_pis.tx == settled tx) and TxSettlement::new/spend_pis are premises (txSettlementAccepted, Spend.parse*). Booleanity of spend_pis.is_valid (BoolTarget::new_unsafe) is the FlagBoolean premise supplied by the spend proof, not a gate of this file. Nonce increment and the sent-tx tree root are never inspected here.",
+      "discharged": false
+    },
+    {
+      "name": "transfer-merkle-inclusion-and-aux-semantics",
+      "obligation": "TransferWitnessTarget::new / TransferWitness::verify Merkle inclusion is the opaque transferInclusion callback. That aux_data equals the tx leaf hash (source SECURITY comment, lines 284-289, 'enforced off-circuit at co-sign time') is not modeled; the chain PI is only shown to fold whatever aux_data the leaf carries.",
+      "discharged": false
+    },
+    {
+      "name": "update-public-state-gadget",
+      "obligation": "UpdatePublicStateTarget::new gates are the imported UpdatePublicState.CircuitGates premise with an opaque Merkle root callback; their lowering and the prev_public_state_root chain are that module's obligation.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-chain-fold-and-gadget-lowering",
+      "obligation": "settled_tx_chain_push(_circuit) is modeled by its 17-word [IMTC]++chain++aux preimage with keccak an opaque function (no collision resistance assumed); the keccak gadget, Bytes32 is_zero, U63 enforce_ge/enforce_gt range checks, select gadgets and field/word canonical conversion are the FieldAndGadgetLowering premise, unproved.",
+      "discharged": false
+    },
+    {
+      "name": "balance-pi-codec-registration-and-plonky2-compilation",
+      "obligation": "BalanceFullPublicInputsTarget::from_pis/to_vec and register_public_inputs are the imported BalancePublicInputs codec; CircuitConfig, add_const_gate, builder.build, PartialWitness writes, data.prove and bincode/serde (de)serialization are opaque. No refinement of the compiled constraint system or of the Rust to this model.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The native builder accepts tx_block_number >= block_r while the circuit enforces tx_block_number > block_r (native_accepts_equal_tx_block_and_block_r vs circuit_rejects_equal_tx_block_and_block_r). Beyond circuit_output_is_next_inputs (same output formula on a gate-satisfying witness) and one concrete example, there is no proof that the circuit's accepted set refines the native builder's on real plonky2 witnesses.",
+      "discharged": false
+    }
+  ]
+}
