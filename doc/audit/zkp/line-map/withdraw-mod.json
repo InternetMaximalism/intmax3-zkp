@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/mod.rs",
+  "source_sha256": "1f4ffb56029db63e8af19a21cb1536f724a3a72b2df73cfef378dd1ba7a7cd51",
+  "source_lines": 5,
+  "module": "Zkp.Implementation.CrateLayout",
+  "model": "doc/audit/zkp/Zkp/Implementation/CrateLayout.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 5,
+      "status": "translated",
+      "label": "pub mod withdraw leaf modules",
+      "declarations": [
+        "Zkp.Implementation.CrateLayout.declaredItems",
+        "Zkp.Implementation.CrateLayout.declaredModules",
+        "Zkp.Implementation.CrateLayout.itemsOf",
+        "Zkp.Implementation.CrateLayout.childrenOf",
+        "Zkp.Implementation.CrateLayout.childExists",
+        "Zkp.Implementation.CrateLayout.leafFiles"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CrateLayout.declared_modules_agree_with_items",
+        "Zkp.Implementation.CrateLayout.every_referenced_child_exists",
+        "Zkp.Implementation.CrateLayout.no_orphan_leaf_files",
+        "Zkp.Implementation.CrateLayout.children_nodup_per_file",
+        "Zkp.Implementation.CrateLayout.non_test_items_are_pub",
+        "Zkp.Implementation.CrateLayout.all_modules_reachable_in_production"
+      ],
+      "note": "Handwritten local semantics of the module declaration items and named kernel-checked consequences; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rustc-module-resolution",
+      "obligation": "rustc path/module resolution, #[path] overrides, feature and cfg evaluation and edition rules are not modeled; the item lists are a handwritten transcription of the mod.rs lines.",
+      "discharged": false
+    },
+    {
+      "name": "filesystem-snapshot",
+      "obligation": "leafFiles is an ls snapshot of the working tree on 2026-09-07; renamed, added or deleted .rs files are not detected by the model.",
+      "discharged": false
+    },
+    {
+      "name": "out-of-scope-witness-and-root",
+      "obligation": "src/circuits/witness/mod.rs and src/lib.rs (root pub mod circuits;) are not modeled; the visibility of the pub use targets inside witness and the root declaration are premises.",
+      "discharged": false
+    },
+    {
+      "name": "declaration-level-only",
+      "obligation": "Nothing about the contents, gates or semantics of any declared leaf module is covered; reachability and test-gating are declaration-level facts only.",
+      "discharged": false
+    }
+  ]
+}

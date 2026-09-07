@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/mod.rs",
+  "source_sha256": "7463689d9b89a2690bc1e97477c89534bc3940b0b97056f992a8a0bd0a4334d4",
+  "source_lines": 6,
+  "module": "Zkp.Implementation.CrateLayout",
+  "model": "doc/audit/zkp/Zkp/Implementation/CrateLayout.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "translated",
+      "label": "pub mod balance / channel",
+      "declarations": [
+        "Zkp.Implementation.CrateLayout.declaredItems",
+        "Zkp.Implementation.CrateLayout.declaredModules",
+        "Zkp.Implementation.CrateLayout.childrenOf",
+        "Zkp.Implementation.CrateLayout.childExists",
+        "Zkp.Implementation.CrateLayout.modulePaths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CrateLayout.root_children_example",
+        "Zkp.Implementation.CrateLayout.every_referenced_child_exists",
+        "Zkp.Implementation.CrateLayout.module_paths_pinned",
+        "Zkp.Implementation.CrateLayout.all_modules_reachable_in_production",
+        "Zkp.Implementation.CrateLayout.non_root_modules_declared_once"
+      ],
+      "note": "Handwritten local semantics of the module declaration items and named kernel-checked consequences; no source/compiler refinement."
+    },
+    {
+      "start": 3,
+      "end": 3,
+      "status": "translated",
+      "label": "pub mod test_utils with NO cfg(test) attribute",
+      "declarations": [
+        "Zkp.Implementation.CrateLayout.declaredItems",
+        "Zkp.Implementation.CrateLayout.itemsOf",
+        "Zkp.Implementation.CrateLayout.pubMod",
+        "Zkp.Implementation.CrateLayout.reachable",
+        "Zkp.Implementation.CrateLayout.testOnlyItems"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CrateLayout.test_utils_is_unconditional_pub_mod",
+        "Zkp.Implementation.CrateLayout.test_utils_not_test_only",
+        "Zkp.Implementation.CrateLayout.test_utils_reachable_in_production",
+        "Zkp.Implementation.CrateLayout.production_reachable_pinned"
+      ],
+      "note": "Handwritten local semantics of the module declaration items and named kernel-checked consequences; no source/compiler refinement."
+    },
+    {
+      "start": 4,
+      "end": 5,
+      "status": "translated",
+      "label": "pub mod validity / withdraw",
+      "declarations": [
+        "Zkp.Implementation.CrateLayout.declaredItems",
+        "Zkp.Implementation.CrateLayout.declaredModules",
+        "Zkp.Implementation.CrateLayout.childrenOf",
+        "Zkp.Implementation.CrateLayout.childExists",
+        "Zkp.Implementation.CrateLayout.modulePaths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CrateLayout.root_children_example",
+        "Zkp.Implementation.CrateLayout.every_referenced_child_exists",
+        "Zkp.Implementation.CrateLayout.validity_children_example",
+        "Zkp.Implementation.CrateLayout.all_modules_reachable_in_production"
+      ],
+      "note": "Handwritten local semantics of the module declaration items and named kernel-checked consequences; no source/compiler refinement."
+    },
+    {
+      "start": 6,
+      "end": 6,
+      "status": "translated",
+      "label": "pub mod witness (directory module out of scope)",
+      "declarations": [
+        "Zkp.Implementation.CrateLayout.declaredItems",
+        "Zkp.Implementation.CrateLayout.excludedDirectoryModules",
+        "Zkp.Implementation.CrateLayout.childExists",
+        "Zkp.Implementation.CrateLayout.allDeclaredPaths"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CrateLayout.excluded_witness_referenced_by_root",
+        "Zkp.Implementation.CrateLayout.every_referenced_child_exists",
+        "Zkp.Implementation.CrateLayout.root_children_example"
+      ],
+      "note": "Declaration item modeled; the witness module body (src/circuits/witness/mod.rs) is out of scope and only its file listing is pinned."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rustc-module-resolution",
+      "obligation": "rustc path/module resolution, #[path] overrides, feature and cfg evaluation and edition rules are not modeled; the item lists are a handwritten transcription of the mod.rs lines.",
+      "discharged": false
+    },
+    {
+      "name": "filesystem-snapshot",
+      "obligation": "leafFiles is an ls snapshot of the working tree on 2026-09-07; renamed, added or deleted .rs files are not detected by the model.",
+      "discharged": false
+    },
+    {
+      "name": "out-of-scope-witness-and-root",
+      "obligation": "src/circuits/witness/mod.rs and src/lib.rs (root pub mod circuits;) are not modeled; the visibility of the pub use targets inside witness and the root declaration are premises.",
+      "discharged": false
+    },
+    {
+      "name": "declaration-level-only",
+      "obligation": "Nothing about the contents, gates or semantics of any declared leaf module is covered; reachability and test-gating are declaration-level facts only.",
+      "discharged": false
+    }
+  ]
+}
