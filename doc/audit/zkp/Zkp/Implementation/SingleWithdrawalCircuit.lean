@@ -752,8 +752,17 @@ theorem extract_address_ok_iff (r : Bytes8) (a : Address) :
     subst h
     exact Decidable.of_not_not canonical
   · rintro rfl
-    obtain ⟨a0,a1,a2,a3,a4⟩ := a
-    simp [extractAddress, recipientOfAddress, addressTagWord, addressTag]
+    have tagEq : (recipientOfAddress a).a / 2 ^ 24 = addressTag := by
+      show addressTagWord / 2 ^ 24 = addressTag
+      decide
+    have tag : ¬ ((recipientOfAddress a).a / 2 ^ 24 ≠ addressTag) := fun ne => ne tagEq
+    have canon : ¬ (recipientOfAddress a ≠
+        recipientOfAddress ⟨(recipientOfAddress a).d, (recipientOfAddress a).e,
+          (recipientOfAddress a).f, (recipientOfAddress a).g, (recipientOfAddress a).h⟩) :=
+      fun ne => ne rfl
+    unfold extractAddress
+    rw [if_neg tag, if_neg canon]
+    rfl
 
 theorem tx_inclusion_ok_iff {Proof Path Leaf : Type} (e : Environment Proof Path Leaf)
     (w : Witness Proof Path Leaf) (channelId : Nat) (txTreeRoot : Root) :
@@ -771,13 +780,13 @@ theorem tx_inclusion_ok_iff {Proof Path Leaf : Type} (e : Environment Proof Path
   · rcases hp : w.txV2MerkleProof with _ | proof
     · simp [verifyTxInclusion, hv, hp]
     · simp only [verifyTxInclusion, hv, hp, unit_bind_ok_iff, require_ok_iff, beq_iff_eq,
-        Option.some.injEq, reduceCtorEq, false_and, and_false, or_false]
+        Option.some.injEq]
       constructor
       · rintro ⟨a, b, c, d, f⟩
-        exact ⟨txV2, proof, rfl, rfl, a, b, c, d, f⟩
-      · rintro ⟨x, y, hx, hy, a, b, c, d, f⟩
-        cases hx; cases hy
-        exact ⟨a, b, c, d, f⟩
+        exact Or.inl ⟨txV2, proof, rfl, rfl, a, b, c, d, f⟩
+      · rintro (⟨x, y, rfl, rfl, a, b, c, d, f⟩ | ⟨hx, -, -⟩)
+        · exact ⟨a, b, c, d, f⟩
+        · exact hx.elim
 
 /-- Everything native admission checked, in source order. `full` is the parsed
     balance public inputs; the output is assembled from `update_public_state.new`
@@ -1065,6 +1074,7 @@ theorem gates_withdrawal_is_checked {Proof Path Leaf : Type}
     (nullifierChecked : ∀ v ∈ p.withdrawal.nullifier.words, v < wordBase) :
     ∀ v ∈ p.words, v < wordBase := by
   have t := g.transferChecked
+  simp only [Transfer.words] at t
   rw [g.recipientCanonical] at t
   have tok := g.tokenOut
   have amt := g.amountOut
@@ -1074,19 +1084,20 @@ theorem gates_withdrawal_is_checked {Proof Path Leaf : Type}
   simp only [Transfer.words, recipientOfAddress, BalancePublicInputs.Bytes8.words, Address.words,
     List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at t
   simp only at tok amt aux
-  subst tok amt aux
+  subst tok
+  rw [← amt, ← aux] at t
   simp only [BalancePublicInputs.Bytes8.words, List.mem_cons, List.mem_singleton, List.not_mem_nil,
     or_false] at nullifierChecked
   intro v hv
   simp only [PublicInputs.words, Withdrawal.words, Address.words, BalancePublicInputs.Bytes8.words,
-    List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hv
+    List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false, or_assoc] at hv
   rcases hv with hv | hv
   · exact stateChecked v hv
   · rcases hv with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
       rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
     all_goals first
-      | exact t _ (by simp)
-      | exact nullifierChecked _ (by simp)
+      | (refine t _ ?_; simp)
+      | (refine nullifierChecked _ ?_; simp)
 
 /-! ## Nullifier binding (representation, not hash injectivity) -/
 
@@ -1221,7 +1232,7 @@ def exampleExpected : PublicInputs :=
       BalancePublicInputs.Bytes8.zero⟩⟩
 
 theorem normal_witness_is_admitted : toPublicInputs exampleEnv exampleWitness = .ok exampleExpected := by
-  decide
+  rfl
 
 theorem normal_nullifier_limbs :
     exampleExpected.withdrawal.nullifier = ⟨0, 28, 0, addressTagWord, 0, 0, 0, 0⟩ := by
@@ -1229,7 +1240,7 @@ theorem normal_nullifier_limbs :
 
 theorem normal_public_inputs_native_roundtrip :
     fromNative exampleExpected.words = .ok exampleExpected := by
-  decide
+  rfl
 
 theorem normal_rollup_leaf :
     rollupLeaf exampleExpected.withdrawal =
