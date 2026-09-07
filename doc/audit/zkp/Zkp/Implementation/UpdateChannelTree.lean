@@ -25,6 +25,15 @@ Three separate objects are modelled, and they are deliberately kept apart:
   `UpdateUserPublicInputs` codec (`to_u64_vec` / `from_u64_slice`,
   `UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN = 59`).
 
+One deliberate simplification of ERROR SHAPE (not of behaviour): the source's
+ten parallel per-block-slot vectors and their ten-way length gate become one
+list of slot records and one length check. Untranslated on purpose: the
+plonky2 builder plumbing (`UpdateUserPublicInputsTarget::new` / `to_vec` /
+`from_slice` / `select` / `set_witness`, `UpdateUserTreeTarget::set_witness`,
+`UpdateUserCircuit::new` / `prove`), the retired
+`validate_member_set_delta` tombstone (a `#[cfg(feature = "deprecated-msu")]`
+dead path), and the whole `#[cfg(test)]` module.
+
 ## What this file is really about (fund safety)
 
 The channel-tree leaf is `ChannelLeaf { index, prev, send_tree_root,
@@ -56,8 +65,8 @@ bp slot's Regev pubkey digest matches its member leaf. The block then FOLDS
 the tuple `(IMCH digest, signer_count, pk_list_digest)` into `bp_sig_chain`.
 The Falcon aggregate that discharges the fold, and the BP signature, are NOT
 verified here — they are the consumer obligation of the recursive
-aggregate-list proof in another circuit (`aggListFold`, `chainStep`
-boundaries).
+aggregate-list proof in another circuit (the `aggListLeaf`,
+`aggPkListDigest` and `chainStep` boundaries).
 
 Named boundaries (also listed in the line map): `merkleRoot` (channel / send /
 tx / channel-action Merkle path folds), `channelLeafHash` / `sendLeafHash` /
@@ -732,16 +741,16 @@ This is the WHOLE per-channel state change: the send cursor advances by one,
 `(prev, cur, tx_tree_root)`, and `member_pubkeys_root` is COPIED. No fund
 vector, no balance digest, no version — the leaf has no such field. -/
 
-def nativeNewSendLeaf (w : Witness) (slot : Slot) : SendLeaf :=
-  ⟨slot.prevLeaf.prev, w.blockNumber, w.block.txTreeRoot⟩
+def nativeNewSendLeaf (bn : Nat) (blk : Block) (slot : Slot) : SendLeaf :=
+  ⟨slot.prevLeaf.prev, bn, blk.txTreeRoot⟩
 
-def nativeNewLeaf (e : Env) (w : Witness) (slot : Slot) : ChannelLeaf :=
-  ⟨slot.prevLeaf.index + 1, w.blockNumber,
-    e.merkleRoot slot.sendProof (e.sendLeafHash (nativeNewSendLeaf w slot)) slot.prevLeaf.index,
+def nativeNewLeaf (e : Env) (bn : Nat) (blk : Block) (slot : Slot) : ChannelLeaf :=
+  ⟨slot.prevLeaf.index + 1, bn,
+    e.merkleRoot slot.sendProof (e.sendLeafHash (nativeNewSendLeaf bn blk slot)) slot.prevLeaf.index,
     slot.prevLeaf.memberPubkeysRoot⟩
 
-def nativeNewRoot (e : Env) (w : Witness) (slot : Slot) : Hash4 :=
-  e.merkleRoot slot.channelProof (e.channelLeafHash (nativeNewLeaf e w slot)) w.block.channelId
+def nativeNewRoot (e : Env) (bn : Nat) (blk : Block) (slot : Slot) : Hash4 :=
+  e.merkleRoot slot.channelProof (e.channelLeafHash (nativeNewLeaf e bn blk slot)) blk.channelId
 
 /-! ### The slot loop -/
 
@@ -755,7 +764,7 @@ def nativeStep (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4)
         nativeChecksB e w strict item.1 item.2.2 >>= fun _ =>
           nativeChainFold e st.chain sigLeaf >>= fun chain =>
             nativeChecksC e w strict item.2.2 >>= fun _ =>
-              .ok ⟨nativeNewRoot e w item.2.2, chain⟩
+              .ok ⟨nativeNewRoot e w.blockNumber w.block item.2.2, chain⟩
 
 def nativeLoop (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4) :
     List (Nat × Nat × Slot) → NState → Result NState
@@ -765,14 +774,16 @@ def nativeLoop (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4) :
 /-- The channel-tree root after the loop, as a PURE fold that reads only the
 block, the slots and the previous root — never the signature accumulator,
 never the channel-state fields. -/
-def nativeRootStep (e : Env) (w : Witness) (item : Nat × Nat × Slot) (root : Hash4) : Hash4 :=
+def nativeRootStep (e : Env) (bn : Nat) (blk : Block) (item : Nat × Nat × Slot) (root : Hash4) :
+    Hash4 :=
   if item.2.1 = 0 then root
-  else if item.2.2.prevLeaf.prev = w.blockNumber then root
-  else nativeNewRoot e w item.2.2
+  else if item.2.2.prevLeaf.prev = bn then root
+  else nativeNewRoot e bn blk item.2.2
 
-def nativeRootFold (e : Env) (w : Witness) : List (Nat × Nat × Slot) → Hash4 → Hash4
+def nativeRootFold (e : Env) (bn : Nat) (blk : Block) :
+    List (Nat × Nat × Slot) → Hash4 → Hash4
   | [], root => root
-  | item :: rest, root => nativeRootFold e w rest (nativeRootStep e w item root)
+  | item :: rest, root => nativeRootFold e bn blk rest (nativeRootStep e bn blk item root)
 
 def nativeSlotItems (w : Witness) : List (Nat × Nat × Slot) :=
   indexed (List.zip w.block.keyIds w.slots)
@@ -786,7 +797,7 @@ def nativeComputePublicInputs (e : Env) (w : Witness) (strict : Bool) : Result P
   let newBlockHashChain := e.blockHash w.prevBlockHashChain w.block
   let _ ← check (decide (w.memberLeaves.length = maxSigCluster)) .length
     "member_leaves must cover all MAX_SIG_CLUSTER slots"
-  let _ ← check (!strict || w.newMemberLeaves.isEmpty) .length
+  let _ ← check (!strict || decide (w.newMemberLeaves = [])) .length
     "new_member_leaves is a retired direct-MSU wire and must be empty"
   let final ← nativeLoop e w strict (nativeSigLeaf e w) (nativeSlotItems w)
     ⟨w.prevAccountTreeRoot, w.prevBpSigChain⟩
@@ -808,5 +819,787 @@ def nativeToPublicInputs (e : Env) (w : Witness) : Result PublicInputs :=
 /-- `to_public_inputs_unchecked` — TEST-ONLY, every cross-check skipped. -/
 def nativeToPublicInputsUnchecked (e : Env) (w : Witness) : Result PublicInputs :=
   nativeComputePublicInputs e w false
+
+/-! ## What the leaf transition is
+
+The only per-channel state this file writes. `member_pubkeys_root` is COPIED —
+direct in-place member-set updates are retired — and there is no other field to
+write, because `ChannelLeaf` has none. -/
+
+theorem native_leaf_index_increments (e : Env) (bn : Nat) (blk : Block) (slot : Slot) :
+    (nativeNewLeaf e bn blk slot).index = slot.prevLeaf.index + 1 := rfl
+
+theorem native_leaf_prev_becomes_this_block (e : Env) (bn : Nat) (blk : Block) (slot : Slot) :
+    (nativeNewLeaf e bn blk slot).prev = bn := rfl
+
+theorem native_leaf_preserves_member_root (e : Env) (bn : Nat) (blk : Block) (slot : Slot) :
+    (nativeNewLeaf e bn blk slot).memberPubkeysRoot = slot.prevLeaf.memberPubkeysRoot := rfl
+
+theorem native_send_leaf_records_block_tx_root (bn : Nat) (blk : Block) (slot : Slot) :
+    nativeNewSendLeaf bn blk slot = ⟨slot.prevLeaf.prev, bn, blk.txTreeRoot⟩ := rfl
+
+/-- The new leaf is a function of `(prevLeaf, blockNumber, block.txTreeRoot,
+sendProof)` ALONE: the channel-state fields, the signer set, the signature
+accumulator, the tx class and the channel action do not appear. -/
+theorem native_leaf_transition_is_index_prev_send_only (e : Env) (bn : Nat) (blk blk' : Block)
+    (slot : Slot) (ht : blk.txTreeRoot = blk'.txTreeRoot) :
+    nativeNewLeaf e bn blk slot = nativeNewLeaf e bn blk' slot := by
+  simp [nativeNewLeaf, nativeNewSendLeaf, ht]
+
+/-! ## The account root is a pure fold
+
+The channel-tree root the block publishes never reads the signature
+accumulator, the folded statement, or the channel-state fields. -/
+
+theorem native_step_root (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4)
+    {item : Nat × Nat × Slot} {st st' : NState}
+    (h : nativeStep e w strict sigLeaf item st = .ok st') :
+    st'.root = nativeRootStep e w.blockNumber w.block item st.root := by
+  simp only [nativeStep, nativeRootStep] at h ⊢
+  split at h
+  · rw [if_pos ‹_›]; exact congrArg NState.root (Except.ok.inj h).symm
+  · rw [if_neg ‹_›]
+    simp only [bind_ok_iff, exists_unit] at h
+    obtain ⟨-, h⟩ := h
+    split at h
+    · rw [if_pos ‹_›]; exact congrArg NState.root (Except.ok.inj h).symm
+    · rw [if_neg ‹_›]
+      simp only [bind_ok_iff, exists_unit] at h
+      obtain ⟨-, chain, -, -, h⟩ := h
+      exact congrArg NState.root (Except.ok.inj h).symm
+
+theorem native_loop_root (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4) :
+    ∀ (items : List (Nat × Nat × Slot)) (st r : NState),
+      nativeLoop e w strict sigLeaf items st = .ok r →
+        r.root = nativeRootFold e w.blockNumber w.block items st.root := by
+  intro items
+  induction items with
+  | nil =>
+      intro st r h
+      simp only [nativeLoop] at h
+      exact congrArg NState.root (Except.ok.inj h).symm
+  | cons item rest ih =>
+      intro st r h
+      simp only [nativeLoop, bind_ok_iff] at h
+      obtain ⟨st', hstep, hrest⟩ := h
+      rw [nativeRootFold, ← native_step_root e w strict sigLeaf hstep]
+      exact ih st' r hrest
+
+theorem native_account_root_is_pure_fold (e : Env) (w : Witness) (strict : Bool)
+    {p : PublicInputs} (h : nativeComputePublicInputs e w strict = .ok p) :
+    p.newAccountTreeRoot =
+      nativeRootFold e w.blockNumber w.block (nativeSlotItems w) w.prevAccountTreeRoot := by
+  simp only [nativeComputePublicInputs, bind_ok_iff, exists_unit, unit_bind_ok_iff,
+    pure_ok_iff] at h
+  obtain ⟨-, -, -, -, final, hloop, hp⟩ := h
+  subst hp
+  exact native_loop_root e w strict (nativeSigLeaf e w) (nativeSlotItems w) _ final hloop
+
+/-- FUND SAFETY, stated exactly: the published channel-tree root does not
+depend on the channel-state fields at all — the fund vector, the balance H1,
+the state version and the epoch are invisible to the tree update. There is
+consequently NO sum-of-funds conservation enforced by this file. -/
+theorem native_account_root_ignores_channel_state_fields (e : Env) (w : Witness) (strict : Bool)
+    (f : ChannelStateFields) {p q : PublicInputs}
+    (h1 : nativeComputePublicInputs e w strict = .ok p)
+    (h2 : nativeComputePublicInputs e { w with fields := f } strict = .ok q) :
+    p.newAccountTreeRoot = q.newAccountTreeRoot := by
+  rw [native_account_root_is_pure_fold e w strict h1,
+    native_account_root_is_pure_fold e { w with fields := f } strict h2]
+  rfl
+
+/-! ## `to_public_inputs_unchecked` really is the same computation
+
+Source lines 335–354 claim the unchecked mirror returns exactly what the strict
+mirror would for any witness the strict mirror accepts. Proved here for the
+model. -/
+
+theorem native_checks_a_relax (e : Env) (w : Witness) (slot : Slot) (root : Hash4)
+    (h : nativeChecksA e w true slot root = .ok ()) :
+    nativeChecksA e w false slot root = .ok () := by
+  simp only [nativeChecksA, unit_bind_ok_iff] at h ⊢
+  exact ⟨h.1, rfl⟩
+
+theorem native_step_relax (e : Env) (w : Witness) (sigLeaf : Hash4)
+    {item : Nat × Nat × Slot} {st st' : NState}
+    (h : nativeStep e w true sigLeaf item st = .ok st') :
+    nativeStep e w false sigLeaf item st = .ok st' := by
+  simp only [nativeStep] at h ⊢
+  split at h
+  · rw [if_pos ‹_›]; exact h
+  · rw [if_neg ‹_›]
+    simp only [bind_ok_iff, exists_unit] at h ⊢
+    refine ⟨native_checks_a_relax e w _ _ h.1, ?_⟩
+    obtain ⟨-, h⟩ := h
+    split at h
+    · rw [if_pos ‹_›]; exact h
+    · rw [if_neg ‹_›]
+      simp only [bind_ok_iff, exists_unit] at h ⊢
+      obtain ⟨-, chain, hchain, -, h⟩ := h
+      exact ⟨rfl, chain, hchain, rfl, h⟩
+
+theorem native_loop_relax (e : Env) (w : Witness) (sigLeaf : Hash4) :
+    ∀ (items : List (Nat × Nat × Slot)) (st r : NState),
+      nativeLoop e w true sigLeaf items st = .ok r →
+        nativeLoop e w false sigLeaf items st = .ok r := by
+  intro items
+  induction items with
+  | nil => intro st r h; exact h
+  | cons item rest ih =>
+      intro st r h
+      simp only [nativeLoop, bind_ok_iff] at h ⊢
+      obtain ⟨st', hstep, hrest⟩ := h
+      exact ⟨st', native_step_relax e w sigLeaf hstep, ih st' r hrest⟩
+
+theorem native_unchecked_agrees_with_strict (e : Env) (w : Witness) {p : PublicInputs}
+    (h : nativeToPublicInputs e w = .ok p) : nativeToPublicInputsUnchecked e w = .ok p := by
+  simp only [nativeToPublicInputs, nativeToPublicInputsUnchecked, nativeComputePublicInputs,
+    bind_ok_iff, exists_unit, unit_bind_ok_iff, pure_ok_iff] at h ⊢
+  obtain ⟨hslots, hkeys, hmem, -, final, hloop, hp⟩ := h
+  exact ⟨hslots, hkeys, hmem, by simp [check], final,
+    native_loop_relax e w (nativeSigLeaf e w) _ _ _ hloop, hp⟩
+
+/-! ## What a signing slot must satisfy (`check_n_of_n_witness`) -/
+
+theorem native_n_of_n_facts (e : Env) (w : Witness) (i : Nat) (slot : Slot)
+    (h : nativeCheckNOfN e w i slot = .ok ()) :
+    w.block.txTreeRoot ≠ Bytes32.zero ∧ i < maxSigCluster ∧
+      2 ≤ w.signerCount ∧ w.signerCount ≤ maxSigCluster ∧ i < w.signerCount ∧
+      e.memberTreeRoot (w.memberLeaves.map e.memberLeafHash) = slot.prevLeaf.memberPubkeysRoot ∧
+      (∀ item ∈ indexed w.memberLeaves, nativeOccupancyCheck w item = .ok ()) := by
+  simp only [nativeCheckNOfN, unit_bind_ok_iff, bind_ok_iff, exists_unit, check_ok_iff,
+    for_each_success, decide_eq_true_eq, Bool.and_eq_true] at h
+  obtain ⟨h1, h2, ⟨h3, h4⟩, h5, h6, h7, -⟩ := h
+  exact ⟨h1, h2, h3, h4, h6, h7, h5⟩
+
+/-- Occupancy is EXACTLY `signer_count`: nothing above it, nothing empty below
+it. Together with the root connect this is what makes
+`signer_count == member_count` a consequence rather than an assumption about
+left-packing. -/
+theorem native_occupancy_is_exact (w : Witness) (idx : Nat) (leaf : MemberLeaf)
+    (h : nativeOccupancyCheck w (idx, leaf) = .ok ()) :
+    (idx < w.signerCount → leaf.pkG ≠ Hash4.zero) ∧
+      (¬ idx < w.signerCount → leaf = MemberLeaf.empty) := by
+  simp only [nativeOccupancyCheck, unit_bind_ok_iff, check_ok_iff, Bool.or_eq_true,
+    decide_eq_true_eq, Bool.not_eq_true', decide_eq_false_iff_not] at h
+  obtain ⟨h1, h2⟩ := h
+  constructor
+  · intro hi
+    rcases h2 with h2 | h2
+    · exact absurd hi h2
+    · exact h2
+  · intro hi
+    rcases h1 with h1 | h1
+    · exact absurd h1 hi
+    · exact h1
+
+/-! ## What the strict slot checks enforce -/
+
+theorem native_checks_c_nonce (e : Env) (w : Witness) (slot : Slot)
+    (h : nativeChecksC e w true slot = .ok ()) : slot.tx.nonce = slot.prevLeaf.index := by
+  simp only [nativeChecksC, if_pos, unit_bind_ok_iff, check_ok_iff, decide_eq_true_eq] at h
+  exact h.2.1
+
+theorem native_checks_c_binds_tx_to_block_root (e : Env) (w : Witness) (slot : Slot)
+    (h : nativeChecksC e w true slot = .ok ()) :
+    e.merkleRoot slot.txProof (e.txV2Hash slot.tx) slot.txIndex =
+      e.reduceToHashOut w.block.txTreeRoot := by
+  simp only [nativeChecksC, if_pos, unit_bind_ok_iff, check_ok_iff, decide_eq_true_eq] at h
+  exact h.1
+
+theorem native_checks_c_binds_action_to_source_channel (e : Env) (w : Witness) (slot : Slot)
+    (hclass : slot.tx.txClass = .channelAction)
+    (h : nativeChecksC e w true slot = .ok ()) :
+    slot.action.sourceChannelId = w.block.channelId := by
+  simp only [nativeChecksC, if_pos, unit_bind_ok_iff, check_ok_iff, hclass,
+    decide_eq_true_eq] at h
+  exact h.2.2.1.2.2.1
+
+/-- The reserved `MemberSetUpdate` tag is refused at the slot where the action
+is authenticated. Direct in-place member-set updates are permanently retired. -/
+theorem native_rejects_member_set_update (e : Env) (w : Witness) (slot : Slot)
+    (hclass : slot.tx.txClass = .channelAction)
+    (hkind : slot.action.kind = .memberSetUpdate) :
+    nativeChecksC e w true slot ≠ .ok () := by
+  intro h
+  simp only [nativeChecksC, if_pos, unit_bind_ok_iff, check_ok_iff, hclass, hkind,
+    throw_ok_iff_false, and_false, false_and] at h
+
+/-- Both surviving action kinds are admitted with NO further condition: nothing
+about the destination channel, the tx hash, the seal or the payload. -/
+theorem native_admits_inter_channel_send_and_close (kind : ChannelActionKind)
+    (h : kind ≠ .memberSetUpdate) :
+    kind = .interChannelSend ∨ kind = .channelClose := by
+  cases kind with
+  | interChannelSend => exact Or.inl rfl
+  | channelClose => exact Or.inr rfl
+  | memberSetUpdate => exact absurd rfl h
+
+theorem native_strict_rejects_retired_msu_wire (e : Env) (w : Witness) (p : PublicInputs)
+    (h : w.newMemberLeaves ≠ []) : nativeToPublicInputs e w ≠ .ok p := by
+  intro hok
+  simp only [nativeToPublicInputs, nativeComputePublicInputs, bind_ok_iff, exists_unit,
+    unit_bind_ok_iff, check_ok_iff, Bool.or_eq_true, Bool.not_eq_true', decide_eq_true_eq,
+    decide_eq_false_iff_not] at hok
+  obtain ⟨-, -, -, hne, -⟩ := hok
+  rcases hne with hne | hne
+  · exact hne
+  · exact h hne
+
+/-! ## The signature accumulator
+
+The block folds AT MOST ONE statement per slot, and that statement is exactly
+the shared `falcon_sig::agg_list` leaf over `(IMCH digest, signer_count,
+pk_list_digest)`. Whether `signer_count` real Falcon signatures over that
+digest exist is decided by the recursive aggregate-list proof another circuit
+consumes, NOT here. -/
+
+theorem native_sig_leaf_is_the_shared_agg_list_leaf (e : Env) (w : Witness) :
+    nativeSigLeaf e w =
+      e.aggListLeaf (e.signingDigest w.fields w.block.channelId w.block.txTreeRoot) w.signerCount
+        (e.aggPkListDigest (w.memberLeaves.map (fun leaf => e.bytes32OfHash leaf.pkG))) := rfl
+
+/-- Only ONE channel-tree index is ever written: the block's own
+`channel_id`. -/
+theorem native_root_step_uses_only_the_block_channel (e : Env) (bn : Nat) (blk : Block)
+    (slot : Slot) :
+    nativeNewRoot e bn blk slot =
+      e.merkleRoot slot.channelProof (e.channelLeafHash (nativeNewLeaf e bn blk slot))
+        blk.channelId := rfl
+
+theorem native_step_chain (e : Env) (w : Witness) (strict : Bool) (sigLeaf : Hash4)
+    {item : Nat × Nat × Slot} {st st' : NState}
+    (h : nativeStep e w strict sigLeaf item st = .ok st') :
+    st'.chain = st.chain ∨
+      ∃ prev, e.hashOfBytes32Native st.chain = some prev ∧
+        st'.chain = e.bytes32OfHash (e.chainStep prev sigLeaf) := by
+  simp only [nativeStep] at h
+  split at h
+  · exact Or.inl (congrArg NState.chain (Except.ok.inj h).symm)
+  · simp only [bind_ok_iff, exists_unit] at h
+    obtain ⟨-, h⟩ := h
+    split at h
+    · exact Or.inl (congrArg NState.chain (Except.ok.inj h).symm)
+    · simp only [bind_ok_iff, exists_unit] at h
+      obtain ⟨-, chain, hchain, -, h⟩ := h
+      refine Or.inr ?_
+      simp only [nativeChainFold] at hchain
+      split at hchain
+      · exact absurd hchain (by simp)
+      · rename_i prev hprev
+        exact ⟨prev, hprev, by
+          rw [congrArg NState.chain (Except.ok.inj h).symm]
+          exact (Except.ok.inj hchain).symm⟩
+
+/-! ## The public inputs are the block's own fields -/
+
+theorem native_public_inputs_copy_block_fields (e : Env) (w : Witness) (strict : Bool)
+    {p : PublicInputs} (h : nativeComputePublicInputs e w strict = .ok p) :
+    p.blockNumber = w.blockNumber ∧ p.blockTimestamp = w.block.timestamp ∧
+      p.prevBlockHashChain = w.prevBlockHashChain ∧
+      p.prevAccountTreeRoot = w.prevAccountTreeRoot ∧
+      p.newBlockHashChain = e.blockHash w.prevBlockHashChain w.block ∧
+      p.depositHashChain = w.block.depositHashChain ∧
+      p.channelRegHashChain = w.block.channelRegHashChain ∧
+      p.prevBpSigChain = w.prevBpSigChain := by
+  simp only [nativeComputePublicInputs, bind_ok_iff, exists_unit, unit_bind_ok_iff,
+    pure_ok_iff] at h
+  obtain ⟨-, -, -, -, final, -, hp⟩ := h
+  subst hp
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-! ## The circuit (`UpdateUserTreeTarget::new`, source lines 968–1425)
+
+An ARBITRARY satisfying witness, not the native path. Class tags and action
+kinds are free field elements here, not Rust enums. -/
+
+structure SlotT where
+  keyId : Nat
+  prevLeaf : ChannelLeaf
+  channelProof : MerklePath
+  sendProof : MerklePath
+  txIndex : Nat
+  tx : TxV2T
+  txProof : MerklePath
+  actionIndex : Nat
+  action : ChannelActionT
+  actionProof : MerklePath
+  /-- The `2 * REGEV_N` witnessed Regev coefficients; only block slots below
+  `MAX_SIG_CLUSTER` get these targets. -/
+  regevCoeffs : List Nat
+  deriving Repr, Inhabited
+
+structure CircuitWitness where
+  blockNumber : Nat
+  prevBlockHashChain : Bytes32
+  prevAccountTreeRoot : Hash4
+  block : Block
+  slots : List SlotT
+  prevBpSigChain : Bytes32
+  memberLeaves : List MemberLeaf
+  signerCount : Nat
+  fields : ChannelStateFields
+  publicInputs : PublicInputs
+  deriving Repr, Inhabited
+
+/-- `is_dummy = is_equal(key_id, 0)`; `should_check_account = not is_dummy`. -/
+def circuitIsDummy (s : SlotT) : Bool := decide (s.keyId = 0)
+
+/-- `should_update = should_check_account and (prev != block_number)` —
+COMPUTED from witnessed values, never a prover flag. -/
+def circuitShouldUpdate (w : CircuitWitness) (s : SlotT) : Bool :=
+  !circuitIsDummy s && !decide (s.prevLeaf.prev = w.blockNumber)
+
+/-- `any_sign`, the OR of every slot's `should_update` (source line 1263). -/
+def circuitAnySign (w : CircuitWitness) : Bool := w.slots.any (circuitShouldUpdate w)
+
+/-- `is_signer[i] = lt_const_threshold(i, signer_count)`, the shared
+thermometer. -/
+def circuitIsSigner (w : CircuitWitness) (i : Nat) : Bool := decide (i < w.signerCount)
+
+def circuitNewLeaf (e : Env) (w : CircuitWitness) (s : SlotT) : ChannelLeaf :=
+  ⟨s.prevLeaf.index + 1, w.blockNumber,
+    e.merkleRoot s.sendProof
+      (e.sendLeafHash ⟨s.prevLeaf.prev, w.blockNumber, w.block.txTreeRoot⟩) s.prevLeaf.index,
+    s.prevLeaf.memberPubkeysRoot⟩
+
+/-- `account_tree_root = select(should_update, updated_root, current_root)`. -/
+def circuitRootStep (e : Env) (w : CircuitWitness) (s : SlotT) (root : Hash4) : Hash4 :=
+  if circuitShouldUpdate w s then
+    e.merkleRoot s.channelProof (e.channelLeafHash (circuitNewLeaf e w s)) w.block.channelId
+  else root
+
+def circuitRootAfter (e : Env) (w : CircuitWitness) (n : Nat) : Hash4 :=
+  (w.slots.take n).foldl (fun root s => circuitRootStep e w s root) w.prevAccountTreeRoot
+
+def circuitAccountRoot (e : Env) (w : CircuitWitness) : Hash4 :=
+  w.slots.foldl (fun root s => circuitRootStep e w s root) w.prevAccountTreeRoot
+
+def circuitSignedDigest (e : Env) (w : CircuitWitness) : Bytes32 :=
+  e.signingDigest w.fields w.block.channelId w.block.txTreeRoot
+
+def circuitSigLeaf (e : Env) (w : CircuitWitness) : Hash4 :=
+  e.aggListLeaf (circuitSignedDigest e w) w.signerCount
+    (e.aggPkListDigest (w.memberLeaves.map (fun leaf => e.bytes32OfHash leaf.pkG)))
+
+/-- `bp_sig_chain = select(should_verify_sig, chain_step(...), bp_sig_chain)`.
+The in-circuit `to_hash_out` repack is TOTAL — unlike the native `try_into`. -/
+def circuitChainStep (e : Env) (w : CircuitWitness) (sigLeaf : Hash4) (s : SlotT)
+    (chain : Bytes32) : Bytes32 :=
+  if circuitShouldUpdate w s then
+    e.bytes32OfHash (e.chainStep (e.hashOfBytes32Target chain) sigLeaf)
+  else chain
+
+def circuitChain (e : Env) (w : CircuitWitness) (sigLeaf : Hash4) : Bytes32 :=
+  w.slots.foldl (fun chain s => circuitChainStep e w sigLeaf s chain) w.prevBpSigChain
+
+/-- The local constraint system, one field per source connection. `is_equal`,
+`not`, `and`, `or`, `select`, `conditional_assert_eq`, `assert_zero` and
+`range_check` are read as their boolean / integer relations; that lowering is a
+boundary. -/
+structure CircuitGates (e : Env) (w : CircuitWitness) : Prop where
+  /-- 1132–1135: a non-dummy slot's previous leaf opens the running root at
+  `channel_id` — the ONLY channel-tree index this circuit ever touches. -/
+  channelOpens : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitIsDummy s = false →
+    e.merkleRoot s.channelProof (e.channelLeafHash s.prevLeaf) w.block.channelId =
+      circuitRootAfter e w i
+  /-- 1141–1142: the slot's TxV2 is in the block's tx tree. -/
+  txBound : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    e.merkleRoot s.txProof (e.txV2HashT s.tx) s.txIndex = e.reduceToHashOut w.block.txTreeRoot
+  /-- 1148: base-send replay gate — the tx nonce is the leaf's send cursor. -/
+  nonceBound : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    s.tx.nonce = s.prevLeaf.index
+  /-- 1154–1163. -/
+  validClass : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    s.tx.txClass = userTransferClass ∨ s.tx.txClass = channelActionClass
+  /-- 1165–1169. -/
+  userTransferZeroActionRoot : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s →
+    circuitShouldUpdate w s = true → s.tx.txClass = userTransferClass →
+    s.tx.channelActionRoot = Hash4.zero
+  /-- 1170–1174. -/
+  channelActionZeroTransferRoot : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s →
+    circuitShouldUpdate w s = true → s.tx.txClass = channelActionClass →
+    s.tx.transferTreeRoot = Hash4.zero
+  /-- 1176–1185. -/
+  actionBound : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    s.tx.txClass = channelActionClass →
+    e.merkleRoot s.actionProof (e.actionHashT s.action) s.actionIndex = s.tx.channelActionRoot
+  /-- 1186–1190: the ONLY thing tying the action to a channel. Nothing here
+  constrains `destination_channel_id`, `tx_hash`, `seal` or `payload_hash`. -/
+  actionSourceChannel : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    s.tx.txClass = channelActionClass → s.action.sourceChannelId = w.block.channelId
+  /-- 1197–1202: the reserved `MemberSetUpdate` tag is refused. -/
+  noMemberSetUpdate : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    s.tx.txClass = channelActionClass → s.action.kind ≠ memberSetUpdateKind
+  /-- 1204–1210: the send slot being written was empty (append-only). -/
+  sendOpens : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    e.merkleRoot s.sendProof (e.sendLeafHash SendLeaf.empty) s.prevLeaf.index =
+      s.prevLeaf.sendTreeRoot
+  /-- 1268–1272: `H2 = 0` is reserved for in-channel updates and must never
+  carry a member signature. -/
+  txRootNonzeroWhenSigning : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → circuitShouldUpdate w s = true →
+    w.block.txTreeRoot ≠ Bytes32.zero
+  /-- 1274–1286: a block slot beyond the member tree cannot sign. -/
+  outOfRangeCannotSign : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → maxSigCluster ≤ i →
+    circuitShouldUpdate w s = false
+  /-- 1289–1293: THE N-of-N binding — the recomputed member root IS the
+  channel leaf's committed `member_pubkeys_root`. -/
+  memberRootConnect : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → i < maxSigCluster →
+    circuitShouldUpdate w s = true →
+    s.prevLeaf.memberPubkeysRoot = e.memberTreeRoot (w.memberLeaves.map e.memberLeafHash)
+  /-- 1297–1299: the posting slot is itself an active member slot. -/
+  postsFromActiveSlot : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → i < maxSigCluster →
+    circuitShouldUpdate w s = true → i < w.signerCount
+  /-- 1306: `2 * REGEV_N` coefficient targets per in-range block slot. -/
+  regevWidth : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → i < maxSigCluster →
+    s.regevCoeffs.length = 2 * regevN
+  /-- 1309–1311: each coefficient range-checked to 32 bits (digest
+  malleability F1-A). -/
+  regevRangeChecked : ∀ (i : Nat) (s : SlotT), w.slots[i]? = some s → i < maxSigCluster →
+    ∀ c ∈ s.regevCoeffs, c < wordBase
+  /-- 1317–1322: the bp slot's Regev digest is bound to ITS member leaf. The
+  other slots' `regev_pk_digest` ride on the root connect alone. -/
+  regevDigestConnect : ∀ (i : Nat) (s : SlotT) (leaf : MemberLeaf), w.slots[i]? = some s → i < maxSigCluster →
+    circuitShouldUpdate w s = true → w.memberLeaves[i]? = some leaf →
+    e.regevDigestOfCoeffs s.regevCoeffs = leaf.regevPkDigest
+  /-- The circuit allocates exactly `MAX_SIG_CLUSTER` member-leaf targets. -/
+  memberLeafCount : w.memberLeaves.length = maxSigCluster
+  /-- 1356–1362: `2 <= signer_count <= MAX_SIG_CLUSTER`, gated on `any_sign`. -/
+  signerCountRange : circuitAnySign w = true → 2 ≤ w.signerCount ∧ w.signerCount ≤ maxSigCluster
+  /-- 1364–1379: slots at or above `signer_count` are the EMPTY leaf. -/
+  paddingSlotsEmpty : circuitAnySign w = true → ∀ (i : Nat) (leaf : MemberLeaf), w.memberLeaves[i]? = some leaf →
+    ¬ i < w.signerCount → leaf = MemberLeaf.empty
+  /-- 1380–1388: an ACTIVE slot must carry a real key. -/
+  activeSlotsOccupied : circuitAnySign w = true → ∀ (i : Nat) (leaf : MemberLeaf), w.memberLeaves[i]? = some leaf →
+    i < w.signerCount → leaf.pkG ≠ Hash4.zero
+  /-- 1391–1402: the registered public inputs. -/
+  pisBlockNumber : w.publicInputs.blockNumber = w.blockNumber
+  pisTimestamp : w.publicInputs.blockTimestamp = w.block.timestamp
+  pisPrevBlockHashChain : w.publicInputs.prevBlockHashChain = w.prevBlockHashChain
+  pisPrevAccountTreeRoot : w.publicInputs.prevAccountTreeRoot = w.prevAccountTreeRoot
+  pisNewBlockHashChain : w.publicInputs.newBlockHashChain = e.blockHash w.prevBlockHashChain w.block
+  pisNewAccountTreeRoot : w.publicInputs.newAccountTreeRoot = circuitAccountRoot e w
+  pisDepositHashChain : w.publicInputs.depositHashChain = w.block.depositHashChain
+  pisChannelRegHashChain : w.publicInputs.channelRegHashChain = w.block.channelRegHashChain
+  pisPrevBpSigChain : w.publicInputs.prevBpSigChain = w.prevBpSigChain
+  pisNewBpSigChain : w.publicInputs.newBpSigChain = circuitChain e w (circuitSigLeaf e w)
+
+section CircuitFacts
+variable {e : Env} {w : CircuitWitness}
+
+/-! ### The leaf transition the circuit builds -/
+
+theorem circuit_leaf_index_increments (s : SlotT) :
+    (circuitNewLeaf e w s).index = s.prevLeaf.index + 1 := rfl
+
+theorem circuit_leaf_prev_becomes_this_block (s : SlotT) :
+    (circuitNewLeaf e w s).prev = w.blockNumber := rfl
+
+/-- Every release transition preserves the registered member root; there is no
+in-place root select left in the circuit. -/
+theorem circuit_leaf_preserves_member_root (s : SlotT) :
+    (circuitNewLeaf e w s).memberPubkeysRoot = s.prevLeaf.memberPubkeysRoot := rfl
+
+/-! ### FUND SAFETY: the tree update cannot see the funds -/
+
+/-- The published channel-tree root is independent of the channel-state
+fields, hence of `fund_amounts`, `balance_state_h1` and `state_version`. No
+sum-of-funds conservation is enforced anywhere in this circuit — there is no
+fund quantity in the channel-tree leaf to conserve. -/
+theorem circuit_account_root_ignores_channel_state_fields (f : ChannelStateFields) :
+    circuitAccountRoot e { w with fields := f } = circuitAccountRoot e w := rfl
+
+/-- ... and neither is it affected by the signature accumulator or the folded
+statement: the root fold never reads them. -/
+theorem circuit_account_root_ignores_prev_chain (c : Bytes32) :
+    circuitAccountRoot e { w with prevBpSigChain := c } = circuitAccountRoot e w := rfl
+
+/-- Only ONE channel-tree index is ever opened or written: the block's own
+`channel_id`. No destination-channel leaf is credited, so a cross-channel
+transfer's debit side is unpaired here. -/
+theorem circuit_root_step_uses_only_the_block_channel (s : SlotT) (root : Hash4) :
+    circuitRootStep e w s root =
+      if circuitShouldUpdate w s then
+        e.merkleRoot s.channelProof (e.channelLeafHash (circuitNewLeaf e w s)) w.block.channelId
+      else root := rfl
+
+/-! ### Authorization: what a signing slot is forced to prove -/
+
+theorem circuit_signing_binds_registered_member_root (g : CircuitGates e w)
+    (i : Nat) (s : SlotT) (hs : w.slots[i]? = some s) (hi : i < maxSigCluster)
+    (hu : circuitShouldUpdate w s = true) :
+    s.prevLeaf.memberPubkeysRoot = e.memberTreeRoot (w.memberLeaves.map e.memberLeafHash) :=
+  g.memberRootConnect i s hs hi hu
+
+theorem circuit_signing_requires_nonzero_tx_root (g : CircuitGates e w)
+    (i : Nat) (s : SlotT) (hs : w.slots[i]? = some s) (hu : circuitShouldUpdate w s = true) :
+    w.block.txTreeRoot ≠ Bytes32.zero :=
+  g.txRootNonzeroWhenSigning i s hs hu
+
+theorem circuit_out_of_range_slot_cannot_sign (g : CircuitGates e w)
+    (i : Nat) (s : SlotT) (hs : w.slots[i]? = some s) (hi : maxSigCluster ≤ i) :
+    circuitShouldUpdate w s = false :=
+  g.outOfRangeCannotSign i s hs hi
+
+theorem circuit_signer_count_between_two_and_cluster (g : CircuitGates e w)
+    (h : circuitAnySign w = true) : 2 ≤ w.signerCount ∧ w.signerCount ≤ maxSigCluster :=
+  g.signerCountRange h
+
+/-- Occupancy is exactly `signer_count` on a signing block: a real member
+parked above it, or an empty slot below it, is refused. -/
+theorem circuit_occupancy_is_exact (g : CircuitGates e w) (h : circuitAnySign w = true)
+    (i : Nat) (leaf : MemberLeaf) (hl : w.memberLeaves[i]? = some leaf) :
+    (i < w.signerCount → leaf.pkG ≠ Hash4.zero) ∧
+      (¬ i < w.signerCount → leaf = MemberLeaf.empty) :=
+  ⟨fun hi => g.activeSlotsOccupied h i leaf hl hi, fun hi => g.paddingSlotsEmpty h i leaf hl hi⟩
+
+/-- The reserved `MemberSetUpdate` tag is rejected in-circuit, so the retired
+transition cannot be revived through the unchecked public-input path. -/
+theorem circuit_rejects_member_set_update (g : CircuitGates e w)
+    (i : Nat) (s : SlotT) (hs : w.slots[i]? = some s) (hu : circuitShouldUpdate w s = true)
+    (hc : s.tx.txClass = channelActionClass) : s.action.kind ≠ memberSetUpdateKind :=
+  g.noMemberSetUpdate i s hs hu hc
+
+/-- The signed digest's channel id and `h2_tag` are the BLOCK's own targets:
+a signature collected for another channel, or over another tx root, is a
+signature over a different digest. -/
+theorem circuit_signed_digest_is_bound_to_this_block :
+    circuitSignedDigest e w = e.signingDigest w.fields w.block.channelId w.block.txTreeRoot := rfl
+
+/-- Exactly one chain step per updating slot, using the shared aggregate-list
+leaf. Whether `signer_count` real Falcon signatures over that digest exist is
+NOT decided here: it is the recursive aggregate-list proof's obligation. -/
+theorem circuit_chain_step_folds_the_agg_list_leaf (sigLeaf : Hash4) (s : SlotT) (chain : Bytes32)
+    (hu : circuitShouldUpdate w s = true) :
+    circuitChainStep e w sigLeaf s chain =
+      e.bytes32OfHash (e.chainStep (e.hashOfBytes32Target chain) sigLeaf) := by
+  simp [circuitChainStep, hu]
+
+theorem circuit_chain_step_is_identity_on_a_non_updating_slot (sigLeaf : Hash4) (s : SlotT)
+    (chain : Bytes32) (hu : circuitShouldUpdate w s = false) :
+    circuitChainStep e w sigLeaf s chain = chain := by
+  simp [circuitChainStep, hu]
+
+/-- A block that applies no member signature folds nothing, whatever the
+witnessed `signer_count` and member leaves are: the well-formedness of the
+signer set is gated on the COMPUTED `any_sign`. -/
+theorem circuit_non_signing_block_folds_nothing (sigLeaf : Hash4)
+    (h : circuitAnySign w = false) : circuitChain e w sigLeaf = w.prevBpSigChain := by
+  have hall : ∀ s ∈ w.slots, circuitShouldUpdate w s = false := by
+    intro s hs
+    cases hb : circuitShouldUpdate w s with
+    | false => rfl
+    | true =>
+        exfalso
+        have hany : circuitAnySign w = true := by
+          simp only [circuitAnySign, List.any_eq_true]
+          exact ⟨s, hs, hb⟩
+        rw [hany] at h
+        exact Bool.noConfusion h
+  simp only [circuitChain]
+  revert hall
+  generalize w.prevBpSigChain = start
+  induction w.slots generalizing start with
+  | nil => intro _; rfl
+  | cons s rest ih =>
+      intro hall
+      simp only [List.foldl_cons]
+      rw [circuit_chain_step_is_identity_on_a_non_updating_slot sigLeaf s start
+        (hall s (List.mem_cons_self _ _))]
+      exact ih start (fun x hx => hall x (List.mem_cons_of_mem _ hx))
+
+end CircuitFacts
+
+/-! ## A concrete accepted block
+
+A 2-of-2 signing block on channel 9: one block slot (the bp, slot 0), a
+`ChannelAction` tx of kind `InterChannelSend`, and the channel's whole
+registered member set. Both the destination channel id and the whole
+channel-state preimage (fund vector, balance H1, state version) are left FREE
+parameters of the example, which is precisely the point: neither is checked. -/
+
+def exampleEnv : Env where
+  blockHash := fun prev _ => prev
+  merkleRoot := fun _ _ _ => Hash4.zero
+  channelLeafHash := fun _ => Hash4.zero
+  sendLeafHash := fun _ => Hash4.zero
+  txV2Hash := fun _ => Hash4.zero
+  txV2HashT := fun _ => Hash4.zero
+  actionHash := fun _ => Hash4.zero
+  actionHashT := fun _ => Hash4.zero
+  memberLeafHash := fun _ => Hash4.zero
+  memberTreeRoot := fun _ => Hash4.zero
+  regevDigestOfCoeffs := fun _ => Hash4.zero
+  signingDigest := fun f _ _ => ⟨[f.stateVersion, 0, 0, 0, 0, 0, 0, 0]⟩
+  aggPkListDigest := fun _ => Hash4.zero
+  aggListLeaf := fun _ n _ => ⟨n, 0, 0, 0⟩
+  chainStep := fun a b => ⟨a.w0 + b.w0, 0, 0, 0⟩
+  reduceToHashOut := fun _ => Hash4.zero
+  bytes32OfHash := fun h => ⟨[h.w0, h.w1, h.w2, h.w3, 0, 0, 0, 0]⟩
+  hashOfBytes32Native := fun _ => some Hash4.zero
+  hashOfBytes32Target := fun _ => Hash4.zero
+
+def exampleBlock : Block :=
+  ⟨1, 9, 1234, [7], ⟨[1, 0, 0, 0, 0, 0, 0, 0]⟩, ⟨[5, 0, 0, 0, 0, 0, 0, 0]⟩,
+    ⟨[6, 0, 0, 0, 0, 0, 0, 0]⟩⟩
+
+def exampleMemberLeaves : List MemberLeaf :=
+  [⟨⟨1, 0, 0, 0⟩, Hash4.zero, Hash4.zero⟩, ⟨⟨2, 0, 0, 0⟩, Hash4.zero, Hash4.zero⟩,
+    MemberLeaf.empty, MemberLeaf.empty, MemberLeaf.empty, MemberLeaf.empty,
+    MemberLeaf.empty, MemberLeaf.empty]
+
+def examplePrevLeaf : ChannelLeaf := ⟨0, 4, Hash4.zero, Hash4.zero⟩
+
+/-- The IMCH preimage, with the fund vector and state version as parameters. -/
+def exampleFields (version : Nat) : ChannelStateFields :=
+  ⟨3, 30, 0, List.replicate maxChannelTokens 1000, Bytes32.zero, Bytes32.zero, Bytes32.zero,
+    7, Bytes32.zero, version⟩
+
+def exampleSlot (dest : Nat) : Slot :=
+  ⟨examplePrevLeaf, ⟨0⟩, ⟨1⟩, 0, ⟨.channelAction, Hash4.zero, 0, Hash4.zero⟩, ⟨2⟩, 0,
+    ⟨.interChannelSend, 9, dest, Bytes32.zero, Bytes32.zero, Hash4.zero⟩, ⟨3⟩, ⟨[], []⟩⟩
+
+def exampleWitness (dest version : Nat) : Witness :=
+  ⟨⟨[3, 0, 0, 0, 0, 0, 0, 0]⟩, Hash4.zero, 30, exampleBlock, [exampleSlot dest], Bytes32.zero,
+    exampleMemberLeaves, [], 2, exampleFields version⟩
+
+def examplePublicInputs : PublicInputs :=
+  ⟨30, 1234, ⟨[3, 0, 0, 0, 0, 0, 0, 0]⟩, Hash4.zero, ⟨[3, 0, 0, 0, 0, 0, 0, 0]⟩, Hash4.zero,
+    ⟨[5, 0, 0, 0, 0, 0, 0, 0]⟩, ⟨[6, 0, 0, 0, 0, 0, 0, 0]⟩, Bytes32.zero,
+    ⟨[2, 0, 0, 0, 0, 0, 0, 0]⟩⟩
+
+/-- Non-vacuous positive: the STRICT native mirror accepts this block, for
+EVERY destination channel id and EVERY channel-state preimage. -/
+theorem native_accepts_example_block (dest version : Nat) :
+    nativeToPublicInputs exampleEnv (exampleWitness dest version) = .ok examplePublicInputs := by
+  rfl
+
+/-- Consequence, stated separately because it is the fund-safety point: the
+destination channel of an `InterChannelSend` is not checked against anything,
+and no destination leaf is credited. -/
+theorem native_accepts_any_destination_channel (dest : Nat) :
+    nativeToPublicInputs exampleEnv (exampleWitness dest 11) = .ok examplePublicInputs :=
+  native_accepts_example_block dest 11
+
+/-- Consequence: the fund vector and state version in the signed preimage are
+opaque to this circuit; the same public inputs come out for every version. -/
+theorem native_accepts_any_channel_state_version (version : Nat) :
+    nativeToPublicInputs exampleEnv (exampleWitness 10 version) = .ok examplePublicInputs :=
+  native_accepts_example_block 10 version
+
+def exampleSlotT (dest : Nat) : SlotT :=
+  ⟨7, examplePrevLeaf, ⟨0⟩, ⟨1⟩, 0, ⟨channelActionClass, Hash4.zero, 0, Hash4.zero⟩, ⟨2⟩, 0,
+    ⟨interChannelSendKind, 9, dest, Bytes32.zero, Bytes32.zero, Hash4.zero⟩, ⟨3⟩,
+    List.replicate (2 * regevN) 0⟩
+
+def exampleCircuitWitness (dest version : Nat) : CircuitWitness :=
+  ⟨30, ⟨[3, 0, 0, 0, 0, 0, 0, 0]⟩, Hash4.zero, exampleBlock, [exampleSlotT dest], Bytes32.zero,
+    exampleMemberLeaves, 2, exampleFields version, examplePublicInputs⟩
+
+theorem example_circuit_slot_updates (dest version : Nat) :
+    circuitShouldUpdate (exampleCircuitWitness dest version) (exampleSlotT dest) = true := rfl
+
+theorem example_circuit_block_signs (dest version : Nat) :
+    circuitAnySign (exampleCircuitWitness dest version) = true := rfl
+
+theorem example_circuit_slots (dest version : Nat) :
+    ∀ (i : Nat) (s : SlotT), (exampleCircuitWitness dest version).slots[i]? = some s →
+      i = 0 ∧ s = exampleSlotT dest := by
+  intro i s h
+  cases i with
+  | zero => exact ⟨rfl, by simpa [exampleCircuitWitness] using h.symm⟩
+  | succ n => simp [exampleCircuitWitness] at h
+
+/-- Non-vacuous positive for the ARBITRARY-witness side: the same block is a
+satisfying witness of every gate the circuit lays down, again for every
+destination channel id and every channel-state preimage. -/
+theorem circuit_gates_hold_for_example (dest version : Nat) :
+    CircuitGates exampleEnv (exampleCircuitWitness dest version) where
+  channelOpens := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  txBound := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  nonceBound := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  validClass := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    exact Or.inr rfl
+  userTransferZeroActionRoot := by
+    intro i s hs _ hc; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    exact absurd hc (by simp [exampleSlotT, channelActionClass, userTransferClass])
+  channelActionZeroTransferRoot := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  actionBound := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  actionSourceChannel := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  noMemberSetUpdate := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    simp [exampleSlotT, interChannelSendKind, memberSetUpdateKind]
+  sendOpens := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  txRootNonzeroWhenSigning := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    simp [exampleCircuitWitness, exampleBlock, Bytes32.zero]
+  outOfRangeCannotSign := by
+    intro i s hs hi; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    exact absurd hi (by simp [maxSigCluster])
+  memberRootConnect := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs; rfl
+  postsFromActiveSlot := by
+    intro i s hs _ _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    simp [exampleCircuitWitness]
+  regevWidth := by
+    intro i s hs _; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    simp [exampleSlotT]
+  regevRangeChecked := by
+    intro i s hs _ c hc; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    have hc0 : c = 0 := by simpa [exampleSlotT] using List.eq_of_mem_replicate hc
+    subst hc0
+    simp [wordBase]
+  regevDigestConnect := by
+    intro i s leaf hs _ _ hl; obtain ⟨rfl, rfl⟩ := example_circuit_slots dest version i s hs
+    simp only [exampleCircuitWitness, exampleMemberLeaves] at hl
+    cases hl; rfl
+  memberLeafCount := rfl
+  signerCountRange := by
+    intro _
+    exact ⟨by simp [exampleCircuitWitness], by simp [exampleCircuitWitness, maxSigCluster]⟩
+  paddingSlotsEmpty := by
+    intro hany i leaf hl hi
+    clear hany
+    rcases i with _ | _ | _ | _ | _ | _ | _ | _ | i <;>
+      simp_all [exampleCircuitWitness, exampleMemberLeaves, MemberLeaf.empty]
+  activeSlotsOccupied := by
+    intro hany i leaf hl hi
+    clear hany
+    rcases i with _ | _ | i <;>
+      simp_all [exampleCircuitWitness, exampleMemberLeaves, Hash4.zero] <;>
+      first
+        | (subst hl; decide)
+        | exact absurd hi (by omega)
+  pisBlockNumber := rfl
+  pisTimestamp := rfl
+  pisPrevBlockHashChain := rfl
+  pisPrevAccountTreeRoot := rfl
+  pisNewBlockHashChain := rfl
+  pisNewAccountTreeRoot := rfl
+  pisDepositHashChain := rfl
+  pisChannelRegHashChain := rfl
+  pisPrevBpSigChain := rfl
+  pisNewBpSigChain := rfl
+
+/-- The action's `destination_channel_id` (and, by the same construction, its
+`tx_hash`, `seal` and `payload_hash`) is free: the gate system is satisfied for
+every value, because no gate mentions it. Cross-channel PAIRING — matching a
+source debit with a destination credit — does not happen in this circuit. -/
+theorem circuit_leaves_action_payload_free (dest : Nat) :
+    CircuitGates exampleEnv (exampleCircuitWitness dest 11) :=
+  circuit_gates_hold_for_example dest 11
+
+/-- The example's public inputs decode back through the source's decoder. -/
+theorem example_public_inputs_round_trip :
+    publicInputsFromWords (publicInputWords examplePublicInputs) = .ok examplePublicInputs := by
+  rfl
 
 end Zkp.Implementation.UpdateChannelTree

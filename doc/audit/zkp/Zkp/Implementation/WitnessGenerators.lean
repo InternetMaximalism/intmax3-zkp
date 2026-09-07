@@ -1523,7 +1523,7 @@ theorem accepted_tx_v2_witness_is_sized_to_num_users
   split at accepted
   · cases accepted
   · rename_i sized
-    push_neg at sized
+    simp only [not_or, ne_eq, Decidable.not_not] at sized
     exact sized
 
 /-! ### IMCH message staging and signature collection -/
@@ -1729,6 +1729,1203 @@ theorem an_unsigned_staged_event_can_never_prove_a_validity_span
     refine List.any_eq_true.mpr ⟨event, present, ?_⟩
     simpa using unsigned
   simp [aggSigListProofAdmissible, nonEmpty, anyUnsigned]
+
+
+
+/-! ### The per-slot witness loop
+
+All slots of a block reference the SAME channel leaf, so only the FIRST
+non-padding slot transitions it; later slots observe `prev == new_block_number`
+and do not update (`slot_step_does_not_transition_an_already_updated_leaf`). -/
+
+structure SlotCtx where
+  channel : Option Nat
+  memberKeys : Option RegisteredPublic
+  updating : List Bool
+  newBlockNumber : Nat
+  txTreeRoot : Hash
+  slotTxV2 : Nat → TxV2
+  slotAction : Nat → Option ChannelAction
+  newMemberLeaves : List MemberLeaf
+
+structure SlotAcc where
+  prevAccountLeaves : List ChannelLeaf
+  userMerkleProofs : List Hash
+  sendMerkleProofs : List Hash
+  memberRegevPks : List RegevPk
+  channelTree : List (Nat × ChannelLeaf)
+  sendLeaves : List (Nat × List SendLeaf)
+  deriving DecidableEq, Repr
+
+def emptySlotAcc (g : BlockGen) : SlotAcc :=
+  ⟨[], [], [], [], g.channelTree, g.sendLeaves⟩
+
+/-- The leaf/send-leaf pair a transitioning slot writes. -/
+def transitionedLeaf (d : Deps) (ctx : SlotCtx) (i : Nat) (entries : List SendLeaf)
+    (prevLeaf : ChannelLeaf) : ChannelLeaf × SendLeaf :=
+  let newSendLeaf : SendLeaf := ⟨prevLeaf.prev, ctx.newBlockNumber, ctx.txTreeRoot⟩
+  ({ index := prevLeaf.index + 1, prev := ctx.newBlockNumber,
+     sendTreeRoot := d.sendRootWith entries newSendLeaf prevLeaf.index,
+     memberRoot := channelLeafMemberRoot (ctx.slotTxV2 i) (ctx.slotAction i)
+       ctx.newMemberLeaves prevLeaf.memberRoot }, newSendLeaf)
+
+/-- The send leaf records the PREVIOUS `prev` and the new block as its interval
+and copies the block's tx tree root; the channel leaf's index increments by one
+and its `prev` becomes the new block number. -/
+theorem transition_threads_the_send_interval_and_increments_the_index
+    (d : Deps) (ctx : SlotCtx) (i : Nat) (entries : List SendLeaf) (prevLeaf : ChannelLeaf) :
+    (transitionedLeaf d ctx i entries prevLeaf).2.prev = prevLeaf.prev ∧
+      (transitionedLeaf d ctx i entries prevLeaf).2.cur = ctx.newBlockNumber ∧
+      (transitionedLeaf d ctx i entries prevLeaf).2.txTreeRoot = ctx.txTreeRoot ∧
+      (transitionedLeaf d ctx i entries prevLeaf).1.index = prevLeaf.index + 1 ∧
+      (transitionedLeaf d ctx i entries prevLeaf).1.prev = ctx.newBlockNumber :=
+  ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- On this branch a block NEVER moves a channel's committed member root, because
+`channel_leaf_member_root` is the identity — which is exactly why the
+`member_pubkeys_root != prev` guard around `advance_registered_member_set` is
+never taken from the block path. -/
+theorem block_leaf_transition_preserves_the_member_root
+    (d : Deps) (ctx : SlotCtx) (i : Nat) (entries : List SendLeaf) (prevLeaf : ChannelLeaf) :
+    (transitionedLeaf d ctx i entries prevLeaf).1.memberRoot = prevLeaf.memberRoot := rfl
+
+theorem member_set_advance_is_unreachable_from_add_block
+    (d : Deps) (ctx : SlotCtx) (i : Nat) (entries : List SendLeaf) (prevLeaf : ChannelLeaf) :
+    ¬ ((transitionedLeaf d ctx i entries prevLeaf).1.memberRoot ≠ prevLeaf.memberRoot) := by
+  simp [transitionedLeaf, channelLeafMemberRoot]
+
+/-- The posting (bp) slot must open its OWN Regev public key; a §Q-3 ADD that
+grew `member_count` past the registered `regev_pks` fails closed here. -/
+def resolvePostingRegev (ctx : SlotCtx) (i : Nat) : Res RegevPk :=
+  if (ctx.updating[i]?).getD false then
+    match ctx.memberKeys with
+    | none => .error (refuse .updatingSlotNotRegistered)
+    | some keys =>
+        match keys.regevPks[i]? with
+        | none => .error (refuse .missingRegevForPostingSlot)
+        | some pk => .ok pk
+  else .ok dummyRegevPk
+
+theorem non_posting_slots_carry_the_dummy_regev_key
+    (ctx : SlotCtx) (i : Nat) (idle : (ctx.updating[i]?).getD false = false) :
+    resolvePostingRegev ctx i = .ok dummyRegevPk := by
+  simp [resolvePostingRegev, idle]
+
+theorem posting_slot_without_a_registered_regev_key_is_refused
+    (ctx : SlotCtx) (i : Nat) (keys : RegisteredPublic)
+    (posting : (ctx.updating[i]?).getD false = true)
+    (registered : ctx.memberKeys = some keys)
+    (missing : keys.regevPks[i]? = none) :
+    resolvePostingRegev ctx i = .error (refuse .missingRegevForPostingSlot) := by
+  simp [resolvePostingRegev, posting, registered, missing]
+
+def slotStep (d : Deps) (ctx : SlotCtx) (i keyId : Nat) (acc : SlotAcc) : Res SlotAcc :=
+  if keyId = 0 then
+    .ok { acc with
+          prevAccountLeaves := acc.prevAccountLeaves ++ [defaultChannelLeaf],
+          userMerkleProofs := acc.userMerkleProofs ++ [dummyProof],
+          sendMerkleProofs := acc.sendMerkleProofs ++ [dummyProof],
+          memberRegevPks := acc.memberRegevPks ++ [dummyRegevPk] }
+  else
+    match ctx.channel with
+    | none => .error (panicWith .channelIdExpect)
+    | some ch => do
+        let regev ← resolvePostingRegev ctx i
+        let entries := (mapGet? acc.sendLeaves ch).getD []
+        let prevLeaf := (mapGet? acc.channelTree ch).getD defaultChannelLeaf
+        let acc1 : SlotAcc :=
+          { acc with
+            prevAccountLeaves := acc.prevAccountLeaves ++ [prevLeaf],
+            userMerkleProofs := acc.userMerkleProofs ++ [d.channelProof acc.channelTree ch],
+            sendMerkleProofs := acc.sendMerkleProofs ++ [d.sendProof entries prevLeaf.index],
+            memberRegevPks := acc.memberRegevPks ++ [regev] }
+        if prevLeaf.prev = ctx.newBlockNumber then pure acc1
+        else
+          let written := transitionedLeaf d ctx i entries prevLeaf
+          pure { acc1 with
+                 channelTree := mapInsert acc1.channelTree ch written.1,
+                 sendLeaves := mapInsert acc1.sendLeaves ch (entries ++ [written.2]) }
+
+def slotLoop (d : Deps) (ctx : SlotCtx) : Nat → List Nat → SlotAcc → Res SlotAcc
+  | _, [], acc => .ok acc
+  | i, keyId :: rest, acc => slotStep d ctx i keyId acc >>= slotLoop d ctx (i + 1) rest
+
+/-- A padding slot (`key_id == 0`) writes dummy proofs and a dummy Regev key and
+touches neither tree. -/
+theorem padding_slot_writes_dummies_and_touches_no_tree
+    (d : Deps) (ctx : SlotCtx) (i : Nat) (acc acc' : SlotAcc)
+    (stepped : slotStep d ctx i 0 acc = .ok acc') :
+    acc'.channelTree = acc.channelTree ∧ acc'.sendLeaves = acc.sendLeaves ∧
+      acc'.memberRegevPks = acc.memberRegevPks ++ [dummyRegevPk] ∧
+      acc'.userMerkleProofs = acc.userMerkleProofs ++ [dummyProof] := by
+  simp only [slotStep, if_pos] at stepped
+  cases stepped
+  exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- The second active slot of the same block observes `prev == new_block_number`
+and does NOT transition the leaf again. -/
+theorem slot_step_does_not_transition_an_already_updated_leaf
+    (d : Deps) (ctx : SlotCtx) (i keyId ch : Nat) (acc acc' : SlotAcc)
+    (active : keyId ≠ 0) (chan : ctx.channel = some ch)
+    (already : ((mapGet? acc.channelTree ch).getD defaultChannelLeaf).prev = ctx.newBlockNumber)
+    (stepped : slotStep d ctx i keyId acc = .ok acc') :
+    acc'.channelTree = acc.channelTree ∧ acc'.sendLeaves = acc.sendLeaves := by
+  simp only [slotStep, active, if_neg, chan, bind_ok_iff, already, if_pos, pure_ok_iff,
+    not_false_eq_true] at stepped
+  obtain ⟨regev, _, accEq⟩ := stepped
+  subst accEq
+  exact ⟨rfl, rfl⟩
+
+/-! ### `add_block_with_tx_v2_inner`
+
+The check order is: supported user count, channel-id resolution, TxV2 witness
+shape, block-number increment, deposit projection, `Block::new`, public-state
+push, updating-slot resolution, IMCH staging, signature collection, the per-slot
+loop, the deposit tree, and finally the stored witness plus the chains. -/
+
+/-- `block.key_ids.iter().position(|&k| k != 0)` — the block proposer's slot. -/
+def firstActiveSlot : List Nat → Nat → Option Nat
+  | [], _ => none
+  | k :: rest, i => if k ≠ 0 then some i else firstActiveSlot rest (i + 1)
+
+def resolveChannel (keyIds : List Nat) (channelId : Nat) : Res (Option Nat) :=
+  if keyIds.any (fun k => k != 0) then (mkChannelId channelId).map some else .ok none
+
+theorem a_padding_only_block_never_constructs_a_channel_id
+    (keyIds : List Nat) (channelId : Nat) (padding : keyIds.any (fun k => k != 0) = false) :
+    resolveChannel keyIds channelId = .ok none := by
+  simp [resolveChannel, padding]
+
+theorem an_active_slot_requires_a_nonzero_channel_id
+    (keyIds : List Nat) (active : keyIds.any (fun k => k != 0) = true) :
+    resolveChannel keyIds 0 = .error .channelIdError := by
+  simp [resolveChannel, active, mkChannelId, Except.map]
+
+/-- `if let Some(witness) = &tx_v2_witness { ... }` — no witness, no shape check. -/
+def checkTxV2Option (numUsers : Nat) (keyIds : List Nat) (w : Option BlockTxV2Witness) :
+    Res Unit :=
+  match w with
+  | none => .ok ()
+  | some x => checkTxV2Witness numUsers keyIds x
+
+/-- The IMCH staging step: fields, the channel's whole registered member set, and
+the digest — all three present only when a slot actually transitions the leaf. -/
+def stageMessage (d : Deps) (args : BlockArgs) (newBlockNumber : Nat) (imsbH1 : Hash)
+    (staged : Option CosignBundle) (updateSlot : Option Nat)
+    (memberKeys : Option RegisteredPublic) :
+    Res (ChannelStateFields × Option (List MemberLeaf) × Option Hash) :=
+  match updateSlot with
+  | none => .ok (defaultChannelStateFields, none, none)
+  | some _ =>
+      match memberKeys with
+      | none => .error (refuse .updatingSlotNotRegistered)
+      | some public =>
+          (stageChannelStateFields d args newBlockNumber imsbH1 staged).map (fun fields =>
+            (fields,
+             some ((indices maxSigCluster).map
+               (fun slot => public.memberTree.getD slot emptyMemberLeaf)),
+             some (d.signingDigest fields args.channelId args.txTreeRoot)))
+
+/-- Recording the block's `(IMCH digest, signer pk list)` statement. -/
+def recordSigEvent (d : Deps) (g : BlockGen) (digest : Option Hash)
+    (memberKeys : Option RegisteredPublic) (staged : Option CosignBundle)
+    (localSigners : Option (List FalconKey)) (unsignedStaging : Bool) : Res BlockGen :=
+  match digest, memberKeys with
+  | some digest, some public =>
+      (collectSigners d public digest staged localSigners unsignedStaging).map (fun signed =>
+        { g with bpSigEvents := g.bpSigEvents ++ [⟨digest, signed.1, signed.2⟩] })
+  | _, _ => .ok g
+
+/-- A member set is staged only for a REGISTERED channel: an updating slot on an
+unregistered channel is refused outright. -/
+theorem staged_member_set_implies_a_registered_channel
+    (d : Deps) (args : BlockArgs) (newBlockNumber : Nat) (imsbH1 : Hash)
+    (staged : Option CosignBundle) (updateSlot : Option Nat)
+    (memberKeys : Option RegisteredPublic)
+    (stage : ChannelStateFields × Option (List MemberLeaf) × Option Hash)
+    (ok : stageMessage d args newBlockNumber imsbH1 staged updateSlot memberKeys = .ok stage)
+    (present : stage.2.1.isSome = true) : memberKeys.isSome = true := by
+  simp only [stageMessage] at ok
+  split at ok
+  · cases ok; simp at present
+  · split at ok
+    · cases ok
+    · rfl
+
+theorem updating_slot_on_an_unregistered_channel_is_refused
+    (d : Deps) (args : BlockArgs) (newBlockNumber : Nat) (imsbH1 : Hash)
+    (staged : Option CosignBundle) (slot : Nat) :
+    stageMessage d args newBlockNumber imsbH1 staged (some slot) none
+      = .error (refuse .updatingSlotNotRegistered) := rfl
+
+theorem sig_event_is_recorded_only_when_a_slot_signs
+    (d : Deps) (g : BlockGen) (memberKeys : Option RegisteredPublic)
+    (staged : Option CosignBundle) (localSigners : Option (List FalconKey))
+    (unsignedStaging : Bool) :
+    recordSigEvent d g none memberKeys staged localSigners unsignedStaging = .ok g := by
+  cases memberKeys <;> rfl
+
+theorem recorded_event_folds_the_block_digest
+    (d : Deps) (g : BlockGen) (digest : Hash) (public : RegisteredPublic)
+    (staged : Option CosignBundle) (localSigners : Option (List FalconKey))
+    (unsignedStaging : Bool) (g' : BlockGen)
+    (accepted : recordSigEvent d g (some digest) (some public) staged localSigners
+      unsignedStaging = .ok g') :
+    ∃ event, g'.bpSigEvents = g.bpSigEvents ++ [event] ∧ event.digest = digest := by
+  simp only [recordSigEvent, Except.map] at accepted
+  split at accepted
+  · cases accepted
+  · rename_i signed _
+    cases accepted
+    exact ⟨⟨digest, signed.1, signed.2⟩, rfl, rfl⟩
+
+def addBlockInner (d : Deps) (g : BlockGen) (args : BlockArgs) : Res BlockGen := do
+  let numUsers ← resolveNumUsers args.keyIds.length g.supportedUserCounts
+  let channel ← resolveChannel args.keyIds args.channelId
+  let channelRegistered :=
+    match channel with
+    | some c => mapContains g.channelMembers c
+    | none => false
+  let _ ← checkTxV2Option numUsers args.keyIds args.txV2
+  let newBlockNumber ← succBlockNumber g.blockNumber
+  let pending := (mapGet? g.deposits newBlockNumber).getD []
+  let projectedDepositChain :=
+    pending.foldl (fun acc dep => d.hashDepositWithPrev dep acc) g.depositHashChain
+  let block ← mkBlock numUsers args.channelId args.keyIds args.timestamp args.txTreeRoot
+    projectedDepositChain g.channelRegHashChain
+  let prevExt := currentExtendedPublicState d g
+  let publicStateMerkleProof := d.publicStateProof g.publicStateTree g.blockNumber
+  let g1 : BlockGen :=
+    { g with publicStateTree := g.publicStateTree ++ [prevExt.inner],
+             deposits := mapErase g.deposits newBlockNumber,
+             nextImsbStateCommitmentRoot := none, nextChannelCosign := none }
+  let prevLeaf := channelLeafAt g (channel.getD 0)
+  let updateSlot : Option Nat :=
+    if channelRegistered && (prevLeaf.prev != newBlockNumber) then
+      firstActiveSlot block.keyIds 0
+    else none
+  let updating := (indices numUsers).map (fun i => updateSlot == some i)
+  let memberKeys := channel.bind (fun c => mapGet? g.channelMembers c)
+  let imsbH1 := g.nextImsbStateCommitmentRoot.getD 0
+  let staged := g.nextChannelCosign
+  let stage ← stageMessage d args newBlockNumber imsbH1 staged updateSlot memberKeys
+  let g2 ← recordSigEvent d g1 stage.2.2 memberKeys staged
+    (channel.bind (fun c => mapGet? g.localTestSigners c)) g.unsignedStaging
+  let ctx : SlotCtx :=
+    { channel := channel, memberKeys := memberKeys, updating := updating,
+      newBlockNumber := newBlockNumber, txTreeRoot := args.txTreeRoot,
+      slotTxV2 := fun i => (args.txV2.bind (fun w => w.txV2s[i]?)).getD defaultTxV2,
+      slotAction := fun i => args.txV2.bind (fun w => w.channelActions.bind (fun a => a[i]?)),
+      newMemberLeaves := (args.txV2.bind (fun w => w.newMemberLeaves)).getD [] }
+  let slots ← slotLoop d ctx 0 block.keyIds (emptySlotAcc g2)
+  let depositWitness := pending.map (fun dep => (dep, d.depositProof g2.depositTree 0))
+  let newDepositChain :=
+    pending.foldl (fun acc dep => d.hashDepositWithPrev dep acc) g2.depositHashChain
+  let witness : BlockWitness :=
+    { depositStepWitness := depositWitness, channelRegStepWitness := [], block := block,
+      prevAccountLeaves := slots.prevAccountLeaves, userMerkleProofs := slots.userMerkleProofs,
+      sendMerkleProofs := slots.sendMerkleProofs,
+      publicStateMerkleProof := publicStateMerkleProof,
+      signerCount := stage.2.1.bind (fun _ => memberKeys.map (fun k => k.memberCount)),
+      memberLeaves := stage.2.1,
+      newMemberLeaves := args.txV2.bind (fun w => w.newMemberLeaves),
+      memberRegevPks := some slots.memberRegevPks,
+      channelStateFields := some stage.1,
+      txV2Indices := args.txV2.map (fun w => w.txV2Indices),
+      txV2s := args.txV2.map (fun w => w.txV2s),
+      txV2MerkleProofs := args.txV2.map (fun w => w.txV2MerkleProofs),
+      channelActionIndices := args.txV2.bind (fun w => w.channelActionIndices),
+      channelActions := args.txV2.bind (fun w => w.channelActions),
+      channelActionMerkleProofs := args.txV2.bind (fun w => w.channelActionMerkleProofs) }
+  pure { g2 with
+         channelTree := slots.channelTree, sendLeaves := slots.sendLeaves,
+         depositTree := g2.depositTree ++ pending, depositHashChain := newDepositChain,
+         blockChainWitness := mapInsert g2.blockChainWitness newBlockNumber witness,
+         blockHashChain := d.hashBlockWithPrev block g2.blockHashChain,
+         blocks := g2.blocks ++ [block], blockNumber := newBlockNumber }
+
+/-- `add_block_with_tx_v2` constructs on a private clone and commits only after
+every native check succeeds, so a refused block advances nothing. -/
+def commitBlock (d : Deps) (g : BlockGen) (args : BlockArgs) : BlockGen :=
+  match addBlockInner d g args with
+  | .ok g' => g'
+  | .error _ => g
+
+theorem refused_block_leaves_generator_unchanged
+    (d : Deps) (g : BlockGen) (args : BlockArgs) (error : GenError)
+    (refused : addBlockInner d g args = .error error) :
+    commitBlock d g args = g := by
+  simp [commitBlock, refused]
+
+/-- `add_block` is `add_block_with_tx_v2` with no per-slot TxV2 witness. -/
+def addBlock (d : Deps) (g : BlockGen) (channelId : Nat) (keyIds : List Nat)
+    (timestamp : Nat) (txTreeRoot : Hash) : Res BlockGen :=
+  addBlockInner d g ⟨channelId, keyIds, timestamp, txTreeRoot, none⟩
+
+theorem add_block_passes_no_tx_v2_witness
+    (d : Deps) (g : BlockGen) (channelId : Nat) (keyIds : List Nat) (timestamp : Nat)
+    (txTreeRoot : Hash) :
+    addBlock d g channelId keyIds timestamp txTreeRoot
+      = addBlockInner d g ⟨channelId, keyIds, timestamp, txTreeRoot, none⟩ := rfl
+
+theorem block_requires_a_supported_user_count
+    (d : Deps) (g : BlockGen) (args : BlockArgs)
+    (unsupported : getNumUsers args.keyIds.length g.supportedUserCounts = none) :
+    addBlockInner d g args = .error (.tooManyKeyIds args.keyIds.length) := by
+  simp [addBlockInner, resolveNumUsers, unsupported, bind, Except.bind]
+
+/-- Precedence: the supported-width lookup runs before the channel-id
+resolution, so a `channel_id = 0` block with active slots and an unsupported
+width reports the width, not the channel id. -/
+theorem user_count_check_precedes_channel_id_resolution
+    (d : Deps) (g : BlockGen) (args : BlockArgs)
+    (unsupported : getNumUsers args.keyIds.length g.supportedUserCounts = none)
+    (active : args.keyIds.any (fun k => k != 0) = true) (zero : args.channelId = 0) :
+    addBlockInner d g args = .error (.tooManyKeyIds args.keyIds.length) ∧
+      resolveChannel args.keyIds args.channelId = .error .channelIdError := by
+  refine ⟨block_requires_a_supported_user_count d g args unsupported, ?_⟩
+  rw [zero]
+  exact an_active_slot_requires_a_nonzero_channel_id args.keyIds active
+
+
+
+/-- Root threading: an accepted block advances the block number by exactly one,
+appends exactly one block, stores the witness under the NEW block number, and
+leaves the channel-registration keccak chain untouched (an ordinary block folds
+the unchanged value into its hash). -/
+theorem accepted_block_threads_the_roots
+    (d : Deps) (g : BlockGen) (args : BlockArgs) (g' : BlockGen)
+    (accepted : addBlockInner d g args = .ok g') :
+    g'.blockNumber = g.blockNumber + 1 ∧
+      g'.blocks.length = g.blocks.length + 1 ∧
+      g'.channelRegHashChain = g.channelRegHashChain ∧
+      g'.channelRegistrations = g.channelRegistrations ∧
+      mapContains g'.blockChainWitness g'.blockNumber = true ∧
+      g'.nextChannelCosign = none ∧ g'.nextImsbStateCommitmentRoot = none := by
+  simp only [addBlockInner, bind_ok_iff, exists_unit, pure_ok_iff] at accepted
+  obtain ⟨numUsers, _, accepted⟩ := accepted
+  obtain ⟨channel, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨next, advance, accepted⟩ := accepted
+  obtain ⟨block, _, accepted⟩ := accepted
+  obtain ⟨stage, _, accepted⟩ := accepted
+  obtain ⟨g2, staged, accepted⟩ := accepted
+  obtain ⟨slots, _, stateEq⟩ := accepted
+  have step := succ_block_number_increments _ _ advance
+  subst step
+  have carried : g2.blockNumber = g.blockNumber ∧ g2.blocks = g.blocks ∧
+      g2.channelRegHashChain = g.channelRegHashChain ∧
+      g2.channelRegistrations = g.channelRegistrations ∧
+      g2.blockChainWitness = g.blockChainWitness ∧
+      g2.nextChannelCosign = none ∧ g2.nextImsbStateCommitmentRoot = none := by
+    simp only [recordSigEvent, Except.map] at staged
+    split at staged
+    · split at staged
+      · cases staged
+      · cases staged
+        exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    · cases staged
+      exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  subst stateEq
+  obtain ⟨numEq, blocksEq, regEq, registrationsEq, witnessEq, cosignEq, imsbEq⟩ := carried
+  refine ⟨by simp [numEq], by simp [blocksEq], regEq, registrationsEq, ?_, cosignEq, imsbEq⟩
+  simpa using map_contains_of_insert g2.blockChainWitness (g.blockNumber + 1) _
+
+/-- Consumption is unconditional: `next_imsb_state_commitment_root` and
+`next_channel_cosign` are `take()`n, so an accepted block always clears both. -/
+theorem accepted_block_consumes_the_staged_cosign_and_h1
+    (d : Deps) (g : BlockGen) (args : BlockArgs) (g' : BlockGen)
+    (accepted : addBlockInner d g args = .ok g') :
+    g'.nextChannelCosign = none ∧ g'.nextImsbStateCommitmentRoot = none :=
+  ⟨(accepted_block_threads_the_roots d g args g' accepted).2.2.2.2.2.1,
+   (accepted_block_threads_the_roots d g args g' accepted).2.2.2.2.2.2⟩
+
+
+/-- The stored witness carries the channel's whole registered member set and its
+`signer_count` together, and both are present exactly when the block staged a
+digest — the N-of-N binding is gated on a block actually signing. The TxV2 and
+channel-action sub-witnesses are FORWARDED from the caller (M-2), never
+hard-coded `None`. -/
+theorem stored_witness_pairs_the_member_set_with_the_signer_count
+    (d : Deps) (g : BlockGen) (args : BlockArgs) (g' : BlockGen) (w : BlockWitness)
+    (accepted : addBlockInner d g args = .ok g')
+    (stored : mapGet? g'.blockChainWitness g'.blockNumber = some w) :
+    (w.memberLeaves = none ↔ w.signerCount = none) ∧
+      w.txV2s = args.txV2.map (fun t => t.txV2s) ∧
+      w.channelActions = args.txV2.bind (fun t => t.channelActions) ∧
+      w.channelRegStepWitness = [] := by
+  simp only [addBlockInner, bind_ok_iff, exists_unit, pure_ok_iff] at accepted
+  obtain ⟨numUsers, _, accepted⟩ := accepted
+  obtain ⟨channel, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨next, advance, accepted⟩ := accepted
+  obtain ⟨block, _, accepted⟩ := accepted
+  obtain ⟨stage, stageOk, accepted⟩ := accepted
+  obtain ⟨g2, _, accepted⟩ := accepted
+  obtain ⟨slots, _, stateEq⟩ := accepted
+  subst stateEq
+  rw [map_get_insert_self] at stored
+  cases stored
+  refine ⟨?_, rfl, rfl, rfl⟩
+  cases hleaves : stage.2.1 with
+  | none => simp [hleaves]
+  | some leaves =>
+      have registered :=
+        staged_member_set_implies_a_registered_channel d args _ _ _ _ _ stage stageOk
+          (by simp [hleaves])
+      cases hkeys : channel.bind (fun c => mapGet? g.channelMembers c) with
+      | none => rw [hkeys] at registered; simp at registered
+      | some public => simp [hleaves, hkeys]
+
+
+
+/-! ### Read-only queries the balance generator drives -/
+
+def findIndex {α : Type} (p : α → Bool) : List α → Nat → Option Nat
+  | [], _ => none
+  | x :: rest, i => if p x then some i else findIndex p rest (i + 1)
+
+def defaultPublicState : PublicState := ⟨0, 0, 0, 0, 0⟩
+def defaultDeposit : Deposit := ⟨0, 0, 0, 0, 0, 0, 0⟩
+def defaultSendLeaf : SendLeaf := ⟨0, 0, 0⟩
+
+/-- `get_send_status`. An unknown/empty channel reports `(0, none)`. -/
+def getSendStatus (g : BlockGen) (channel atBlock : Nat) : Res SendStatus :=
+  let leaves := sendLeavesAt g channel
+  if leaves.isEmpty then .ok ⟨0, none⟩
+  else
+    match leaves.find? (fun l => decide (l.prev ≤ atBlock) && decide (atBlock < l.cur)) with
+    | some l => .ok ⟨l.prev, some l.cur⟩
+    | none => .ok ⟨((leaves.getLast? ).map (fun l => l.cur)).getD 0, none⟩
+
+theorem send_status_of_an_unrecorded_channel_is_the_default
+    (g : BlockGen) (channel atBlock : Nat) (unknown : sendLeavesAt g channel = []) :
+    getSendStatus g channel atBlock = .ok ⟨0, none⟩ := by
+  simp [getSendStatus, unknown]
+
+def getAccountState (d : Deps) (g : BlockGen) (channel blockNumber : Nat) :
+    Res (Nat × AccountState) :=
+  if g.blockNumber < blockNumber then .error (refuse .blockNumberInFuture)
+  else
+    let leaves := sendLeavesAt g channel
+    let index :=
+      (findIndex (fun l => decide (l.prev ≤ blockNumber) && decide (blockNumber < l.cur))
+        leaves 0).getD 0
+    .ok (g.blockNumber,
+      { channelId := channel, accountTreeRoot := d.channelTreeRoot g.channelTree,
+        sendLeaf := leaves.getD index defaultSendLeaf, sendLeafIndex := index,
+        sendMerkleProof := d.sendProof leaves index,
+        channelLeaf := channelLeafAt g channel,
+        userMerkleProof := d.channelProof g.channelTree channel })
+
+theorem account_state_refuses_a_future_block
+    (d : Deps) (g : BlockGen) (channel blockNumber : Nat) (future : g.blockNumber < blockNumber) :
+    getAccountState d g channel blockNumber = .error (refuse .blockNumberInFuture) := by
+  simp [getAccountState, future]
+
+/-- `get_account_state_for_tx` selects by tx tree root and — unlike
+`get_account_state` — performs NO block-number bound check. -/
+def getAccountStateForTx (d : Deps) (g : BlockGen) (channel : Nat) (txTreeRoot : Hash) :
+    Res (Nat × AccountState) :=
+  let leaves := sendLeavesAt g channel
+  match findIndex (fun l => l.txTreeRoot == txTreeRoot) leaves 0 with
+  | none => .error (refuse .noSendLeafForTxRoot)
+  | some index =>
+      .ok (g.blockNumber,
+        { channelId := channel, accountTreeRoot := d.channelTreeRoot g.channelTree,
+          sendLeaf := leaves.getD index defaultSendLeaf, sendLeafIndex := index,
+          sendMerkleProof := d.sendProof leaves index,
+          channelLeaf := channelLeafAt g channel,
+          userMerkleProof := d.channelProof g.channelTree channel })
+
+theorem account_state_for_tx_requires_a_recorded_send_leaf
+    (d : Deps) (g : BlockGen) (channel : Nat) (txTreeRoot : Hash)
+    (absent : findIndex (fun l => l.txTreeRoot == txTreeRoot) (sendLeavesAt g channel) 0 = none) :
+    getAccountStateForTx d g channel txTreeRoot = .error (refuse .noSendLeafForTxRoot) := by
+  simp [getAccountStateForTx, absent]
+
+def getUpdatePublicStateWitness (d : Deps) (g : BlockGen) (blockNumber : Nat) :
+    Res UpdatePublicState :=
+  if g.blockNumber < blockNumber then .error (refuse .blockNumberInFuture)
+  else
+    let new := currentPublicState d g
+    if blockNumber = g.blockNumber then .ok ⟨new, new, none⟩
+    else .ok ⟨new, g.publicStateTree.getD blockNumber defaultPublicState,
+              some (d.publicStateProof g.publicStateTree blockNumber)⟩
+
+/-- At the head the witness is a self-transition with no Merkle opening. -/
+theorem update_public_state_at_the_head_is_a_self_transition
+    (d : Deps) (g : BlockGen) (w : UpdatePublicState)
+    (accepted : getUpdatePublicStateWitness d g g.blockNumber = .ok w) :
+    w.old = w.new ∧ w.merkleProof = none := by
+  simp only [getUpdatePublicStateWitness, Nat.lt_irrefl, if_neg, if_pos,
+    not_false_eq_true] at accepted
+  cases accepted
+  exact ⟨rfl, rfl⟩
+
+/-- `get_deposit_merkle_proof(receiver)` returns the FIRST leaf with a matching
+recipient. A recipient funded more than once is therefore ambiguous — the reason
+the production path uses the index-bound variant below. -/
+def getDepositMerkleProof (d : Deps) (g : BlockGen) (receiver : Hash) : Res (Deposit × Hash) :=
+  match findIndex (fun dep => dep.recipient == receiver) g.depositTree 0 with
+  | none => .error (refuse .noDepositForReceiver)
+  | some i => .ok (g.depositTree.getD i defaultDeposit, d.depositProof g.depositTree i)
+
+theorem deposit_by_recipient_selects_the_first_match
+    (d : Deps) (g : BlockGen) (receiver : Hash) (i : Nat) (out : Deposit × Hash)
+    (found : findIndex (fun dep => dep.recipient == receiver) g.depositTree 0 = some i)
+    (accepted : getDepositMerkleProof d g receiver = .ok out) :
+    out.1 = g.depositTree.getD i defaultDeposit := by
+  simp only [getDepositMerkleProof, found] at accepted
+  cases accepted
+  rfl
+
+/-- `get_deposit_merkle_proof_at_index` binds the L1 event index AND the
+recipient: index existence, then `deposit_index` agreement, then recipient. -/
+def getDepositMerkleProofAtIndex (d : Deps) (g : BlockGen) (index : Nat) (expected : Hash) :
+    Res (Deposit × Hash) :=
+  match g.depositTree[index]? with
+  | none => .error (refuse .depositIndexOutOfRange)
+  | some dep =>
+      if dep.depositIndex ≠ index then .error (refuse .depositIndexMismatch)
+      else if dep.recipient ≠ expected then .error (refuse .depositRecipientMismatch)
+      else .ok (dep, d.depositProof g.depositTree index)
+
+theorem deposit_at_index_binds_both_the_index_and_the_recipient
+    (d : Deps) (g : BlockGen) (index : Nat) (expected : Hash) (out : Deposit × Hash)
+    (accepted : getDepositMerkleProofAtIndex d g index expected = .ok out) :
+    out.1.depositIndex = index ∧ out.1.recipient = expected ∧
+      g.depositTree[index]? = some out.1 := by
+  simp only [getDepositMerkleProofAtIndex] at accepted
+  split at accepted
+  · cases accepted
+  · rename_i dep present
+    split at accepted
+    · cases accepted
+    · rename_i indexOk
+      split at accepted
+      · cases accepted
+      · rename_i recipientOk
+        cases accepted
+        exact ⟨by simpa using indexOk, by simpa using recipientOk, present⟩
+
+theorem deposit_index_check_precedes_the_recipient_check
+    (d : Deps) (g : BlockGen) (index : Nat) (expected : Hash) (dep : Deposit)
+    (present : g.depositTree[index]? = some dep) (wrongIndex : dep.depositIndex ≠ index) :
+    getDepositMerkleProofAtIndex d g index expected = .error (refuse .depositIndexMismatch) := by
+  simp [getDepositMerkleProofAtIndex, present, wrongIndex]
+
+
+
+/-! ## `BalanceWitnessGenerator`
+
+`src/circuits/witness/balance_witness_generator.rs`. Every `assert_eq!` here is a
+PANIC in the source; they are modeled as `nativePanic` errors so their position
+in the check order stays visible. The plonky2 proof values are modeled by their
+parsed public inputs (`BalancePis`); proving and verification are out of scope. -/
+
+structure BalancePis where
+  channelId : Nat
+  publicState : PublicState
+  blockR : Nat
+  privateCommitment : Hash
+  deriving DecidableEq, Repr
+
+structure PrivateStateS where
+  assetTree : List (Nat × Nat)
+  nullifiers : List Hash
+  sentTxLen : Nat
+  nonce : Nat
+  salt : Nat
+  prevPrivateCommitment : Hash
+  deriving DecidableEq, Repr
+
+structure Transfer where
+  tokenIndex : Nat
+  amount : Nat
+  recipient : Hash
+  auxData : Hash
+  deriving DecidableEq, Repr
+
+def defaultTransfer : Transfer := ⟨0, 0, 0, 0⟩
+
+structure Tx where
+  transferTreeRoot : Hash
+  nonce : Nat
+  deriving DecidableEq, Repr
+
+/-- `UpdatePrivateState` as produced by the imported constructor: a dependency
+boundary, not a translated body. -/
+structure UpdatePrivateStateW where
+  tokenIndex : Nat
+  amount : Nat
+  nullifier : Hash
+  prevPrivateState : PrivateStateS
+  newPrivateState : PrivateStateS
+  prevBalance : Nat
+  deriving DecidableEq, Repr
+
+structure SpendWitness where
+  txNonce : Nat
+  prevPrivateState : PrivateStateS
+  transfers : List Transfer
+  beforeBalances : List Nat
+  assetMerkleProofs : List Hash
+  sentTxMerkleProof : Hash
+  deriving DecidableEq, Repr
+
+structure TransferWitnessW where
+  transferTreeRoot : Hash
+  transfer : Transfer
+  transferIndex : Nat
+  transferMerkleProof : Hash
+  deriving DecidableEq, Repr
+
+structure TxSettlementW where
+  channelId : Nat
+  tx : Tx
+  publicState : PublicState
+  accountState : AccountState
+  txMerkleProof : Hash
+  txV2 : Option TxV2
+  deriving DecidableEq, Repr
+
+structure ReceiveTransferWitnessW where
+  senderUpdatePublicState : UpdatePublicState
+  receiverUpdatePublicState : UpdatePublicState
+  newBlockR : Nat
+  accountState : AccountState
+  txSettlement : TxSettlementW
+  transferWitness : TransferWitnessW
+  transferSalt : Nat
+  updatePrivateState : UpdatePrivateStateW
+  deriving DecidableEq, Repr
+
+structure DepositWitnessW where
+  channelId : Nat
+  depositTreeRoot : Hash
+  depositSalt : Nat
+  deposit : Deposit
+  depositMerkleProof : Hash
+  deriving DecidableEq, Repr
+
+structure ReceiveDepositWitnessW where
+  updatePublicState : UpdatePublicState
+  newBlockR : Nat
+  accountState : AccountState
+  depositWitness : DepositWitnessW
+  updatePrivateState : UpdatePrivateStateW
+  deriving DecidableEq, Repr
+
+structure SendTxWitnessW where
+  updatePublicState : UpdatePublicState
+  txSettlement : TxSettlementW
+  transferWitness : TransferWitnessW
+  deriving DecidableEq, Repr
+
+structure SingleWithdrawalWitnessW where
+  privateState : PrivateStateS
+  updatePublicState : UpdatePublicState
+  accountState : AccountState
+  txMerkleProof : Hash
+  txV2 : Option TxV2
+  tx : Tx
+  sentTxMerkleProof : Hash
+  transferWitness : TransferWitnessW
+  deriving DecidableEq, Repr
+
+/-- The balance side's opaque dependencies. -/
+structure BalanceDeps where
+  block : Deps
+  commitment : PrivateStateS → Hash
+  /-- `SettledTransfer::new(transfer, sender_channel, transfer_index, tx_nonce).nullifier()`. -/
+  settledTransferNullifier : Transfer → Nat → Nat → Nat → Hash
+  assetProof : List (Nat × Nat) → Nat → Hash
+  sentTxProof : Nat → Nat → Hash
+  /-- `IndexedMerkleTree::prove_and_insert` — a callback, not evidence of freshness. -/
+  nullifierInsert : List Hash → Hash → Res (List Hash × Hash)
+  /-- `UpdatePrivateState::new`. -/
+  mkUpdatePrivateState : Nat → Nat → Hash → PrivateStateS → Hash → Nat → Hash →
+    Res UpdatePrivateStateW
+  /-- `TransferWitness::new`. -/
+  mkTransferWitness : Hash → Transfer → Nat → Hash → Res TransferWitnessW
+  /-- `DepositWitness::new`. -/
+  mkDepositWitness : Nat → Hash → Nat → Deposit → Hash → Res DepositWitnessW
+
+structure BalanceGen where
+  channelId : Nat
+  salt : Nat
+  balancePis : BalancePis
+  priv : PrivateStateS
+  block : BlockGen
+  deriving DecidableEq, Repr
+
+/-! ### `spend_witness` -/
+
+def padTransfers (ts : List Transfer) : List Transfer :=
+  ts ++ List.replicate (maxTransfersPerTx - ts.length) defaultTransfer
+
+theorem padded_transfers_reach_the_maximum (ts : List Transfer)
+    (fits : ts.length ≤ maxTransfersPerTx) : (padTransfers ts).length = maxTransfersPerTx := by
+  simp only [padTransfers, List.length_append, List.length_replicate]
+  omega
+
+/-- The per-transfer debit loop. `prev_balance - transfer.amount` is a U256
+subtraction: an underflow PANICS in the source. -/
+def spendFold (bd : BalanceDeps) :
+    List Transfer → List (Nat × Nat) × List Nat × List Hash →
+      Res (List (Nat × Nat) × List Nat × List Hash)
+  | [], acc => .ok acc
+  | t :: rest, acc =>
+      let prev := (mapGet? acc.1 t.tokenIndex).getD 0
+      if prev < t.amount then .error (panicWith .balanceUnderflow)
+      else
+        spendFold bd rest
+          (mapInsert acc.1 t.tokenIndex (prev - t.amount),
+           acc.2.1 ++ [prev], acc.2.2 ++ [bd.assetProof acc.1 t.tokenIndex])
+
+def spendWitness (bd : BalanceDeps) (b : BalanceGen) (transfers : List Transfer) :
+    Res SpendWitness := do
+  let padded := padTransfers transfers
+  let out ← spendFold bd padded (b.priv.assetTree, [], [])
+  pure { txNonce := b.priv.nonce, prevPrivateState := b.priv, transfers := padded,
+         beforeBalances := out.2.1, assetMerkleProofs := out.2.2,
+         sentTxMerkleProof := bd.sentTxProof b.priv.sentTxLen b.priv.nonce }
+
+/-- The spend witness's `tx_nonce` and its sent-tx opening index are BOTH the
+current private nonce; the transfer list is padded to the maximum. -/
+theorem spend_witness_uses_the_current_nonce_for_the_tx_and_the_sent_tx_opening
+    (bd : BalanceDeps) (b : BalanceGen) (transfers : List Transfer) (w : SpendWitness)
+    (fits : transfers.length ≤ maxTransfersPerTx)
+    (accepted : spendWitness bd b transfers = .ok w) :
+    w.txNonce = b.priv.nonce ∧ w.prevPrivateState = b.priv ∧
+      w.transfers.length = maxTransfersPerTx ∧
+      w.sentTxMerkleProof = bd.sentTxProof b.priv.sentTxLen b.priv.nonce := by
+  simp only [spendWitness, bind_ok_iff, pure_ok_iff] at accepted
+  obtain ⟨out, _, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨rfl, rfl, padded_transfers_reach_the_maximum transfers fits, rfl⟩
+
+/-! ### `receive_transfer_witness` -/
+
+structure ReceiveTransferData where
+  to : Nat
+  transfer : Transfer
+  senderPis : BalancePis
+  txTreeRoot : Hash
+  tx : Tx
+  txMerkleProof : Hash
+  txV2 : Option TxV2
+  transferIndex : Nat
+  transferMerkleProof : Hash
+  transferSalt : Nat
+  deriving DecidableEq, Repr
+
+/-- `new_block_r`: one BEFORE the channel's next send block, or the head block
+when the channel has no later send. `next_send_block = 0` would underflow. -/
+def newBlockR (status : SendStatus) (currentBlockNumber : Nat) : Res Nat :=
+  match status.nextSendBlock with
+  | some next => if next = 0 then .error (panicWith .sendBlockUnderflow) else .ok (next - 1)
+  | none => .ok currentBlockNumber
+
+theorem new_block_r_is_one_before_the_next_send_block
+    (status : SendStatus) (current next : Nat) (hasNext : status.nextSendBlock = some next)
+    (nonZero : next ≠ 0) : newBlockR status current = .ok (next - 1) := by
+  simp [newBlockR, hasNext, nonZero]
+
+theorem new_block_r_without_a_next_send_is_the_head_block
+    (status : SendStatus) (current : Nat) (noNext : status.nextSendBlock = none) :
+    newBlockR status current = .ok current := by
+  simp [newBlockR, noNext]
+
+def receiveTransferWitness (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveTransferData) :
+    Res ReceiveTransferWitnessW := do
+  let prevPis := b.balancePis
+  let current := b.block.blockNumber
+  let _ ← check (data.to == b.channelId) (panicWith .recipientMismatchAssert)
+  let senderUpdate ← getUpdatePublicStateWitness bd.block b.block data.senderPis.publicState.blockNumber
+  let receiverUpdate ← getUpdatePublicStateWitness bd.block b.block prevPis.publicState.blockNumber
+  let _ ← check (senderUpdate.old == data.senderPis.publicState)
+    (panicWith .publicStateMismatchAssert)
+  let _ ← check (receiverUpdate.old == prevPis.publicState) (panicWith .publicStateMismatchAssert)
+  let _ ← check (senderUpdate.new == receiverUpdate.new) (panicWith .publicStateMismatchAssert)
+  let status ← getSendStatus b.block b.channelId prevPis.blockR
+  let blockR ← newBlockR status current
+  let _ ← check (prevPis.blockR ≤ blockR) (refuse .newBlockRRegressed)
+  let sender ← getAccountStateForTx bd.block b.block data.senderPis.channelId data.txTreeRoot
+  let _ ← check (sender.2.sendLeaf.cur ≤ blockR) (refuse .txBlockAfterBlockR)
+  let _ ← check (sender.2.accountTreeRoot == senderUpdate.new.accountTreeRoot)
+    (panicWith .accountRootMismatchAssert)
+  let receiver ← getAccountState bd.block b.block b.channelId prevPis.blockR
+  let _ ← check (receiver.2.accountTreeRoot == receiverUpdate.new.accountTreeRoot)
+    (panicWith .accountRootMismatchAssert)
+  let transferWitness ← bd.mkTransferWitness data.tx.transferTreeRoot data.transfer
+    data.transferIndex data.transferMerkleProof
+  let nullifier := bd.settledTransferNullifier transferWitness.transfer data.senderPis.channelId
+    transferWitness.transferIndex data.tx.nonce
+  let inserted ← bd.nullifierInsert b.priv.nullifiers nullifier
+  let prevBalance := (mapGet? b.priv.assetTree transferWitness.transfer.tokenIndex).getD 0
+  let update ← bd.mkUpdatePrivateState transferWitness.transfer.tokenIndex
+    transferWitness.transfer.amount nullifier b.priv inserted.2 prevBalance
+    (bd.assetProof b.priv.assetTree transferWitness.transfer.tokenIndex)
+  pure { senderUpdatePublicState := senderUpdate, receiverUpdatePublicState := receiverUpdate,
+         newBlockR := blockR, accountState := receiver.2,
+         txSettlement := { channelId := data.senderPis.channelId, tx := data.tx,
+                           publicState := senderUpdate.new, accountState := sender.2,
+                           txMerkleProof := data.txMerkleProof, txV2 := data.txV2 },
+         transferWitness := transferWitness, transferSalt := data.transferSalt,
+         updatePrivateState := update }
+
+/-- The recipient assert runs BEFORE any public-state witness is fetched. -/
+theorem receive_transfer_requires_this_generator_to_be_the_recipient
+    (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveTransferData)
+    (other : data.to ≠ b.channelId) :
+    receiveTransferWitness bd b data = .error (panicWith .recipientMismatchAssert) := by
+  simp [receiveTransferWitness, check, other, bind, Except.bind]
+
+/-- Accepted receive-transfer witnesses are monotone in `block_r` and never
+settle a tx from a block later than the receiver's own `block_r`; the sender and
+receiver agree on the NEW public state. -/
+theorem receive_transfer_admission_facts
+    (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveTransferData)
+    (w : ReceiveTransferWitnessW) (accepted : receiveTransferWitness bd b data = .ok w) :
+    b.balancePis.blockR ≤ w.newBlockR ∧
+      w.txSettlement.accountState.sendLeaf.cur ≤ w.newBlockR ∧
+      w.senderUpdatePublicState.new = w.receiverUpdatePublicState.new ∧
+      w.txSettlement.channelId = data.senderPis.channelId := by
+  simp only [receiveTransferWitness, bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff,
+    beq_iff_eq, decide_eq_true_eq] at accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨senderUpdate, _, accepted⟩ := accepted
+  obtain ⟨receiverUpdate, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨sameNew, accepted⟩ := accepted
+  obtain ⟨status, _, accepted⟩ := accepted
+  obtain ⟨blockR, _, accepted⟩ := accepted
+  obtain ⟨monotone, accepted⟩ := accepted
+  obtain ⟨sender, _, accepted⟩ := accepted
+  obtain ⟨inRange, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨receiver, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨transferWitness, _, accepted⟩ := accepted
+  obtain ⟨inserted, _, accepted⟩ := accepted
+  obtain ⟨update, _, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨monotone, inRange, sameNew, rfl⟩
+
+/-- SECURITY (F-WD-2): the transfer nullifier is settlement-INDEPENDENT. The
+value handed to `UpdatePrivateState::new` is a function of the transfer, the
+SENDER's channel id, the transfer index and the tx nonce only — nothing about
+the settling block enters it — and the previous private state passed alongside
+is the generator's own. (`UpdatePrivateState::new` itself is an opaque callback,
+so this pins the CALL, not its result.) -/
+theorem receive_transfer_nullifier_is_settlement_independent
+    (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveTransferData)
+    (w : ReceiveTransferWitnessW) (accepted : receiveTransferWitness bd b data = .ok w) :
+    ∃ nullifierRoot,
+      bd.mkUpdatePrivateState w.transferWitness.transfer.tokenIndex
+        w.transferWitness.transfer.amount
+        (bd.settledTransferNullifier w.transferWitness.transfer data.senderPis.channelId
+          w.transferWitness.transferIndex data.tx.nonce)
+        b.priv nullifierRoot
+        ((mapGet? b.priv.assetTree w.transferWitness.transfer.tokenIndex).getD 0)
+        (bd.assetProof b.priv.assetTree w.transferWitness.transfer.tokenIndex)
+        = .ok w.updatePrivateState := by
+  simp only [receiveTransferWitness, bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff] at accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨senderUpdate, _, accepted⟩ := accepted
+  obtain ⟨receiverUpdate, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨status, _, accepted⟩ := accepted
+  obtain ⟨blockR, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨sender, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨receiver, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨transferWitness, _, accepted⟩ := accepted
+  obtain ⟨inserted, _, accepted⟩ := accepted
+  obtain ⟨update, updateOk, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨inserted.2, updateOk⟩
+
+
+/-! ### Commits -/
+
+/-- `commit_receive_transfer`. NOTE (faithfulness): the source assigns
+`self.balance_proof = new_balance_proof` FIRST and then asserts; an assert
+failure is a panic, so the model returns an error for the whole call. The nonce
+and salt are COPIED from the witness's new private state — this commit never
+increments a nonce of its own. -/
+def commitReceiveTransfer (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis)
+    (update : UpdatePrivateStateW) : Res BalanceGen := do
+  let prevBalance := (mapGet? b.priv.assetTree update.tokenIndex).getD 0
+  let _ ← check (prevBalance == update.prevBalance) (panicWith .balanceMismatchAssert)
+  let inserted ← bd.nullifierInsert b.priv.nullifiers update.nullifier
+  let next : PrivateStateS :=
+    { b.priv with
+      assetTree := mapInsert b.priv.assetTree update.tokenIndex (prevBalance + update.amount),
+      nullifiers := inserted.1,
+      prevPrivateCommitment := bd.commitment update.prevPrivateState,
+      nonce := update.newPrivateState.nonce, salt := update.newPrivateState.salt }
+  let _ ← check (bd.commitment update.newPrivateState == bd.commitment next)
+    (panicWith .commitmentMismatchAssert)
+  pure { b with balancePis := newPis, priv := next }
+
+theorem commit_receive_transfer_credits_the_incoming_amount_and_copies_the_nonce
+    (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis) (update : UpdatePrivateStateW)
+    (b' : BalanceGen) (accepted : commitReceiveTransfer bd b newPis update = .ok b') :
+    b'.priv.nonce = update.newPrivateState.nonce ∧
+      b'.priv.salt = update.newPrivateState.salt ∧
+      b'.priv.prevPrivateCommitment = bd.commitment update.prevPrivateState ∧
+      mapGet? b'.priv.assetTree update.tokenIndex = some (update.prevBalance + update.amount) ∧
+      b'.balancePis = newPis := by
+  simp only [commitReceiveTransfer, bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff,
+    beq_iff_eq] at accepted
+  obtain ⟨balanceEq, accepted⟩ := accepted
+  obtain ⟨inserted, _, accepted⟩ := accepted
+  obtain ⟨_, stateEq⟩ := accepted
+  subst stateEq
+  refine ⟨rfl, rfl, rfl, ?_, rfl⟩
+  rw [← balanceEq]
+  exact map_get_insert_self _ _ _
+
+/-! ### `receive_deposit_witness` -/
+
+structure ReceiveDepositData where
+  receiver : Hash
+  depositSalt : Nat
+  deriving DecidableEq, Repr
+
+/-- The two deposit-selection variants. -/
+def lookupDeposit (d : Deps) (g : BlockGen) (receiver : Hash) (depositIndex : Option Nat) :
+    Res (Deposit × Hash) :=
+  match depositIndex with
+  | some index => getDepositMerkleProofAtIndex d g index receiver
+  | none => getDepositMerkleProof d g receiver
+
+/-- `receive_deposit_witness_inner`. `deposit_index = some i` is the production
+variant that binds the L1 event index; `none` is the fixture helper that selects
+by recipient alone (ambiguous once an account is funded twice). -/
+def receiveDepositWitness (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveDepositData)
+    (depositIndex : Option Nat) : Res ReceiveDepositWitnessW := do
+  let prevPis := b.balancePis
+  let current := b.block.blockNumber
+  let update ← getUpdatePublicStateWitness bd.block b.block prevPis.publicState.blockNumber
+  let _ ← check (update.old == prevPis.publicState) (panicWith .publicStateMismatchAssert)
+  let status ← getSendStatus b.block b.channelId prevPis.blockR
+  let blockR ← newBlockR status current
+  let _ ← check (prevPis.blockR ≤ blockR) (refuse .newBlockRRegressed)
+  let account ← getAccountState bd.block b.block b.channelId prevPis.blockR
+  let _ ← check (account.2.accountTreeRoot == update.new.accountTreeRoot)
+    (panicWith .accountRootMismatchAssert)
+  let found ← lookupDeposit bd.block b.block data.receiver depositIndex
+  let _ ← check (found.1.blockNumber ≤ blockR) (refuse .depositBlockAfterBlockR)
+  let nullifier := bd.block.depositNullifier found.1
+  let inserted ← bd.nullifierInsert b.priv.nullifiers nullifier
+  let prevBalance := (mapGet? b.priv.assetTree found.1.tokenIndex).getD 0
+  let privUpdate ← bd.mkUpdatePrivateState found.1.tokenIndex found.1.amount nullifier b.priv
+    inserted.2 prevBalance (bd.assetProof b.priv.assetTree found.1.tokenIndex)
+  let depositWitness ← bd.mkDepositWitness b.channelId update.new.depositTreeRoot data.depositSalt
+    found.1 found.2
+  pure { updatePublicState := update, newBlockR := blockR, accountState := account.2,
+         depositWitness := depositWitness, updatePrivateState := privUpdate }
+
+/-- A deposit may not be newer than the receiver's `block_r`, and the deposit
+witness is bound to the NEW public state's deposit tree root. -/
+theorem deposit_admission_facts
+    (bd : BalanceDeps) (b : BalanceGen) (data : ReceiveDepositData) (depositIndex : Option Nat)
+    (w : ReceiveDepositWitnessW)
+    (accepted : receiveDepositWitness bd b data depositIndex = .ok w) :
+    b.balancePis.blockR ≤ w.newBlockR ∧
+      ∃ deposit proof,
+        deposit.blockNumber ≤ w.newBlockR ∧
+        bd.mkDepositWitness b.channelId w.updatePublicState.new.depositTreeRoot data.depositSalt
+          deposit proof = .ok w.depositWitness := by
+  simp only [receiveDepositWitness, bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff,
+    beq_iff_eq, decide_eq_true_eq] at accepted
+  obtain ⟨update, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨status, _, accepted⟩ := accepted
+  obtain ⟨blockR, _, accepted⟩ := accepted
+  obtain ⟨monotone, accepted⟩ := accepted
+  obtain ⟨account, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨found, _, accepted⟩ := accepted
+  obtain ⟨fresh, accepted⟩ := accepted
+  obtain ⟨inserted, _, accepted⟩ := accepted
+  obtain ⟨privUpdate, _, accepted⟩ := accepted
+  obtain ⟨depositWitness, depositOk, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨monotone, found.1, found.2, fresh, depositOk⟩
+
+/-- `commit_receive_deposit` mirrors `commit_receive_transfer`. -/
+def commitReceiveDeposit (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis)
+    (update : UpdatePrivateStateW) : Res BalanceGen :=
+  commitReceiveTransfer bd b newPis update
+
+/-! ### `send_tx_witness` / `commit_send_tx` -/
+
+structure SendTxData where
+  txTreeRoot : Hash
+  tx : Tx
+  txMerkleProof : Hash
+  txV2 : Option TxV2
+  transfer : Transfer
+  transferMerkleProof : Hash
+  deriving DecidableEq, Repr
+
+def sendTxWitness (bd : BalanceDeps) (b : BalanceGen) (data : SendTxData) : Res SendTxWitnessW := do
+  let prevPis := b.balancePis
+  let update ← getUpdatePublicStateWitness bd.block b.block prevPis.publicState.blockNumber
+  let _ ← check (update.old == prevPis.publicState) (panicWith .publicStateMismatchAssert)
+  let account ← getAccountStateForTx bd.block b.block b.channelId data.txTreeRoot
+  let _ ← check (account.2.accountTreeRoot == update.new.accountTreeRoot)
+    (panicWith .accountRootMismatchAssert)
+  let transferWitness ← bd.mkTransferWitness data.tx.transferTreeRoot data.transfer 0
+    data.transferMerkleProof
+  pure { updatePublicState := update,
+         txSettlement := { channelId := b.channelId, tx := data.tx, publicState := update.new,
+                           accountState := account.2, txMerkleProof := data.txMerkleProof,
+                           txV2 := data.txV2 },
+         transferWitness := transferWitness }
+
+/-- The outgoing transfer is always opened at index 0 of the tx's transfer tree. -/
+theorem send_tx_opens_the_transfer_at_index_zero
+    (bd : BalanceDeps) (b : BalanceGen) (data : SendTxData) (w : SendTxWitnessW)
+    (accepted : sendTxWitness bd b data = .ok w) :
+    bd.mkTransferWitness data.tx.transferTreeRoot data.transfer 0 data.transferMerkleProof
+      = .ok w.transferWitness ∧
+    w.txSettlement.accountState.accountTreeRoot = w.updatePublicState.new.accountTreeRoot := by
+  simp only [sendTxWitness, bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff,
+    beq_iff_eq] at accepted
+  obtain ⟨update, _, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨account, _, accepted⟩ := accepted
+  obtain ⟨rootEq, accepted⟩ := accepted
+  obtain ⟨transferWitness, transferOk, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨transferOk, rootEq⟩
+
+/-- `commit_send_tx`. The balance proof is replaced BEFORE the `is_valid` test,
+so an invalid spend still swaps the generator's proof while leaving the private
+state untouched. The nonce increments by exactly one, and the sent-tx tree length
+must equal `tx.nonce + 1`. -/
+def commitSendTx (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis)
+    (txNonce : Nat) (prevCommitment newCommitment : Hash) (spend : SpendWitness)
+    (spendValid : Bool) : Res BalanceGen :=
+  let carried := { b with balancePis := newPis }
+  if !spendValid then .ok carried
+  else do
+    let _ ← check (bd.commitment spend.prevPrivateState == prevCommitment)
+      (panicWith .commitmentMismatchAssert)
+    let debited := (spend.transfers.zip spend.beforeBalances).foldl
+      (fun tree p => mapInsert tree p.1.tokenIndex (p.2 - p.1.amount)) carried.priv.assetTree
+    let _ ← check (carried.priv.sentTxLen + 1 == txNonce + 1) (panicWith .nonceMismatchAssert)
+    let next : PrivateStateS :=
+      { carried.priv with assetTree := debited, sentTxLen := carried.priv.sentTxLen + 1,
+        prevPrivateCommitment := bd.commitment spend.prevPrivateState,
+        nonce := spend.prevPrivateState.nonce + 1 }
+    let _ ← check (bd.commitment next == newCommitment) (panicWith .commitmentMismatchAssert)
+    pure { carried with priv := next }
+
+theorem commit_send_tx_replaces_the_proof_even_when_the_spend_is_invalid
+    (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis) (txNonce : Nat)
+    (prevCommitment newCommitment : Hash) (spend : SpendWitness) :
+    commitSendTx bd b newPis txNonce prevCommitment newCommitment spend false
+      = .ok { b with balancePis := newPis } := by
+  simp [commitSendTx]
+
+theorem commit_send_tx_is_a_private_state_noop_on_an_invalid_spend
+    (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis) (txNonce : Nat)
+    (prevCommitment newCommitment : Hash) (spend : SpendWitness) (b' : BalanceGen)
+    (accepted : commitSendTx bd b newPis txNonce prevCommitment newCommitment spend false
+      = .ok b') : b'.priv = b.priv := by
+  rw [commit_send_tx_replaces_the_proof_even_when_the_spend_is_invalid] at accepted
+  cases accepted
+  rfl
+
+theorem commit_send_tx_increments_the_nonce_and_the_sent_tx_length
+    (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis) (txNonce : Nat)
+    (prevCommitment newCommitment : Hash) (spend : SpendWitness) (b' : BalanceGen)
+    (accepted : commitSendTx bd b newPis txNonce prevCommitment newCommitment spend true
+      = .ok b') :
+    b'.priv.nonce = spend.prevPrivateState.nonce + 1 ∧
+      b'.priv.sentTxLen = b.priv.sentTxLen + 1 ∧
+      b.priv.sentTxLen = txNonce ∧
+      b'.priv.prevPrivateCommitment = bd.commitment spend.prevPrivateState := by
+  simp only [commitSendTx, Bool.not_true, Bool.false_eq_true, if_neg, not_false_eq_true,
+    bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff, beq_iff_eq] at accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨nonceEq, accepted⟩ := accepted
+  obtain ⟨_, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨rfl, rfl, by omega, rfl⟩
+
+/-! ### `single_withdrawal_witness` -/
+
+structure SingleWithdrawalData where
+  txTreeRoot : Hash
+  tx : Tx
+  txMerkleProof : Hash
+  txV2 : Option TxV2
+  transfer : Transfer
+  transferIndex : Nat
+  transferMerkleProof : Hash
+  deriving DecidableEq, Repr
+
+/-- SECURITY-RELEVANT ASYMMETRY (faithful to the source): unlike
+`send_tx_witness`, this builder performs NO `assert_eq!` that the account
+state's tree root equals the update-public-state's new root, and no
+`update_public_state.old == balance_pis.public_state` check. -/
+def singleWithdrawalWitness (bd : BalanceDeps) (b : BalanceGen) (data : SingleWithdrawalData) :
+    Res SingleWithdrawalWitnessW := do
+  let balancePis := b.balancePis
+  let update ← getUpdatePublicStateWitness bd.block b.block balancePis.publicState.blockNumber
+  let account ← getAccountStateForTx bd.block b.block b.channelId data.txTreeRoot
+  let transferWitness ← bd.mkTransferWitness data.tx.transferTreeRoot data.transfer
+    data.transferIndex data.transferMerkleProof
+  pure { privateState := b.priv, updatePublicState := update, accountState := account.2,
+         txMerkleProof := data.txMerkleProof, txV2 := data.txV2, tx := data.tx,
+         sentTxMerkleProof := bd.sentTxProof b.priv.sentTxLen data.tx.nonce,
+         transferWitness := transferWitness }
+
+/-- The witness is produced even when the account root and the new public state's
+account root disagree: this builder has no root-agreement admission condition. -/
+theorem single_withdrawal_witness_performs_no_root_agreement_check
+    (bd : BalanceDeps) (b : BalanceGen) (data : SingleWithdrawalData)
+    (update : UpdatePublicState) (account : Nat × AccountState) (transferWitness : TransferWitnessW)
+    (updateOk : getUpdatePublicStateWitness bd.block b.block b.balancePis.publicState.blockNumber
+      = .ok update)
+    (accountOk : getAccountStateForTx bd.block b.block b.channelId data.txTreeRoot = .ok account)
+    (transferOk : bd.mkTransferWitness data.tx.transferTreeRoot data.transfer data.transferIndex
+      data.transferMerkleProof = .ok transferWitness) :
+    singleWithdrawalWitness bd b data =
+      .ok { privateState := b.priv, updatePublicState := update, accountState := account.2,
+            txMerkleProof := data.txMerkleProof, txV2 := data.txV2, tx := data.tx,
+            sentTxMerkleProof := bd.sentTxProof b.priv.sentTxLen data.tx.nonce,
+            transferWitness := transferWitness } := by
+  simp only [singleWithdrawalWitness, updateOk, accountOk, transferOk, bind, Except.bind,
+    pure, Except.pure]
+
+/-- The sent-tx opening index is the WITHDRAWING tx's nonce, not the generator's
+current nonce. -/
+theorem single_withdrawal_opens_the_sent_tx_at_the_tx_nonce
+    (bd : BalanceDeps) (b : BalanceGen) (data : SingleWithdrawalData)
+    (w : SingleWithdrawalWitnessW) (accepted : singleWithdrawalWitness bd b data = .ok w) :
+    w.sentTxMerkleProof = bd.sentTxProof b.priv.sentTxLen data.tx.nonce ∧
+      w.privateState = b.priv ∧ w.tx = data.tx := by
+  simp only [singleWithdrawalWitness, bind_ok_iff, pure_ok_iff] at accepted
+  obtain ⟨update, _, accepted⟩ := accepted
+  obtain ⟨account, _, accepted⟩ := accepted
+  obtain ⟨transferWitness, _, stateEq⟩ := accepted
+  subst stateEq
+  exact ⟨rfl, rfl, rfl⟩
 
 
 end Zkp.Implementation.WitnessGenerators
