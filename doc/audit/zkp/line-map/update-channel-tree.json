@@ -1,0 +1,666 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/update_channel_tree.rs",
+  "source_sha256": "bc07c7d1a287a50da2bd40e4b31237df7ad9202a915b10a918859cdf0cb785d8",
+  "source_lines": 2569,
+  "module": "Zkp.Implementation.UpdateChannelTree",
+  "model": "doc/audit/zkp/Zkp/Implementation/UpdateChannelTree.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 55,
+      "status": "dependency-boundary",
+      "label": "crate and plonky2 imports",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Env"
+      ],
+      "theorems": [],
+      "note": "Every imported gadget (Poseidon/keccak hashing, Merkle proofs, falcon_sig::agg_list, poseidon_sig::list, RegevPk, the plonky2 CircuitBuilder API) enters the model only as an opaque callback field of Env. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 56,
+      "end": 70,
+      "status": "translated",
+      "label": "UpdateUserTreeError variants",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Category",
+        "Zkp.Implementation.UpdateChannelTree.Fault",
+        "Zkp.Implementation.UpdateChannelTree.Result",
+        "Zkp.Implementation.UpdateChannelTree.check"
+      ],
+      "theorems": [],
+      "note": "The model's fault type keeps a category plus a location string; the source's formatted messages are not reproduced verbatim."
+    },
+    {
+      "start": 71,
+      "end": 92,
+      "status": "translated",
+      "label": "UpdateUserPublicInputs fields",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Field-for-field; the doc comments describing the bp_sig_chain accumulator are the boundary text carried into the module header."
+    },
+    {
+      "start": 93,
+      "end": 157,
+      "status": "translated",
+      "label": "UpdateUserTree witness fields",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Witness",
+        "Zkp.Implementation.UpdateChannelTree.Slot",
+        "Zkp.Implementation.UpdateChannelTree.Block",
+        "Zkp.Implementation.UpdateChannelTree.ChannelLeaf",
+        "Zkp.Implementation.UpdateChannelTree.MemberLeaf",
+        "Zkp.Implementation.UpdateChannelTree.RegevPk",
+        "Zkp.Implementation.UpdateChannelTree.ChannelStateFields",
+        "Zkp.Implementation.UpdateChannelTree.TxV2",
+        "Zkp.Implementation.UpdateChannelTree.ChannelAction",
+        "Zkp.Implementation.UpdateChannelTree.MerklePath",
+        "Zkp.Implementation.UpdateChannelTree.maxChannelTokens"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.max_channel_tokens_pinned"
+      ],
+      "note": "The ten parallel per-block-slot vectors are collapsed into one list of Slot records; the ten-way length gate becomes one length check. This is a simplification of error SHAPE, not of behaviour."
+    },
+    {
+      "start": 158,
+      "end": 170,
+      "status": "translated",
+      "label": "channel_leaf_member_root: the member root is preserved",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeNewLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_leaf_preserves_member_root"
+      ],
+      "note": "The retired direct-MSU tombstone returns the previous root unchanged; the model bakes that into the leaf transition."
+    },
+    {
+      "start": 171,
+      "end": 246,
+      "status": "untranslated",
+      "label": "validate_member_set_delta (cfg(feature = \"deprecated-msu\"), deprecated)",
+      "declarations": [],
+      "theorems": [],
+      "note": "A feature-gated, deprecated tombstone for the retired direct member-set update. Not compiled in the release build and not modelled; the release refusal of the reserved action tag IS modelled (see the 1192-1202 span)."
+    },
+    {
+      "start": 247,
+      "end": 252,
+      "status": "non-executable",
+      "label": "impl header and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 253,
+      "end": 326,
+      "status": "translated",
+      "label": "check_n_of_n_witness: the native N-of-N witness restatement",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeCheckNOfN",
+        "Zkp.Implementation.UpdateChannelTree.nativeOccupancyCheck"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_n_of_n_facts",
+        "Zkp.Implementation.UpdateChannelTree.native_occupancy_is_exact",
+        "Zkp.Implementation.UpdateChannelTree.max_sig_cluster_pinned"
+      ],
+      "note": "Check order and error precedence follow the source. No signature is verified here, natively or in-circuit; the recomputed member root, the occupancy bounds and the Regev digest bind are what is checked."
+    },
+    {
+      "start": 327,
+      "end": 334,
+      "status": "translated",
+      "label": "to_public_inputs (the validating mirror prove runs)",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeToPublicInputs"
+      ],
+      "theorems": [],
+      "note": "Thin wrapper over compute_public_inputs with strict = true."
+    },
+    {
+      "start": 335,
+      "end": 355,
+      "status": "translated",
+      "label": "to_public_inputs_unchecked (cfg(test)): the same computation, no cross-checks",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeToPublicInputsUnchecked"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_unchecked_agrees_with_strict",
+        "Zkp.Implementation.UpdateChannelTree.native_checks_a_relax",
+        "Zkp.Implementation.UpdateChannelTree.native_step_relax",
+        "Zkp.Implementation.UpdateChannelTree.native_loop_relax"
+      ],
+      "note": "Source-gated on #[cfg(test)] but modelled because the source states a behavioural claim about it, which the linked theorem proves for the model."
+    },
+    {
+      "start": 356,
+      "end": 401,
+      "status": "translated",
+      "label": "length gates, block hash chain, member_leaves width, retired MSU wire",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeComputePublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_strict_rejects_retired_msu_wire"
+      ],
+      "note": "Block::hash_with_prev_hash is the opaque Env.blockHash callback; its key_ids length gate is modelled as a separate check."
+    },
+    {
+      "start": 402,
+      "end": 433,
+      "status": "translated",
+      "label": "running root and chain init; the folded (digest, signer_count, pk_list_digest) statement",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeSignerPks",
+        "Zkp.Implementation.UpdateChannelTree.nativeSignedDigest",
+        "Zkp.Implementation.UpdateChannelTree.nativeSigLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_sig_leaf_is_the_shared_agg_list_leaf"
+      ],
+      "note": "signing_digest, agg_pk_list_digest and agg_list_leaf are opaque callbacks; the model reproduces only that the digest takes channel_id and h2_tag from THIS block and that the pk list covers all MAX_SIG_CLUSTER slots."
+    },
+    {
+      "start": 434,
+      "end": 606,
+      "status": "translated",
+      "label": "the per-block-slot loop: openings, tx class rules, chain fold, leaf transition",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeStep",
+        "Zkp.Implementation.UpdateChannelTree.nativeLoop",
+        "Zkp.Implementation.UpdateChannelTree.nativeChecksA",
+        "Zkp.Implementation.UpdateChannelTree.nativeChecksB",
+        "Zkp.Implementation.UpdateChannelTree.nativeChecksC",
+        "Zkp.Implementation.UpdateChannelTree.nativeChainFold",
+        "Zkp.Implementation.UpdateChannelTree.nativeNewSendLeaf",
+        "Zkp.Implementation.UpdateChannelTree.nativeNewLeaf",
+        "Zkp.Implementation.UpdateChannelTree.nativeNewRoot",
+        "Zkp.Implementation.UpdateChannelTree.nativeSlotItems",
+        "Zkp.Implementation.UpdateChannelTree.nativeRootStep",
+        "Zkp.Implementation.UpdateChannelTree.nativeRootFold",
+        "Zkp.Implementation.UpdateChannelTree.channelIdLimit",
+        "Zkp.Implementation.UpdateChannelTree.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_step_root",
+        "Zkp.Implementation.UpdateChannelTree.native_loop_root",
+        "Zkp.Implementation.UpdateChannelTree.native_step_chain",
+        "Zkp.Implementation.UpdateChannelTree.native_rejects_member_set_update",
+        "Zkp.Implementation.UpdateChannelTree.native_checks_c_nonce",
+        "Zkp.Implementation.UpdateChannelTree.native_checks_c_binds_tx_to_block_root",
+        "Zkp.Implementation.UpdateChannelTree.native_checks_c_binds_action_to_source_channel",
+        "Zkp.Implementation.UpdateChannelTree.native_admits_inter_channel_send_and_close",
+        "Zkp.Implementation.UpdateChannelTree.native_leaf_index_increments",
+        "Zkp.Implementation.UpdateChannelTree.native_leaf_prev_becomes_this_block",
+        "Zkp.Implementation.UpdateChannelTree.native_leaf_transition_is_index_prev_send_only",
+        "Zkp.Implementation.UpdateChannelTree.native_root_step_uses_only_the_block_channel",
+        "Zkp.Implementation.UpdateChannelTree.native_send_leaf_records_block_tx_root",
+        "Zkp.Implementation.UpdateChannelTree.channel_id_limit_pinned"
+      ],
+      "note": "Merkle verify/get_root are the opaque Env.merkleRoot callback, so nothing here is a Merkle soundness claim. The tx class match, the source-channel bind and the MemberSetUpdate refusal are modelled exactly; destination_channel_id, tx_hash, seal and payload_hash are read by nothing."
+    },
+    {
+      "start": 607,
+      "end": 621,
+      "status": "translated",
+      "label": "the returned public inputs",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeComputePublicInputs",
+        "Zkp.Implementation.UpdateChannelTree.PublicInputs",
+        "Zkp.Implementation.UpdateChannelTree.exampleWitness",
+        "Zkp.Implementation.UpdateChannelTree.exampleSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.native_public_inputs_copy_block_fields",
+        "Zkp.Implementation.UpdateChannelTree.native_account_root_is_pure_fold",
+        "Zkp.Implementation.UpdateChannelTree.native_account_root_ignores_channel_state_fields",
+        "Zkp.Implementation.UpdateChannelTree.native_accepts_example_block",
+        "Zkp.Implementation.UpdateChannelTree.native_accepts_any_destination_channel",
+        "Zkp.Implementation.UpdateChannelTree.native_accepts_any_channel_state_version"
+      ],
+      "note": "The account root is recomputed by the loop and never read from a proof; the linked theorems show it is a pure fold that cannot see the channel-state fields."
+    },
+    {
+      "start": 622,
+      "end": 627,
+      "status": "translated",
+      "label": "UPDATE_ACCOUNT_PUBLIC_INPUTS_LEN",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.publicInputsLen",
+        "Zkp.Implementation.UpdateChannelTree.bytes32Len",
+        "Zkp.Implementation.UpdateChannelTree.u64Len",
+        "Zkp.Implementation.UpdateChannelTree.poseidonHashOutLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.public_inputs_len_pinned",
+        "Zkp.Implementation.UpdateChannelTree.bytes32_len_pinned",
+        "Zkp.Implementation.UpdateChannelTree.u64_len_pinned",
+        "Zkp.Implementation.UpdateChannelTree.poseidon_hash_out_len_pinned"
+      ],
+      "note": "Pinned as literals with the same arithmetic as the source constant."
+    },
+    {
+      "start": 628,
+      "end": 643,
+      "status": "translated",
+      "label": "UpdateUserPublicInputs::to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.publicInputWords",
+        "Zkp.Implementation.UpdateChannelTree.u64Words",
+        "Zkp.Implementation.UpdateChannelTree.Hash4",
+        "Zkp.Implementation.UpdateChannelTree.Bytes32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.public_input_words_length",
+        "Zkp.Implementation.UpdateChannelTree.hash4_words_length",
+        "Zkp.Implementation.UpdateChannelTree.u64_words_length"
+      ],
+      "note": "Field order reproduced exactly; U64::to_u64_vec becomes the two-limb split."
+    },
+    {
+      "start": 644,
+      "end": 647,
+      "status": "dependency-boundary",
+      "label": "commitment(): Poseidon over the public-input words",
+      "declarations": [],
+      "theorems": [],
+      "note": "PoseidonHashOut::hash_inputs_u64 is not modelled; no hash property is claimed anywhere."
+    },
+    {
+      "start": 648,
+      "end": 714,
+      "status": "translated",
+      "label": "UpdateUserPublicInputs::from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.publicInputsFromWords",
+        "Zkp.Implementation.UpdateChannelTree.takeU64",
+        "Zkp.Implementation.UpdateChannelTree.takeBytes32",
+        "Zkp.Implementation.UpdateChannelTree.takeHash4",
+        "Zkp.Implementation.UpdateChannelTree.blockNumberLimit",
+        "Zkp.Implementation.UpdateChannelTree.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.public_inputs_codec_round_trips",
+        "Zkp.Implementation.UpdateChannelTree.public_inputs_decoder_rejects_wrong_length",
+        "Zkp.Implementation.UpdateChannelTree.example_public_inputs_round_trip"
+      ],
+      "note": "Length gate first, then BlockNumber::new, then the cursor walk in source field order, with the u32-range gate of U32LimbTrait::from_u64_slice and the length-only gate of PoseidonHashOut::from_u64_slice."
+    },
+    {
+      "start": 715,
+      "end": 729,
+      "status": "dependency-boundary",
+      "label": "UpdateUserPublicInputsTarget fields",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "The model does not distinguish a plonky2 Target from its value; only the field layout is shared."
+    },
+    {
+      "start": 730,
+      "end": 758,
+      "status": "dependency-boundary",
+      "label": "UpdateUserPublicInputsTarget::new (virtual targets and range checks)",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Env"
+      ],
+      "theorems": [],
+      "note": "Builder allocation and range-check lowering are not modelled."
+    },
+    {
+      "start": 759,
+      "end": 774,
+      "status": "translated",
+      "label": "UpdateUserPublicInputsTarget::to_vec (the registered public-input order)",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.publicInputWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.public_input_words_length"
+      ],
+      "note": "Same order as to_u64_vec; this is the order register_public_inputs publishes."
+    },
+    {
+      "start": 775,
+      "end": 782,
+      "status": "dependency-boundary",
+      "label": "in-circuit commitment()",
+      "declarations": [],
+      "theorems": [],
+      "note": "In-circuit Poseidon is not modelled."
+    },
+    {
+      "start": 783,
+      "end": 838,
+      "status": "dependency-boundary",
+      "label": "UpdateUserPublicInputsTarget::from_slice",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.publicInputWords"
+      ],
+      "theorems": [],
+      "note": "Only the field ORDER is shared with the model; the target decoder's assert_eq on length and its absence of canonicity checks are not modelled."
+    },
+    {
+      "start": 839,
+      "end": 864,
+      "status": "dependency-boundary",
+      "label": "set_witness (witness-write effects)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Native witness-writing effects are outside the model."
+    },
+    {
+      "start": 865,
+      "end": 935,
+      "status": "dependency-boundary",
+      "label": "UpdateUserPublicInputsTarget::select",
+      "declarations": [],
+      "theorems": [],
+      "note": "plonky2 select lowering is a boundary; the model reads select as an if/then/else on the boolean."
+    },
+    {
+      "start": 936,
+      "end": 967,
+      "status": "translated",
+      "label": "UpdateUserTreeTarget fields",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.CircuitWitness",
+        "Zkp.Implementation.UpdateChannelTree.SlotT",
+        "Zkp.Implementation.UpdateChannelTree.TxV2T",
+        "Zkp.Implementation.UpdateChannelTree.ChannelActionT"
+      ],
+      "theorems": [],
+      "note": "tx_class and channel-action kind are free field elements in the circuit witness, not Rust enums - the model keeps that distinction."
+    },
+    {
+      "start": 968,
+      "end": 1024,
+      "status": "dependency-boundary",
+      "label": "UpdateUserTreeTarget::new prologue (target allocation, range checks, block hash chain)",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Env",
+        "Zkp.Implementation.UpdateChannelTree.channelTreeHeight",
+        "Zkp.Implementation.UpdateChannelTree.sendTreeHeight",
+        "Zkp.Implementation.UpdateChannelTree.txTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.channel_tree_height_pinned",
+        "Zkp.Implementation.UpdateChannelTree.send_tree_height_pinned",
+        "Zkp.Implementation.UpdateChannelTree.tx_tree_height_pinned",
+        "Zkp.Implementation.UpdateChannelTree.channel_tree_height_is_channel_id_bits"
+      ],
+      "note": "Builder allocation, the TX_TREE_HEIGHT index range checks and the in-circuit keccak block hash are opaque; only the tree-height constants are pinned."
+    },
+    {
+      "start": 1025,
+      "end": 1048,
+      "status": "translated",
+      "label": "the IMCH signing digest: channel_id and h2_tag come from THIS block",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.circuitSignedDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.circuit_signed_digest_is_bound_to_this_block"
+      ],
+      "note": "The digest itself is an opaque callback; what is modelled is that its channel id and h2_tag are the block's own targets, so a foreign or stale digest is a different value."
+    },
+    {
+      "start": 1049,
+      "end": 1091,
+      "status": "translated",
+      "label": "the signer set: thermometer, member leaves, recomputed root, folded statement",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.circuitIsSigner",
+        "Zkp.Implementation.UpdateChannelTree.circuitSigLeaf",
+        "Zkp.Implementation.UpdateChannelTree.memberTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.member_tree_height_is_log2_of_cluster",
+        "Zkp.Implementation.UpdateChannelTree.member_tree_height_pinned"
+      ],
+      "note": "compute_member_tree_root, agg_pk_list_digest and agg_list_leaf are shared opaque gadgets; the model calls the same callbacks the native mirror uses."
+    },
+    {
+      "start": 1092,
+      "end": 1112,
+      "status": "translated",
+      "label": "prev_bp_sig_chain, the computed any_sign flag, Regev digest constants",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.circuitAnySign",
+        "Zkp.Implementation.UpdateChannelTree.circuitChain",
+        "Zkp.Implementation.UpdateChannelTree.regevPkPoseidonDomain",
+        "Zkp.Implementation.UpdateChannelTree.regevN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.regev_domain_pinned",
+        "Zkp.Implementation.UpdateChannelTree.regev_n_pinned"
+      ],
+      "note": "any_sign is COMPUTED from the per-slot should_update flags, never witnessed; the model defines it that way."
+    },
+    {
+      "start": 1113,
+      "end": 1240,
+      "status": "translated",
+      "label": "per-slot gates: account opening, tx binding, nonce, class rules, action bind, MSU refusal, send opening, leaf update",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.circuitIsDummy",
+        "Zkp.Implementation.UpdateChannelTree.circuitShouldUpdate",
+        "Zkp.Implementation.UpdateChannelTree.circuitNewLeaf",
+        "Zkp.Implementation.UpdateChannelTree.circuitRootStep",
+        "Zkp.Implementation.UpdateChannelTree.circuitRootAfter",
+        "Zkp.Implementation.UpdateChannelTree.circuitAccountRoot",
+        "Zkp.Implementation.UpdateChannelTree.CircuitGates",
+        "Zkp.Implementation.UpdateChannelTree.memberSetUpdateKind",
+        "Zkp.Implementation.UpdateChannelTree.userTransferClass",
+        "Zkp.Implementation.UpdateChannelTree.channelActionClass",
+        "Zkp.Implementation.UpdateChannelTree.interChannelSendKind",
+        "Zkp.Implementation.UpdateChannelTree.channelCloseKind"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.circuit_leaf_index_increments",
+        "Zkp.Implementation.UpdateChannelTree.circuit_leaf_prev_becomes_this_block",
+        "Zkp.Implementation.UpdateChannelTree.circuit_leaf_preserves_member_root",
+        "Zkp.Implementation.UpdateChannelTree.circuit_root_step_uses_only_the_block_channel",
+        "Zkp.Implementation.UpdateChannelTree.circuit_account_root_ignores_channel_state_fields",
+        "Zkp.Implementation.UpdateChannelTree.circuit_account_root_ignores_prev_chain",
+        "Zkp.Implementation.UpdateChannelTree.circuit_rejects_member_set_update",
+        "Zkp.Implementation.UpdateChannelTree.member_set_update_kind_pinned"
+      ],
+      "note": "One CircuitGates field per source connection, on an ARBITRARY satisfying witness. conditional_assert_eq / is_equal / select / assert_zero are read as their boolean and integer relations; that lowering is a boundary."
+    },
+    {
+      "start": 1241,
+      "end": 1342,
+      "status": "translated",
+      "label": "N-of-N member-set binding and the single chain fold",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.CircuitGates",
+        "Zkp.Implementation.UpdateChannelTree.circuitChainStep",
+        "Zkp.Implementation.UpdateChannelTree.circuitChain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.circuit_signing_binds_registered_member_root",
+        "Zkp.Implementation.UpdateChannelTree.circuit_signing_requires_nonzero_tx_root",
+        "Zkp.Implementation.UpdateChannelTree.circuit_out_of_range_slot_cannot_sign",
+        "Zkp.Implementation.UpdateChannelTree.circuit_chain_step_folds_the_agg_list_leaf",
+        "Zkp.Implementation.UpdateChannelTree.circuit_chain_step_is_identity_on_a_non_updating_slot"
+      ],
+      "note": "The model reproduces the root connect, the active-slot requirement, the Regev digest bind and the fold. It does NOT claim any signature exists: the aggregate-list proof that discharges the folded statement lives in another circuit and is an undischarged boundary here."
+    },
+    {
+      "start": 1343,
+      "end": 1389,
+      "status": "translated",
+      "label": "block-level signer-set well-formedness gated on any_sign",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.CircuitGates",
+        "Zkp.Implementation.UpdateChannelTree.maxSigCluster"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.circuit_signer_count_between_two_and_cluster",
+        "Zkp.Implementation.UpdateChannelTree.circuit_occupancy_is_exact",
+        "Zkp.Implementation.UpdateChannelTree.circuit_non_signing_block_folds_nothing",
+        "Zkp.Implementation.UpdateChannelTree.max_sig_cluster_pinned"
+      ],
+      "note": "The 2..=MAX_SIG_CLUSTER range check and the two-directional occupancy gates, both conditioned on the computed any_sign."
+    },
+    {
+      "start": 1390,
+      "end": 1425,
+      "status": "translated",
+      "label": "public input assembly and the returned target struct",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.CircuitGates",
+        "Zkp.Implementation.UpdateChannelTree.exampleEnv",
+        "Zkp.Implementation.UpdateChannelTree.exampleCircuitWitness",
+        "Zkp.Implementation.UpdateChannelTree.exampleSlotT",
+        "Zkp.Implementation.UpdateChannelTree.exampleMemberLeaves",
+        "Zkp.Implementation.UpdateChannelTree.exampleBlock",
+        "Zkp.Implementation.UpdateChannelTree.examplePublicInputs",
+        "Zkp.Implementation.UpdateChannelTree.exampleFields",
+        "Zkp.Implementation.UpdateChannelTree.examplePrevLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UpdateChannelTree.circuit_gates_hold_for_example",
+        "Zkp.Implementation.UpdateChannelTree.circuit_leaves_action_payload_free",
+        "Zkp.Implementation.UpdateChannelTree.example_circuit_slot_updates",
+        "Zkp.Implementation.UpdateChannelTree.example_circuit_block_signs",
+        "Zkp.Implementation.UpdateChannelTree.example_circuit_slots"
+      ],
+      "note": "The public-input wiring is a CircuitGates field per output; the example witness makes the whole gate system non-vacuous."
+    },
+    {
+      "start": 1426,
+      "end": 1533,
+      "status": "dependency-boundary",
+      "label": "UpdateUserTreeTarget::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness-writing effects, including the member_leaves length assert and the deliberately short Regev zip, are outside the model."
+    },
+    {
+      "start": 1534,
+      "end": 1541,
+      "status": "translated",
+      "label": "UpdateUserCircuitError",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.Fault",
+        "Zkp.Implementation.UpdateChannelTree.Category"
+      ],
+      "theorems": [],
+      "note": "Modelled loosely as the same fault type; the proving failure variant has no model counterpart."
+    },
+    {
+      "start": 1542,
+      "end": 1606,
+      "status": "dependency-boundary",
+      "label": "UpdateUserCircuit: build, prove, prove_with_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.UpdateChannelTree.nativeToPublicInputs",
+        "Zkp.Implementation.UpdateChannelTree.nativeToPublicInputsUnchecked"
+      ],
+      "theorems": [],
+      "note": "Circuit building and proving are opaque. The model records only that prove runs the STRICT native mirror first and that the pub(crate) test entry point bypasses it."
+    },
+    {
+      "start": 1607,
+      "end": 2569,
+      "status": "test-only",
+      "label": "#[cfg(test)] module: fixtures, positive and negative cases",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read but not translated. The negative cases pin in-circuit constraints via to_public_inputs_unchecked; the model states the corresponding facts directly as theorems instead."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "merkleRoot",
+      "obligation": "Channel-, send-, tx- and channel-action Merkle path folds (proof.verify / get_root) are an opaque callback. No injectivity, binding or Merkle soundness property is assumed or proved; 'the witnessed leaf is the leaf at that index' rests on collision resistance of the unmodelled hash.",
+      "discharged": false
+    },
+    {
+      "name": "channelLeafHash / sendLeafHash / txV2Hash / txV2HashT / actionHash / actionHashT / memberLeafHash",
+      "obligation": "Poseidon leaf hashing (Leafable::hash) is opaque; the model never assumes distinct leaves have distinct hashes.",
+      "discharged": false
+    },
+    {
+      "name": "memberTreeRoot",
+      "obligation": "compute_member_tree_root (in-circuit) and MemberTree::push/get_root (native) are the SAME opaque callback in the model. Their agreement, and the claim that a duplicate pk_g is unrepresentable under the real Poseidon tree, are undischarged premises.",
+      "discharged": false
+    },
+    {
+      "name": "blockHash",
+      "obligation": "Block::hash_with_prev_hash (solidity_keccak256 over prev || channel_id || timestamp || key_ids || tx_tree_root || deposit_hash_chain || channel_reg_hash_chain) and its in-circuit twin are opaque and are not proved to agree.",
+      "discharged": false
+    },
+    {
+      "name": "signingDigest",
+      "obligation": "ChannelStateMessageFields::signing_digest is opaque. Its 139-limb preimage layout is modelled in Zkp.Implementation.BlockMessages, which is built but NOT a registered current module and is therefore deliberately not imported here; the interface is named, not consumed.",
+      "discharged": false
+    },
+    {
+      "name": "aggPkListDigest / aggListLeaf",
+      "obligation": "falcon_sig::agg_list gadgets are opaque. The folded tuple is reproduced structurally; nothing here proves that any Falcon signature exists, nor that signer_count counts distinct signers.",
+      "discharged": false
+    },
+    {
+      "name": "chainStep",
+      "obligation": "poseidon_sig::list::list_chain_step is opaque. The order-sensitivity and collision resistance of the accumulator are assumed, not proved.",
+      "discharged": false
+    },
+    {
+      "name": "aggregate-list recursive proof",
+      "obligation": "The statement folded into bp_sig_chain is discharged by a recursive aggregate-list proof consumed by the validity circuit, not by this file. Proof soundness and the C == final.bp_sig_chain check are entirely outside this model.",
+      "discharged": false
+    },
+    {
+      "name": "BP signature",
+      "obligation": "No block-producer signature is verified in this source file or in this model. Whatever authorises the block producer is enforced elsewhere (block posting / channel-reg chain), and is an undischarged premise here.",
+      "discharged": false
+    },
+    {
+      "name": "regevDigestOfCoeffs",
+      "obligation": "RegevPk::poseidon_digest and its in-circuit recompute over [IMRP, n, a.., b..] are one opaque callback; only the bp slot's digest is bound, the other MAX_SIG_CLUSTER-1 slots' digests ride on the member-root connect (design 'cost trap').",
+      "discharged": false
+    },
+    {
+      "name": "reduceToHashOut / bytes32OfHash / hashOfBytes32Native / hashOfBytes32Target",
+      "obligation": "Bytes32 <-> PoseidonHashOut repacking. The native try_into CAN fail on a non-canonical value while the in-circuit to_hash_out is a total repack; the model records the asymmetry but proves nothing about it.",
+      "discharged": false
+    },
+    {
+      "name": "field lowering",
+      "obligation": "is_equal, not, and, or, select, conditional_assert_eq, assert_zero, range_check, is_zero and lt_const_threshold are read as boolean and integer relations over Nat. Goldilocks field arithmetic, wraparound and the arithmetisation of these gadgets are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "native/target refinement",
+      "obligation": "The native mirror and the circuit are two independent Lean objects. Nothing proves the Rust native path and the plonky2 constraint system agree, nor that either matches this model.",
+      "discharged": false
+    },
+    {
+      "name": "single-fold soundness",
+      "obligation": "The source itself flags that bp_sig_chain folds at most one statement per block and ASSUMES exactly one channel-leaf transition per block. The model reproduces the per-slot fold but does not prove that at most one slot can update; that rests on the unmodelled Merkle binding of the running root at index channel_id.",
+      "discharged": false
+    },
+    {
+      "name": "fund accounting",
+      "obligation": "No fund quantity exists in the channel-tree leaf, so this file enforces NO conservation of channel funds across a block, no cross-channel debit/credit pairing, and no destination-channel credit. Those obligations belong entirely to other circuits (the channel state-update verifier and the close/settlement path) and are undischarged here.",
+      "discharged": false
+    },
+    {
+      "name": "witness-write and proving effects",
+      "obligation": "set_witness, builder.build and data.prove are opaque; completeness of the honest prover path is not modelled.",
+      "discharged": false
+    }
+  ]
+}
