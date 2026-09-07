@@ -316,10 +316,9 @@ def LeafHashAgrees (K : Keccak) (e : RollupValue.Environment) : Prop :=
 /-- BOUNDARY: the circuit's 23-word keccak preimage and the contract model's
 abstract `HashInput.withdrawalPis` denote the same function. -/
 def SolidityPisHashAgrees (K : Keccak) (e : RollupValue.Environment) : Prop :=
-  ∀ chain prover root block,
-    K (bytes32Limbs chain ++ addressLimbs prover ++ bytes32Limbs root ++
-        blockNumberU32Limbs block)
-      = e.hash (.withdrawalPis chain prover root block)
+  ∀ (chain : Words8) (prover : Nat) (root : Words8) (block : Nat),
+    K (chain.words ++ addressLimbs prover ++ root.words ++ blockNumberU32Limbs block)
+      = e.hash (.withdrawalPis chain.value prover root.value block)
 
 theorem fold_chain_matches_rollup_fold (K : Keccak) (e : RollupValue.Environment)
     (agree : LeafHashAgrees K e) :
@@ -553,6 +552,7 @@ theorem native_step_initial_seeds_zero (env : VerifierEnv) (w : StepWitness)
     prevChainHash env w = .ok initialHashChain := by
   unfold prevChainHash
   rw [initial]
+  rfl
 
 /-- A non-initial step verifies the previous chain proof AND forces the previous
 statement's public state to equal this step's `update_public_state.new`. -/
@@ -574,7 +574,7 @@ theorem native_step_non_initial_pins_prev_state (env : VerifierEnv) (w : StepWit
 The recursive structure is modeled at the STATEMENT level: one `Link` per step,
 carrying the previous statement it claims, the leaf it folds, its public-state
 transition and the statement it publishes. Proof soundness is NOT assumed; the
-theorems below are about the constraint system's layout only. -/
+results below are about the constraint system's layout only. -/
 
 structure Link where
   prev : Option StepPublicInputs
@@ -582,10 +582,13 @@ structure Link where
   update : UpdatePublicState.Update
   out : StepPublicInputs
 
-def Link.prevHash (l : Link) : Nat :=
-  match l.prev with
+/-- The previous chain hash a step folds onto: `Bytes32::default()` for the
+initial step, the predecessor's published hash otherwise. -/
+def optHash : Option StepPublicInputs → Nat
   | none => initialHashChain
   | some p => p.withdrawalHashChain.value
+
+def Link.prevHash (l : Link) : Nat := optHash l.prev
 
 /-- The gate equations the step imposes on its OWN output, as emitted by
 `WithdrawalStepTarget::new`. Note the deliberate asymmetry: on the initial step
@@ -598,105 +601,109 @@ structure LinkValid (K : Keccak) (l : Link) : Prop where
   newMatchesPrev : ∀ p, l.prev = some p → p.publicState = l.update.newState
   vdMatchesPrev : ∀ p, l.prev = some p → l.out.vd = p.vd
 
-/-- `Linked start ls fin`: consecutive links consume the previous statement. -/
+/-- `Linked start ls fin`: consecutive links consume the previous statement.
+`start = none` is a chain that begins at its own initial step. -/
 def Linked : Option StepPublicInputs → List Link → Option StepPublicInputs → Prop
   | start, [], fin => fin = start
   | start, l :: ls, fin => l.prev = start ∧ Linked (some l.out) ls fin
 
-/-- Every step of a linked, locally valid chain publishes the SAME public state,
-and every step's `update_public_state.new` equals it. This is the WDR-CRIT-001
-cascade: one canonical target state for the whole batch. -/
+/-- WDR-CRIT-001 cascade: every step of a linked, locally valid chain publishes
+the SAME public state as the final statement, and every step's
+`update_public_state.new` equals it. One canonical target state per batch. -/
 theorem chain_states_constant (K : Keccak) :
-    ∀ (ls : List Link) (start fin : StepPublicInputs),
-      Linked (some start) ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
-      fin.publicState = start.publicState ∧
-        ∀ l ∈ ls, l.out.publicState = start.publicState ∧
-          l.update.newState = start.publicState := by
+    ∀ (ls : List Link) (start : Option StepPublicInputs) (fin : StepPublicInputs),
+      Linked start ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
+      (∀ p, start = some p → p.publicState = fin.publicState) ∧
+        ∀ l ∈ ls, l.out.publicState = fin.publicState ∧
+          l.update.newState = fin.publicState := by
   intro ls
   induction ls with
   | nil =>
     intro start fin linked _
-    cases linked
-    exact ⟨rfl, by intro l hl; cases hl⟩
+    subst linked
+    exact ⟨by intro p h; rw [Option.some.inj h], by intro l hl; cases hl⟩
   | cons l ls ih =>
     intro start fin linked valid
     obtain ⟨head, rest⟩ := linked
     have hl : LinkValid K l := valid l (List.mem_cons_self _ _)
-    have hstate : l.out.publicState = start.publicState := by
-      have := hl.newMatchesPrev start head
-      rw [hl.outState, this]
-    obtain ⟨hfin, hall⟩ := ih l.out fin rest (fun x hx => valid x (List.mem_cons_of_mem _ hx))
-    refine ⟨by rw [hfin, hstate], ?_⟩
-    intro x hx
-    rcases List.mem_cons.mp hx with rfl | hx
-    · exact ⟨hstate, by rw [← hl.outState]; exact hstate⟩
-    · obtain ⟨h1, h2⟩ := hall x hx
-      exact ⟨by rw [h1, hstate], by rw [h2, hstate]⟩
+    obtain ⟨hstart, hall⟩ := ih (some l.out) fin rest
+      (fun x hx => valid x (List.mem_cons_of_mem _ hx))
+    have hout : l.out.publicState = fin.publicState := hstart l.out rfl
+    have hnew : l.update.newState = fin.publicState := by rw [← hl.outState]; exact hout
+    refine ⟨?_, ?_⟩
+    · intro p h
+      rw [← head] at h
+      rw [hl.newMatchesPrev p h, hnew]
+    · intro x hx
+      rcases List.mem_cons.mp hx with rfl | hx
+      · exact ⟨hout, hnew⟩
+      · exact hall x hx
 
 /-- A linked, locally valid chain publishes exactly the keccak fold of its
 leaves, provided digests are canonical 256-bit values (so the `Bytes32`
 re-packing between steps is the identity). -/
 theorem chain_hash_is_leaf_fold (K : Keccak) (canonical : KeccakCanonical K) :
-    ∀ (ls : List Link) (start fin : StepPublicInputs),
-      Linked (some start) ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
+    ∀ (ls : List Link) (start : Option StepPublicInputs) (fin : StepPublicInputs),
+      Linked start ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
       fin.withdrawalHashChain.value
-        = foldChain K start.withdrawalHashChain.value (ls.map Link.withdrawal) := by
+        = foldChain K (optHash start) (ls.map Link.withdrawal) := by
   intro ls
   induction ls with
   | nil =>
     intro start fin linked _
-    have hf : fin = start := Option.some.inj linked
-    subst hf
-    exact (fold_chain_nil K fin.withdrawalHashChain.value).symm
+    subst linked
+    exact (fold_chain_nil K (optHash (some fin))).symm
   | cons l ls ih =>
     intro start fin linked valid
     obtain ⟨head, rest⟩ := linked
     have hl : LinkValid K l := valid l (List.mem_cons_self _ _)
-    have hprev : l.prevHash = start.withdrawalHashChain.value := by
-      simp [Link.prevHash, head]
+    have hprev : l.prevHash = optHash start := by rw [Link.prevHash, head]
     have hout : l.out.withdrawalHashChain.value
-        = hashWithPrevHash K start.withdrawalHashChain.value l.withdrawal := by
+        = hashWithPrevHash K (optHash start) l.withdrawal := by
       rw [hl.outHash, ← hprev]
       exact bytes32_of_value_of_lt _ (canonical _)
     rw [List.map_cons, fold_chain_cons, ← hout]
-    exact ih l.out fin rest (fun x hx => valid x (List.mem_cons_of_mem _ hx))
+    exact ih (some l.out) fin rest (fun x hx => valid x (List.mem_cons_of_mem _ hx))
 
 /-- All statements in a linked chain carry the same verifier data. Together with
 the wrapper's `constant_verifier_data` anchor (`WrapperGates.cyclicVdAnchor`),
-this pins every intermediate step to the genuine chain circuit. The INITIAL
-step's own vd word is unconstrained in isolation; it is pinned only through its
-successor. -/
+this pins every step to the genuine chain circuit. The INITIAL step's own vd
+word is unconstrained in isolation; it is pinned only through its successors. -/
 theorem chain_vd_constant (K : Keccak) :
-    ∀ (ls : List Link) (start fin : StepPublicInputs),
-      Linked (some start) ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
-      fin.vd = start.vd ∧ ∀ l ∈ ls, l.out.vd = start.vd := by
+    ∀ (ls : List Link) (start : Option StepPublicInputs) (fin : StepPublicInputs),
+      Linked start ls (some fin) → (∀ l ∈ ls, LinkValid K l) →
+      (∀ p, start = some p → p.vd = fin.vd) ∧ ∀ l ∈ ls, l.out.vd = fin.vd := by
   intro ls
   induction ls with
   | nil =>
     intro start fin linked _
-    cases linked
-    exact ⟨rfl, by intro l hl; cases hl⟩
+    subst linked
+    exact ⟨by intro p h; rw [Option.some.inj h], by intro l hl; cases hl⟩
   | cons l ls ih =>
     intro start fin linked valid
     obtain ⟨head, rest⟩ := linked
     have hl : LinkValid K l := valid l (List.mem_cons_self _ _)
-    have hvd : l.out.vd = start.vd := hl.vdMatchesPrev start head
-    obtain ⟨hfin, hall⟩ := ih l.out fin rest (fun x hx => valid x (List.mem_cons_of_mem _ hx))
-    refine ⟨by rw [hfin, hvd], ?_⟩
-    intro x hx
-    rcases List.mem_cons.mp hx with rfl | hx
-    · exact hvd
-    · rw [hall x hx, hvd]
+    obtain ⟨hstart, hall⟩ := ih (some l.out) fin rest
+      (fun x hx => valid x (List.mem_cons_of_mem _ hx))
+    have hout : l.out.vd = fin.vd := hstart l.out rfl
+    refine ⟨?_, ?_⟩
+    · intro p h
+      rw [← head] at h
+      rw [← hl.vdMatchesPrev p h, hout]
+    · intro x hx
+      rcases List.mem_cons.mp hx with rfl | hx
+      · exact hout
+      · exact hall x hx
 
-/-- Anchoring the FINAL statement's verifier data (what the wrapper's
+/-- Anchoring the FINAL statement's verifier data (exactly what the wrapper's
 `add_proof_target_and_verify_cyclic` does) pins every step's carried vd. -/
-theorem chain_vd_anchored (K : Keccak) (ls : List Link) (start fin : StepPublicInputs)
-    (anchor : List Nat) (linked : Linked (some start) ls (some fin))
+theorem chain_vd_anchored (K : Keccak) (ls : List Link) (start : Option StepPublicInputs)
+    (fin : StepPublicInputs) (anchor : List Nat) (linked : Linked start ls (some fin))
     (valid : ∀ l ∈ ls, LinkValid K l) (anchored : fin.vd = anchor) :
-    start.vd = anchor ∧ ∀ l ∈ ls, l.out.vd = anchor := by
-  obtain ⟨hfin, hall⟩ := chain_vd_constant K ls start fin linked valid
-  have hstart : start.vd = anchor := by rw [← anchored, hfin]
-  exact ⟨hstart, fun l hl => by rw [hall l hl, hstart]⟩
+    ∀ l ∈ ls, l.out.vd = anchor := by
+  obtain ⟨-, hall⟩ := chain_vd_constant K ls start fin linked valid
+  intro l hl
+  rw [hall l hl, anchored]
 
 /-! ## Arbitrary satisfying witness for the step target (withdrawal_step.rs 317-406)
 
@@ -782,7 +789,7 @@ theorem gates_of_native_step (env : VerifierEnv) (w : StepWitness) (out : StepPu
            !UpdatePublicState.statesEqual w.update.newState w.update.oldState,
            UpdatePublicState.expectedOldRoot env.getRoot w.update⟩
       , chainVd := env.chainVd, out := out } := by
-  obtain ⟨single', prevHash, update, _, decoded', matched, prevOk, final⟩ :=
+  obtain ⟨single', prevHash, -, -, decoded', matched, prevOk, final⟩ :=
     native_step_success env w out accepted
   have hsingle : single = single' := by
     rw [decoded] at decoded'; injection decoded'
@@ -915,8 +922,10 @@ theorem from_u64_slice_roundtrip (p : PublicInputs)
     forall_eq_or_imp, forall_eq] at pisCanonical extCanonical
   obtain ⟨h0, h1, h2, h3, h4, h5, h6, h7⟩ := pisCanonical
   obtain ⟨g0, g1, g2, g3, g4, g5, g6, g7⟩ := extCanonical
+  dsimp only at masked block
   simp [PublicInputs.toU64Vec, Words8.words, fromU64Slice, require, decodeBytes32,
     firstOutOfRange, Words8.read, bind, Except.bind, pure, Except.pure,
+    finalPublicInputsLen, bytes32Len, List.take, List.drop,
     Nat.not_le.mpr h0, Nat.not_le.mpr h1, Nat.not_le.mpr h2, Nat.not_le.mpr h3,
     Nat.not_le.mpr h4, Nat.not_le.mpr h5, Nat.not_le.mpr h6, Nat.not_le.mpr h7,
     Nat.not_le.mpr g0, Nat.not_le.mpr g1, Nat.not_le.mpr g2, Nat.not_le.mpr g3,
@@ -952,7 +961,7 @@ structure WrapperGates (K : Keccak) (P : Poseidon) (anchor : List Nat)
       w.out.blockNumber⟩
 
 theorem wrapper_registers_seventeen_words (K : Keccak) (P : Poseidon) (anchor : List Nat)
-    (w : WrapperWitness) (gates : WrapperGates K P anchor w) :
+    (w : WrapperWitness) (_gates : WrapperGates K P anchor w) :
     w.out.toU64Vec.length = finalPublicInputsLen := rfl
 
 theorem wrapper_block_number_is_chain_block_number (K : Keccak) (P : Poseidon)
@@ -1064,13 +1073,12 @@ theorem circuit_layout_matches_rollup_verifier
 `ws.foldl (foldWithdrawalLeaf e) 0` over the chain's leaves. -/
 theorem chain_hash_matches_rollup_fold (K : Keccak) (e : RollupValue.Environment)
     (canonical : KeccakCanonical K) (leafAgree : LeafHashAgrees K e)
-    (ls : List Link) (start fin : StepPublicInputs)
-    (seeded : start.withdrawalHashChain.value = initialHashChain)
-    (linked : Linked (some start) ls (some fin)) (valid : ∀ l ∈ ls, LinkValid K l) :
+    (ls : List Link) (fin : StepPublicInputs)
+    (linked : Linked none ls (some fin)) (valid : ∀ l ∈ ls, LinkValid K l) :
     fin.withdrawalHashChain.value
       = ((ls.map Link.withdrawal).map toRollupWithdrawal).foldl
           (RollupValue.foldWithdrawalLeaf e) 0 := by
-  rw [chain_hash_is_leaf_fold K canonical ls start fin linked valid, seeded]
+  rw [chain_hash_is_leaf_fold K canonical ls none fin linked valid]
   exact fold_chain_from_zero_matches_rollup K e leafAgree _
 
 /-! ## Named boundaries that stay undischarged -/
@@ -1139,7 +1147,7 @@ def sampleWitness : StepWitness :=
   , singleWithdrawalProof := ⟨sampleSinglePis⟩
   , update := sampleUpdate }
 
-/-- A concrete initial step is admitted, publishes `update.new` and seeds the
+/-- A concrete initial step is accepted, publishes `update.new` and seeds the
 chain at zero. -/
 theorem sample_step_accepted :
     stepToPublicInputs sampleEnv sampleWitness
@@ -1148,5 +1156,89 @@ theorem sample_step_accepted :
             , publicState := sampleState
             , vd := [1, 2, 3, 4] } := by
   rfl
+
+/-- The concrete step also satisfies the local gate set: `StepGates` is not
+vacuous. -/
+def sampleLink : Link :=
+  { prev := none
+  , withdrawal := sampleWithdrawal
+  , update := sampleUpdate
+  , out := { withdrawalHashChain :=
+               bytes32Of (hashWithPrevHash sampleKeccak initialHashChain sampleWithdrawal)
+           , publicState := sampleState
+           , vd := [1, 2, 3, 4] } }
+
+set_option maxRecDepth 40000 in
+theorem sample_link_valid : LinkValid sampleKeccak sampleLink := by
+  refine ⟨rfl, rfl, ?_, ?_⟩ <;> (intro p h; simp [sampleLink] at h)
+
+theorem sample_chain_linked : Linked none [sampleLink] (some sampleLink.out) :=
+  ⟨rfl, rfl⟩
+
+/-- Instantiating the chain theorems on the concrete one-step chain. -/
+theorem sample_chain_hash_is_fold :
+    sampleLink.out.withdrawalHashChain.value
+      = foldChain sampleKeccak initialHashChain [sampleWithdrawal] := by
+  refine chain_hash_is_leaf_fold sampleKeccak sample_keccak_canonical [sampleLink] none
+    sampleLink.out sample_chain_linked ?_
+  intro l hl
+  rcases List.mem_cons.mp hl with rfl | hl
+  · exact sample_link_valid
+  · cases hl
+
+/-! ### Final 17-word decoder examples -/
+
+def samplePisHash : Words8 := ⟨5, 1, 2, 3, 4, 5, 6, 7⟩
+def sampleExtCommitment : Words8 := ⟨9, 8, 7, 6, 5, 4, 3, 2⟩
+def samplePublicInputs : PublicInputs := ⟨samplePisHash, sampleExtCommitment, 42⟩
+
+theorem sample_final_words :
+    samplePublicInputs.toU64Vec = [5, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2, 42] := rfl
+
+theorem sample_decoder_accepted :
+    fromU64Slice [5, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2, 42]
+      = .ok samplePublicInputs := by
+  rfl
+
+theorem sample_decoder_rejects_short :
+    fromU64Slice [5, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2]
+      = .error (.invalidLength 17 16) := by
+  rfl
+
+/-- A pis-hash top limb above `2^29` cannot come out of `remove_3bits`. -/
+theorem sample_decoder_rejects_unmasked_top_limb :
+    fromU64Slice [2 ^ 29, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2, 42]
+      = .error (.maskedLimbTooLarge (2 ^ 29)) := by
+  rfl
+
+/-- A block number at or above `2^63` cannot come out of the 63-bit range check. -/
+theorem sample_decoder_rejects_wide_block_number :
+    fromU64Slice [5, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2, 2 ^ 63]
+      = .error (.blockNumberOverflow (2 ^ 63)) := by
+  rfl
+
+/-! ### Wrapper example -/
+
+def sampleExt : ExtendedPublicState :=
+  ⟨sampleState, Words8.zero, Words8.zero, 0, Words8.zero, Words8.zero⟩
+
+def samplePoseidon : Poseidon := fun _ => sampleExtCommitment
+
+def sampleWrapper : WrapperWitness :=
+  { chainPis := sampleLink.out
+  , ext := sampleExt
+  , prover := 0xabcd
+  , out := { pisHash := ProofPreimage.hash sampleKeccak
+               ⟨sampleLink.out.withdrawalHashChain, 0xabcd, sampleExtCommitment, 7⟩
+           , extCommitment := sampleExtCommitment
+           , blockNumber := 7 } }
+
+set_option maxRecDepth 40000 in
+/-- `WrapperGates` is satisfiable: the concrete wrapper witness meets every local
+gate, including the 63-bit block-number range check. -/
+theorem sample_wrapper_gates :
+    WrapperGates sampleKeccak samplePoseidon [1, 2, 3, 4] sampleWrapper := by
+  refine ⟨rfl, rfl, rfl, rfl, ?_, rfl⟩
+  decide
 
 end Zkp.Implementation.WithdrawalChain

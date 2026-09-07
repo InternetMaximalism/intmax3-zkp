@@ -267,7 +267,7 @@ theorem map_upto_congr {α : Type} (n : Nat) (f g : Nat → α) (h : ∀ i, i < 
     simp only [upto, List.map_append, List.map_cons, List.map_nil,
       ih (fun i hi => h i (by omega)), h k (by omega)]
 
-theorem getD_map {α β : Type} [Inhabited α] (l : List α) (f : α → β) (d : α) (i : Nat)
+theorem getD_map {α β : Type} (l : List α) (f : α → β) (d : α) (i : Nat)
     (hi : i < l.length) : (l.map f).getD i (f d) = f (l.getD i d) := by
   induction l generalizing i with
   | nil => cases hi
@@ -829,15 +829,18 @@ def nativeMemberRoot (e : Environment) (r : Record) : Hash4 :=
     if i < r.memberCount + r.delegateCount then memberLeafHash e (r.slot i).toMember
     else emptyMemberLeafHash e))
 
+def parsePrev (cap : Nat) (raw : List Nat) : Except StepError PublicInputs :=
+  match PublicInputs.fromU64Slice cap raw with
+  | .ok v => .ok v
+  | .error err => .error (.publicInputsError err)
+
 def StepWitness.prevPis (cap : Nat) (chainVd : List Nat) (w : StepWitness) :
     Except StepError PublicInputs :=
   match w.initialValue, w.prevProof with
   | some (chain, root, count), _ =>
       .ok ⟨chain, root, count, chain, root, count, w.blockNumber, chainVd⟩
   | none, some raw => do
-      let pis ← match PublicInputs.fromU64Slice cap raw with
-        | .ok v => .ok v
-        | .error err => .error (.publicInputsError err)
+      let pis ← parsePrev cap raw
       check (pis.blockNumber = w.blockNumber) (.blockNumberMismatch pis.blockNumber w.blockNumber)
       pure pis
   | none, none => .error (.invalidInput "Exactly one input must be provided")
@@ -933,7 +936,7 @@ theorem to_public_inputs_enforces_unregistered_leaf (e : Environment) (cap : Nat
 theorem prev_pis_requires_matching_block_number (cap : Nat) (chainVd : List Nat)
     (w : StepWitness) (raw : List Nat) (pis prev : PublicInputs)
     (hi : w.initialValue = none) (hp : w.prevProof = some raw)
-    (hparse : PublicInputs.fromU64Slice cap raw = .ok pis)
+    (hparse : parsePrev cap raw = .ok pis)
     (h : w.prevPis cap chainVd = .ok prev) : pis.blockNumber = w.blockNumber ∧ prev = pis := by
   simp only [StepWitness.prevPis, hi, hp, hparse, bind_ok_iff, unit_bind_ok_iff, exists_unit,
     check_ok_iff, pure_ok_iff, Except.ok.injEq] at h
@@ -963,5 +966,630 @@ theorem to_public_inputs_increments_count (e : Environment) (cap : Nat) (chainVd
 theorem validated_record_roundtrips (r : Record) (h : r.validate = .ok ())
     (i : Nat) (hi : i < maxSigCluster) : (r.slot i).toMember.regEntry = r.slot i :=
   reg_entry_roundtrip _ (validate_all_slots_canonical r h i hi)
+
+/-! ## Arbitrary satisfying witnesses: the gate equations of `ChannelRegStepTarget::new` -/
+
+/-- `lt_const_threshold i c = Σ_{t = i+1..MAX_SIG_CLUSTER} [c = t]` (the source's unrolled sum of
+    `is_equal` bits, wrapped as a `BoolTarget` with an explicit `assert_bool`). -/
+def ltConstThreshold (i c : Nat) : Nat :=
+  ((((upto (maxSigCluster + 1)).filter (fun t => decide (i < t))).map
+    (fun t => if c = t then 1 else 0)).foldl (· + ·) 0)
+
+/-- The thermometer mask is exactly `i < active_count`, and is 0/1, for every `active_count` the
+    range checks allow (`[2, MAX_SIG_CLUSTER]`). Kernel-checked over the whole finite domain. -/
+theorem lt_const_threshold_correct :
+    ∀ i ∈ upto maxSigCluster, ∀ c ∈ upto (maxSigCluster + 1), minMemberCount ≤ c →
+      ltConstThreshold i c = (if i < c then 1 else 0) := by decide
+
+theorem lt_const_threshold_is_boolean :
+    ∀ i ∈ upto maxSigCluster, ∀ c ∈ upto (maxSigCluster + 1),
+      ltConstThreshold i c = 0 ∨ ltConstThreshold i c = 1 := by decide
+
+/-- The witnessed targets of one step. `members` are the 8 slots witnessed ONCE as Poseidon
+    values (`member_pk_ges` / `member_pk_bs` / `member_regev_pk_digests`) plus the recipient limbs. -/
+structure StepInputs where
+  isInitial : Bool
+  initialChain : Words8
+  initialRoot : Hash4
+  initialCount : Nat
+  prevPis : PublicInputs
+  channelId : Nat
+  bpSlot : Nat
+  memberCount : Nat
+  delegateCount : Nat
+  members : List MemberEntry
+  siblings : List Hash4
+  blockNumber : Nat
+  chainVd : List Nat
+  out : PublicInputs
+
+def StepInputs.slot (x : StepInputs) (i : Nat) : MemberEntry := x.members.getD i MemberEntry.zero
+def StepInputs.activeCount (x : StepInputs) : Nat := x.memberCount + x.delegateCount
+
+/-- `Bytes32Target::select(is_initial, initial, prev.channel_reg_hash_chain)` and friends. -/
+def StepInputs.prevChain (x : StepInputs) : Words8 :=
+  if x.isInitial then x.initialChain else x.prevPis.channelRegHashChain
+def StepInputs.prevRoot (x : StepInputs) : Hash4 :=
+  if x.isInitial then x.initialRoot else x.prevPis.channelTreeRoot
+def StepInputs.prevCount (x : StepInputs) : Nat :=
+  if x.isInitial then x.initialCount else x.prevPis.channelRegCount
+def StepInputs.selectedInitialChain (x : StepInputs) : Words8 :=
+  if x.isInitial then x.initialChain else x.prevPis.initialChannelRegHashChain
+def StepInputs.selectedInitialRoot (x : StepInputs) : Hash4 :=
+  if x.isInitial then x.initialRoot else x.prevPis.initialChannelTreeRoot
+def StepInputs.selectedInitialCount (x : StepInputs) : Nat :=
+  if x.isInitial then x.initialCount else x.prevPis.initialChannelRegCount
+
+/-- The registration record the keccak preimage commits to: the header targets plus the CANONICAL
+    32-byte re-encoding of the witnessed Poseidon identities (R2: same targets, both consumers). -/
+def StepInputs.record (x : StepInputs) : Record :=
+  recordOfMembers x.channelId x.bpSlot x.memberCount x.delegateCount x.members
+
+/-- The local gate equations of `ChannelRegStepTarget::new`. Everything here is a constraint the
+    source actually emits; nothing about proof soundness or hashing is assumed. -/
+structure CircuitGates (e : Environment) (cap : Nat) (x : StepInputs) : Prop where
+  /-- fixed-size arrays / gadget heights, fixed at build time -/
+  memberSlots : x.members.length = maxSigCluster
+  siblingsHeight : x.siblings.length = channelTreeHeight
+  vdLen : x.chainVd.length = vdVecLen cap
+  /-- `from_pis` of the previous chain proof reads `CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN + vd` limbs -/
+  prevWidths : x.prevPis.Widths cap
+  /-- `ChannelIdTarget::new(builder, true)`: 32-bit range check -/
+  channelIdRange : x.channelId < limbBase
+  /-- `range_check(bp_member_slot, 32)`, `range_check(member_count, 32)`, `range_check(delegate_count, 32)` -/
+  bpSlotRange : x.bpSlot < limbBase
+  memberCountRange : x.memberCount < limbBase
+  delegateCountRange : x.delegateCount < limbBase
+  /-- `Bytes32Target::new(builder, true)` / `U63Target::new(builder, true)` on the initial values -/
+  initialChainWords : CheckedWords x.initialChain.words
+  initialCountRange : x.initialCount < u63Limit
+  blockNumberRange : x.blockNumber < u63Limit
+  /-- `AddressTarget::new(builder, true)`: the recipient limbs are 32-bit, and NOTHING else -/
+  recipientWords : ∀ i, i < maxSigCluster → CheckedWords (x.slot i).recipient.words
+  /-- Goldilocks range of the witnessed identity elements (`FieldAndGadgetLowering`) -/
+  identityFields : ∀ i, i < maxSigCluster →
+    (x.slot i).pkG.canonicalField ∧ (x.slot i).pkB.canonicalField ∧ (x.slot i).regev.canonicalField
+  /-- `builder.assert_zero(delegate_count)`: cosigner-only L1 registration (Option B) -/
+  delegateZero : x.delegateCount = 0
+  /-- `range_check(member_count - 2, 4)` -/
+  memberCountLower : minMemberCount ≤ x.memberCount
+  /-- `range_check(MAX_SIG_CLUSTER - member_count, 4)` -/
+  memberCountUpper : x.memberCount ≤ maxSigCluster
+  /-- `range_check(MAX_SIG_CLUSTER - active_count, 4)` (retained redundant bound) -/
+  activeUpper : x.activeCount ≤ maxSigCluster
+  /-- `range_check(member_count - 1 - bp_member_slot, 4)` -/
+  bpSlotLtMemberCount : x.bpSlot < x.memberCount
+  /-- `conditional_assert_eq(.., zero_hash, not_active)` on the three identity components -/
+  paddingEmpty : ∀ i, x.activeCount ≤ i → i < maxSigCluster →
+    (x.slot i).pkG = Hash4.zero ∧ (x.slot i).pkB = Hash4.zero ∧ (x.slot i).regev = Hash4.zero
+  /-- `conditional_assert_eq(not_initial, prev_pis.block_number, block_number)` -/
+  blockNumberMatch : x.isInitial = false → x.prevPis.blockNumber = x.blockNumber
+  /-- `conditionally_connect_vd(not_initial, prev_pis.vd, channel_reg_chain_vd)` -/
+  vdConnected : x.isInitial = false → x.chainVd = x.prevPis.vd
+  /-- `conditionally_verify_proof(not_initial, prev_proof, prev_pis.vd, cd)`: the previous proof is
+      verified under the verifier data DECLARED IN ITS OWN public inputs -/
+  prevProofVerified : x.isInitial = false → e.proofAccepted x.prevPis.vd x.prevPis.toU64Vec = true
+  /-- R5: `channel_merkle_proof.verify(default_leaf, channel_id, prev_tree_root)` -/
+  unregisteredGuard :
+    merkleRoot e (channelLeafHash e (defaultChannelLeaf e)) x.channelId x.siblings = x.prevRoot
+  outInitialChain : x.out.initialChannelRegHashChain = x.selectedInitialChain
+  outInitialRoot : x.out.initialChannelTreeRoot = x.selectedInitialRoot
+  outInitialCount : x.out.initialChannelRegCount = x.selectedInitialCount
+  /-- `channel_reg_hash_with_prev_hash_circuit(prev_hash, channel_id, bp, mc, dc, entries)` -/
+  outChain : x.out.channelRegHashChain = e.keccakWords (foldWords x.prevChain x.record)
+  /-- `channel_merkle_proof.get_root(new_leaf, channel_id)` with the in-circuit member root -/
+  outRoot : x.out.channelTreeRoot =
+    merkleRoot e (channelLeafHash e (registeredChannelLeaf e (memberPubkeysRoot e x.members)))
+      x.channelId x.siblings
+  /-- `add_const(prev_count, 1)` + `range_check(.., 63)` -/
+  outCount : x.out.channelRegCount = x.prevCount + 1
+  outCountRange : x.out.channelRegCount < u63Limit
+  outBlock : x.out.blockNumber = x.blockNumber
+  outVd : x.out.vd = x.chainVd
+
+/-- Cosigner-only registration is a CIRCUIT fact, not a convention: the active region is exactly
+    `member_count` wide, so a consumer reading `member_count` reads the width of the region the
+    written `member_pubkeys_root` commits to. -/
+theorem gates_force_active_equals_member_count (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) : x.activeCount = x.memberCount := by
+  simp [StepInputs.activeCount, g.delegateZero]
+
+theorem gates_bound_member_count (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) : 2 ≤ x.memberCount ∧ x.memberCount ≤ maxSigCluster :=
+  ⟨g.memberCountLower, g.memberCountUpper⟩
+
+theorem gates_bp_slot_indexes_an_active_member (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) : x.bpSlot < x.memberCount := g.bpSlotLtMemberCount
+
+/-- Slots at or above `member_count` hash to the EMPTY member leaf, so the computed root is the
+    root of a tree with exactly `member_count` occupied slots. -/
+theorem gates_padding_slots_hash_to_empty_leaf (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) (i : Nat) (hlo : x.memberCount ≤ i) (hhi : i < maxSigCluster) :
+    memberLeafHash e (x.slot i) = emptyMemberLeafHash e := by
+  have hact : x.activeCount ≤ i := by
+    rw [gates_force_active_equals_member_count e cap x g]; exact hlo
+  obtain ⟨h1, h2, h3⟩ := g.paddingEmpty i hact hhi
+  simp [memberLeafHash, emptyMemberLeafHash, MemberEntry.zero, h1, h2, h3]
+
+theorem member_leaf_hash_congr (e : Environment) (m m' : MemberEntry)
+    (h1 : m.pkG = m'.pkG) (h2 : m.pkB = m'.pkB) (h3 : m.regev = m'.regev) :
+    memberLeafHash e m = memberLeafHash e m' := by
+  simp [memberLeafHash, h1, h2, h3]
+
+/-- The written `member_pubkeys_root` is the root over exactly the `member_count` active slots,
+    with every other slot the empty leaf. -/
+theorem gates_member_root_commits_exactly_member_count (e : Environment) (cap : Nat)
+    (x : StepInputs) (g : CircuitGates e cap x) :
+    memberPubkeysRoot e x.members =
+      memberRootOfHashes e ((upto maxSigCluster).map (fun i =>
+        if i < x.memberCount then memberLeafHash e (x.slot i) else emptyMemberLeafHash e)) := by
+  simp only [memberPubkeysRoot]
+  congr 1
+  refine map_upto_congr maxSigCluster _ _ ?_
+  intro i hi
+  by_cases hlt : i < x.memberCount
+  · simp [hlt, StepInputs.slot]
+  · simp only [hlt, if_false]
+    exact gates_padding_slots_hash_to_empty_leaf e cap x g i (Nat.le_of_not_lt hlt) hi
+
+/-- `x` with a different declared verifier data (initial step). -/
+def StepInputs.withVd (x : StepInputs) (vd : List Nat) : StepInputs :=
+  { x with chainVd := vd, out := { x.out with vd := vd } }
+
+/-- `x` with a different free initial chain value (initial step); the fold output moves with it. -/
+def StepInputs.withInitialChain (e : Environment) (x : StepInputs) (chain : Words8) : StepInputs :=
+  { x with
+      initialChain := chain,
+      out := { x.out with
+                 initialChannelRegHashChain := chain,
+                 channelRegHashChain := e.keccakWords (foldWords chain x.record) } }
+
+/-- `x` with different member slots; the fold output moves with them. -/
+def StepInputs.withMembers (e : Environment) (x : StepInputs) (ms : List MemberEntry) : StepInputs :=
+  { x with
+      members := ms,
+      out := { x.out with
+                 channelRegHashChain := e.keccakWords (foldWords x.prevChain
+                   (recordOfMembers x.channelId x.bpSlot x.memberCount x.delegateCount ms)) } }
+
+/-- CONSUMER-VD BOUNDARY. On an initial step nothing constrains the verifier data the proof
+    declares: any correctly sized `vd` extends to a satisfying witness. Only
+    `check_cyclic_proof_verifier_data` (or the block step) pins it. -/
+theorem initial_step_vd_unconstrained (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) (hi : x.isInitial = true) (vd : List Nat)
+    (hlen : vd.length = vdVecLen cap) : CircuitGates e cap (x.withVd vd) := by
+  refine ⟨g.memberSlots, g.siblingsHeight, hlen, g.prevWidths, g.channelIdRange, g.bpSlotRange,
+    g.memberCountRange, g.delegateCountRange, g.initialChainWords, g.initialCountRange,
+    g.blockNumberRange, g.recipientWords, g.identityFields, g.delegateZero, g.memberCountLower,
+    g.memberCountUpper, g.activeUpper, g.bpSlotLtMemberCount, g.paddingEmpty, g.blockNumberMatch,
+    ?_, ?_, g.unregisteredGuard, g.outInitialChain, g.outInitialRoot, g.outInitialCount,
+    g.outChain, g.outRoot, g.outCount, g.outCountRange, g.outBlock, rfl⟩ <;>
+    (intro h; simp [StepInputs.withVd, hi] at h)
+
+/-- INITIAL-STATE BOUNDARY. On an initial step the anchor triple is a free input: any 32-bit
+    initial chain extends to a satisfying witness (the chain output moves with it). Binding it to
+    the contract's `pendingRegistrationChain` is a consumer obligation outside these files. -/
+theorem initial_step_initial_chain_unconstrained (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) (hi : x.isInitial = true) (chain : Words8)
+    (hc : CheckedWords chain.words) : CircuitGates e cap (x.withInitialChain e chain) := by
+  refine ⟨g.memberSlots, g.siblingsHeight, g.vdLen, g.prevWidths, g.channelIdRange, g.bpSlotRange,
+    g.memberCountRange, g.delegateCountRange, hc, g.initialCountRange,
+    g.blockNumberRange, g.recipientWords, g.identityFields, g.delegateZero, g.memberCountLower,
+    g.memberCountUpper, g.activeUpper, g.bpSlotLtMemberCount, g.paddingEmpty, g.blockNumberMatch,
+    g.vdConnected, g.prevProofVerified, ?_, ?_, g.outInitialRoot, g.outInitialCount, ?_,
+    g.outRoot, g.outCount, g.outCountRange, g.outBlock, g.outVd⟩
+  · have := g.unregisteredGuard
+    simpa [StepInputs.withInitialChain, StepInputs.prevRoot, hi] using
+      (by simpa [StepInputs.prevRoot, hi] using this)
+  · simp [StepInputs.withInitialChain, StepInputs.selectedInitialChain, hi]
+  · simp [StepInputs.withInitialChain, StepInputs.prevChain, StepInputs.record, hi]
+
+/-- RECIPIENT BOUNDARY. The circuit constrains the member RECIPIENT limbs only to be 32-bit:
+    neither the active ones nor (unlike native `validate()`) the padding ones are pinned. Any
+    recipient assignment extends to a satisfying witness with the SAME `member_pubkeys_root`; only
+    the keccak chain value moves, so recipients are bound solely by equality with the L1 chain. -/
+theorem gates_leave_recipients_free (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) (ms : List MemberEntry) (hlen : ms.length = maxSigCluster)
+    (hid : ∀ i, i < maxSigCluster →
+      (ms.getD i MemberEntry.zero).pkG = (x.slot i).pkG ∧
+      (ms.getD i MemberEntry.zero).pkB = (x.slot i).pkB ∧
+      (ms.getD i MemberEntry.zero).regev = (x.slot i).regev)
+    (hrec : ∀ i, i < maxSigCluster → CheckedWords (ms.getD i MemberEntry.zero).recipient.words) :
+    CircuitGates e cap (x.withMembers e ms) := by
+  have hroot : memberPubkeysRoot e ms = memberPubkeysRoot e x.members := by
+    simp only [memberPubkeysRoot]
+    congr 1
+    refine map_upto_congr maxSigCluster _ _ ?_
+    intro i hi
+    obtain ⟨h1, h2, h3⟩ := hid i hi
+    exact member_leaf_hash_congr e _ _ h1 h2 h3
+  refine ⟨hlen, g.siblingsHeight, g.vdLen, g.prevWidths, g.channelIdRange, g.bpSlotRange,
+    g.memberCountRange, g.delegateCountRange, g.initialChainWords, g.initialCountRange,
+    g.blockNumberRange, hrec, ?_, g.delegateZero, g.memberCountLower,
+    g.memberCountUpper, g.activeUpper, g.bpSlotLtMemberCount, ?_, g.blockNumberMatch,
+    g.vdConnected, g.prevProofVerified, g.unregisteredGuard, g.outInitialChain, g.outInitialRoot,
+    g.outInitialCount, rfl, ?_, g.outCount, g.outCountRange, g.outBlock, g.outVd⟩
+  · intro i hi
+    obtain ⟨h1, h2, h3⟩ := hid i hi
+    have hs : (StepInputs.withMembers e x ms).slot i = ms.getD i MemberEntry.zero := rfl
+    rw [hs, h1, h2, h3]
+    exact g.identityFields i hi
+  · intro i hlo hhi
+    obtain ⟨h1, h2, h3⟩ := hid i hhi
+    have hs : (StepInputs.withMembers e x ms).slot i = ms.getD i MemberEntry.zero := rfl
+    rw [hs, h1, h2, h3]
+    exact g.paddingEmpty i hlo hhi
+  · show x.out.channelTreeRoot =
+      merkleRoot e (channelLeafHash e (registeredChannelLeaf e (memberPubkeysRoot e ms)))
+        x.channelId x.siblings
+    rw [hroot]
+    exact g.outRoot
+
+/-! ## What the native canonicality check actually rejects
+
+    `PoseidonHashOut::try_from(Bytes32)` splits each 64-bit half into `(high, low)` u32 limbs and
+    recombines them; that round trip is the identity on ANY `Bytes32`, so the native
+    `NonCanonicalPkG` / `NonCanonicalPkB` / `NonCanonicalRegevPkDigest` errors cannot fire. The
+    GOLDILOCKS canonicality the comments describe is enforced only in-circuit, by the identity
+    being witnessed as a field element: a registration whose 64-bit halves are `>= p` passes
+    native validation and is simply UNPROVABLE. -/
+
+theorem native_canonicality_check_cannot_fail (x : Words8) (h : CheckedWords x.words) :
+    x.canonical := by
+  cases x with
+  | mk w0 w1 w2 w3 w4 w5 w6 w7 =>
+    have h1 : w1 < limbBase := h _ (by simp [Words8.words])
+    have h3 : w3 < limbBase := h _ (by simp [Words8.words])
+    have h5 : w5 < limbBase := h _ (by simp [Words8.words])
+    have h7 : w7 < limbBase := h _ (by simp [Words8.words])
+    simp only [limbBase] at h1 h3 h5 h7
+    simp only [Words8.canonical, Words8.reduceToHash, Hash4.toWords, limbBase, Words8.mk.injEq]
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> omega
+
+/-- The intended (Goldilocks) canonicality of a registered identity half. -/
+def Words8.goldilocksCanonical (x : Words8) : Prop := x.reduceToHash.canonicalField
+
+/-- A registered identity the native validator accepts but no witness can satisfy: its halves are
+    u32 limbs (so `try_from` succeeds) yet the recombined element is above the Goldilocks modulus,
+    which `Bytes32Target::from_hash_out` can never produce. -/
+def nonGoldilocksWords : Words8 := ⟨4294967295, 4294967295, 0, 0, 0, 0, 0, 0⟩
+
+theorem non_goldilocks_words_accepted_natively :
+    CheckedWords nonGoldilocksWords.words ∧ nonGoldilocksWords.canonical ∧
+      ¬ nonGoldilocksWords.goldilocksCanonical := by
+  refine ⟨by decide, by decide, ?_⟩
+  intro h
+  have := h nonGoldilocksWords.reduceToHash.h0 (by simp [Hash4.elems])
+  simp only [nonGoldilocksWords, Words8.reduceToHash, limbBase, goldilocks] at this
+  omega
+
+/-! ## `set_witness`: the native assignment, and that it satisfies the gates -/
+
+def initialChainOf (w : StepWitness) : Words8 :=
+  match w.initialValue with | some (c, _, _) => c | none => Words8.zero
+def initialRootOf (w : StepWitness) : Hash4 :=
+  match w.initialValue with | some (_, r, _) => r | none => Hash4.zero
+def initialCountOf (w : StepWitness) : Nat :=
+  match w.initialValue with | some (_, _, n) => n | none => 0
+
+/-- `ChannelRegStepTarget::set_witness` (plus `public_inputs.set_witness`). -/
+def nativeInputs (chainVd : List Nat) (w : StepWitness) (prev out : PublicInputs) : StepInputs :=
+  { isInitial := w.initialValue.isSome,
+    initialChain := initialChainOf w,
+    initialRoot := initialRootOf w,
+    initialCount := initialCountOf w,
+    prevPis := prev,
+    channelId := w.record.channelId,
+    bpSlot := w.record.bpSlot,
+    memberCount := w.record.memberCount,
+    delegateCount := w.record.delegateCount,
+    members := w.record.members.map RegEntry.toMember,
+    siblings := w.channelMerkleProof,
+    blockNumber := w.blockNumber,
+    chainVd := chainVd,
+    out := out }
+
+/-- Width / range invariants of the native values (Rust types), plus the two obligations
+    `to_public_inputs` does NOT discharge: that the previous proof verifies
+    (`NativeProofNotChecked`) and that its declared verifier data is the chain's
+    (`ConsumerVdPin`), and the Goldilocks range of the witnessed identities. -/
+structure NativeWidths (e : Environment) (cap : Nat) (chainVd : List Nat) (w : StepWitness)
+    (prev : PublicInputs) : Prop where
+  membersLen : w.record.members.length = maxSigCluster
+  siblingsLen : w.channelMerkleProof.length = channelTreeHeight
+  vdLen : chainVd.length = vdVecLen cap
+  prevWidths : prev.Widths cap
+  channelIdRange : w.record.channelId < limbBase
+  blockNumberRange : w.blockNumber < u63Limit
+  initialChainWords : CheckedWords (initialChainOf w).words
+  initialCountRange : initialCountOf w < u63Limit
+  recipientWords : ∀ i, i < maxSigCluster → CheckedWords (w.record.slot i).recipient.words
+  /-- `GoldilocksWitnessRange`: `set_witness` calls `F::from_canonical_u64` on the reduced halves. -/
+  identityFields : ∀ i, i < maxSigCluster →
+    (w.record.slot i).toMember.pkG.canonicalField ∧ (w.record.slot i).toMember.pkB.canonicalField ∧
+      (w.record.slot i).toMember.regev.canonicalField
+  vdMatch : w.initialValue = none → chainVd = prev.vd
+  proofVerifies : w.initialValue = none → e.proofAccepted prev.vd prev.toU64Vec = true
+
+theorem native_slot (w : StepWitness) (chainVd : List Nat) (prev out : PublicInputs)
+    (hlen : w.record.members.length = maxSigCluster) (i : Nat) (hi : i < maxSigCluster) :
+    (nativeInputs chainVd w prev out).slot i = (w.record.slot i).toMember :=
+  getD_map w.record.members RegEntry.toMember RegEntry.zero i (by rw [hlen]; exact hi)
+
+theorem native_prev_selection (cap : Nat) (chainVd : List Nat) (w : StepWitness)
+    (prev out : PublicInputs) (h : w.prevPis cap chainVd = .ok prev) :
+    (nativeInputs chainVd w prev out).prevChain = prev.channelRegHashChain ∧
+    (nativeInputs chainVd w prev out).prevRoot = prev.channelTreeRoot ∧
+    (nativeInputs chainVd w prev out).prevCount = prev.channelRegCount ∧
+    (nativeInputs chainVd w prev out).selectedInitialChain = prev.initialChannelRegHashChain ∧
+    (nativeInputs chainVd w prev out).selectedInitialRoot = prev.initialChannelTreeRoot ∧
+    (nativeInputs chainVd w prev out).selectedInitialCount = prev.initialChannelRegCount ∧
+    ((nativeInputs chainVd w prev out).isInitial = false →
+      prev.blockNumber = w.blockNumber ∧ w.initialValue = none) ∧
+    (prev.vd = chainVd ∨ w.initialValue = none) := by
+  cases hv : w.initialValue with
+  | some triple =>
+    obtain ⟨c, r, n⟩ := triple
+    rw [prev_pis_initial cap chainVd w c r n hv] at h
+    have hp : prev = ⟨c, r, n, c, r, n, w.blockNumber, chainVd⟩ := (Except.ok.inj h).symm
+    subst hp
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, Or.inl rfl⟩ <;>
+      simp [nativeInputs, StepInputs.prevChain, StepInputs.prevRoot, StepInputs.prevCount,
+        StepInputs.selectedInitialChain, StepInputs.selectedInitialRoot,
+        StepInputs.selectedInitialCount, initialChainOf, initialRootOf, initialCountOf, hv]
+  | none =>
+    cases hpp : w.prevProof with
+    | none => rw [StepWitness.prevPis, hv, hpp] at h; simp at h
+    | some raw =>
+      refine ⟨by simp [nativeInputs, StepInputs.prevChain, hv],
+        by simp [nativeInputs, StepInputs.prevRoot, hv],
+        by simp [nativeInputs, StepInputs.prevCount, hv],
+        by simp [nativeInputs, StepInputs.selectedInitialChain, hv],
+        by simp [nativeInputs, StepInputs.selectedInitialRoot, hv],
+        by simp [nativeInputs, StepInputs.selectedInitialCount, hv], fun _ => ⟨?_, rfl⟩, Or.inr rfl⟩
+      cases hparse : parsePrev cap raw with
+      | error err =>
+        rw [StepWitness.prevPis, hv, hpp] at h
+        simp only [hparse, bind_ok_iff] at h
+        simp at h
+      | ok pis =>
+        obtain ⟨hblk, heq⟩ := prev_pis_requires_matching_block_number cap chainVd w raw pis prev
+          hv hpp hparse h
+        rw [heq]; exact hblk
+
+theorem map_roundtrip_of_index (l : List RegEntry)
+    (h : ∀ i, i < l.length → (l.getD i RegEntry.zero).canonical) :
+    (l.map RegEntry.toMember).map MemberEntry.regEntry = l := by
+  induction l with
+  | nil => rfl
+  | cons a as ih =>
+    have ha : a.canonical := h 0 (by simp)
+    have hrest : ∀ i, i < as.length → (as.getD i RegEntry.zero).canonical := by
+      intro i hi
+      have := h (i + 1) (by simp only [List.length_cons]; omega)
+      simpa using this
+    simp only [List.map_cons, reg_entry_roundtrip a ha, ih hrest]
+
+/-- On a validated record the circuit's canonical re-encoding reproduces the record exactly, so
+    `x.record` (what the keccak preimage commits to) IS the on-chain record. -/
+theorem native_record_is_the_record (chainVd : List Nat) (w : StepWitness) (prev out : PublicInputs)
+    (hvalid : w.record.validate = .ok ()) (hlen : w.record.members.length = maxSigCluster) :
+    (nativeInputs chainVd w prev out).record = w.record := by
+  have hcan : ∀ i, i < w.record.members.length →
+      (w.record.members.getD i RegEntry.zero).canonical := by
+    intro i hi
+    exact validate_all_slots_canonical w.record hvalid i (by rw [hlen] at hi; exact hi)
+  simp only [nativeInputs, StepInputs.record, recordOfMembers]
+  rw [map_roundtrip_of_index w.record.members hcan]
+
+/-- The in-circuit member root equals the native `member_pubkeys_root_for` on a validated record. -/
+theorem native_member_root_matches (chainVd : List Nat) (e : Environment) (w : StepWitness)
+    (prev out : PublicInputs) (hvalid : w.record.validate = .ok ())
+    (hlen : w.record.members.length = maxSigCluster) :
+    memberPubkeysRoot e (nativeInputs chainVd w prev out).members = nativeMemberRoot e w.record := by
+  have hdc : w.record.delegateCount = 0 := (validate_parts w.record hvalid).2.1
+  simp only [memberPubkeysRoot, nativeMemberRoot, nativeInputs]
+  congr 1
+  refine map_upto_congr maxSigCluster _ _ ?_
+  intro i hi
+  have hslot : (w.record.members.map RegEntry.toMember).getD i MemberEntry.zero
+      = (w.record.slot i).toMember := by
+    rw [show MemberEntry.zero = RegEntry.toMember RegEntry.zero from rfl]
+    exact getD_map w.record.members RegEntry.toMember RegEntry.zero i (by rw [hlen]; exact hi)
+  rw [hslot, hdc]
+  by_cases hlt : i < w.record.memberCount
+  · simp [hlt]
+  · have hz : w.record.slot i = RegEntry.zero :=
+      validate_padding_zero w.record hvalid i (Nat.le_of_not_lt hlt) hi
+    simp only [Nat.add_zero, hlt, if_false, hz]
+    rfl
+
+/-- NATIVE ⇒ GATES. A witness the native builder admits, assigned by `set_witness`, satisfies the
+    step's gate equations — under the width invariants of the Rust types, the Goldilocks range of
+    the witnessed identities, and the two obligations the native path does NOT discharge (the
+    previous proof actually verifying, and its declared verifier data being the chain's). -/
+theorem native_assignment_satisfies_gates (e : Environment) (cap : Nat) (chainVd : List Nat)
+    (w : StepWitness) (prev out : PublicInputs)
+    (hvalid : w.record.validate = .ok ())
+    (hprev : w.prevPis cap chainVd = .ok prev)
+    (hout : w.toPublicInputs e cap chainVd = .ok out)
+    (hw : NativeWidths e cap chainVd w prev) :
+    CircuitGates e cap (nativeInputs chainVd w prev out) := by
+  obtain ⟨-, hu⟩ := to_public_inputs_effect e cap chainVd w out hout
+  obtain ⟨prev', hprev', hguard, hchain, hroot, hcount, hcrange, hic, hir, hicount, hblk, hvdout⟩ :=
+    to_public_inputs_unchecked_effect e cap chainVd w out hu
+  have hpe : prev = prev' := by
+    rw [hprev'] at hprev; exact (Except.ok.inj hprev).symm
+  subst hpe
+  obtain ⟨sChain, sRoot, sCount, sIChain, sIRoot, sICount, sBlock, sVd⟩ :=
+    native_prev_selection cap chainVd w prev out hprev
+  obtain ⟨hmcLo, hmcHi⟩ := validate_bounds_member_count w.record hvalid
+  have hdc : w.record.delegateCount = 0 := (validate_parts w.record hvalid).2.1
+  have hbp : w.record.bpSlot < w.record.memberCount := validate_bp_slot_in_range w.record hvalid
+  have hrec : (nativeInputs chainVd w prev out).record = w.record :=
+    native_record_is_the_record chainVd w prev out hvalid hw.membersLen
+  have hmr : memberPubkeysRoot e (nativeInputs chainVd w prev out).members
+      = nativeMemberRoot e w.record :=
+    native_member_root_matches chainVd e w prev out hvalid hw.membersLen
+  have hslot : ∀ i, i < maxSigCluster →
+      (nativeInputs chainVd w prev out).slot i = (w.record.slot i).toMember :=
+    fun i hi => native_slot w chainVd prev out hw.membersLen i hi
+  have hvd : (nativeInputs chainVd w prev out).chainVd = prev.vd := by
+    rcases sVd with h | h
+    · exact h.symm
+    · exact (hw.vdMatch h)
+  refine ⟨?_, hw.siblingsLen, hw.vdLen, hw.prevWidths, hw.channelIdRange, ?_, ?_, ?_,
+    hw.initialChainWords, hw.initialCountRange, hw.blockNumberRange, ?_, ?_, hdc, hmcLo, hmcHi,
+    ?_, hbp, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · simp [nativeInputs, hw.membersLen]
+  · simp only [nativeInputs, maxSigCluster, limbBase] at *; omega
+  · simp only [nativeInputs, maxSigCluster, limbBase] at *; omega
+  · simp only [nativeInputs, hdc, limbBase]; omega
+  · intro i hi; rw [hslot i hi]; exact hw.recipientWords i hi
+  · intro i hi; rw [hslot i hi]; exact hw.identityFields i hi
+  · simp only [StepInputs.activeCount, nativeInputs, hdc, Nat.add_zero]; exact hmcHi
+  · intro i hlo hhi
+    have hmc : (nativeInputs chainVd w prev out).activeCount = w.record.memberCount := by
+      simp [StepInputs.activeCount, nativeInputs, hdc]
+    rw [hmc] at hlo
+    rw [hslot i hhi, validate_padding_zero w.record hvalid i hlo hhi]
+    exact ⟨rfl, rfl, rfl⟩
+  · intro h; exact (sBlock h).1
+  · intro h; exact hw.vdMatch (sBlock h).2
+  · intro h; exact hw.proofVerifies (sBlock h).2
+  · rw [sRoot]; exact hguard
+  · rw [sIChain]; exact hic
+  · rw [sIRoot]; exact hir
+  · rw [sICount]; exact hicount
+  · rw [sChain, hrec]; exact hchain
+  · rw [hmr]; exact hroot
+  · rw [sCount]; exact hcount
+  · exact hcrange
+  · exact hblk
+  · rw [hvd]; exact hvdout
+
+/-! ## Cyclic composition (`ChannelRegHashChainCircuit`) and the chain fold
+
+    The wrapper circuit verifies ONE step proof and re-registers its public inputs unchanged, so a
+    chain proof's public inputs are the last step's. The `Chain` inductive is the PROOF-SOUNDNESS
+    PREMISE: an accepted previous chain proof is assumed to come from a gate-satisfying step. -/
+
+def foldChain (e : Environment) (start : Words8) (rs : List Record) : Words8 :=
+  rs.foldl (fun acc r => e.keccakWords (foldWords acc r)) start
+
+theorem fold_chain_snoc (e : Environment) (start : Words8) (rs : List Record) (r : Record) :
+    foldChain e start (rs ++ [r]) = e.keccakWords (foldWords (foldChain e start rs) r) := by
+  simp [foldChain, List.foldl_append]
+
+/-- `ChannelRegHashChainCircuit::new`: verify the step proof, forward its public inputs verbatim. -/
+def wrapperOutput (stepPis : PublicInputs) : PublicInputs := stepPis
+
+theorem wrapper_forwards_step_public_inputs (p : PublicInputs) : wrapperOutput p = p := rfl
+
+theorem wrapper_public_input_count (cap : Nat) :
+    chainPublicInputCount cap = publicInputsLen + vdVecLen cap := rfl
+
+inductive Chain (e : Environment) (cap : Nat) (baseVd : List Nat) :
+    List Record → PublicInputs → Prop where
+  | initial (x : StepInputs) (g : CircuitGates e cap x) (hi : x.isInitial = true)
+      (hvd : x.chainVd = baseVd) : Chain e cap baseVd [x.record] x.out
+  | step (rs : List Record) (prev : PublicInputs) (h : Chain e cap baseVd rs prev)
+      (x : StepInputs) (g : CircuitGates e cap x) (hi : x.isInitial = false)
+      (hp : x.prevPis = prev) : Chain e cap baseVd (rs ++ [x.record]) x.out
+
+/-- Structural invariants every record in a chain satisfies, as CIRCUIT facts. -/
+structure Record.CosignerOnly (r : Record) : Prop where
+  delegates : r.delegateCount = 0
+  lower : minMemberCount ≤ r.memberCount
+  upper : r.memberCount ≤ maxSigCluster
+  bp : r.bpSlot < r.memberCount
+  slots : r.members.length = maxSigCluster
+
+theorem gates_record_cosigner_only (e : Environment) (cap : Nat) (x : StepInputs)
+    (g : CircuitGates e cap x) : x.record.CosignerOnly := by
+  refine ⟨g.delegateZero, g.memberCountLower, g.memberCountUpper, g.bpSlotLtMemberCount, ?_⟩
+  simp [StepInputs.record, recordOfMembers, g.memberSlots]
+
+/-- The declared verifier data is forwarded unchanged by every step: a whole chain declares ONE
+    verifier data, the one the initial step freely chose (`ConsumerVdPin`). -/
+theorem chain_declares_single_vd (e : Environment) (cap : Nat) (baseVd : List Nat)
+    (rs : List Record) (out : PublicInputs) (h : Chain e cap baseVd rs out) : out.vd = baseVd := by
+  induction h with
+  | initial x g hi hvd => rw [g.outVd, hvd]
+  | step rs prev hc x g hi hp ih => rw [g.outVd, g.vdConnected hi, hp]; exact ih
+
+/-- MAIN CHAIN FACT. A chain proof's `channel_reg_hash_chain` is the keccak fold over the
+    consumed registration records from its own `initial_channel_reg_hash_chain`, its
+    `channel_reg_count` is the initial count plus the number of records, every record is
+    cosigner-only with `member_count ∈ [2, 8]`, and the chain declares one verifier data. -/
+theorem chain_is_fold (e : Environment) (cap : Nat) (baseVd : List Nat) (rs : List Record)
+    (out : PublicInputs) (h : Chain e cap baseVd rs out) :
+    out.channelRegHashChain = foldChain e out.initialChannelRegHashChain rs ∧
+      out.channelRegCount = out.initialChannelRegCount + rs.length ∧
+      rs ≠ [] ∧ (∀ r ∈ rs, r.CosignerOnly) ∧ out.vd = baseVd := by
+  induction h with
+  | initial x g hi hvd =>
+    have hchain : x.prevChain = x.initialChain := by simp [StepInputs.prevChain, hi]
+    have hcount : x.prevCount = x.initialCount := by simp [StepInputs.prevCount, hi]
+    have hic : x.out.initialChannelRegHashChain = x.initialChain := by
+      rw [g.outInitialChain]; simp [StepInputs.selectedInitialChain, hi]
+    have hicount : x.out.initialChannelRegCount = x.initialCount := by
+      rw [g.outInitialCount]; simp [StepInputs.selectedInitialCount, hi]
+    refine ⟨?_, ?_, by simp, ?_, by rw [g.outVd, hvd]⟩
+    · rw [g.outChain, hchain, hic]; simp [foldChain]
+    · rw [g.outCount, hcount, hicount]; simp
+    · intro r hr
+      rcases List.mem_singleton.mp hr with rfl
+      exact gates_record_cosigner_only e cap x g
+  | step rs prev hc x g hi hp ih =>
+    obtain ⟨ihchain, ihcount, ihne, ihall, ihvd⟩ := ih
+    have hchain : x.prevChain = prev.channelRegHashChain := by
+      simp [StepInputs.prevChain, hi, hp]
+    have hcount : x.prevCount = prev.channelRegCount := by simp [StepInputs.prevCount, hi, hp]
+    have hic : x.out.initialChannelRegHashChain = prev.initialChannelRegHashChain := by
+      rw [g.outInitialChain]; simp [StepInputs.selectedInitialChain, hi, hp]
+    have hicount : x.out.initialChannelRegCount = prev.initialChannelRegCount := by
+      rw [g.outInitialCount]; simp [StepInputs.selectedInitialCount, hi, hp]
+    refine ⟨?_, ?_, by simp, ?_, by rw [g.outVd, g.vdConnected hi, hp]; exact ihvd⟩
+    · rw [g.outChain, hchain, hic, fold_chain_snoc, ← ihchain]
+    · rw [g.outCount, hcount, hicount, ihcount, List.length_append]
+      simp [Nat.add_assoc]
+    · intro r hr
+      rcases List.mem_append.mp hr with hmem | hmem
+      · exact ihall r hmem
+      · rcases List.mem_singleton.mp hmem with rfl
+        exact gates_record_cosigner_only e cap x g
+
+/-! ## `ChannelRegHashChainCircuit::verify` -/
+
+inductive VerifyError where
+  | cyclicVerifierDataMismatch
+  | proofInvalid
+  deriving DecidableEq, Repr
+
+/-- `check_cyclic_proof_verifier_data(proof, data.verifier_only, data.common)?` then `data.verify`. -/
+def verifyChainProof (e : Environment) (dataVd : List Nat) (p : PublicInputs) :
+    Except VerifyError Unit := do
+  check (p.vd = dataVd) .cyclicVerifierDataMismatch
+  check (e.proofAccepted dataVd p.toU64Vec = true) .proofInvalid
+
+theorem chain_verify_pins_declared_vd (e : Environment) (dataVd : List Nat) (p : PublicInputs)
+    (h : verifyChainProof e dataVd p = .ok ()) : p.vd = dataVd := by
+  simp only [verifyChainProof, unit_bind_ok_iff, check_ok_iff] at h
+  exact h.1
+
+theorem chain_verify_requires_accepted_proof (e : Environment) (dataVd : List Nat)
+    (p : PublicInputs) (h : verifyChainProof e dataVd p = .ok ()) :
+    e.proofAccepted dataVd p.toU64Vec = true := by
+  simp only [verifyChainProof, unit_bind_ok_iff, check_ok_iff] at h
+  exact h.2
+
+/-- The free initial verifier data becomes pinned exactly when a consumer runs the cyclic check. -/
+theorem verified_chain_uses_the_circuit_verifier_data (e : Environment) (cap : Nat)
+    (baseVd dataVd : List Nat) (rs : List Record) (out : PublicInputs)
+    (h : Chain e cap baseVd rs out) (hv : verifyChainProof e dataVd out = .ok ()) :
+    baseVd = dataVd := by
+  rw [← chain_declares_single_vd e cap baseVd rs out h]
+  exact chain_verify_pins_declared_vd e dataVd out hv
 
 end Zkp.Implementation.ChannelRegChain
