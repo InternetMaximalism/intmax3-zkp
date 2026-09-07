@@ -74,7 +74,7 @@ def h2TagEnd : Nat := 137
 /-- Small-block preimage width (small_block_message.rs line 71). -/
 def smallBlockPreimageLen : Nat := 41
 /-- Witnessed limbs of the IMCH twin: 139 minus domain, two channel-id limbs and 8 `h2_tag`. -/
-def channelStateWitnessedLen : Nat := 127
+def channelStateWitnessedLen : Nat := 128
 /-- Witnessed limbs of the IMSB twin: 41 minus domain, channel id and 8 `tx_tree_root`. -/
 def smallBlockWitnessedLen : Nat := 31
 
@@ -209,6 +209,22 @@ theorem forall_mem_append_right {P : α → Prop} {xs ys : List α}
     (h : ∀ x ∈ xs ++ ys, P x) : ∀ x ∈ ys, P x :=
   fun x hx => h x (List.mem_append.mpr (Or.inr hx))
 
+theorem mem_of_mem_take {x : α} : ∀ {n : Nat} {l : List α}, x ∈ l.take n → x ∈ l
+  | 0, _, h => by rw [List.take_zero] at h; exact absurd h (List.not_mem_nil x)
+  | _ + 1, [], h => by rw [List.take_nil] at h; exact absurd h (List.not_mem_nil x)
+  | _ + 1, _ :: _, h => by
+    rw [List.take_cons_succ, List.mem_cons] at h
+    rcases h with rfl | h
+    · exact List.mem_cons.mpr (Or.inl rfl)
+    · exact List.mem_cons.mpr (Or.inr (mem_of_mem_take h))
+
+theorem mem_of_mem_drop {x : α} : ∀ {n : Nat} {l : List α}, x ∈ l.drop n → x ∈ l
+  | 0, _, h => by rwa [List.drop_zero] at h
+  | _ + 1, [], h => by rw [List.drop_nil] at h; exact absurd h (List.not_mem_nil x)
+  | _ + 1, _ :: _, h => by
+    rw [List.drop_succ_cons] at h
+    exact List.mem_cons.mpr (Or.inr (mem_of_mem_drop h))
+
 theorem amounts_bounded_iff (x : Amounts Nat) :
     x.Bounded ↔ x.t0.Bounded ∧ x.t1.Bounded ∧ x.t2.Bounded ∧ x.t3.Bounded ∧ x.t4.Bounded ∧
       x.t5.Bounded ∧ x.t6.Bounded ∧ x.t7.Bounded ∧ x.t8.Bounded ∧ x.t9.Bounded := by
@@ -261,7 +277,7 @@ def ChannelStateLimbs.map (g : α → β) (l : ChannelStateLimbs α) : ChannelSt
    l.fundIntmaxStateRoot.map g, l.balanceStateH1.map g, l.sharedNativeNullifierRoot.map g,
    l.unallocatedConfirmedIncoming.map g, l.prevDigest.map g, l.stateVersion.map g⟩
 
-/-- The 127 witnessed limbs in PREIMAGE order (the complement of the connected offsets). -/
+/-- The 128 witnessed limbs in PREIMAGE order (the complement of the connected offsets). -/
 def ChannelStateLimbs.witnessed (l : ChannelStateLimbs α) : List α :=
   l.epoch.words ++ l.smallBlockNumber.words ++ l.closeFreezeNonce.words ++ l.fundAmounts.words ++
   l.fundIntmaxStateRoot.words ++ l.balanceStateH1.words ++ l.sharedNativeNullifierRoot.words ++
@@ -343,14 +359,10 @@ theorem channel_state_segment_offsets (domain channelId : α) (l : ChannelStateL
     (p.drop 121).take 8 = l.prevDigest.words ∧
     (p.drop h2TagStart).take (h2TagEnd - h2TagStart) = h2Tag.words ∧
     p.drop 137 = l.stateVersion.words := by
-  cases l with
-  | mk ep sb cf am fr h1 nr ui pd sv =>
-    cases ep; cases sb; cases cf; cases sv; cases h2Tag
-    cases am with
-    | mk t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 =>
-      cases t0; cases t1; cases t2; cases t3; cases t4; cases t5; cases t6; cases t7; cases t8; cases t9
-      cases fr; cases h1; cases nr; cases ui; cases pd
-      exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  simp only [channelStatePreimageG, Words8.words, Words2.words, Amounts.words, channelIdLimb,
+    fundChannelIdLimb, h2TagStart, h2TagEnd, Nat.reduceSub, List.cons_append, List.nil_append,
+    List.append_assoc, List.getD_cons_zero, List.getD_cons_succ, List.drop_succ_cons,
+    List.drop_zero, List.take_cons_succ, List.take_zero, and_self, and_true, true_and]
 
 /-- The single `channel_id` argument lands on BOTH limb 1 and limb 8 (lines 121 and 125). -/
 theorem channel_id_feeds_two_limbs (domain channelId : α) (l : ChannelStateLimbs α)
@@ -485,7 +497,10 @@ theorem read_channel_state_preimage (domain channelId : α) (l : ChannelStateLim
     | mk t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 =>
       cases t0; cases t1; cases t2; cases t3; cases t4; cases t5; cases t6; cases t7; cases t8; cases t9
       cases fr; cases h1; cases nr; cases ui; cases pd
-      rfl
+      simp only [readChannelStatePreimage, Words8.read, Words2.read, Amounts.read,
+        channelStatePreimageG, Words8.words, Words2.words, Amounts.words, Nat.reduceAdd,
+        List.cons_append, List.nil_append, List.append_assoc, List.getD_cons_zero,
+        List.getD_cons_succ]
 
 theorem channel_state_layout_injective {domain domain' channelId channelId' : α}
     {l l' : ChannelStateLimbs α} {h2Tag h2Tag' : Words8 α}
@@ -553,22 +568,10 @@ theorem native_preimage_limbs_are_u32 (f : ChannelStateFields) (channelId : Nat)
     ∀ x ∈ nativePreimage f channelId h2Tag, x < limbBase := by
   obtain ⟨e, s, c, v, am, fr, h1, nr, ui, pd⟩ := rep
   unfold nativePreimage channelStatePreimageG toLimbs
-  simp only
-  repeat' apply forall_mem_append_of
-  · exact singleton_bounded channel_state_domain_is_u32
-  · exact singleton_bounded cid
-  · exact split_u64_limbs_are_u32 e
-  · exact split_u64_limbs_are_u32 s
-  · exact split_u64_limbs_are_u32 c
-  · exact singleton_bounded cid
-  · exact am
-  · exact fr
-  · exact h1
-  · exact nr
-  · exact ui
-  · exact pd
-  · exact tag
-  · exact split_u64_limbs_are_u32 v
+  simp only [List.forall_mem_append, and_assoc]
+  exact ⟨singleton_bounded channel_state_domain_is_u32, singleton_bounded cid,
+    split_u64_limbs_are_u32 e, split_u64_limbs_are_u32 s, split_u64_limbs_are_u32 c,
+    singleton_bounded cid, am, fr, h1, nr, ui, pd, tag, split_u64_limbs_are_u32 v⟩
 
 /-! ## IMCH target twin (lines 181–308) -/
 
@@ -605,14 +608,9 @@ theorem target_preimage_partition (t : ChannelStateTarget) (domain channelId : W
     targetPreimage t domain channelId h2Tag =
       [domain, channelId] ++ t.witnessed.take 6 ++ [channelId] ++
         (t.witnessed.drop 6).take 120 ++ h2Tag.words ++ t.witnessed.drop 126 := by
-  cases t with
-  | mk ep sb cf am fr h1 nr ui pd sv =>
-    cases ep; cases sb; cases cf; cases sv
-    cases am with
-    | mk t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 =>
-      cases t0; cases t1; cases t2; cases t3; cases t4; cases t5; cases t6; cases t7; cases t8; cases t9
-      cases fr; cases h1; cases nr; cases ui; cases pd
-      rfl
+  simp only [targetPreimage, channelStatePreimageG, ChannelStateLimbs.witnessed, Words8.words,
+    Words2.words, Amounts.words, List.cons_append, List.nil_append, List.append_assoc,
+    List.take_cons_succ, List.take_zero, List.drop_succ_cons, List.drop_zero]
 
 /-- Every wire in the target preimage is either a caller wire or a witnessed wire of the struct
     (no third source: the struct has no `channel_id` / `h2_tag` field by construction, lines 174–179). -/
@@ -622,16 +620,14 @@ theorem target_preimage_wires_are_caller_or_witnessed (t : ChannelStateTarget)
       w ∈ [domain, channelId] ++ h2Tag.words ∨ w ∈ t.witnessed := by
   rw [target_preimage_partition]
   intro w hw
-  simp only [List.append_assoc, List.mem_append, List.mem_cons, List.mem_singleton,
-    List.not_mem_nil, or_false] at hw ⊢
-  rcases hw with (rfl | rfl) | hw | rfl | hw | hw | hw
-  · exact Or.inl (Or.inl rfl)
-  · exact Or.inl (Or.inr (Or.inl rfl))
-  · exact Or.inr (List.mem_of_mem_take hw)
-  · exact Or.inl (Or.inr (Or.inl rfl))
-  · exact Or.inr (List.mem_of_mem_drop (List.mem_of_mem_take hw))
-  · exact Or.inl (Or.inr (Or.inr hw))
-  · exact Or.inr (List.mem_of_mem_drop hw)
+  simp only [List.append_assoc, List.mem_append] at hw
+  rcases hw with hw | hw | hw | hw | hw | hw
+  · exact Or.inl (List.mem_append.mpr (Or.inl hw))
+  · exact Or.inr (mem_of_mem_take hw)
+  · exact Or.inl (List.mem_append.mpr (Or.inl (by rw [List.mem_singleton.mp hw]; simp)))
+  · exact Or.inr (mem_of_mem_drop (mem_of_mem_take hw))
+  · exact Or.inl (List.mem_append.mpr (Or.inr hw))
+  · exact Or.inr (mem_of_mem_drop hw)
 
 /-- Builder-freshness premise (boundary `enclosing-circuit-connects`): the caller's wires are
     not among the struct's freshly allocated wires. With it, the negative half of
@@ -727,11 +723,10 @@ def KeccakGadget := List Nat → Words8 Nat
 
 /-- The local wiring of `signing_digest` (lines 276–278): a constant wire carrying `IMCH`,
     the preimage over it, and the gadget output. Gadget soundness is not asserted. -/
-structure DigestGates (gadget : KeccakGadget) (val : Wire → Nat) (t : ChannelStateTarget)
-    (channelId : Wire) (h2Tag : Words8 Wire) (out : Words8 Wire) : Prop where
-  domainWire : Wire
-  domainConstant : val domainWire = channelStateDomain
-  output : out.map val = gadget ((targetPreimage t domainWire channelId h2Tag).map val)
+def DigestGates (gadget : KeccakGadget) (val : Wire → Nat) (t : ChannelStateTarget)
+    (channelId : Wire) (h2Tag : Words8 Wire) (out : Words8 Wire) : Prop :=
+  ∃ domainWire : Wire, val domainWire = channelStateDomain ∧
+    out.map val = gadget ((targetPreimage t domainWire channelId h2Tag).map val)
 
 /-! ### `set_witness` (lines 281–308) -/
 
@@ -858,8 +853,9 @@ theorem digest_gates_compute_native_digest (e : HashEnvironment) (assign : Wire 
     (sw : SetWitness assign t f) (cid : assign channelId = channelIdValue)
     (tag : h2Wires.map assign = h2Tag) :
     out.map assign = nativeSigningDigest e f channelIdValue h2Tag := by
-  rw [gates.output, set_witness_reproduces_native_preimage assign t f gates.domainWire channelId
-    h2Wires channelIdValue h2Tag sw gates.domainConstant cid tag]
+  obtain ⟨domainWire, domainConstant, output⟩ := gates
+  rw [output, set_witness_reproduces_native_preimage assign t f domainWire channelId
+    h2Wires channelIdValue h2Tag sw domainConstant cid tag]
   rfl
 
 /-! ## IMSB small-block message (small_block_message.rs) -/
@@ -1088,14 +1084,12 @@ theorem small_target_preimage_wires_are_caller_or_witnessed (t : SmallBlockTarge
       w ∈ [domain, channelId] ++ txTreeRoot.words ∨ w ∈ t.witnessed := by
   rw [small_target_preimage_partition]
   intro w hw
-  simp only [List.append_assoc, List.mem_append, List.mem_cons, List.mem_singleton,
-    List.not_mem_nil, or_false] at hw ⊢
-  rcases hw with (rfl | rfl) | hw | hw | hw
-  · exact Or.inl (Or.inl rfl)
-  · exact Or.inl (Or.inr (Or.inl rfl))
-  · exact Or.inr (List.mem_of_mem_take hw)
-  · exact Or.inl (Or.inr (Or.inr hw))
-  · exact Or.inr (List.mem_of_mem_drop hw)
+  simp only [List.append_assoc, List.mem_append] at hw
+  rcases hw with hw | hw | hw | hw
+  · exact Or.inl (List.mem_append.mpr (Or.inl hw))
+  · exact Or.inr (mem_of_mem_take hw)
+  · exact Or.inl (List.mem_append.mpr (Or.inr hw))
+  · exact Or.inr (mem_of_mem_drop hw)
 
 /-- Allocation ORDER of `SmallBlockMessageFieldsTarget::new` (lines 114–120): slot, pk_g,
     small_block_number, medium_epoch_hint, close_freeze_nonce, prev root, state commitment root
@@ -1151,11 +1145,10 @@ theorem small_keccak_inputs_bounded_given_caller_wires (val : Wire → Nat) (t :
     · exact root w h
   · exact gates w h
 
-structure SmallDigestGates (gadget : KeccakGadget) (val : Wire → Nat) (t : SmallBlockTarget)
-    (channelId : Wire) (txTreeRoot : Words8 Wire) (out : Words8 Wire) : Prop where
-  domainWire : Wire
-  domainConstant : val domainWire = smallBlockDomain
-  output : out.map val = gadget ((smallTargetPreimage t domainWire channelId txTreeRoot).map val)
+def SmallDigestGates (gadget : KeccakGadget) (val : Wire → Nat) (t : SmallBlockTarget)
+    (channelId : Wire) (txTreeRoot : Words8 Wire) (out : Words8 Wire) : Prop :=
+  ∃ domainWire : Wire, val domainWire = smallBlockDomain ∧
+    out.map val = gadget ((smallTargetPreimage t domainWire channelId txTreeRoot).map val)
 
 theorem small_block_preimage_map (g : α → β) (domain channelId : α) (l : SmallBlockLimbs α)
     (txTreeRoot : Words8 α) :
@@ -1218,8 +1211,9 @@ theorem small_digest_gates_compute_native_digest (e : HashEnvironment) (assign :
     (sw : SmallSetWitness assign t f) (cid : assign channelId = channelIdValue)
     (root : rootWires.map assign = txTreeRoot) :
     out.map assign = nativeSmallDigest e f channelIdValue txTreeRoot := by
-  rw [gates.output, small_set_witness_reproduces_native_preimage assign t f gates.domainWire channelId
-    rootWires channelIdValue txTreeRoot sw gates.domainConstant cid root]
+  obtain ⟨domainWire, domainConstant, output⟩ := gates
+  rw [output, small_set_witness_reproduces_native_preimage assign t f domainWire channelId
+    rootWires channelIdValue txTreeRoot sw domainConstant cid root]
   rfl
 
 /-! ## Cross-message facts -/
@@ -1258,7 +1252,12 @@ theorem pinned_fixture_offsets :
     ((nativePreimage pinnedFields pinnedChannelId pinnedH2Tag).drop 129).take 8 =
       [9, 10, 11, 12, 13, 14, 15, 0xffffffff] ∧
     (nativePreimage pinnedFields pinnedChannelId pinnedH2Tag).drop 137 = [0xdeadbeef, 0x00000001] := by
-  decide
+  simp only [nativePreimage, channelStatePreimageG, toLimbs, pinnedFields, pinnedChannelId,
+    pinnedH2Tag, splitU64, limbBase, channelStateDomain, Words8.words, Words2.words, Amounts.words,
+    Amounts.zero, Words8.zero, Nat.reducePow, Nat.reduceDiv, Nat.reduceMod, Nat.reduceAdd,
+    List.cons_append, List.nil_append, List.append_assoc, List.length_cons, List.length_nil,
+    List.getD_cons_zero, List.getD_cons_succ, List.drop_succ_cons, List.drop_zero,
+    List.take_cons_succ, List.take_zero, and_self, and_true, true_and]
 
 theorem pinned_fixture_is_native_representable : pinnedFields.NativeRepresentable := by
   simp only [ChannelStateFields.NativeRepresentable, pinnedFields, scalarLimit, Amounts.Bounded,

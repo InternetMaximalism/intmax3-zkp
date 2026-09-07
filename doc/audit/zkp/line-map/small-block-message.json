@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/small_block_message.rs",
+  "source_sha256": "869ccb7332074beccc329e059297e562b9b294c34ef55ae9961ec71596e9758c",
+  "source_lines": 234,
+  "module": "Zkp.Implementation.BlockMessages",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockMessages.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 24,
+      "status": "non-executable",
+      "label": "module docs (IMSB message; STATUS: no longer a live authorization path)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 25,
+      "end": 42,
+      "status": "dependency-boundary",
+      "label": "imports: plonky2 builder/witness API, keccak gadget, hash_words, split_u64, Bytes32 limb traits",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.splitU64",
+        "Zkp.Implementation.BlockMessages.joinU64",
+        "Zkp.Implementation.BlockMessages.Words8",
+        "Zkp.Implementation.BlockMessages.Words8.words",
+        "Zkp.Implementation.BlockMessages.Words2",
+        "Zkp.Implementation.BlockMessages.HashEnvironment",
+        "Zkp.Implementation.BlockMessages.KeccakGadget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.split_u64_joins_back",
+        "Zkp.Implementation.BlockMessages.split_u64_injective",
+        "Zkp.Implementation.BlockMessages.split_u64_limbs_are_u32",
+        "Zkp.Implementation.BlockMessages.words8_has_eight_limbs",
+        "Zkp.Implementation.BlockMessages.words2_has_two_limbs"
+      ],
+      "note": "Imported crate semantics kept opaque: `hash_words` / `builder.keccak256` are the `HashEnvironment.hashWords` / `KeccakGadget` callbacks (no collision resistance, no gadget soundness); `split_u64` and `to_u32_vec` are transcribed locally as `splitU64` / `Words8.words` with Nat standing for u32/u64/field elements; the plonky2 builder API is not modeled."
+    },
+    {
+      "start": 43,
+      "end": 50,
+      "status": "non-executable",
+      "label": "section comment, doc comment and derive for SmallBlockMessageFields",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 51,
+      "end": 64,
+      "status": "translated",
+      "label": "SmallBlockMessageFields: witnessed components excluding channel_id and tx_tree_root",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SmallBlockFields",
+        "Zkp.Implementation.BlockMessages.SmallBlockFields.NativeRepresentable",
+        "Zkp.Implementation.BlockMessages.Words8",
+        "Zkp.Implementation.BlockMessages.Words8.Bounded"
+      ],
+      "theorems": [],
+      "note": "u32 / u64 / Bytes32 are Nat and 8-limb words with the `NativeRepresentable` bound as an explicit premise. The off-circuit `state_commitment_root == balance_state.h1()` check mentioned in the doc lives elsewhere and is not modeled."
+    },
+    {
+      "start": 65,
+      "end": 71,
+      "status": "non-executable",
+      "label": "impl header and signing_digest doc comment (41-limb layout table)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 72,
+      "end": 86,
+      "status": "translated",
+      "label": "SmallBlockMessageFields::signing_digest: hash_words over the 41-limb IMSB stream",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.nativeSmallPreimage",
+        "Zkp.Implementation.BlockMessages.nativeSmallDigest",
+        "Zkp.Implementation.BlockMessages.smallBlockPreimageG",
+        "Zkp.Implementation.BlockMessages.smallToLimbs",
+        "Zkp.Implementation.BlockMessages.SmallBlockLimbs",
+        "Zkp.Implementation.BlockMessages.smallBlockSegmentWidths",
+        "Zkp.Implementation.BlockMessages.smallBlockSegmentOffsets",
+        "Zkp.Implementation.BlockMessages.prefixSums",
+        "Zkp.Implementation.BlockMessages.SmallBlockReading",
+        "Zkp.Implementation.BlockMessages.readSmallBlockPreimage",
+        "Zkp.Implementation.BlockMessages.pinnedSmallFields",
+        "Zkp.Implementation.BlockMessages.smallBlockDomain",
+        "Zkp.Implementation.BlockMessages.smallBlockPreimageLen",
+        "Zkp.Implementation.BlockMessages.HashEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_block_segment_offsets_are_prefix_sums",
+        "Zkp.Implementation.BlockMessages.small_block_segment_widths_sum_to_41",
+        "Zkp.Implementation.BlockMessages.small_block_preimage_width",
+        "Zkp.Implementation.BlockMessages.native_small_preimage_width",
+        "Zkp.Implementation.BlockMessages.small_block_segment_offsets",
+        "Zkp.Implementation.BlockMessages.small_block_carries_bp_slot_and_key",
+        "Zkp.Implementation.BlockMessages.small_block_connected_offsets",
+        "Zkp.Implementation.BlockMessages.read_small_block_preimage",
+        "Zkp.Implementation.BlockMessages.small_block_layout_injective",
+        "Zkp.Implementation.BlockMessages.small_to_limbs_injective",
+        "Zkp.Implementation.BlockMessages.native_small_preimage_injective",
+        "Zkp.Implementation.BlockMessages.concrete_small_digest_binding",
+        "Zkp.Implementation.BlockMessages.small_block_domain_is_u32",
+        "Zkp.Implementation.BlockMessages.native_small_preimage_limbs_are_u32",
+        "Zkp.Implementation.BlockMessages.small_block_stream_starts_with_domain",
+        "Zkp.Implementation.BlockMessages.channel_state_and_small_block_streams_never_coincide",
+        "Zkp.Implementation.BlockMessages.pinned_small_fixture_stream",
+        "Zkp.Implementation.BlockMessages.small_block_preimage_len_pinned",
+        "Zkp.Implementation.BlockMessages.small_block_domain_pinned",
+        "Zkp.Implementation.BlockMessages.domains_are_distinct"
+      ],
+      "note": "Exact segment order/offsets (channel_id once at [1], bp slot at [2], bp pk_g at [3..11), tx_tree_root at [21..29)), width, injectivity and u32 bounds are theorems about the local stream; the digest is the opaque `hashWords` (boundary `keccak-hash`). The canonical `SmallBlockRootMessage::signing_digest()` in common/channel.rs is not transcribed; only the fixture of the source's own golden test is replayed."
+    },
+    {
+      "start": 87,
+      "end": 91,
+      "status": "non-executable",
+      "label": "closing brace, target-twin doc comment, derive",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 92,
+      "end": 103,
+      "status": "translated",
+      "label": "SmallBlockMessageFieldsTarget: the witnessed wire struct",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SmallBlockLimbs",
+        "Zkp.Implementation.BlockMessages.SmallBlockTarget",
+        "Zkp.Implementation.BlockMessages.Wire",
+        "Zkp.Implementation.BlockMessages.SmallBlockLimbs.witnessed",
+        "Zkp.Implementation.BlockMessages.SmallBlockLimbs.map",
+        "Zkp.Implementation.BlockMessages.Words2"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_block_witnessed_width"
+      ],
+      "note": "`Target` is a wire identifier `Wire := Nat`; the struct is the `Wire` instance of the shared limb shape with no channel_id / tx_tree_root field."
+    },
+    {
+      "start": 104,
+      "end": 105,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 106,
+      "end": 130,
+      "status": "translated",
+      "label": "SmallBlockMessageFieldsTarget::new: allocation order (not preimage order), every limb range_check(_, 32)",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SmallAlloc",
+        "Zkp.Implementation.BlockMessages.SmallAlloc.limbs",
+        "Zkp.Implementation.BlockMessages.SmallAlloc.rangeChecked",
+        "Zkp.Implementation.BlockMessages.smallBlockAllocationPlan",
+        "Zkp.Implementation.BlockMessages.SmallTargetRangeGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_block_allocation_width",
+        "Zkp.Implementation.BlockMessages.small_block_allocation_all_range_checked",
+        "Zkp.Implementation.BlockMessages.small_block_allocation_has_no_channel_id_or_tx_root"
+      ],
+      "note": "The allocation plan (order, limb counts, range_check flag) is modeled; what `range_check(t, 32)` enforces is the assumed predicate `SmallTargetRangeGates` (boundary `plonky2-range-check-lowering`); `add_virtual_target` / `Bytes32Target::new` are plonky2 API."
+    },
+    {
+      "start": 131,
+      "end": 136,
+      "status": "non-executable",
+      "label": "compute_signing_digest doc comment (caller supplies channel_id / tx_tree_root, 'already range-checked')",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 137,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "compute_signing_digest signature and the constant IMSB domain wire",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SmallDigestGates"
+      ],
+      "theorems": [],
+      "note": "Generic bounds and `builder.constant(IMSB)` are plonky2 API; the constant domain wire is recorded as the `domainWire` component of the `SmallDigestGates` premise."
+    },
+    {
+      "start": 150,
+      "end": 160,
+      "status": "translated",
+      "label": "in-circuit preimage vector: the same 41 limbs with the caller's domain / channel_id / tx_tree_root wires",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.smallTargetPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_target_connected_wires_at_pinned_offsets",
+        "Zkp.Implementation.BlockMessages.small_target_preimage_partition",
+        "Zkp.Implementation.BlockMessages.small_target_preimage_wires_are_caller_or_witnessed",
+        "Zkp.Implementation.BlockMessages.small_keccak_inputs_bounded_given_caller_wires",
+        "Zkp.Implementation.BlockMessages.small_block_preimage_map"
+      ],
+      "note": "Wire identity at the connected offsets is a theorem; that the caller's channel_id / tx_tree_root wires are range-checked is an explicit premise, exactly as the source comment assumes (boundary `enclosing-circuit-connects`)."
+    },
+    {
+      "start": 161,
+      "end": 162,
+      "status": "dependency-boundary",
+      "label": "builder.keccak256 gadget and Bytes32Target::from_slice",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.KeccakGadget",
+        "Zkp.Implementation.BlockMessages.SmallDigestGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_digest_gates_compute_native_digest"
+      ],
+      "note": "The keccak gadget is an opaque value-level callback (boundary `keccak-hash`); only the wiring is recorded, no gadget soundness or native/gadget agreement."
+    },
+    {
+      "start": 163,
+      "end": 163,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 164,
+      "end": 187,
+      "status": "translated",
+      "label": "set_witness: slot, pk_g, the three u64 limb pairs, then the two roots",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SmallSetWitness",
+        "Zkp.Implementation.BlockMessages.smallBlockWitnessWrites",
+        "Zkp.Implementation.BlockMessages.Consistent",
+        "Zkp.Implementation.BlockMessages.Words8.pairs",
+        "Zkp.Implementation.BlockMessages.Words2.pairs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.small_block_witness_write_count",
+        "Zkp.Implementation.BlockMessages.small_block_writes_give_set_witness",
+        "Zkp.Implementation.BlockMessages.small_set_witness_reproduces_native_preimage",
+        "Zkp.Implementation.BlockMessages.words8_consistent_map",
+        "Zkp.Implementation.BlockMessages.words2_consistent_map"
+      ],
+      "note": "The write list is transcribed in source order; a witness holding every write is a `SmallSetWitness`, under which the target preimage evaluates to the native preimage limb for limb. `F::from_canonical_u32` / `set_target` are plonky2 API."
+    },
+    {
+      "start": 188,
+      "end": 189,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 190,
+      "end": 234,
+      "status": "test-only",
+      "label": "cfg(test): golden-vector vs SmallBlockRootMessage::signing_digest()",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) module; not modeled. The golden-vector, mutation and target-identity tests are the source's own guards, not theorems here."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-hash",
+      "obligation": "`hash_words` and `builder.keccak256` are opaque callbacks (`HashEnvironment.hashWords`, `KeccakGadget`). Collision resistance, gadget soundness and native/gadget agreement are not stated; digest binding is proved only on a concrete compared pair with collision-freedom of that pair as a premise.",
+      "discharged": false
+    },
+    {
+      "name": "enclosing-circuit-connects",
+      "obligation": "`channel_id` and `tx_tree_root` must be the enclosing circuit's block-level, already range-checked wires; the model takes them as parameters and their u32 bound as a premise. Whether any circuit still consumes this digest is outside the file (the source says it is not a live authorization path).",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`range_check(t, 32)` is the assumed predicate `SmallTargetRangeGates` on the witnessed wires; its gate/field lowering is unproved and it does not cover the caller's wires.",
+      "discharged": false
+    },
+    {
+      "name": "native-and-target-representation",
+      "obligation": "Nat stands for u32 / u64 / Goldilocks field elements and `Wire := Nat` for `Target`; `assign : Wire -> Nat` is an arbitrary witness. Overflow, canonical field encoding and witness-write failures are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "no-authorization",
+      "obligation": "No signature, member-slot registration, `tx_tree_root != 0`, block acceptance or the off-circuit `state_commitment_root == balance_state.h1()` check is modeled; the IMSB digest authorizes nothing in this module.",
+      "discharged": false
+    }
+  ]
+}

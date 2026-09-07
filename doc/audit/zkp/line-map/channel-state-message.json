@@ -1,0 +1,403 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/channel_state_message.rs",
+  "source_sha256": "81ae6124b05bf08bc48de86b84b86668466629eb1b451db1f7914166a0999b10",
+  "source_lines": 707,
+  "module": "Zkp.Implementation.BlockMessages",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockMessages.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 45,
+      "status": "non-executable",
+      "label": "module docs (Design B rationale, connected-vs-witnessed limbs)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 46,
+      "end": 65,
+      "status": "dependency-boundary",
+      "label": "imports: plonky2 builder/witness API, keccak gadget, hash_words, split_u64, Bytes32/U256 limb traits",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.splitU64",
+        "Zkp.Implementation.BlockMessages.joinU64",
+        "Zkp.Implementation.BlockMessages.Words8",
+        "Zkp.Implementation.BlockMessages.Words8.words",
+        "Zkp.Implementation.BlockMessages.Words2",
+        "Zkp.Implementation.BlockMessages.HashEnvironment",
+        "Zkp.Implementation.BlockMessages.KeccakGadget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.split_u64_joins_back",
+        "Zkp.Implementation.BlockMessages.split_u64_injective",
+        "Zkp.Implementation.BlockMessages.split_u64_limbs_are_u32",
+        "Zkp.Implementation.BlockMessages.words8_has_eight_limbs",
+        "Zkp.Implementation.BlockMessages.words2_has_two_limbs"
+      ],
+      "note": "Imported crate semantics kept opaque: `hash_words` / `builder.keccak256` are the `HashEnvironment.hashWords` / `KeccakGadget` callbacks (no collision resistance, no gadget soundness); `split_u64` and `to_u32_vec` are transcribed locally as `splitU64` / `Words8.words` with Nat standing for u32/u64/field elements; the plonky2 builder API is not modeled."
+    },
+    {
+      "start": 66,
+      "end": 66,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 67,
+      "end": 75,
+      "status": "translated",
+      "label": "pinned layout constants: 139-limb width, CHANNEL_ID_LIMB=1, FUND_CHANNEL_ID_LIMB=8, H2_TAG_LIMBS=129..137",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.channelStatePreimageLen",
+        "Zkp.Implementation.BlockMessages.channelIdLimb",
+        "Zkp.Implementation.BlockMessages.fundChannelIdLimb",
+        "Zkp.Implementation.BlockMessages.h2TagStart",
+        "Zkp.Implementation.BlockMessages.h2TagEnd",
+        "Zkp.Implementation.BlockMessages.channelStateWitnessedLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.channel_state_preimage_len_pinned",
+        "Zkp.Implementation.BlockMessages.channel_id_limb_pinned",
+        "Zkp.Implementation.BlockMessages.fund_channel_id_limb_pinned",
+        "Zkp.Implementation.BlockMessages.h2_tag_limbs_pinned",
+        "Zkp.Implementation.BlockMessages.channel_state_segment_widths_sum_to_139",
+        "Zkp.Implementation.BlockMessages.channel_state_witnessed_width"
+      ],
+      "note": "Constants pinned as literals with `_pinned` theorems; the one-line doc comments between them are non-executable."
+    },
+    {
+      "start": 76,
+      "end": 83,
+      "status": "non-executable",
+      "label": "doc comment and derive for ChannelStateMessageFields",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 84,
+      "end": 98,
+      "status": "translated",
+      "label": "ChannelStateMessageFields: the witnessed components (no channel_id, no h2_tag, no signatures, no digest)",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.ChannelStateFields",
+        "Zkp.Implementation.BlockMessages.ChannelStateFields.NativeRepresentable",
+        "Zkp.Implementation.BlockMessages.Amounts",
+        "Zkp.Implementation.BlockMessages.Amounts.words",
+        "Zkp.Implementation.BlockMessages.Words8.Bounded",
+        "Zkp.Implementation.BlockMessages.Amounts.Bounded",
+        "Zkp.Implementation.BlockMessages.maxChannelTokens"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.amounts_have_eighty_limbs",
+        "Zkp.Implementation.BlockMessages.amounts_width_is_tokens_times_u256",
+        "Zkp.Implementation.BlockMessages.max_channel_tokens_pinned",
+        "Zkp.Implementation.BlockMessages.amounts_bounded_iff"
+      ],
+      "note": "u64 scalars and [u32; 8] words are Nat with the `NativeRepresentable` bound as an explicit premise; `[U256; MAX_CHANNEL_TOKENS]` is the ten-slot `Amounts`."
+    },
+    {
+      "start": 99,
+      "end": 117,
+      "status": "non-executable",
+      "label": "impl header and preimage doc comment (limb-offset table, channel_id-in-two-limbs rationale)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 118,
+      "end": 141,
+      "status": "translated",
+      "label": "ChannelStateMessageFields::preimage: the 139-limb IMCH limb stream, channel_id at [1] and [8], h2_tag at [129..137), state_version tail",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.nativePreimage",
+        "Zkp.Implementation.BlockMessages.channelStatePreimageG",
+        "Zkp.Implementation.BlockMessages.toLimbs",
+        "Zkp.Implementation.BlockMessages.ChannelStateLimbs",
+        "Zkp.Implementation.BlockMessages.channelStateSegmentWidths",
+        "Zkp.Implementation.BlockMessages.channelStateSegmentOffsets",
+        "Zkp.Implementation.BlockMessages.prefixSums",
+        "Zkp.Implementation.BlockMessages.canonicalPreimage",
+        "Zkp.Implementation.BlockMessages.ChannelStateReading",
+        "Zkp.Implementation.BlockMessages.readChannelStatePreimage",
+        "Zkp.Implementation.BlockMessages.pinnedFields",
+        "Zkp.Implementation.BlockMessages.pinnedH2Tag",
+        "Zkp.Implementation.BlockMessages.pinnedChannelId",
+        "Zkp.Implementation.BlockMessages.channelStateDomain",
+        "Zkp.Implementation.BlockMessages.limbBase",
+        "Zkp.Implementation.BlockMessages.scalarLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.channel_state_segment_offsets_are_prefix_sums",
+        "Zkp.Implementation.BlockMessages.channel_state_preimage_width",
+        "Zkp.Implementation.BlockMessages.native_preimage_width",
+        "Zkp.Implementation.BlockMessages.channel_state_segment_offsets",
+        "Zkp.Implementation.BlockMessages.channel_id_feeds_two_limbs",
+        "Zkp.Implementation.BlockMessages.state_version_is_the_tail",
+        "Zkp.Implementation.BlockMessages.mirror_matches_canonical_iff_fund_channel_id_equal",
+        "Zkp.Implementation.BlockMessages.foreign_fund_channel_id_changes_preimage",
+        "Zkp.Implementation.BlockMessages.read_channel_state_preimage",
+        "Zkp.Implementation.BlockMessages.channel_state_layout_injective",
+        "Zkp.Implementation.BlockMessages.to_limbs_injective",
+        "Zkp.Implementation.BlockMessages.native_preimage_injective",
+        "Zkp.Implementation.BlockMessages.channel_state_domain_is_u32",
+        "Zkp.Implementation.BlockMessages.native_preimage_limbs_are_u32",
+        "Zkp.Implementation.BlockMessages.channel_state_stream_starts_with_domain",
+        "Zkp.Implementation.BlockMessages.channel_state_and_small_block_streams_never_coincide",
+        "Zkp.Implementation.BlockMessages.pinned_fixture_offsets",
+        "Zkp.Implementation.BlockMessages.pinned_fixture_is_native_representable",
+        "Zkp.Implementation.BlockMessages.pinned_fixture_limbs_are_u32",
+        "Zkp.Implementation.BlockMessages.channel_state_domain_pinned",
+        "Zkp.Implementation.BlockMessages.limb_base_pinned"
+      ],
+      "note": "Exact segment order/offsets, width, injectivity and u32 bounds are theorems about the local stream; the mirror-vs-canonical comparison is against a local transcription of `ChannelState::signing_digest()` (common/channel.rs), not that file. `debug_assert_eq!` on the width is `native_preimage_width`."
+    },
+    {
+      "start": 142,
+      "end": 146,
+      "status": "non-executable",
+      "label": "signing_digest doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 147,
+      "end": 149,
+      "status": "translated",
+      "label": "ChannelStateMessageFields::signing_digest = hash_words(preimage)",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.nativeSigningDigest",
+        "Zkp.Implementation.BlockMessages.HashEnvironment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.mirror_digest_matches_canonical_of_invariant",
+        "Zkp.Implementation.BlockMessages.concrete_digest_binding",
+        "Zkp.Implementation.BlockMessages.channel_state_digest_depends_only_on_fields_channel_and_h2"
+      ],
+      "note": "The digest is the opaque `hashWords` of the local preimage; digest binding is stated only on one concrete compared pair with collision-freedom of that pair as an explicit premise (boundary `keccak-hash`)."
+    },
+    {
+      "start": 150,
+      "end": 154,
+      "status": "non-executable",
+      "label": "from_channel_state doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 155,
+      "end": 168,
+      "status": "translated",
+      "label": "from_channel_state: projection dropping channel_id, channel_fund.channel_id and h2_tag; reads balance_state.h1() and state_version",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.fromChannelState",
+        "Zkp.Implementation.BlockMessages.ChannelState",
+        "Zkp.Implementation.BlockMessages.BalanceStateView"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.from_channel_state_reads_h1_and_version",
+        "Zkp.Implementation.BlockMessages.from_channel_state_drops_connected_components",
+        "Zkp.Implementation.BlockMessages.projected_state_mirrors_canonical"
+      ],
+      "note": "`balance_state.h1()` is an opaque field of `BalanceStateView` (boundary `balance-state-h1`); `digest` and `member_signatures` are not read and not modeled."
+    },
+    {
+      "start": 169,
+      "end": 180,
+      "status": "non-executable",
+      "label": "closing brace, target-twin doc comment (no channel_id / h2_tag wires by construction), derive",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 181,
+      "end": 197,
+      "status": "translated",
+      "label": "ChannelStateMessageFieldsTarget: the witnessed wire struct, same shape as the native fields",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.ChannelStateLimbs",
+        "Zkp.Implementation.BlockMessages.ChannelStateTarget",
+        "Zkp.Implementation.BlockMessages.Wire",
+        "Zkp.Implementation.BlockMessages.ChannelStateLimbs.witnessed",
+        "Zkp.Implementation.BlockMessages.ChannelStateLimbs.map",
+        "Zkp.Implementation.BlockMessages.Words2"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.channel_state_witnessed_width"
+      ],
+      "note": "`Target` is a wire identifier `Wire := Nat`; the struct is the `Wire` instance of the shared limb shape, with no channel_id / h2_tag field by construction."
+    },
+    {
+      "start": 198,
+      "end": 199,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 200,
+      "end": 226,
+      "status": "translated",
+      "label": "ChannelStateMessageFieldsTarget::new: allocation order, every limb range_check(_, 32)",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.Alloc",
+        "Zkp.Implementation.BlockMessages.Alloc.limbs",
+        "Zkp.Implementation.BlockMessages.Alloc.rangeChecked",
+        "Zkp.Implementation.BlockMessages.channelStateAllocationPlan",
+        "Zkp.Implementation.BlockMessages.TargetRangeGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.channel_state_allocation_width",
+        "Zkp.Implementation.BlockMessages.channel_state_allocation_all_range_checked",
+        "Zkp.Implementation.BlockMessages.channel_state_allocation_has_no_channel_id_or_h2_tag"
+      ],
+      "note": "The allocation plan (order, limb counts, range_check flag) is modeled; what `range_check(t, 32)` enforces is the assumed predicate `TargetRangeGates` (boundary `plonky2-range-check-lowering`), and `add_virtual_target` / `U256Target::new` / `Bytes32Target::new` are plonky2 API."
+    },
+    {
+      "start": 227,
+      "end": 233,
+      "status": "non-executable",
+      "label": "target preimage doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 234,
+      "end": 262,
+      "status": "translated",
+      "label": "ChannelStateMessageFieldsTarget::preimage: the same 139 limbs with the caller's domain / channel_id / h2_tag wires at the connected offsets",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.targetPreimage",
+        "Zkp.Implementation.BlockMessages.FreshCallerWires"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.target_preimage_width",
+        "Zkp.Implementation.BlockMessages.target_connected_wires_at_pinned_offsets",
+        "Zkp.Implementation.BlockMessages.target_preimage_partition",
+        "Zkp.Implementation.BlockMessages.target_preimage_wires_are_caller_or_witnessed",
+        "Zkp.Implementation.BlockMessages.witnessed_wires_never_at_connected_offsets",
+        "Zkp.Implementation.BlockMessages.keccak_inputs_bounded_given_caller_wires",
+        "Zkp.Implementation.BlockMessages.channel_state_preimage_map"
+      ],
+      "note": "Wire identity at the connected offsets is a theorem; the negative half (no witnessed wire at a connected offset) needs the builder-freshness premise `FreshCallerWires` (boundary `enclosing-circuit-connects`). `assert_eq!` on the width is `target_preimage_width`."
+    },
+    {
+      "start": 263,
+      "end": 264,
+      "status": "non-executable",
+      "label": "signing_digest doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 265,
+      "end": 279,
+      "status": "dependency-boundary",
+      "label": "in-circuit signing_digest: constant IMCH domain wire, preimage, builder.keccak256 gadget",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.KeccakGadget",
+        "Zkp.Implementation.BlockMessages.DigestGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.digest_gates_compute_native_digest"
+      ],
+      "note": "The keccak gadget is an opaque value-level callback (boundary `keccak-hash`); `DigestGates` only records the wiring (a constant wire carrying IMCH, the preimage over it, the gadget output). No gadget soundness and no native-keccak/gadget agreement is stated."
+    },
+    {
+      "start": 280,
+      "end": 280,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 281,
+      "end": 308,
+      "status": "translated",
+      "label": "set_witness: writes split_u64 limbs of the four u64s, then the amounts and the five 8-limb values",
+      "declarations": [
+        "Zkp.Implementation.BlockMessages.SetWitness",
+        "Zkp.Implementation.BlockMessages.channelStateWitnessWrites",
+        "Zkp.Implementation.BlockMessages.Consistent",
+        "Zkp.Implementation.BlockMessages.Words8.pairs",
+        "Zkp.Implementation.BlockMessages.Words2.pairs",
+        "Zkp.Implementation.BlockMessages.Amounts.pairs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockMessages.channel_state_witness_write_count",
+        "Zkp.Implementation.BlockMessages.channel_state_writes_give_set_witness",
+        "Zkp.Implementation.BlockMessages.set_witness_reproduces_native_preimage",
+        "Zkp.Implementation.BlockMessages.words8_consistent_map",
+        "Zkp.Implementation.BlockMessages.words2_consistent_map",
+        "Zkp.Implementation.BlockMessages.amounts_consistent_map"
+      ],
+      "note": "The write list is transcribed in source order; a witness holding every write is a `SetWitness`, under which the target preimage evaluates to the native preimage limb for limb. `F::from_canonical_u32` / `set_target` are plonky2 API (Nat stands for field elements)."
+    },
+    {
+      "start": 309,
+      "end": 310,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 311,
+      "end": 707,
+      "status": "test-only",
+      "label": "cfg(test): golden-vector vs ChannelState::signing_digest(), pinned offsets, load-bearing-limb mutation test, target-wire identity test, in-circuit recompute proof test",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) module; not modeled. The golden-vector, mutation and target-identity tests are the source's own guards, not theorems here."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-hash",
+      "obligation": "`hash_words` and `builder.keccak256` are opaque callbacks (`HashEnvironment.hashWords`, `KeccakGadget`). Collision resistance, gadget soundness/completeness and agreement between the native keccak and the gadget are not stated; digest binding is proved only on a concrete compared pair with collision-freedom of that pair as a premise.",
+      "discharged": false
+    },
+    {
+      "name": "enclosing-circuit-connects",
+      "obligation": "`channel_id` (both limbs) and `h2_tag` must be the enclosing circuit's block-level wires (update_channel_tree, not this file). The model takes them as parameters plus the builder-freshness premise `FreshCallerWires`; that the caller actually connects them, and that `channel_fund.channel_id == channel_id` holds for every admitted state, is the caller's obligation.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`range_check(t, 32)` is the assumed predicate `TargetRangeGates` on the witnessed wires; its gate/field lowering is unproved, and the caller's wires are not covered by it (the keccak gadget does not range-check its inputs).",
+      "discharged": false
+    },
+    {
+      "name": "native-and-target-representation",
+      "obligation": "Nat stands for u32 / u64 / Goldilocks field elements and `Wire := Nat` for `Target`; `assign : Wire -> Nat` is an arbitrary witness. Overflow, canonical field encoding and witness-write failures are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "balance-state-h1",
+      "obligation": "`balance_state.h1()` is an opaque `BalanceStateView.h1` field; its computation and its relation to the balance state are not modeled here.",
+      "discharged": false
+    },
+    {
+      "name": "no-authorization",
+      "obligation": "Signature validity, N-of-N aggregation, member registration, block acceptance, `tx_tree_root != 0`, and fund custody are outside both files and this module; no theorem here says a digest match authorizes anything.",
+      "discharged": false
+    }
+  ]
+}
