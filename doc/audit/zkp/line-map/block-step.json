@@ -1,0 +1,784 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/block_step.rs",
+  "source_sha256": "e184e457d91501922cd5883e9495e16eaf84383f90b6dc407ce845d07a4d65bd",
+  "source_lines": 1169,
+  "module": "Zkp.Implementation.BlockStep",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockStep.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "dependency-boundary",
+      "label": "std HashMap import",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.lookupLast",
+        "Zkp.Implementation.BlockStep.dummyLookup"
+      ],
+      "theorems": [],
+      "note": "HashMap collect/get semantics (last insertion wins) is modeled by lookupLast/dummyLookup; the container itself is external."
+    },
+    {
+      "start": 2,
+      "end": 2,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 3,
+      "end": 19,
+      "status": "dependency-boundary",
+      "label": "plonky2 imports",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.StepEnv",
+        "Zkp.Implementation.BlockStep.Proof",
+        "Zkp.Implementation.BlockStep.VerifierCircuitData"
+      ],
+      "theorems": [],
+      "note": "Every plonky2 item (builder, circuit data, proofs, hashers) is an opaque callback or record in the model."
+    },
+    {
+      "start": 20,
+      "end": 20,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 21,
+      "end": 57,
+      "status": "dependency-boundary",
+      "label": "crate imports (public-input layouts, trees, gadgets)",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.ExtendedPublicState",
+        "Zkp.Implementation.BlockStep.PublicState",
+        "Zkp.Implementation.BlockStep.UpdateUserPublicInputs",
+        "Zkp.Implementation.BlockStep.DepositChainPublicInputs",
+        "Zkp.Implementation.BlockStep.ChannelRegChainPublicInputs",
+        "Zkp.Implementation.BlockStep.MerkleProof"
+      ],
+      "theorems": [],
+      "note": "The imported layouts are re-declared locally as Lean structures; the gadgets they come with stay opaque."
+    },
+    {
+      "start": 58,
+      "end": 58,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 59,
+      "end": 87,
+      "status": "translated",
+      "label": "BlockStepError variants",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 88,
+      "end": 88,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 89,
+      "end": 115,
+      "status": "translated",
+      "label": "BlockStepWitness fields",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 116,
+      "end": 121,
+      "status": "non-executable",
+      "label": "impl header and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 122,
+      "end": 128,
+      "status": "translated",
+      "label": "to_public_inputs signature",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.toPublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 129,
+      "end": 149,
+      "status": "translated",
+      "label": "previous chain proof verification / decode, or free initial state",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.resolvePrev",
+        "Zkp.Implementation.BlockStep.liftBlockChain",
+        "Zkp.Implementation.BlockStep.decodeBlockChainPis",
+        "Zkp.Implementation.BlockStep.extendedPublicStateU64Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.resolve_prev_first_block_accepts_any_initial_state",
+        "Zkp.Implementation.BlockStep.resolve_prev_first_block_needs_initial_state",
+        "Zkp.Implementation.BlockStep.resolve_prev_rejects_unaccepted_proof",
+        "Zkp.Implementation.BlockStep.decode_block_chain_pis_length_gate",
+        "Zkp.Implementation.BlockStep.extended_public_state_len_pinned",
+        "Zkp.Implementation.BlockStep.lift_block_chain_ok_iff"
+      ],
+      "note": "Proof acceptance is the opaque StepEnv.accepts; only the branch structure and the decode length gate are modeled."
+    },
+    {
+      "start": 150,
+      "end": 153,
+      "status": "translated",
+      "label": "previous extended / inner public state bindings",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.toPublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 154,
+      "end": 169,
+      "status": "translated",
+      "label": "update-account verifier lookup, proof verification and public-input decode",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.lookupLast",
+        "Zkp.Implementation.BlockStep.liftVd",
+        "Zkp.Implementation.BlockStep.liftUpdate",
+        "Zkp.Implementation.BlockStep.decodeUpdateUserPis"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.lookup_last_prefers_tail",
+        "Zkp.Implementation.BlockStep.lift_vd_ok_iff",
+        "Zkp.Implementation.BlockStep.lift_update_ok_iff",
+        "Zkp.Implementation.BlockStep.decode_update_user_pis_length_gate",
+        "Zkp.Implementation.BlockStep.decode_update_user_encode",
+        "Zkp.Implementation.BlockStep.update_user_public_inputs_len_pinned"
+      ],
+      "note": "The HashMap lookup keeps the LAST duplicate entry; proof acceptance stays opaque."
+    },
+    {
+      "start": 170,
+      "end": 201,
+      "status": "translated",
+      "label": "block-number increment and the update-proof consistency checks (incl. P2b bp_sig_chain)",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.toPublicInputs",
+        "Zkp.Implementation.BlockStep.check",
+        "Zkp.Implementation.BlockStep.u63Max"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.to_public_inputs_native_facts",
+        "Zkp.Implementation.BlockStep.to_public_inputs_increments_block_number",
+        "Zkp.Implementation.BlockStep.to_public_inputs_folds_block_hash_chain",
+        "Zkp.Implementation.BlockStep.u63_max_pinned",
+        "Zkp.Implementation.BlockStep.check_ok_iff"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 202,
+      "end": 259,
+      "status": "translated",
+      "label": "conditional deposit-chain fold",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.resolveDeposit",
+        "Zkp.Implementation.BlockStep.DepositOutcome"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.resolve_deposit_no_change_freezes",
+        "Zkp.Implementation.BlockStep.resolve_deposit_change_needs_linked_proof",
+        "Zkp.Implementation.BlockStep.resolve_deposit_ignores_redundant_proof",
+        "Zkp.Implementation.BlockStep.deposit_chain_public_inputs_len_pinned",
+        "Zkp.Implementation.BlockStep.lift_deposit_ok_iff",
+        "Zkp.Implementation.BlockStep.decode_deposit_chain_pis_length_gate"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 260,
+      "end": 338,
+      "status": "translated",
+      "label": "conditional channel-registration fold, R6 exclusion, proof-iff-change guard and G6 anchoring",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.resolveChannelReg",
+        "Zkp.Implementation.BlockStep.ChannelRegOutcome"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.resolve_channel_reg_absent_freezes",
+        "Zkp.Implementation.BlockStep.resolve_channel_reg_present_excludes_user_update",
+        "Zkp.Implementation.BlockStep.resolve_channel_reg_present_moves_chain",
+        "Zkp.Implementation.BlockStep.channel_reg_proof_present_iff_chain_moves",
+        "Zkp.Implementation.BlockStep.channel_reg_chain_public_inputs_len_pinned",
+        "Zkp.Implementation.BlockStep.lift_channel_reg_ok_iff",
+        "Zkp.Implementation.BlockStep.decode_channel_reg_chain_pis_length_gate"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 339,
+      "end": 357,
+      "status": "dependency-boundary",
+      "label": "public-state Merkle membership check and root recomputation",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.StepEnv",
+        "Zkp.Implementation.BlockStep.MerkleProof",
+        "Zkp.Implementation.BlockStep.emptyPublicStateLeaf"
+      ],
+      "theorems": [],
+      "note": "get_root/verify are the opaque StepEnv.merkleRoot; no collision freedom is assumed anywhere."
+    },
+    {
+      "start": 358,
+      "end": 380,
+      "status": "translated",
+      "label": "new public state / extended state assembly and the returned public inputs",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.nativeOutput",
+        "Zkp.Implementation.BlockStep.ExtendedPublicState",
+        "Zkp.Implementation.BlockStep.PublicState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.to_public_inputs_preserves_initial_state_and_key",
+        "Zkp.Implementation.BlockStep.to_public_inputs_timestamp_is_update_declared"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 381,
+      "end": 382,
+      "status": "non-executable",
+      "label": "closing braces and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 383,
+      "end": 406,
+      "status": "translated",
+      "label": "BlockStepTarget wire layout",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepWires"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 407,
+      "end": 419,
+      "status": "non-executable",
+      "label": "impl header, BlockStepTarget::new signature and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 420,
+      "end": 424,
+      "status": "translated",
+      "label": "non-empty update-verifier-list assertion",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.newTargetPrecondition"
+      ],
+      "theorems": [],
+      "note": "Modeled as a precondition Prop; the Rust panics rather than returning an error."
+    },
+    {
+      "start": 425,
+      "end": 448,
+      "status": "dependency-boundary",
+      "label": "previous chain proof target, conditional verification and conditional verifier-key connection",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.StepEnv",
+        "Zkp.Implementation.BlockStep.VerifierKey"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_first_step_verifier_key_is_free",
+        "Zkp.Implementation.BlockStep.selected_prev_state_key_irrelevant"
+      ],
+      "note": "conditionally_verify_proof / conditionally_connect_vd are modeled by their intended local meaning only; the theorem records that on a first step the emitted key is a free witness."
+    },
+    {
+      "start": 449,
+      "end": 462,
+      "status": "translated",
+      "label": "selection of the initial and previous extended public states",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.selectedInitialState",
+        "Zkp.Implementation.BlockStep.selectedPrevState",
+        "Zkp.Implementation.BlockStep.selectExt"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 463,
+      "end": 471,
+      "status": "translated",
+      "label": "one-hot flag allocation and assert_one(hot_sum)",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.slotFlags"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 472,
+      "end": 480,
+      "status": "dependency-boundary",
+      "label": "per-slot update proof targets, conditional verification and from_slice re-slicing",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.Proof",
+        "Zkp.Implementation.BlockStep.UpdateUserPublicInputs"
+      ],
+      "theorems": [],
+      "note": "from_slice is a pure re-slicing with a build-time length assert and no range checks; the wires carry the parsed structures."
+    },
+    {
+      "start": 481,
+      "end": 495,
+      "status": "dependency-boundary",
+      "label": "Poseidon commitments of the per-slot inputs, select_vec and connect",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_selected_update_is_slot_update"
+      ],
+      "note": "Commitment injectivity is an explicit premise on the compared pair, never a theorem."
+    },
+    {
+      "start": 496,
+      "end": 517,
+      "status": "dependency-boundary",
+      "label": "deposit and channel-registration cyclic proof targets and their public inputs",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.DepositChainPublicInputs",
+        "Zkp.Implementation.BlockStep.ChannelRegChainPublicInputs"
+      ],
+      "theorems": [],
+      "note": "add_proof_target_and_conditionally_verify_cyclic is an opaque gadget in the model."
+    },
+    {
+      "start": 518,
+      "end": 531,
+      "status": "translated",
+      "label": "in-circuit block-number increment, 63-bit range check and connect",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.fieldAdd1",
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.fieldOrder",
+        "Zkp.Implementation.BlockStep.blockNumberBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_block_number_increments",
+        "Zkp.Implementation.BlockStep.next_block_number_range_check_allows_field_wrap",
+        "Zkp.Implementation.BlockStep.field_order_pinned"
+      ],
+      "note": "add_const is modeled modulo the Goldilocks order; the range check constrains the NEXT value only."
+    },
+    {
+      "start": 532,
+      "end": 549,
+      "status": "translated",
+      "label": "account-root, block-hash-chain and bp_sig_chain wiring",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_fold_block_hash_chain",
+        "Zkp.Implementation.BlockStep.gates_thread_bp_sig_chain"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 550,
+      "end": 604,
+      "status": "translated",
+      "label": "deposit flag constraint, conditional asserts and value selection",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.selectedDepositHashChain",
+        "Zkp.Implementation.BlockStep.selectedDepositTreeRoot",
+        "Zkp.Implementation.BlockStep.selectedDepositCount",
+        "Zkp.Implementation.BlockStep.selectBytes32",
+        "Zkp.Implementation.BlockStep.selectHash",
+        "Zkp.Implementation.BlockStep.selectNat"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_no_deposit_proof_freezes_deposit_state",
+        "Zkp.Implementation.BlockStep.gates_deposit_proof_links_chain"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 605,
+      "end": 671,
+      "status": "translated",
+      "label": "R6 exclusion, registration conditional asserts, selection, flag constraint and G6 binding",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.selectedAccountTreeRoot",
+        "Zkp.Implementation.BlockStep.selectedChannelRegHashChain",
+        "Zkp.Implementation.BlockStep.BlockStepGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_registration_excludes_user_update",
+        "Zkp.Implementation.BlockStep.gates_no_registration_uses_update_root",
+        "Zkp.Implementation.BlockStep.gates_registration_anchored_in_block_hash",
+        "Zkp.Implementation.BlockStep.gates_registration_flag_iff_chain_moves"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 672,
+      "end": 689,
+      "status": "dependency-boundary",
+      "label": "public-state Merkle proof target, in-circuit verify and get_root",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.StepEnv",
+        "Zkp.Implementation.BlockStep.MerkleProof",
+        "Zkp.Implementation.BlockStep.BlockStepGates",
+        "Zkp.Implementation.BlockStep.publicStateTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.public_state_tree_height_pinned"
+      ],
+      "note": "The Merkle gadget is the opaque StepEnv.merkleRoot; only the tree height constant is pinned."
+    },
+    {
+      "start": 690,
+      "end": 723,
+      "status": "translated",
+      "label": "registered public inputs and the returned BlockStepTarget",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.registeredPis",
+        "Zkp.Implementation.BlockStep.BlockStepWires"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.gates_timestamp_passthrough",
+        "Zkp.Implementation.BlockStep.example_gates_satisfied"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 724,
+      "end": 744,
+      "status": "non-executable",
+      "label": "closing brace, attribute, set_witness signature and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 745,
+      "end": 767,
+      "status": "translated",
+      "label": "previous-proof flag, dummy substitution and the initial-state requirement",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.setWitness",
+        "Zkp.Implementation.BlockStep.check"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.set_witness_first_block_needs_initial_state"
+      ],
+      "note": "Dummy-proof substitution itself is not modeled; only the error it guards."
+    },
+    {
+      "start": 768,
+      "end": 786,
+      "status": "untranslated",
+      "label": "deposit and channel-registration flag / dummy-proof witness writing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 787,
+      "end": 820,
+      "status": "translated",
+      "label": "one-hot flag writing, selected-slot public-input parse and the matched-slot requirement",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.slotWitness",
+        "Zkp.Implementation.BlockStep.slotFlags",
+        "Zkp.Implementation.BlockStep.dummyLookup",
+        "Zkp.Implementation.BlockStep.setWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.set_witness_requires_supported_user_count",
+        "Zkp.Implementation.BlockStep.slot_witness_true_implies_supported",
+        "Zkp.Implementation.BlockStep.duplicate_user_counts_set_two_one_hot_flags",
+        "Zkp.Implementation.BlockStep.duplicate_user_counts_native_uses_last"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 821,
+      "end": 831,
+      "status": "untranslated",
+      "label": "Merkle-proof, verifier-data and new_pis witness writing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 832,
+      "end": 832,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 833,
+      "end": 850,
+      "status": "translated",
+      "label": "BlockStepCircuit fields (common data identities and supported user counts)",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepCircuitShape"
+      ],
+      "theorems": [],
+      "note": "Only the fields that prove()'s preflight compares are modeled; circuit data and dummy proofs are not."
+    },
+    {
+      "start": 851,
+      "end": 863,
+      "status": "non-executable",
+      "label": "blank line, impl header, where clause and BlockStepCircuit::new signature",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 864,
+      "end": 871,
+      "status": "dependency-boundary",
+      "label": "CircuitBuilder allocation and BlockStepTarget::new invocation",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.BlockStepGates"
+      ],
+      "theorems": [],
+      "note": "plonky2 circuit construction is outside the model."
+    },
+    {
+      "start": 872,
+      "end": 873,
+      "status": "translated",
+      "label": "registration of the step public-input vector",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.stepRegisteredPis",
+        "Zkp.Implementation.BlockStep.stepRegisteredLen",
+        "Zkp.Implementation.BlockStep.blockChainPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.step_registered_pis_length",
+        "Zkp.Implementation.BlockStep.step_registered_len_pinned_at_cap_height_four",
+        "Zkp.Implementation.BlockStep.step_registered_pis_round_trip",
+        "Zkp.Implementation.BlockStep.block_chain_public_inputs_len_pinned",
+        "Zkp.Implementation.BlockStep.decode_extended_public_state_encode",
+        "Zkp.Implementation.BlockStep.decode_public_state_encode",
+        "Zkp.Implementation.BlockStep.extended_public_state_encode_length",
+        "Zkp.Implementation.BlockStep.public_state_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 874,
+      "end": 876,
+      "status": "dependency-boundary",
+      "label": "builder.build (plonky2 compilation)",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.StepEnv"
+      ],
+      "theorems": [],
+      "note": "Circuit compilation is an opaque boundary."
+    },
+    {
+      "start": 877,
+      "end": 903,
+      "status": "untranslated",
+      "label": "dummy-proof generation and BlockStepCircuit struct assembly",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 904,
+      "end": 912,
+      "status": "non-executable",
+      "label": "blank line and BlockStepCircuit::prove signature",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 913,
+      "end": 947,
+      "status": "translated",
+      "label": "prove() preflight: common-data equality and the supported user-count list",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.provePreflight",
+        "Zkp.Implementation.BlockStep.BlockStepCircuitShape"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.prove_preflight_pins_common_data_and_user_counts",
+        "Zkp.Implementation.BlockStep.prove_preflight_admits_duplicate_user_counts"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 948,
+      "end": 954,
+      "status": "translated",
+      "label": "native public-input derivation call",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.example_native_accepts_first_block",
+        "Zkp.Implementation.BlockStep.example_native_accepts_any_timestamp",
+        "Zkp.Implementation.BlockStep.example_timestamps_are_unconstrained",
+        "Zkp.Implementation.BlockStep.example_update_well_formed",
+        "Zkp.Implementation.BlockStep.example_update_other_timestamp_well_formed"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 955,
+      "end": 966,
+      "status": "translated",
+      "label": "target witness assignment call",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.setWitness",
+        "Zkp.Implementation.BlockStep.dummyLookup"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 967,
+      "end": 974,
+      "status": "dependency-boundary",
+      "label": "public-input witness assignment and the plonky2 prover",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.StepEnv"
+      ],
+      "theorems": [],
+      "note": "Proving is an opaque boundary; no soundness or completeness is claimed."
+    },
+    {
+      "start": 975,
+      "end": 979,
+      "status": "translated",
+      "label": "BlockStepCircuit::verify",
+      "declarations": [
+        "Zkp.Implementation.BlockStep.verifyStepProof"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockStep.verify_step_proof_ok_iff"
+      ],
+      "note": "A bare delegation to the opaque plonky2 verifier; no local check of its own."
+    },
+    {
+      "start": 980,
+      "end": 981,
+      "status": "non-executable",
+      "label": "closing braces and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content; nothing to model."
+    },
+    {
+      "start": 982,
+      "end": 1169,
+      "status": "test-only",
+      "label": "#[cfg(test)] module: release-only end-to-end block-step test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "recursive-proof-verification",
+      "obligation": "StepEnv.accepts stands for VerifierCircuitData::verify and for the in-circuit conditional proof gadgets; nothing is proved about plonky2 proof soundness, so an accepted previous-chain, update, deposit or channel-registration proof carries no meaning beyond the equalities this file checks.",
+      "discharged": false
+    },
+    {
+      "name": "public-state-merkle-gadget",
+      "obligation": "StepEnv.merkleRoot stands for IncrementalMerkleProof::get_root and its in-circuit counterpart; no collision freedom or binding property of the Poseidon Merkle tree is assumed or proved, so 'the previous public state was inserted at index block_number' is not established by the model.",
+      "discharged": false
+    },
+    {
+      "name": "update-inputs-commitment-injectivity",
+      "obligation": "The one-hot selection connects Poseidon commitments of the per-slot UpdateUserPublicInputs; that the selected wires equal the selected slot's public inputs holds only under an explicit collision premise on the compared pair (gates_selected_update_is_slot_update).",
+      "discharged": false
+    },
+    {
+      "name": "verifier-key-limb-codec",
+      "obligation": "StepEnv.vdEncode / vdDecode stand for vd_to_vec and vd_from_pis_slice; their being a codec is the VdCodecSound premise, and no claim is made that the limbs identify a unique circuit.",
+      "discharged": false
+    },
+    {
+      "name": "gate-lowering",
+      "obligation": "conditionally_verify_proof, add_proof_target_and_conditionally_verify(_cyclic), conditionally_connect_vd, select_vec, conditional_assert_eq, is_equal, assert_one and range_check are modeled by their intended local semantics; that the emitted plonky2 gates actually enforce those semantics is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-arithmetic-representation",
+      "obligation": "Wires are integer representatives. The in-circuit block-number increment is modeled as addition modulo the Goldilocks order and the 63-bit range check applies to the NEXT value only; nothing in this file range-checks the previous block number parsed out of the previous proof's public inputs.",
+      "discharged": false
+    },
+    {
+      "name": "native-vs-circuit-refinement",
+      "obligation": "toPublicInputs (the Rust witness builder) and BlockStepGates (an arbitrary satisfying assignment) are separate models; no theorem claims that a gate-satisfying assignment must come from the native path, nor that the native path always produces a satisfying assignment.",
+      "discharged": false
+    },
+    {
+      "name": "initial-state-and-cyclic-key-anchoring",
+      "obligation": "On a first step both initial_public_state and the emitted verifier key are free witnesses (resolve_prev_first_block_accepts_any_initial_state, gates_first_step_verifier_key_is_free); the anchoring must come from the block-hash-chain wrapper and from the contract's blockHashChainAt snapshot, neither of which is modeled here.",
+      "discharged": false
+    },
+    {
+      "name": "sub-block-message-and-signature-authorization",
+      "obligation": "No signature, sig-cluster membership, N-of-N threshold or block-producer key is checked in this file. The admitted sub-block message, its folding into block_hash_chain, and the advance of bp_sig_chain are delegated to the update_channel_tree proof and to the aggregate-list proof consumed by the validity circuit; the model treats them as declared public inputs only.",
+      "discharged": false
+    },
+    {
+      "name": "dummy-proof-substitution",
+      "obligation": "DummyProof construction and the substitution of dummy proofs into unselected branches are not modeled; the model only records the error raised when a dummy is missing.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-and-prover",
+      "obligation": "CircuitBuilder construction, builder.build and data.prove/data.verify are opaque; the registered public-input vector layout is modeled but its compilation is not.",
+      "discharged": false
+    }
+  ]
+}

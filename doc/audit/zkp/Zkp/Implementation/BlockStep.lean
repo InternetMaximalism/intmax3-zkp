@@ -1487,6 +1487,12 @@ theorem gates_registration_flag_iff_chain_moves {env : StepEnv}
     rw [hreg]
     exact (decide_ne_eq_true_iff _ _).mpr (fun hEq => h hEq.symm)
 
+theorem selected_prev_state_key_irrelevant (w : BlockStepWires)
+    (noPrev : w.hasPrevBlockProof = false) (k : VerifierKey)
+    (pis : BlockChainPublicInputs) :
+    selectedPrevState { w with blockChainVd := k, newPis := pis } = selectedPrevState w := by
+  simp [selectedPrevState, selectExt, noPrev]
+
 /-- On a first step the emitted initial state is the free `initial_public_state` witness and
     the emitted verifier key is a free witness too: replacing both by anything at all keeps
     every gate satisfied. -/
@@ -1497,10 +1503,8 @@ theorem gates_first_step_verifier_key_is_free {env : StepEnv}
     (noPrev : w.hasPrevBlockProof = false) (k : VerifierKey) :
     BlockStepGates env commit bcVd dVd rVd uVds
       { w with blockChainVd := k, newPis := registeredPis { w with blockChainVd := k } } := by
-  have hsel : ∀ v : VerifierKey,
-      selectedPrevState { w with blockChainVd := v,
-        newPis := registeredPis { w with blockChainVd := v } } = selectedPrevState w := by
-    intro v; simp [selectedPrevState, selectExt, noPrev]
+  have hsel := selected_prev_state_key_irrelevant w noPrev k
+    (registeredPis { w with blockChainVd := k })
   exact
     { slots_nonempty := gates.slots_nonempty
       slot_inputs_aligned := gates.slot_inputs_aligned
@@ -1557,5 +1561,204 @@ theorem gates_timestamp_passthrough {env : StepEnv} {commit : UpdateUserPublicIn
     {bcVd dVd rVd : VerifierCircuitData} {uVds : List VerifierCircuitData}
     {w : BlockStepWires} (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
     w.newPis.ext.inner.timestamp = w.selectedUpdate.blockTimestamp := by
-  rw [gates.registered]
+  rw [gates.registered]; rfl
 
+/-! ## Worked examples
+
+A concrete accepting native trace and a concrete satisfying gate assignment, so that none
+of the statements above is vacuous. -/
+
+def oneBytes32 : Bytes32 := ⟨List.replicate bytes32Len 1⟩
+
+def exampleUpdate : UpdateUserPublicInputs :=
+  { blockNumber := 1
+    blockTimestamp := zeroU64
+    prevBlockHashChain := zeroBytes32
+    prevAccountTreeRoot := zeroHash
+    newBlockHashChain := oneBytes32
+    newAccountTreeRoot := zeroHash
+    depositHashChain := zeroBytes32
+    channelRegHashChain := zeroBytes32
+    prevBpSigChain := zeroBytes32
+    newBpSigChain := zeroBytes32 }
+
+/-- The same block with a different declared timestamp: also accepted, because nothing
+    constrains the timestamp. -/
+def exampleUpdateOtherTimestamp : UpdateUserPublicInputs :=
+  { exampleUpdate with blockTimestamp := ⟨[5, 7]⟩ }
+
+def exampleInitialState : ExtendedPublicState :=
+  { inner := { blockNumber := 0
+               timestamp := zeroU64
+               accountTreeRoot := zeroHash
+               depositTreeRoot := zeroHash
+               prevPublicStateRoot := zeroHash }
+    blockHashChain := zeroBytes32
+    depositHashChain := zeroBytes32
+    depositCount := 0
+    channelRegHashChain := zeroBytes32
+    bpSigChain := zeroBytes32 }
+
+def exampleVd : VerifierCircuitData := { common := 0, vdLen := 68, verifierOnly := ⟨7⟩ }
+
+def exampleEnv : StepEnv :=
+  { accepts := fun _ _ => true
+    merkleRoot := fun _ _ _ => zeroHash
+    vdEncode := fun k => List.replicate 68 k.id
+    vdDecode := fun xs => .ok ⟨xs.headD 0⟩ }
+
+def exampleWitness (u : UpdateUserPublicInputs) : BlockStepWitness :=
+  { numUsers := 2
+    initialPublicState := some exampleInitialState
+    prevBlockChainProof := none
+    depositHashChainProof := none
+    channelRegHashChainProof := none
+    updateUserProof := ⟨u.encode⟩
+    publicStateMerkleProof := ⟨[]⟩ }
+
+def exampleOutput (u : UpdateUserPublicInputs) : BlockChainPublicInputs :=
+  { initialExt := exampleInitialState
+    ext := { inner := { blockNumber := 1
+                        timestamp := u.blockTimestamp
+                        accountTreeRoot := zeroHash
+                        depositTreeRoot := zeroHash
+                        prevPublicStateRoot := zeroHash }
+             blockHashChain := oneBytes32
+             depositHashChain := zeroBytes32
+             depositCount := 0
+             channelRegHashChain := zeroBytes32
+             bpSigChain := zeroBytes32 }
+    vd := exampleVd.verifierOnly }
+
+theorem example_update_well_formed : exampleUpdate.WellFormed := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp [exampleUpdate, U64Val.WellFormed, Bytes32.WellFormed, Hash.WellFormed,
+      zeroU64, zeroBytes32, zeroHash, oneBytes32, bytes32Len, poseidonHashOutLen, u64Len]
+
+theorem example_update_other_timestamp_well_formed :
+    exampleUpdateOtherTimestamp.WellFormed := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp [exampleUpdateOtherTimestamp, exampleUpdate, U64Val.WellFormed, Bytes32.WellFormed,
+      Hash.WellFormed, zeroU64, zeroBytes32, zeroHash, oneBytes32, bytes32Len,
+      poseidonHashOutLen, u64Len]
+
+theorem example_native_accepts_first_block :
+    toPublicInputs exampleEnv exampleVd [(2, exampleVd)] exampleVd exampleVd
+      (exampleWitness exampleUpdate) = .ok (exampleOutput exampleUpdate) := by
+  simp only [toPublicInputs, exampleWitness, resolvePrev, liftVd, lookupLast, liftUpdate,
+    decode_update_user_encode example_update_well_formed, check, bind_d_ok]
+  rfl
+
+theorem example_native_accepts_any_timestamp :
+    toPublicInputs exampleEnv exampleVd [(2, exampleVd)] exampleVd exampleVd
+      (exampleWitness exampleUpdateOtherTimestamp) = .ok (exampleOutput exampleUpdateOtherTimestamp) := by
+  simp only [toPublicInputs, exampleWitness, resolvePrev, liftVd, lookupLast, liftUpdate,
+    decode_update_user_encode example_update_other_timestamp_well_formed, check, bind_d_ok]
+  rfl
+
+/-- The two accepted traces differ only in the declared block timestamp, and the step
+    publishes both: `to_public_inputs` never compares timestamps. -/
+theorem example_timestamps_are_unconstrained :
+    (exampleOutput exampleUpdate).ext.inner.timestamp ≠
+      (exampleOutput exampleUpdateOtherTimestamp).ext.inner.timestamp := by
+  simp only [exampleOutput, exampleUpdate, exampleUpdateOtherTimestamp, zeroU64, u64Len]
+  decide
+
+def exampleCommit : UpdateUserPublicInputs → Hash := fun _ => zeroHash
+
+def exampleWiresBase : BlockStepWires :=
+  { hasPrevBlockProof := false
+    hasDepositProof := false
+    hasChannelRegProof := false
+    oneHot := [true]
+    slotUpdateInputs := [exampleUpdate]
+    slotProofs := [⟨exampleUpdate.encode⟩]
+    initialPublicState := exampleInitialState
+    prevBlockChainProof := ⟨[]⟩
+    prevProofPis := default
+    depositProof := ⟨[]⟩
+    depositInputs := default
+    channelRegProof := ⟨[]⟩
+    channelRegInputs := default
+    selectedUpdate := exampleUpdate
+    merkleProof := ⟨[]⟩
+    prevPublicStateRootOut := zeroHash
+    blockChainVd := ⟨7⟩
+    nextBlockNumber := 1
+    newPis := default }
+
+def exampleWires : BlockStepWires :=
+  { exampleWiresBase with newPis := registeredPis exampleWiresBase }
+
+theorem example_gates_satisfied :
+    BlockStepGates exampleEnv exampleCommit exampleVd exampleVd exampleVd [exampleVd]
+      exampleWires := by
+  constructor
+  all_goals first
+    | rfl
+    | decide
+    | (intro h; exact absurd h (by decide))
+    | (intro _ _ _ _ _ _; rfl)
+    | (intro _ _ _ _; rfl)
+
+/-! ## Circuit construction and verification (`BlockStepCircuit::new` / `verify`)
+
+`new` asserts a non-empty verifier list (a panic, not an error), builds the target, and
+registers `new_pis.to_vec(config)` -- and nothing else -- as the circuit's public inputs.
+`verify` is a bare delegation to plonky2. -/
+
+/-- `assert!(!update_account_vds.is_empty(), ...)` in `BlockStepTarget::new`. -/
+def newTargetPrecondition (updateAccountVds : List (Nat × VerifierCircuitData)) : Prop :=
+  updateAccountVds ≠ []
+
+/-- The registered public-input vector: both extended states then the cyclic verifier key. -/
+def stepRegisteredPis (env : StepEnv) (_vdLen : Nat) (pis : BlockChainPublicInputs) : List Nat :=
+  pis.initialExt.encode ++ pis.ext.encode ++ env.vdEncode pis.vd
+
+def stepRegisteredLen (vdLen : Nat) : Nat := blockChainPublicInputsLen + vdLen
+
+theorem step_registered_len_pinned_at_cap_height_four : stepRegisteredLen 68 = 164 := by decide
+
+theorem step_registered_pis_length {env : StepEnv} {vdLen : Nat}
+    {pis : BlockChainPublicInputs} (codec : VdCodecSound env vdLen)
+    (wfInit : pis.initialExt.WellFormed) (wfExt : pis.ext.WellFormed) :
+    (stepRegisteredPis env vdLen pis).length = stepRegisteredLen vdLen := by
+  simp only [stepRegisteredPis, List.length_append,
+    extended_public_state_encode_length wfInit, extended_public_state_encode_length wfExt,
+    codec.encode_length, stepRegisteredLen, blockChainPublicInputsLen]
+  omega
+
+/-- Round trip: a step proof's registered vector decodes back to the same public inputs, so
+    the layout the parent step re-slices is the one this step registered. -/
+theorem step_registered_pis_round_trip {env : StepEnv} {vdLen : Nat}
+    {pis : BlockChainPublicInputs} (codec : VdCodecSound env vdLen)
+    (wfInit : pis.initialExt.WellFormed) (wfExt : pis.ext.WellFormed) :
+    decodeBlockChainPis env vdLen (stepRegisteredPis env vdLen pis) = .ok pis := by
+  have hlen : (pis.initialExt.encode ++ (pis.ext.encode ++ env.vdEncode pis.vd)).length
+      = blockChainPublicInputsLen + vdLen := by
+    have h := step_registered_pis_length codec wfInit wfExt
+    simpa [stepRegisteredPis, stepRegisteredLen, List.append_assoc] using h
+  have htake : (env.vdEncode pis.vd).take vdLen = env.vdEncode pis.vd := by
+    rw [← codec.encode_length pis.vd]
+    simp
+  simp only [decodeBlockChainPis, stepRegisteredPis, List.append_assoc]
+  rw [if_neg (by simp [hlen])]
+  rw [decode_extended_public_state_encode _ wfInit]
+  simp only [bind_d_ok]
+  rw [decode_extended_public_state_encode _ wfExt]
+  simp only [bind_d_ok]
+  rw [htake, codec.decode_encode pis.vd]
+  simp only [bind_d_ok]
+
+/-- `BlockStepCircuit::verify` performs no local check of its own: it is exactly the
+    opaque plonky2 verifier applied to this circuit's key. -/
+def verifyStepProof (env : StepEnv) (stepVd : VerifierCircuitData) (proof : Proof) :
+    Result Unit :=
+  check (env.accepts stepVd proof = true) (.invalidProof "step proof rejected")
+
+theorem verify_step_proof_ok_iff (env : StepEnv) (stepVd : VerifierCircuitData)
+    (proof : Proof) :
+    verifyStepProof env stepVd proof = .ok () ↔ env.accepts stepVd proof = true := by
+  simp [verifyStepProof, check_ok_iff]
+
+end Zkp.Implementation.BlockStep
