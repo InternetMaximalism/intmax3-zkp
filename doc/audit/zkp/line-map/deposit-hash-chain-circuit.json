@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/deposit_hash_chain/deposit_hash_chain_circuit.rs",
+  "source_sha256": "7be3073f1f34c428eeef13f2130c56acc997b4a61c88335d20133b74ef75839b",
+  "source_lines": 221,
+  "module": "Zkp.Implementation.DepositChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/DepositChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "Imports: plonky2 builder/circuit-data/proof API, check_cyclic_proof_verifier_data, thiserror, the pis codec and cyclic helpers",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Environment",
+        "Zkp.Implementation.DepositChain.PublicInputs",
+        "Zkp.Implementation.DepositChain.parseTargets",
+        "Zkp.Implementation.DepositChain.vdVecLen",
+        "Zkp.Implementation.DepositChain.publicInputsLen",
+        "Zkp.Implementation.DepositChain.lastN"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. check_cyclic_proof_verifier_data, add_proof_target_and_verify, simple_recursion_circuit_data and add_noop_gates come from plonky2 or from utils::cyclic; only their externally visible effect is re-modeled below."
+    },
+    {
+      "start": 27,
+      "end": 28,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 29,
+      "end": 35,
+      "status": "translated",
+      "label": "DepositHashChainCircuitError: FailedToProve / ProofVerificationError",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.ChainVerifyError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The model splits the second variant into the two distinguishable outcomes of verify: the cyclic verifier-data check failing, and plonky2 rejecting the proof."
+    },
+    {
+      "start": 36,
+      "end": 36,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 37,
+      "end": 45,
+      "status": "dependency-boundary",
+      "label": "DepositHashChainCircuit struct: plonky2 CircuitData and the step proof target",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Environment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitData and ProofWithPublicInputsTarget are plonky2 types; verification of the step proof appears only as Environment.proofAccepted."
+    },
+    {
+      "start": 46,
+      "end": 52,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 53,
+      "end": 77,
+      "status": "translated",
+      "label": "new: verify the step proof under the constant step verifier data, re-register from_pis(step public inputs) unchanged, assert the built common data equals the cyclic common data",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.WrapGates",
+        "Zkp.Implementation.DepositChain.parseTargets",
+        "Zkp.Implementation.DepositChain.PublicInputs.words",
+        "Zkp.Implementation.DepositChain.Chain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.wrap_forwards_step_public_inputs",
+        "Zkp.Implementation.DepositChain.parse_targets_round_trip",
+        "Zkp.Implementation.DepositChain.chain_declares_single_vd"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. This wrapper adds NO constraints of its own: it forwards the step circuit's public inputs verbatim, which is what makes the step's own conditionally-verified previous proof a proof of this same circuit. That forwarding is what lets the Chain inductive treat a continued step's prevPis as itself reachable. The common-data equality assert and try_build_with_options are build-time plonky2 behaviour and are not modeled."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 79,
+      "end": 92,
+      "status": "translated",
+      "label": "generate_cd: build the cyclic common circuit data, pad with 1<<12 noop gates, then overwrite num_public_inputs",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.chainPublicInputCount",
+        "Zkp.Implementation.DepositChain.publicInputsLen",
+        "Zkp.Implementation.DepositChain.vdVecLen",
+        "Zkp.Implementation.DepositChain.noopGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.chain_public_input_count_pinned",
+        "Zkp.Implementation.DepositChain.public_inputs_len_pinned",
+        "Zkp.Implementation.DepositChain.vd_vec_len_pinned",
+        "Zkp.Implementation.DepositChain.noop_gates_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the arithmetic of the declared public-input count (27 + 4 + 4*cap) and the noop padding constant are modeled; the FRI/gate-count shape of the generated common data is opaque, and the model does not show that the real built circuit matches it."
+    },
+    {
+      "start": 93,
+      "end": 93,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 94,
+      "end": 104,
+      "status": "dependency-boundary",
+      "label": "prove: set the step proof target and run plonky2 prove",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Environment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. PartialWitness and data.prove are opaque; no theorem claims proving succeeds."
+    },
+    {
+      "start": 105,
+      "end": 105,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 106,
+      "end": 123,
+      "status": "translated",
+      "label": "verify: check_cyclic_proof_verifier_data (the last vd_vec_len public inputs must equal this circuit's own verifier data) BEFORE data.verify",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.verifyChain",
+        "Zkp.Implementation.DepositChain.lastN",
+        "Zkp.Implementation.DepositChain.ChainVerifyError",
+        "Zkp.Implementation.DepositChain.PublicInputs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.chain_verify_pins_declared_vd",
+        "Zkp.Implementation.DepositChain.chain_verify_checks_vd_first",
+        "Zkp.Implementation.DepositChain.vd_is_last_in_layout"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. This is the ConsumerVdPin discharge point modeled here: a chain proof accepted by verify demonstrably declares this circuit's verifier data in its public inputs, and the cyclic check runs first so a proof with a foreign declared vd is rejected without reaching plonky2. Nothing forces any OTHER consumer (block_step.rs) to perform the same check."
+    },
+    {
+      "start": 124,
+      "end": 125,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 126,
+      "end": 221,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: one step through the wrapper, public inputs compared field by field",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only integration test; not part of the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2_refinement",
+      "obligation": "The handwritten gate equations (CircuitGates, WrapGates), the builder/prover/verifier programs and the registered public-input vector must be linked to actual plonky2 compilation, proving and verification; none of that lowering is discharged here.",
+      "discharged": false
+    },
+    {
+      "name": "hash_opacity",
+      "obligation": "Environment.keccakWords (plonky2_keccak solidity_keccak256 over u32 words), poseidonWords (PoseidonHashOut::hash_inputs_u64) and twoToOne (the Poseidon 2-to-1 of the incremental deposit tree) are opaque callbacks. No collision resistance, preimage resistance or injectivity is assumed or proved, so equal accumulator values never imply equal deposit sequences.",
+      "discharged": false
+    },
+    {
+      "name": "proof_soundness",
+      "obligation": "Environment.proofAccepted vd pis is an opaque Bool. 'accepted implies produced by a gate-satisfying witness' is encoded as the Chain inductive premise, never proved; plonky2/FRI soundness is out of scope.",
+      "discharged": false
+    },
+    {
+      "name": "consumer_vd_pin",
+      "obligation": "On the initial step new_pis.vd is a free virtual verifier data (theorem initial_step_vd_unconstrained) and every continued step forwards it unchanged (chain_declares_single_vd). Only a consumer pins it to the real chain verifier data: DepositHashChainCircuit::verify -> check_cyclic_proof_verifier_data (modeled as chain_verify_pins_declared_vd) or block_step.rs add_proof_target_and_conditionally_verify_cyclic, which is outside the modeled files and must be audited there.",
+      "discharged": false
+    },
+    {
+      "name": "field_and_gadget_lowering",
+      "obligation": "Goldilocks arithmetic, split_le, range_check, select, the keccak and Poseidon gadgets, DepositMerkleProofTarget and from_pis slicing are modeled as Nat equations over lists. Their circuit lowering, and in particular that split_le(prev_count, 63) is what bounds the previous count below 2^63, is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "vd_canonicity",
+      "obligation": "vd_from_pis_slice / vd_from_pis_slice_target read verifier-data field elements from u64 public inputs with no canonicity check; verifier-data words are carried as an opaque List Nat and compared only for equality.",
+      "discharged": false
+    },
+    {
+      "name": "common_data_fixpoint",
+      "obligation": "new asserts data.common == generate_cd() and that try_build_with_options succeeded, i.e. that the circuit built here really is the cyclic circuit whose common data the step circuit was built against. That fixpoint (and the num_public_inputs overwrite in generate_cd being consistent with the registered vector) is a plonky2 build-time property the model assumes rather than proves.",
+      "discharged": false
+    },
+    {
+      "name": "step_vd_is_constant",
+      "obligation": "add_proof_target_and_verify embeds the deposit-step verifier data as a CONSTANT, so this wrapper only ever accepts genuine deposit-step proofs. That constancy is a property of the imported helper and is assumed, not modeled.",
+      "discharged": false
+    }
+  ]
+}

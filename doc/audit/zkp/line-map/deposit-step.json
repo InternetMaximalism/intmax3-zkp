@@ -1,0 +1,442 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/deposit_hash_chain/deposit_step.rs",
+  "source_sha256": "2e84ad4c7138fef0c53fe7fdaf9029b821ac0d6d55ecb3da5440c1efe717d671",
+  "source_lines": 563,
+  "module": "Zkp.Implementation.DepositChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/DepositChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 37,
+      "status": "dependency-boundary",
+      "label": "Imports: plonky2 builder/witness/proof API, common::deposit, deposit tree gadget, u63, cyclic and dummy-proof helpers",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Deposit",
+        "Zkp.Implementation.DepositChain.Deposit.empty",
+        "Zkp.Implementation.DepositChain.Deposit.toU64Vec",
+        "Zkp.Implementation.DepositChain.Deposit.foldWords",
+        "Zkp.Implementation.DepositChain.Deposit.NativeWidths",
+        "Zkp.Implementation.DepositChain.Deposit.toRecord",
+        "Zkp.Implementation.DepositChain.Deposit.leafHash",
+        "Zkp.Implementation.DepositChain.emptyLeafHash",
+        "Zkp.Implementation.DepositChain.Environment",
+        "Zkp.Implementation.DepositChain.merkleFold",
+        "Zkp.Implementation.DepositChain.merkleRoot",
+        "Zkp.Implementation.DepositChain.wordsToBytes",
+        "Zkp.Implementation.DepositChain.KeccakBridge",
+        "Zkp.Implementation.DepositChain.KeccakOutputsChecked",
+        "Zkp.Implementation.DepositChain.depositTreeHeight",
+        "Zkp.Implementation.DepositChain.limbBase",
+        "Zkp.Implementation.DepositChain.u63Limit",
+        "Zkp.Implementation.DepositChain.goldilocks",
+        "Zkp.Implementation.DepositChain.bytes32Len",
+        "Zkp.Implementation.DepositChain.poseidonHashOutLen",
+        "Zkp.Implementation.DepositChain.addressLen",
+        "Zkp.Implementation.DepositChain.u256Len",
+        "Zkp.Implementation.DepositChain.leafWordCount",
+        "Zkp.Implementation.DepositChain.foldWordCount",
+        "Zkp.Implementation.DepositChain.Words8",
+        "Zkp.Implementation.DepositChain.Words5",
+        "Zkp.Implementation.DepositChain.Hash4",
+        "Zkp.Implementation.DepositChain.CheckedWords",
+        "Zkp.Implementation.DepositChain.limbValue",
+        "Zkp.Implementation.DepositChain.Words8.value",
+        "Zkp.Implementation.DepositChain.Words5.value"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.leaf_words_length",
+        "Zkp.Implementation.DepositChain.fold_words_length",
+        "Zkp.Implementation.DepositChain.fold_omits_index_and_block",
+        "Zkp.Implementation.DepositChain.leaf_commits_index_and_block",
+        "Zkp.Implementation.DepositChain.empty_deposit_widths",
+        "Zkp.Implementation.DepositChain.fold_words_checked",
+        "Zkp.Implementation.DepositChain.deposit_tree_height_pinned",
+        "Zkp.Implementation.DepositChain.fold_word_count_pinned",
+        "Zkp.Implementation.DepositChain.words8_length",
+        "Zkp.Implementation.DepositChain.words5_length",
+        "Zkp.Implementation.DepositChain.hash4_length",
+        "Zkp.Implementation.DepositChain.words8_of_list_words",
+        "Zkp.Implementation.DepositChain.hash4_of_list_words",
+        "Zkp.Implementation.DepositChain.limbs_checked_iff",
+        "Zkp.Implementation.DepositChain.u63_limit_below_goldilocks",
+        "Zkp.Implementation.DepositChain.merkle_root_no_siblings",
+        "Zkp.Implementation.DepositChain.words_to_bytes_append",
+        "Zkp.Implementation.DepositChain.bytes32_of_limbs_raw",
+        "Zkp.Implementation.DepositChain.address_of_limbs_raw",
+        "Zkp.Implementation.DepositChain.bytes32_of_limbs",
+        "Zkp.Implementation.DepositChain.address_of_limbs",
+        "Zkp.Implementation.DepositChain.token_word_bytes",
+        "Zkp.Implementation.DepositChain.fold_preimage_matches_rollup_model",
+        "Zkp.Implementation.DepositChain.fold_value_matches_rollup_under_bridge",
+        "Zkp.Implementation.DepositChain.to_record_omits_index_and_block"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The deposit leaf (common::deposit::Deposit), its Poseidon leaf encoding to_u64_vec, its keccak fold encoding hash_with_prev_hash, the deposit Merkle gadget and the Poseidon/keccak hashers all come from crates imported here; the model re-declares their DATA layout (Deposit, foldWords, toU64Vec, merkleFold) and treats the hash functions themselves as opaque Environment callbacks. The linked theorems are about that modeled interface only, including the byte-level comparison with RollupValue.hashPreimage (.deposit ...)."
+    },
+    {
+      "start": 38,
+      "end": 38,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 39,
+      "end": 55,
+      "status": "translated",
+      "label": "UpdateDepositTreeError enum",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.StepError",
+        "Zkp.Implementation.DepositChain.ParseError",
+        "Zkp.Implementation.DepositChain.liftParse"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Five variants: InvaldInput, InvalidProof, FailedToProve, MerkleProofError and the From-converted DepositChainPublicInputsError; liftParse models the #[from] conversion."
+    },
+    {
+      "start": 56,
+      "end": 56,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 57,
+      "end": 68,
+      "status": "translated",
+      "label": "DepositStepWitness: initial_value / prev_deposit_chain_proof / deposit / merkle proof",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.NativeWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The previous proof is carried as its public-input words only (prevProofPis): to_public_inputs reads nothing else from it, and never verifies it."
+    },
+    {
+      "start": 69,
+      "end": 74,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 75,
+      "end": 131,
+      "status": "translated",
+      "label": "to_public_inputs: exactly-one-source check, initial-value branch, previous-proof parse, block-number consistency, deposit_index == deposit_count",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.toPublicInputs",
+        "Zkp.Implementation.DepositChain.sourceCount",
+        "Zkp.Implementation.DepositChain.previousPis",
+        "Zkp.Implementation.DepositChain.initialPis",
+        "Zkp.Implementation.DepositChain.parseU64",
+        "Zkp.Implementation.DepositChain.liftParse"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.source_count_one_iff",
+        "Zkp.Implementation.DepositChain.native_requires_exactly_one_source",
+        "Zkp.Implementation.DepositChain.native_initial_step",
+        "Zkp.Implementation.DepositChain.native_continued_step",
+        "Zkp.Implementation.DepositChain.native_index_equals_previous_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Executable Except mirroring the source order of checks and error precedence: total_inputs != 1 first, then the initial-value record (current = initial, vd = the caller-supplied chain verifier data) or from_u64_slice of the previous proof's public inputs plus the block-number equality, then the deposit_index == deposit_count check."
+    },
+    {
+      "start": 132,
+      "end": 171,
+      "status": "translated",
+      "label": "to_public_inputs: empty-leaf Merkle verification, re-rooting with the deposit leaf, U63 count increment, new keccak chain, result record",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.finishStep",
+        "Zkp.Implementation.DepositChain.u63Add",
+        "Zkp.Implementation.DepositChain.nativeOutput",
+        "Zkp.Implementation.DepositChain.merkleRoot",
+        "Zkp.Implementation.DepositChain.merkleFold",
+        "Zkp.Implementation.DepositChain.emptyLeafHash",
+        "Zkp.Implementation.DepositChain.Deposit.leafHash",
+        "Zkp.Implementation.DepositChain.Deposit.foldWords",
+        "Zkp.Implementation.DepositChain.Deposit.empty",
+        "Zkp.Implementation.DepositChain.rollupFold"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.finish_step_ok_iff",
+        "Zkp.Implementation.DepositChain.native_ok_shape",
+        "Zkp.Implementation.DepositChain.native_accepts_short_sibling_list",
+        "Zkp.Implementation.DepositChain.native_first_step_example",
+        "Zkp.Implementation.DepositChain.rollup_finish_deposit_is_fold_step"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The same sibling list is used twice: opened against the empty leaf at prev_deposit_count and re-rooted with the deposit leaf at the same index. U63::add(1) is modeled as the exact 2^63 bound. The initial_* fields and vd are copied through unchanged. native_accepts_short_sibling_list records that the native verify uses siblings.len() as the height, so a short proof is accepted natively."
+    },
+    {
+      "start": 172,
+      "end": 173,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 174,
+      "end": 185,
+      "status": "translated",
+      "label": "DepositStepTarget: is_initial, initial_* targets, prev proof target, deposit, merkle proof, new_pis",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Witness",
+        "Zkp.Implementation.DepositChain.Witness.prevChain",
+        "Zkp.Implementation.DepositChain.Witness.prevRoot",
+        "Zkp.Implementation.DepositChain.Witness.prevCount",
+        "Zkp.Implementation.DepositChain.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The previous proof target is modeled by the PublicInputs record from_pis reads out of it (parse_targets_round_trip makes that lossless for a vector of the registered length); the proof body itself only appears through Environment.proofAccepted."
+    },
+    {
+      "start": 186,
+      "end": 187,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 188,
+      "end": 318,
+      "status": "translated",
+      "label": "DepositStepTarget::new: range-checked allocations, conditional cyclic verification and vd connect, is_initial selects, index/block connects, Merkle verify + re-root, range-checked increment, keccak fold, new_pis",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.CircuitGates",
+        "Zkp.Implementation.DepositChain.stepOutput",
+        "Zkp.Implementation.DepositChain.Chain",
+        "Zkp.Implementation.DepositChain.Trace",
+        "Zkp.Implementation.DepositChain.RootStep",
+        "Zkp.Implementation.DepositChain.foldChain",
+        "Zkp.Implementation.DepositChain.Indexed",
+        "Zkp.Implementation.DepositChain.PublicInputs.dummy",
+        "Zkp.Implementation.DepositChain.depositTreeHeight",
+        "Zkp.Implementation.DepositChain.goldilocks",
+        "Zkp.Implementation.DepositChain.u63Limit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.prev_count_below_u63",
+        "Zkp.Implementation.DepositChain.step_count_increments",
+        "Zkp.Implementation.DepositChain.step_fold_is_keccak_of_previous_chain",
+        "Zkp.Implementation.DepositChain.step_root_appends_at_count",
+        "Zkp.Implementation.DepositChain.step_block_number_is_deposit_block",
+        "Zkp.Implementation.DepositChain.continued_step_binds_previous_proof",
+        "Zkp.Implementation.DepositChain.initial_step_outputs",
+        "Zkp.Implementation.DepositChain.initial_step_vd_unconstrained",
+        "Zkp.Implementation.DepositChain.chain_declares_single_vd",
+        "Zkp.Implementation.DepositChain.chain_is_trace",
+        "Zkp.Implementation.DepositChain.indexed_snoc",
+        "Zkp.Implementation.DepositChain.fold_chain_snoc",
+        "Zkp.Implementation.DepositChain.trace_is_fold",
+        "Zkp.Implementation.DepositChain.fold_chain_checked",
+        "Zkp.Implementation.DepositChain.fold_chain_matches_rollup_fold",
+        "Zkp.Implementation.DepositChain.chain_matches_rollup_fold"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitGates is the local gate system for ARBITRARY satisfying witnesses, stated in source order and deliberately separate from the native path. It records that the previous proof is conditionally verified under the verifier data declared in THAT PROOF'S OWN public inputs, that deposit_index is connected to the selected previous count unconditionally (both branches), that the block number is connected only on a continued step, and that add_const + range_check(63) cannot wrap in Goldilocks. Chain iterates these gates under the proof-soundness premise; chain_matches_rollup_fold compares the resulting chain value with RollupValue's finishDeposit fold under the named keccak bridges."
+    },
+    {
+      "start": 319,
+      "end": 319,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 320,
+      "end": 358,
+      "status": "translated",
+      "label": "DepositStepTarget::set_witness: is_initial flag, initial_* values or zeros, real or dummy previous proof, new_pis, deposit, merkle proof",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.nativeAssignment",
+        "Zkp.Implementation.DepositChain.PublicInputs.dummy"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.native_assignment_satisfies_gates",
+        "Zkp.Implementation.DepositChain.dummy_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. nativeAssignment is the witness this function writes; native_assignment_satisfies_gates links the native admission path to CircuitGates under explicit premises (Rust type widths, the 63-sibling assertion, the real verifier-data length, and NativeProofNotChecked: that the supplied previous proof actually verifies)."
+    },
+    {
+      "start": 359,
+      "end": 361,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 362,
+      "end": 373,
+      "status": "dependency-boundary",
+      "label": "DepositStepCircuit struct: plonky2 CircuitData, the target, the registered public inputs and the dummy proof",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Environment",
+        "Zkp.Implementation.DepositChain.PublicInputs.dummy"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. CircuitData, ProofWithPublicInputs and DummyProof are plonky2 types; only the all-zero public inputs of the dummy proof are modeled (PublicInputs.dummy)."
+    },
+    {
+      "start": 374,
+      "end": 380,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 381,
+      "end": 394,
+      "status": "translated",
+      "label": "DepositStepCircuit::new: build with the standard recursion config and register new_pis.to_vec() as the public inputs",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs.words",
+        "Zkp.Implementation.DepositChain.publicInputsLen",
+        "Zkp.Implementation.DepositChain.vdVecLen",
+        "Zkp.Implementation.DepositChain.chainPublicInputCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.words_length",
+        "Zkp.Implementation.DepositChain.public_inputs_len_pinned",
+        "Zkp.Implementation.DepositChain.vd_vec_len_pinned",
+        "Zkp.Implementation.DepositChain.chain_public_input_count_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the registered public-input VECTOR and its length are modeled (CircuitGates.registered plus PublicInputs.words); CircuitBuilder::build, the CircuitConfig and DummyProof::new are opaque."
+    },
+    {
+      "start": 395,
+      "end": 395,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 396,
+      "end": 410,
+      "status": "dependency-boundary",
+      "label": "DepositStepCircuit::prove: native to_public_inputs, PartialWitness assembly, plonky2 prove",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.toPublicInputs",
+        "Zkp.Implementation.DepositChain.nativeAssignment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The native admission and the witness assignment are modeled (toPublicInputs, nativeAssignment); PartialWitness and data.prove are opaque, so 'prove succeeds' is never derived and NativeProofNotChecked stays undischarged here."
+    },
+    {
+      "start": 411,
+      "end": 411,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 412,
+      "end": 419,
+      "status": "dependency-boundary",
+      "label": "DepositStepCircuit::verify: plonky2 data.verify",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Environment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Modeled only as Environment.proofAccepted; this step circuit does NOT run check_cyclic_proof_verifier_data (that is the wrapper's job)."
+    },
+    {
+      "start": 420,
+      "end": 421,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 422,
+      "end": 563,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: two-step deposit chain against TestCyclicCircuit",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only integration test; not part of the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2_refinement",
+      "obligation": "The handwritten gate equations (CircuitGates, WrapGates), the builder/prover/verifier programs and the registered public-input vector must be linked to actual plonky2 compilation, proving and verification; none of that lowering is discharged here.",
+      "discharged": false
+    },
+    {
+      "name": "hash_opacity",
+      "obligation": "Environment.keccakWords (plonky2_keccak solidity_keccak256 over u32 words), poseidonWords (PoseidonHashOut::hash_inputs_u64) and twoToOne (the Poseidon 2-to-1 of the incremental deposit tree) are opaque callbacks. No collision resistance, preimage resistance or injectivity is assumed or proved, so equal accumulator values never imply equal deposit sequences.",
+      "discharged": false
+    },
+    {
+      "name": "proof_soundness",
+      "obligation": "Environment.proofAccepted vd pis is an opaque Bool. 'accepted implies produced by a gate-satisfying witness' is encoded as the Chain inductive premise, never proved; plonky2/FRI soundness is out of scope.",
+      "discharged": false
+    },
+    {
+      "name": "consumer_vd_pin",
+      "obligation": "On the initial step new_pis.vd is a free virtual verifier data (theorem initial_step_vd_unconstrained) and every continued step forwards it unchanged (chain_declares_single_vd). Only a consumer pins it to the real chain verifier data: DepositHashChainCircuit::verify -> check_cyclic_proof_verifier_data (modeled as chain_verify_pins_declared_vd) or block_step.rs add_proof_target_and_conditionally_verify_cyclic, which is outside the modeled files and must be audited there.",
+      "discharged": false
+    },
+    {
+      "name": "field_and_gadget_lowering",
+      "obligation": "Goldilocks arithmetic, split_le, range_check, select, the keccak and Poseidon gadgets, DepositMerkleProofTarget and from_pis slicing are modeled as Nat equations over lists. Their circuit lowering, and in particular that split_le(prev_count, 63) is what bounds the previous count below 2^63, is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "solidity_keccak_packing",
+      "obligation": "SolidityKeccakPacking: plonky2_keccak solidity_keccak256 must consume each u32 word as four big-endian bytes (wordsToBytes). Under that packing fold_preimage_matches_rollup_model is kernel-checked; equality of the chain VALUES additionally needs KeccakBridge and RollupValue.HashEncodingAgrees (the same keccak on both sides) and KeccakOutputsChecked (32-bit gadget output limbs).",
+      "discharged": false
+    },
+    {
+      "name": "initial_state_pin",
+      "obligation": "The initial hash chain, tree root and count of a chain proof are free inputs of the initial step. That they equal IntmaxRollup's actual pendingDepositChain / deposit tree / depositCount is pinned in block_step.rs, and L1 finality of the deposits is outside every modeled file.",
+      "discharged": false
+    },
+    {
+      "name": "vd_canonicity",
+      "obligation": "vd_from_pis_slice / vd_from_pis_slice_target read verifier-data field elements from u64 public inputs with no canonicity check; verifier-data words are carried as an opaque List Nat and compared only for equality.",
+      "discharged": false
+    },
+    {
+      "name": "native_merkle_height",
+      "obligation": "Native DepositMerkleProof::verify uses siblings.len() as the tree height (theorem native_accepts_short_sibling_list), so a short sibling list is accepted on the native path. The 63-sibling shape is enforced only by DepositMerkleProofTarget::new (CircuitGates.siblingsHeight) and by the set_witness length assertion inside the imported gadget, neither of which is proved here.",
+      "discharged": false
+    },
+    {
+      "name": "native_proof_not_checked",
+      "obligation": "to_public_inputs never verifies the supplied prev_deposit_chain_proof; it only parses its public inputs, and an invalid proof is rejected later inside plonky2 prove. This is the hproof premise of native_assignment_satisfies_gates and is not discharged.",
+      "discharged": false
+    },
+    {
+      "name": "deposit_leaf_encoding",
+      "obligation": "Deposit::to_u64_vec (Poseidon leaf / nullifier preimage, 32 u64 words including deposit_index and block_number) and Deposit::hash_with_prev_hash (keccak fold preimage, 38 u32 words WITHOUT index or block) live in common::deposit and are re-declared here by hand; their agreement with the real Rust encodings is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "no_deposit_uniqueness",
+      "obligation": "Nothing in this file prevents the same L1 deposit being appended twice at different indices, or an invented deposit being appended: the model only shows that whatever deposits a chain proof appended form a consecutive-index, single-block-number trace. Correspondence with real L1 deposits is InitialStatePin plus the on-chain deposit tree.",
+      "discharged": false
+    }
+  ]
+}

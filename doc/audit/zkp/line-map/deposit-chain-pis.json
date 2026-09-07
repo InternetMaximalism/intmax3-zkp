@@ -1,0 +1,359 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/deposit_hash_chain/deposit_chain_pis.rs",
+  "source_sha256": "1e6947bc35918d1a56fd269012686d010bfafdb63a3e29394a5ddb9b1e8b8186",
+  "source_lines": 301,
+  "module": "Zkp.Implementation.DepositChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/DepositChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "Imports: plonky2 builder/config types, u63/BlockNumber, Bytes32, PoseidonHashOut, the vd_to_vec / vd_from_pis_slice cyclic helpers",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.Words8",
+        "Zkp.Implementation.DepositChain.Hash4",
+        "Zkp.Implementation.DepositChain.CheckedWords",
+        "Zkp.Implementation.DepositChain.limbsChecked",
+        "Zkp.Implementation.DepositChain.vdVecLen",
+        "Zkp.Implementation.DepositChain.bytes32Len",
+        "Zkp.Implementation.DepositChain.poseidonHashOutLen",
+        "Zkp.Implementation.DepositChain.limbBase",
+        "Zkp.Implementation.DepositChain.u63Limit",
+        "Zkp.Implementation.DepositChain.Words8.ofList",
+        "Zkp.Implementation.DepositChain.Hash4.ofList",
+        "Zkp.Implementation.DepositChain.Words8.words",
+        "Zkp.Implementation.DepositChain.Hash4.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.limbs_checked_iff",
+        "Zkp.Implementation.DepositChain.words8_length",
+        "Zkp.Implementation.DepositChain.hash4_length",
+        "Zkp.Implementation.DepositChain.words8_of_list_words",
+        "Zkp.Implementation.DepositChain.hash4_of_list_words",
+        "Zkp.Implementation.DepositChain.vd_vec_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Bytes32 (8 u32 limbs), PoseidonHashOut (4 field words) and the verifier-data serialization (digest 4 words then 4 words per cap element) are re-declared as data layouts; the plonky2 types and the cap/FRI configuration behind vd_vec_len are opaque."
+    },
+    {
+      "start": 27,
+      "end": 27,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 28,
+      "end": 28,
+      "status": "translated",
+      "label": "DEPOSIT_CHAIN_PUBLIC_INPUTS_LEN = 2*BYTES32_LEN + 2*POSEIDON_HASH_OUT_LEN + 3",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.publicInputsLen",
+        "Zkp.Implementation.DepositChain.bytes32Len",
+        "Zkp.Implementation.DepositChain.poseidonHashOutLen",
+        "Zkp.Implementation.DepositChain.chainPublicInputCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.public_inputs_len_pinned",
+        "Zkp.Implementation.DepositChain.chain_public_input_count_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Pinned as a literal-derived constant: 27 words before the verifier data."
+    },
+    {
+      "start": 29,
+      "end": 30,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 31,
+      "end": 39,
+      "status": "translated",
+      "label": "DepositChainPublicInputsError: InvalidLength / ParseError",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.ParseError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. InvalidLength carries expected and actual; ParseError carries the field name."
+    },
+    {
+      "start": 40,
+      "end": 40,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 41,
+      "end": 56,
+      "status": "translated",
+      "label": "DepositChainPublicInputs struct: initial triple, current triple, block number, verifier data",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs",
+        "Zkp.Implementation.DepositChain.PublicInputs.Canonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.dummy_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Canonical is the Rust field-type invariant of this struct: chain limbs are u32, the two counts and the block number are u63, verifier data has the exact vd_vec_len length. The two tree roots are Poseidon field words with NO range invariant."
+    },
+    {
+      "start": 57,
+      "end": 62,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 63,
+      "end": 75,
+      "status": "translated",
+      "label": "to_u64_vec: field concatenation with the verifier data LAST",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs.words",
+        "Zkp.Implementation.DepositChain.lastN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.words_length",
+        "Zkp.Implementation.DepositChain.vd_is_last_in_layout"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. This is the registered public-input layout. vd_is_last_in_layout records that the verifier data occupies the final vd_vec_len slots, which is exactly the window check_cyclic_proof_verifier_data reads."
+    },
+    {
+      "start": 76,
+      "end": 76,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 77,
+      "end": 164,
+      "status": "translated",
+      "label": "from_u64_slice: exact-length guard then cursor-ordered field parsing",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.parseU64",
+        "Zkp.Implementation.DepositChain.parseBytes32",
+        "Zkp.Implementation.DepositChain.parseHashOut",
+        "Zkp.Implementation.DepositChain.parseU63",
+        "Zkp.Implementation.DepositChain.parseVd",
+        "Zkp.Implementation.DepositChain.slice",
+        "Zkp.Implementation.DepositChain.sliceRecord"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.parse_rejects_wrong_length",
+        "Zkp.Implementation.DepositChain.parse_words_ok_iff",
+        "Zkp.Implementation.DepositChain.parse_gives_canonical",
+        "Zkp.Implementation.DepositChain.parse_round_trip",
+        "Zkp.Implementation.DepositChain.parse_root_words_not_range_checked",
+        "Zkp.Implementation.DepositChain.slice_record_words",
+        "Zkp.Implementation.DepositChain.slice_initial_chain",
+        "Zkp.Implementation.DepositChain.slice_initial_root",
+        "Zkp.Implementation.DepositChain.get_initial_count",
+        "Zkp.Implementation.DepositChain.slice_chain",
+        "Zkp.Implementation.DepositChain.slice_root",
+        "Zkp.Implementation.DepositChain.get_count",
+        "Zkp.Implementation.DepositChain.get_block",
+        "Zkp.Implementation.DepositChain.slice_vd"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Executable Except in source order: InvalidLength before any field parse, then Bytes32::from_u64_slice (per-limb u32 range), PoseidonHashOut::from_u64_slice (length only, NO canonicity or range check), U63::new / BlockNumber::new (< 2^63) and vd_from_pis_slice (length only). parse_root_words_not_range_checked is a positive example showing a tree-root word equal to the Goldilocks modulus is accepted."
+    },
+    {
+      "start": 165,
+      "end": 167,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 168,
+      "end": 177,
+      "status": "translated",
+      "label": "DepositChainPublicInputsTarget struct",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The same eight fields as the native struct; the model shares one PublicInputs record for both sides."
+    },
+    {
+      "start": 178,
+      "end": 179,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 180,
+      "end": 194,
+      "status": "translated",
+      "label": "DepositChainPublicInputsTarget::new: range-checked virtual targets plus virtual verifier data",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs.TargetAllocationChecks",
+        "Zkp.Implementation.DepositChain.u63Limit",
+        "Zkp.Implementation.DepositChain.limbBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.u63_limit_below_goldilocks"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. TargetAllocationChecks is exactly the range gates requested here: u32 limbs for both hash chains, u63 for both counts and the block number. The two Poseidon roots and the verifier data get NO range gates, matching add_virtual_hash / add_virtual_verifier_data."
+    },
+    {
+      "start": 195,
+      "end": 195,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 196,
+      "end": 208,
+      "status": "translated",
+      "label": "to_vec (target side): same field order as to_u64_vec, verifier data last",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs.words",
+        "Zkp.Implementation.DepositChain.lastN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.words_length",
+        "Zkp.Implementation.DepositChain.vd_is_last_in_layout"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The model uses one layout function for the native and target serializations, which pins them to be identical; the source keeps them as two hand-written lists and their agreement is assumed."
+    },
+    {
+      "start": 209,
+      "end": 209,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 210,
+      "end": 253,
+      "status": "translated",
+      "label": "from_pis: length assert then unchecked slicing of the public-input targets",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.parseTargets",
+        "Zkp.Implementation.DepositChain.sliceRecord",
+        "Zkp.Implementation.DepositChain.slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.parse_targets_eq_slice_record",
+        "Zkp.Implementation.DepositChain.parse_targets_of_length",
+        "Zkp.Implementation.DepositChain.parse_targets_rejects_short",
+        "Zkp.Implementation.DepositChain.parse_targets_round_trip",
+        "Zkp.Implementation.DepositChain.parse_targets_agrees_with_native"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. A pure slice with NO gates: the assert is a build-time panic (modeled as none), any sufficiently long vector parses, trailing words are ignored, and no range check is imposed on the sliced limbs. parse_targets_agrees_with_native records that on a vector the native parser accepts, both sides read the same values."
+    },
+    {
+      "start": 254,
+      "end": 254,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 255,
+      "end": 280,
+      "status": "dependency-boundary",
+      "label": "set_witness: write every field plus set_verifier_data_target",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. WitnessWrite and set_verifier_data_target are plonky2 APIs; only the record of values written is modeled, and witness assignment is assumed to be faithful."
+    },
+    {
+      "start": 281,
+      "end": 281,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 282,
+      "end": 299,
+      "status": "translated",
+      "label": "connect: connect every field including the verifier data",
+      "declarations": [
+        "Zkp.Implementation.DepositChain.PublicInputs.ConnectGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.DepositChain.connect_gates_iff_equal"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. ConnectGates is field-by-field equality; connect_gates_iff_equal shows nothing is omitted, i.e. connecting two DepositChainPublicInputsTargets makes them equal as records."
+    },
+    {
+      "start": 300,
+      "end": 301,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line, impl header or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2_refinement",
+      "obligation": "The handwritten gate equations (CircuitGates, WrapGates), the builder/prover/verifier programs and the registered public-input vector must be linked to actual plonky2 compilation, proving and verification; none of that lowering is discharged here.",
+      "discharged": false
+    },
+    {
+      "name": "consumer_vd_pin",
+      "obligation": "On the initial step new_pis.vd is a free virtual verifier data (theorem initial_step_vd_unconstrained) and every continued step forwards it unchanged (chain_declares_single_vd). Only a consumer pins it to the real chain verifier data: DepositHashChainCircuit::verify -> check_cyclic_proof_verifier_data (modeled as chain_verify_pins_declared_vd) or block_step.rs add_proof_target_and_conditionally_verify_cyclic, which is outside the modeled files and must be audited there.",
+      "discharged": false
+    },
+    {
+      "name": "field_and_gadget_lowering",
+      "obligation": "Goldilocks arithmetic, split_le, range_check, select, the keccak and Poseidon gadgets, DepositMerkleProofTarget and from_pis slicing are modeled as Nat equations over lists. Their circuit lowering, and in particular that split_le(prev_count, 63) is what bounds the previous count below 2^63, is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "vd_canonicity",
+      "obligation": "vd_from_pis_slice / vd_from_pis_slice_target read verifier-data field elements from u64 public inputs with no canonicity check; verifier-data words are carried as an opaque List Nat and compared only for equality.",
+      "discharged": false
+    },
+    {
+      "name": "u64_to_field_reduction",
+      "obligation": "from_u64_slice reads the proof's public inputs after ToU64 conversion of field elements, and vd_from_pis_slice converts them back with to_field_vec. The model works with Nat words and assumes that round trip is the identity on the values a real proof can carry.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon_root_words_unchecked",
+      "obligation": "Neither from_u64_slice nor DepositChainPublicInputsTarget::new range-checks the two Poseidon tree-root words (theorem parse_root_words_not_range_checked). Any constraint on them must come from the Poseidon gadget that consumes them, which is outside this file.",
+      "discharged": false
+    },
+    {
+      "name": "two_serializations_agree",
+      "obligation": "to_u64_vec and to_vec are two independently hand-written field orders in the source; the model collapses them into one layout function (PublicInputs.words). Their agreement, and their agreement with from_u64_slice / from_pis cursor arithmetic, is assumed rather than proved against the Rust code.",
+      "discharged": false
+    }
+  ]
+}
