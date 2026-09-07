@@ -1,0 +1,467 @@
+{
+  "schema_version": 1,
+  "source": "hosting/wallet/signature-release-ledger.mjs",
+  "source_sha256": "2648d117d0ded3380e1eece0429a5ae8a0fd55d850d39e01aba3f5b502cd8ff0",
+  "source_lines": 171,
+  "module": "Zkp.Implementation.SignatureReleaseLedger",
+  "model": "doc/audit/zkp/Zkp/Implementation/SignatureReleaseLedger.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 3,
+      "status": "non-executable",
+      "label": "header comment: release fence, not a replacement for WASM checks",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 4,
+      "end": 6,
+      "status": "translated",
+      "label": "DB_NAME, STORE and ZERO constants",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.dbName",
+        "Zkp.Implementation.SignatureReleaseLedger.storeName",
+        "Zkp.Implementation.SignatureReleaseLedger.zeroDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.constants_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 7,
+      "end": 7,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 8,
+      "end": 13,
+      "status": "translated",
+      "label": "hex32: /^0x[0-9a-fA-F]{64}$/ check and lowercase",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Error",
+        "Zkp.Implementation.SignatureReleaseLedger.Result",
+        "Zkp.Implementation.SignatureReleaseLedger.isHexDigit",
+        "Zkp.Implementation.SignatureReleaseLedger.isHex32Text",
+        "Zkp.Implementation.SignatureReleaseLedger.lowercase",
+        "Zkp.Implementation.SignatureReleaseLedger.hex32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.hex32_ok_is_hex"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. `Error` enumerates every throw message of the file; the regex is modeled as an explicit character predicate."
+    },
+    {
+      "start": 14,
+      "end": 14,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 15,
+      "end": 22,
+      "status": "translated",
+      "label": "field: camel/snake wire alias with conflicting-alias refusal",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Json",
+        "Zkp.Implementation.SignatureReleaseLedger.lookupField",
+        "Zkp.Implementation.SignatureReleaseLedger.prop",
+        "Zkp.Implementation.SignatureReleaseLedger.field"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. The alias comparison calls the opaque `Host.stringify` callback (boundary json-host-callbacks); non-objects read as undefined."
+    },
+    {
+      "start": 23,
+      "end": 23,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 24,
+      "end": 29,
+      "status": "translated",
+      "label": "channelId: safe integer in 0..=0xffffffff",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.maxChannelId",
+        "Zkp.Implementation.SignatureReleaseLedger.channelIdOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.channel_id_ok_bounded"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. JS numbers are abstracted as integer/non-integer (boundary js-number-model)."
+    },
+    {
+      "start": 30,
+      "end": 30,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 31,
+      "end": 37,
+      "status": "translated",
+      "label": "signatureFor: slot 0..=7, identity equals signerPkG, non-null signature",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.maxMemberSlot",
+        "Zkp.Implementation.SignatureReleaseLedger.slotOf",
+        "Zkp.Implementation.SignatureReleaseLedger.signatureBytesPresent",
+        "Zkp.Implementation.SignatureReleaseLedger.signatureFor",
+        "Zkp.Implementation.SignatureReleaseLedger.refuseIf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.slot_of_ok",
+        "Zkp.Implementation.SignatureReleaseLedger.signature_for_ok_slot_bounded"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. Short-circuit order of the source condition (slot, then field/hex32 errors, then identity, then null bytes) is kept."
+    },
+    {
+      "start": 38,
+      "end": 38,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 39,
+      "end": 55,
+      "status": "translated",
+      "label": "signatureDecision: consistency checks, successor mismatch, replay of the stored bytes",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.schemaVersion",
+        "Zkp.Implementation.SignatureReleaseLedger.LedgerKey",
+        "Zkp.Implementation.SignatureReleaseLedger.Decision",
+        "Zkp.Implementation.SignatureReleaseLedger.decideAgainstExisting",
+        "Zkp.Implementation.SignatureReleaseLedger.signatureDecision"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.signature_decision_no_existing",
+        "Zkp.Implementation.SignatureReleaseLedger.signature_decision_existing",
+        "Zkp.Implementation.SignatureReleaseLedger.different_successor_rejected",
+        "Zkp.Implementation.SignatureReleaseLedger.signature_decision_key"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. Stored rows are assumed Decision-shaped (boundary stored-row-shape); success with an existing row returns that row, never the candidate."
+    },
+    {
+      "start": 56,
+      "end": 56,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 57,
+      "end": 82,
+      "status": "dependency-boundary",
+      "label": "createIndexedDbSignatureLedger / lazy open(): IndexedDB availability, upgrade, blocked, error, versionchange",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Backend",
+        "Zkp.Implementation.SignatureReleaseLedger.OpenOutcome",
+        "Zkp.Implementation.SignatureReleaseLedger.openDatabase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.open_database_ok"
+      ],
+      "note": "Browser IndexedDB open/upgrade behaviour is a per-call premise (`Backend.indexedDbAvailable`, `Backend.openOutcome`); only the error precedence of lines 62-65 and the three outcomes are modeled. The cached promise and versionchange reset are not modeled."
+    },
+    {
+      "start": 83,
+      "end": 83,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 84,
+      "end": 116,
+      "status": "translated",
+      "label": "remember: strict-durability readwrite transaction, read/decide/add, abort on any failure",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Store",
+        "Zkp.Implementation.SignatureReleaseLedger.emptyStore",
+        "Zkp.Implementation.SignatureReleaseLedger.storeInsert",
+        "Zkp.Implementation.SignatureReleaseLedger.writeIfAbsent",
+        "Zkp.Implementation.SignatureReleaseLedger.Durability",
+        "Zkp.Implementation.SignatureReleaseLedger.Durability.isStrict",
+        "Zkp.Implementation.SignatureReleaseLedger.CommitOutcome",
+        "Zkp.Implementation.SignatureReleaseLedger.requireStrict",
+        "Zkp.Implementation.SignatureReleaseLedger.commit",
+        "Zkp.Implementation.SignatureReleaseLedger.remember"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.store_insert_self",
+        "Zkp.Implementation.SignatureReleaseLedger.store_insert_other",
+        "Zkp.Implementation.SignatureReleaseLedger.write_if_absent_absent",
+        "Zkp.Implementation.SignatureReleaseLedger.write_if_absent_present",
+        "Zkp.Implementation.SignatureReleaseLedger.require_strict_ok",
+        "Zkp.Implementation.SignatureReleaseLedger.commit_ok",
+        "Zkp.Implementation.SignatureReleaseLedger.remember_ok",
+        "Zkp.Implementation.SignatureReleaseLedger.remember_requires_strict_durability"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. The granted durability and the transaction outcome (oncomplete/onabort/onerror) are premises (boundary indexeddb-durability-and-serialization); one `remember` is one atomic step on the store."
+    },
+    {
+      "start": 117,
+      "end": 118,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 119,
+      "end": 119,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 120,
+      "end": 121,
+      "status": "translated",
+      "label": "assertUnsignedProposal: only the four unsigned delegate actions are screened",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.unsignedProposalActions",
+        "Zkp.Implementation.SignatureReleaseLedger.assertUnsignedProposal"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.unsigned_proposal_screened"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 122,
+      "end": 124,
+      "status": "non-executable",
+      "label": "comment: trusted WASM serde output, slimWire cannot sign",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 125,
+      "end": 128,
+      "status": "dependency-boundary",
+      "label": "memberSignatures regex on the WASM wire",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Host",
+        "Zkp.Implementation.SignatureReleaseLedger.assertUnsignedProposal"
+      ],
+      "theorems": [],
+      "note": "The regex `/\"(?:memberSignatures|member_signatures)\"\\s*:(?!\\s*\\[\\s*\\])/` is the opaque predicate `Host.wireCarriesMemberSignatures` (boundary unsigned-proposal-regex); only 'string wire and predicate false' is modeled."
+    },
+    {
+      "start": 129,
+      "end": 129,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 130,
+      "end": 130,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 131,
+      "end": 137,
+      "status": "translated",
+      "label": "createSignatureReleaseGate.release dispatch: signed actions vs unsigned pass-through",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.signActions",
+        "Zkp.Implementation.SignatureReleaseLedger.SignInput",
+        "Zkp.Implementation.SignatureReleaseLedger.Request",
+        "Zkp.Implementation.SignatureReleaseLedger.release",
+        "Zkp.Implementation.SignatureReleaseLedger.Reachable"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.release_preserves_stored",
+        "Zkp.Implementation.SignatureReleaseLedger.stored_decision_never_changes"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. `Reachable` closes `release` under arbitrary call sequences on one store; the default IndexedDB backend argument is the `Backend` premise."
+    },
+    {
+      "start": 138,
+      "end": 154,
+      "status": "translated",
+      "label": "release: identity, wire text, JSON.parse, state, genesis zero predecessor, own signature, slot, candidate/key",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.requireWireText",
+        "Zkp.Implementation.SignatureReleaseLedger.parseJson",
+        "Zkp.Implementation.SignatureReleaseLedger.stateOf",
+        "Zkp.Implementation.SignatureReleaseLedger.signatureVector",
+        "Zkp.Implementation.SignatureReleaseLedger.ownSignatures",
+        "Zkp.Implementation.SignatureReleaseLedger.singleOwn",
+        "Zkp.Implementation.SignatureReleaseLedger.isNumber",
+        "Zkp.Implementation.SignatureReleaseLedger.Prepared",
+        "Zkp.Implementation.SignatureReleaseLedger.mkCandidate",
+        "Zkp.Implementation.SignatureReleaseLedger.buildCandidate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.build_candidate_genesis",
+        "Zkp.Implementation.SignatureReleaseLedger.genesis_nonzero_predecessor_refused"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. `JSON.parse` is the opaque `Host.parse` with SyntaxError as the only failure (boundary json-host-callbacks); the key string is modeled as the `LedgerKey` triple (boundary key-encoding-injectivity)."
+    },
+    {
+      "start": 155,
+      "end": 157,
+      "status": "translated",
+      "label": "durable remember, persisted guard, second signatureDecision on the returned row",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.releaseSigned"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.release_signed_ok",
+        "Zkp.Implementation.SignatureReleaseLedger.release_returns_only_stored",
+        "Zkp.Implementation.SignatureReleaseLedger.no_release_without_strict_durability",
+        "Zkp.Implementation.SignatureReleaseLedger.same_key_same_decision",
+        "Zkp.Implementation.SignatureReleaseLedger.same_key_same_successor_and_bytes",
+        "Zkp.Implementation.SignatureReleaseLedger.genesis_release_requires_zero_predecessor",
+        "Zkp.Implementation.SignatureReleaseLedger.first_sign_then_retry_replays",
+        "Zkp.Implementation.SignatureReleaseLedger.different_successor_retry_refused",
+        "Zkp.Implementation.SignatureReleaseLedger.relaxed_durability_refused"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. The `!persisted` guard cannot fire in the model because `remember` resolves with a decision or fails; the end-to-end theorems and the positive/negative traces are linked here where the durable decision is taken."
+    },
+    {
+      "start": 158,
+      "end": 158,
+      "status": "translated",
+      "label": "signState returns the stored signature's JSON",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.render"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.render_ok"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 159,
+      "end": 161,
+      "status": "non-executable",
+      "label": "comment: preserve original state text (u64 JSON numbers)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    },
+    {
+      "start": 162,
+      "end": 166,
+      "status": "translated",
+      "label": "cosign: the fresh signature text must occur exactly once in the wire",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.render"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate. `indexOf` scanning is the opaque `Host.occurrences`; only `= 1` is checked, as in the source (boundary wire-splice)."
+    },
+    {
+      "start": 167,
+      "end": 168,
+      "status": "dependency-boundary",
+      "label": "slice/concat splice of the stored signature over the fresh one",
+      "declarations": [
+        "Zkp.Implementation.SignatureReleaseLedger.Host",
+        "Zkp.Implementation.SignatureReleaseLedger.RenderedFrom"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SignatureReleaseLedger.render_ok"
+      ],
+      "note": "`result.slice(0,start) + JSON.stringify(saved.signature) + result.slice(...)` is the opaque `Host.replaceFirst`; `render_ok` only states that the rendered wire is that callback applied to the stored bytes (boundary wire-splice)."
+    },
+    {
+      "start": 169,
+      "end": 171,
+      "status": "non-executable",
+      "label": "structural spacing / syntax",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, comment, blank line or closing brace; no executable constraint inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "json-host-callbacks",
+      "obligation": "JSON.stringify / JSON.parse are opaque `Host` callbacks; the wire-alias comparison of `field` and the parse of the WASM result/state inherit their semantics, with SyntaxError as the only modeled parse failure.",
+      "discharged": false
+    },
+    {
+      "name": "wire-splice",
+      "obligation": "The indexOf/slice splice of the stored signature into the co-sign wire is opaque (`Host.occurrences`, `Host.replaceFirst`); that the fresh signature text occurs exactly once and that the splice yields a valid wire is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "unsigned-proposal-regex",
+      "obligation": "The memberSignatures regex screening unsigned delegate proposals is the opaque predicate `Host.wireCarriesMemberSignatures`; that it detects every signature-bearing wire is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "indexeddb-durability-and-serialization",
+      "obligation": "IndexedDB availability, open/upgrade outcome, the granted durability and the commit outcome are per-call `Backend` premises; the browser is assumed to honour `durability: 'strict'` when it reports it, a completed transaction is assumed durable, and readwrite transactions on the store are assumed serialized so one `remember` is one atomic step.",
+      "discharged": false
+    },
+    {
+      "name": "stored-row-shape",
+      "obligation": "Rows read from the object store are assumed to have the `Decision` shape; the source reads arbitrary IndexedDB rows and only checks the listed fields.",
+      "discharged": false
+    },
+    {
+      "name": "key-encoding-injectivity",
+      "obligation": "The JS key `JSON.stringify([signerPkG, channelId, prevDigest])` is modeled as the triple `LedgerKey`; injectivity of the string encoding is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "js-number-model",
+      "obligation": "JS numbers are abstracted as integers vs. non-integers (`Json.number` / `Json.nonInteger`); Number.isSafeInteger, NaN/Infinity and -0 are subsumed by the range checks, not modeled bit-exactly.",
+      "discharged": false
+    },
+    {
+      "name": "single-store-scope",
+      "obligation": "Every theorem is about one `Store` lineage: other devices, browser profiles, origins or DB names, and cleared/evicted storage are outside the model, so cross-store equivocation is not prevented.",
+      "discharged": false
+    },
+    {
+      "name": "signature-validity",
+      "obligation": "Falcon signature validity or randomization, the WASM signer and its state-transition/exit-kit checks are not modeled; signature bytes are opaque `Json` and delegate (unsigned) usage never touches the store.",
+      "discharged": false
+    },
+    {
+      "name": "no-source-refinement",
+      "obligation": "The Lean definitions are handwritten semantics of the JavaScript; no refinement between the JS/WASM/browser execution and the model is proved.",
+      "discharged": false
+    }
+  ]
+}
