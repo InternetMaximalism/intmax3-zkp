@@ -305,4 +305,1257 @@ theorem decode_extended_public_state_encode {e : ExtendedPublicState} (rest : Li
   simp only [List.cons_append, List.append_assoc, take_scalar_cons, bind_d_ok,
     take_limbs_append hc, take_limbs_append hs]
 
-end Zkp.Implementation.BlockStep
+/-! ## The three consumed public-input layouts
+
+`UpdateUserPublicInputs` (update_channel_tree.rs) carries no verifier data; the two hash
+chain layouts end with the cyclic verifier key. -/
+
+structure UpdateUserPublicInputs where
+  blockNumber : Nat
+  blockTimestamp : U64Val
+  prevBlockHashChain : Bytes32
+  prevAccountTreeRoot : Hash
+  newBlockHashChain : Bytes32
+  newAccountTreeRoot : Hash
+  depositHashChain : Bytes32
+  channelRegHashChain : Bytes32
+  prevBpSigChain : Bytes32
+  newBpSigChain : Bytes32
+  deriving DecidableEq, Repr, Inhabited
+
+structure VerifierKey where
+  id : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+structure DepositChainPublicInputs where
+  initialDepositHashChain : Bytes32
+  initialDepositTreeRoot : Hash
+  initialDepositCount : Nat
+  depositHashChain : Bytes32
+  depositTreeRoot : Hash
+  depositCount : Nat
+  blockNumber : Nat
+  vd : VerifierKey
+  deriving DecidableEq, Repr, Inhabited
+
+structure ChannelRegChainPublicInputs where
+  initialChannelRegHashChain : Bytes32
+  initialChannelTreeRoot : Hash
+  initialChannelRegCount : Nat
+  channelRegHashChain : Bytes32
+  channelTreeRoot : Hash
+  channelRegCount : Nat
+  blockNumber : Nat
+  vd : VerifierKey
+  deriving DecidableEq, Repr, Inhabited
+
+structure BlockChainPublicInputs where
+  initialExt : ExtendedPublicState
+  ext : ExtendedPublicState
+  vd : VerifierKey
+  deriving DecidableEq, Repr, Inhabited
+
+def UpdateUserPublicInputs.encode (u : UpdateUserPublicInputs) : List Nat :=
+  u.blockNumber :: (u.blockTimestamp.limbs ++ u.prevBlockHashChain.limbs ++
+    u.prevAccountTreeRoot.limbs ++ u.newBlockHashChain.limbs ++ u.newAccountTreeRoot.limbs ++
+    u.depositHashChain.limbs ++ u.channelRegHashChain.limbs ++ u.prevBpSigChain.limbs ++
+    u.newBpSigChain.limbs)
+
+def UpdateUserPublicInputs.WellFormed (u : UpdateUserPublicInputs) : Prop :=
+  u.blockTimestamp.WellFormed ∧ u.prevBlockHashChain.WellFormed ∧
+    u.prevAccountTreeRoot.WellFormed ∧ u.newBlockHashChain.WellFormed ∧
+    u.newAccountTreeRoot.WellFormed ∧ u.depositHashChain.WellFormed ∧
+    u.channelRegHashChain.WellFormed ∧ u.prevBpSigChain.WellFormed ∧ u.newBpSigChain.WellFormed
+
+/-- `UpdateUserPublicInputs::from_u64_slice`: exact-length gate, then the cursor walk. -/
+def decodeUpdateUserPis (xs : List Nat) : Except DecodeError UpdateUserPublicInputs :=
+  if xs.length ≠ updateUserPublicInputsLen then
+    .error (.invalidLength updateUserPublicInputsLen xs.length)
+  else
+    bindD (takeScalar "block_number" xs) fun (bn, xs) =>
+    bindD (takeLimbs u64Len "block_timestamp" xs) fun (ts, xs) =>
+    bindD (takeLimbs bytes32Len "prev_block_hash_chain" xs) fun (pbhc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "prev_account_tree_root" xs) fun (patr, xs) =>
+    bindD (takeLimbs bytes32Len "new_block_hash_chain" xs) fun (nbhc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "new_account_tree_root" xs) fun (natr, xs) =>
+    bindD (takeLimbs bytes32Len "deposit_hash_chain" xs) fun (dhc, xs) =>
+    bindD (takeLimbs bytes32Len "channel_reg_hash_chain" xs) fun (crhc, xs) =>
+    bindD (takeLimbs bytes32Len "prev_bp_sig_chain" xs) fun (pbsc, xs) =>
+    bindD (takeLimbs bytes32Len "new_bp_sig_chain" xs) fun (nbsc, _) =>
+    .ok { blockNumber := bn, blockTimestamp := ⟨ts⟩, prevBlockHashChain := ⟨pbhc⟩,
+          prevAccountTreeRoot := ⟨patr⟩, newBlockHashChain := ⟨nbhc⟩,
+          newAccountTreeRoot := ⟨natr⟩, depositHashChain := ⟨dhc⟩,
+          channelRegHashChain := ⟨crhc⟩, prevBpSigChain := ⟨pbsc⟩, newBpSigChain := ⟨nbsc⟩ }
+
+theorem update_user_encode_length {u : UpdateUserPublicInputs} (wf : u.WellFormed) :
+    u.encode.length = updateUserPublicInputsLen := by
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩ := wf
+  simp only [U64Val.WellFormed] at h1
+  simp only [Bytes32.WellFormed] at h2 h4 h6 h7 h8 h9
+  simp only [Hash.WellFormed] at h3 h5
+  simp only [UpdateUserPublicInputs.encode, List.length_cons, List.length_append,
+    h1, h2, h3, h4, h5, h6, h7, h8, h9]
+  simp only [updateUserPublicInputsLen, bytes32Len, poseidonHashOutLen, u64Len]
+
+theorem decode_update_user_encode {u : UpdateUserPublicInputs} (wf : u.WellFormed) :
+    decodeUpdateUserPis u.encode = .ok u := by
+  have hlen := update_user_encode_length wf
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩ := wf
+  simp only [U64Val.WellFormed] at h1
+  simp only [Bytes32.WellFormed] at h2 h4 h6 h7 h8 h9
+  simp only [Hash.WellFormed] at h3 h5
+  simp only [decodeUpdateUserPis, hlen, ne_eq, not_true_eq_false, if_false]
+  simp only [UpdateUserPublicInputs.encode, List.cons_append, List.append_assoc,
+    take_scalar_cons, bind_d_ok, take_limbs_append h1, take_limbs_append h2,
+    take_limbs_append h3, take_limbs_append h4, take_limbs_append h5, take_limbs_append h6,
+    take_limbs_append h7, take_limbs_append h8]
+  rw [show u.newBpSigChain.limbs = u.newBpSigChain.limbs ++ ([] : List Nat) by simp]
+  simp only [take_limbs_append h9, bind_d_ok]
+
+/-! ## Opaque environment
+
+Everything cryptographic in the file is a callback here. `accepts` stands for
+`VerifierCircuitData::verify` (previous chain proof, update proof, deposit chain proof,
+channel-registration chain proof); `merkleRoot` stands for
+`IncrementalMerkleProof::get_root`; `vdEncode`/`vdDecode` stand for the cyclic verifier
+key limb codec. No property of any of them is proved. -/
+
+structure VerifierCircuitData where
+  /-- identity of the `CommonCircuitData` this key belongs to (compared by `prove`). -/
+  common : Nat
+  vdLen : Nat
+  verifierOnly : VerifierKey
+  deriving DecidableEq, Repr, Inhabited
+
+structure Proof where
+  publicInputs : List Nat
+  deriving DecidableEq, Repr, Inhabited
+
+structure MerkleProof where
+  siblings : List Hash
+  deriving DecidableEq, Repr, Inhabited
+
+structure StepEnv where
+  accepts : VerifierCircuitData → Proof → Bool
+  merkleRoot : MerkleProof → PublicState → Nat → Hash
+  vdEncode : VerifierKey → List Nat
+  vdDecode : List Nat → Except DecodeError VerifierKey
+
+/-- The undischarged assumption that the verifier-key limb codec is a codec at all. -/
+structure VdCodecSound (env : StepEnv) (vdLen : Nat) : Prop where
+  encode_length : ∀ k, (env.vdEncode k).length = vdLen
+  decode_encode : ∀ k, env.vdDecode (env.vdEncode k) = .ok k
+
+def decodeBlockChainPis (env : StepEnv) (vdLen : Nat) (xs : List Nat) :
+    Except DecodeError BlockChainPublicInputs :=
+  if xs.length ≠ blockChainPublicInputsLen + vdLen then
+    .error (.invalidLength (blockChainPublicInputsLen + vdLen) xs.length)
+  else
+    bindD (decodeExtendedPublicStateAt xs) fun (initExt, xs) =>
+    bindD (decodeExtendedPublicStateAt xs) fun (ext, xs) =>
+    bindD (env.vdDecode (xs.take vdLen)) fun vd =>
+    .ok { initialExt := initExt, ext := ext, vd := vd }
+
+def decodeDepositChainPis (env : StepEnv) (vdLen : Nat) (xs : List Nat) :
+    Except DecodeError DepositChainPublicInputs :=
+  if xs.length ≠ depositChainPublicInputsLen + vdLen then
+    .error (.invalidLength (depositChainPublicInputsLen + vdLen) xs.length)
+  else
+    bindD (takeLimbs bytes32Len "initial_deposit_hash_chain" xs) fun (idhc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "initial_deposit_tree_root" xs) fun (idtr, xs) =>
+    bindD (takeScalar "initial_deposit_count" xs) fun (idc, xs) =>
+    bindD (takeLimbs bytes32Len "deposit_hash_chain" xs) fun (dhc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "deposit_tree_root" xs) fun (dtr, xs) =>
+    bindD (takeScalar "deposit_count" xs) fun (dc, xs) =>
+    bindD (takeScalar "block_number" xs) fun (bn, xs) =>
+    bindD (env.vdDecode (xs.take vdLen)) fun vd =>
+    .ok { initialDepositHashChain := ⟨idhc⟩, initialDepositTreeRoot := ⟨idtr⟩,
+          initialDepositCount := idc, depositHashChain := ⟨dhc⟩, depositTreeRoot := ⟨dtr⟩,
+          depositCount := dc, blockNumber := bn, vd := vd }
+
+def decodeChannelRegChainPis (env : StepEnv) (vdLen : Nat) (xs : List Nat) :
+    Except DecodeError ChannelRegChainPublicInputs :=
+  if xs.length ≠ channelRegChainPublicInputsLen + vdLen then
+    .error (.invalidLength (channelRegChainPublicInputsLen + vdLen) xs.length)
+  else
+    bindD (takeLimbs bytes32Len "initial_channel_reg_hash_chain" xs) fun (ichc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "initial_channel_tree_root" xs) fun (ictr, xs) =>
+    bindD (takeScalar "initial_channel_reg_count" xs) fun (icc, xs) =>
+    bindD (takeLimbs bytes32Len "channel_reg_hash_chain" xs) fun (chc, xs) =>
+    bindD (takeLimbs poseidonHashOutLen "channel_tree_root" xs) fun (ctr, xs) =>
+    bindD (takeScalar "channel_reg_count" xs) fun (cc, xs) =>
+    bindD (takeScalar "block_number" xs) fun (bn, xs) =>
+    bindD (env.vdDecode (xs.take vdLen)) fun vd =>
+    .ok { initialChannelRegHashChain := ⟨ichc⟩, initialChannelTreeRoot := ⟨ictr⟩,
+          initialChannelRegCount := icc, channelRegHashChain := ⟨chc⟩, channelTreeRoot := ⟨ctr⟩,
+          channelRegCount := cc, blockNumber := bn, vd := vd }
+
+theorem decode_block_chain_pis_length_gate {env : StepEnv} {vdLen : Nat} {xs : List Nat}
+    (bad : xs.length ≠ blockChainPublicInputsLen + vdLen) :
+    decodeBlockChainPis env vdLen xs =
+      .error (.invalidLength (blockChainPublicInputsLen + vdLen) xs.length) := by
+  simp [decodeBlockChainPis, bad]
+
+theorem decode_deposit_chain_pis_length_gate {env : StepEnv} {vdLen : Nat} {xs : List Nat}
+    (bad : xs.length ≠ depositChainPublicInputsLen + vdLen) :
+    decodeDepositChainPis env vdLen xs =
+      .error (.invalidLength (depositChainPublicInputsLen + vdLen) xs.length) := by
+  simp [decodeDepositChainPis, bad]
+
+theorem decode_channel_reg_chain_pis_length_gate {env : StepEnv} {vdLen : Nat} {xs : List Nat}
+    (bad : xs.length ≠ channelRegChainPublicInputsLen + vdLen) :
+    decodeChannelRegChainPis env vdLen xs =
+      .error (.invalidLength (channelRegChainPublicInputsLen + vdLen) xs.length) := by
+  simp [decodeChannelRegChainPis, bad]
+
+theorem decode_update_user_pis_length_gate {xs : List Nat}
+    (bad : xs.length ≠ updateUserPublicInputsLen) :
+    decodeUpdateUserPis xs = .error (.invalidLength updateUserPublicInputsLen xs.length) := by
+  simp [decodeUpdateUserPis, bad]
+
+/-! ## Errors and the native witness -/
+
+inductive BlockStepError where
+  | invalidInput (message : String)
+  | invalidProof (message : String)
+  | missingUpdateUserVerifierData (numUsers : Nat)
+  | depositChainPublicInputs (error : DecodeError)
+  | channelRegChainPublicInputs (error : DecodeError)
+  | blockChainPublicInputs (error : DecodeError)
+  | updateUserPublicInputs (message : String)
+  | publicStateMerkleProof (message : String)
+  | failedToProve (message : String)
+  deriving DecidableEq, Repr
+
+abbrev Result (α : Type) := Except BlockStepError α
+
+def check (condition : Prop) [Decidable condition] (error : BlockStepError) : Result Unit :=
+  if condition then .ok () else .error error
+
+theorem check_ok_iff (condition : Prop) [Decidable condition] (error : BlockStepError) :
+    check condition error = .ok () ↔ condition := by
+  unfold check
+  split
+  · rename_i h; simp [h]
+  · rename_i h; simp [h]
+
+theorem bind_ok_iff {α β : Type} (r : Result α) (f : α → Result β) (value : β) :
+    (r >>= f) = .ok value ↔ ∃ x, r = .ok x ∧ f x = .ok value := by
+  cases r <;> simp [Bind.bind, Except.bind]
+
+theorem unit_bind_ok_iff {α : Type} (r : Result Unit) (s : Result α) (value : α) :
+    (r >>= fun _ => s) = .ok value ↔ r = .ok () ∧ s = .ok value := by
+  cases r with
+  | error e => simp [Bind.bind, Except.bind]
+  | ok u => cases u; simp [Bind.bind, Except.bind]
+
+theorem exists_unit (p : Unit → Prop) : (∃ x, p x) ↔ p () := by
+  constructor
+  · rintro ⟨⟨⟩, h⟩; exact h
+  · intro h; exact ⟨(), h⟩
+
+theorem pure_ok_iff {α : Type} (a b : α) : (pure a : Result α) = .ok b ↔ a = b := by
+  constructor
+  · intro h; exact Except.ok.inj h
+  · intro h; subst h; rfl
+
+structure BlockStepWitness where
+  /-- padding number of users in this block; selects one update-account circuit. -/
+  numUsers : Nat
+  initialPublicState : Option ExtendedPublicState
+  prevBlockChainProof : Option Proof
+  depositHashChainProof : Option Proof
+  channelRegHashChainProof : Option Proof
+  updateUserProof : Proof
+  publicStateMerkleProof : MerkleProof
+  deriving DecidableEq, Repr, Inhabited
+
+/-- `update_account_vds.iter().map(...).collect::<HashMap<_,_>>()` keeps the LAST entry for a
+    repeated `num_users`, unlike a first-match association lookup. -/
+def lookupLast (key : Nat) : List (Nat × VerifierCircuitData) → Option VerifierCircuitData
+  | [] => none
+  | (k, v) :: rest =>
+      match lookupLast key rest with
+      | some v' => some v'
+      | none => if k = key then some v else none
+
+theorem lookup_last_prefers_tail (key k : Nat) (v : VerifierCircuitData)
+    (rest : List (Nat × VerifierCircuitData)) (v' : VerifierCircuitData)
+    (found : lookupLast key rest = some v') :
+    lookupLast key ((k, v) :: rest) = some v' := by
+  simp [lookupLast, found]
+
+/-! ## Native acceptance: `BlockStepWitness::to_public_inputs`
+
+Executable mirror of the Rust control flow, including the order of the checks and which
+error each one raises. Nothing here is claimed about the proofs it verifies. -/
+
+/-! The `?`/`map_err` conversions from a decoding error to a `BlockStepError`, named so the
+acceptance proofs peel them with a lemma instead of a `split`. -/
+
+def liftBlockChain (r : Except DecodeError BlockChainPublicInputs) :
+    Result BlockChainPublicInputs :=
+  match r with
+  | .error e => .error (.blockChainPublicInputs e)
+  | .ok v => .ok v
+
+def liftDeposit (r : Except DecodeError DepositChainPublicInputs) :
+    Result DepositChainPublicInputs :=
+  match r with
+  | .error e => .error (.depositChainPublicInputs e)
+  | .ok v => .ok v
+
+def liftChannelReg (r : Except DecodeError ChannelRegChainPublicInputs) :
+    Result ChannelRegChainPublicInputs :=
+  match r with
+  | .error e => .error (.channelRegChainPublicInputs e)
+  | .ok v => .ok v
+
+def liftUpdate (r : Except DecodeError UpdateUserPublicInputs) :
+    Result UpdateUserPublicInputs :=
+  match r with
+  | .error _ => .error (.updateUserPublicInputs "invalid update-account public inputs")
+  | .ok v => .ok v
+
+def liftVd (numUsers : Nat) (o : Option VerifierCircuitData) : Result VerifierCircuitData :=
+  match o with
+  | none => .error (.missingUpdateUserVerifierData numUsers)
+  | some vd => .ok vd
+
+theorem lift_block_chain_ok_iff (r : Except DecodeError BlockChainPublicInputs)
+    (v : BlockChainPublicInputs) : liftBlockChain r = .ok v ↔ r = .ok v := by
+  cases r <;> simp [liftBlockChain]
+
+theorem lift_deposit_ok_iff (r : Except DecodeError DepositChainPublicInputs)
+    (v : DepositChainPublicInputs) : liftDeposit r = .ok v ↔ r = .ok v := by
+  cases r <;> simp [liftDeposit]
+
+theorem lift_channel_reg_ok_iff (r : Except DecodeError ChannelRegChainPublicInputs)
+    (v : ChannelRegChainPublicInputs) : liftChannelReg r = .ok v ↔ r = .ok v := by
+  cases r <;> simp [liftChannelReg]
+
+theorem lift_update_ok_iff (r : Except DecodeError UpdateUserPublicInputs)
+    (v : UpdateUserPublicInputs) : liftUpdate r = .ok v ↔ r = .ok v := by
+  cases r <;> simp [liftUpdate]
+
+theorem lift_vd_ok_iff (numUsers : Nat) (o : Option VerifierCircuitData)
+    (v : VerifierCircuitData) : liftVd numUsers o = .ok v ↔ o = some v := by
+  cases o <;> simp [liftVd]
+
+/-- The previous chain state: either the previous proof's public inputs, or (first block)
+    the caller-supplied `initial_public_state`, used as BOTH the initial and the current
+    extended state. -/
+def resolvePrev (env : StepEnv) (blockChainVd : VerifierCircuitData)
+    (w : BlockStepWitness) : Result BlockChainPublicInputs :=
+  match w.prevBlockChainProof with
+  | some prevProof =>
+      if !env.accepts blockChainVd prevProof then
+        .error (.invalidProof "previous block chain proof invalid")
+      else
+        liftBlockChain (decodeBlockChainPis env blockChainVd.vdLen prevProof.publicInputs)
+  | none =>
+      match w.initialPublicState with
+      | none =>
+          .error (.invalidInput
+            "initial_public_state must be provided when previous block proof is absent")
+      | some initialState =>
+          .ok { initialExt := initialState, ext := initialState,
+                vd := blockChainVd.verifierOnly }
+
+structure DepositOutcome where
+  depositHashChain : Bytes32
+  depositTreeRoot : Hash
+  depositCount : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+structure ChannelRegOutcome where
+  accountTreeRoot : Hash
+  channelRegHashChain : Bytes32
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Deposit fold. The chain only advances when the update proof's declared
+    `deposit_hash_chain` differs from the previous one, and then only via a deposit chain
+    proof that starts exactly at the previous triple and ends at the declared value. -/
+def resolveDeposit (env : StepEnv) (depositChainVd : VerifierCircuitData)
+    (prevExt : ExtendedPublicState) (blockNumber : Nat) (upd : UpdateUserPublicInputs)
+    (depositProof : Option Proof) : Result DepositOutcome :=
+  if prevExt.depositHashChain = upd.depositHashChain then
+    .ok { depositHashChain := prevExt.depositHashChain,
+          depositTreeRoot := prevExt.inner.depositTreeRoot,
+          depositCount := prevExt.depositCount }
+  else
+    match depositProof with
+    | none =>
+        .error (.invalidInput
+          "deposit_hash_chain_proof must be provided when deposit hash chain is updated")
+    | some proof => do
+        let _ ← check (env.accepts depositChainVd proof = true)
+          (.invalidProof "deposit hash chain proof invalid")
+        let di ← liftDeposit (decodeDepositChainPis env depositChainVd.vdLen proof.publicInputs)
+        let _ ← check (di.initialDepositHashChain = prevExt.depositHashChain)
+          (.invalidInput "deposit proof initial deposit hash chain mismatch")
+        let _ ← check (di.initialDepositTreeRoot = prevExt.inner.depositTreeRoot)
+          (.invalidInput "deposit proof initial deposit tree root mismatch")
+        let _ ← check (di.initialDepositCount = prevExt.depositCount)
+          (.invalidInput "deposit proof initial deposit count mismatch")
+        let _ ← check (di.depositHashChain = upd.depositHashChain)
+          (.invalidInput
+            "deposit proof resulting deposit hash chain must match update account input")
+        let _ ← check (di.blockNumber = blockNumber)
+          (.invalidInput "deposit proof block number mismatch")
+        .ok { depositHashChain := di.depositHashChain, depositTreeRoot := di.depositTreeRoot,
+              depositCount := di.depositCount }
+
+/-- Channel-registration fold, including the R6 intra-block exclusion and the
+    "proof present iff the chain moves" guard that follows the `if let` block. -/
+def resolveChannelReg (env : StepEnv) (channelRegChainVd : VerifierCircuitData)
+    (prevExt : ExtendedPublicState) (blockNumber : Nat) (upd : UpdateUserPublicInputs)
+    (regProof : Option Proof) : Result ChannelRegOutcome :=
+  match regProof with
+  | none =>
+      .ok { accountTreeRoot := upd.newAccountTreeRoot,
+            channelRegHashChain := prevExt.channelRegHashChain }
+  | some proof => do
+      let _ ← check (env.accepts channelRegChainVd proof = true)
+        (.invalidProof "channel reg hash chain proof invalid")
+      let ci ← liftChannelReg
+        (decodeChannelRegChainPis env channelRegChainVd.vdLen proof.publicInputs)
+      let _ ← check (ci.initialChannelRegHashChain = prevExt.channelRegHashChain)
+        (.invalidInput "channel reg proof initial channel reg hash chain mismatch")
+      let _ ← check (ci.initialChannelTreeRoot = prevExt.inner.accountTreeRoot)
+        (.invalidInput "channel reg proof initial channel tree root mismatch")
+      let _ ← check (ci.blockNumber = blockNumber)
+        (.invalidInput "channel reg proof block number mismatch")
+      let _ ← check (upd.newAccountTreeRoot = upd.prevAccountTreeRoot)
+        (.invalidInput "registration block must not update the account tree (R6 exclusion)")
+      let _ ← check (ci.channelRegHashChain ≠ prevExt.channelRegHashChain)
+        (.invalidInput
+          "channel_reg_hash_chain_proof must be provided iff the channel reg hash chain changes")
+      .ok { accountTreeRoot := ci.channelTreeRoot,
+            channelRegHashChain := ci.channelRegHashChain }
+
+/-- The emitted step public inputs: the initial extended state and the cyclic verifier key
+    are carried over unchanged from the previous chain proof; everything else is rebuilt. -/
+def nativeOutput (prevInputs : BlockChainPublicInputs) (blockNumber : Nat)
+    (upd : UpdateUserPublicInputs) (dep : DepositOutcome) (reg : ChannelRegOutcome)
+    (prevPublicStateRoot : Hash) : BlockChainPublicInputs :=
+  { initialExt := prevInputs.initialExt
+    ext := { inner := { blockNumber := blockNumber
+                        timestamp := upd.blockTimestamp
+                        accountTreeRoot := reg.accountTreeRoot
+                        depositTreeRoot := dep.depositTreeRoot
+                        prevPublicStateRoot := prevPublicStateRoot }
+             blockHashChain := upd.newBlockHashChain
+             depositHashChain := dep.depositHashChain
+             depositCount := dep.depositCount
+             channelRegHashChain := reg.channelRegHashChain
+             bpSigChain := upd.newBpSigChain }
+    vd := prevInputs.vd }
+
+def toPublicInputs (env : StepEnv) (blockChainVd : VerifierCircuitData)
+    (updateAccountVds : List (Nat × VerifierCircuitData))
+    (depositChainVd channelRegChainVd : VerifierCircuitData)
+    (w : BlockStepWitness) : Result BlockChainPublicInputs := do
+  let prevInputs ← resolvePrev env blockChainVd w
+  let prevExt := prevInputs.ext
+  let prevState := prevExt.inner
+  let updateVd ← liftVd w.numUsers (lookupLast w.numUsers updateAccountVds)
+  let _ ← check (env.accepts updateVd w.updateUserProof = true)
+    (.invalidProof "update account proof invalid")
+  let upd ← liftUpdate (decodeUpdateUserPis w.updateUserProof.publicInputs)
+  let _ ← check (prevState.blockNumber + 1 ≤ u63Max)
+    (.invalidInput "previous block number is at max value")
+  let blockNumber := prevState.blockNumber + 1
+  let _ ← check (upd.blockNumber = blockNumber)
+    (.invalidInput "update account proof block number must be previous block number + 1")
+  let _ ← check (upd.prevAccountTreeRoot = prevState.accountTreeRoot)
+    (.invalidInput "update account proof initial user tree root mismatch")
+  let _ ← check (upd.prevBlockHashChain = prevExt.blockHashChain)
+    (.invalidInput "update account proof initial block hash chain mismatch")
+  let _ ← check (upd.prevBpSigChain = prevExt.bpSigChain)
+    (.invalidInput "update account proof initial bp_sig_chain mismatch")
+  let dep ← resolveDeposit env depositChainVd prevExt blockNumber upd w.depositHashChainProof
+  let reg ← resolveChannelReg env channelRegChainVd prevExt blockNumber upd
+    w.channelRegHashChainProof
+  let _ ← check (upd.channelRegHashChain = reg.channelRegHashChain)
+    (.invalidInput
+      "block channel_reg_hash_chain (in block hash) must equal the resulting ext-state channel_reg_hash_chain")
+  let _ ← check
+    (env.merkleRoot w.publicStateMerkleProof emptyPublicStateLeaf prevState.blockNumber
+      = prevState.prevPublicStateRoot)
+    (.publicStateMerkleProof "failed to verify empty public state membership")
+  .ok (nativeOutput prevInputs blockNumber upd dep reg
+        (env.merkleRoot w.publicStateMerkleProof prevState prevState.blockNumber))
+
+/-! ## What native acceptance establishes
+
+`NativeFacts` is exactly the conjunction of the checks `to_public_inputs` performs, plus
+the shape of what it returns. Everything below is derived from it, so no theorem about the
+native path can quietly claim more than the Rust checks. -/
+
+structure NativeFacts (env : StepEnv) (blockChainVd : VerifierCircuitData)
+    (updateAccountVds : List (Nat × VerifierCircuitData))
+    (depositChainVd channelRegChainVd : VerifierCircuitData)
+    (w : BlockStepWitness) (out : BlockChainPublicInputs)
+    (prevInputs : BlockChainPublicInputs) (upd : UpdateUserPublicInputs)
+    (dep : DepositOutcome) (reg : ChannelRegOutcome)
+    (updateVd : VerifierCircuitData) : Prop where
+  prev_resolved : resolvePrev env blockChainVd w = .ok prevInputs
+  update_vd_found : lookupLast w.numUsers updateAccountVds = some updateVd
+  update_proof_accepted : env.accepts updateVd w.updateUserProof = true
+  update_pis_decoded : decodeUpdateUserPis w.updateUserProof.publicInputs = .ok upd
+  block_number_in_range : prevInputs.ext.inner.blockNumber + 1 ≤ u63Max
+  update_block_number : upd.blockNumber = prevInputs.ext.inner.blockNumber + 1
+  update_prev_account_root : upd.prevAccountTreeRoot = prevInputs.ext.inner.accountTreeRoot
+  update_prev_block_hash_chain : upd.prevBlockHashChain = prevInputs.ext.blockHashChain
+  update_prev_bp_sig_chain : upd.prevBpSigChain = prevInputs.ext.bpSigChain
+  deposit_resolved : resolveDeposit env depositChainVd prevInputs.ext
+    (prevInputs.ext.inner.blockNumber + 1) upd w.depositHashChainProof = .ok dep
+  channel_reg_resolved : resolveChannelReg env channelRegChainVd prevInputs.ext
+    (prevInputs.ext.inner.blockNumber + 1) upd w.channelRegHashChainProof = .ok reg
+  reg_chain_anchored_in_block_hash : upd.channelRegHashChain = reg.channelRegHashChain
+  empty_leaf_membership :
+    env.merkleRoot w.publicStateMerkleProof emptyPublicStateLeaf prevInputs.ext.inner.blockNumber
+      = prevInputs.ext.inner.prevPublicStateRoot
+  output_shape : out = nativeOutput prevInputs (prevInputs.ext.inner.blockNumber + 1) upd dep reg
+    (env.merkleRoot w.publicStateMerkleProof prevInputs.ext.inner prevInputs.ext.inner.blockNumber)
+
+theorem to_public_inputs_native_facts {env : StepEnv} {blockChainVd : VerifierCircuitData}
+    {updateAccountVds : List (Nat × VerifierCircuitData)}
+    {depositChainVd channelRegChainVd : VerifierCircuitData} {w : BlockStepWitness}
+    {out : BlockChainPublicInputs}
+    (accepted : toPublicInputs env blockChainVd updateAccountVds depositChainVd
+      channelRegChainVd w = .ok out) :
+    ∃ (prevInputs : BlockChainPublicInputs) (upd : UpdateUserPublicInputs)
+      (dep : DepositOutcome) (reg : ChannelRegOutcome) (updateVd : VerifierCircuitData),
+      NativeFacts env blockChainVd updateAccountVds depositChainVd channelRegChainVd w out
+        prevInputs upd dep reg updateVd := by
+  simp only [toPublicInputs, bind_ok_iff, unit_bind_ok_iff, exists_unit, check_ok_iff,
+    pure_ok_iff, lift_vd_ok_iff, lift_update_ok_iff, Except.ok.injEq] at accepted
+  obtain ⟨prevInputs, hprev, accepted⟩ := accepted
+  obtain ⟨updateVd, hvd, accepted⟩ := accepted
+  obtain ⟨hacc, accepted⟩ := accepted
+  obtain ⟨upd, hupd, accepted⟩ := accepted
+  obtain ⟨hrange, accepted⟩ := accepted
+  obtain ⟨hbn, accepted⟩ := accepted
+  obtain ⟨hatr, accepted⟩ := accepted
+  obtain ⟨hbhc, accepted⟩ := accepted
+  obtain ⟨hbsc, accepted⟩ := accepted
+  obtain ⟨dep, hdep, accepted⟩ := accepted
+  obtain ⟨reg, hreg, accepted⟩ := accepted
+  obtain ⟨hg6, accepted⟩ := accepted
+  obtain ⟨hmerkle, accepted⟩ := accepted
+  exact ⟨prevInputs, upd, dep, reg, updateVd,
+        { prev_resolved := hprev, update_vd_found := hvd, update_proof_accepted := hacc
+          update_pis_decoded := hupd, block_number_in_range := hrange
+          update_block_number := hbn, update_prev_account_root := hatr
+          update_prev_block_hash_chain := hbhc, update_prev_bp_sig_chain := hbsc
+          deposit_resolved := hdep, channel_reg_resolved := hreg
+          reg_chain_anchored_in_block_hash := hg6, empty_leaf_membership := hmerkle
+          output_shape := accepted.symm }⟩
+
+/-! ### Consequences of native acceptance -/
+
+theorem to_public_inputs_increments_block_number {env : StepEnv}
+    {blockChainVd : VerifierCircuitData} {vds : List (Nat × VerifierCircuitData)}
+    {depositChainVd channelRegChainVd : VerifierCircuitData} {w : BlockStepWitness}
+    {out : BlockChainPublicInputs}
+    (accepted : toPublicInputs env blockChainVd vds depositChainVd channelRegChainVd w = .ok out) :
+    ∃ prev : BlockChainPublicInputs,
+      resolvePrev env blockChainVd w = .ok prev ∧
+      out.ext.inner.blockNumber = prev.ext.inner.blockNumber + 1 ∧
+      out.ext.inner.blockNumber ≤ u63Max := by
+  obtain ⟨prev, upd, dep, reg, updateVd, facts⟩ := to_public_inputs_native_facts accepted
+  refine ⟨prev, facts.prev_resolved, ?_, ?_⟩
+  · rw [facts.output_shape]; rfl
+  · rw [facts.output_shape]; exact facts.block_number_in_range
+
+theorem to_public_inputs_folds_block_hash_chain {env : StepEnv}
+    {blockChainVd : VerifierCircuitData} {vds : List (Nat × VerifierCircuitData)}
+    {depositChainVd channelRegChainVd : VerifierCircuitData} {w : BlockStepWitness}
+    {out : BlockChainPublicInputs}
+    (accepted : toPublicInputs env blockChainVd vds depositChainVd channelRegChainVd w = .ok out) :
+    ∃ (prev : BlockChainPublicInputs) (upd : UpdateUserPublicInputs),
+      resolvePrev env blockChainVd w = .ok prev ∧
+      decodeUpdateUserPis w.updateUserProof.publicInputs = .ok upd ∧
+      upd.prevBlockHashChain = prev.ext.blockHashChain ∧
+      out.ext.blockHashChain = upd.newBlockHashChain ∧
+      upd.prevBpSigChain = prev.ext.bpSigChain ∧
+      out.ext.bpSigChain = upd.newBpSigChain := by
+  obtain ⟨prev, upd, dep, reg, updateVd, facts⟩ := to_public_inputs_native_facts accepted
+  refine ⟨prev, upd, facts.prev_resolved, facts.update_pis_decoded,
+    facts.update_prev_block_hash_chain, ?_, facts.update_prev_bp_sig_chain, ?_⟩ <;>
+    rw [facts.output_shape] <;> rfl
+
+theorem to_public_inputs_preserves_initial_state_and_key {env : StepEnv}
+    {blockChainVd : VerifierCircuitData} {vds : List (Nat × VerifierCircuitData)}
+    {depositChainVd channelRegChainVd : VerifierCircuitData} {w : BlockStepWitness}
+    {out : BlockChainPublicInputs}
+    (accepted : toPublicInputs env blockChainVd vds depositChainVd channelRegChainVd w = .ok out) :
+    ∃ prev : BlockChainPublicInputs,
+      resolvePrev env blockChainVd w = .ok prev ∧
+      out.initialExt = prev.initialExt ∧ out.vd = prev.vd := by
+  obtain ⟨prev, upd, dep, reg, updateVd, facts⟩ := to_public_inputs_native_facts accepted
+  exact ⟨prev, facts.prev_resolved, by rw [facts.output_shape]; rfl, by
+    rw [facts.output_shape]; rfl⟩
+
+theorem resolve_deposit_no_change_freezes {env : StepEnv} {vd : VerifierCircuitData}
+    {prevExt : ExtendedPublicState} {bn : Nat} {upd : UpdateUserPublicInputs}
+    {proof : Option Proof} {dep : DepositOutcome}
+    (same : prevExt.depositHashChain = upd.depositHashChain)
+    (resolved : resolveDeposit env vd prevExt bn upd proof = .ok dep) :
+    dep.depositHashChain = prevExt.depositHashChain ∧
+    dep.depositTreeRoot = prevExt.inner.depositTreeRoot ∧
+    dep.depositCount = prevExt.depositCount := by
+  simp only [resolveDeposit, same, if_pos] at resolved
+  cases resolved
+  exact ⟨same.symm, rfl, rfl⟩
+
+theorem resolve_deposit_change_needs_linked_proof {env : StepEnv} {vd : VerifierCircuitData}
+    {prevExt : ExtendedPublicState} {bn : Nat} {upd : UpdateUserPublicInputs}
+    {proof : Option Proof} {dep : DepositOutcome}
+    (changed : prevExt.depositHashChain ≠ upd.depositHashChain)
+    (resolved : resolveDeposit env vd prevExt bn upd proof = .ok dep) :
+    ∃ (p : Proof) (di : DepositChainPublicInputs),
+      proof = some p ∧
+      env.accepts vd p = true ∧
+      decodeDepositChainPis env vd.vdLen p.publicInputs = .ok di ∧
+      di.initialDepositHashChain = prevExt.depositHashChain ∧
+      di.initialDepositTreeRoot = prevExt.inner.depositTreeRoot ∧
+      di.initialDepositCount = prevExt.depositCount ∧
+      di.depositHashChain = upd.depositHashChain ∧
+      di.blockNumber = bn ∧
+      dep = { depositHashChain := di.depositHashChain, depositTreeRoot := di.depositTreeRoot,
+              depositCount := di.depositCount } := by
+  simp only [resolveDeposit, changed, if_neg, not_false_eq_true] at resolved
+  cases proof with
+  | none => exact absurd resolved (by simp)
+  | some p =>
+    simp only [bind_ok_iff, unit_bind_ok_iff, exists_unit, check_ok_iff, pure_ok_iff,
+      lift_deposit_ok_iff, Except.ok.injEq] at resolved
+    obtain ⟨hacc, resolved⟩ := resolved
+    obtain ⟨di, hdec, resolved⟩ := resolved
+    obtain ⟨h1, resolved⟩ := resolved
+    obtain ⟨h2, resolved⟩ := resolved
+    obtain ⟨h3, resolved⟩ := resolved
+    obtain ⟨h4, resolved⟩ := resolved
+    obtain ⟨h5, resolved⟩ := resolved
+    exact ⟨p, di, rfl, hacc, hdec, h1, h2, h3, h4, h5, resolved.symm⟩
+
+theorem resolve_channel_reg_absent_freezes {env : StepEnv} {vd : VerifierCircuitData}
+    {prevExt : ExtendedPublicState} {bn : Nat} {upd : UpdateUserPublicInputs}
+    {reg : ChannelRegOutcome}
+    (resolved : resolveChannelReg env vd prevExt bn upd none = .ok reg) :
+    reg.accountTreeRoot = upd.newAccountTreeRoot ∧
+    reg.channelRegHashChain = prevExt.channelRegHashChain := by
+  simp only [resolveChannelReg] at resolved
+  cases resolved
+  exact ⟨rfl, rfl⟩
+
+theorem resolve_channel_reg_present_excludes_user_update {env : StepEnv}
+    {vd : VerifierCircuitData} {prevExt : ExtendedPublicState} {bn : Nat}
+    {upd : UpdateUserPublicInputs} {p : Proof} {reg : ChannelRegOutcome}
+    (resolved : resolveChannelReg env vd prevExt bn upd (some p) = .ok reg) :
+    ∃ ci : ChannelRegChainPublicInputs,
+      env.accepts vd p = true ∧
+      decodeChannelRegChainPis env vd.vdLen p.publicInputs = .ok ci ∧
+      ci.initialChannelRegHashChain = prevExt.channelRegHashChain ∧
+      ci.initialChannelTreeRoot = prevExt.inner.accountTreeRoot ∧
+      ci.blockNumber = bn ∧
+      upd.newAccountTreeRoot = upd.prevAccountTreeRoot ∧
+      ci.channelRegHashChain ≠ prevExt.channelRegHashChain ∧
+      reg = { accountTreeRoot := ci.channelTreeRoot,
+              channelRegHashChain := ci.channelRegHashChain } := by
+  simp only [resolveChannelReg, bind_ok_iff, unit_bind_ok_iff, exists_unit, check_ok_iff,
+    pure_ok_iff, lift_channel_reg_ok_iff, Except.ok.injEq] at resolved
+  obtain ⟨hacc, resolved⟩ := resolved
+  obtain ⟨ci, hdec, resolved⟩ := resolved
+  obtain ⟨h1, resolved⟩ := resolved
+  obtain ⟨h2, resolved⟩ := resolved
+  obtain ⟨h3, resolved⟩ := resolved
+  obtain ⟨h4, resolved⟩ := resolved
+  obtain ⟨h5, resolved⟩ := resolved
+  exact ⟨ci, hacc, hdec, h1, h2, h3, h4, h5, resolved.symm⟩
+
+/-! ### Deposit / registration conditionality, and the unanchored first block -/
+
+theorem resolve_deposit_ignores_redundant_proof (env : StepEnv) (vd : VerifierCircuitData)
+    (prevExt : ExtendedPublicState) (bn : Nat) (upd : UpdateUserPublicInputs)
+    (proof : Option Proof) (same : prevExt.depositHashChain = upd.depositHashChain) :
+    resolveDeposit env vd prevExt bn upd proof =
+      .ok { depositHashChain := prevExt.depositHashChain,
+            depositTreeRoot := prevExt.inner.depositTreeRoot,
+            depositCount := prevExt.depositCount } := by
+  simp [resolveDeposit, same]
+
+theorem resolve_channel_reg_present_moves_chain {env : StepEnv} {vd : VerifierCircuitData}
+    {prevExt : ExtendedPublicState} {bn : Nat} {upd : UpdateUserPublicInputs} {p : Proof}
+    {reg : ChannelRegOutcome}
+    (resolved : resolveChannelReg env vd prevExt bn upd (some p) = .ok reg) :
+    reg.channelRegHashChain ≠ prevExt.channelRegHashChain := by
+  obtain ⟨ci, _, _, _, _, _, _, hne, hshape⟩ :=
+    resolve_channel_reg_present_excludes_user_update resolved
+  rw [hshape]; exact hne
+
+theorem channel_reg_proof_present_iff_chain_moves {env : StepEnv} {vd : VerifierCircuitData}
+    {prevExt : ExtendedPublicState} {bn : Nat} {upd : UpdateUserPublicInputs}
+    {regProof : Option Proof} {reg : ChannelRegOutcome}
+    (resolved : resolveChannelReg env vd prevExt bn upd regProof = .ok reg) :
+    reg.channelRegHashChain ≠ prevExt.channelRegHashChain ↔ regProof ≠ none := by
+  cases regProof with
+  | none =>
+    obtain ⟨_, hsame⟩ := resolve_channel_reg_absent_freezes resolved
+    simp [hsame]
+  | some p =>
+    have hne : (some p : Option Proof) ≠ none := by simp
+    exact ⟨fun _ => hne, fun _ => resolve_channel_reg_present_moves_chain resolved⟩
+
+/-- A first step (no previous chain proof) accepts an ARBITRARY `initial_public_state` and
+    publishes it as both the initial and the previous state. Nothing in this file pins it;
+    the anchoring lives in the chain wrapper and in the contract snapshot. -/
+theorem resolve_prev_first_block_accepts_any_initial_state (env : StepEnv)
+    (blockChainVd : VerifierCircuitData) (w : BlockStepWitness) (s : ExtendedPublicState)
+    (noPrev : w.prevBlockChainProof = none) (init : w.initialPublicState = some s) :
+    resolvePrev env blockChainVd w =
+      .ok { initialExt := s, ext := s, vd := blockChainVd.verifierOnly } := by
+  simp [resolvePrev, noPrev, init]
+
+theorem resolve_prev_first_block_needs_initial_state (env : StepEnv)
+    (blockChainVd : VerifierCircuitData) (w : BlockStepWitness)
+    (noPrev : w.prevBlockChainProof = none) (noInit : w.initialPublicState = none) :
+    resolvePrev env blockChainVd w = .error (.invalidInput
+      "initial_public_state must be provided when previous block proof is absent") := by
+  simp [resolvePrev, noPrev, noInit]
+
+theorem resolve_prev_rejects_unaccepted_proof (env : StepEnv)
+    (blockChainVd : VerifierCircuitData) (w : BlockStepWitness) (p : Proof)
+    (hasPrev : w.prevBlockChainProof = some p) (rejected : env.accepts blockChainVd p = false) :
+    resolvePrev env blockChainVd w =
+      .error (.invalidProof "previous block chain proof invalid") := by
+  simp [resolvePrev, hasPrev, rejected]
+
+/-- The emitted timestamp is whatever the update proof declared: `to_public_inputs` performs
+    NO comparison against the previous timestamp (no monotonicity, no bound). -/
+theorem to_public_inputs_timestamp_is_update_declared {env : StepEnv}
+    {blockChainVd : VerifierCircuitData} {vds : List (Nat × VerifierCircuitData)}
+    {depositChainVd channelRegChainVd : VerifierCircuitData} {w : BlockStepWitness}
+    {out : BlockChainPublicInputs}
+    (accepted : toPublicInputs env blockChainVd vds depositChainVd channelRegChainVd w = .ok out) :
+    ∃ upd : UpdateUserPublicInputs,
+      decodeUpdateUserPis w.updateUserProof.publicInputs = .ok upd ∧
+      out.ext.inner.timestamp = upd.blockTimestamp := by
+  obtain ⟨prev, upd, dep, reg, updateVd, facts⟩ := to_public_inputs_native_facts accepted
+  exact ⟨upd, facts.update_pis_decoded, by rw [facts.output_shape]; rfl⟩
+
+/-! ## `BlockStepTarget::set_witness` and `BlockStepCircuit::prove` (native side) -/
+
+def dummyLookup (key : Nat) : List (Nat × Proof) → Option Proof
+  | [] => none
+  | (k, v) :: rest =>
+      match dummyLookup key rest with
+      | some v' => some v'
+      | none => if k = key then some v else none
+
+/-- The one-hot flags `set_witness` writes: `value.num_users == num_users` for EVERY slot,
+    so a repeated `num_users` sets more than one flag. -/
+def slotFlags (numUsers : Nat) : List (Nat × VerifierCircuitData) → List Bool
+  | [] => []
+  | (n, _) :: rest => decide (numUsers = n) :: slotFlags numUsers rest
+
+/-- The witness-writing loop: for the selected slot the real update proof is parsed (a
+    parse failure is an error), for every other slot a dummy proof must exist. -/
+def slotWitness (dummies : List (Nat × Proof)) (w : BlockStepWitness) :
+    List (Nat × VerifierCircuitData) → Result Bool
+  | [] => .ok false
+  | (n, _) :: rest =>
+      if w.numUsers = n then
+        match decodeUpdateUserPis w.updateUserProof.publicInputs with
+        | .error _ =>
+            .error (.updateUserPublicInputs "invalid update-account public inputs")
+        | .ok _ => (slotWitness dummies w rest) >>= fun _ => .ok true
+      else
+        match dummyLookup n dummies with
+        | none => .error (.invalidInput "dummy update-account proof missing for num_users")
+        | some _ => slotWitness dummies w rest
+
+def setWitness (updateAccountVds : List (Nat × VerifierCircuitData))
+    (dummies : List (Nat × Proof)) (w : BlockStepWitness) : Result Unit := do
+  let _ ← check (w.prevBlockChainProof ≠ none ∨ w.initialPublicState ≠ none)
+    (.invalidInput "initial_public_state must be provided when previous block proof is absent")
+  let matched ← slotWitness dummies w updateAccountVds
+  let _ ← check (matched = true) (.missingUpdateUserVerifierData w.numUsers)
+  .ok ()
+
+theorem set_witness_first_block_needs_initial_state
+    (updateAccountVds : List (Nat × VerifierCircuitData)) (dummies : List (Nat × Proof))
+    (w : BlockStepWitness) (noPrev : w.prevBlockChainProof = none)
+    (noInit : w.initialPublicState = none) :
+    setWitness updateAccountVds dummies w = .error (.invalidInput
+      "initial_public_state must be provided when previous block proof is absent") := by
+  simp [setWitness, check, noPrev, noInit, Bind.bind, Except.bind]
+
+theorem slot_witness_true_implies_supported {dummies : List (Nat × Proof)}
+    {w : BlockStepWitness} :
+    ∀ vds : List (Nat × VerifierCircuitData), slotWitness dummies w vds = .ok true →
+      ∃ v : VerifierCircuitData, (w.numUsers, v) ∈ vds := by
+  intro vds
+  induction vds with
+  | nil => intro h; exact absurd h (by simp [slotWitness])
+  | cons head rest ih =>
+    obtain ⟨n, v⟩ := head
+    intro h
+    by_cases hn : w.numUsers = n
+    · exact ⟨v, by simp [hn]⟩
+    · simp only [slotWitness, hn, if_neg, not_false_eq_true] at h
+      split at h
+      · exact absurd h (by simp)
+      · obtain ⟨v', hv'⟩ := ih h
+        exact ⟨v', List.mem_cons_of_mem _ hv'⟩
+
+theorem set_witness_requires_supported_user_count
+    {updateAccountVds : List (Nat × VerifierCircuitData)} {dummies : List (Nat × Proof)}
+    {w : BlockStepWitness} (accepted : setWitness updateAccountVds dummies w = .ok ()) :
+    ∃ v : VerifierCircuitData, (w.numUsers, v) ∈ updateAccountVds := by
+  simp only [setWitness, bind_ok_iff, unit_bind_ok_iff, exists_unit, check_ok_iff,
+    pure_ok_iff] at accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨matched, hmatched, accepted⟩ := accepted
+  obtain ⟨hTrue, _⟩ := accepted
+  subst hTrue
+  exact slot_witness_true_implies_supported updateAccountVds hmatched
+
+/-- A repeated `num_users` is silently accepted by `prove`'s preflight, resolved by the LAST
+    entry natively (`HashMap::collect`) but sets TWO one-hot flags in the witness, which the
+    `assert_one(hot_sum)` gate rejects. The two statements below pin both halves. -/
+theorem duplicate_user_counts_native_uses_last (numUsers : Nat)
+    (v1 v2 : VerifierCircuitData) :
+    lookupLast numUsers [(numUsers, v1), (numUsers, v2)] = some v2 := by
+  simp [lookupLast]
+
+theorem duplicate_user_counts_set_two_one_hot_flags (numUsers : Nat)
+    (v1 v2 : VerifierCircuitData) :
+    ((slotFlags numUsers [(numUsers, v1), (numUsers, v2)]).filter id).length = 2 := by
+  simp [slotFlags]
+
+structure BlockStepCircuitShape where
+  blockChainCommon : Nat
+  depositChainCommon : Nat
+  channelRegChainCommon : Nat
+  supportedUserCounts : List Nat
+  deriving DecidableEq, Repr, Inhabited
+
+/-- `BlockStepCircuit::prove`'s preflight, in source order. -/
+def provePreflight (shape : BlockStepCircuitShape)
+    (blockChainVd depositChainVd channelRegChainVd : VerifierCircuitData)
+    (updateAccountVds : List (Nat × VerifierCircuitData)) : Result Unit := do
+  let _ ← check (blockChainVd.common = shape.blockChainCommon)
+    (.invalidInput "block chain verifier common data mismatch")
+  let _ ← check (depositChainVd.common = shape.depositChainCommon)
+    (.invalidInput "deposit chain verifier common data mismatch")
+  let _ ← check (channelRegChainVd.common = shape.channelRegChainCommon)
+    (.invalidInput "channel reg chain verifier common data mismatch")
+  let _ ← check (updateAccountVds.length = shape.supportedUserCounts.length)
+    (.invalidInput "update account verifier count mismatch")
+  let _ ← check (updateAccountVds.map Prod.fst = shape.supportedUserCounts)
+    (.invalidInput "update account verifier mismatch")
+  .ok ()
+
+theorem prove_preflight_pins_common_data_and_user_counts {shape : BlockStepCircuitShape}
+    {blockChainVd depositChainVd channelRegChainVd : VerifierCircuitData}
+    {updateAccountVds : List (Nat × VerifierCircuitData)}
+    (accepted : provePreflight shape blockChainVd depositChainVd channelRegChainVd
+      updateAccountVds = .ok ()) :
+    blockChainVd.common = shape.blockChainCommon ∧
+    depositChainVd.common = shape.depositChainCommon ∧
+    channelRegChainVd.common = shape.channelRegChainCommon ∧
+    updateAccountVds.map Prod.fst = shape.supportedUserCounts := by
+  simp only [provePreflight, bind_ok_iff, unit_bind_ok_iff, exists_unit, check_ok_iff,
+    pure_ok_iff] at accepted
+  obtain ⟨h1, accepted⟩ := accepted
+  obtain ⟨h2, accepted⟩ := accepted
+  obtain ⟨h3, accepted⟩ := accepted
+  obtain ⟨_, accepted⟩ := accepted
+  obtain ⟨h5, _⟩ := accepted
+  exact ⟨h1, h2, h3, h5⟩
+
+/-- The preflight does NOT reject a repeated `num_users`: only the element-wise list of
+    counts is compared, so `[n, n]` passes whenever the circuit was built from `[n, n]`. -/
+theorem prove_preflight_admits_duplicate_user_counts (n : Nat)
+    (blockChainVd depositChainVd channelRegChainVd v1 v2 : VerifierCircuitData) :
+    provePreflight { blockChainCommon := blockChainVd.common
+                     depositChainCommon := depositChainVd.common
+                     channelRegChainCommon := channelRegChainVd.common
+                     supportedUserCounts := [n, n] }
+      blockChainVd depositChainVd channelRegChainVd [(n, v1), (n, v2)] = .ok () := by
+  simp [provePreflight, check, Bind.bind, Except.bind]
+
+/-! ## Arbitrary satisfying witnesses: `BlockStepTarget::new`
+
+The gates below are the LOCAL semantics of the constraints the constructor emits, over a
+free assignment of the wires. They are deliberately separate from the native path: a
+`BlockStepGates` witness need not come from `to_public_inputs`.
+
+`from_pis`/`from_slice` are pure re-slicings of a proof's public-input targets (their only
+length check is a build-time assert, and they perform NO range checks), so the wires simply
+carry the parsed structures. Proof acceptance, the Merkle gadget and the Poseidon
+commitment remain opaque. -/
+
+theorem decide_ne_eq_false_iff {α : Type} [DecidableEq α] (a b : α) :
+    (decide (a ≠ b) = false) ↔ a = b := by
+  by_cases h : a = b <;> simp [h]
+
+theorem decide_ne_eq_true_iff {α : Type} [DecidableEq α] (a b : α) :
+    (decide (a ≠ b) = true) ↔ a ≠ b := by
+  by_cases h : a = b <;> simp [h]
+
+def selectExt (c : Bool) (t f : ExtendedPublicState) : ExtendedPublicState := if c then t else f
+def selectHash (c : Bool) (t f : Hash) : Hash := if c then t else f
+def selectBytes32 (c : Bool) (t f : Bytes32) : Bytes32 := if c then t else f
+def selectNat (c : Bool) (t f : Nat) : Nat := if c then t else f
+
+/-- `builder.add_const(prev_block_number, ONE)` is field addition, not integer addition. -/
+def fieldAdd1 (x : Nat) : Nat := (x + 1) % fieldOrder
+
+structure BlockStepWires where
+  hasPrevBlockProof : Bool
+  hasDepositProof : Bool
+  hasChannelRegProof : Bool
+  oneHot : List Bool
+  slotUpdateInputs : List UpdateUserPublicInputs
+  slotProofs : List Proof
+  initialPublicState : ExtendedPublicState
+  prevBlockChainProof : Proof
+  prevProofPis : BlockChainPublicInputs
+  depositProof : Proof
+  depositInputs : DepositChainPublicInputs
+  channelRegProof : Proof
+  channelRegInputs : ChannelRegChainPublicInputs
+  selectedUpdate : UpdateUserPublicInputs
+  merkleProof : MerkleProof
+  prevPublicStateRootOut : Hash
+  blockChainVd : VerifierKey
+  nextBlockNumber : Nat
+  newPis : BlockChainPublicInputs
+
+def selectedInitialState (w : BlockStepWires) : ExtendedPublicState :=
+  selectExt w.hasPrevBlockProof w.prevProofPis.initialExt w.initialPublicState
+
+def selectedPrevState (w : BlockStepWires) : ExtendedPublicState :=
+  selectExt w.hasPrevBlockProof w.prevProofPis.ext w.initialPublicState
+
+def selectedDepositHashChain (w : BlockStepWires) : Bytes32 :=
+  selectBytes32 w.hasDepositProof w.depositInputs.depositHashChain
+    (selectedPrevState w).depositHashChain
+
+def selectedDepositTreeRoot (w : BlockStepWires) : Hash :=
+  selectHash w.hasDepositProof w.depositInputs.depositTreeRoot
+    (selectedPrevState w).inner.depositTreeRoot
+
+def selectedDepositCount (w : BlockStepWires) : Nat :=
+  selectNat w.hasDepositProof w.depositInputs.depositCount (selectedPrevState w).depositCount
+
+def selectedAccountTreeRoot (w : BlockStepWires) : Hash :=
+  selectHash w.hasChannelRegProof w.channelRegInputs.channelTreeRoot
+    w.selectedUpdate.newAccountTreeRoot
+
+def selectedChannelRegHashChain (w : BlockStepWires) : Bytes32 :=
+  selectBytes32 w.hasChannelRegProof w.channelRegInputs.channelRegHashChain
+    (selectedPrevState w).channelRegHashChain
+
+/-- The registered public inputs of the step circuit. -/
+def registeredPis (w : BlockStepWires) : BlockChainPublicInputs :=
+  { initialExt := selectedInitialState w
+    ext := { inner := { blockNumber := w.nextBlockNumber
+                        timestamp := w.selectedUpdate.blockTimestamp
+                        accountTreeRoot := selectedAccountTreeRoot w
+                        depositTreeRoot := selectedDepositTreeRoot w
+                        prevPublicStateRoot := w.prevPublicStateRootOut }
+             blockHashChain := w.selectedUpdate.newBlockHashChain
+             depositHashChain := selectedDepositHashChain w
+             depositCount := selectedDepositCount w
+             channelRegHashChain := selectedChannelRegHashChain w
+             bpSigChain := w.selectedUpdate.newBpSigChain }
+    vd := w.blockChainVd }
+
+structure BlockStepGates (env : StepEnv) (commit : UpdateUserPublicInputs → Hash)
+    (blockChainVd depositChainVd channelRegChainVd : VerifierCircuitData)
+    (updateVds : List VerifierCircuitData) (w : BlockStepWires) : Prop where
+  slots_nonempty : 0 < w.oneHot.length
+  slot_inputs_aligned : w.slotUpdateInputs.length = w.oneHot.length
+  slot_proofs_aligned : w.slotProofs.length = w.oneHot.length
+  slot_vds_aligned : updateVds.length = w.oneHot.length
+  /-- `builder.assert_one(hot_sum)`. -/
+  one_hot_sum : (w.oneHot.filter id).length = 1
+  /-- `conditionally_verify_proof` on the previous chain proof. -/
+  prev_proof_verified : w.hasPrevBlockProof = true → env.accepts blockChainVd w.prevBlockChainProof = true
+  /-- `conditionally_connect_vd`: only when the previous proof is present. -/
+  prev_vd_connected : w.hasPrevBlockProof = true → w.prevProofPis.vd = w.blockChainVd
+  /-- `add_proof_target_and_conditionally_verify` on the selected update slot. -/
+  slot_proof_verified : ∀ (i : Nat) (vd : VerifierCircuitData) (p : Proof),
+    w.oneHot[i]? = some true → updateVds[i]? = some vd →
+    w.slotProofs[i]? = some p → env.accepts vd p = true
+  /-- `select_vec` of the per-slot Poseidon commitments, connected to the selected wires. -/
+  selected_commitment : ∀ (i : Nat) (u : UpdateUserPublicInputs),
+    w.oneHot[i]? = some true → w.slotUpdateInputs[i]? = some u →
+    commit w.selectedUpdate = commit u
+  prev_block_number_in_field : (selectedPrevState w).inner.blockNumber < fieldOrder
+  next_block_number_add : w.nextBlockNumber = fieldAdd1 (selectedPrevState w).inner.blockNumber
+  /-- `builder.range_check(next_block_number_value, 63)` -- on the NEXT value only. -/
+  next_block_number_range : w.nextBlockNumber < 2 ^ blockNumberBits
+  update_block_number : w.selectedUpdate.blockNumber = w.nextBlockNumber
+  update_prev_account_root :
+    w.selectedUpdate.prevAccountTreeRoot = (selectedPrevState w).inner.accountTreeRoot
+  update_prev_block_hash_chain :
+    w.selectedUpdate.prevBlockHashChain = (selectedPrevState w).blockHashChain
+  update_prev_bp_sig_chain : w.selectedUpdate.prevBpSigChain = (selectedPrevState w).bpSigChain
+  /-- `builder.connect(has_deposit_proof, deposit_hash_changed)`. -/
+  deposit_flag_iff : w.hasDepositProof =
+    decide ((selectedPrevState w).depositHashChain ≠ w.selectedUpdate.depositHashChain)
+  deposit_proof_verified : w.hasDepositProof = true → env.accepts depositChainVd w.depositProof = true
+  deposit_initial_chain : w.hasDepositProof = true →
+    w.depositInputs.initialDepositHashChain = (selectedPrevState w).depositHashChain
+  deposit_initial_tree_root : w.hasDepositProof = true →
+    w.depositInputs.initialDepositTreeRoot = (selectedPrevState w).inner.depositTreeRoot
+  deposit_initial_count : w.hasDepositProof = true →
+    w.depositInputs.initialDepositCount = (selectedPrevState w).depositCount
+  deposit_result_chain : w.hasDepositProof = true →
+    w.depositInputs.depositHashChain = w.selectedUpdate.depositHashChain
+  deposit_block_number : w.hasDepositProof = true →
+    w.depositInputs.blockNumber = w.nextBlockNumber
+  /-- R6: `conditional_assert_true(has_channel_reg_proof, account_root_eq)`. -/
+  reg_excludes_user_update : w.hasChannelRegProof = true →
+    w.selectedUpdate.prevAccountTreeRoot = w.selectedUpdate.newAccountTreeRoot
+  reg_proof_verified : w.hasChannelRegProof = true →
+    env.accepts channelRegChainVd w.channelRegProof = true
+  reg_initial_chain : w.hasChannelRegProof = true →
+    w.channelRegInputs.initialChannelRegHashChain = (selectedPrevState w).channelRegHashChain
+  reg_initial_tree_root : w.hasChannelRegProof = true →
+    w.channelRegInputs.initialChannelTreeRoot = (selectedPrevState w).inner.accountTreeRoot
+  reg_block_number : w.hasChannelRegProof = true →
+    w.channelRegInputs.blockNumber = w.nextBlockNumber
+  /-- `builder.connect(has_channel_reg_proof, channel_reg_changed)`. -/
+  reg_flag_iff : w.hasChannelRegProof =
+    decide ((selectedPrevState w).channelRegHashChain ≠ selectedChannelRegHashChain w)
+  /-- G6: the block-hash-committed registration chain equals the resulting one. -/
+  reg_chain_in_block_hash : w.selectedUpdate.channelRegHashChain = selectedChannelRegHashChain w
+  merkle_empty_leaf :
+    env.merkleRoot w.merkleProof emptyPublicStateLeaf (selectedPrevState w).inner.blockNumber
+      = (selectedPrevState w).inner.prevPublicStateRoot
+  merkle_new_root : w.prevPublicStateRootOut =
+    env.merkleRoot w.merkleProof (selectedPrevState w).inner (selectedPrevState w).inner.blockNumber
+  registered : w.newPis = registeredPis w
+
+/-! ### What the gates force -/
+
+theorem gates_block_number_increments {env : StepEnv} {commit : UpdateUserPublicInputs → Hash}
+    {bcVd dVd rVd : VerifierCircuitData} {uVds : List VerifierCircuitData}
+    {w : BlockStepWires} (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (prevInRange : (selectedPrevState w).inner.blockNumber < 2 ^ blockNumberBits) :
+    w.newPis.ext.inner.blockNumber = (selectedPrevState w).inner.blockNumber + 1 ∧
+    w.selectedUpdate.blockNumber = (selectedPrevState w).inner.blockNumber + 1 := by
+  have hmod : fieldAdd1 (selectedPrevState w).inner.blockNumber
+      = (selectedPrevState w).inner.blockNumber + 1 := by
+    unfold fieldAdd1
+    apply Nat.mod_eq_of_lt
+    have h1 : (2 : Nat) ^ blockNumberBits < fieldOrder := by decide
+    omega
+  have hnext : w.nextBlockNumber = (selectedPrevState w).inner.blockNumber + 1 := by
+    rw [gates.next_block_number_add, hmod]
+  refine ⟨?_, ?_⟩
+  · rw [gates.registered]; exact hnext
+  · rw [gates.update_block_number]; exact hnext
+
+/-- The 63-bit range check is applied to the NEXT block number only, so it does not by
+    itself exclude a field wrap-around of the previous one: the model records this rather
+    than assuming the previous state is well formed. -/
+theorem next_block_number_range_check_allows_field_wrap :
+    fieldAdd1 (fieldOrder - 1) = 0 ∧ (0 : Nat) < 2 ^ blockNumberBits := by
+  constructor
+  · unfold fieldAdd1
+    have h : fieldOrder - 1 + 1 = fieldOrder := by unfold fieldOrder; omega
+    rw [h, Nat.mod_self]
+  · decide
+
+theorem gates_fold_block_hash_chain {env : StepEnv} {commit : UpdateUserPublicInputs → Hash}
+    {bcVd dVd rVd : VerifierCircuitData} {uVds : List VerifierCircuitData}
+    {w : BlockStepWires} (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
+    w.selectedUpdate.prevBlockHashChain = (selectedPrevState w).blockHashChain ∧
+    w.newPis.ext.blockHashChain = w.selectedUpdate.newBlockHashChain := by
+  exact ⟨gates.update_prev_block_hash_chain, by rw [gates.registered]; rfl⟩
+
+theorem gates_thread_bp_sig_chain {env : StepEnv} {commit : UpdateUserPublicInputs → Hash}
+    {bcVd dVd rVd : VerifierCircuitData} {uVds : List VerifierCircuitData}
+    {w : BlockStepWires} (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
+    w.selectedUpdate.prevBpSigChain = (selectedPrevState w).bpSigChain ∧
+    w.newPis.ext.bpSigChain = w.selectedUpdate.newBpSigChain := by
+  exact ⟨gates.update_prev_bp_sig_chain, by rw [gates.registered]; rfl⟩
+
+theorem gates_no_deposit_proof_freezes_deposit_state {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (noDeposit : w.hasDepositProof = false) :
+    (selectedPrevState w).depositHashChain = w.selectedUpdate.depositHashChain ∧
+    w.newPis.ext.depositHashChain = (selectedPrevState w).depositHashChain ∧
+    w.newPis.ext.inner.depositTreeRoot = (selectedPrevState w).inner.depositTreeRoot ∧
+    w.newPis.ext.depositCount = (selectedPrevState w).depositCount := by
+  have hflag := gates.deposit_flag_iff
+  rw [noDeposit] at hflag
+  have hsame : (selectedPrevState w).depositHashChain = w.selectedUpdate.depositHashChain :=
+    (decide_ne_eq_false_iff _ _).mp hflag.symm
+  refine ⟨hsame, ?_, ?_, ?_⟩ <;>
+    rw [gates.registered] <;>
+    simp [registeredPis, selectedDepositHashChain, selectedDepositTreeRoot,
+      selectedDepositCount, selectBytes32, selectHash, selectNat, noDeposit]
+
+theorem gates_deposit_proof_links_chain {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (hasDeposit : w.hasDepositProof = true) :
+    env.accepts dVd w.depositProof = true ∧
+    w.depositInputs.initialDepositHashChain = (selectedPrevState w).depositHashChain ∧
+    w.depositInputs.initialDepositTreeRoot = (selectedPrevState w).inner.depositTreeRoot ∧
+    w.depositInputs.initialDepositCount = (selectedPrevState w).depositCount ∧
+    w.depositInputs.depositHashChain = w.selectedUpdate.depositHashChain ∧
+    w.depositInputs.blockNumber = w.nextBlockNumber ∧
+    w.newPis.ext.depositHashChain = w.depositInputs.depositHashChain ∧
+    w.newPis.ext.inner.depositTreeRoot = w.depositInputs.depositTreeRoot ∧
+    w.newPis.ext.depositCount = w.depositInputs.depositCount := by
+  refine ⟨gates.deposit_proof_verified hasDeposit, gates.deposit_initial_chain hasDeposit,
+    gates.deposit_initial_tree_root hasDeposit, gates.deposit_initial_count hasDeposit,
+    gates.deposit_result_chain hasDeposit, gates.deposit_block_number hasDeposit, ?_, ?_, ?_⟩ <;>
+    rw [gates.registered] <;>
+    simp [registeredPis, selectedDepositHashChain, selectedDepositTreeRoot,
+      selectedDepositCount, selectBytes32, selectHash, selectNat, hasDeposit]
+
+theorem gates_registration_excludes_user_update {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (hasReg : w.hasChannelRegProof = true) :
+    env.accepts rVd w.channelRegProof = true ∧
+    w.selectedUpdate.prevAccountTreeRoot = w.selectedUpdate.newAccountTreeRoot ∧
+    w.channelRegInputs.initialChannelTreeRoot = (selectedPrevState w).inner.accountTreeRoot ∧
+    w.channelRegInputs.initialChannelRegHashChain = (selectedPrevState w).channelRegHashChain ∧
+    w.channelRegInputs.blockNumber = w.nextBlockNumber ∧
+    w.newPis.ext.inner.accountTreeRoot = w.channelRegInputs.channelTreeRoot ∧
+    w.newPis.ext.channelRegHashChain = w.channelRegInputs.channelRegHashChain := by
+  refine ⟨gates.reg_proof_verified hasReg, gates.reg_excludes_user_update hasReg,
+    gates.reg_initial_tree_root hasReg, gates.reg_initial_chain hasReg,
+    gates.reg_block_number hasReg, ?_, ?_⟩ <;>
+    rw [gates.registered] <;>
+    simp [registeredPis, selectedAccountTreeRoot, selectedChannelRegHashChain, selectHash,
+      selectBytes32, hasReg]
+
+theorem gates_no_registration_uses_update_root {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (noReg : w.hasChannelRegProof = false) :
+    w.newPis.ext.inner.accountTreeRoot = w.selectedUpdate.newAccountTreeRoot ∧
+    w.newPis.ext.channelRegHashChain = (selectedPrevState w).channelRegHashChain := by
+  constructor <;> rw [gates.registered] <;>
+    simp [registeredPis, selectedAccountTreeRoot, selectedChannelRegHashChain, selectHash,
+      selectBytes32, noReg]
+
+/-- G6 as the gates state it: the registration chain the block hash commits to (through the
+    update proof) is exactly the one the step publishes. -/
+theorem gates_registration_anchored_in_block_hash {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
+    w.newPis.ext.channelRegHashChain = w.selectedUpdate.channelRegHashChain := by
+  rw [gates.registered, gates.reg_chain_in_block_hash]
+  rfl
+
+theorem gates_registration_flag_iff_chain_moves {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
+    (w.hasChannelRegProof = true) ↔
+      w.newPis.ext.channelRegHashChain ≠ (selectedPrevState w).channelRegHashChain := by
+  have hreg := gates.reg_flag_iff
+  have hpis : w.newPis.ext.channelRegHashChain = selectedChannelRegHashChain w := by
+    rw [gates.registered]; rfl
+  rw [hpis]
+  constructor
+  · intro h
+    rw [h] at hreg
+    exact fun hEq => ((decide_ne_eq_true_iff _ _).mp hreg.symm) hEq.symm
+  · intro h
+    rw [hreg]
+    exact (decide_ne_eq_true_iff _ _).mpr (fun hEq => h hEq.symm)
+
+/-- On a first step the emitted initial state is the free `initial_public_state` witness and
+    the emitted verifier key is a free witness too: replacing both by anything at all keeps
+    every gate satisfied. -/
+theorem gates_first_step_verifier_key_is_free {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires}
+    (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (noPrev : w.hasPrevBlockProof = false) (k : VerifierKey) :
+    BlockStepGates env commit bcVd dVd rVd uVds
+      { w with blockChainVd := k, newPis := registeredPis { w with blockChainVd := k } } := by
+  have hsel : ∀ v : VerifierKey,
+      selectedPrevState { w with blockChainVd := v,
+        newPis := registeredPis { w with blockChainVd := v } } = selectedPrevState w := by
+    intro v; simp [selectedPrevState, selectExt, noPrev]
+  exact
+    { slots_nonempty := gates.slots_nonempty
+      slot_inputs_aligned := gates.slot_inputs_aligned
+      slot_proofs_aligned := gates.slot_proofs_aligned
+      slot_vds_aligned := gates.slot_vds_aligned
+      one_hot_sum := gates.one_hot_sum
+      prev_proof_verified := by intro h; simp [noPrev] at h
+      prev_vd_connected := by intro h; simp [noPrev] at h
+      slot_proof_verified := gates.slot_proof_verified
+      selected_commitment := gates.selected_commitment
+      prev_block_number_in_field := by rw [hsel]; exact gates.prev_block_number_in_field
+      next_block_number_add := by rw [hsel]; exact gates.next_block_number_add
+      next_block_number_range := gates.next_block_number_range
+      update_block_number := gates.update_block_number
+      update_prev_account_root := by rw [hsel]; exact gates.update_prev_account_root
+      update_prev_block_hash_chain := by rw [hsel]; exact gates.update_prev_block_hash_chain
+      update_prev_bp_sig_chain := by rw [hsel]; exact gates.update_prev_bp_sig_chain
+      deposit_flag_iff := by rw [hsel]; exact gates.deposit_flag_iff
+      deposit_proof_verified := gates.deposit_proof_verified
+      deposit_initial_chain := by rw [hsel]; exact gates.deposit_initial_chain
+      deposit_initial_tree_root := by rw [hsel]; exact gates.deposit_initial_tree_root
+      deposit_initial_count := by rw [hsel]; exact gates.deposit_initial_count
+      deposit_result_chain := gates.deposit_result_chain
+      deposit_block_number := gates.deposit_block_number
+      reg_excludes_user_update := gates.reg_excludes_user_update
+      reg_proof_verified := gates.reg_proof_verified
+      reg_initial_chain := by rw [hsel]; exact gates.reg_initial_chain
+      reg_initial_tree_root := by rw [hsel]; exact gates.reg_initial_tree_root
+      reg_block_number := gates.reg_block_number
+      reg_flag_iff := by
+        simp only [selectedChannelRegHashChain, hsel]
+        exact gates.reg_flag_iff
+      reg_chain_in_block_hash := by
+        simp only [selectedChannelRegHashChain, hsel]
+        exact gates.reg_chain_in_block_hash
+      merkle_empty_leaf := by rw [hsel]; exact gates.merkle_empty_leaf
+      merkle_new_root := by rw [hsel]; exact gates.merkle_new_root
+      registered := rfl }
+
+/-- The one-hot selection identifies the selected update inputs only up to a Poseidon
+    commitment collision; the collision-freeness is a premise, never a theorem. -/
+theorem gates_selected_update_is_slot_update {env : StepEnv}
+    {commit : UpdateUserPublicInputs → Hash} {bcVd dVd rVd : VerifierCircuitData}
+    {uVds : List VerifierCircuitData} {w : BlockStepWires} {i : Nat}
+    {u : UpdateUserPublicInputs} (gates : BlockStepGates env commit bcVd dVd rVd uVds w)
+    (flag : w.oneHot[i]? = some true) (slot : w.slotUpdateInputs[i]? = some u)
+    (noCollision : commit w.selectedUpdate = commit u → w.selectedUpdate = u) :
+    w.selectedUpdate = u :=
+  noCollision (gates.selected_commitment i u flag slot)
+
+/-- The timestamp is passed through from the selected update proof; no gate compares it
+    with the previous block's. -/
+theorem gates_timestamp_passthrough {env : StepEnv} {commit : UpdateUserPublicInputs → Hash}
+    {bcVd dVd rVd : VerifierCircuitData} {uVds : List VerifierCircuitData}
+    {w : BlockStepWires} (gates : BlockStepGates env commit bcVd dVd rVd uVds w) :
+    w.newPis.ext.inner.timestamp = w.selectedUpdate.blockTimestamp := by
+  rw [gates.registered]
+

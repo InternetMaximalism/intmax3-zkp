@@ -1,0 +1,1003 @@
+import Zkp.Implementation.TrustBoundary
+
+/-!
+# System-level fund safety of the composed implementation models
+
+This module is a COMPOSITION of the handwritten models in this directory under
+the named premises of `Zkp.Implementation.TrustBoundary`. It is NOT an
+end-to-end cryptographic proof, NOT a refinement of the Rust/plonky2 prover, the
+Solidity sources or the EVM, and NOT a claim that a deployment is safe. Every
+model it composes is itself a manual reading of source text.
+
+The combined state pairs the Rollup value ledger (`RollupValue.State`), a
+per-manager Settlement Manager value state (`ManagerValue.State`) and the
+materializer's storage (`CloseFunding.State`). `Step` ranges over the modeled
+money and authorization entrypoints, reusing `FundFlow.AccountingStep` for the
+four transitions it already covers (materializer/Rollup channel-exit credit,
+Manager pull, `submitClaim`, `claimCredit` payout — `FundFlow.credit_call_projection`
+already identifies the materializer's expanded call with the Rollup dispatch) and
+reusing `FundFlow.NativePullCallbackFrame` as the native call-frame condition.
+No accounting is re-derived here that `RollupValue`, `ManagerValue`,
+`CloseFunding` or `FundFlow` already proves.
+
+Each `Step` carries the per-token inflow and outflow it is responsible for, so
+the conservation theorem is an exact identity rather than a conditional slogan:
+value only enters through a Rollup deposit and only leaves through a proof-backed
+withdrawal set, a direct pending pull, or another Manager's materialization
+draining the POOLED escrow. That last case is the reason a single-manager
+`accounted` total is not conserved in general, and it is visible in the theorem
+rather than hidden by a hypothesis.
+
+Explicitly NOT proved here: that an accepted proof means anything (premises a,
+b1, b2), that a finalized close vector is backed by the channel's own deposits
+(premise c), that a passing aggregate check means signatures exist (premise d),
+that hashes bind (premises e1, e2), that the finality getters observe the
+canonical L1 head (premises f1, f2), that storage survives unmodeled entrypoints
+(premises g1, g2), or that any deployed artifact behaves like these definitions
+(premise h). Liveness, censorship, gas, ordering and ERC20 token honesty are not
+represented at all.
+-/
+
+namespace Zkp.Implementation.SystemSafety
+
+/-! ## Generic success peeling -/
+
+/-- Success of a bound computation exposes the intermediate success. -/
+theorem bind_success {ε α β : Type} {x : Except ε α} {f : α → Except ε β} {y : β}
+    (h : (x >>= f) = .ok y) : ∃ z, x = .ok z ∧ f z = .ok y := by
+  cases x with
+  | error err => exact absurd h (by simp [Bind.bind, Except.bind])
+  | ok z => exact ⟨z, rfl, h⟩
+
+theorem rollup_require_ok {c : Bool} {err : RollupValue.Error} {u : Unit}
+    (h : RollupValue.require c err = .ok u) : c = true := by
+  cases c
+  · exact absurd h (by simp [RollupValue.require])
+  · rfl
+
+/-! ## Combined state -/
+
+/-- Rollup value ledger, one Manager value state per Manager address, and the
+materializer storage. Non-monetary Rollup chain state travels inside
+`RollupValue.State.chain`; nothing here duplicates it. -/
+structure State where
+  rollup : RollupValue.State
+  managers : Nat → ManagerValue.State
+  funding : CloseFunding.State
+
+/-- The Manager projection used by the `TrustBoundary` durability premises. -/
+def managerOf (cfg : ManagerValue.Config) (s : State) : ManagerValue.State := s.managers cfg.manager
+
+/-- The materializer projection used by the `TrustBoundary` durability premises. -/
+def fundingOf (s : State) : CloseFunding.State := s.funding
+
+/-- The `FundFlow.Accounts` view of one Manager inside the combined state. -/
+def accountsOf (cfg : ManagerValue.Config) (s : State) : FundFlow.Accounts :=
+  ⟨s.rollup, s.managers cfg.manager⟩
+
+/-- `FundFlow.accounted` for one Manager: pooled escrow, that Manager's Rollup
+pending credit, and what it has already received. A counter total, not an
+observed ERC20 balance. -/
+def measure (cfg : ManagerValue.Config) (s : State) (token : Nat) : Nat :=
+  FundFlow.accounted (accountsOf cfg s) cfg.manager token
+
+/-- Per-token quantity attached to a step. -/
+abbrev Flow := Nat → Nat
+
+def zeroFlow : Flow := fun _ => 0
+
+def addFlow (a b : Flow) : Flow := fun t => a t + b t
+
+/-- Thin selector over the two source proof-backed withdrawal endpoints. It adds
+no semantics: see `withdrawal_set_is_source_endpoints`. -/
+def withdrawalSet (native : Bool) (e : RollupValue.Environment) (s : RollupValue.State)
+    (ws : List RollupValue.Withdrawal) (prover : Nat) (proof : RollupValue.Bytes) :
+    RollupValue.Result (RollupValue.State × List RollupValue.Event) :=
+  if native then RollupValue.withdrawNative e s ws prover proof
+  else RollupValue.withdrawERC20 e s ws prover proof
+
+theorem withdrawal_set_is_source_endpoints (e : RollupValue.Environment) (s : RollupValue.State)
+    (ws : List RollupValue.Withdrawal) (prover : Nat) (proof : RollupValue.Bytes) :
+    withdrawalSet true e s ws prover proof = RollupValue.withdrawNative e s ws prover proof ∧
+    withdrawalSet false e s ws prover proof = RollupValue.withdrawERC20 e s ws prover proof :=
+  ⟨rfl, rfl⟩
+
+/-- ERC20 analogue of `FundFlow.NativePullCallbackFrame`: an explicit call-frame
+obligation on the token callback, NOT a claim that ERC20 contracts are honest. -/
+def TokenCallFrame (e : RollupValue.Environment) : Prop :=
+  ∀ s call out, e.tokenCall s call = .ok out → out.escrow = s.escrow ∧ out.pending = s.pending
+
+/-! ## Reusable shapes of the Rollup entrypoints -/
+
+theorem guarded_ok_shape {s after : RollupValue.State}
+    {body : RollupValue.State → RollupValue.Result (RollupValue.State × List RollupValue.Event)}
+    {events : List RollupValue.Event}
+    (h : RollupValue.guarded s body = .ok (after, events)) :
+    ∃ mid, body { s with status := 2 } = .ok (mid, events) ∧
+      after.escrow = mid.escrow ∧ after.pending = mid.pending := by
+  simp only [RollupValue.guarded] at h
+  obtain ⟨locked, hlock, h⟩ := bind_success h
+  have lockedEq : locked = { s with status := 2 } := by
+    simp only [RollupValue.nonReentrantBefore] at hlock
+    split at hlock
+    · exact absurd hlock (by simp)
+    · exact (Except.ok.inj hlock).symm
+  subst lockedEq
+  obtain ⟨pair, hbody, h⟩ := bind_success h
+  obtain ⟨mid, logs⟩ := pair
+  have hpair : (RollupValue.nonReentrantAfter mid, logs) = (after, events) := Except.ok.inj h
+  obtain ⟨rfl, rfl⟩ := Prod.mk.inj hpair
+  exact ⟨mid, hbody, rfl, rfl⟩
+
+theorem release_then_guarded {e : RollupValue.Environment} {s after : RollupValue.State}
+    {body : RollupValue.State → RollupValue.Result (RollupValue.State × List RollupValue.Event)}
+    {events : List RollupValue.Event}
+    (h : (do RollupValue.releaseRuntime e; RollupValue.guarded s body) = .ok (after, events)) :
+    ∃ mid, body { s with status := 2 } = .ok (mid, events) ∧
+      after.escrow = mid.escrow ∧ after.pending = mid.pending := by
+  obtain ⟨_, _, h⟩ := bind_success h
+  exact guarded_ok_shape h
+
+theorem finish_deposit_frames_ledger {e : RollupValue.Environment} {s after : RollupValue.State}
+    {d : RollupValue.DepositRecord} {events : List RollupValue.Event}
+    (h : RollupValue.finishDeposit e s d = .ok (after, events)) :
+    after.escrow = s.escrow ∧ after.pending = s.pending := by
+  simp only [RollupValue.finishDeposit] at h
+  obtain ⟨_, _, h⟩ := bind_success h
+  have hpair := Except.ok.inj h
+  obtain ⟨rfl, rfl⟩ := Prod.mk.inj hpair
+  exact ⟨rfl, rfl⟩
+
+/-- Exact ledger effect of a successful deposit on both source branches. The
+ERC20 branch is conditional on the explicit token call-frame obligation, which is
+not a claim about real ERC20 contracts. -/
+theorem deposit_accounts {e : RollupValue.Environment} {s after : RollupValue.State}
+    {recipient index amount aux : Nat} {events : List RollupValue.Event}
+    (frame : TokenCallFrame e)
+    (h : RollupValue.deposit e s recipient index amount aux = .ok (after, events)) :
+    after.escrow (RollupValue.assetOfToken index) =
+        s.escrow (RollupValue.assetOfToken index) + amount ∧
+      (∀ a, a ≠ RollupValue.assetOfToken index → after.escrow a = s.escrow a) ∧
+      after.pending = s.pending := by
+  simp only [RollupValue.deposit] at h
+  obtain ⟨mid, hbody, hescrow, hpending⟩ := release_then_guarded h
+  simp only [RollupValue.depositBody] at hbody
+  have midEffect : mid.escrow (RollupValue.assetOfToken index) =
+      s.escrow (RollupValue.assetOfToken index) + amount ∧
+      (∀ a, a ≠ RollupValue.assetOfToken index → mid.escrow a = s.escrow a) ∧
+      mid.pending = s.pending := by
+    split at hbody
+    · rename_i zero
+      subst zero
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨pre, hpre, hfin⟩ := bind_success hbody
+      have preEq : RollupValue.depositEscrowState { s with status := 2 } .native amount = pre :=
+        Except.ok.inj hpre
+      subst preEq
+      obtain ⟨fescrow, fpending⟩ := finish_deposit_frames_ledger hfin
+      refine ⟨?_, ?_, by rw [fpending]⟩
+      · rw [fescrow]
+        simp [RollupValue.depositEscrowState, RollupValue.put, RollupValue.assetOfToken]
+      · intro a different
+        simp only [RollupValue.assetOfToken, if_pos rfl] at different
+        rw [fescrow]
+        simp [RollupValue.depositEscrowState, RollupValue.put, different]
+    · rename_i nonzero
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨callback, hcall, hbody⟩ := bind_success hbody
+      obtain ⟨frameEscrow, framePending⟩ := frame _ _ _ hcall
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨_, _, hbody⟩ := bind_success hbody
+      obtain ⟨pre, hpre, hfin⟩ := bind_success hbody
+      have preEq : RollupValue.depositEscrowState callback (.erc20 index) amount = pre :=
+        Except.ok.inj hpre
+      subst preEq
+      obtain ⟨fescrow, fpending⟩ := finish_deposit_frames_ledger hfin
+      have asset : RollupValue.assetOfToken index = RollupValue.Asset.erc20 index := by
+        simp [RollupValue.assetOfToken, nonzero]
+      refine ⟨?_, ?_, ?_⟩
+      · rw [fescrow]
+        simp [RollupValue.depositEscrowState, RollupValue.put, asset, frameEscrow]
+      · intro a different
+        rw [asset] at different
+        rw [fescrow]
+        simp [RollupValue.depositEscrowState, RollupValue.put, different, frameEscrow]
+      · rw [fpending]
+        simp [RollupValue.depositEscrowState, framePending]
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hescrow, midEffect.1]
+  · intro a different
+    rw [hescrow]
+    exact midEffect.2.1 a different
+  · rw [hpending, midEffect.2.2]
+
+/-- Exact per-asset accounting of a proof-backed withdrawal set, reusing the
+Rollup loop theorem. The verifier stage is peeled but its soundness is NOT used;
+only the ledger writes matter here. -/
+theorem withdrawal_set_accounts {e : RollupValue.Environment} {native : Bool}
+    {s after : RollupValue.State} {ws : List RollupValue.Withdrawal} {prover : Nat}
+    {proof : RollupValue.Bytes} {events : List RollupValue.Event}
+    (h : withdrawalSet native e s ws prover proof = .ok (after, events))
+    (asset : RollupValue.Asset) (recipient : Nat) :
+    after.escrow asset + RollupValue.setAmount native asset ws = s.escrow asset ∧
+    after.pending asset recipient = s.pending asset recipient +
+      RollupValue.setCredit native asset recipient ws := by
+  have guardedCall : RollupValue.guarded s (fun locked => do
+      let block ← RollupValue.verifyWithdrawalSet e locked ws prover proof
+      RollupValue.withdrawLeaves e native block locked ws) = .ok (after, events) := by
+    cases native <;> simpa [withdrawalSet, RollupValue.withdrawNative,
+      RollupValue.withdrawERC20] using h
+  obtain ⟨mid, hbody, hescrow, hpending⟩ := guarded_ok_shape guardedCall
+  obtain ⟨block, _, hloop⟩ := bind_success hbody
+  have accounting := RollupValue.withdrawal_loop_conserves_each_token e native block
+    { s with status := 2 } mid ws events asset recipient hloop
+  rw [hescrow, hpending]
+  exact accounting
+
+/-- Exact ledger effect of the direct ERC20 pending pull, under the token
+call-frame obligation. -/
+theorem token_pull_debits_actual_rollup_credit {e : RollupValue.Environment}
+    {s after : RollupValue.State} {index amount : Nat} {events : List RollupValue.Event}
+    (frame : TokenCallFrame e)
+    (h : RollupValue.withdrawToken e s index amount = .ok (after, events)) :
+    after.escrow = s.escrow ∧
+      after.pending = (RollupValue.pullState s (.erc20 index) e.caller amount).pending := by
+  simp only [RollupValue.withdrawToken] at h
+  obtain ⟨mid, hbody, hescrow, hpending⟩ := release_then_guarded h
+  simp only [RollupValue.withdrawTokenBody] at hbody
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  obtain ⟨callback, hcall, hbody⟩ := bind_success hbody
+  obtain ⟨frameEscrow, framePending⟩ := frame _ _ _ hcall
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  obtain ⟨_, _, hbody⟩ := bind_success hbody
+  have midEq : (callback, [RollupValue.Event.tokenWithdrawalClaimed e.caller index amount]) =
+      (mid, events) := Except.ok.inj hbody
+  obtain ⟨rfl, _⟩ := Prod.mk.inj midEq
+  refine ⟨?_, ?_⟩
+  · rw [hescrow, frameEscrow]
+    rfl
+  · rw [hpending, framePending]
+    rfl
+
+/-! ## Reusable shapes of the materializer and Manager entrypoints -/
+
+theorem funding_credit_success_is_exact {e : CloseFunding.Environment}
+    {l after : CloseFunding.Ledger} {manager : Nat} {c : CloseFunding.Credit}
+    (h : CloseFunding.creditChannelExit e l manager c = .ok after) :
+    after = CloseFunding.creditState l manager c := by
+  simp only [CloseFunding.creditChannelExit] at h
+  obtain ⟨_, _, h⟩ := bind_success h
+  obtain ⟨_, _, h⟩ := bind_success h
+  obtain ⟨_, _, h⟩ := bind_success h
+  obtain ⟨_, _, h⟩ := bind_success h
+  exact (Except.ok.inj h).symm
+
+/-- Another Manager's materialization cannot move this Manager's pending credit;
+only the pooled escrow is shared. -/
+theorem funding_vector_frames_other_manager {e : CloseFunding.Environment}
+    {before after : CloseFunding.Ledger} {manager other : Nat} {cs : List CloseFunding.Credit}
+    (different : other ≠ manager)
+    (h : CloseFunding.creditVector e manager before cs = .ok after) (token : Nat) :
+    after.pending token other = before.pending token other := by
+  induction cs generalizing before with
+  | nil =>
+    simp only [CloseFunding.creditVector] at h
+    rw [← Except.ok.inj h]
+  | cons c cs ih =>
+    simp only [CloseFunding.creditVector] at h
+    obtain ⟨middle, hstep, h⟩ := bind_success h
+    have middleEq : middle.pending token other = before.pending token other := by
+      split at hstep
+      · rw [← Except.ok.inj hstep]
+      · rw [funding_credit_success_is_exact hstep]
+        by_cases sameToken : token = c.token
+        · subst sameToken
+          exact CloseFunding.credit_other_manager_framed before manager other c different
+        · exact congrFun (CloseFunding.credit_other_token_framed before manager c token
+            sameToken).2 other
+    rw [ih h, middleEq]
+
+theorem materialize_call_shape {e : CloseFunding.Environment} {before after : CloseFunding.World}
+    {manager : Nat} {proof : CloseFunding.Bytes} {events : List CloseFunding.Event}
+    (h : CloseFunding.materializeSignedHead e before manager proof = .ok (after, events)) :
+    ∃ p, CloseFunding.prepareSignedHead e before.storage manager proof = .ok p ∧
+      after.storage = CloseFunding.latchState before.storage p ∧
+      CloseFunding.creditVector e manager before.ledger p.credits = .ok after.ledger := by
+  simp only [CloseFunding.materializeSignedHead] at h
+  obtain ⟨p, hplan, h⟩ := bind_success h
+  obtain ⟨ledger, hcredit, h⟩ := bind_success h
+  have hpair := Except.ok.inj h
+  obtain ⟨rfl, _⟩ := Prod.mk.inj hpair
+  exact ⟨p, hplan, rfl, hcredit⟩
+
+theorem request_close_frames_value {cfg : ManagerValue.Config} {ext : ManagerValue.External}
+    {now : Nat} {s out : ManagerValue.State}
+    (call : ManagerValue.requestCloseCore cfg ext now s = .ok out) :
+    out.received = s.received ∧ out.paid = s.paid ∧ out.cap = s.cap ∧ out.used = s.used ∧
+      out.payouts = s.payouts := by
+  simp only [ManagerValue.requestCloseCore] at call
+  split at call
+  · exact absurd call (by simp)
+  · split at call
+    · exact absurd call (by simp)
+    · split at call
+      · exact absurd call (by simp)
+      · split at call
+        · exact absurd call (by simp)
+        · split at call
+          · exact absurd call (by simp)
+          · rw [← Except.ok.inj call]
+            exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-! ## The modeled step relation -/
+
+/-- One transition of a modeled money or authorization entrypoint, carrying the
+per-token value it lets in and the per-token value it lets out. Constructors that
+carry `zeroFlow` on both sides are exactly the value-neutral ones. -/
+inductive Step (cfg : ManagerValue.Config) : State → State → Flow → Flow → Prop where
+  /-- The four transitions `FundFlow.AccountingStep` already models: the Rollup
+  channel-exit credit (the materializer's expanded call, by
+  `FundFlow.credit_call_projection`), the Manager pull, `submitClaim` and the
+  `claimCredit` payout. -/
+  | accounting (s : State) (out : FundFlow.Accounts)
+      (step : FundFlow.AccountingStep cfg (accountsOf cfg s) out) :
+      Step cfg s { s with rollup := out.rollup,
+                          managers := ManagerValue.put s.managers cfg.manager out.manager }
+        zeroFlow zeroFlow
+  /-- `IntmaxRollup.deposit`: the only modeled way value enters. -/
+  | deposit (e : RollupValue.Environment) (s : State) (out : RollupValue.State)
+      (recipient index amount aux : Nat) (events : List RollupValue.Event)
+      (frame : TokenCallFrame e)
+      (call : RollupValue.deposit e s.rollup recipient index amount aux = .ok (out, events)) :
+      Step cfg s { s with rollup := out } (fun t => if t = index then amount else 0) zeroFlow
+  /-- `withdrawNative` / `withdrawERC20`: escrow leaves, some of it as this
+  Manager's pending credit. -/
+  | withdrawalSet (e : RollupValue.Environment) (native : Bool) (s : State)
+      (out : RollupValue.State) (ws : List RollupValue.Withdrawal) (prover : Nat)
+      (proof : RollupValue.Bytes) (events : List RollupValue.Event)
+      (call : withdrawalSet native e s.rollup ws prover proof = .ok (out, events)) :
+      Step cfg s { s with rollup := out }
+        (fun t => RollupValue.setCredit native (RollupValue.assetOfToken t) cfg.manager ws)
+        (fun t => RollupValue.setAmount native (RollupValue.assetOfToken t) ws)
+  /-- Direct native pending pull, under `FundFlow.NativePullCallbackFrame`. -/
+  | userWithdrawNative (e : RollupValue.Environment) (s : State) (out : RollupValue.State)
+      (amount : Nat) (events : List RollupValue.Event)
+      (frame : FundFlow.NativePullCallbackFrame e)
+      (call : RollupValue.withdraw e s.rollup amount = .ok (out, events)) :
+      Step cfg s { s with rollup := out } zeroFlow
+        (fun t => if RollupValue.assetOfToken t = RollupValue.Asset.native ∧ e.caller = cfg.manager
+          then amount else 0)
+  /-- Direct ERC20 pending pull, under `TokenCallFrame`. -/
+  | userWithdrawToken (e : RollupValue.Environment) (s : State) (out : RollupValue.State)
+      (index amount : Nat) (events : List RollupValue.Event) (frame : TokenCallFrame e)
+      (call : RollupValue.withdrawToken e s.rollup index amount = .ok (out, events)) :
+      Step cfg s { s with rollup := out } zeroFlow
+        (fun t => if RollupValue.assetOfToken t = RollupValue.Asset.erc20 index ∧
+          e.caller = cfg.manager then amount else 0)
+  /-- Close finalization on chain: the materializer latches the channel and
+  credits the whole close vector out of pooled escrow. When the crediting Manager
+  is another channel's, this Manager's total strictly drops by the credited
+  amount — pooled escrow is shared, and that is what the outflow records. -/
+  | materialize (fe : CloseFunding.Environment) (s : State) (fundingAfter : CloseFunding.State)
+      (out : RollupValue.State) (manager : Nat) (proof : CloseFunding.Bytes)
+      (p : CloseFunding.MaterializationPlan) (events : List CloseFunding.Event)
+      (plan : CloseFunding.prepareSignedHead fe s.funding manager proof = .ok p)
+      (call : CloseFunding.materializeSignedHead fe ⟨s.funding, FundFlow.projectLedger s.rollup⟩
+        manager proof = .ok (⟨fundingAfter, FundFlow.projectLedger out⟩, events)) :
+      Step cfg s { s with rollup := out, funding := fundingAfter } zeroFlow
+        (fun t => if manager = cfg.manager then 0 else CloseFunding.transferred p.credits t)
+  /-- Close request on the Manager: freezes the channel, moves no value. -/
+  | requestClose (ext : ManagerValue.External) (s : State) (out : ManagerValue.State) (now : Nat)
+      (call : ManagerValue.requestCloseCore cfg ext now (s.managers cfg.manager) = .ok out) :
+      Step cfg s { s with managers := ManagerValue.put s.managers cfg.manager out }
+        zeroFlow zeroFlow
+  /-- Materializer freeze (close request seen by the satellite). -/
+  | fundingFreeze (fe : CloseFunding.Environment) (s : State) (out : CloseFunding.State)
+      (caller channel generation : Nat) (events : List CloseFunding.Event)
+      (call : CloseFunding.freezeFromManager fe s.funding caller channel generation =
+        .ok (out, events)) :
+      Step cfg s { s with funding := out } zeroFlow zeroFlow
+  /-- Materializer unfreeze (close cancellation seen by the satellite). -/
+  | fundingUnfreeze (s : State) (out : CloseFunding.State) (caller channel generation : Nat)
+      (events : List CloseFunding.Event)
+      (call : CloseFunding.unfreezeFromManager s.funding caller channel generation =
+        .ok (out, events)) :
+      Step cfg s { s with funding := out } zeroFlow zeroFlow
+  /-- Materializer post journal. -/
+  | fundingRecordPost (fe : CloseFunding.Environment) (s : State) (out : CloseFunding.State)
+      (caller channel block : Nat) (events : List CloseFunding.Event)
+      (call : CloseFunding.recordPost fe s.funding caller channel block = .ok (out, events)) :
+      Step cfg s { s with funding := out } zeroFlow zeroFlow
+  /-- Materializer post rollback. -/
+  | fundingRollbackPost (fe : CloseFunding.Environment) (s : State) (out : CloseFunding.State)
+      (caller block : Nat) (events : List CloseFunding.Event)
+      (call : CloseFunding.rollbackPost fe s.funding caller block = .ok (out, events)) :
+      Step cfg s { s with funding := out } zeroFlow zeroFlow
+  /-- Rollup batch rollback, under the Rollup's own callback frame condition. -/
+  | rollupRollback (e : RollupValue.Environment) (s : State) (out : RollupValue.State) (id : Nat)
+      (frame : RollupValue.RollbackCallbackFrame e)
+      (call : RollupValue.rollbackBatch e s.rollup id = .ok out) :
+      Step cfg s { s with rollup := out } zeroFlow zeroFlow
+
+/-- Finite sequence of modeled steps, accumulating inflow and outflow. -/
+inductive Trace (cfg : ManagerValue.Config) : State → State → Flow → Flow → Prop where
+  | refl (s : State) : Trace cfg s s zeroFlow zeroFlow
+  | next {s middle last : State} {inA outA inB outB : Flow}
+      (prior : Trace cfg s middle inA outA) (step : Step cfg middle last inB outB) :
+      Trace cfg s last (addFlow inA inB) (addFlow outA outB)
+
+theorem trace_flow_congr {cfg : ManagerValue.Config} {a b : State} {i i' o o' : Flow}
+    (t : Trace cfg a b i o) (hi : ∀ x, i x = i' x) (ho : ∀ x, o x = o' x) :
+    Trace cfg a b i' o' := by
+  have ei : i = i' := funext hi
+  have eo : o = o' := funext ho
+  subst ei
+  subst eo
+  exact t
+
+/-! ## Conservation -/
+
+theorem step_conserves (cfg : ManagerValue.Config) {before after : State} {inflow outflow : Flow}
+    (step : Step cfg before after inflow outflow) (token : Nat) :
+    measure cfg after token + outflow token = measure cfg before token + inflow token := by
+  cases step with
+  | accounting s out st =>
+    have conserved := FundFlow.accounting_step_conserves cfg st token
+    simp only [measure, accountsOf, FundFlow.accounted, ManagerValue.put, if_pos rfl,
+      zeroFlow] at conserved ⊢
+    omega
+  | deposit e s out recipient index amount aux events frame call =>
+    obtain ⟨hit, miss, pending⟩ := deposit_accounts frame call
+    by_cases same : token = index
+    · subst same
+      simp only [measure, accountsOf, FundFlow.accounted, zeroFlow, if_pos rfl, hit, pending]
+      omega
+    · have different : RollupValue.assetOfToken token ≠ RollupValue.assetOfToken index := by
+        intro eq
+        exact same ((FundFlow.asset_dispatch_injective token index).mp eq)
+      simp only [measure, accountsOf, FundFlow.accounted, zeroFlow, if_neg same,
+        miss _ different, pending]
+  | withdrawalSet e native s out ws prover proof events call =>
+    obtain ⟨escrow, pending⟩ := withdrawal_set_accounts call (RollupValue.assetOfToken token)
+      cfg.manager
+    simp only [measure, accountsOf, FundFlow.accounted, pending]
+    omega
+  | userWithdrawNative e s out amount events frame call =>
+    obtain ⟨_, enough, pending, escrow⟩ :=
+      FundFlow.native_pull_call_debits_actual_rollup_credit e s.rollup out amount events frame call
+    simp only [measure, accountsOf, FundFlow.accounted, zeroFlow, escrow]
+    by_cases hit : RollupValue.assetOfToken token = RollupValue.Asset.native ∧
+        e.caller = cfg.manager
+    · obtain ⟨asset, caller⟩ := hit
+      have debit := RollupValue.pull_debits_exact_amount s.rollup .native e.caller amount enough
+      rw [if_pos ⟨asset, caller⟩, asset, congrFun (congrFun pending .native) cfg.manager, ← caller]
+      omega
+    · rw [if_neg hit, Nat.add_zero]
+      have framed : out.pending (RollupValue.assetOfToken token) cfg.manager =
+          s.rollup.pending (RollupValue.assetOfToken token) cfg.manager := by
+        rw [congrFun (congrFun pending _) cfg.manager]
+        by_cases asset : RollupValue.assetOfToken token = RollupValue.Asset.native
+        · have caller : cfg.manager ≠ e.caller := by
+            intro eq
+            exact hit ⟨asset, eq.symm⟩
+          rw [asset]
+          exact RollupValue.pull_frames_other_recipient s.rollup .native e.caller cfg.manager
+            amount caller
+        · exact congrFun (RollupValue.pull_frames_other_asset s.rollup .native
+            (RollupValue.assetOfToken token) e.caller amount asset) cfg.manager
+      rw [framed]
+  | userWithdrawToken e s out index amount events frame call =>
+    obtain ⟨escrow, pending⟩ := token_pull_debits_actual_rollup_credit frame call
+    simp only [measure, accountsOf, FundFlow.accounted, zeroFlow, escrow]
+    by_cases hit : RollupValue.assetOfToken token = RollupValue.Asset.erc20 index ∧
+        e.caller = cfg.manager
+    · obtain ⟨asset, caller⟩ := hit
+      have enough : amount ≤ s.rollup.pending (.erc20 index) e.caller := by
+        simp only [RollupValue.withdrawToken] at call
+        obtain ⟨mid, hbody, _, _⟩ := release_then_guarded call
+        simp only [RollupValue.withdrawTokenBody] at hbody
+        obtain ⟨_, _, hbody⟩ := bind_success hbody
+        obtain ⟨_, guard, _⟩ := bind_success hbody
+        have guarded := rollup_require_ok guard
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at guarded
+        exact guarded.2
+      have debit := RollupValue.pull_debits_exact_amount s.rollup (.erc20 index) e.caller amount
+        enough
+      rw [if_pos ⟨asset, caller⟩, asset, congrFun (congrFun pending (.erc20 index)) cfg.manager,
+        ← caller]
+      omega
+    · rw [if_neg hit, Nat.add_zero]
+      have framed : out.pending (RollupValue.assetOfToken token) cfg.manager =
+          s.rollup.pending (RollupValue.assetOfToken token) cfg.manager := by
+        rw [congrFun (congrFun pending _) cfg.manager]
+        by_cases asset : RollupValue.assetOfToken token = RollupValue.Asset.erc20 index
+        · have caller : cfg.manager ≠ e.caller := by
+            intro eq
+            exact hit ⟨asset, eq.symm⟩
+          rw [asset]
+          exact RollupValue.pull_frames_other_recipient s.rollup (.erc20 index) e.caller
+            cfg.manager amount caller
+        · exact congrFun (RollupValue.pull_frames_other_asset s.rollup (.erc20 index)
+            (RollupValue.assetOfToken token) e.caller amount asset) cfg.manager
+      rw [framed]
+  | materialize fe s fundingAfter out manager proof p events plan call =>
+    obtain ⟨q, hplan, _, hcredit⟩ := materialize_call_shape call
+    have same : q = p := Except.ok.inj (hplan.symm.trans plan)
+    subst same
+    have accounting := CloseFunding.successful_vector_accounting hcredit token
+    simp only [FundFlow.projected_escrow, FundFlow.projected_pending] at accounting
+    obtain ⟨escrow, pending⟩ := accounting
+    simp only [measure, accountsOf, FundFlow.accounted, zeroFlow]
+    by_cases mine : manager = cfg.manager
+    · subst mine
+      rw [if_pos rfl]
+      omega
+    · rw [if_neg mine]
+      have framed : out.pending (RollupValue.assetOfToken token) cfg.manager =
+          s.rollup.pending (RollupValue.assetOfToken token) cfg.manager := by
+        have := funding_vector_frames_other_manager (other := cfg.manager)
+          (fun eq => mine eq.symm) hcredit token
+        simpa only [FundFlow.projected_pending] using this
+      rw [framed]
+      omega
+  | requestClose ext s out now call =>
+    obtain ⟨received, _, _, _, _⟩ := request_close_frames_value call
+    simp only [measure, accountsOf, FundFlow.accounted, ManagerValue.put, if_pos rfl, zeroFlow,
+      received]
+  | fundingFreeze => rfl
+  | fundingUnfreeze => rfl
+  | fundingRecordPost => rfl
+  | fundingRollbackPost => rfl
+  | rollupRollback e s out id frame call =>
+    have framed := RollupValue.rollback_batch_preserves_protected_state e frame s.rollup out id call
+    have escrow := congrArg RollupValue.State.escrow framed
+    have pending := congrArg RollupValue.State.pending framed
+    simp only [RollupValue.protectedView] at escrow pending
+    simp only [measure, accountsOf, FundFlow.accounted, zeroFlow, escrow, pending]
+
+/-- **Exact per-token accounting identity.** Along any finite sequence of modeled
+steps, this Manager's accounted total changes by exactly the recorded inflow
+minus the recorded outflow. Template: `FundFlow.every_accounting_trace_conserves`,
+which is the special case where every step is value-neutral. -/
+theorem trace_conserves_per_token (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow) (token : Nat) :
+    measure cfg after token + outflow token = measure cfg before token + inflow token := by
+  induction trace with
+  | refl => simp [zeroFlow]
+  | next _ step ih =>
+    have single := step_conserves cfg step token
+    simp only [addFlow] at *
+    omega
+
+/-! ## Attribution to the Manager's own channel -/
+
+theorem step_received_within_cap (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (step : Step cfg before after inflow outflow)
+    (bounded : ∀ t, (before.managers cfg.manager).received t ≤
+      (before.managers cfg.manager).cap t) :
+    (∀ t, (after.managers cfg.manager).received t ≤ (after.managers cfg.manager).cap t) ∧
+      (after.managers cfg.manager).cap = (before.managers cfg.manager).cap := by
+  cases step with
+  | accounting s out st =>
+    have managerEq : (State.mk out.rollup
+        (ManagerValue.put s.managers cfg.manager out.manager) s.funding).managers cfg.manager =
+        out.manager := by simp [ManagerValue.put]
+    cases st with
+    | credit => exact ⟨by simpa [managerEq] using bounded, by simp [managerEq]⟩
+    | pull ext _ next token pull _ =>
+      have exact := FundFlow.manager_pull_exact_state cfg ext (s.managers cfg.manager) next token pull
+      refine ⟨fun t => ?_, by simp [managerEq, exact]⟩
+      by_cases same : t = token
+      · subst same
+        simp [managerEq, exact, ManagerValue.put]
+      · simpa [managerEq, exact, ManagerValue.put, same] using bounded t
+    | payout ext _ next sender nullifier payout =>
+      obtain ⟨effects, _, _⟩ := ManagerValue.payout_success_exact_effects ext
+        (s.managers cfg.manager) next sender nullifier payout
+      refine ⟨fun t => ?_, by simp [managerEq, effects, ManagerValue.payoutEffects]⟩
+      simpa [managerEq, effects, ManagerValue.payoutEffects] using bounded t
+    | submitClaim ext _ next claim proof submit =>
+      have effects := ManagerValue.submit_success_effects cfg ext (s.managers cfg.manager) next
+        claim proof submit
+      refine ⟨fun t => ?_, by simp [managerEq, effects, ManagerValue.claimEffects]⟩
+      simpa [managerEq, effects, ManagerValue.claimEffects] using bounded t
+  | requestClose ext s out now call =>
+    obtain ⟨received, _, cap, _, _⟩ := request_close_frames_value call
+    refine ⟨fun t => ?_, by simp [ManagerValue.put, cap]⟩
+    simpa [ManagerValue.put, received, cap] using bounded t
+  | deposit => exact ⟨bounded, rfl⟩
+  | withdrawalSet => exact ⟨bounded, rfl⟩
+  | userWithdrawNative => exact ⟨bounded, rfl⟩
+  | userWithdrawToken => exact ⟨bounded, rfl⟩
+  | materialize => exact ⟨bounded, rfl⟩
+  | fundingFreeze => exact ⟨bounded, rfl⟩
+  | fundingUnfreeze => exact ⟨bounded, rfl⟩
+  | fundingRecordPost => exact ⟨bounded, rfl⟩
+  | fundingRollbackPost => exact ⟨bounded, rfl⟩
+  | rollupRollback => exact ⟨bounded, rfl⟩
+
+theorem step_preserves_materialization_latch (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (step : Step cfg before after inflow outflow)
+    (c : CloseFunding.Channel) (latched : before.funding.materializedChannelExit c ≠ 0) :
+    after.funding.materializedChannelExit c = before.funding.materializedChannelExit c := by
+  cases step with
+  | materialize fe s fundingAfter out manager proof p events plan call =>
+    obtain ⟨q, hplan, storage, _⟩ := materialize_call_shape call
+    have same : q = p := Except.ok.inj (hplan.symm.trans plan)
+    subst same
+    obtain ⟨_, anchor, local_⟩ := CloseFunding.prepared_signed_head_requires_receipt_and_local_checks plan
+    obtain ⟨_, _, _, _, exited, _⟩ := CloseFunding.prepared_materialization_guards local_
+    have different : c ≠ p.channel := by
+      intro eq
+      rw [eq] at latched
+      exact latched exited
+    have : fundingAfter = CloseFunding.latchState s.funding p := storage
+    rw [this]
+    exact CloseFunding.latch_other_channel_framed s.funding p c different
+  | accounting => rfl
+  | deposit => rfl
+  | withdrawalSet => rfl
+  | userWithdrawNative => rfl
+  | userWithdrawToken => rfl
+  | requestClose => rfl
+  | fundingFreeze fe s out caller channel generation events call =>
+    simp only [CloseFunding.freezeFromManager] at call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    have pair := Except.ok.inj call
+    obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+    rfl
+  | fundingUnfreeze s out caller channel generation events call =>
+    simp only [CloseFunding.unfreezeFromManager] at call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    obtain ⟨_, _, call⟩ := bind_success call
+    have pair := Except.ok.inj call
+    obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+    rfl
+  | fundingRecordPost fe s out caller channel block events call =>
+    simp only [CloseFunding.recordPost] at call
+    obtain ⟨_, _, call⟩ := bind_success call
+    split at call
+    · have pair := Except.ok.inj call
+      obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+      rfl
+    · obtain ⟨_, _, call⟩ := bind_success call
+      obtain ⟨_, _, call⟩ := bind_success call
+      have pair := Except.ok.inj call
+      obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+      rfl
+  | fundingRollbackPost fe s out caller block events call =>
+    simp only [CloseFunding.rollbackPost] at call
+    obtain ⟨_, _, call⟩ := bind_success call
+    split at call
+    · have pair := Except.ok.inj call
+      obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+      rfl
+    · obtain ⟨_, _, call⟩ := bind_success call
+      have pair := Except.ok.inj call
+      obtain ⟨rfl, _⟩ := Prod.mk.inj pair
+      rfl
+  | rollupRollback => rfl
+
+/-- **Attribution.** Along any modeled trace: (i) the Manager's received counter
+never passes its own close-vector cap and that cap is never rewritten by a
+modeled step, and (ii) once a channel is materialized, the latch survives every
+later modeled step, so the channel's close vector is credited at most once.
+`materialization_credits_are_the_managers_own_vector` below adds that the credited
+amounts are precisely the Manager's own getter values.
+
+What is NOT proved, and remains exactly premise (c): that the cap itself — the
+finalized close vector — is bounded by what this channel deposited. Nothing in
+`RollupValue`, `ManagerValue` or `CloseFunding` relates the vector to deposits;
+escrow is pooled, and `RollupValue`'s header says so. -/
+theorem trace_channel_attribution (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow)
+    (bounded : ∀ t, (before.managers cfg.manager).received t ≤
+      (before.managers cfg.manager).cap t) :
+    (∀ t, (after.managers cfg.manager).received t ≤ (after.managers cfg.manager).cap t) ∧
+      (after.managers cfg.manager).cap = (before.managers cfg.manager).cap ∧
+      (∀ c : CloseFunding.Channel, before.funding.materializedChannelExit c ≠ 0 →
+        after.funding.materializedChannelExit c = before.funding.materializedChannelExit c) := by
+  induction trace with
+  | refl => exact ⟨bounded, rfl, fun _ _ => rfl⟩
+  | next _ step ih =>
+    obtain ⟨midBounded, midCap, midLatch⟩ := ih
+    obtain ⟨nextBounded, nextCap⟩ := step_received_within_cap cfg step midBounded
+    refine ⟨nextBounded, nextCap.trans midCap, fun c latched => ?_⟩
+    have kept := midLatch c latched
+    have live : _ ≠ 0 := by rw [kept]; exact latched
+    rw [step_preserves_materialization_latch cfg step c live, kept]
+
+/-- Every amount the materializer credits is the Manager's own token-vector
+getter value, the vector has no duplicate token, and the channel is latched.
+Direct consequence of `CloseFunding.materialization_call_complete_vector`; it
+carries no claim that those getter values are legitimate. -/
+theorem materialization_credits_are_the_managers_own_vector {fe : CloseFunding.Environment}
+    {before after : CloseFunding.World} {manager : Nat} {proof : CloseFunding.Bytes}
+    {events : List CloseFunding.Event}
+    (call : CloseFunding.materializeSignedHead fe before manager proof = .ok (after, events)) :
+    ∃ p : CloseFunding.MaterializationPlan, p.manager = manager ∧
+      p.credits.length = p.tokenCount ∧ CloseFunding.TokensUnique p.credits ∧
+      (∀ c ∈ p.credits, (fe.manager manager).amountAt c.token = .ok c.amount) ∧
+      after.storage.materializedChannelExit p.channel = p.digest ∧ p.digest ≠ 0 ∧
+      (∀ token, after.ledger.escrow token + CloseFunding.transferred p.credits token =
+          before.ledger.escrow token ∧
+        after.ledger.pending token manager =
+          before.ledger.pending token manager + CloseFunding.transferred p.credits token) :=
+  CloseFunding.materialization_call_complete_vector call
+
+/-- The remaining gap of premise (c), stated in full: the accepted close
+statement's own token amounts are within what that channel deposited. This is the
+obligation the Balance/validity circuit family must discharge. -/
+theorem close_vector_backing_is_exactly_premise_c
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerProjection : σ → ManagerValue.State} {fundingProjection : σ → CloseFunding.State}
+    (tb : TrustBoundary.TrustBoundary m Deployed Modeled Unmodeled managerProjection
+      fundingProjection)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true)
+    (i : Fin 10) (live : i.val < f.tokenCount.val) :
+    (f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val :=
+  tb.closeVectorBacked f proof accepted i live
+
+/-! ## Replay protection and payout bound -/
+
+/-- **Nullifier single use.** Along any modeled trace the payout index stays
+coherent, used markers are never cleared, and no already-used nullifier can be
+claimed again at the end of the trace. Lifted from
+`FundFlow.every_accounting_trace_preserves_nullifier_and_payout_index` and
+`FundFlow.submitted_claim_nullifier_was_unused`. Durability against transitions
+OUTSIDE this step relation is premise (g1), not a theorem. -/
+theorem trace_nullifier_single_use (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow)
+    (indexed : FundFlow.PayoutIndexed (before.managers cfg.manager)) :
+    FundFlow.PayoutIndexed (after.managers cfg.manager) ∧
+      (∀ n, (before.managers cfg.manager).used n = true →
+        (after.managers cfg.manager).used n = true) ∧
+      (∀ (ext : ManagerValue.External) (claim : ManagerValue.Claim)
+        (proof : ManagerValue.Proof) (out : ManagerValue.State),
+        (before.managers cfg.manager).used claim.nullifier = true →
+        ManagerValue.submitClaimCore cfg ext (after.managers cfg.manager) claim proof ≠ .ok out) := by
+  have core : FundFlow.PayoutIndexed (after.managers cfg.manager) ∧
+      (∀ n, (before.managers cfg.manager).used n = true →
+        (after.managers cfg.manager).used n = true) := by
+    induction trace with
+    | refl => exact ⟨indexed, fun _ h => h⟩
+    | next _ step ih =>
+      obtain ⟨midIndexed, midUsed⟩ := ih
+      cases step with
+      | accounting s out st =>
+        obtain ⟨nextIndexed, nextUsed⟩ :=
+          FundFlow.accounting_step_preserves_nullifier_and_payout_index cfg st midIndexed
+        refine ⟨?_, fun n used => ?_⟩
+        · simpa [ManagerValue.put] using nextIndexed
+        · simpa [ManagerValue.put] using nextUsed n (midUsed n used)
+      | requestClose ext s out now call =>
+        obtain ⟨_, _, _, used, payouts⟩ := request_close_frames_value call
+        refine ⟨?_, fun n live => ?_⟩
+        · intro n live
+          simp only [ManagerValue.put, if_pos rfl, payouts] at live ⊢
+          rw [used]
+          exact midIndexed n live
+        · simpa [ManagerValue.put, used] using midUsed n live
+      | deposit => exact ⟨midIndexed, midUsed⟩
+      | withdrawalSet => exact ⟨midIndexed, midUsed⟩
+      | userWithdrawNative => exact ⟨midIndexed, midUsed⟩
+      | userWithdrawToken => exact ⟨midIndexed, midUsed⟩
+      | materialize => exact ⟨midIndexed, midUsed⟩
+      | fundingFreeze => exact ⟨midIndexed, midUsed⟩
+      | fundingUnfreeze => exact ⟨midIndexed, midUsed⟩
+      | fundingRecordPost => exact ⟨midIndexed, midUsed⟩
+      | fundingRollbackPost => exact ⟨midIndexed, midUsed⟩
+      | rollupRollback => exact ⟨midIndexed, midUsed⟩
+  refine ⟨core.1, core.2, fun ext claim proof out used submit => ?_⟩
+  have unused := FundFlow.submitted_claim_nullifier_was_unused cfg ext
+    (after.managers cfg.manager) out claim proof submit
+  rw [core.2 claim.nullifier used] at unused
+  exact Bool.noConfusion unused
+
+/-- **Payout bound.** Along any modeled trace the Manager never pays out more per
+token than it received, and the pooled-escrow split of
+`FundFlow.accounted_splits_paid_and_unspent` continues to hold. -/
+theorem trace_paid_bounded (cfg : ManagerValue.Config) {before after : State}
+    {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow)
+    (bounded : FundFlow.PaidBounded (before.managers cfg.manager)) :
+    FundFlow.PaidBounded (after.managers cfg.manager) ∧
+      ∀ token, after.rollup.escrow (RollupValue.assetOfToken token) +
+          after.rollup.pending (RollupValue.assetOfToken token) cfg.manager +
+          FundFlow.unspent (after.managers cfg.manager) token +
+          (after.managers cfg.manager).paid token + outflow token =
+        measure cfg before token + inflow token := by
+  have core : FundFlow.PaidBounded (after.managers cfg.manager) := by
+    induction trace with
+    | refl => exact bounded
+    | next _ step ih =>
+      cases step with
+      | accounting s out st =>
+        have next := FundFlow.accounting_step_preserves_paid_bound cfg st ih
+        intro t
+        simpa [ManagerValue.put] using next t
+      | requestClose ext s out now call =>
+        obtain ⟨received, paid, _, _, _⟩ := request_close_frames_value call
+        intro t
+        simpa [ManagerValue.put, received, paid] using ih t
+      | deposit => exact ih
+      | withdrawalSet => exact ih
+      | userWithdrawNative => exact ih
+      | userWithdrawToken => exact ih
+      | materialize => exact ih
+      | fundingFreeze => exact ih
+      | fundingUnfreeze => exact ih
+      | fundingRecordPost => exact ih
+      | fundingRollbackPost => exact ih
+      | rollupRollback => exact ih
+  refine ⟨core, fun token => ?_⟩
+  have split := FundFlow.accounted_splits_paid_and_unspent (accountsOf cfg after) cfg.manager token
+    (core token)
+  have conserved := trace_conserves_per_token cfg trace token
+  simp only [measure, accountsOf, FundFlow.accounted] at split conserved ⊢
+  omega
+
+/-! ## Close acceptance -/
+
+/-- **Close acceptance binds the statement.** Unconditionally, a successful
+modeled Solidity close verification pins the exact 103-word record the pinned
+adapter returned (`SettlementCloseBridge`). Only the second conjunct — that some
+witness satisfies the circuit's local gate equations for that same record — uses
+premise (a); acceptance alone establishes nothing about truth, funding or
+authorization. -/
+theorem close_acceptance_binds_statement
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerProjection : σ → ManagerValue.State} {fundingProjection : σ → CloseFunding.State}
+    (tb : TrustBoundary.TrustBoundary m Deployed Modeled Unmodeled managerProjection
+      fundingProjection)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
+        .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
+      (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words.length =
+        CloseCircuit.publicInputsLength ∧
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w :=
+  ⟨SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt m.evm m.installed
+      m.keccak f proof accepted,
+    CloseCircuit.public_input_word_count _,
+    tb.closeProofSoundness f proof accepted⟩
+
+/-- The claim endpoints have the same shape: the statement is pinned
+unconditionally, the witness only under premises (b1)/(b2). -/
+theorem claim_acceptance_binds_statement
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerProjection : σ → ManagerValue.State} {fundingProjection : σ → CloseFunding.State}
+    (tb : TrustBoundary.TrustBoundary m Deployed Modeled Unmodeled managerProjection
+      fundingProjection)
+    (f : SettlementVerifier.WithdrawalFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyWithdrawalClaim m.evm m.installed f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.withdrawal proof =
+        .ok (ClaimSettlementBridge.withdrawalStatement f).words ∧
+      ∃ w : WithdrawalClaimCircuit.Witness ClaimPath ClaimCore,
+        WithdrawalClaimCircuit.CircuitGates m.claimEnv
+          (ClaimSettlementBridge.withdrawalStatement f) w :=
+  ⟨ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt m.evm m.installed f proof
+      accepted,
+    tb.withdrawalProofSoundness f proof accepted⟩
+
+/-! ## Non-vacuous instantiation
+
+The concrete trace below reuses `FundFlow.normal*`: a channel-exit credit of 100
+native units, the Manager pull of the same 100, a claim of 5 and the payout of
+those 5. Every conclusion above is instantiated on it. These are model
+evaluations, not transactions against any deployment. -/
+
+def stepState (cfg : ManagerValue.Config) (s : State) (out : FundFlow.Accounts) : State :=
+  { s with rollup := out.rollup, managers := ManagerValue.put s.managers cfg.manager out.manager }
+
+theorem accounts_of_step_state (cfg : ManagerValue.Config) (s : State) (out : FundFlow.Accounts) :
+    accountsOf cfg (stepState cfg s out) = out := by
+  simp [accountsOf, stepState, ManagerValue.put]
+
+def normalStart : State :=
+  ⟨FundFlow.normalBefore.rollup, fun _ => FundFlow.normalBefore.manager, CloseFunding.empty⟩
+
+def normalCredited : State := stepState ManagerValue.sampleConfig normalStart FundFlow.normalCredited
+def normalPulled : State := stepState ManagerValue.sampleConfig normalCredited FundFlow.normalPulled
+def normalClaimed : State := stepState ManagerValue.sampleConfig normalPulled FundFlow.normalClaimed
+def normalPaid : State := stepState ManagerValue.sampleConfig normalClaimed FundFlow.normalPaid
+
+theorem normal_accounting_step (s : State) (out : FundFlow.Accounts)
+    (step : FundFlow.AccountingStep ManagerValue.sampleConfig (accountsOf ManagerValue.sampleConfig s) out) :
+    Step ManagerValue.sampleConfig s (stepState ManagerValue.sampleConfig s out) zeroFlow zeroFlow :=
+  Step.accounting s out step
+
+/-- A nonempty modeled trace through the same credit/pull/claim/payout
+definitions, with zero inflow and zero outflow. -/
+theorem normal_credit_pull_claim_payout_trace (base : RollupValue.Environment) :
+    Trace ManagerValue.sampleConfig normalStart normalPaid zeroFlow zeroFlow := by
+  have startAccounts : accountsOf ManagerValue.sampleConfig normalStart = FundFlow.normalBefore := rfl
+  have credited : Step ManagerValue.sampleConfig normalStart normalCredited zeroFlow zeroFlow := by
+    apply Step.accounting
+    rw [startAccounts]
+    apply FundFlow.AccountingStep.credit (FundFlow.normalRollup base) FundFlow.normalBefore
+      FundFlow.normalCredited.rollup 0 100
+    apply (RollupValue.successful_close_credit_characterization _ _ _ _ _ _).mpr
+    refine ⟨rfl, rfl, ?_⟩
+    apply (RollupValue.successful_credit_characterization _ _ _ _ _).mpr
+    exact ⟨by decide, by decide, rfl⟩
+  have pulled : Step ManagerValue.sampleConfig normalCredited normalPulled zeroFlow zeroFlow := by
+    apply Step.accounting
+    rw [accounts_of_step_state]
+    apply FundFlow.AccountingStep.pull ManagerValue.sampleExternal FundFlow.normalCredited
+      FundFlow.normalPulled.manager 0
+    · rfl
+    · decide
+  have claimed : Step ManagerValue.sampleConfig normalPulled normalClaimed zeroFlow zeroFlow := by
+    apply Step.accounting
+    rw [accounts_of_step_state]
+    exact FundFlow.AccountingStep.submitClaim ManagerValue.sampleExternal _ _
+      ManagerValue.sampleClaim [] (by rfl)
+  have paid : Step ManagerValue.sampleConfig normalClaimed normalPaid zeroFlow zeroFlow := by
+    apply Step.accounting
+    rw [accounts_of_step_state]
+    exact FundFlow.AccountingStep.payout ManagerValue.sampleExternal _ _ 23 91 (by rfl)
+  refine trace_flow_congr
+    (Trace.next (Trace.next (Trace.next (Trace.next (Trace.refl normalStart) credited) pulled)
+      claimed) paid) ?_ ?_ <;>
+    intro x <;> rfl
+
+/-- The trace is not vacuous: value really moved, the nullifier was consumed, and
+every conclusion above holds on it with concrete numbers. -/
+theorem normal_trace_witnesses_every_conclusion (base : RollupValue.Environment) :
+    measure ManagerValue.sampleConfig normalPaid 0 =
+        measure ManagerValue.sampleConfig normalStart 0 ∧
+      (normalPaid.managers ManagerValue.sampleConfig.manager).paid 0 = 5 ∧
+      FundFlow.unspent (normalPaid.managers ManagerValue.sampleConfig.manager) 0 = 95 ∧
+      normalPaid.rollup.escrow .native = 0 ∧
+      normalPaid.rollup.pending .native 42 = 0 ∧
+      (normalPaid.managers ManagerValue.sampleConfig.manager).used 91 = true := by
+  refine ⟨?_, by decide, by decide, by decide, by decide, by decide⟩
+  have conserved := trace_conserves_per_token ManagerValue.sampleConfig
+    (normal_credit_pull_claim_payout_trace base) 0
+  simpa [zeroFlow] using conserved
+
+theorem normal_trace_paid_bounded (base : RollupValue.Environment) :
+    FundFlow.PaidBounded (normalPaid.managers ManagerValue.sampleConfig.manager) :=
+  (trace_paid_bounded ManagerValue.sampleConfig (normal_credit_pull_claim_payout_trace base)
+    (by intro t; decide)).1
+
+theorem normal_trace_nullifier_stays_used (base : RollupValue.Environment)
+    (ext : ManagerValue.External) (proof : ManagerValue.Proof) (out : ManagerValue.State) :
+    ManagerValue.submitClaimCore ManagerValue.sampleConfig ext
+      (normalPaid.managers ManagerValue.sampleConfig.manager) ManagerValue.sampleClaim proof
+      ≠ .ok out := by
+  have reused := trace_nullifier_single_use ManagerValue.sampleConfig
+    (normal_credit_pull_claim_payout_trace base) (by intro n live; revert live; decide)
+  exact reused.2.2 ext ManagerValue.sampleClaim proof out (by decide)
+
+theorem normal_trace_received_within_cap (base : RollupValue.Environment) :
+    ∀ t, (normalPaid.managers ManagerValue.sampleConfig.manager).received t ≤
+      (normalPaid.managers ManagerValue.sampleConfig.manager).cap t :=
+  (trace_channel_attribution ManagerValue.sampleConfig
+    (normal_credit_pull_claim_payout_trace base) (by intro t; decide)).1
+
+end Zkp.Implementation.SystemSafety
