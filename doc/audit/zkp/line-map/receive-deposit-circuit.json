@@ -1,0 +1,1162 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/receive_deposit_circuit.rs",
+  "source_sha256": "7f7ca749b601606387a13d3f02b481ac7c62ba8cfc1f9a03d9cd8ab6916d411e",
+  "source_lines": 733,
+  "module": "Zkp.Implementation.ReceiveDepositCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/ReceiveDepositCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 37,
+      "status": "dependency-boundary",
+      "label": "plonky2 builder/proof/witness API, crate codecs, gadgets, keccak chain push, u63 targets, serializers",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 38,
+      "end": 39,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 40,
+      "end": 64,
+      "status": "translated",
+      "label": "ReceiveDepositError variants in source order",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.Error",
+        "Zkp.Implementation.ReceiveDepositCircuit.Result"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 65,
+      "end": 66,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 67,
+      "end": 91,
+      "status": "translated",
+      "label": "ReceiveDepositWitness fields: previous proof, public-state update, new block_r, account state, deposit witness, private-state update",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.Witness",
+        "Zkp.Implementation.ReceiveDepositCircuit.AccountState",
+        "Zkp.Implementation.ReceiveDepositCircuit.DepositWitness",
+        "Zkp.Implementation.ReceiveDepositCircuit.Deposit",
+        "Zkp.Implementation.ReceiveDepositCircuit.Address"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_has_32_words"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 92,
+      "end": 97,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 98,
+      "end": 101,
+      "status": "translated",
+      "label": "to_public_inputs signature and Result type",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_ok_iff"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 102,
+      "end": 105,
+      "status": "translated",
+      "label": "native 29-word statement parse of the previous proof's public inputs (imported BalancePublicInputs codec), `?` error propagation",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.parseFull"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.parse_ok_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.parse_error_maps_fault",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_prev_parse_failure_first",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_parse_bounds",
+        "Zkp.Implementation.ReceiveDepositCircuit.check_native_fields_ok"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 106,
+      "end": 110,
+      "status": "translated",
+      "label": "verifier data and receiver channel taken from the previous statement",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeOutput",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_output_shape"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 111,
+      "end": 115,
+      "status": "translated",
+      "label": "update_public_state.verify() mapped to ConnectionError (imported UpdatePublicState native verify)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.publicUpdateOrError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.public_update_ok_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_public_update_failure_second",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_public_update_is_locally_verified"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 116,
+      "end": 116,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 117,
+      "end": 123,
+      "status": "translated",
+      "label": "update_public_state.old must equal the previous statement's public state; new state becomes the output state",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_old_state_mismatch_third",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_output_shape"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 124,
+      "end": 124,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 125,
+      "end": 131,
+      "status": "dependency-boundary",
+      "label": "account_state.verify(): send-leaf and channel-leaf Merkle openings mapped to ConnectionError",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.accountStateOrError",
+        "Zkp.Implementation.ReceiveDepositCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.account_state_ok_iff"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 132,
+      "end": 132,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 133,
+      "end": 144,
+      "status": "translated",
+      "label": "account state channel equals receiver; account tree root equals the NEW public state's account root",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_extracts"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 145,
+      "end": 145,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 146,
+      "end": 151,
+      "status": "translated",
+      "label": "deposit witness channel equals receiver",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_recipient_is_receiver_channel_with_salt"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 152,
+      "end": 152,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 153,
+      "end": 160,
+      "status": "translated",
+      "label": "deposit_witness.verify(): 63-bit index guard, deposit-tree opening at deposit_index (opaque Merkle callee), tagged recipient from receiver channel + salt; InvalidRecipient kept, other errors become InvalidDepositWitness",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.depositWitnessOrError",
+        "Zkp.Implementation.ReceiveDepositCircuit.depositWitnessVerify",
+        "Zkp.Implementation.ReceiveDepositCircuit.DepositWitnessError",
+        "Zkp.Implementation.ReceiveDepositCircuit.describeDepositWitnessError",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipientOf",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipientPreimage",
+        "Zkp.Implementation.ReceiveDepositCircuit.tagUserId"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_verify_ok_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_index_error_first",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_merkle_error_second",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_recipient_error_third",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_or_error_ok_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_recipient_error_is_invalid_recipient",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_witness_other_error_is_invalid_deposit_witness",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipient_preimage_has_6_words",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipient_preimage_injective",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipient_top_byte_is_user_id_tag",
+        "Zkp.Implementation.ReceiveDepositCircuit.recipient_keeps_low_limbs",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_tree_height_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_index_limit_matches_u63",
+        "Zkp.Implementation.ReceiveDepositCircuit.user_id_domain_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.user_id_tag_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_recipient_is_tagged_hash",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_deposit_witness_verifies"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 161,
+      "end": 161,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 162,
+      "end": 167,
+      "status": "translated",
+      "label": "deposit witness root equals the NEW public state's deposit tree root",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_deposit_opens_under_new_deposit_root"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 168,
+      "end": 168,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 169,
+      "end": 176,
+      "status": "translated",
+      "label": "prev_block_r <= new_block_r <= public_state.block_number (native integer comparison)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_block_window"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 177,
+      "end": 177,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 178,
+      "end": 192,
+      "status": "translated",
+      "label": "outgoing window only when channel_leaf.prev != 0: send_leaf.prev <= prev_block_r and new_block_r < send_leaf.cur",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.outgoingWindowCheck"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.outgoing_ok_iff"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 193,
+      "end": 193,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 194,
+      "end": 199,
+      "status": "translated",
+      "label": "deposit.block_number <= new_block_r",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_block_window"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 200,
+      "end": 200,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 201,
+      "end": 220,
+      "status": "translated",
+      "label": "private-state update must credit the deposit's token and amount; nullifier must equal Poseidon over the full 32-word deposit preimage (index and block included)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks",
+        "Zkp.Implementation.ReceiveDepositCircuit.nullifierOf",
+        "Zkp.Implementation.ReceiveDepositCircuit.Deposit.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_credits_deposit_token_and_amount",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_nullifier_is_full_deposit_hash",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_words_start_with_index",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_words_have_block_second",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_words_injective",
+        "Zkp.Implementation.ReceiveDepositCircuit.distinct_deposits_have_distinct_nullifier_preimages",
+        "Zkp.Implementation.ReceiveDepositCircuit.deposit_length_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 221,
+      "end": 221,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 222,
+      "end": 228,
+      "status": "translated",
+      "label": "prev private state commitment must equal the previous statement's private commitment (imported PrivateState.commitment)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.NativeChecks",
+        "Zkp.Implementation.ReceiveDepositCircuit.rootOfHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.root_of_hash_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 229,
+      "end": 229,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 230,
+      "end": 230,
+      "status": "translated",
+      "label": "new private commitment taken from the supplied new_private_state without recomputation",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeOutput"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_trusts_supplied_new_private_state",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_ignores_gadget_semantics"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 231,
+      "end": 235,
+      "status": "non-executable",
+      "label": "spacing and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 236,
+      "end": 237,
+      "status": "translated",
+      "label": "settled_tx_chain_push(prev chain, deposit nullifier): keccak over [0x494d5443, chain, leaf] (keccak opaque)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.chainPush",
+        "Zkp.Implementation.ReceiveDepositCircuit.chainPreimage",
+        "Zkp.Implementation.ReceiveDepositCircuit.toBytes8"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_chain_always_folds_nullifier",
+        "Zkp.Implementation.ReceiveDepositCircuit.chain_preimage_has_17_words",
+        "Zkp.Implementation.ReceiveDepositCircuit.chain_preimage_starts_with_domain",
+        "Zkp.Implementation.ReceiveDepositCircuit.to_bytes8_injective",
+        "Zkp.Implementation.ReceiveDepositCircuit.settled_tx_chain_domain_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 238,
+      "end": 238,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 239,
+      "end": 250,
+      "status": "translated",
+      "label": "output statement: receiver channel, new public state, new block_r, new private commitment, folded chain, inherited verifier data",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeOutput",
+        "Zkp.Implementation.ReceiveDepositCircuit.nativeToPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.native_ok_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_extracts",
+        "Zkp.Implementation.ReceiveDepositCircuit.native_success_output_shape",
+        "Zkp.Implementation.ReceiveDepositCircuit.balance_length_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.balance_length_matches_codec",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_prev_statement_parses",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_native_checks",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_native_admission",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_output_credits_receiver_at_block_6"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 251,
+      "end": 254,
+      "status": "non-executable",
+      "label": "closing braces, spacing, derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 255,
+      "end": 263,
+      "status": "translated",
+      "label": "ReceiveDepositTarget wire groups",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 264,
+      "end": 274,
+      "status": "non-executable",
+      "label": "spacing, impl header, constructor signature and bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 275,
+      "end": 275,
+      "status": "dependency-boundary",
+      "label": "add_virtual_proof_with_pis (plonky2 builder API)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.BuildOp",
+        "Zkp.Implementation.ReceiveDepositCircuit.buildPlan"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 276,
+      "end": 279,
+      "status": "translated",
+      "label": "BalanceFullPublicInputsTarget::from_pis on the proof wires (imported target codec, suffix-tolerant)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.balance_proof_verified_before_gadgets"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 280,
+      "end": 280,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 281,
+      "end": 281,
+      "status": "dependency-boundary",
+      "label": "builder.verify_proof of the previous balance proof under the verifier data embedded in its own public inputs",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.Environment",
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 282,
+      "end": 282,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 283,
+      "end": 283,
+      "status": "translated",
+      "label": "previous balance statement projection",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.receiverId"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 284,
+      "end": 284,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 285,
+      "end": 285,
+      "status": "translated",
+      "label": "UpdatePublicStateTarget::new (imported UpdatePublicState.CircuitGates)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_public_state_is_updated_state"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 286,
+      "end": 289,
+      "status": "dependency-boundary",
+      "label": "checked allocations: 63-bit block_r, account-state openings, deposit witness (deposit-tree opening at deposit_index, tagged recipient), imported UpdatePrivateState gadget; range checks are premises",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.DepositChecked",
+        "Zkp.Implementation.ReceiveDepositCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.every_sub_gadget_is_checked_allocation",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_range_checks_credit_inputs"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 290,
+      "end": 290,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 291,
+      "end": 294,
+      "status": "translated",
+      "label": "update_public_state.old connected to the previous statement's public state; new state is the output state",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.publicStateOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_public_state_is_updated_state"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 295,
+      "end": 295,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 296,
+      "end": 301,
+      "status": "translated",
+      "label": "account state channel connected to receiver; account root connected to the NEW public state's account root",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_account_state_is_receivers_at_new_account_root"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 302,
+      "end": 302,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 303,
+      "end": 308,
+      "status": "translated",
+      "label": "deposit witness channel connected to receiver; deposit tree root connected to the NEW public state's deposit root",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.depositOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_deposit_opens_under_output_deposit_root_at_index",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_recipient_binds_receiver_channel_and_salt",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_recipient_top_byte_is_tagged"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 309,
+      "end": 309,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 310,
+      "end": 312,
+      "status": "translated",
+      "label": "new_block_r.enforce_ge(prev_block_r); public_state.block_number.enforce_ge(new_block_r) as Goldilocks sub + 63-bit range check (not an ordering at the top of the domain)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.EnforceGe",
+        "Zkp.Implementation.ReceiveDepositCircuit.fieldSub",
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.u63Limit",
+        "Zkp.Implementation.ReceiveDepositCircuit.goldilocks",
+        "Zkp.Implementation.ReceiveDepositCircuit.orderingBound"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_ge_of_le",
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_ge_iff_le_of_lower_bounded",
+        "Zkp.Implementation.ReceiveDepositCircuit.wrapped_difference_at_top",
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_ge_accepts_zero_below_top",
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_ge_is_not_ordering_at_top",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_block_window_when_operands_bounded",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_block_lower_gate_admits_wrap",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_block_r_is_new_block_r",
+        "Zkp.Implementation.ReceiveDepositCircuit.u63_limit_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.goldilocks_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.ordering_bound_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.ordering_bound_is_field_minus_limit",
+        "Zkp.Implementation.ReceiveDepositCircuit.u63_bits_pinned",
+        "Zkp.Implementation.ReceiveDepositCircuit.block_limit_matches_u63"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 313,
+      "end": 313,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 314,
+      "end": 320,
+      "status": "translated",
+      "label": "has_outgoing = !is_zero(channel_leaf.prev); conditional_ge / conditional_gt as select(cond, diff, 0) + 63-bit range check",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.hasOutgoing",
+        "Zkp.Implementation.ReceiveDepositCircuit.ConditionalGe",
+        "Zkp.Implementation.ReceiveDepositCircuit.ConditionalGt",
+        "Zkp.Implementation.ReceiveDepositCircuit.selectOrZero",
+        "Zkp.Implementation.ReceiveDepositCircuit.fieldAddOne",
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.has_outgoing_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.conditional_ge_false_is_vacuous",
+        "Zkp.Implementation.ReceiveDepositCircuit.conditional_ge_true_iff",
+        "Zkp.Implementation.ReceiveDepositCircuit.conditional_ge_of_imp",
+        "Zkp.Implementation.ReceiveDepositCircuit.conditional_gt_of_imp",
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_gt_of_lt",
+        "Zkp.Implementation.ReceiveDepositCircuit.enforce_gt_iff_lt_of_lower_bounded",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_outgoing_window_when_prior_send"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 321,
+      "end": 321,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 322,
+      "end": 323,
+      "status": "translated",
+      "label": "new_block_r.enforce_ge(deposit.block_number)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_deposit_block_when_bounded"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 324,
+      "end": 324,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 325,
+      "end": 335,
+      "status": "translated",
+      "label": "token index / amount connected to the deposit; in-circuit deposit nullifier (Poseidon over the full deposit preimage) connected to the private-state update",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.nullifierOf",
+        "Zkp.Implementation.ReceiveDepositCircuit.Deposit.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_credits_exact_deposit_amount",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_credit_does_not_decrease_balance",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_credit_lands_at_deposit_token",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_nullifier_is_full_deposit_hash",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_invokes_nullifier_gadget_with_deposit_nullifier"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 336,
+      "end": 336,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 337,
+      "end": 339,
+      "status": "translated",
+      "label": "previous private commitment connected to the previous statement; new commitment computed",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuitOutput"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_previous_state_opens_prev_statement",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_commits_the_gadget_output"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 340,
+      "end": 344,
+      "status": "non-executable",
+      "label": "spacing and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 345,
+      "end": 349,
+      "status": "translated",
+      "label": "settled_tx_chain_push_circuit(prev chain, deposit nullifier): unconditional fold",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.chainPush",
+        "Zkp.Implementation.ReceiveDepositCircuit.chainPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_chain_always_folds_nullifier"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 350,
+      "end": 350,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 351,
+      "end": 361,
+      "status": "translated",
+      "label": "output statement wires: receiver channel, new public state, new block_r, new commitment, folded chain, inherited verifier data",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuitOutput",
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_keeps_receiver_channel_and_key",
+        "Zkp.Implementation.ReceiveDepositCircuit.circuit_output_statement_has_29_words",
+        "Zkp.Implementation.ReceiveDepositCircuit.target_witness_of_native_success",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_circuit_witness",
+        "Zkp.Implementation.ReceiveDepositCircuit.normal_deposit_checked",
+        "Zkp.Implementation.ReceiveDepositCircuit.from_small_checked"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 362,
+      "end": 362,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 363,
+      "end": 371,
+      "status": "translated",
+      "label": "target handle set returned by the constructor",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 372,
+      "end": 384,
+      "status": "non-executable",
+      "label": "closing braces, spacing, set_witness signature",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 385,
+      "end": 395,
+      "status": "translated",
+      "label": "witness assignment order including the derived statement",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.Write",
+        "Zkp.Implementation.ReceiveDepositCircuit.witnessWrites"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.witness_write_count",
+        "Zkp.Implementation.ReceiveDepositCircuit.witness_writes_derived_statement_last",
+        "Zkp.Implementation.ReceiveDepositCircuit.witness_write_count_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 396,
+      "end": 398,
+      "status": "non-executable",
+      "label": "closing braces and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 399,
+      "end": 410,
+      "status": "untranslated",
+      "label": "ReceiveDepositCircuit struct: circuit data, balance common data, target and public-input handles",
+      "declarations": [],
+      "theorems": [],
+      "note": "No declaration of the Lean model corresponds to these lines; left untranslated on purpose."
+    },
+    {
+      "start": 411,
+      "end": 417,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 418,
+      "end": 422,
+      "status": "translated",
+      "label": "constructor: build target, register the full statement encoding as public inputs",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.registeredPublicInputs",
+        "Zkp.Implementation.ReceiveDepositCircuit.buildPlan"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.registered_statement_is_full_encoding",
+        "Zkp.Implementation.ReceiveDepositCircuit.registered_statement_width",
+        "Zkp.Implementation.ReceiveDepositCircuit.const_gate_added_after_public_inputs"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 423,
+      "end": 428,
+      "status": "non-executable",
+      "label": "spacing and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 429,
+      "end": 431,
+      "status": "dependency-boundary",
+      "label": "add_const_gate and builder.build (plonky2)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.buildPlan",
+        "Zkp.Implementation.ReceiveDepositCircuit.BuildOp"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 432,
+      "end": 440,
+      "status": "non-executable",
+      "label": "spacing, struct return, closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 441,
+      "end": 445,
+      "status": "translated",
+      "label": "prove: native admission (to_public_inputs) first",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.prove"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.prove_requires_native_admission",
+        "Zkp.Implementation.ReceiveDepositCircuit.prove_failure_precedence"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 446,
+      "end": 449,
+      "status": "translated",
+      "label": "PartialWitness fill: target.set_witness then public_inputs.set_witness (statement written twice)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.proveWrites"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveDepositCircuit.prove_writes_statement_twice"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 450,
+      "end": 452,
+      "status": "dependency-boundary",
+      "label": "CircuitData::prove mapped to FailedToProve (opaque prover)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveDepositCircuit.prove"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; no whole-funds safety follows from the call alone."
+    },
+    {
+      "start": 453,
+      "end": 454,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 455,
+      "end": 506,
+      "status": "untranslated",
+      "label": "to_bytes / from_bytes circuit serialization",
+      "declarations": [],
+      "theorems": [],
+      "note": "No declaration of the Lean model corresponds to these lines; left untranslated on purpose."
+    },
+    {
+      "start": 507,
+      "end": 508,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 509,
+      "end": 515,
+      "status": "untranslated",
+      "label": "ReceiveDepositCircuitBytes serialization payload",
+      "declarations": [],
+      "theorems": [],
+      "note": "No declaration of the Lean model corresponds to these lines; left untranslated on purpose."
+    },
+    {
+      "start": 516,
+      "end": 516,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 517,
+      "end": 733,
+      "status": "test-only",
+      "label": "cfg(test) receive-deposit proof-generation test (values mirrored by the normal trace, not translated)",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) body only; no production theorem coverage inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "recursive-balance-proof-verification",
+      "obligation": "builder.verify_proof of the previous balance proof under the verifier data read from its own public inputs (proofAccepted) is an opaque acceptance premise; plonky2 recursive soundness, cyclic verifier-key pinning and the well-formedness (63-bit block_r, non-zero channel) of the previous statement are not established here.",
+      "discharged": false
+    },
+    {
+      "name": "deposit-tree-inclusion",
+      "obligation": "depositMerkleAccepted / depositMerkleVerify are opaque: prove the IncrementalMerkleProof gadget opens the Poseidon-hashed deposit leaf at deposit_index under the connected root, and that the NEW public state's deposit root is the canonical on-chain deposit tree root (L1 finality of the deposit is a caller obligation).",
+      "discharged": false
+    },
+    {
+      "name": "account-state-openings",
+      "obligation": "accountStateAccepted / accountStateVerify are opaque: send-leaf and channel-leaf Merkle openings under the NEW public state's account root, and the meaning of send_leaf.prev/cur and channel_leaf.prev as the receiver's outgoing history.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-and-keccak",
+      "obligation": "poseidonBytes32 (nullifier and recipient) and keccak (settled-tx chain) are opaque callbacks; only preimage-layout injectivity (deposit_words_injective, recipient_preimage_injective) is proved, never hash injectivity, nullifier freshness or chain uniqueness. The u64 to (high, low) u32 split and the tag-byte replacement are modeled but their gadget lowering is not.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-comparison-lowering",
+      "obligation": "EnforceGe / ConditionalGe / ConditionalGt model enforce_ge as (self - lower mod p) < 2^63 with select/is_zero read exactly; prove that plonky2 sub, select, is_equal and split_le(63) implement these on canonical wires. Integer block-window theorems additionally assume the operands lie below 2^63 (checked allocations) and lower operands at most 2^63 - 2^32 + 1; the new public state's block_number is an UNCHECKED allocation in this circuit.",
+      "discharged": false
+    },
+    {
+      "name": "checked-allocation-range-premises",
+      "obligation": "newBlockRange, accountRanges, depositChannelRange and depositRanges are premises standing for the range checks of BlockNumberTarget/AccountStateTarget/DepositWitnessTarget/UpdatePrivateStateTarget::new(_, true); their gate lowering is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "imported-gadget-interfaces",
+      "obligation": "getRoot (UpdatePublicState), assetRoot and nullifierCall (UpdatePrivateState) and convertFields (native field conversion of verifier data) keep the obligations of the imported current modules; the credit theorem relies on the imported per-limb AddGates relation whose field lowering is open.",
+      "discharged": false
+    },
+    {
+      "name": "native-witness-and-proof-generation",
+      "obligation": "PartialWitness writes, the duplicated statement write in prove, CircuitData::prove and serde/bincode serialization (to_bytes/from_bytes, untranslated) are opaque; native success is satisfiability evidence only, never a soundness premise for arbitrary witnesses.",
+      "discharged": false
+    },
+    {
+      "name": "callee-files-not-mapped",
+      "obligation": "DepositWitness::verify, Deposit::to_u64_vec/nullifier, calculate_recipient_from_user_id and U63Target::enforce_ge are modeled from their source files but no line maps for deposit_witness.rs, deposit.rs, recipient.rs or u63.rs are provided by this module.",
+      "discharged": false
+    }
+  ]
+}
