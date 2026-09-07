@@ -162,10 +162,12 @@ theorem except_bind_ok_iff {ε α β : Type} (r : Except ε α) (f : α → Exce
     field bound. -/
 def publicStateFromNative (xs : List Nat) : Except PisFault PublicState :=
   if xs.length ≠ publicStateU64Len then .error (.publicState "length") else
-  let p := BalancePublicInputs.PublicState.read xs
-  if p.blockNumber ≥ blockLimit then .error (.publicState "block_number") else
-  if p.timestampHi ≥ wordBase ∨ p.timestampLo ≥ wordBase then .error (.publicState "timestamp") else
-  .ok p
+  if (BalancePublicInputs.PublicState.read xs).blockNumber ≥ blockLimit then
+    .error (.publicState "block_number") else
+  if (BalancePublicInputs.PublicState.read xs).timestampHi ≥ wordBase ∨
+      (BalancePublicInputs.PublicState.read xs).timestampLo ≥ wordBase then
+    .error (.publicState "timestamp") else
+  .ok (BalancePublicInputs.PublicState.read xs)
 
 /-- `Withdrawal::from_u64_slice`: `assert!(x <= u32::MAX)` on every limb
     (a panic, before any length check), then `from_u32_slice` exact length. -/
@@ -416,7 +418,8 @@ theorem value_be_injective_on_checked {xs ys : List Nat}
   have cy' : U256Arithmetic.Checked U256Arithmetic.wordBase ys.reverse :=
     fun d hd => cy d (List.mem_reverse.mp hd)
   have len' : xs.reverse.length = ys.reverse.length := by simpa using len
-  have := value_le_injective_on_checked cx' cy' len' eq
+  have reversed := value_le_injective_on_checked cx' cy' len' eq
+  have := congrArg List.reverse reversed
   simpa using this
 
 /-- Representation binding of the L1 leaf projection: two 32-bit-checked
@@ -428,14 +431,21 @@ theorem rollup_leaf_injective_on_checked {w v : Withdrawal} (cw : w.Checked) (cv
   have sub : ∀ part : List Nat, ∀ {u : Withdrawal}, u.Checked →
       (∀ x ∈ part, x ∈ u.words) → U256Arithmetic.Checked U256Arithmetic.wordBase part :=
     fun part _ cu mem d hd => word_base_agrees ▸ cu d (mem d hd)
-  have rec := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))
-    (sub _ cv (by simp [Withdrawal.words])) (by simp [Address.words]) hr
-  have amt := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))
-    (sub _ cv (by simp [Withdrawal.words])) (by simp [BalancePublicInputs.Bytes8.words]) ha
-  have nul := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))
-    (sub _ cv (by simp [Withdrawal.words])) (by simp [BalancePublicInputs.Bytes8.words]) hn
-  have aux := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))
-    (sub _ cv (by simp [Withdrawal.words])) (by simp [BalancePublicInputs.Bytes8.words]) hx
+  have rec := value_be_injective_on_checked
+    (sub _ cw (by intro y hy; simp [Withdrawal.words, hy]))
+    (sub _ cv (by intro y hy; simp [Withdrawal.words, hy])) (by simp [Address.words]) hr
+  have amt := value_be_injective_on_checked
+    (sub _ cw (by intro y hy; simp [Withdrawal.words, hy]))
+    (sub _ cv (by intro y hy; simp [Withdrawal.words, hy]))
+    (by simp [BalancePublicInputs.Bytes8.words]) ha
+  have nul := value_be_injective_on_checked
+    (sub _ cw (by intro y hy; simp [Withdrawal.words, hy]))
+    (sub _ cv (by intro y hy; simp [Withdrawal.words, hy]))
+    (by simp [BalancePublicInputs.Bytes8.words]) hn
+  have aux := value_be_injective_on_checked
+    (sub _ cw (by intro y hy; simp [Withdrawal.words, hy]))
+    (sub _ cv (by intro y hy; simp [Withdrawal.words, hy]))
+    (by simp [BalancePublicInputs.Bytes8.words]) hx
   apply withdrawal_encoding_injective
   simp only [Withdrawal.words, rec, ht, amt, nul, aux]
 
@@ -494,7 +504,7 @@ theorem settled_words_bind_transfer_channel_index_nonce {t u : Transfer} {c d i 
   obtain ⟨⟨s0,s1,s2,s3,s4,s5,s6,s7⟩, uk, ⟨b0,b1,b2,b3,b4,b5,b6,b7⟩, ⟨y0,y1,y2,y3,y4,y5,y6,y7⟩⟩ := u
   simp only [settledTransferWords, Transfer.words, BalancePublicInputs.Bytes8.words,
     List.cons_append, List.nil_append, List.cons.injEq, Transfer.mk.injEq,
-    BalancePublicInputs.Bytes8.mk.injEq, and_true] at same ⊢
+    BalancePublicInputs.Bytes8.mk.injEq, and_true, and_assoc] at same ⊢
   exact same
 
 /-- `From<PoseidonHashOut> for Bytes32`: each 64-bit element becomes
@@ -515,8 +525,13 @@ def CanonicalBytes32 (b : Bytes8) : Prop :=
   (∀ x ∈ b.words, x < wordBase) ∧ ∀ x ∈ (reduceToHashOut b).words, x < goldilocks
 
 theorem reduce_of_split (r : Root) : reduceToHashOut (bytes32OfHashOut r) = r := by
+  have key : ∀ n : Nat, n / wordBase * wordBase + n % wordBase = n := by
+    intro n
+    rw [Nat.mul_comm (n / wordBase) wordBase]
+    exact Nat.div_add_mod n wordBase
   obtain ⟨a, b, c, d⟩ := r
-  simp [reduceToHashOut, bytes32OfHashOut, Nat.div_add_mod']
+  simp only [reduceToHashOut, bytes32OfHashOut, BalancePublicInputs.Root.mk.injEq]
+  exact ⟨key a, key b, key c, key d⟩
 
 theorem canonical_reduction_injective {b c : Bytes8} (hb : CanonicalBytes32 b) (hc : CanonicalBytes32 c)
     (same : reduceToHashOut b = reduceToHashOut c) : b = c := by
@@ -643,10 +658,9 @@ def lift {ε α : Type} (r : Except ε α) (error : Error) : Result α :=
     round trip (bytes 1..11 must be zero). -/
 def extractAddress (r : Bytes8) : Result Address :=
   if r.a / 2 ^ 24 ≠ addressTag then .error (.invalidRecipient "Invalid recipient tag") else
-  let address : Address := ⟨r.d, r.e, r.f, r.g, r.h⟩
-  if r ≠ recipientOfAddress address then
+  if r ≠ recipientOfAddress ⟨r.d, r.e, r.f, r.g, r.h⟩ then
     .error (.invalidRecipient "non-canonical ADDRESS_TAG recipient: bytes 1..11 must be zero")
-  else .ok address
+  else .ok ⟨r.d, r.e, r.f, r.g, r.h⟩
 
 /-- Lines 325-366: typed tx path (both supplied) or legacy path (neither);
     a half-supplied pair is rejected. -/
@@ -664,7 +678,10 @@ def verifyTxInclusion {Proof Path Leaf : Type} (e : Environment Proof Path Leaf)
     require (txV2.nonce == w.tx.nonce) (.inconsistentWitness "tx_v2 nonce mismatch")
   | none, none =>
     require (e.txVerify w.txMerkleProof w.tx channelId txTreeRoot) .txMerkleProof
-  | _, _ => .error (.inconsistentWitness "tx_v2 and tx_v2_merkle_proof must be provided together")
+  | some _, none =>
+    .error (.inconsistentWitness "tx_v2 and tx_v2_merkle_proof must be provided together")
+  | none, some _ =>
+    .error (.inconsistentWitness "tx_v2 and tx_v2_merkle_proof must be provided together")
 
 def toPublicInputs {Proof Path Leaf : Type} (e : Environment Proof Path Leaf)
     (w : Witness Proof Path Leaf) : Result PublicInputs := do
@@ -760,13 +777,10 @@ theorem tx_inclusion_ok_iff {Proof Path Leaf : Type} (e : Environment Proof Path
       exact ⟨a, b, c, d, f⟩
   · rename_i hv hp
     simp [require_ok_iff, hv, hp]
-  · rename_i mismatch hv hp
-    simp only [reduceCtorEq, false_iff, not_or]
-    constructor
-    · rintro ⟨x, y, hx, hy, _⟩
-      exact mismatch x y hx hy
-    · rintro ⟨hx, hy, _⟩
-      exact hp hx hy
+  · rename_i txV2 hv hp
+    simp [hv, hp]
+  · rename_i proof hv hp
+    simp [hv, hp]
 
 /-- Everything native admission checked, in source order. `full` is the parsed
     balance public inputs; the output is assembled from `update_public_state.new`
@@ -794,9 +808,8 @@ theorem native_admission_facts {Proof Path Leaf : Type} {e : Environment Proof P
             nullifierOf e w.transferWitness.transfer full.pis.channelId
               w.transferWitness.transferIndex w.tx.nonce,
             w.transferWitness.transfer.auxData⟩⟩ := by
-  unfold toPublicInputs at accepted
-  simp only [unit_bind_ok_iff, bind_ok_iff, exists_unit, require_ok_iff, lift_ok_iff, pure_ok_iff,
-    beq_iff_eq] at accepted
+  simp only [toPublicInputs, unit_bind_ok_iff, bind_ok_iff, exists_unit, require_ok_iff,
+    lift_ok_iff, pure_ok_iff, beq_iff_eq] at accepted
   obtain ⟨cyc, ver, full, hfull, commit, upd, old, sent, troot, tver, chan, aroot, acc, incl,
     recipient, hr, hp⟩ := accepted
   exact ⟨cyc, ver, full, hfull, commit, upd, old, sent, troot, tver, chan, aroot, acc, incl,

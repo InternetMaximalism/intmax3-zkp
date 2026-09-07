@@ -194,6 +194,8 @@ instance : DecidablePred CheckedWords := fun ws => List.decidableBAll _ ws
 /-- Field elements are below the Goldilocks modulus (`FieldAndGadgetLowering`). -/
 def Hash4.canonicalField (h : Hash4) : Prop := ∀ x ∈ h.elems, x < goldilocks
 
+instance : DecidablePred Hash4.canonicalField := fun h => List.decidableBAll _ h.elems
+
 /-- `Bytes32::from(PoseidonHashOut)` / `Bytes32Target::from_hash_out`: each field element is
     split into `(high, low)` 32-bit limbs, high first. Deterministic, and the only way the
     circuit can obtain the 32-byte member identity. -/
@@ -1591,5 +1593,378 @@ theorem verified_chain_uses_the_circuit_verifier_data (e : Environment) (cap : N
     baseVd = dataVd := by
   rw [← chain_declares_single_vd e cap baseVd rs out h]
   exact chain_verify_pins_declared_vd e dataVd out hv
+
+/-! ## Comparison with the IntmaxRollup model (`RollupValue.registerChannel`)
+
+    `SolidityKeccakPacking`: `plonky2_keccak::solidity_keccak256` consumes each u32 word as four
+    big-endian bytes. Under that packing the circuit's fold preimage is byte-identical to
+    `RollupValue.hashPreimage (.channelRegistration ..)`, which is the preimage
+    `IntmaxRollup._channelRegHashChain` builds with `abi.encodePacked`. -/
+
+theorem upto_succ_cons (n : Nat) : upto (n + 1) = 0 :: (upto n).map (· + 1) := by
+  induction n with
+  | zero => rfl
+  | succ k ih =>
+    show upto (k + 1) ++ [k + 1] = 0 :: (upto (k + 1)).map (· + 1)
+    have key : upto (k + 1) ++ [k + 1] = 0 :: ((upto k).map (· + 1) ++ [k + 1]) := by
+      rw [ih]; rfl
+    rw [key]
+    simp [upto, List.map_append]
+
+theorem map_eq_upto_getD {α β : Type} (l : List α) (d : α) (f : α → β) :
+    l.map f = (upto l.length).map (fun i => f (l.getD i d)) := by
+  induction l with
+  | nil => rfl
+  | cons a as ih =>
+    rw [List.length_cons, upto_succ_cons]
+    simp only [List.map_cons, List.map_map]
+    rw [ih]
+    rfl
+
+def wordsToBytes (ws : List Nat) : RollupValue.Bytes := ws.bind (RollupValue.wordBytes 4)
+
+theorem words_to_bytes_append (xs ys : List Nat) :
+    wordsToBytes (xs ++ ys) = wordsToBytes xs ++ wordsToBytes ys := by
+  simp [wordsToBytes, List.append_bind]
+
+theorem bytes32_of_limbs_raw (w0 w1 w2 w3 w4 w5 w6 w7 : Nat)
+    (h1 : w1 < limbBase) (h2 : w2 < limbBase) (h3 : w3 < limbBase)
+    (h4 : w4 < limbBase) (h5 : w5 < limbBase) (h6 : w6 < limbBase) (h7 : w7 < limbBase) :
+    RollupValue.wordBytes 32 (limbValue [w0, w1, w2, w3, w4, w5, w6, w7]) =
+      [w0, w1, w2, w3, w4, w5, w6, w7].bind (RollupValue.wordBytes 4) := by
+  have hr32 : List.range 32 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31] := rfl
+  have hr4 : List.range 4 = [0,1,2,3] := rfl
+  simp only [RollupValue.wordBytes, hr32, hr4, List.map, List.bind_cons, List.bind_nil,
+    List.append_nil, List.cons_append, List.nil_append, limbValue, List.foldl, limbBase] at *
+  simp only [List.cons.injEq, and_true]
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;>
+    (congr 1; omega)
+
+theorem address_of_limbs_raw (a0 a1 a2 a3 a4 : Nat)
+    (h1 : a1 < limbBase) (h2 : a2 < limbBase) (h3 : a3 < limbBase) (h4 : a4 < limbBase) :
+    RollupValue.wordBytes 20 (limbValue [a0, a1, a2, a3, a4]) =
+      [a0, a1, a2, a3, a4].bind (RollupValue.wordBytes 4) := by
+  have hr20 : List.range 20 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19] := rfl
+  have hr4 : List.range 4 = [0,1,2,3] := rfl
+  simp only [RollupValue.wordBytes, hr20, hr4, List.map, List.bind_cons, List.bind_nil,
+    List.append_nil, List.cons_append, List.nil_append, limbValue, List.foldl, limbBase] at *
+  simp only [List.cons.injEq, and_true]
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;> (congr 1; omega)
+
+theorem bytes32_of_limbs (x : Words8) (h : CheckedWords x.words) :
+    RollupValue.wordBytes 32 x.value = wordsToBytes x.words := by
+  cases x with
+  | mk w0 w1 w2 w3 w4 w5 w6 w7 =>
+    exact bytes32_of_limbs_raw w0 w1 w2 w3 w4 w5 w6 w7 (h _ (by simp [Words8.words]))
+      (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words]))
+      (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words]))
+
+theorem address_of_limbs (x : Words5) (h : CheckedWords x.words) :
+    RollupValue.wordBytes 20 x.value = wordsToBytes x.words := by
+  cases x with
+  | mk a0 a1 a2 a3 a4 =>
+    exact address_of_limbs_raw a0 a1 a2 a3 a4 (h _ (by simp [Words5.words]))
+      (h _ (by simp [Words5.words])) (h _ (by simp [Words5.words])) (h _ (by simp [Words5.words]))
+
+/-- One member slot as the contract sees it. -/
+def RegEntry.toSlot (m : RegEntry) : RollupValue.MemberSlot :=
+  ⟨m.pkG.value, m.pkB.value, m.regev.value, m.recipient.value⟩
+
+def RegEntry.Checked (m : RegEntry) : Prop :=
+  CheckedWords m.pkG.words ∧ CheckedWords m.pkB.words ∧ CheckedWords m.regev.words ∧
+    CheckedWords m.recipient.words
+
+theorem zero_entry_to_slot : RegEntry.zero.toSlot = ⟨0, 0, 0, 0⟩ := by decide
+
+theorem slot_words_to_bytes (m : RegEntry) (h : m.Checked) :
+    wordsToBytes m.words = RollupValue.encodeMemberSlot m.toSlot := by
+  obtain ⟨h1, h2, h3, h4⟩ := h
+  simp only [RegEntry.words, RegEntry.toSlot, RollupValue.encodeMemberSlot, words_to_bytes_append,
+    bytes32_of_limbs _ h1, bytes32_of_limbs _ h2, bytes32_of_limbs _ h3, address_of_limbs _ h4]
+
+theorem slots_words_to_bytes (ms : List RegEntry) (h : ∀ m ∈ ms, m.Checked) :
+    wordsToBytes (ms.bind RegEntry.words) =
+      (ms.map RegEntry.toSlot).bind RollupValue.encodeMemberSlot := by
+  induction ms with
+  | nil => rfl
+  | cons a as ih =>
+    simp only [List.bind_cons, List.map_cons, words_to_bytes_append,
+      slot_words_to_bytes a (h a (List.mem_cons_self a as)),
+      ih (fun m hm => h m (List.mem_cons_of_mem a hm))]
+
+/-- All limbs of a record are u32 (the Rust types) — needed for the byte-packing comparison. -/
+structure Record.CheckedRecord (r : Record) : Prop where
+  channel : r.channelId < limbBase
+  bp : r.bpSlot < limbBase
+  count : r.memberCount < limbBase
+  delegates : r.delegateCount < limbBase
+  slots : ∀ m ∈ r.members, m.Checked
+
+/-- KERNEL-CHECKED. Under `SolidityKeccakPacking` the step's keccak preimage is byte-identical to
+    the `IntmaxRollup._channelRegHashChain` preimage of `RollupValue`. -/
+theorem fold_preimage_matches_rollup_model (prev : Words8) (r : Record)
+    (hp : CheckedWords prev.words) (hr : r.CheckedRecord) :
+    wordsToBytes (foldWords prev r) =
+      RollupValue.hashPreimage (.channelRegistration prev.value r.channelId r.bpSlot
+        r.memberCount r.delegateCount (r.members.map RegEntry.toSlot)) := by
+  simp only [foldWords, words_to_bytes_append, RollupValue.hashPreimage, bytes32_of_limbs _ hp,
+    slots_words_to_bytes r.members hr.slots, List.append_assoc]
+  rfl
+
+/-- The two `HashInput` shapes `RollupValue` uses for a registration have the SAME preimage:
+    `registerChannel` builds the header bytes explicitly, `channelRegHashChain` structurally. -/
+theorem rollup_registration_preimage_forms_agree (prev channel bp count delegates : Nat)
+    (slots : List RollupValue.MemberSlot) :
+    RollupValue.hashPreimage (.channelRegistration prev channel bp count delegates slots) =
+      RollupValue.hashPreimage (.registrationBytes
+        (RollupValue.wordBytes 32 prev ++ RollupValue.wordBytes 4 channel ++
+          RollupValue.wordBytes 4 bp ++ RollupValue.wordBytes 4 count ++
+          RollupValue.wordBytes 4 delegates) slots) := by
+  simp [RollupValue.hashPreimage, List.append_assoc]
+
+/-- KeccakBridge: the in-circuit keccak over u32 words and a byte-level keccak agree on u32 words. -/
+def KeccakBridge (e : Environment) (keccak : RollupValue.Bytes → RollupValue.Hash) : Prop :=
+  ∀ ws, CheckedWords ws → (e.keccakWords ws).value = keccak (wordsToBytes ws)
+
+/-- The keccak gadget returns 32-bit limbs (plonky2_keccak, outside the modeled files). -/
+def KeccakOutputsChecked (e : Environment) : Prop := ∀ ws, CheckedWords (e.keccakWords ws).words
+
+theorem fold_words_checked (prev : Words8) (r : Record) (hp : CheckedWords prev.words)
+    (hr : r.CheckedRecord) : CheckedWords (foldWords prev r) := by
+  intro v hv
+  simp only [foldWords, List.mem_append] at hv
+  rcases hv with (hv | hv) | hv
+  · exact hp v hv
+  · simp only [List.mem_cons, List.not_mem_nil, or_false] at hv
+    rcases hv with rfl | rfl | rfl | rfl
+    · exact hr.channel
+    · exact hr.bp
+    · exact hr.count
+    · exact hr.delegates
+  · obtain ⟨m, hm, hvm⟩ := List.mem_bind.mp hv
+    obtain ⟨h1, h2, h3, h4⟩ := hr.slots m hm
+    simp only [RegEntry.words, List.mem_append] at hvm
+    rcases hvm with ((hvm | hvm) | hvm) | hvm
+    · exact h1 v hvm
+    · exact h2 v hvm
+    · exact h3 v hvm
+    · exact h4 v hvm
+
+/-- The Solidity-side fold: `pendingRegistrationChain := keccak(prev ‖ header ‖ 8 slots)`. -/
+def rollupRegFold (re : RollupValue.Environment) (start : RollupValue.Hash) (rs : List Record) :
+    RollupValue.Hash :=
+  rs.foldl (fun acc r => re.hash (.channelRegistration acc r.channelId r.bpSlot r.memberCount
+    r.delegateCount (r.members.map RegEntry.toSlot))) start
+
+theorem fold_value_matches_rollup_under_bridge (e : Environment) (re : RollupValue.Environment)
+    (keccak : RollupValue.Bytes → RollupValue.Hash) (hb : KeccakBridge e keccak)
+    (ha : RollupValue.HashEncodingAgrees re keccak) (prev : Words8) (r : Record)
+    (hp : CheckedWords prev.words) (hr : r.CheckedRecord) :
+    (e.keccakWords (foldWords prev r)).value =
+      re.hash (.channelRegistration prev.value r.channelId r.bpSlot r.memberCount r.delegateCount
+        (r.members.map RegEntry.toSlot)) := by
+  rw [hb _ (fold_words_checked prev r hp hr), fold_preimage_matches_rollup_model prev r hp hr, ha]
+
+theorem fold_chain_matches_rollup_fold (e : Environment) (re : RollupValue.Environment)
+    (keccak : RollupValue.Bytes → RollupValue.Hash) (hb : KeccakBridge e keccak)
+    (ha : RollupValue.HashEncodingAgrees re keccak) (hout : KeccakOutputsChecked e)
+    (start : Words8) (h0 : CheckedWords start.words) (rs : List Record)
+    (hrs : ∀ r ∈ rs, r.CheckedRecord) :
+    (foldChain e start rs).value = rollupRegFold re start.value rs := by
+  induction rs generalizing start with
+  | nil => simp [foldChain, rollupRegFold]
+  | cons r rest ih =>
+    have hr := hrs r (List.mem_cons_self r rest)
+    have hrest : ∀ x ∈ rest, x.CheckedRecord := fun x hx => hrs x (List.mem_cons_of_mem r hx)
+    simp only [foldChain, rollupRegFold, List.foldl_cons]
+    have step := fold_value_matches_rollup_under_bridge e re keccak hb ha start r h0 hr
+    have rest' := ih (e.keccakWords (foldWords start r)) (hout _) hrest
+    simp only [foldChain, rollupRegFold] at rest'
+    rw [rest', step]
+
+/-- MAIN COMPARISON. A chain proof's final `channel_reg_hash_chain` equals `IntmaxRollup`'s
+    `pendingRegistrationChain` fold over the SAME registrations, in the SAME order, from the SAME
+    initial value; the count is the initial count plus the number of registrations; every record is
+    cosigner-only with `member_count ∈ [2, 8]`; and the chain declares one verifier data.
+    Premises: proof soundness (`Chain`), the keccak bridges (`SolidityKeccakPacking`,
+    `KeccakBridge`, `RollupValue.HashEncodingAgrees`), 32-bit gadget outputs, and u32 record limbs.
+    Whether the initial value is the contract's actual pending chain is `InitialStatePin`. -/
+theorem chain_matches_rollup_fold (e : Environment) (re : RollupValue.Environment) (cap : Nat)
+    (keccak : RollupValue.Bytes → RollupValue.Hash) (hb : KeccakBridge e keccak)
+    (ha : RollupValue.HashEncodingAgrees re keccak) (hout : KeccakOutputsChecked e)
+    (baseVd : List Nat) (rs : List Record) (out : PublicInputs) (h : Chain e cap baseVd rs out)
+    (h0 : CheckedWords out.initialChannelRegHashChain.words)
+    (hrs : ∀ r ∈ rs, r.CheckedRecord) :
+    out.channelRegHashChain.value =
+        rollupRegFold re out.initialChannelRegHashChain.value rs ∧
+      out.channelRegCount = out.initialChannelRegCount + rs.length ∧
+      (∀ r ∈ rs, r.CosignerOnly) ∧ out.vd = baseVd := by
+  obtain ⟨hchain, hcount, -, hall, hvd⟩ := chain_is_fold e cap baseVd rs out h
+  refine ⟨?_, hcount, hall, hvd⟩
+  rw [hchain]
+  exact fold_chain_matches_rollup_fold e re keccak hb ha hout _ h0 rs hrs
+
+/-! ## Relating a record to the L1 registration calldata -/
+
+/-- The record's 8 slots are the contract's padded slot list: active entries first, ZERO slots
+    afterwards. The circuit forces the identity components of a padding slot to zero but NOT its
+    recipient (`gates_leave_recipients_free`), so this is a hypothesis, not a gate consequence. -/
+theorem record_slots_are_padded (r : Record) (hlen : r.members.length = maxSigCluster)
+    (hpad : ∀ i, r.memberCount ≤ i → i < maxSigCluster → r.slot i = RegEntry.zero) :
+    r.members.map RegEntry.toSlot =
+      (upto maxSigCluster).map (fun i =>
+        if i < r.memberCount then (r.slot i).toSlot else ⟨0, 0, 0, 0⟩) := by
+  rw [map_eq_upto_getD r.members RegEntry.zero RegEntry.toSlot, hlen]
+  refine map_upto_congr maxSigCluster _ _ ?_
+  intro i hi
+  by_cases hlt : i < r.memberCount
+  · simp [hlt, Record.slot]
+  · simp only [hlt, if_false]
+    rw [show r.members.getD i RegEntry.zero = r.slot i from rfl,
+      hpad i (Nat.le_of_not_lt hlt) hi, zero_entry_to_slot]
+
+/-- "This registration record IS that L1 `registerChannel` calldata": same channel, same bp slot,
+    zero delegates, same member count, and the contract's padded slot list is the record's. -/
+def MatchesRegistration (r : Record) (reg : RollupValue.Registration) : Prop :=
+  reg.channel = r.channelId ∧ reg.bpSlot = r.bpSlot ∧ reg.delegates = 0 ∧
+    reg.pkGs.length = r.memberCount ∧
+    (upto maxSigCluster).map (fun i =>
+      if i < r.memberCount then
+        RollupValue.MemberSlot.mk (reg.pkGs.getD i 0) (reg.pkBs.getD i 0) (reg.regev.getD i 0)
+          (reg.recipients.getD i 0)
+      else ⟨0, 0, 0, 0⟩) = r.members.map RegEntry.toSlot
+
+theorem range_eight_is_upto : List.range 8 = upto maxSigCluster := by decide
+
+/-- One `RollupValue.channelRegHashChain` step on matching calldata IS one step of the fold the
+    circuit performs (same `HashInput`), given the circuit-enforced `delegate_count = 0`. -/
+theorem rollup_chain_step_matches_record (re : RollupValue.Environment) (r : Record)
+    (reg : RollupValue.Registration) (hm : MatchesRegistration r reg) (hdc : r.delegateCount = 0)
+    (prev : RollupValue.Hash) :
+    RollupValue.channelRegHashChain re prev reg =
+      re.hash (.channelRegistration prev r.channelId r.bpSlot r.memberCount r.delegateCount
+        (r.members.map RegEntry.toSlot)) := by
+  obtain ⟨h1, h2, h3, h4, h5⟩ := hm
+  simp only [RollupValue.channelRegHashChain, h1, h2, h4, hdc, range_eight_is_upto, h5]
+
+theorem rollup_require_ok_iff (c : Bool) (err : RollupValue.Error) :
+    (RollupValue.require c err = .ok ()) ↔ c = true := by
+  cases c <;> simp [RollupValue.require]
+
+/-- `IntmaxRollup.registerChannel` folds `pendingRegistrationChain` by exactly one registration
+    hash and bumps `registrationCount` by one; the checks it enforces are `delegates = 0`,
+    `2 <= count <= 8` and `bp_member_slot < count` — the same shape the step circuit enforces. -/
+theorem rollup_register_channel_folds_pending_chain (re : RollupValue.Environment)
+    (keccak : RollupValue.Bytes → RollupValue.Hash) (ha : RollupValue.HashEncodingAgrees re keccak)
+    (s after : RollupValue.State) (reg : RollupValue.Registration)
+    (ev : List RollupValue.Event) (h : RollupValue.registerChannel re s reg = .ok (after, ev)) :
+    ∃ slots, RollupValue.registrationSlots reg.pkGs.length reg.pkGs reg.pkBs reg.regev
+        reg.recipients 8 = .ok slots ∧
+      after.pendingRegistrationChain = re.hash (.channelRegistration s.pendingRegistrationChain
+        reg.channel reg.bpSlot reg.pkGs.length 0 slots) ∧
+      after.registrationCount = s.registrationCount + 1 ∧ reg.delegates = 0 ∧
+      2 ≤ reg.pkGs.length ∧ reg.pkGs.length ≤ 8 ∧ reg.bpSlot < reg.pkGs.length := by
+  simp only [RollupValue.registerChannel, RollupValue.channelRegHashChainRaw, RollupValue.checkedAdd,
+    bind_ok_iff, unit_bind_ok_iff, exists_unit, pure_ok_iff, rollup_require_ok_iff,
+    Prod.mk.injEq] at h
+  obtain ⟨-, -, -, hdel, -, hcounts, hbp, -, chain, ⟨slots, hslots, hhash⟩, cnt, ⟨-, hcnt⟩,
+    hstate⟩ := h
+  simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hcounts hdel hbp
+  refine ⟨slots, hslots, ?_, ?_, hdel, hcounts.1.1.1.1, hcounts.1.1.1.2, hbp⟩
+  · rw [← hstate.1]
+    simp only [RollupValue.recordCheckpoint, ← hhash]
+    rw [ha, ha, rollup_registration_preimage_forms_agree]
+  · rw [← hstate.1]
+    simp only [RollupValue.recordCheckpoint, ← hcnt]
+
+/-! ## A concrete, non-vacuous accepted step
+
+    Small opaque callbacks stand in for keccak / Poseidon; the point is that the native admission,
+    the gate equations and the one-step chain are simultaneously satisfiable. -/
+
+def demoEnv : Environment where
+  keccakWords := fun ws => ⟨ws.length, ws.foldl (· + ·) 0 % 1000003, 0, 0, 0, 0, 0, 0⟩
+  poseidonWords := fun ws => ⟨ws.foldl (· + ·) 0 % 1000003, ws.length, 0, 0⟩
+  twoToOne := fun a b => ⟨(a.h0 + 2 * b.h0 + 1) % 1000003, 0, 0, 0⟩
+  emptySendTreeRoot := ⟨7, 0, 0, 0⟩
+  proofAccepted := fun _ _ => true
+
+def demoEntry (k : Nat) : RegEntry :=
+  ⟨⟨0, k, 0, 0, 0, 0, 0, 0⟩, ⟨0, k + 16, 0, 0, 0, 0, 0, 0⟩, ⟨0, k + 32, 0, 0, 0, 0, 0, 0⟩,
+   ⟨k, 0, 0, 0, 0⟩⟩
+
+def demoMembers : List RegEntry :=
+  [demoEntry 1, demoEntry 2, RegEntry.zero, RegEntry.zero, RegEntry.zero, RegEntry.zero,
+   RegEntry.zero, RegEntry.zero]
+
+def demoRecord : Record := ⟨5, 1, 2, 0, demoMembers⟩
+
+set_option maxRecDepth 20000 in
+theorem demo_record_validates : demoRecord.validate = .ok () := by rfl
+
+def demoSiblings : List Hash4 := List.replicate channelTreeHeight Hash4.zero
+def demoVd : List Nat := [1, 2, 3, 4]
+
+def demoInitialRoot : Hash4 :=
+  merkleRoot demoEnv (channelLeafHash demoEnv (defaultChannelLeaf demoEnv)) 5 demoSiblings
+
+def demoWitness : StepWitness :=
+  ⟨some (Words8.zero, demoInitialRoot, 0), none, demoRecord, demoSiblings, 7⟩
+
+def demoPrev : PublicInputs :=
+  ⟨Words8.zero, demoInitialRoot, 0, Words8.zero, demoInitialRoot, 0, 7, demoVd⟩
+
+theorem demo_prev_pis : demoWitness.prevPis 0 demoVd = .ok demoPrev := rfl
+
+set_option maxRecDepth 20000 in
+theorem demo_native_accepts :
+    ∃ out, demoWitness.toPublicInputs demoEnv 0 demoVd = .ok out ∧
+      out.channelRegCount = 1 ∧ out.initialChannelRegCount = 0 ∧ out.blockNumber = 7 ∧
+      out.channelTreeRoot =
+        merkleRoot demoEnv
+          (channelLeafHash demoEnv (registeredChannelLeaf demoEnv (nativeMemberRoot demoEnv demoRecord)))
+          5 demoSiblings :=
+  ⟨_, rfl, rfl, rfl, rfl, rfl⟩
+
+set_option maxRecDepth 20000 in
+theorem demo_native_widths : NativeWidths demoEnv 0 demoVd demoWitness demoPrev := by
+  refine ⟨rfl, rfl, rfl, ⟨by decide, by decide, by decide,
+    by decide, by decide, rfl⟩, by decide, by decide, by decide, by decide, ?_, ?_,
+    fun h => absurd h (by decide), fun h => absurd h (by decide)⟩
+  · intro i hi
+    have hd : ∀ j ∈ upto maxSigCluster,
+        CheckedWords (demoWitness.record.slot j).recipient.words := by decide
+    exact hd i ((mem_upto i maxSigCluster).mpr hi)
+  · intro i hi
+    have hd : ∀ j ∈ upto maxSigCluster,
+        (demoWitness.record.slot j).toMember.pkG.canonicalField ∧
+        (demoWitness.record.slot j).toMember.pkB.canonicalField ∧
+        (demoWitness.record.slot j).toMember.regev.canonicalField := by decide
+    exact hd i ((mem_upto i maxSigCluster).mpr hi)
+
+set_option maxRecDepth 20000 in
+/-- NON-VACUOUS. One concrete registration is natively admitted, its `set_witness` assignment
+    satisfies every gate of `ChannelRegStepTarget::new`, and it forms a one-record chain whose
+    count is 1. -/
+theorem demo_chain_nonvacuous :
+    ∃ out, demoWitness.toPublicInputs demoEnv 0 demoVd = .ok out ∧
+      CircuitGates demoEnv 0 (nativeInputs demoVd demoWitness demoPrev out) ∧
+      Chain demoEnv 0 demoVd [demoRecord] out ∧ out.channelRegCount = 1 := by
+  obtain ⟨out, hout, hcount, -⟩ := demo_native_accepts
+  have hg := native_assignment_satisfies_gates demoEnv 0 demoVd demoWitness demoPrev out
+    demo_record_validates demo_prev_pis hout demo_native_widths
+  have hrec : (nativeInputs demoVd demoWitness demoPrev out).record = demoRecord :=
+    native_record_is_the_record demoVd demoWitness demoPrev out demo_record_validates rfl
+  refine ⟨out, hout, hg, ?_, hcount⟩
+  have hc := Chain.initial (e := demoEnv) (cap := 0) (baseVd := demoVd) _ hg rfl rfl
+  rwa [hrec] at hc
+
+set_option maxRecDepth 20000 in
+/-- The demo record's member root is the root over exactly its 2 active slots. -/
+theorem demo_member_root_is_two_slots :
+    nativeMemberRoot demoEnv demoRecord =
+      memberRootOfHashes demoEnv ((upto maxSigCluster).map (fun i =>
+        if i < 2 then memberLeafHash demoEnv (demoRecord.slot i).toMember
+        else emptyMemberLeafHash demoEnv)) := rfl
 
 end Zkp.Implementation.ChannelRegChain
