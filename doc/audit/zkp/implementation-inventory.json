@@ -548,49 +548,49 @@
       "sha256": "d62285362f097bfeb34b4ad646e00a8f0728510c863b7e7a36f6c9e77d572acc",
       "lines": 246,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-processor.json"
     },
     {
       "path": "src/circuits/balance/common/account_state.rs",
       "sha256": "2d36a6f004052a2619099581fa77770ddb8272d570f5c803b2aa83e02c34c474",
       "lines": 163,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/account-state.json"
     },
     {
       "path": "src/circuits/balance/common/deposit_witness.rs",
       "sha256": "0cf79c81944bc625ba6411f5595b5add4cbb47301a096a16ba97453402d7a91e",
       "lines": 150,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-witness.json"
     },
     {
       "path": "src/circuits/balance/common/mod.rs",
       "sha256": "50d92af01caa6a7f82b8c72d76adb2812f57ba5cc1e63a4b3af86b3a6ec659a2",
       "lines": 7,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-common-mod.json"
     },
     {
       "path": "src/circuits/balance/common/recipient.rs",
       "sha256": "dd352b2ef2b67ec2905aef571fe74f1cd04d85601264e65a5e44c9c7ba091a24",
       "lines": 201,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/recipient.json"
     },
     {
       "path": "src/circuits/balance/common/transfer_witness.rs",
       "sha256": "d37031de232095b9ebdedb989bb454345cd52131277aaa04d38536b0191b0a60",
       "lines": 118,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/transfer-witness.json"
     },
     {
       "path": "src/circuits/balance/common/tx_settlement.rs",
       "sha256": "21b70de9bac4ef11749eb0caf187fa944c904d616cf08025bb4c07901bfba25e",
       "lines": 596,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/tx-settlement.json"
     },
     {
       "path": "src/circuits/balance/common/update_private_state.rs",
@@ -611,28 +611,28 @@
       "sha256": "9fe232c169e50e496b0d47ae3c99c4f95cd6b908fbdcb2a4c2191e32edf08cc3",
       "lines": 9,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-mod.json"
     },
     {
       "path": "src/circuits/balance/receive_deposit_circuit.rs",
       "sha256": "7f7ca749b601606387a13d3f02b481ac7c62ba8cfc1f9a03d9cd8ab6916d411e",
       "lines": 733,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/receive-deposit-circuit.json"
     },
     {
       "path": "src/circuits/balance/receive_transfer_circuit.rs",
       "sha256": "ee12486f9db02c5755ab6371cd8ba14072e0334068d724ddb4b46b813bc39fd5",
       "lines": 1110,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/receive-transfer-circuit.json"
     },
     {
       "path": "src/circuits/balance/send_tx_circuit.rs",
       "sha256": "28e8dea4d6af871616ed4d0abd69ba2a51529c8dbf4e2f4fb5bff89f511b706d",
       "lines": 709,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/send-tx-circuit.json"
     },
     {
       "path": "src/circuits/balance/spend_circuit.rs",
@@ -695,7 +695,7 @@
       "sha256": "244562fcd68205776d24444570f2ee9e83464c0c2cf78bba3afce1073277c6b3",
       "lines": 1428,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/e2e-flow.json"
     },
     {
       "path": "src/circuits/channel/h1_gadget.rs",
@@ -709,7 +709,7 @@
       "sha256": "4b41a3dec32d309ce63f22865a77794b83c5ada7a2107174917596a5028a4ac4",
       "lines": 14,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-mod.json"
     },
     {
       "path": "src/circuits/channel/post_close_claim_circuit.rs",
@@ -751,231 +751,231 @@
       "sha256": "7463689d9b89a2690bc1e97477c89534bc3940b0b97056f992a8a0bd0a4334d4",
       "lines": 6,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/circuits-mod.json"
     },
     {
       "path": "src/circuits/test_utils/mod.rs",
       "sha256": "10302b60c53a3867e8cb2af9fd5904ddd3586bd90e37c1463e02bb342ec49876",
       "lines": 6,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/test-utils-mod.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/block_chain_pis.rs",
       "sha256": "c7de76d6b45682772df5dfc0ab12d5d4649e23bb72da9aa6cc4dc96032c1c3d8",
       "lines": 204,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-chain-pis.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/block_hash_chain_circuit.rs",
       "sha256": "a88690515a8718a0b57d81bf2dd1a7d992b4cb40326842486a2951de7d958adf",
       "lines": 124,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-hash-chain-circuit.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/block_hash_chain_processor.rs",
       "sha256": "dd29a6cea8f5df28e372df5286f8f458c78571afbbad842282fc5d455af8fe6a",
       "lines": 477,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-hash-chain-processor.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/block_step.rs",
       "sha256": "e184e457d91501922cd5883e9495e16eaf84383f90b6dc407ce845d07a4d65bd",
       "lines": 1169,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-step.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/channel_state_message.rs",
       "sha256": "81ae6124b05bf08bc48de86b84b86668466629eb1b451db1f7914166a0999b10",
       "lines": 707,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-state-message.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/ext_public_state.rs",
       "sha256": "946f9de0287b941324a8c702566eea1827c517f35b42f83b8f93cf82bc7aaa81",
       "lines": 324,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/ext-public-state.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/mod.rs",
       "sha256": "31fd0a39e333487698f334f41e4651044b48e8ff2467a7089425060e4cb76030",
       "lines": 13,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-hash-chain-mod.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/nofn_attack.rs",
       "sha256": "097c911d715de249bf87aca52e2a5ef634c3029f12fef47ed033ec32e3470a91",
       "lines": 708,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/nofn-attack.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/small_block_message.rs",
       "sha256": "869ccb7332074beccc329e059297e562b9b294c34ef55ae9961ec71596e9758c",
       "lines": 234,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/small-block-message.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/update_channel_tree.rs",
       "sha256": "bc07c7d1a287a50da2bd40e4b31237df7ad9202a915b10a918859cdf0cb785d8",
       "lines": 2569,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/update-channel-tree.json"
     },
     {
       "path": "src/circuits/validity/block_hash_chain/validity_circuit.rs",
       "sha256": "7f9e7c8cad10f20707e3a8852dcbf68f8ee5802dffb51b879314637f7b6a71ac",
       "lines": 453,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/validity-circuit.json"
     },
     {
       "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_chain_pis.rs",
       "sha256": "f53c090b36d794c99bdf0e40022132ad6febd69418f7fb91e35f6ba49d387176",
       "lines": 313,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-reg-chain-pis.json"
     },
     {
       "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_chain_processor.rs",
       "sha256": "b6cbe3a2fa66186cec957555817b15df8b77e8bcc7db5ffe291620746fdc40c9",
       "lines": 246,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-reg-chain-processor.json"
     },
     {
       "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_hash_chain_circuit.rs",
       "sha256": "3bb0d8c7357a605fa37e8f14423855f7edb0f091d1c734754252b89086668a09",
       "lines": 126,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-reg-hash-chain-circuit.json"
     },
     {
       "path": "src/circuits/validity/channel_reg_hash_chain/channel_reg_step.rs",
       "sha256": "5198621137327edd7fd045058a8a0e4d7ea092d42f8a0bfd0d79306d8cbd08ec",
       "lines": 982,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-reg-step.json"
     },
     {
       "path": "src/circuits/validity/channel_reg_hash_chain/mod.rs",
       "sha256": "1e268be94de6fe95d3baeefb88a460d7bd87e82b5101bfae17d5f4910d57a637",
       "lines": 4,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-reg-hash-chain-mod.json"
     },
     {
       "path": "src/circuits/validity/deposit_hash_chain/deposit_chain_pis.rs",
       "sha256": "1e6947bc35918d1a56fd269012686d010bfafdb63a3e29394a5ddb9b1e8b8186",
       "lines": 301,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-chain-pis.json"
     },
     {
       "path": "src/circuits/validity/deposit_hash_chain/deposit_chain_processor.rs",
       "sha256": "d662900eaf8862b027ce00b2c18b109301dc488b77e639c4ae552ba0a77a1d8c",
       "lines": 212,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-chain-processor.json"
     },
     {
       "path": "src/circuits/validity/deposit_hash_chain/deposit_hash_chain_circuit.rs",
       "sha256": "7be3073f1f34c428eeef13f2130c56acc997b4a61c88335d20133b74ef75839b",
       "lines": 221,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-hash-chain-circuit.json"
     },
     {
       "path": "src/circuits/validity/deposit_hash_chain/deposit_step.rs",
       "sha256": "2e84ad4c7138fef0c53fe7fdaf9029b821ac0d6d55ecb3da5440c1efe717d671",
       "lines": 563,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-step.json"
     },
     {
       "path": "src/circuits/validity/deposit_hash_chain/mod.rs",
       "sha256": "9467f77615960e6574afdf07acfa022890704867a8bb6f38ee3a01c2ff46e45b",
       "lines": 4,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-hash-chain-mod.json"
     },
     {
       "path": "src/circuits/validity/mod.rs",
       "sha256": "fa15f624cc677dba902425bab97a48779f0623ab8ffa3badf6dd56848490e6f3",
       "lines": 3,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/validity-mod.json"
     },
     {
       "path": "src/circuits/withdraw/mod.rs",
       "sha256": "1f4ffb56029db63e8af19a21cb1536f724a3a72b2df73cfef378dd1ba7a7cd51",
       "lines": 5,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdraw-mod.json"
     },
     {
       "path": "src/circuits/withdraw/single_withdrawal_circuit.rs",
       "sha256": "18c551ce8794ad4bf717e5c546c90d28060e00258a76ab9c2d0a6fce81815713",
       "lines": 1037,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/single-withdrawal-circuit.json"
     },
     {
       "path": "src/circuits/withdraw/withdrawal_chain_circuit.rs",
       "sha256": "24ed20d9ed1e0900012d6efa8de42ea7809eca3ef5da89c7fbb9f2369c0d48c8",
       "lines": 364,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-chain-circuit.json"
     },
     {
       "path": "src/circuits/withdraw/withdrawal_circuit.rs",
       "sha256": "f98200ad8c5570555f8134128d1c88a3ae267d89925ef61cbe88e20bed86d345",
       "lines": 233,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-circuit.json"
     },
     {
       "path": "src/circuits/withdraw/withdrawal_processor.rs",
       "sha256": "aa44f71498fa2b6f41ab385d900f19ae98a88c82a960857411d1e19c5bba8923",
       "lines": 109,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-processor.json"
     },
     {
       "path": "src/circuits/withdraw/withdrawal_step.rs",
       "sha256": "1a521d9ba077a69ea364b3a64d2e88ef85e65cad9f7a6267f1be9dc65a79a05f",
       "lines": 649,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/withdrawal-step.json"
     },
     {
       "path": "src/circuits/witness/balance_witness_generator.rs",
       "sha256": "fcd0e0556d15f57ed77e852cb624687c20507bd290310ae19246abd7a45ba249",
       "lines": 1083,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/balance-witness-generator.json"
     },
     {
       "path": "src/circuits/witness/block_witness_generator.rs",
       "sha256": "9e6d6b747ee9079dc1ecc820d84654d8dcc9e04ce0a6cb09f8b69c7ff582371a",
       "lines": 2456,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/block-witness-generator.json"
     },
     {
       "path": "src/circuits/witness/mod.rs",
       "sha256": "de0e07763888d429a02b7a1e76e437d277c690a6c9916cbf53a4e4e0311db612",
       "lines": 18,
       "category": "core",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/witness-mod.json"
     },
     {
       "path": "src/common/balance_state.rs",
@@ -1655,6 +1655,13 @@
       "lines": 58,
       "category": "dependency",
       "line_map": null
+    },
+    {
+      "path": "hosting/wallet/signature-release-ledger.mjs",
+      "sha256": "2648d117d0ded3380e1eece0429a5ae8a0fd55d850d39e01aba3f5b502cd8ff0",
+      "lines": 171,
+      "category": "dependency",
+      "line_map": "doc/audit/zkp/line-map/signature-release-ledger.json"
     }
   ]
 }

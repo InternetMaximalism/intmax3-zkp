@@ -1,4 +1,4 @@
-# 実装の行対応 Lean 化 — 2026-09-06 作業記録
+# 実装の行対応 Lean 化 — 2026-09-07 作業記録
 
 ## 結論と対象
 
@@ -147,6 +147,97 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-07：全 core file 対応・信頼境界の集約・全 entrypoint 合成の checkpoint
+
+- **110 Lean モジュール**を build。現行 **57 モジュール・2,839 named theorems** の実在・種別・
+  推移的 kernel axioms を検査して main guard 成功。実装対応は **52 モジュール・2,620 定理**、
+  前段の仕様側は 5 モジュール・219 定理です。前回 `680146f` から **1,566 定理**追加。
+- **273 reviewed-source hashes、1 MLE gitlink、76 source maps** を検証して line guard 成功。
+- guard 回帰テスト 51 件（main 29 + line 22）に加え、fixture parity の回帰 40 件も成功。
+- 物理行分類：手書き翻訳 **19,450**、依存境界 **4,948**、非実行 **6,832**、
+  テスト専用 **13,927**、未翻訳 **72,211**。**core 71 file すべてが対応表を持ちます**
+  （未対応 core は 0 行）。未翻訳の残りは全て `src/common`、`src/utils`、`src/regev`、
+  `src/falcon_sig`、MLE 等の依存側です。これは証明率ではありません。
+
+**信頼境界の集約。** [TrustBoundary](./Zkp/Implementation/TrustBoundary.lean) は、これまで各定理の
+引数に散らばっていた未証明の前提を、既存モデルの型で書いた 12 の名前付き field に集約します。
+close proof soundness、claim proof soundness、close vector の自チャネル預入による裏付け、
+署名妥当性 oracle、有限個の比較対に対する hash binding、L1 canonical head / finality、
+durable replay ledger、source/EVM/compiler refinement です。公理は追加していません。
+全 verifier が拒否する退化した環境でのみ inhabitation を示し、その環境では資金移動が
+一切認可されないことも併記しています。
+
+**全 entrypoint の合成。** [SystemSafety](./Zkp/Implementation/SystemSafety.lean) は Rollup 入金、
+withdrawNative / withdrawERC20、materializer credit、Manager pull、submitClaim、
+claimCredit payout、close の request / cancel / finalize、rollback を 12 の `Step` で覆い、
+任意の有限 trace について次を **前提なしで** 証明します。
+
+- `trace_conserves_per_token`：token ごとの `Rollup escrow + pending + Manager unspent` の保存。
+- `trace_channel_attribution`：Manager の `received` が自チャネルの cap を超えないこと、
+  cap が書き換わらないこと、materialization が一度 latch されたら保持されること。
+- `trace_nullifier_single_use`：消費済み nullifier の永続と、再提出が必ず失敗すること。
+- `trace_paid_bounded`：`paid ≤ received` の保存と、保存則の paid / unspent 分解。
+
+前提に依存するのは close / claim の受理から回路 gate 充足への飛躍だけです
+（`close_acceptance_binds_statement`、`claim_acceptance_binds_statement`）。
+**残る隙間は `close_vector_backing_is_exactly_premise_c` が明示します。**
+Rollup escrow は pooled であるため、cap とチャネル自身の預入額を結ぶ部分は依然として前提 (c) です。
+
+**回路と Solidity の一致（4 本）。** 手書きモデル同士の照合ではなく、回路側の語列・byte 列が
+Solidity 実装モデルの計算と一致することを導出しました。
+
+| 定理 | 内容 |
+|---|---|
+| `DepositChain.chain_matches_rollup_fold` | deposit chain の fold が `pendingDepositChain` と一致。preimage の byte 一致は hash 前提なしで kernel 検証 |
+| `ChannelRegChain.chain_matches_rollup_fold` | 登録 chain の 244 語 preimage が `hashPreimage (.channelRegistration …)` と byte 一致 |
+| `ValidityChain.circuit_pi_layout_matches_solidity_preimage` | 41 語 164 byte の公開入力が `finalize` の hash preimage と一致 |
+| `WithdrawalChain.circuit_layout_matches_rollup_verifier` | 17 語が `verifyWithdrawalSet` の再計算と一致。limb マスクが `% 2^253` と等価であることも導出 |
+
+**実 fixture による refinement 証拠。** [fixture-parity](./fixture-parity.md) と
+`.github/ci/lean-fixture-parity.py` は、Lean codec を実際の prover fixture で実行し、
+Rust / Solidity 側の値と field 単位で照合します。18 fixture・177 項目が一致し、不一致は 0 です。
+17 語の withdrawal 公開入力は Lean decoder、Solidity helper の Lean モデル、prover の登録語、
+Python による keccak 再計算の 4 経路で一致します。**これは refinement の証明ではなく、
+手書きモデルと実出力の一致という証拠**です。
+
+**replay ledger のモデル化。** [SignatureReleaseLedger](./Zkp/Implementation/SignatureReleaseLedger.lean)
+は wallet 側 `hosting/wallet/signature-release-ledger.mjs` を対象に、同一 (署名者, channel, 前 digest)
+に対して異なる successor の署名が公開されないこと、再試行が保存済み bytes を再生することを
+証明します。別デバイス・別ストア、storage 消去、IndexedDB の durability は前提のままです。
+
+### source 側で判明した観察（人間の判断が必要な項目）
+
+いずれも定理として固定してあり、脆弱性の実証ではありません。
+
+1. **チャネル木はブロックを通じた資金保存を強制しません。** `ChannelLeaf` に fund vector がなく、
+   公開されるチャネル木 root は IMCH preimage を丸ごと差し替えても不変です
+   （`UpdateChannelTree.native_account_root_ignores_channel_state_fields`）。
+2. **`update_channel_tree.rs` では署名が一切検証されません。** N-of-N Falcon aggregate も BP 署名も
+   検証されず、`bp_sig_chain` への fold のみです。存在証明は別回路の再帰 proof の責務です。
+3. **チャネル間送金の対応付けはブロック側で行われません。** 開かれるチャネル木 index は
+   `block.channel_id` の 1 つだけで、`destination_channel_id` はどこからも読まれません。
+4. **block step の最初の step では初期公開状態と cyclic verifier 鍵が自由な witness** であり、
+   timestamp も無制約です（`BlockStep.gates_first_step_verifier_key_is_free` ほか）。
+5. **`ChannelRegRecord::validate` の canonicality 検査は到達不能**です。`try_from` が同じ 32/32 分割を
+   組み直すため決して失敗しません（`ChannelRegChain.native_canonicality_check_cannot_fail`）。
+   非 canonical な identity は witness 構築時ではなく proving 時に失敗します。
+6. **回路側で member recipient が制約されません。** `member_pubkeys_root` を変えずに任意の recipient を
+   割り当てる充足 witness が存在し、束縛は L1 の chain 一致のみです。
+7. **`src/circuits/mod.rs` の `test_utils` は cfg(test) なしの公開 module** で、harness の決定的
+   Falcon 鍵導出が production から到達可能です（`CrateLayout.test_utils_not_test_only`、
+   `WitnessGenerators.harness_key_material_is_production_reachable`）。鍵は公開 channel id の
+   純関数で、slot 符号化は 256 で衝突します（`assert!(slot < 255)` が効いています）。
+8. **transfer witness の native 検査に index の範囲検査がなく**、index と index+64 が区別されません。
+   6 bit 境界は回路側にのみ存在します。**transfer の token index は回路でも範囲検査されません。**
+9. **user-id recipient は Poseidon 出力の上位 byte を tag が上書きするため 248 bit しかコミットしません。**
+10. **native と回路で block number 比較が異なります。** send_tx / tx_settlement の native は
+    `tx_block_number >= block_r` を許可し、回路は strict `>` を課します（prover 側の不一致）。
+11. **`U63Target::enforce_ge` は定義域の上端で順序検査になりません**（下側 0 と上側 `2^63-1` を受理）。
+    順序が成り立つのは下側被演算子が `2^63 - 2^32 + 1` 以下のときです。
+12. **`withdrawal_prover` は 17 語の公開入力に含まれず**、keccak preimage 経由でのみ束縛されます。
+    また契約は空の withdrawal 集合を拒否しますが、回路は拒否しません。
+
+
 ### `e604a36` 以降：Balance / 状態更新 / 復号 gadget の checkpoint
 
 - **89 モジュール**を build、現行 **36 モジュール・1,273 named theorems** の実在・種別・
@@ -292,7 +383,10 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 
 ## 続きで必要なこと
 
-1. 残る validity / deposit / transfer / withdrawal 回路と、Balance の send / receive 各回路の
+0. **core 71 file の対応表は完了しました（未対応 core 0 行）。** 残る主作業は依存側 72,211 行の
+   翻訳です。Poseidon / keccak / Merkle / Falcon / Regev の実装が現在の opaque callback を
+   置き換えるまで、hash binding と署名妥当性は前提のままです。
+1. （履歴）残る validity / deposit / transfer / withdrawal 回路と、Balance の send / receive 各回路の
    手書き翻訳を追加する。`state_update_verifier.rs` と `decryption_gadget.rs` の本体、
    Balance の PI / switch board / 外側回路、private / public state 更新は追加済みだが、
    Manager / Rollup の ABI・callback・generated getter と全到達可能状態の証明、
