@@ -890,9 +890,11 @@ theorem gates_imply_an_empty_chain_when_no_list_proof_verifies
     (parsed : BlockChainPIs.fromPisTarget env.capCount w.blockChainPis = .ok c)
     (noProof : ¬ env.aggListVerifies w.aggListPis) :
     c.final.bpSigChain = BalancePublicInputs.Bytes8.zero := by
-  by_contra nonzero
-  exact noProof
-    (gates_force_the_signature_list_proof_when_the_chain_is_nonzero env w c g parsed nonzero).1
+  by_cases zero : c.final.bpSigChain = BalancePublicInputs.Bytes8.zero
+  · exact zero
+  · exact absurd
+      (gates_force_the_signature_list_proof_when_the_chain_is_nonzero env w c g parsed zero).1
+      noProof
 
 /-- The same conclusion from the commitment side: the dummy proof's all-zero commitment cannot
 stand in for a non-empty signature chain. -/
@@ -901,9 +903,11 @@ theorem dummy_list_commitment_forces_an_empty_chain
     (parsed : BlockChainPIs.fromPisTarget env.capCount w.blockChainPis = .ok c)
     (dummy : listCommitment w.aggListPis = BalancePublicInputs.Bytes8.zero) :
     c.final.bpSigChain = BalancePublicInputs.Bytes8.zero := by
-  by_contra nonzero
-  have := (gates_force_the_signature_list_proof_when_the_chain_is_nonzero env w c g parsed nonzero).2
-  exact nonzero (by rw [← this, dummy])
+  by_cases zero : c.final.bpSigChain = BalancePublicInputs.Bytes8.zero
+  · exact zero
+  · have :=
+      (gates_force_the_signature_list_proof_when_the_chain_is_nonzero env w c g parsed zero).2
+    exact absurd (by rw [← this, dummy]) zero
 
 /-- An environment in which both recursive verifications succeed; used only to exhibit satisfying
 assignments. It asserts nothing about real proofs. -/
@@ -916,25 +920,27 @@ def openEnv (capCount : Nat) (vd : List Nat) (poseidon : List Nat → Bytes32)
     poseidon := poseidon
     keccak := keccak }
 
+theorem bytes8_read_words (x : Bytes32) (rest : List Nat) :
+    BalancePublicInputs.Bytes8.read (x.words ++ rest) 0 = x := by
+  obtain ⟨a, b, c, d, e, f, g, h⟩ := x
+  simp [BalancePublicInputs.Bytes8.read, BalancePublicInputs.Bytes8.words]
+
 /-- Positive example: a normal accepted trace. -/
 theorem gates_have_a_satisfying_assignment (capCount : Nat) (vd : List Nat)
     (hvd : vd.length = vdVecLen capCount) (poseidon : List Nat → Bytes32)
     (keccak : RollupValue.Bytes → Bytes32) (initial final : ExtendedPublicState) (prover : Addr) :
     Gates (openEnv capCount vd poseidon keccak)
       { blockChainPis := (BlockChainPIs.mk initial final vd).words
-        aggListPis := (BalancePublicInputs.Bytes8.zero).words
+        aggListPis := final.bpSigChain.words
         prover := prover
         registered := registeredWords (openEnv capCount vd poseidon keccak)
           (BlockChainPIs.mk initial final vd) prover } := by
   refine ⟨BlockChainPIs.mk initial final vd, ?_, trivial, rfl, ?_, rfl⟩
   · simpa using block_chain_from_pis_target_roundtrip capCount (BlockChainPIs.mk initial final vd)
       hvd []
-  · intro h
-    exact ⟨trivial, by
-      simp only [shouldVerifyList, bne_iff_ne, ne_eq, Bool.not_eq_true'] at h
-      simp only [listCommitment, BalancePublicInputs.Bytes8.words,
-        BalancePublicInputs.Bytes8.read, BalancePublicInputs.Bytes8.zero]
-      simp_all⟩
+  · intro _
+    refine ⟨trivial, ?_⟩
+    simpa [listCommitment] using bytes8_read_words final.bpSigChain []
 
 /-- The circuit deliberately does NOT require `initial.bp_sig_chain = 0`: a validity span may start
 from any finalized extended state whose lifetime signature chain is already non-empty. Exhibited
@@ -942,8 +948,7 @@ by a satisfying assignment. -/
 theorem gates_accept_a_span_starting_from_a_nonzero_signature_chain (capCount : Nat)
     (vd : List Nat) (hvd : vd.length = vdVecLen capCount) (poseidon : List Nat → Bytes32)
     (keccak : RollupValue.Bytes → Bytes32) (initial final : ExtendedPublicState) (prover : Addr)
-    (started : initial.bpSigChain ≠ BalancePublicInputs.Bytes8.zero)
-    (ended : final.bpSigChain = BalancePublicInputs.Bytes8.zero) :
+    (started : initial.bpSigChain ≠ BalancePublicInputs.Bytes8.zero) :
     ∃ w : ValidityWitness, Gates (openEnv capCount vd poseidon keccak) w ∧
       (∃ c, BlockChainPIs.fromPisTarget capCount w.blockChainPis = .ok c ∧
         c.initial.bpSigChain ≠ BalancePublicInputs.Bytes8.zero) := by
@@ -959,8 +964,7 @@ here. -/
 theorem gates_do_not_order_the_initial_and_final_block_numbers (capCount : Nat)
     (vd : List Nat) (hvd : vd.length = vdVecLen capCount) (poseidon : List Nat → Bytes32)
     (keccak : RollupValue.Bytes → Bytes32) (initial final : ExtendedPublicState) (prover : Addr)
-    (regress : final.inner.blockNumber < initial.inner.blockNumber)
-    (ended : final.bpSigChain = BalancePublicInputs.Bytes8.zero) :
+    (regress : final.inner.blockNumber < initial.inner.blockNumber) :
     ∃ w : ValidityWitness, Gates (openEnv capCount vd poseidon keccak) w ∧
       (∃ c, BlockChainPIs.fromPisTarget capCount w.blockChainPis = .ok c ∧
         c.final.inner.blockNumber < c.initial.inner.blockNumber) := by
@@ -968,3 +972,114 @@ theorem gates_do_not_order_the_initial_and_final_block_numbers (capCount : Nat)
     prover, BlockChainPIs.mk initial final vd, ?_, regress⟩
   simpa using block_chain_from_pis_target_roundtrip capCount (BlockChainPIs.mk initial final vd)
     hvd []
+
+/-! ## Native `prove` / `verify` -/
+
+/-- An opaque proof handle; only its public inputs are modeled. -/
+structure Proof where
+  publicInputs : List Nat
+  deriving DecidableEq, Repr
+
+/-- `ValidityCircuit::prove`: `agg_list_proof.unwrap_or(&self.agg_list_dummy)`. Passing `None` is
+not an argument check — it silently substitutes the dummy proof. -/
+def ValidityCircuit.proveWitness (dummy blockChainProof : Proof) (aggListProof : Option Proof)
+    (prover : Addr) (registered : List Nat) : ValidityWitness :=
+  { blockChainPis := blockChainProof.publicInputs
+    aggListPis := (aggListProof.getD dummy).publicInputs
+    prover := prover
+    registered := registered }
+
+/-- `ValidityCircuit::verify` is `data.verify` only — unlike `BlockHashChainCircuit::verify` it
+runs no native `check_cyclic_proof_verifier_data`; the cyclic binding of the inner block-chain
+proof is an in-circuit constraint (`Gates`'s verifier-data conjunct). -/
+def ValidityCircuit.verify (proofOk : Bool) : Result Unit :=
+  if proofOk then .ok () else .error .proofVerification
+
+theorem prove_substitutes_the_dummy_list_proof (dummy blockChainProof : Proof) (prover : Addr)
+    (registered : List Nat) :
+    (ValidityCircuit.proveWitness dummy blockChainProof none prover registered).aggListPis
+      = dummy.publicInputs := rfl
+
+theorem prove_passes_the_supplied_list_proof (dummy blockChainProof list : Proof) (prover : Addr)
+    (registered : List Nat) :
+    (ValidityCircuit.proveWitness dummy blockChainProof (some list) prover registered).aggListPis
+      = list.publicInputs := rfl
+
+/-- Calling `prove` with `None` on a span whose folded chain is non-empty is not a way to skip the
+signature check: with the dummy's all-zero commitment the constraint system is unsatisfiable. -/
+theorem prove_with_none_requires_an_empty_signature_chain (env : CircuitEnv)
+    (dummy blockChainProof : Proof) (prover : Addr) (registered : List Nat) (c : BlockChainPIs)
+    (dummyZero : listCommitment dummy.publicInputs = BalancePublicInputs.Bytes8.zero)
+    (g : Gates env (ValidityCircuit.proveWitness dummy blockChainProof none prover registered))
+    (parsed : BlockChainPIs.fromPisTarget env.capCount blockChainProof.publicInputs = .ok c) :
+    c.final.bpSigChain = BalancePublicInputs.Bytes8.zero :=
+  dummy_list_commitment_forces_an_empty_chain env _ c g parsed dummyZero
+
+theorem validity_verify_is_a_proof_check_only :
+    ValidityCircuit.verify true = .ok () ∧
+      ValidityCircuit.verify false = .error .proofVerification ∧
+      BlockHashChainCircuit.verify false true = .error .cyclicVerifierData :=
+  ⟨rfl, rfl, rfl⟩
+
+/-- Capstone: the eight words a satisfying assignment registers are exactly the eight limbs
+`IntmaxRollup.finalize` compares its recomputed validity-PI hash against, under the named keccak
+coherence premise. Everything else `finalize` requires is read off in
+`finalize_consumes_initial_final_chain_and_commitment`. -/
+theorem gates_registered_words_are_what_finalize_compares (env : CircuitEnv)
+    (w : ValidityWitness) (c : BlockChainPIs) (e : RollupValue.Environment) (g : Gates env w)
+    (parsed : BlockChainPIs.fromPisTarget env.capCount w.blockChainPis = .ok c)
+    (b : LimbBounds (validityPisOf env c w.prover))
+    (agree : RollupValue.HashEncodingAgrees e (fun bytes => beValue (env.keccak bytes).words))
+    (canon : LimbsCanonical
+      (ValidityPIs.hash env.keccak (validityPisOf env c w.prover)).words) :
+    RollupValue.limbsMatchBytes32 w.registered 0
+        (RollupValue.computeValidityPIHash e (validityPisOf env c w.prover).toRollup) = true := by
+  rw [gates_register_the_hash_of_the_folded_states env w c g parsed]
+  exact registered_words_match_contract_comparison e env.keccak _ b agree canon
+
+/-! ## Concrete example: `contracts/test/data/vpi_fixture.json` -/
+
+def fixtureInitialCommitment : Bytes32 :=
+  ⟨1710928608, 1792874820, 1978196764, 98793053, 677992151, 695908494, 9346082, 865191694⟩
+
+def fixtureFinalChain : Bytes32 :=
+  ⟨1054100008, 4228653367, 535749988, 3996968578, 3933876916, 3079150035, 722292773, 473827487⟩
+
+def fixtureFinalCommitment : Bytes32 :=
+  ⟨3812547506, 513441605, 373693138, 1179267215, 1831481552, 752336278, 2878705299, 1260361742⟩
+
+def fixturePIs : ValidityPIs :=
+  { initialBlockNumber := 0
+    initialBlockChain := BalancePublicInputs.Bytes8.zero
+    initialExtCommitment := fixtureInitialCommitment
+    finalBlockNumber := 1
+    finalBlockChain := fixtureFinalChain
+    finalExtCommitment := fixtureFinalCommitment
+    prover := Addr.zero }
+
+theorem fixture_limbs_are_canonical : LimbBounds fixturePIs := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> (try unfold LimbsCanonical) <;> decide
+
+/-- The eight-limb encoding recomposes to exactly the 32-byte hex values recorded in
+`contracts/test/data/vpi_fixture.json`. -/
+theorem fixture_recovers_the_recorded_hex :
+    fixturePIs.toRollup =
+      { initialBlock := 0
+        initialChain := 0
+        initialRoot :=
+          0x65fab2e06add194475e8e31c05e3765d286956d7297ab88e008e9c223391c70e
+        finalBlock := 1
+        finalChain :=
+          0x3ed44a28fc0c21371feee564ee3ce682ea7a32b4b78819d32b0d50251c3e089f
+        finalRoot :=
+          0xe33edbb21e9a7f4516461ad2464a308f6d2a30d02cd7bd96ab958e934b1f980e
+        prover := 0 } := by decide
+
+theorem fixture_preimage_matches_the_solidity_preimage :
+    fixturePIs.preimage = RollupValue.hashPreimage (.validityPis fixturePIs.toRollup) :=
+  circuit_pi_layout_matches_solidity_preimage fixturePIs fixture_limbs_are_canonical
+
+theorem fixture_preimage_width :
+    fixturePIs.preimage.length = validityPreimageWidth := validity_preimage_width fixturePIs
+
+end Zkp.Implementation.ValidityChain

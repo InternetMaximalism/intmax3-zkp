@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/block_chain_pis.rs",
+  "source_sha256": "c7de76d6b45682772df5dfc0ab12d5d4649e23bb72da9aa6cc4dc96032c1c3d8",
+  "source_lines": 204,
+  "module": "Zkp.Implementation.ValidityChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ValidityChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "Imported plonky2 and cyclic verifier-data helpers",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.vdVecLen"
+      ],
+      "theorems": [],
+      "note": "`use` lines pull in plonky2 builder/proof APIs, the Poseidon and keccak gadgets and the typed limb traits. The model treats all of them as opaque callbacks or premises; no lowering is proved."
+    },
+    {
+      "start": 26,
+      "end": 27,
+      "status": "translated",
+      "label": "BLOCK_CHAIN_PUBLIC_INPUTS_LEN",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.blockChainPublicInputsLen",
+        "Zkp.Implementation.ValidityChain.blockChainPisLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_chain_public_inputs_len_pinned"
+      ],
+      "note": "Handwritten local semantics; the 2 * 48 public-input width is pinned as a literal."
+    },
+    {
+      "start": 28,
+      "end": 39,
+      "status": "translated",
+      "label": "BlockChainPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.Fault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the length and per-field parse failures are modeled by the shared Fault type."
+    },
+    {
+      "start": 40,
+      "end": 50,
+      "status": "translated",
+      "label": "BlockChainPublicInputs fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the two extended states are modeled structurally and the VerifierOnlyCircuitData is kept as an opaque word list."
+    },
+    {
+      "start": 51,
+      "end": 56,
+      "declarations": [],
+      "theorems": [],
+      "status": "non-executable",
+      "label": "Comment, attribute or whitespace",
+      "note": "Read-only source commentary, derive/where attribute or closing brace; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 57,
+      "end": 65,
+      "status": "translated",
+      "label": "BlockChainPublicInputs::to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_chain_words_count"
+      ],
+      "note": "Handwritten local semantics; the concatenation order initial-state, state, verifier-data and the resulting width are modeled."
+    },
+    {
+      "start": 66,
+      "end": 118,
+      "status": "translated",
+      "label": "BlockChainPublicInputs::from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs.fromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_chain_from_u64_slice_rejects_wrong_length"
+      ],
+      "note": "Handwritten local semantics; the exact expected length (96 + vd_vec_len), the cursor order and the two range-checked extended-state parses are modeled. The verifier-data reconstruction itself is opaque."
+    },
+    {
+      "start": 119,
+      "end": 125,
+      "status": "translated",
+      "label": "BlockChainPublicInputsTarget fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the target carries the same three components."
+    },
+    {
+      "start": 126,
+      "end": 137,
+      "status": "dependency-boundary",
+      "label": "Target allocation of the two states and the verifier data",
+      "declarations": [],
+      "theorems": [],
+      "note": "add_virtual_verifier_data and the checked ExtendedPublicStateTarget allocation are plonky2 boundaries."
+    },
+    {
+      "start": 138,
+      "end": 146,
+      "status": "translated",
+      "label": "BlockChainPublicInputsTarget::to_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_chain_words_count"
+      ],
+      "note": "Handwritten local semantics; the in-circuit encoding is the same list as the native one."
+    },
+    {
+      "start": 147,
+      "end": 173,
+      "status": "translated",
+      "label": "BlockChainPublicInputsTarget::from_pis",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockChainPIs.fromPisTarget",
+        "Zkp.Implementation.ValidityChain.vdVecLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_chain_from_pis_target_roundtrip",
+        "Zkp.Implementation.ValidityChain.block_chain_from_pis_target_ignores_trailing_inputs",
+        "Zkp.Implementation.ValidityChain.block_chain_from_pis_target_rejects_short_input"
+      ],
+      "note": "Handwritten local semantics; the `>=` length assertion is modeled as a panic and the split as pure prefix arithmetic. Trailing public inputs of the inner proof are dropped without constraint and nothing is range-checked here."
+    },
+    {
+      "start": 174,
+      "end": 192,
+      "status": "dependency-boundary",
+      "label": "BlockChainPublicInputsTarget::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness assignment, including set_verifier_data_target, is a plonky2 boundary."
+    },
+    {
+      "start": 193,
+      "end": 201,
+      "status": "translated",
+      "label": "Connecting the two extended public states",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.Connect"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.connected_ext_states_are_equal"
+      ],
+      "note": "Handwritten local semantics; the two ExtendedPublicStateTarget::connect calls are field-wise equality and therefore pin both states."
+    },
+    {
+      "start": 202,
+      "end": 204,
+      "status": "dependency-boundary",
+      "label": "builder.connect_verifier_data",
+      "declarations": [],
+      "theorems": [],
+      "note": "Merkle-cap and circuit-digest equality of two VerifierCircuitTargets is a plonky2 boundary; the model only compares opaque word lists."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "cyclic_verifier_data",
+      "obligation": "vd_vec_len / vd_to_vec / vd_from_pis_slice and connect_verifier_data are modeled as an opaque word list of length 4 + 4*cap_elements. The Merkle-cap and circuit-digest semantics, and check_cyclic_proof_verifier_data, are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "target_parser_panics",
+      "obligation": "The in-circuit from_pis assertion denotes a build-time panic, not a constraint; a short public-input vector is a compile failure, and an over-long one silently loses its tail. No refinement to Rust panic semantics is proved.",
+      "discharged": false
+    },
+    {
+      "name": "extended_state_parse",
+      "obligation": "The two per-state parses inherit the ext_public_state.rs boundaries (Poseidon commitment, target range allocation).",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "No proof relates the handwritten model to the Rust source or to the plonky2 gate lowering.",
+      "discharged": false
+    }
+  ]
+}

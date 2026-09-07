@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/validity_circuit.rs",
+  "source_sha256": "7f9e7c8cad10f20707e3a8852dcbf68f8ee5802dffb51b879314637f7b6a71ac",
+  "source_lines": 453,
+  "module": "Zkp.Implementation.ValidityChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ValidityChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 35,
+      "status": "dependency-boundary",
+      "label": "Imported plonky2, keccak gadget and recursive-verification helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "`use` lines pull in plonky2 builder/proof APIs, the Poseidon and keccak gadgets and the typed limb traits. The model treats all of them as opaque callbacks or premises; no lowering is proved."
+    },
+    {
+      "start": 36,
+      "end": 45,
+      "status": "translated",
+      "label": "ValidityPublicInputs fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the seven public-input fields (initial/final block number, block hash chain, extended commitment, and prover) are modeled structurally."
+    },
+    {
+      "start": 46,
+      "end": 62,
+      "status": "translated",
+      "label": "ValidityPublicInputs::from_states",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs.fromStates",
+        "Zkp.Implementation.ValidityChain.validityPisOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.from_states_takes_the_span_endpoints",
+        "Zkp.Implementation.ValidityChain.validity_pis_expose_only_block_number_chain_and_commitment"
+      ],
+      "note": "Handwritten local semantics; the span endpoints are read out of the two extended states and every other extended-state field reaches the public inputs only through the Poseidon commitment."
+    },
+    {
+      "start": 63,
+      "end": 75,
+      "status": "translated",
+      "label": "ValidityPublicInputs::to_u32_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs.u32Words",
+        "Zkp.Implementation.ValidityChain.blockNumberWords",
+        "Zkp.Implementation.ValidityChain.ValidityPIs.toRollup",
+        "Zkp.Implementation.ValidityChain.beValue",
+        "Zkp.Implementation.ValidityChain.validityPiWordCount",
+        "Zkp.Implementation.ValidityChain.Addr",
+        "Zkp.Implementation.ValidityChain.Addr.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.validity_pi_word_count",
+        "Zkp.Implementation.ValidityChain.fixture_recovers_the_recorded_hex"
+      ],
+      "note": "Handwritten local semantics; the 2 + 8 + 8 + 2 + 8 + 8 + 5 = 41 u32-limb concatenation order is modeled, and the big-endian recomposition of those limbs is checked against contracts/test/data/vpi_fixture.json."
+    },
+    {
+      "start": 76,
+      "end": 81,
+      "status": "dependency-boundary",
+      "label": "ValidityPublicInputs::hash (solidity_keccak256)",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs.preimage",
+        "Zkp.Implementation.ValidityChain.ValidityPIs.hash",
+        "Zkp.Implementation.ValidityChain.validityPreimageWidth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.validity_preimage_width",
+        "Zkp.Implementation.ValidityChain.circuit_pi_layout_matches_solidity_preimage",
+        "Zkp.Implementation.ValidityChain.solidity_preimage_width",
+        "Zkp.Implementation.ValidityChain.fixture_preimage_matches_the_solidity_preimage",
+        "Zkp.Implementation.ValidityChain.fixture_preimage_width"
+      ],
+      "note": "keccak itself is an opaque callback; what IS modeled is the byte serialization solidity_keccak256 applies (each u32 as four big-endian bytes). On that serialization the circuit's 164-byte preimage is DERIVED equal to RollupValue.hashPreimage (.validityPis ...), the preimage IntmaxRollup.finalize hashes."
+    },
+    {
+      "start": 82,
+      "end": 91,
+      "status": "translated",
+      "label": "ValidityPublicInputsTarget fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the target carries the same seven fields in the same order."
+    },
+    {
+      "start": 92,
+      "end": 127,
+      "status": "dependency-boundary",
+      "label": "Target allocation and witness assignment",
+      "declarations": [],
+      "theorems": [],
+      "note": "BlockNumberTarget/Bytes32Target/AddressTarget allocation with is_checked, and PartialWitness assignment, are plonky2 boundaries."
+    },
+    {
+      "start": 128,
+      "end": 141,
+      "status": "translated",
+      "label": "ValidityPublicInputsTarget::to_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs.u32Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.validity_pi_word_count"
+      ],
+      "note": "Handwritten local semantics; the in-circuit limb order is the same 41-word list as the native to_u32_vec."
+    },
+    {
+      "start": 142,
+      "end": 157,
+      "status": "dependency-boundary",
+      "label": "ValidityPublicInputsTarget::hash (builder.keccak256)",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityPIs.hash",
+        "Zkp.Implementation.ValidityChain.ValidityPIs.preimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.validity_preimage_width"
+      ],
+      "note": "The in-circuit keccak gadget is opaque; agreement between it and the native solidity_keccak256 on the same preimage is a named premise."
+    },
+    {
+      "start": 158,
+      "end": 166,
+      "status": "translated",
+      "label": "ValidityCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.Fault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the prove and verify failure kinds are modeled by the shared Fault type."
+    },
+    {
+      "start": 167,
+      "end": 194,
+      "status": "dependency-boundary",
+      "label": "Circuit handle, proof targets and dummy proof",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.Proof"
+      ],
+      "theorems": [],
+      "note": "CircuitData, ProofWithPublicInputsTarget and the DummyProof are opaque plonky2 objects; only the public-input list a proof carries is modeled. The extensive source prose about the aggregate-list wrapper's verifier key is NOT promoted to a guarantee."
+    },
+    {
+      "start": 195,
+      "end": 212,
+      "declarations": [],
+      "theorems": [],
+      "status": "non-executable",
+      "label": "Comment, attribute or whitespace",
+      "note": "Read-only source commentary, derive/where attribute or closing brace; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 213,
+      "end": 302,
+      "status": "translated",
+      "label": "ValidityCircuit::new constraint system",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.CircuitEnv",
+        "Zkp.Implementation.ValidityChain.ValidityWitness",
+        "Zkp.Implementation.ValidityChain.Gates",
+        "Zkp.Implementation.ValidityChain.shouldVerifyList",
+        "Zkp.Implementation.ValidityChain.listCommitment",
+        "Zkp.Implementation.ValidityChain.registeredWords",
+        "Zkp.Implementation.ValidityChain.openEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.gates_register_the_hash_of_the_folded_states",
+        "Zkp.Implementation.ValidityChain.gates_bind_the_inner_verifier_data",
+        "Zkp.Implementation.ValidityChain.gates_force_the_signature_list_proof_when_the_chain_is_nonzero",
+        "Zkp.Implementation.ValidityChain.gates_imply_an_empty_chain_when_no_list_proof_verifies",
+        "Zkp.Implementation.ValidityChain.dummy_list_commitment_forces_an_empty_chain",
+        "Zkp.Implementation.ValidityChain.gates_have_a_satisfying_assignment",
+        "Zkp.Implementation.ValidityChain.gates_accept_a_span_starting_from_a_nonzero_signature_chain",
+        "Zkp.Implementation.ValidityChain.gates_do_not_order_the_initial_and_final_block_numbers",
+        "Zkp.Implementation.ValidityChain.gates_registered_words_are_what_finalize_compares",
+        "Zkp.Implementation.ValidityChain.registered_words_match_contract_comparison"
+      ],
+      "note": "Handwritten local semantics of the gate set: cyclic verification of the block-hash-chain proof with the constant verifier data connected to the one the proof re-exports; should_verify_list computed from the FOLDED final.bp_sig_chain rather than a prover flag; conditional aggregate-list verification plus commitment equality; and registration of the keccak of the validity public inputs built from the SAME parsed states. Also recorded as satisfiable-but-unconstrained: a non-zero initial bp_sig_chain, and any ordering of the initial and final block numbers. Recursive verification remains an opaque predicate."
+    },
+    {
+      "start": 303,
+      "end": 315,
+      "declarations": [],
+      "theorems": [],
+      "status": "non-executable",
+      "label": "Comment, attribute or whitespace",
+      "note": "Read-only source commentary, derive/where attribute or closing brace; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 316,
+      "end": 332,
+      "status": "translated",
+      "label": "ValidityCircuit::prove",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityCircuit.proveWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.prove_substitutes_the_dummy_list_proof",
+        "Zkp.Implementation.ValidityChain.prove_passes_the_supplied_list_proof",
+        "Zkp.Implementation.ValidityChain.prove_with_none_requires_an_empty_signature_chain"
+      ],
+      "note": "Handwritten local semantics; passing None silently substitutes the dummy aggregate-list proof, and with the dummy's all-zero commitment the constraint system is unsatisfiable whenever the folded chain is non-empty. Proving itself is not modeled."
+    },
+    {
+      "start": 333,
+      "end": 342,
+      "status": "translated",
+      "label": "ValidityCircuit::verify",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ValidityCircuit.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.validity_verify_is_a_proof_check_only"
+      ],
+      "note": "Handwritten local semantics; unlike BlockHashChainCircuit::verify this path runs no native cyclic verifier-data check. The corresponding binding is the in-circuit verifier-data equality in Gates."
+    },
+    {
+      "start": 343,
+      "end": 453,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test module. The 2^16 validity degree and 2^14 aggregate-list wrapper degree assertions are recorded in the model as constants only; nothing derives them, and the test's end-to-end public-input equality is not reproduced."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "recursive_proof_verification",
+      "obligation": "add_proof_target_and_verify_cyclic and add_proof_target_and_conditionally_verify are opaque predicates. No proof soundness, no knowledge extraction, and in particular nothing that says a verified aggregate-list proof really witnesses N-of-N Falcon signatures.",
+      "discharged": false
+    },
+    {
+      "name": "keccak_preimage_coherence",
+      "obligation": "That the circuit's keccak (native solidity_keccak256 and the in-circuit gadget alike) is the same function IntmaxRollup's keccak256 computes over the same preimage is the explicit premise RollupValue.HashEncodingAgrees. The byte layout of the two preimages IS derived equal; the hash itself is not.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon_commitment",
+      "obligation": "ExtendedPublicState commitments are opaque Poseidon outputs. Deposit chain, registration chain, deposit count, bp_sig_chain and every tree root reach the contract only through them, so binding those fields depends on an undischarged collision-resistance assumption.",
+      "discharged": false
+    },
+    {
+      "name": "agg_list_verifier_key",
+      "obligation": "The source notes that the aggregate-list and the retired single-signature list wrappers present identical CommonCircuitData, so only the baked-in verifier key separates them. Which key is actually baked in, and what statement each folded step proves, is outside this model.",
+      "discharged": false
+    },
+    {
+      "name": "block_number_and_chain_monotonicity",
+      "obligation": "This circuit imposes no order between the initial and final block numbers and no relation between the two extended states beyond what the folded block-chain proof asserts. Monotonicity and chain continuity must come from block_step / update_channel_tree and from IntmaxRollup.fullVerify's blockHashAt comparisons.",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "No proof relates the handwritten model to the Rust source, to the plonky2 gate lowering, or to the MLE wrapper that actually carries this circuit's public inputs on chain.",
+      "discharged": false
+    }
+  ]
+}

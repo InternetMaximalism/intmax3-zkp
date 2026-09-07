@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/block_hash_chain_circuit.rs",
+  "source_sha256": "a88690515a8718a0b57d81bf2dd1a7d992b4cb40326842486a2951de7d958adf",
+  "source_lines": 124,
+  "module": "Zkp.Implementation.ValidityChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ValidityChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 27,
+      "status": "dependency-boundary",
+      "label": "Imported plonky2 recursion and cyclic helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "`use` lines pull in plonky2 builder/proof APIs, the Poseidon and keccak gadgets and the typed limb traits. The model treats all of them as opaque callbacks or premises; no lowering is proved."
+    },
+    {
+      "start": 28,
+      "end": 36,
+      "status": "translated",
+      "label": "BlockHashChainCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.Fault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the prove and verify failure kinds are modeled by the shared Fault type."
+    },
+    {
+      "start": 37,
+      "end": 52,
+      "status": "dependency-boundary",
+      "label": "Circuit handle, proof target and impl bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "CircuitData and ProofWithPublicInputsTarget are opaque plonky2 objects; only the public-input list they carry is modeled."
+    },
+    {
+      "start": 53,
+      "end": 78,
+      "status": "translated",
+      "label": "BlockHashChainCircuit::new",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockHashChainGates",
+        "Zkp.Implementation.ValidityChain.BlockHashChainCircuit.newBuild"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_hash_chain_build_checks_common_data_first",
+        "Zkp.Implementation.ValidityChain.block_hash_chain_build_rejects_a_failed_build",
+        "Zkp.Implementation.ValidityChain.block_hash_chain_re_exports_the_block_step_prefix"
+      ],
+      "note": "Handwritten local semantics; the wrapper verifies the block-step proof against baked-in verifier data and re-registers the parsed 2*48 + vd prefix verbatim. The build-time common-data assertion is checked before the build-success assertion. Recursive verification itself is an opaque predicate."
+    },
+    {
+      "start": 79,
+      "end": 89,
+      "status": "dependency-boundary",
+      "label": "generate_cd template circuit construction",
+      "declarations": [],
+      "theorems": [],
+      "note": "simple_recursion_circuit_data, add_virtual_proof_with_pis, verify_proof and add_noop_gates shape the CommonCircuitData; none of that is modeled."
+    },
+    {
+      "start": 90,
+      "end": 93,
+      "status": "translated",
+      "label": "generate_cd public-input count override",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockHashChainCircuit.publicInputCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_hash_chain_public_input_count_pinned"
+      ],
+      "note": "Handwritten local semantics; num_public_inputs is overwritten with BLOCK_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len(config)."
+    },
+    {
+      "start": 94,
+      "end": 105,
+      "status": "untranslated",
+      "label": "BlockHashChainCircuit::prove",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness assignment and plonky2 proving for this wrapper are not modeled."
+    },
+    {
+      "start": 106,
+      "end": 124,
+      "status": "translated",
+      "label": "BlockHashChainCircuit::verify",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.BlockHashChainCircuit.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.block_hash_chain_verify_checks_cyclic_vd_first",
+        "Zkp.Implementation.ValidityChain.block_hash_chain_verify_needs_both_checks"
+      ],
+      "note": "Handwritten local semantics; check_cyclic_proof_verifier_data runs BEFORE data.verify, and both must succeed. Whether either check is cryptographically sound is a boundary."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "recursive_verification",
+      "obligation": "add_proof_target_and_verify and data.verify are opaque predicates. Nothing derives soundness, completeness or knowledge-extraction from them.",
+      "discharged": false
+    },
+    {
+      "name": "common_data_shape",
+      "obligation": "The equality of the built CommonCircuitData with the generated template (and therefore the cyclic self-compatibility of this wrapper) is asserted at build time in Rust; the model records the check order only.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic_verifier_data",
+      "obligation": "check_cyclic_proof_verifier_data is modeled as a boolean gate in the native verify path; its Merkle-cap/digest semantics are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "pass_through_wrapper",
+      "obligation": "The wrapper adds no constraint of its own on the re-exported verifier data; the binding to this circuit's own key comes from the native cyclic check and from ValidityCircuit's add_proof_target_and_verify_cyclic. That the combination is sufficient is not proved here.",
+      "discharged": false
+    }
+  ]
+}

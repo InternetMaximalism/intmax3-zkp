@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/ext_public_state.rs",
+  "source_sha256": "946f9de0287b941324a8c702566eea1827c517f35b42f83b8f93cf82bc7aaa81",
+  "source_lines": 324,
+  "module": "Zkp.Implementation.ValidityChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ValidityChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 23,
+      "status": "dependency-boundary",
+      "label": "Imported plonky2, Poseidon and limb-trait implementations",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.commitment"
+      ],
+      "theorems": [],
+      "note": "`use` lines pull in plonky2 builder/proof APIs, the Poseidon and keccak gadgets and the typed limb traits. The model treats all of them as opaque callbacks or premises; no lowering is proved."
+    },
+    {
+      "start": 24,
+      "end": 25,
+      "status": "translated",
+      "label": "EXTENDED_PUBLIC_STATE_U64_LEN",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.extPublicStateU64Len",
+        "Zkp.Implementation.ValidityChain.publicStateU64Len",
+        "Zkp.Implementation.ValidityChain.bytes32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_public_state_len_pinned"
+      ],
+      "note": "Handwritten local semantics; the 48-word length and its 15 + 4*8 + 1 decomposition are pinned as literals."
+    },
+    {
+      "start": 26,
+      "end": 37,
+      "status": "translated",
+      "label": "ExtendedPublicStateError variants",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.Fault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the parse-failure kinds are modeled as a single Fault type shared by the four files."
+    },
+    {
+      "start": 38,
+      "end": 63,
+      "status": "translated",
+      "label": "ExtendedPublicState fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the six fields (inner public state, block hash chain, deposit hash chain, deposit count, channel-registration chain, bp_sig_chain) are modeled structurally. Source prose about N-of-N semantics is NOT promoted to a guarantee."
+    },
+    {
+      "start": 64,
+      "end": 82,
+      "status": "translated",
+      "label": "ExtendedPublicState::new",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the constructor is field-wise and adds no check."
+    },
+    {
+      "start": 83,
+      "end": 94,
+      "status": "translated",
+      "label": "ExtendedPublicState::to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_public_state_word_count",
+        "Zkp.Implementation.ValidityChain.ext_encoding_injective"
+      ],
+      "note": "Handwritten local semantics; the concatenation order and the resulting 48-word width are modeled, and the encoding is shown to determine every field."
+    },
+    {
+      "start": 95,
+      "end": 98,
+      "status": "dependency-boundary",
+      "label": "ExtendedPublicState::commitment (Poseidon)",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.commitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_commitment_absorbs_every_word"
+      ],
+      "note": "Poseidon is an opaque callback over the 48 encoded words. No collision resistance or injectivity is claimed; only that equal word lists give equal commitments."
+    },
+    {
+      "start": 99,
+      "end": 141,
+      "status": "translated",
+      "label": "ExtendedPublicState::from_u64_slice",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.fromU64Slice",
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.read",
+        "Zkp.Implementation.ValidityChain.canonicalLimbs",
+        "Zkp.Implementation.ValidityChain.LimbsCanonical",
+        "Zkp.Implementation.ValidityChain.blockLimit",
+        "Zkp.Implementation.ValidityChain.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_from_u64_slice_roundtrip",
+        "Zkp.Implementation.ValidityChain.ext_from_u64_slice_rejects_wrong_length",
+        "Zkp.Implementation.ValidityChain.ext_from_u64_slice_rejects_an_oversized_deposit_count",
+        "Zkp.Implementation.ValidityChain.ext_read_after_words",
+        "Zkp.Implementation.ValidityChain.canonical_limbs_iff"
+      ],
+      "note": "Handwritten local semantics; the exact-length check, the cursor offsets and the order of the u63 / u32-limb range checks are modeled, including that the deposit count is checked after the two hash chains."
+    },
+    {
+      "start": 142,
+      "end": 152,
+      "status": "translated",
+      "label": "ExtendedPublicStateTarget fields",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the target struct carries the same six fields in the same order as the native one."
+    },
+    {
+      "start": 153,
+      "end": 206,
+      "status": "dependency-boundary",
+      "label": "Target allocation, constants and witness writing",
+      "declarations": [],
+      "theorems": [],
+      "note": "builder.add_virtual_* / range-check gadgets / constant materialization / witness assignment are plonky2 boundaries. The `is_checked` flag that gives these wires their u32/u63 ranges is not modeled."
+    },
+    {
+      "start": 207,
+      "end": 222,
+      "status": "translated",
+      "label": "ExtendedPublicStateTarget::connect",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.Connect"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.connected_ext_states_are_equal"
+      ],
+      "note": "Handwritten local semantics; connect is field-wise equality over all six fields, so it pins the whole state."
+    },
+    {
+      "start": 223,
+      "end": 268,
+      "status": "translated",
+      "label": "ExtendedPublicStateTarget::select",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.select"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_select_picks_the_branch"
+      ],
+      "note": "Handwritten local semantics; select is modeled as a pointwise branch, not as the underlying arithmetic selector gates."
+    },
+    {
+      "start": 269,
+      "end": 280,
+      "status": "translated",
+      "label": "ExtendedPublicStateTarget::to_vec",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_public_state_word_count"
+      ],
+      "note": "Handwritten local semantics; the in-circuit encoding order is the same list as the native to_u64_vec."
+    },
+    {
+      "start": 281,
+      "end": 288,
+      "status": "dependency-boundary",
+      "label": "ExtendedPublicStateTarget::commitment (Poseidon gadget)",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.commitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_commitment_absorbs_every_word"
+      ],
+      "note": "The in-circuit Poseidon gadget and its hash-out-to-Bytes32 conversion are opaque. Agreement between the native and in-circuit hash is a named premise, not a theorem."
+    },
+    {
+      "start": 289,
+      "end": 324,
+      "status": "translated",
+      "label": "ExtendedPublicStateTarget::from_slice",
+      "declarations": [
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.fromSliceTarget",
+        "Zkp.Implementation.ValidityChain.ExtendedPublicState.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ValidityChain.ext_from_slice_target_performs_no_range_check"
+      ],
+      "note": "Handwritten local semantics; the exact-length assertion is modeled as a panic and the split as pure cursor arithmetic. This path performs NO range validation."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon_commitment",
+      "obligation": "PoseidonHashOut::hash_inputs_u64 and PoseidonHashOutTarget::hash_inputs are opaque callbacks. Collision resistance, and agreement between the native and in-circuit implementations, must be discharged elsewhere; nothing here derives state equality from commitment equality.",
+      "discharged": false
+    },
+    {
+      "name": "target_range_allocation",
+      "obligation": "Canonicality of the target limbs (u32 words, u63 block number and deposit count) comes from the `is_checked` allocation gadgets, which are not modeled. The in-circuit from_slice path re-checks nothing.",
+      "discharged": false
+    },
+    {
+      "name": "inner_public_state_encoding",
+      "obligation": "The 15-word inner PublicState encoding is reused from Zkp.Implementation.BalancePublicInputs; its refinement to src/common/public_state.rs is that module's obligation, not this one's.",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "No proof relates the handwritten model to the Rust source, to the plonky2 gate lowering, or to Goldilocks field arithmetic.",
+      "discharged": false
+    }
+  ]
+}
