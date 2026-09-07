@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/withdrawal_processor.rs",
+  "source_sha256": "aa44f71498fa2b6f41ab385d900f19ae98a88c82a960857411d1e19c5bba8923",
+  "source_lines": 109,
+  "module": "Zkp.Implementation.Processors",
+  "model": "doc/audit/zkp/Zkp/Implementation/Processors.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.Processors.Proof",
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.Withdrawal.Address"
+      ],
+      "theorems": [],
+      "note": "Withdrawal circuits, the extended public state and Ethereum addresses are opaque here."
+    },
+    {
+      "start": 22,
+      "end": 22,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 23,
+      "end": 33,
+      "status": "translated",
+      "label": "WithdrawalProcessorError",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.Error"
+      ],
+      "theorems": [],
+      "note": "All three error variants and the circuit each maps to."
+    },
+    {
+      "start": 34,
+      "end": 34,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 35,
+      "end": 44,
+      "status": "translated",
+      "label": "WithdrawalProcessor fields",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.Env",
+        "Zkp.Implementation.Processors.Withdrawal.Artifact"
+      ],
+      "theorems": [],
+      "note": "The three owned circuits; generic bounds are not modeled."
+    },
+    {
+      "start": 45,
+      "end": 51,
+      "status": "non-executable",
+      "label": "impl header and trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 52,
+      "end": 68,
+      "status": "translated",
+      "label": "new(): ordered circuit construction",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.buildPlan",
+        "Zkp.Implementation.Processors.BuildStep",
+        "Zkp.Implementation.Processors.buildOrdered"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.withdrawal_build_plan_is_ordered",
+        "Zkp.Implementation.Processors.withdrawal_circuit_binds_chain_verifier_data"
+      ],
+      "note": "Dependency-ordered build plan; the externally supplied `single_withdrawal_vd` is a parameter, not a produced artifact."
+    },
+    {
+      "start": 69,
+      "end": 69,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 70,
+      "end": 80,
+      "status": "dependency-boundary",
+      "label": "the three verifier-data accessors",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.Env.chainVd",
+        "Zkp.Implementation.Processors.Withdrawal.Artifact"
+      ],
+      "theorems": [],
+      "note": "Only the chain verifier data is modeled, as the cyclic key passed to the step circuit; the step and withdrawal accessors return opaque plonky2 handles."
+    },
+    {
+      "start": 81,
+      "end": 81,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 82,
+      "end": 94,
+      "status": "translated",
+      "label": "prove_step(): step circuit then chain wrapper",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.proveStepRun",
+        "Zkp.Implementation.Processors.Withdrawal.StepWitness",
+        "Zkp.Implementation.Processors.Withdrawal.Call"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.withdrawal_prove_step_uses_chain_verifier_data",
+        "Zkp.Implementation.Processors.withdrawal_step_failure_skips_chain_circuit",
+        "Zkp.Implementation.Processors.withdrawal_prove_step_wraps_step_proof",
+        "Zkp.Implementation.Processors.withdrawal_example_step_succeeds"
+      ],
+      "note": "Call order and error precedence are modeled; proving is an opaque callback."
+    },
+    {
+      "start": 95,
+      "end": 95,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 96,
+      "end": 109,
+      "status": "translated",
+      "label": "prove_final(): binds the prover address and ext public state",
+      "declarations": [
+        "Zkp.Implementation.Processors.Withdrawal.proveFinalRun"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.withdrawal_prove_final_makes_one_call",
+        "Zkp.Implementation.Processors.withdrawal_prove_final_threads_prover_and_ext_state",
+        "Zkp.Implementation.Processors.withdrawal_example_final_binds_prover"
+      ],
+      "note": "Exactly one call: the chain proof it is handed is NOT natively verified and the extended public state is not re-derived."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proving-and-verification",
+      "obligation": "Every `prove` and `verify` call is an opaque callback returning success or failure; nothing in the model implies proof soundness, completeness, zero-knowledge, or recursive-verification soundness.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-construction-lowering",
+      "obligation": "`generate_cd`, each circuit's `new`, and `verifier_data()` lower to plonky2 gates that the model does not represent; the build plan records dependency order only.",
+      "discharged": false
+    },
+    {
+      "name": "withdrawal-cyclic-verifier-key",
+      "obligation": "The model records that the withdrawal chain verifier data is passed into the step circuit, but does not prove it equals the key inside a chained proof.",
+      "discharged": false
+    },
+    {
+      "name": "single-withdrawal-verifier-key",
+      "obligation": "`single_withdrawal_vd` is supplied by the caller; the model does not check it is the key of the real single-withdrawal circuit.",
+      "discharged": false
+    },
+    {
+      "name": "withdrawal-prover-binding",
+      "obligation": "The prover address and extended public state are threaded into an opaque circuit call; no claim is made that the resulting proof binds them.",
+      "discharged": false
+    }
+  ]
+}

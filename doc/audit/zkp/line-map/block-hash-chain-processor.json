@@ -1,0 +1,351 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/block_hash_chain_processor.rs",
+  "source_sha256": "dd29a6cea8f5df28e372df5286f8f458c78571afbbad842282fc5d455af8fe6a",
+  "source_lines": 477,
+  "module": "Zkp.Implementation.Processors",
+  "model": "doc/audit/zkp/Zkp/Implementation/Processors.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 52,
+      "status": "dependency-boundary",
+      "label": "std, plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.Processors.Proof",
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.MerkleProof",
+        "Zkp.Implementation.Processors.BlockChain.ExtPublicState",
+        "Zkp.Implementation.Processors.BlockChain.PublicState"
+      ],
+      "theorems": [],
+      "note": "Every imported circuit, tree, tx and Regev type is opaque here; only the fields the driver reads are named."
+    },
+    {
+      "start": 53,
+      "end": 60,
+      "status": "translated",
+      "label": "dummy_regev_pk(): all-zero key of the pinned length",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.dummyRegevPk",
+        "Zkp.Implementation.Processors.BlockChain.RegevPk",
+        "Zkp.Implementation.Processors.regevN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.regev_n_pinned"
+      ],
+      "note": "The zero vectors and their pinned length; Regev key semantics is not modeled."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 62,
+      "end": 80,
+      "status": "translated",
+      "label": "BlockHashChainProcessorError",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.Error"
+      ],
+      "theorems": [],
+      "note": "All seven error variants, including the `#[from]` sub-processor errors."
+    },
+    {
+      "start": 81,
+      "end": 81,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 82,
+      "end": 126,
+      "status": "translated",
+      "label": "BlockHashChainProcessorWitness fields (with doc comments)",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.Witness",
+        "Zkp.Implementation.Processors.BlockChain.Block",
+        "Zkp.Implementation.Processors.BlockChain.MemberLeaf",
+        "Zkp.Implementation.Processors.BlockChain.TxV2",
+        "Zkp.Implementation.Processors.BlockChain.ChannelAction",
+        "Zkp.Implementation.Processors.BlockChain.ActionKind",
+        "Zkp.Implementation.Processors.BlockChain.ChannelStateFields"
+      ],
+      "theorems": [],
+      "note": "The optional fields are kept as `Option`s so the dummy resolution below is visible; payload contents are opaque."
+    },
+    {
+      "start": 127,
+      "end": 127,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 128,
+      "end": 188,
+      "status": "translated",
+      "label": "to_update_channel_tree(): the single dummy-resolution point",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.Witness.toUpdateChannelTree",
+        "Zkp.Implementation.Processors.BlockChain.UpdateUserTree",
+        "Zkp.Implementation.Processors.BlockChain.MemberLeaf.dflt",
+        "Zkp.Implementation.Processors.BlockChain.TxV2.dflt",
+        "Zkp.Implementation.Processors.BlockChain.ChannelStateFields.dflt",
+        "Zkp.Implementation.Processors.BlockChain.ChannelAction.dflt",
+        "Zkp.Implementation.Processors.BlockChain.ChannelAction.isMemberUpdate",
+        "Zkp.Implementation.Processors.BlockChain.dummyMerkleProof",
+        "Zkp.Implementation.Processors.maxSigCluster",
+        "Zkp.Implementation.Processors.txTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.block_tree_threads_previous_extended_state",
+        "Zkp.Implementation.Processors.block_tree_defaults_member_set_to_full_cluster",
+        "Zkp.Implementation.Processors.block_tree_defaults_signer_count_to_zero",
+        "Zkp.Implementation.Processors.block_tree_defaults_new_member_leaves_to_empty",
+        "Zkp.Implementation.Processors.block_tree_dummy_regev_keys_have_pinned_length",
+        "Zkp.Implementation.Processors.block_tree_dummy_slot_vectors_match_user_count",
+        "Zkp.Implementation.Processors.block_default_channel_actions_are_never_member_updates",
+        "Zkp.Implementation.Processors.block_tree_uses_supplied_options_verbatim",
+        "Zkp.Implementation.Processors.block_dummy_tx_merkle_proofs_use_pinned_height",
+        "Zkp.Implementation.Processors.max_sig_cluster_pinned",
+        "Zkp.Implementation.Processors.tx_tree_height_pinned"
+      ],
+      "note": "Every `unwrap_or_else` dummy is modeled, including the SECURITY (M-2) `ChannelAction::default()` whose kind makes `is_member_update` false."
+    },
+    {
+      "start": 189,
+      "end": 189,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 190,
+      "end": 204,
+      "status": "translated",
+      "label": "BlockHashChainProcessor fields",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.Env",
+        "Zkp.Implementation.Processors.BlockChain.Artifact"
+      ],
+      "theorems": [],
+      "note": "The owned circuits, verifier data and the two sub-processors."
+    },
+    {
+      "start": 205,
+      "end": 211,
+      "status": "non-executable",
+      "label": "impl header and trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 212,
+      "end": 257,
+      "status": "translated",
+      "label": "new(): assert, then ordered circuit construction",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.buildPlan",
+        "Zkp.Implementation.Processors.BlockChain.newProcessor",
+        "Zkp.Implementation.Processors.BlockChain.Construction",
+        "Zkp.Implementation.Processors.BuildStep",
+        "Zkp.Implementation.Processors.buildOrdered"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.block_build_plan_is_ordered",
+        "Zkp.Implementation.Processors.block_step_circuit_binds_all_four_verifier_keys",
+        "Zkp.Implementation.Processors.block_hash_chain_circuit_binds_block_step_verifier_data",
+        "Zkp.Implementation.Processors.block_new_panics_on_empty_supported_counts",
+        "Zkp.Implementation.Processors.block_new_registers_every_supported_count"
+      ],
+      "note": "The `assert!` is modeled as a panic outcome, not an error value; construction is a dependency-ordered plan."
+    },
+    {
+      "start": 258,
+      "end": 258,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 259,
+      "end": 269,
+      "status": "dependency-boundary",
+      "label": "the three verifier-data accessors",
+      "declarations": [
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.BlockChain.Artifact"
+      ],
+      "theorems": [],
+      "note": "`VerifierCircuitData` clones are opaque plonky2 handles; the model keeps them as artifacts of the build plan."
+    },
+    {
+      "start": 270,
+      "end": 270,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 271,
+      "end": 401,
+      "status": "translated",
+      "label": "prove_block(): the ordered call plan",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.proveBlockRun",
+        "Zkp.Implementation.Processors.BlockChain.proveBlock",
+        "Zkp.Implementation.Processors.BlockChain.proveBlockCalls",
+        "Zkp.Implementation.Processors.BlockChain.proveBlockTail",
+        "Zkp.Implementation.Processors.BlockChain.runDepositChain",
+        "Zkp.Implementation.Processors.BlockChain.runChannelRegChain",
+        "Zkp.Implementation.Processors.BlockChain.depositStepWitnessFor",
+        "Zkp.Implementation.Processors.BlockChain.channelRegStepWitnessFor",
+        "Zkp.Implementation.Processors.BlockChain.depositSeed",
+        "Zkp.Implementation.Processors.BlockChain.channelRegSeed",
+        "Zkp.Implementation.Processors.BlockChain.BlockStepWitness",
+        "Zkp.Implementation.Processors.BlockChain.Call",
+        "Zkp.Implementation.Processors.BlockChain.TailCall",
+        "Zkp.Implementation.Processors.BlockChain.Call.isNativeVerify",
+        "Zkp.Implementation.Processors.BlockChain.Env.updateUserCircuit",
+        "Zkp.Implementation.Processors.BlockChain.originMessage",
+        "Zkp.Implementation.Processors.BlockChain.blockNumberOverflowMessage",
+        "Zkp.Implementation.Processors.BlockChain.missingInitialStateMessage",
+        "Zkp.Implementation.Processors.BlockChain.parseFailureMessage",
+        "Zkp.Implementation.Processors.flagBit",
+        "Zkp.Implementation.Processors.u63Max"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.block_unsupported_user_count_stops_before_any_call",
+        "Zkp.Implementation.Processors.block_requires_exactly_one_origin",
+        "Zkp.Implementation.Processors.block_missing_initial_state_arm_is_unreachable",
+        "Zkp.Implementation.Processors.block_chained_origin_is_admitted",
+        "Zkp.Implementation.Processors.block_genesis_origin_is_admitted",
+        "Zkp.Implementation.Processors.block_verifies_previous_proof_first",
+        "Zkp.Implementation.Processors.block_previous_proof_verification_failure_stops_all_proving",
+        "Zkp.Implementation.Processors.block_public_input_parse_failure_stops_all_proving",
+        "Zkp.Implementation.Processors.block_genesis_run_skips_verification_and_parse",
+        "Zkp.Implementation.Processors.block_tail_calls_are_never_native_verifies",
+        "Zkp.Implementation.Processors.block_genesis_run_makes_no_native_verify_call",
+        "Zkp.Implementation.Processors.block_empty_deposit_chain_makes_no_call",
+        "Zkp.Implementation.Processors.block_empty_channel_reg_chain_makes_no_call",
+        "Zkp.Implementation.Processors.block_deposit_loop_calls_the_step_driver_first",
+        "Zkp.Implementation.Processors.block_deposit_chain_seeds_only_the_first_step",
+        "Zkp.Implementation.Processors.block_channel_reg_loop_calls_the_step_driver_first",
+        "Zkp.Implementation.Processors.block_channel_reg_chain_threads_block_number",
+        "Zkp.Implementation.Processors.block_channel_reg_chain_seeds_count_zero",
+        "Zkp.Implementation.Processors.block_channel_reg_chain_seeds_account_tree_root",
+        "Zkp.Implementation.Processors.block_deposit_chain_seeds_deposit_tree_root",
+        "Zkp.Implementation.Processors.block_number_overflow_is_reported_after_deposit_steps",
+        "Zkp.Implementation.Processors.block_number_is_previous_plus_one",
+        "Zkp.Implementation.Processors.block_success_threads_every_intermediate_proof",
+        "Zkp.Implementation.Processors.block_example_genesis_succeeds",
+        "Zkp.Implementation.Processors.block_example_genesis_makes_three_calls",
+        "Zkp.Implementation.Processors.block_example_both_origins_is_rejected",
+        "Zkp.Implementation.Processors.block_example_unsupported_user_count_is_rejected",
+        "Zkp.Implementation.Processors.u63_max_pinned"
+      ],
+      "note": "Check order, error precedence, seeding, proof threading and the genesis/chained split are modeled; every proving and parsing call is an opaque callback."
+    },
+    {
+      "start": 402,
+      "end": 402,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 403,
+      "end": 409,
+      "status": "translated",
+      "label": "verify(): delegates to the block hash chain circuit",
+      "declarations": [
+        "Zkp.Implementation.Processors.BlockChain.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.block_verify_uses_hash_chain_circuit_only"
+      ],
+      "note": "Delegation only; verification itself is a dependency boundary."
+    },
+    {
+      "start": 410,
+      "end": 410,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 411,
+      "end": 477,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only generator-driven integration test; not modeled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proving-and-verification",
+      "obligation": "Every `prove` and `verify` call is an opaque callback returning success or failure; nothing in the model implies proof soundness, completeness, zero-knowledge, or recursive-verification soundness.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-construction-lowering",
+      "obligation": "`generate_cd`, each circuit's `new`, and `verifier_data()` lower to plonky2 gates that the model does not represent; the build plan records dependency order only.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-verifier-key-equality",
+      "obligation": "The model records that the chain circuit's own verifier data is passed into the step circuit, but does not prove that this key equals the key a verified proof was produced under.",
+      "discharged": false
+    },
+    {
+      "name": "hash-chain-and-merkle-semantics",
+      "obligation": "Deposits, registration records, digests, Merkle proofs and tree roots are opaque payloads; no hashing, Merkle membership or chain-folding semantics is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "block-chain-public-input-codec",
+      "obligation": "`BlockChainPublicInputs::from_u64_slice` is an opaque parser returning the previous extended public state; the model does not re-derive the encoding or prove it matches the circuit's public inputs.",
+      "discharged": false
+    },
+    {
+      "name": "witness-generator-refusal",
+      "obligation": "The SECURITY (M-2) claim that `BlockWitnessGenerator::add_block_with_tx_v2_inner` refuses to construct a ChannelAction block with a `None` action witness lives in another file and is not modeled here.",
+      "discharged": false
+    },
+    {
+      "name": "update-user-circuit-selection",
+      "obligation": "Selecting a circuit by user count is modeled as a lookup in a registered list; that the selected circuit actually constrains that many users is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "block-number-arithmetic",
+      "obligation": "`U63::add` is modeled as `Nat` successor with an explicit `u63Max` bound; the u64 `checked_add` plus `U63::new` range check is not proved equivalent.",
+      "discharged": false
+    }
+  ]
+}

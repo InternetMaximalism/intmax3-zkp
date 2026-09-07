@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/balance_processor.rs",
+  "source_sha256": "d62285362f097bfeb34b4ad646e00a8f0728510c863b7e7a36f6c9e77d572acc",
+  "source_lines": 246,
+  "module": "Zkp.Implementation.Processors",
+  "model": "doc/audit/zkp/Zkp/Implementation/Processors.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "plonky2, serde and crate imports",
+      "declarations": [
+        "Zkp.Implementation.Processors.Proof",
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.Balance.LeafWitness"
+      ],
+      "theorems": [],
+      "note": "Branch circuits, witnesses, channel ids and salts are opaque here."
+    },
+    {
+      "start": 27,
+      "end": 27,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 28,
+      "end": 44,
+      "status": "translated",
+      "label": "BalanceProcessorError",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Error"
+      ],
+      "theorems": [],
+      "note": "All five error variants and the circuit each maps to."
+    },
+    {
+      "start": 45,
+      "end": 45,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 46,
+      "end": 59,
+      "status": "translated",
+      "label": "BalanceProcessor fields",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Env",
+        "Zkp.Implementation.Processors.Balance.Artifact"
+      ],
+      "theorems": [],
+      "note": "The five owned circuits; generic bounds are not modeled."
+    },
+    {
+      "start": 60,
+      "end": 66,
+      "status": "non-executable",
+      "label": "impl header and trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 67,
+      "end": 88,
+      "status": "translated",
+      "label": "new(): ordered circuit construction",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.buildPlan",
+        "Zkp.Implementation.Processors.BuildStep",
+        "Zkp.Implementation.Processors.buildOrdered"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_build_plan_is_ordered",
+        "Zkp.Implementation.Processors.balance_switch_board_binds_all_three_branch_keys",
+        "Zkp.Implementation.Processors.balance_circuit_binds_switch_board_verifier_data"
+      ],
+      "note": "Dependency-ordered build plan; the externally supplied `spend_vd` is a parameter, not a produced artifact."
+    },
+    {
+      "start": 89,
+      "end": 89,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 90,
+      "end": 92,
+      "status": "translated",
+      "label": "balance_vd()",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Env.balanceVd"
+      ],
+      "theorems": [],
+      "note": "The cyclic key handed to every switch-board prove call."
+    },
+    {
+      "start": 93,
+      "end": 93,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 94,
+      "end": 114,
+      "status": "translated",
+      "label": "prove_initial(): the genesis entry point",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.proveInitialRun",
+        "Zkp.Implementation.Processors.Balance.SwitchBoardWitness",
+        "Zkp.Implementation.Processors.Balance.SwitchBoardWitness.filled",
+        "Zkp.Implementation.Processors.Balance.finish",
+        "Zkp.Implementation.Processors.Balance.Call",
+        "Zkp.Implementation.Processors.Balance.Call.isLeafProof"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_genesis_proves_no_leaf_circuit",
+        "Zkp.Implementation.Processors.balance_genesis_witness_is_one_hot",
+        "Zkp.Implementation.Processors.balance_finish_calls_shape",
+        "Zkp.Implementation.Processors.balance_switch_board_receives_balance_verifier_data",
+        "Zkp.Implementation.Processors.balance_switch_board_failure_skips_balance_circuit",
+        "Zkp.Implementation.Processors.balance_result_is_balance_circuit_output",
+        "Zkp.Implementation.Processors.balance_example_initial_succeeds",
+        "Zkp.Implementation.Processors.balance_example_initial_makes_two_calls"
+      ],
+      "note": "Genesis fills only `initial_value` and proves no branch circuit; proving is an opaque callback."
+    },
+    {
+      "start": 115,
+      "end": 115,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 116,
+      "end": 143,
+      "status": "translated",
+      "label": "prove_receive_transfer()",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.proveReceiveTransferRun",
+        "Zkp.Implementation.Processors.Balance.proveLeafRun",
+        "Zkp.Implementation.Processors.Balance.switchBoardWitness",
+        "Zkp.Implementation.Processors.Balance.leafError",
+        "Zkp.Implementation.Processors.Balance.Mode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_leaf_witness_is_one_hot",
+        "Zkp.Implementation.Processors.balance_leaf_failure_skips_switch_board_and_balance",
+        "Zkp.Implementation.Processors.balance_leaf_error_is_per_mode",
+        "Zkp.Implementation.Processors.balance_leaf_proof_precedes_switch_board",
+        "Zkp.Implementation.Processors.balance_entry_points_differ_only_in_mode"
+      ],
+      "note": "Branch proof first, then switch board, then balance circuit; a branch failure stops the chain."
+    },
+    {
+      "start": 144,
+      "end": 144,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 145,
+      "end": 172,
+      "status": "translated",
+      "label": "prove_receive_deposit()",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.proveReceiveDepositRun",
+        "Zkp.Implementation.Processors.Balance.proveLeafRun",
+        "Zkp.Implementation.Processors.Balance.switchBoardWitness",
+        "Zkp.Implementation.Processors.Balance.leafError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_leaf_witness_is_one_hot",
+        "Zkp.Implementation.Processors.balance_leaf_failure_skips_switch_board_and_balance"
+      ],
+      "note": "Same three-call plan with the deposit slot filled."
+    },
+    {
+      "start": 173,
+      "end": 173,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 174,
+      "end": 201,
+      "status": "translated",
+      "label": "prove_send_tx()",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.proveSendTxRun",
+        "Zkp.Implementation.Processors.Balance.proveLeafRun",
+        "Zkp.Implementation.Processors.Balance.switchBoardWitness",
+        "Zkp.Implementation.Processors.Balance.leafError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_example_send_tx_makes_three_calls",
+        "Zkp.Implementation.Processors.balance_leaf_failure_skips_switch_board_and_balance"
+      ],
+      "note": "Same three-call plan with the send slot filled."
+    },
+    {
+      "start": 202,
+      "end": 202,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 203,
+      "end": 213,
+      "status": "translated",
+      "label": "to_bytes(): slot order",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Slot",
+        "Zkp.Implementation.Processors.Balance.serializeOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_codec_slot_order_round_trips"
+      ],
+      "note": "Only the ordered slot list is modeled; bincode/serde encoding is a dependency boundary."
+    },
+    {
+      "start": 214,
+      "end": 214,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 215,
+      "end": 237,
+      "status": "translated",
+      "label": "from_bytes(): slot order",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Slot",
+        "Zkp.Implementation.Processors.Balance.deserializeOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.balance_codec_slot_order_round_trips"
+      ],
+      "note": "Only the ordered slot list is modeled; no constructor validation of decoded circuits is invented."
+    },
+    {
+      "start": 238,
+      "end": 238,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 239,
+      "end": 246,
+      "status": "translated",
+      "label": "BalanceProcessorBytes payload",
+      "declarations": [
+        "Zkp.Implementation.Processors.Balance.Slot"
+      ],
+      "theorems": [],
+      "note": "The five payload slots; the byte encoding is a dependency boundary."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proving-and-verification",
+      "obligation": "Every `prove` and `verify` call is an opaque callback returning success or failure; nothing in the model implies proof soundness, completeness, zero-knowledge, or recursive-verification soundness.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-construction-lowering",
+      "obligation": "`generate_cd`, each circuit's `new`, and `verifier_data()` lower to plonky2 gates that the model does not represent; the build plan records dependency order only.",
+      "discharged": false
+    },
+    {
+      "name": "balance-cyclic-verifier-key",
+      "obligation": "The model records that the balance circuit's verifier data is passed to every switch-board prove call, but does not prove it equals the key carried inside a candidate proof.",
+      "discharged": false
+    },
+    {
+      "name": "branch-circuit-semantics",
+      "obligation": "Receive-transfer, receive-deposit and send-tx witnesses are opaque; nothing about balance conservation, spend validity or nullifiers is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "bincode-serde-codec",
+      "obligation": "`to_bytes`/`from_bytes` encode via bincode/serde; only slot order is modeled, not the encoding or its round-trip.",
+      "discharged": false
+    }
+  ]
+}

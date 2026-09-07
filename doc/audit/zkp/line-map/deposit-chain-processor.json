@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/deposit_hash_chain/deposit_chain_processor.rs",
+  "source_sha256": "d662900eaf8862b027ce00b2c18b109301dc488b77e639c4ae552ba0a77a1d8c",
+  "source_lines": 212,
+  "module": "Zkp.Implementation.Processors",
+  "model": "doc/audit/zkp/Zkp/Implementation/Processors.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 14,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.Processors.Proof",
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.MerkleProof"
+      ],
+      "theorems": [],
+      "note": "Proof objects and verifier data come from plonky2; the model represents them as opaque tokens."
+    },
+    {
+      "start": 15,
+      "end": 15,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 16,
+      "end": 23,
+      "status": "translated",
+      "label": "DepositChainProcessorError",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the two error variants and their `#[from]` sources."
+    },
+    {
+      "start": 24,
+      "end": 24,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 25,
+      "end": 33,
+      "status": "translated",
+      "label": "DepositChainProcessor fields",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.Circuit",
+        "Zkp.Implementation.Processors.DepositChain.Env"
+      ],
+      "theorems": [],
+      "note": "The two owned circuits; the generic bounds are not modeled."
+    },
+    {
+      "start": 34,
+      "end": 40,
+      "status": "non-executable",
+      "label": "impl header and trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 41,
+      "end": 52,
+      "status": "translated",
+      "label": "new(): ordered circuit construction",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.buildPlan",
+        "Zkp.Implementation.Processors.DepositChain.Artifact",
+        "Zkp.Implementation.Processors.BuildStep",
+        "Zkp.Implementation.Processors.buildOrdered"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.deposit_build_plan_is_ordered",
+        "Zkp.Implementation.Processors.deposit_chain_circuit_binds_step_verifier_data"
+      ],
+      "note": "Modeled as a dependency-ordered build plan, not as gate construction."
+    },
+    {
+      "start": 53,
+      "end": 53,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 54,
+      "end": 56,
+      "status": "translated",
+      "label": "deposit_chain_vd()",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.Env.chainVd"
+      ],
+      "theorems": [],
+      "note": "The accessor that yields the cyclic key handed back to the step circuit."
+    },
+    {
+      "start": 57,
+      "end": 57,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 58,
+      "end": 67,
+      "status": "translated",
+      "label": "prove_step(): step circuit then chain wrapper",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.proveStepRun",
+        "Zkp.Implementation.Processors.DepositChain.proveStep",
+        "Zkp.Implementation.Processors.DepositChain.proveStepCalls",
+        "Zkp.Implementation.Processors.DepositChain.StepWitness",
+        "Zkp.Implementation.Processors.DepositChain.Call",
+        "Zkp.Implementation.Processors.DepositChain.Deposit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.deposit_prove_step_calls_step_circuit_first",
+        "Zkp.Implementation.Processors.deposit_prove_step_uses_own_chain_verifier_data",
+        "Zkp.Implementation.Processors.deposit_step_failure_skips_chain_circuit",
+        "Zkp.Implementation.Processors.deposit_prove_step_wraps_step_proof",
+        "Zkp.Implementation.Processors.deposit_step_calls_begin_with_the_step_circuit",
+        "Zkp.Implementation.Processors.deposit_example_step_succeeds",
+        "Zkp.Implementation.Processors.deposit_example_step_makes_two_calls"
+      ],
+      "note": "Call order and error precedence are modeled; the proving calls themselves are opaque callbacks."
+    },
+    {
+      "start": 68,
+      "end": 68,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 69,
+      "end": 75,
+      "status": "translated",
+      "label": "verify(): delegates to the hash-chain circuit",
+      "declarations": [
+        "Zkp.Implementation.Processors.DepositChain.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.deposit_verify_uses_chain_circuit_only"
+      ],
+      "note": "Delegation only; verification itself is a dependency boundary."
+    },
+    {
+      "start": 76,
+      "end": 76,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 77,
+      "end": 212,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only integration test; not modeled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proving-and-verification",
+      "obligation": "Every `prove` and `verify` call is an opaque callback returning success or failure; nothing in the model implies proof soundness, completeness, zero-knowledge, or recursive-verification soundness.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-construction-lowering",
+      "obligation": "`generate_cd`, each circuit's `new`, and `verifier_data()` lower to plonky2 gates that the model does not represent; the build plan records dependency order only.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-verifier-key-equality",
+      "obligation": "The model records that the chain circuit's own verifier data is passed into the step circuit, but does not prove that this key equals the key a verified proof was produced under.",
+      "discharged": false
+    },
+    {
+      "name": "hash-chain-and-merkle-semantics",
+      "obligation": "Deposits, registration records, digests, Merkle proofs and tree roots are opaque payloads; no hashing, Merkle membership or chain-folding semantics is modeled.",
+      "discharged": false
+    }
+  ]
+}

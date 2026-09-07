@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/channel_reg_hash_chain/channel_reg_chain_processor.rs",
+  "source_sha256": "b6cbe3a2fa66186cec957555817b15df8b77e8bcc7db5ffe291620746fdc40c9",
+  "source_lines": 246,
+  "module": "Zkp.Implementation.Processors",
+  "model": "doc/audit/zkp/Zkp/Implementation/Processors.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "non-executable",
+      "label": "module doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment and blank line."
+    },
+    {
+      "start": 3,
+      "end": 16,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.Processors.Proof",
+        "Zkp.Implementation.Processors.VerifierData",
+        "Zkp.Implementation.Processors.MerkleProof"
+      ],
+      "theorems": [],
+      "note": "Proof objects and verifier data come from plonky2; modeled as opaque tokens."
+    },
+    {
+      "start": 17,
+      "end": 17,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 18,
+      "end": 25,
+      "status": "translated",
+      "label": "ChannelRegChainProcessorError",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the two error variants."
+    },
+    {
+      "start": 26,
+      "end": 26,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 27,
+      "end": 35,
+      "status": "translated",
+      "label": "ChannelRegChainProcessor fields",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.Circuit",
+        "Zkp.Implementation.Processors.ChannelRegChain.Env"
+      ],
+      "theorems": [],
+      "note": "The two owned circuits; generic bounds are not modeled."
+    },
+    {
+      "start": 36,
+      "end": 42,
+      "status": "non-executable",
+      "label": "impl header and trait bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 43,
+      "end": 54,
+      "status": "translated",
+      "label": "new(): ordered circuit construction",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.buildPlan",
+        "Zkp.Implementation.Processors.ChannelRegChain.Artifact",
+        "Zkp.Implementation.Processors.BuildStep",
+        "Zkp.Implementation.Processors.buildOrdered"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.channel_reg_build_plan_is_ordered",
+        "Zkp.Implementation.Processors.channel_reg_build_plan_mirrors_deposit_build_plan"
+      ],
+      "note": "Dependency-ordered build plan, mirroring the deposit chain constructor."
+    },
+    {
+      "start": 55,
+      "end": 55,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 56,
+      "end": 58,
+      "status": "translated",
+      "label": "channel_reg_chain_vd()",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.Env.chainVd"
+      ],
+      "theorems": [],
+      "note": "The accessor that yields the cyclic key handed back to the step circuit."
+    },
+    {
+      "start": 59,
+      "end": 59,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 60,
+      "end": 71,
+      "status": "translated",
+      "label": "prove_step(): step circuit then chain wrapper",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.proveStepRun",
+        "Zkp.Implementation.Processors.ChannelRegChain.proveStep",
+        "Zkp.Implementation.Processors.ChannelRegChain.proveStepCalls",
+        "Zkp.Implementation.Processors.ChannelRegChain.StepWitness",
+        "Zkp.Implementation.Processors.ChannelRegChain.Call",
+        "Zkp.Implementation.Processors.ChannelRegChain.Record"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.channel_reg_prove_step_calls_step_circuit_first",
+        "Zkp.Implementation.Processors.channel_reg_step_failure_skips_chain_circuit",
+        "Zkp.Implementation.Processors.channel_reg_prove_step_wraps_step_proof",
+        "Zkp.Implementation.Processors.channel_reg_step_calls_begin_with_the_step_circuit"
+      ],
+      "note": "Call order and error precedence are modeled; proving is an opaque callback."
+    },
+    {
+      "start": 72,
+      "end": 72,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 73,
+      "end": 79,
+      "status": "translated",
+      "label": "verify(): delegates to the hash-chain circuit",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.verify"
+      ],
+      "theorems": [],
+      "note": "Delegation only; verification itself is a dependency boundary."
+    },
+    {
+      "start": 80,
+      "end": 80,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 81,
+      "end": 90,
+      "status": "translated",
+      "label": "impl Default: forwards to new()",
+      "declarations": [
+        "Zkp.Implementation.Processors.ChannelRegChain.defaultBuildPlan"
+      ],
+      "theorems": [
+        "Zkp.Implementation.Processors.channel_reg_default_equals_new_build_plan"
+      ],
+      "note": "Default construction runs the same build plan as `new`."
+    },
+    {
+      "start": 91,
+      "end": 91,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank separator."
+    },
+    {
+      "start": 92,
+      "end": 246,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only integration test; not modeled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proving-and-verification",
+      "obligation": "Every `prove` and `verify` call is an opaque callback returning success or failure; nothing in the model implies proof soundness, completeness, zero-knowledge, or recursive-verification soundness.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-construction-lowering",
+      "obligation": "`generate_cd`, each circuit's `new`, and `verifier_data()` lower to plonky2 gates that the model does not represent; the build plan records dependency order only.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-verifier-key-equality",
+      "obligation": "The model records that the chain circuit's own verifier data is passed into the step circuit, but does not prove that this key equals the key a verified proof was produced under.",
+      "discharged": false
+    },
+    {
+      "name": "hash-chain-and-merkle-semantics",
+      "obligation": "Deposits, registration records, digests, Merkle proofs and tree roots are opaque payloads; no hashing, Merkle membership or chain-folding semantics is modeled.",
+      "discharged": false
+    }
+  ]
+}
