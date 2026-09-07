@@ -15,7 +15,7 @@ What the model covers
 - `hex32`, `field`, `channelId`, `signatureFor` as executable checks with the
   source's error precedence (`Error` enumerates every message of the file),
 - `signatureDecision` exactly: no existing record ⇒ the candidate; otherwise the
-  five consistency conditions (schema version, key, signer, channel, predecessor,
+  consistency conditions (schema version, key, signer, channel, predecessor,
   slot), then successor mismatch, then the stored-signature slot check, then the
   EXISTING record is returned (replay of the exact stored bytes),
 - `remember` as an abstract durable store with read-decide-add semantics inside
@@ -53,7 +53,7 @@ Named boundaries (explicit premises / opaque callbacks, NOT proved here)
 What is NOT covered
 - Other devices, other browser profiles, other origins or a different
   `DB_NAME`: each store is a separate `Store`; the ledger cannot see signatures
-  released elsewhere.
+  released elsewhere, so nothing here prevents equivocation across stores.
 - Cleared or evicted storage: a `Store` that lost a row behaves as if the
   predecessor was never signed; no theorem survives a store reset.
 - The WASM signer, the state-transition / exit-kit checks it performs, and
@@ -62,8 +62,8 @@ What is NOT covered
   their wire is only screened by the opaque regex.
 - IndexedDB durability itself is a premise (`CommitOutcome.complete` means
   durable), as is the uniqueness of the spliced signature text in the wire.
-- Nothing here says a released signature is valid, that the signed state is
-  correct, or that the ledger prevents equivocation across stores.
+- Nothing here says a released signature is valid or that the signed state is
+  correct.
 -/
 
 namespace Zkp.Implementation.SignatureReleaseLedger
@@ -134,6 +134,45 @@ inductive Error where
   deriving DecidableEq, Repr
 
 abbrev Result (α : Type) := Except Error α
+
+/-! ## Except helpers -/
+
+theorem bind_ok_iff {α β : Type} (r : Result α) (f : α → Result β) (value : β) :
+    (r >>= f) = .ok value ↔ ∃ x, r = .ok x ∧ f x = .ok value := by
+  cases r <;> simp [Bind.bind, Except.bind]
+
+theorem map_ok_iff {α β : Type} (r : Result α) (f : α → β) (value : β) :
+    Except.map f r = .ok value ↔ ∃ x, r = .ok x ∧ f x = value := by
+  cases r <;> simp [Except.map]
+
+theorem exists_unit (p : Unit → Prop) : (∃ x, p x) ↔ p () := by
+  constructor
+  · rintro ⟨⟨⟩, h⟩; exact h
+  · intro h; exact ⟨(), h⟩
+
+theorem pure_ok_iff {α : Type} (a b : α) : (pure a : Result α) = .ok b ↔ a = b := by
+  constructor
+  · intro h; exact Except.ok.inj h
+  · intro h; subst h; rfl
+
+theorem error_ok_iff_false {α : Type} (e : Error) (value : α) :
+    ((Except.error e : Result α) = .ok value) ↔ False := by
+  constructor
+  · intro h; cases h
+  · intro h; exact h.elim
+
+/-- `if condition then throw error` as a statement of a do-block. -/
+def refuseIf (condition : Prop) [Decidable condition] (error : Error) : Result Unit :=
+  if condition then .error error else .ok ()
+
+theorem refuse_if_ok_iff (condition : Prop) [Decidable condition] (error : Error) :
+    refuseIf condition error = .ok () ↔ ¬ condition := by
+  unfold refuseIf
+  split
+  · rename_i hc
+    exact ⟨(fun h => nomatch h), fun hn => (hn hc).elim⟩
+  · rename_i hc
+    exact ⟨fun _ => hc, fun _ => rfl⟩
 
 /-! ## JS values
 
@@ -215,23 +254,32 @@ def channelIdOf (value : Option Json) : Result Nat :=
     if 0 ≤ n ∧ n ≤ (maxChannelId : Int) then .ok n.toNat else .error .inexactChannelId
   | _ => .error .inexactChannelId
 
+/-- `!Number.isInteger(slot) || slot < 0 || slot > 7` (source line 33). -/
+def slotOf (value : Option Json) : Result Int :=
+  match value with
+  | some (.number n) =>
+    if n < 0 ∨ (maxMemberSlot : Int) < n then .error .identitySlotInconsistent else .ok n
+  | _ => .error .identitySlotInconsistent
+
+/-- `signature.signature == null` negated (source line 35). -/
+def signatureBytesPresent (signature : Option Json) : Result Unit :=
+  match prop signature "signature" with
+  | none => .error .identitySlotInconsistent
+  | some .null => .error .identitySlotInconsistent
+  | some _ => .ok ()
+
 /-- `signatureFor(signature, signerPkG)`: slot integer in `0 ..= 7`, identity
 equal to `signerPkG` (after `hex32`, whose own error escapes), and a non-null
 `signature` member. Returns the slot. -/
 def signatureFor (stringify : Json → String) (signature : Option Json) (signerPkG : String) :
     Result Nat := do
-  let slot ← field stringify signature "memberSlot" "member_slot"
-  match slot with
-  | some (.number n) =>
-    if n < 0 ∨ (maxMemberSlot : Int) < n then throw .identitySlotInconsistent
-    let identity ← field stringify signature "pkG" "pk_g"
-    let pk ← hex32 identity "signature identity"
-    if pk ≠ signerPkG then throw .identitySlotInconsistent
-    match prop signature "signature" with
-    | none => throw .identitySlotInconsistent
-    | some .null => throw .identitySlotInconsistent
-    | some _ => pure n.toNat
-  | _ => throw .identitySlotInconsistent
+  let slotField ← field stringify signature "memberSlot" "member_slot"
+  let slot ← slotOf slotField
+  let identity ← field stringify signature "pkG" "pk_g"
+  let pk ← hex32 identity "signature identity"
+  refuseIf (pk ≠ signerPkG) .identitySlotInconsistent
+  signatureBytesPresent signature
+  pure slot.toNat
 
 /-! ## Records -/
 
@@ -263,24 +311,27 @@ def mkCandidate (identity : String) (channelId : Nat) (prevDigest successorDiges
 
 /-! ## `signatureDecision` (source lines 39–55) -/
 
-def signatureDecision (stringify : Json → String) (candidate : Decision)
-    (existing : Option Decision) : Result Decision :=
-  match existing with
+/-- Source lines 41–54: the branch of `signatureDecision` with an existing row. -/
+def decideAgainstExisting (stringify : Json → String) (candidate existing : Decision) :
+    Result Decision :=
+  if existing.schemaVersion ≠ schemaVersion ∨ existing.key ≠ candidate.key
+      ∨ existing.signerPkG ≠ candidate.signerPkG ∨ existing.channelId ≠ candidate.channelId
+      ∨ existing.prevDigest ≠ candidate.prevDigest ∨ existing.memberSlot ≠ candidate.memberSlot then
+    .error .decisionInconsistent
+  else if existing.successorDigest ≠ candidate.successorDigest then
+    .error .differentSuccessor
+  else
+    match signatureFor stringify (some existing.signature) candidate.signerPkG with
+    | .error e => .error e
+    | .ok slot =>
+      if slot ≠ candidate.memberSlot then .error .durableSlotInconsistent
+      -- Falcon signatures may be randomized: replay the stored bytes, never fresh ones.
+      else .ok existing
+
+def signatureDecision (stringify : Json → String) (candidate : Decision) :
+    Option Decision → Result Decision
   | none => .ok candidate
-  | some existing =>
-    if existing.schemaVersion ≠ schemaVersion ∨ existing.key ≠ candidate.key
-        ∨ existing.signerPkG ≠ candidate.signerPkG ∨ existing.channelId ≠ candidate.channelId
-        ∨ existing.prevDigest ≠ candidate.prevDigest ∨ existing.memberSlot ≠ candidate.memberSlot then
-      .error .decisionInconsistent
-    else if existing.successorDigest ≠ candidate.successorDigest then
-      .error .differentSuccessor
-    else
-      match signatureFor stringify (some existing.signature) candidate.signerPkG with
-      | .error e => .error e
-      | .ok slot =>
-        if slot ≠ candidate.memberSlot then .error .durableSlotInconsistent
-        -- Falcon signatures may be randomized: replay the stored bytes, never fresh ones.
-        else .ok existing
+  | some existing => decideAgainstExisting stringify candidate existing
 
 /-! ## Durable store and `remember` (source lines 57–118) -/
 
@@ -289,8 +340,15 @@ def Store := LedgerKey → Option Decision
 
 def emptyStore : Store := fun _ => none
 
-def insert (store : Store) (key : LedgerKey) (decision : Decision) : Store :=
+/-- `store.add(saved)` on an absent key. -/
+def storeInsert (store : Store) (key : LedgerKey) (decision : Decision) : Store :=
   fun k => if k = key then some decision else store k
+
+/-- `if (!read.result) store.add(saved)`: an existing row is never overwritten. -/
+def writeIfAbsent (store : Store) (key : LedgerKey) (decision : Decision) : Store :=
+  match store key with
+  | none => storeInsert store key decision
+  | some _ => store
 
 inductive OpenOutcome where
   | opened | failed | blocked
@@ -315,26 +373,35 @@ def Durability.isStrict : Durability → Bool
   | .strict => true
   | _ => false
 
+/-- `open()` (source lines 59–82). -/
+def openDatabase (backend : Backend) : Result Unit :=
+  if !backend.indexedDbAvailable then .error .noIndexedDb
+  else
+    match backend.openOutcome with
+    | .failed => .error .databaseOpenFailed
+    | .blocked => .error .databaseUpgradeBlocked
+    | .opened => .ok ()
+
+/-- Source lines 93–97: refuse anything but granted `strict` durability. -/
+def requireStrict (backend : Backend) : Result Unit :=
+  if backend.durability.isStrict then .ok () else .error .notStrictlyDurable
+
+/-- Source lines 98–100: the transaction outcome after the read/decision/add. -/
+def commit (backend : Backend) (store' : Store) (saved : Decision) : Result (Decision × Store) :=
+  match backend.commitOutcome with
+  | .failed => .error .storageFailed
+  | .aborted => .error .storageAborted
+  | .complete => .ok (saved, store')
+
 /-- `remember(candidate)`: read the row at `candidate.key`, decide, add only when
 absent, all inside one strict-durability transaction. Any failure aborts the
 transaction: the store is unchanged and nothing is resolved. -/
 def remember (backend : Backend) (stringify : Json → String) (store : Store)
     (candidate : Decision) : Result (Decision × Store) := do
-  if !backend.indexedDbAvailable then throw .noIndexedDb
-  match backend.openOutcome with
-  | .failed => throw .databaseOpenFailed
-  | .blocked => throw .databaseUpgradeBlocked
-  | .opened => pure ()
-  if !backend.durability.isStrict then throw .notStrictlyDurable
-  let existing := store candidate.key
-  let saved ← signatureDecision stringify candidate existing
-  match backend.commitOutcome with
-  | .failed => throw .storageFailed
-  | .aborted => throw .storageAborted
-  | .complete =>
-    pure (saved, match existing with
-      | none => insert store candidate.key saved
-      | some _ => store)
+  openDatabase backend
+  requireStrict backend
+  let saved ← signatureDecision stringify candidate (store candidate.key)
+  commit backend (writeIfAbsent store candidate.key saved) saved
 
 /-! ## `assertUnsignedProposal` and `release` (source lines 120–171) -/
 
@@ -363,6 +430,39 @@ def assertUnsignedProposal (host : Host) (action : String) (result : Option Json
     | _ => .error .unsignedProposalCarriesSignatures
   else .ok ()
 
+/-- Source line 139: the WASM result must be the serialized wire string. -/
+def requireWireText (result : Option Json) : Result String :=
+  match result with
+  | some (.str s) => .ok s
+  | _ => .error .resultNotString
+
+/-- `JSON.parse` with its `SyntaxError`. -/
+def parseJson (host : Host) (text : String) : Result Json :=
+  match host.parse text with
+  | some j => .ok j
+  | none => .error .parseFailure
+
+/-- Source lines 141–142: the state whose predecessor/successor are recorded. -/
+def stateOf (host : Host) (action : String) (input : SignInput) (output : Json) :
+    Result (Option Json) :=
+  if action = "signState" then
+    match input.stateJson with
+    | some (.str s) =>
+      match host.parse s with
+      | some j => .ok (some j)
+      | none => .error .parseFailure
+    | other => .ok other
+  else .ok (some output)
+
+/-- Source lines 145–146: the member-signature vector. -/
+def signatureVector (host : Host) (action : String) (output : Json) : Result (List Json) :=
+  match (if action = "signState" then .ok (some (.arr [output]))
+      else field host.stringify (some output) "memberSignatures" "member_signatures" :
+      Result (Option Json)) with
+  | .error e => .error e
+  | .ok (some (.arr items)) => .ok items
+  | .ok _ => .error .noSignatureVector
+
 /-- `signatures.filter(signature => hex32(field(signature,'pkG','pk_g'), …) === identity)`;
 the first invalid element's error escapes, in vector order. -/
 def ownSignatures (stringify : Json → String) (identity : String) : List Json → Result (List Json)
@@ -372,6 +472,11 @@ def ownSignatures (stringify : Json → String) (identity : String) : List Json 
     let pk ← hex32 pkField "signature identity"
     let others ← ownSignatures stringify identity rest
     pure (if pk = identity then signature :: others else others)
+
+/-- Source line 148: `own.length !== 1`. -/
+def singleOwn : List Json → Result Json
+  | [only] => .ok only
+  | _ => .error .notExactlyOneOwnSignature
 
 /-- `memberSlot !== input.slot` negated: `input.slot` is that exact number. -/
 def isNumber (value : Option Json) (n : Nat) : Bool :=
@@ -390,34 +495,17 @@ structure Prepared where
 /-- Source lines 138–154 in order. -/
 def buildCandidate (host : Host) (req : Request) : Result Prepared := do
   let identity ← hex32 req.signerPkG "session signer identity"
-  let resultText ← match req.result with
-    | some (.str s) => pure s
-    | _ => throw .resultNotString
-  let output ← match host.parse resultText with
-    | some j => pure j
-    | none => throw .parseFailure
-  let state ← if req.action = "signState" then
-      match req.input.stateJson with
-      | some (.str s) =>
-        match host.parse s with
-        | some j => pure (some j)
-        | none => throw .parseFailure
-      | other => pure other
-    else pure (some output)
+  let resultText ← requireWireText req.result
+  let output ← parseJson host resultText
+  let state ← stateOf host req.action req.input output
   let prevField ← field host.stringify state "prevDigest" "prev_digest"
   let prevDigest ← hex32 prevField "predecessor digest"
-  if req.action = "signState" ∧ prevDigest ≠ zeroDigest then throw .genesisRequiresZeroPredecessor
-  let signatures ← if req.action = "signState" then pure (some (.arr [output]))
-    else field host.stringify (some output) "memberSignatures" "member_signatures"
-  let vector ← match signatures with
-    | some (.arr items) => pure items
-    | _ => throw .noSignatureVector
+  refuseIf (req.action = "signState" ∧ prevDigest ≠ zeroDigest) .genesisRequiresZeroPredecessor
+  let vector ← signatureVector host req.action output
   let own ← ownSignatures host.stringify identity vector
-  let first ← match own with
-    | [only] => pure only
-    | _ => throw .notExactlyOneOwnSignature
+  let first ← singleOwn own
   let memberSlot ← signatureFor host.stringify (some first) identity
-  if req.action = "signState" ∧ !isNumber req.input.slot memberSlot then throw .genesisSlotMismatch
+  refuseIf (req.action = "signState" ∧ !isNumber req.input.slot memberSlot) .genesisSlotMismatch
   let channelField ← field host.stringify state "channelId" "channel_id"
   let channel ← channelIdOf channelField
   let successorDigest ← hex32 (prop state "digest") "successor digest"
@@ -428,10 +516,11 @@ def buildCandidate (host : Host) (req : Request) : Result Prepared := do
 `cosign` splices it over the unique occurrence of the fresh signature text. -/
 def render (host : Host) (req : Request) (prepared : Prepared) (saved : Decision) : Result Json :=
   if req.action = "signState" then .ok (.str (host.stringify saved.signature))
+  else if host.occurrences prepared.resultText (host.stringify prepared.own) ≠ 1 then
+    .error .wireNotCanonical
   else
-    let original := host.stringify prepared.own
-    if host.occurrences prepared.resultText original ≠ 1 then .error .wireNotCanonical
-    else .ok (.str (host.replaceFirst prepared.resultText original (host.stringify saved.signature)))
+    .ok (.str (host.replaceFirst prepared.resultText (host.stringify prepared.own)
+      (host.stringify saved.signature)))
 
 /-- `release` for `signState`/`cosign` (source lines 138–168), also exposing the
 decision record whose signature bytes are returned. The `!persisted` guard of
@@ -448,13 +537,9 @@ def releaseSigned (backend : Backend) (host : Host) (store : Store) (req : Reque
 def release (backend : Backend) (host : Host) (store : Store) (req : Request) :
     Result (Option Json × Store) :=
   if req.action ∈ signActions then
-    match releaseSigned backend host store req with
-    | .ok r => .ok (some r.2.1, r.2.2)
-    | .error e => .error e
+    Except.map (fun r => (some r.2.1, r.2.2)) (releaseSigned backend host store req)
   else
-    match assertUnsignedProposal host req.action req.result with
-    | .ok () => .ok (req.result, store)
-    | .error e => .error e
+    Except.map (fun _ => (req.result, store)) (assertUnsignedProposal host req.action req.result)
 
 /-- Stores reachable from a store by any sequence of `release` calls (any
 backend, host and request per step). -/
@@ -462,34 +547,6 @@ inductive Reachable : Store → Store → Prop
   | refl (s : Store) : Reachable s s
   | step {s s' s'' : Store} (backend : Backend) (host : Host) (req : Request) (out : Option Json) :
       release backend host s req = .ok (out, s') → Reachable s' s'' → Reachable s s''
-
-/-! ## Except helpers -/
-
-theorem bind_ok_iff {α β : Type} (r : Result α) (f : α → Result β) (value : β) :
-    (r >>= f) = .ok value ↔ ∃ x, r = .ok x ∧ f x = .ok value := by
-  cases r <;> simp [Bind.bind, Except.bind]
-
-theorem exists_unit (p : Unit → Prop) : (∃ x, p x) ↔ p () := by
-  constructor
-  · rintro ⟨⟨⟩, h⟩; exact h
-  · intro h; exact ⟨(), h⟩
-
-theorem pure_ok_iff {α : Type} (a b : α) : (pure a : Result α) = .ok b ↔ a = b := by
-  constructor
-  · intro h; exact Except.ok.inj h
-  · intro h; subst h; rfl
-
-theorem throw_ok_iff_false {α : Type} (e : Error) (value : α) :
-    ((throw e : Result α) = .ok value) ↔ False := by
-  constructor
-  · intro h; cases h
-  · intro h; exact h.elim
-
-theorem error_ok_iff_false {α : Type} (e : Error) (value : α) :
-    ((Except.error e : Result α) = .ok value) ↔ False := by
-  constructor
-  · intro h; cases h
-  · intro h; exact h.elim
 
 /-! ## Validator facts -/
 
@@ -512,34 +569,39 @@ theorem channel_id_ok_bounded (value : Option Json) (n : Nat) :
   · rename_i m
     split at h
     · rename_i hm
-      have := Except.ok.inj h
-      subst this
+      have hn := Except.ok.inj h
+      subst hn
+      have ht : ((m.toNat : Nat) : Int) = m := Int.toNat_of_nonneg hm.1
+      unfold maxChannelId at hm ⊢
       omega
     · cases h
+  · cases h
+
+theorem slot_of_ok (value : Option Json) (n : Int) :
+    slotOf value = .ok n → 0 ≤ n ∧ n.toNat ≤ maxMemberSlot := by
+  intro h
+  unfold slotOf at h
+  split at h
+  · rename_i m
+    split at h
+    · cases h
+    · rename_i hm
+      have hn := Except.ok.inj h
+      subst hn
+      unfold maxMemberSlot at hm ⊢
+      have h0 : 0 ≤ m := by omega
+      have ht : ((m.toNat : Nat) : Int) = m := Int.toNat_of_nonneg h0
+      omega
   · cases h
 
 theorem signature_for_ok_slot_bounded (stringify : Json → String) (signature : Option Json)
     (signerPkG : String) (slot : Nat) :
     signatureFor stringify signature signerPkG = .ok slot → slot ≤ maxMemberSlot := by
   intro h
-  simp only [signatureFor, bind_ok_iff] at h
-  obtain ⟨slotField, _, h⟩ := h
-  split at h
-  · rename_i n
-    split at h
-    · simp only [throw_ok_iff_false, bind_ok_iff, false_and, exists_false] at h
-    · rename_i hn
-      simp only [bind_ok_iff] at h
-      obtain ⟨_, _, _, _, h⟩ := h
-      split at h
-      · simp only [throw_ok_iff_false, bind_ok_iff, false_and, exists_false] at h
-      · split at h
-        · cases h
-        · cases h
-        · have := Except.ok.inj h
-          subst this
-          omega
-  · cases h
+  simp only [signatureFor, bind_ok_iff, exists_unit, pure_ok_iff] at h
+  obtain ⟨_, _, n, hslot, _, _, _, _, _, _, hn⟩ := h
+  subst hn
+  exact (slot_of_ok _ _ hslot).2
 
 /-! ## `signatureDecision` facts -/
 
@@ -555,20 +617,21 @@ theorem signature_decision_existing (stringify : Json → String) (candidate exi
     existing.prevDigest = candidate.prevDigest ∧ existing.memberSlot = candidate.memberSlot ∧
     existing.successorDigest = candidate.successorDigest := by
   intro h
-  unfold signatureDecision at h
-  split at h
-  · cases h
+  have h' : decideAgainstExisting stringify candidate existing = .ok saved := h
+  unfold decideAgainstExisting at h'
+  split at h'
+  · cases h'
   · rename_i hconsistent
-    split at h
-    · cases h
+    split at h'
+    · cases h'
     · rename_i hsucc
-      split at h
-      · cases h
-      · split at h
-        · cases h
-        · have hs := Except.ok.inj h
+      split at h'
+      · cases h'
+      · split at h'
+        · cases h'
+        · have hs := Except.ok.inj h'
           subst hs
-          simp only [not_or, Decidable.not_not] at hconsistent hsucc
+          simp only [not_or, ne_eq, Decidable.not_not] at hconsistent hsucc
           exact ⟨rfl, hconsistent.1, hconsistent.2.1, hconsistent.2.2.1, hconsistent.2.2.2.1,
             hconsistent.2.2.2.2.1, hconsistent.2.2.2.2.2, hsucc⟩
 
@@ -585,13 +648,76 @@ theorem signature_decision_key (stringify : Json → String) (candidate : Decisi
     saved.key = candidate.key ∧ saved.prevDigest = candidate.prevDigest := by
   intro h
   cases existing with
-  | none => rw [signature_decision_no_existing] at h; cases h; exact ⟨rfl, rfl⟩
+  | none =>
+    rw [signature_decision_no_existing] at h
+    have hs := Except.ok.inj h
+    subst hs
+    exact ⟨rfl, rfl⟩
   | some existing =>
     obtain ⟨hs, _, hk, _, _, hp, _, _⟩ := signature_decision_existing stringify candidate existing saved h
     subst hs
     exact ⟨hk, hp⟩
 
-/-! ## `remember` facts -/
+/-! ## Store and `remember` facts -/
+
+theorem store_insert_self (store : Store) (key : LedgerKey) (decision : Decision) :
+    storeInsert store key decision key = some decision := by
+  simp [storeInsert]
+
+theorem store_insert_other (store : Store) (key : LedgerKey) (decision : Decision) (k : LedgerKey) :
+    k ≠ key → storeInsert store key decision k = store k := by
+  intro h
+  simp [storeInsert, h]
+
+theorem write_if_absent_absent (store : Store) (key : LedgerKey) (decision : Decision) :
+    store key = none → writeIfAbsent store key decision = storeInsert store key decision := by
+  intro h
+  simp [writeIfAbsent, h]
+
+theorem write_if_absent_present (store : Store) (key : LedgerKey) (decision existing : Decision) :
+    store key = some existing → writeIfAbsent store key decision = store := by
+  intro h
+  simp [writeIfAbsent, h]
+
+theorem open_database_ok (backend : Backend) :
+    openDatabase backend = .ok () → backend.indexedDbAvailable = true ∧ backend.openOutcome = .opened := by
+  intro h
+  unfold openDatabase at h
+  split at h
+  · cases h
+  · rename_i havail
+    split at h
+    · cases h
+    · cases h
+    · rename_i hopen
+      refine ⟨?_, hopen⟩
+      cases ha : backend.indexedDbAvailable
+      · simp [ha] at havail
+      · rfl
+
+theorem require_strict_ok (backend : Backend) :
+    requireStrict backend = .ok () → backend.durability = .strict := by
+  intro h
+  unfold requireStrict at h
+  split at h
+  · rename_i hs
+    cases hd : backend.durability
+    · rfl
+    · simp [hd, Durability.isStrict] at hs
+    · simp [hd, Durability.isStrict] at hs
+  · cases h
+
+theorem commit_ok (backend : Backend) (store' : Store) (decision saved : Decision) (store'' : Store) :
+    commit backend store' decision = .ok (saved, store'') →
+    backend.commitOutcome = .complete ∧ saved = decision ∧ store'' = store' := by
+  intro h
+  unfold commit at h
+  split at h
+  · cases h
+  · cases h
+  · rename_i hc
+    have hpair := Except.ok.inj h
+    exact ⟨hc, (congrArg Prod.fst hpair).symm, (congrArg Prod.snd hpair).symm⟩
 
 theorem remember_ok (backend : Backend) (stringify : Json → String) (store : Store)
     (candidate saved : Decision) (store' : Store) :
@@ -600,52 +726,35 @@ theorem remember_ok (backend : Backend) (stringify : Json → String) (store : S
     (∀ k d, store k = some d → store' k = some d) ∧
     (∀ d, store candidate.key = some d → saved = d) := by
   intro h
-  simp only [remember, bind_ok_iff] at h
-  split at h
-  · simp only [throw_ok_iff_false, false_and, exists_false] at h
-  · simp only [pure_ok_iff, exists_eq_left] at h
-    split at h
-    · simp only [throw_ok_iff_false, false_and, exists_false] at h
-    · simp only [throw_ok_iff_false, false_and, exists_false] at h
-    · simp only [pure_ok_iff, exists_eq_left] at h
-      split at h
-      · simp only [throw_ok_iff_false, false_and, exists_false] at h
-      · simp only [pure_ok_iff, exists_eq_left] at h
-        obtain ⟨decided, hdecided, h⟩ := h
-        split at h
-        · cases h
-        · cases h
-        · have hpair := Except.ok.inj h
-          have hsaved : decided = saved := congrArg Prod.fst hpair
-          have hstore : (match store candidate.key with
-              | none => insert store candidate.key decided
-              | some _ => store) = store' := congrArg Prod.snd hpair
-          subst hsaved
-          have hkey := signature_decision_key stringify candidate _ decided hdecided
-          cases hex : store candidate.key with
-          | none =>
-            rw [hex] at hstore hdecided
-            rw [signature_decision_no_existing] at hdecided
-            have hc := Except.ok.inj hdecided
-            subst hc
-            subst hstore
-            refine ⟨?_, rfl, ?_, ?_⟩
-            · simp [insert]
-            · intro k d hk
-              simp only [insert]
-              split
-              · rename_i hkk; subst hkk; rw [hex] at hk; cases hk
-              · exact hk
-            · intro d hd; rw [hex] at hd; cases hd
-          | some existing =>
-            rw [hex] at hstore hdecided
-            subst hstore
-            obtain ⟨hs, _⟩ := signature_decision_existing stringify candidate existing decided hdecided
-            subst hs
-            refine ⟨hex, hkey.1, fun _ _ hk => hk, ?_⟩
-            intro d hd
-            rw [hex] at hd
-            exact (Option.some.inj hd).symm
+  simp only [remember, bind_ok_iff, exists_unit] at h
+  obtain ⟨_, _, decided, hdecided, hcommit⟩ := h
+  obtain ⟨_, hsaved, hstore⟩ := commit_ok _ _ _ _ _ hcommit
+  subst hsaved hstore
+  have hkey := signature_decision_key stringify candidate _ _ hdecided
+  cases hex : store candidate.key with
+  | none =>
+    rw [hex, signature_decision_no_existing] at hdecided
+    have hc := Except.ok.inj hdecided
+    subst hc
+    rw [write_if_absent_absent _ _ _ hex]
+    refine ⟨store_insert_self _ _ _, rfl, ?_, ?_⟩
+    · intro k d hk
+      by_cases hkk : k = candidate.key
+      · subst hkk
+        rw [hex] at hk
+        cases hk
+      · rw [store_insert_other _ _ _ _ hkk]
+        exact hk
+    · intro d hd
+      cases hd
+  | some existing =>
+    rw [hex] at hdecided
+    obtain ⟨hs, _⟩ := signature_decision_existing stringify candidate existing _ hdecided
+    subst hs
+    rw [write_if_absent_present _ _ _ _ hex]
+    refine ⟨hex, hkey.1, fun _ _ hk => hk, ?_⟩
+    intro d hd
+    exact Option.some.inj hd
 
 /-- Nothing is written unless strict durability was granted. -/
 theorem remember_requires_strict_durability (backend : Backend) (stringify : Json → String)
@@ -654,28 +763,10 @@ theorem remember_requires_strict_durability (backend : Backend) (stringify : Jso
     backend.durability = .strict ∧ backend.commitOutcome = .complete ∧
     backend.indexedDbAvailable = true ∧ backend.openOutcome = .opened := by
   intro h
-  simp only [remember, bind_ok_iff] at h
-  split at h
-  · simp only [throw_ok_iff_false, false_and, exists_false] at h
-  · rename_i havail
-    simp only [pure_ok_iff, exists_eq_left] at h
-    split at h
-    · simp only [throw_ok_iff_false, false_and, exists_false] at h
-    · simp only [throw_ok_iff_false, false_and, exists_false] at h
-    · rename_i hopen
-      simp only [pure_ok_iff, exists_eq_left] at h
-      split at h
-      · simp only [throw_ok_iff_false, false_and, exists_false] at h
-      · rename_i hstrict
-        simp only [pure_ok_iff, exists_eq_left] at h
-        obtain ⟨_, _, h⟩ := h
-        split at h
-        · cases h
-        · cases h
-        · rename_i hcommit
-          refine ⟨?_, hcommit, ?_, hopen⟩
-          · cases hd : backend.durability <;> simp [hd, Durability.isStrict] at hstrict ⊢
-          · cases ha : backend.indexedDbAvailable <;> simp [ha] at havail ⊢
+  simp only [remember, bind_ok_iff, exists_unit] at h
+  obtain ⟨hopen, hstrict, _, _, hcommit⟩ := h
+  obtain ⟨havail, hopened⟩ := open_database_ok _ hopen
+  exact ⟨require_strict_ok _ hstrict, (commit_ok _ _ _ _ _ hcommit).1, havail, hopened⟩
 
 /-! ## `release` facts -/
 
@@ -694,7 +785,7 @@ theorem release_signed_ok (backend : Backend) (host : Host) (store : Store) (req
   subst h1 h2 h3
   obtain ⟨hs, _⟩ := signature_decision_existing host.stringify prepared.candidate persisted decided hdec
   subst hs
-  exact ⟨prepared, decided, hprep, hrem, rfl, hout⟩
+  exact ⟨prepared, _, hprep, hrem, rfl, hout⟩
 
 /-- Theorem (1a): one `release` call never changes or removes a stored decision. -/
 theorem release_preserves_stored (backend : Backend) (host : Host) (store : Store) (req : Request)
@@ -703,19 +794,17 @@ theorem release_preserves_stored (backend : Backend) (host : Host) (store : Stor
   intro h hk
   unfold release at h
   split at h
-  · split at h
-    · rename_i r hr
-      obtain ⟨saved, out', s'⟩ := r
-      have hs : s' = store' := congrArg Prod.snd (Except.ok.inj h)
-      subst hs
-      obtain ⟨_, _, _, hrem, _, _⟩ := release_signed_ok backend host store req saved out' store' hr
-      exact (remember_ok _ _ _ _ _ _ hrem).2.2.1 k d hk
-    · cases h
-  · split at h
-    · have hs : store = store' := congrArg Prod.snd (Except.ok.inj h)
-      subst hs
-      exact hk
-    · cases h
+  · rw [map_ok_iff] at h
+    obtain ⟨⟨saved, out', s'⟩, hr, hv⟩ := h
+    have hs : s' = store' := congrArg Prod.snd hv
+    rw [← hs]
+    obtain ⟨_, _, _, hrem, _, _⟩ := release_signed_ok _ _ _ _ _ _ _ hr
+    exact (remember_ok _ _ _ _ _ _ hrem).2.2.1 k d hk
+  · rw [map_ok_iff] at h
+    obtain ⟨_, _, hv⟩ := h
+    have hs : store = store' := congrArg Prod.snd hv
+    rw [← hs]
+    exact hk
 
 /-- Theorem (1): along any sequence of `release` calls on one store, a decision
 stored under a key never changes. -/
@@ -755,7 +844,7 @@ theorem release_returns_only_stored (backend : Backend) (host : Host) (store : S
   subst hs
   obtain ⟨hstored, hkey, _, _⟩ := remember_ok _ _ _ _ _ _ hrem
   rw [hkey]
-  exact ⟨hstored, render_ok host req prepared saved out hout⟩
+  exact ⟨hstored, render_ok host req prepared _ out hout⟩
 
 /-- Theorem (4'): a signed release with a strict-durability failure or any
 storage abort releases nothing (no `.ok` value exists). -/
@@ -783,8 +872,8 @@ theorem same_key_same_decision (b₁ b₂ : Backend) (h₁ h₂ : Host) (s s₁ 
   have hstored₁ := (release_returns_only_stored b₁ h₁ s req₁ d₁ out₁ s₁ hr₁).1
   have hstored₂ := stored_decision_never_changes s₁ s₂ d₁.key d₁ hreach hstored₁
   obtain ⟨prepared, persisted, _, hrem, hs, _⟩ := release_signed_ok b₂ h₂ s₂ req₂ d₂ out₂ s₃ hr₂
-  subst hs
   obtain ⟨_, hk, _, hreplay⟩ := remember_ok _ _ _ _ _ _ hrem
+  rw [← hs] at hk hreplay
   rw [← hk, hkey] at hreplay
   exact hreplay d₁ hstored₂
 
@@ -805,20 +894,15 @@ theorem build_candidate_genesis (host : Host) (req : Request) (prepared : Prepar
     req.action = "signState" → buildCandidate host req = .ok prepared →
     prepared.candidate.prevDigest = zeroDigest := by
   intro haction h
-  simp only [buildCandidate, bind_ok_iff, pure_ok_iff, haction, if_true, true_and] at h
-  obtain ⟨identity, _, resultText, hres, output, hout, state, hstate, prevField, _, prevDigest, _, h⟩ := h
-  split at h
-  · simp only [throw_ok_iff_false, false_and, exists_false] at h
-  · rename_i hzero
-    simp only [pure_ok_iff, exists_eq_left, bind_ok_iff] at h
-    obtain ⟨vector, _, own, _, first, _, memberSlot, _, h⟩ := h
-    split at h
-    · simp only [throw_ok_iff_false, false_and, exists_false] at h
-    · simp only [pure_ok_iff, exists_eq_left, bind_ok_iff] at h
-      obtain ⟨_, _, _, _, _, _, hp⟩ := h
-      subst hp
-      simp only [Decidable.not_not] at hzero
-      exact hzero
+  simp only [buildCandidate, bind_ok_iff, exists_unit, pure_ok_iff] at h
+  obtain ⟨identity, _, resultText, _, output, _, state, _, prevField, _, prevDigest, _, hgen,
+    vector, _, own, _, first, _, memberSlot, _, _, channelField, _, channel, _,
+    successorDigest, _, hp⟩ := h
+  subst hp
+  rw [refuse_if_ok_iff] at hgen
+  have hzero : prevDigest = zeroDigest :=
+    Decidable.byContradiction fun hne => hgen ⟨haction, hne⟩
+  exact hzero
 
 /-- Theorem (3): a genesis (`signState`) release only ever returns a decision
 whose predecessor digest is zero. -/
@@ -829,27 +913,11 @@ theorem genesis_release_requires_zero_predecessor (backend : Backend) (host : Ho
     saved.prevDigest = zeroDigest := by
   intro haction h
   obtain ⟨prepared, persisted, hprep, hrem, hs, _⟩ := release_signed_ok backend host store req saved out store' h
-  subst hs
   have hgen := build_candidate_genesis host req prepared haction hprep
-  have hrem' := hrem
-  simp only [remember, bind_ok_iff] at hrem'
-  split at hrem'
-  · simp only [throw_ok_iff_false, false_and, exists_false] at hrem'
-  · simp only [pure_ok_iff, exists_eq_left] at hrem'
-    split at hrem'
-    · simp only [throw_ok_iff_false, false_and, exists_false] at hrem'
-    · simp only [throw_ok_iff_false, false_and, exists_false] at hrem'
-    · simp only [pure_ok_iff, exists_eq_left] at hrem'
-      split at hrem'
-      · simp only [throw_ok_iff_false, false_and, exists_false] at hrem'
-      · simp only [pure_ok_iff, exists_eq_left] at hrem'
-        obtain ⟨decided, hdecided, hrem'⟩ := hrem'
-        split at hrem'
-        · cases hrem'
-        · cases hrem'
-        · have hd : decided = saved := congrArg Prod.fst (Except.ok.inj hrem')
-          subst hd
-          rw [(signature_decision_key _ _ _ _ hdecided).2, hgen]
+  simp only [remember, bind_ok_iff, exists_unit] at hrem
+  obtain ⟨_, _, decided, hdecided, hcommit⟩ := hrem
+  obtain ⟨_, hsaved, _⟩ := commit_ok _ _ _ _ _ hcommit
+  rw [hs, hsaved, (signature_decision_key _ _ _ _ hdecided).2, hgen]
 
 /-! ## Positive trace (theorem 5): first sign, then a retry with fresh randomized bytes -/
 
@@ -892,9 +960,10 @@ the retry (same state, fresh randomized bytes B) is accepted, leaves the store
 unchanged, and replays bytes A — even though B would render as `SIG-B`. -/
 theorem first_sign_then_retry_replays :
     releaseSigned exampleBackend exampleHost emptyStore (exampleRequest "A")
-      = .ok (exampleDecision, .str "SIG-A", insert emptyStore exampleKey exampleDecision) ∧
-    releaseSigned exampleBackend exampleHost (insert emptyStore exampleKey exampleDecision) (exampleRequest "B")
-      = .ok (exampleDecision, .str "SIG-A", insert emptyStore exampleKey exampleDecision) ∧
+      = .ok (exampleDecision, .str "SIG-A", storeInsert emptyStore exampleKey exampleDecision) ∧
+    releaseSigned exampleBackend exampleHost (storeInsert emptyStore exampleKey exampleDecision)
+      (exampleRequest "B")
+      = .ok (exampleDecision, .str "SIG-A", storeInsert emptyStore exampleKey exampleDecision) ∧
     exampleHost.stringify (exampleSignature 2) = "SIG-B" :=
   ⟨rfl, rfl, rfl⟩
 
@@ -905,7 +974,7 @@ def exampleOtherState : Json :=
         ("digest", .str "0x2222222222222222222222222222222222222222222222222222222222222222")]
 
 theorem different_successor_retry_refused :
-    releaseSigned exampleBackend exampleHost (insert emptyStore exampleKey exampleDecision)
+    releaseSigned exampleBackend exampleHost (storeInsert emptyStore exampleKey exampleDecision)
       { exampleRequest "B" with input := { stateJson := some exampleOtherState, slot := some (.number 3) } }
       = .error .differentSuccessor :=
   rfl
@@ -923,5 +992,14 @@ theorem relaxed_durability_refused :
     releaseSigned { exampleBackend with durability := .relaxed } exampleHost emptyStore (exampleRequest "A")
       = .error .notStrictlyDurable :=
   rfl
+
+/-- Negative companion: an unsigned delegate proposal whose wire carries member
+signatures is refused, and a clean one passes through untouched. -/
+theorem unsigned_proposal_screened :
+    release exampleBackend { exampleHost with wireCarriesMemberSignatures := fun _ => true } emptyStore
+      { exampleRequest "A" with action := "send" } = .error .unsignedProposalCarriesSignatures ∧
+    release exampleBackend exampleHost emptyStore { exampleRequest "A" with action := "send" }
+      = .ok (some (.str "A"), emptyStore) :=
+  ⟨rfl, rfl⟩
 
 end Zkp.Implementation.SignatureReleaseLedger

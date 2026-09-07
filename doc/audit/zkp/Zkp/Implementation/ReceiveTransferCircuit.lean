@@ -386,11 +386,10 @@ theorem outgoing_ok_iff (prevBlockR : Nat) (a : AccountState P) (newBlockR : Nat
   by_cases h0 : a.channelLeafPrev = 0
   · simp [h0]
   · by_cases h1 : prevBlockR < a.sendLeafPrev
-    · simp [h0, h1]
+    · simp [h0, h1] <;> omega
     · by_cases h2 : a.sendLeafCur ≤ newBlockR
-      · simp [h0, h1, h2]
-      · simp [h0, h1, h2]
-        omega
+      · simp [h0, h1, h2] <;> omega
+      · simp [h0, h1, h2] <;> omega
 
 /-! ### The native guard bundle -/
 
@@ -530,6 +529,17 @@ theorem native_success_output_shape (e : Environment N S P) (w : Witness N S P) 
 def Witness.withNext (w : Witness N S P) (s : PrivateState.State) : Witness N S P :=
   { w with updatePrivateState := { w.updatePrivateState with next := s } }
 
+/-- No native guard reads `updatePrivateState.next`: every check survives a
+replacement of the claimed `new_private_state`. -/
+theorem native_checks_ignore_next (e : Environment N S P) (w : Witness N S P) (s : PrivateState.State)
+    (prevFull senderFull : FullInputs) (spend : SpendPublicInputs)
+    (c : NativeChecks e w prevFull senderFull spend) :
+    NativeChecks e (w.withNext s) prevFull senderFull spend :=
+  ⟨c.prevParse, c.senderParse, c.sharedVerifierData, c.receiverOld, c.senderOld, c.newStatesAgree,
+    c.accountChannel, c.accountRoot, c.settlementChannel, c.settlementPublicState, c.transferRoot,
+    c.recipient, c.blockWindow, c.outgoingWindow, c.settlementBlock, c.spendParse, c.spendCommitment,
+    c.spendValid, c.tokenIndex, c.amount, c.nullifier, c.previousCommitment⟩
+
 /-- The native helper does not recompute the private-state update: whatever
 `new_private_state` the caller supplies is committed unchanged into the output
 statement, with every other check unaffected. This is what the CIRCUIT's
@@ -543,7 +553,8 @@ theorem native_trusts_supplied_new_private_state (e : Environment N S P) (w : Wi
       out'.vd = out.vd := by
   obtain ⟨prevFull, senderFull, spend, c, rfl⟩ := native_success_extracts e w out h
   refine ⟨nativeOutput e (w.withNext s) prevFull, ?_, rfl, rfl, rfl, rfl, rfl, rfl⟩
-  exact (native_ok_iff e _ _).mpr ⟨prevFull, senderFull, spend, c, rfl⟩
+  exact (native_ok_iff e _ _).mpr
+    ⟨prevFull, senderFull, spend, native_checks_ignore_next e w s prevFull senderFull spend c, rfl⟩
 
 /-- Swap every gadget-acceptance premise and gadget interface for arbitrary ones. -/
 def Environment.withGadgets (e : Environment N S P)
@@ -553,10 +564,15 @@ def Environment.withGadgets (e : Environment N S P)
     (accountStateAccepted : AccountState P → Prop) (txSettlementAccepted : TxSettlement S P → Prop)
     (transferWitnessAccepted : TransferWitness P → Prop) (spendPisTarget : S → SpendPublicInputs) :
     Environment N S P :=
-  { e with proofAccepted := proofAccepted, getRoot := getRoot, assetRoot := assetRoot,
-    nullifierCall := nullifierCall, accountStateAccepted := accountStateAccepted,
-    txSettlementAccepted := txSettlementAccepted,
-    transferWitnessAccepted := transferWitnessAccepted, spendPisTarget := spendPisTarget }
+  { e with
+    proofAccepted := proofAccepted
+    getRoot := getRoot
+    assetRoot := assetRoot
+    nullifierCall := nullifierCall
+    accountStateAccepted := accountStateAccepted
+    txSettlementAccepted := txSettlementAccepted
+    transferWitnessAccepted := transferWitnessAccepted
+    spendPisTarget := spendPisTarget }
 
 /-- Native admission never evaluates proof verification, Merkle openings, the
 nullifier gadget or the target spend-PI projection: its result is invariant
@@ -578,27 +594,32 @@ theorem native_ignores_gadget_semantics (e : Environment N S P) (w : Witness N S
 /-- `ReceiveTransferCircuit::prove`: native admission first, then the opaque
 prover over the same statement. -/
 def prove (e : Environment N S P) (prover : Witness N S P → FullInputs → Except String Pf)
-    (w : Witness N S P) : Result Pf := do
-  let pis ← nativeToPublicInputs e w
-  match prover w pis with
-  | .error detail => throw (.failedToProve detail)
-  | .ok proof => pure proof
+    (w : Witness N S P) : Result Pf :=
+  match nativeToPublicInputs e w with
+  | .error err => .error err
+  | .ok pis =>
+    match prover w pis with
+    | .error detail => .error (.failedToProve detail)
+    | .ok proof => .ok proof
 
 theorem prove_requires_native_admission (e : Environment N S P)
     (prover : Witness N S P → FullInputs → Except String Pf) (w : Witness N S P) (proof : Pf)
     (h : prove e prover w = .ok proof) :
     ∃ pis, nativeToPublicInputs e w = .ok pis ∧ prover w pis = .ok proof := by
-  simp only [prove, bind_ok_iff] at h
-  obtain ⟨pis, hpis, hrest⟩ := h
-  refine ⟨pis, hpis, ?_⟩
-  cases hp : prover w pis with
-  | error d => simp [hp] at hrest
-  | ok p => simp [hp] at hrest; rw [hrest]
+  unfold prove at h
+  cases hn : nativeToPublicInputs e w with
+  | error err => simp [hn] at h
+  | ok pis =>
+    cases hp : prover w pis with
+    | error d => simp [hn, hp] at h
+    | ok p =>
+      simp [hn, hp] at h
+      exact ⟨pis, rfl, by rw [hp, h]⟩
 
 theorem prove_failure_precedence (e : Environment N S P)
     (prover : Witness N S P → FullInputs → Except String Pf) (w : Witness N S P) (err : Error)
     (h : nativeToPublicInputs e w = .error err) : prove e prover w = .error err := by
-  simp [prove, h, Bind.bind, Except.bind]
+  simp [prove, h]
 
 /-! ## Witness writes (source lines 555–583) -/
 
@@ -864,8 +885,9 @@ theorem circuit_chain_folds_aux_when_nonzero (h : CircuitGates e w)
   simp only [circuitOutput, fold_chain_pushes_when_aux_nonzero _ _ _ interChannel]
 
 theorem circuit_output_statement_has_29_words (h : CircuitGates e w) :
-    w.output.pis.words.length = balanceLength :=
-  BalancePublicInputs.balance_word_count _
+    w.output.pis.words.length = balanceLength := by
+  rw [h.outputStatement]
+  exact BalancePublicInputs.balance_word_count _
 
 /-! ### Registered public inputs (source line 612) -/
 
@@ -910,34 +932,47 @@ theorem target_witness_of_native_success (e : Environment N S P) (w : Witness N 
     (spendTarget : e.spendPisTarget w.txSettlement.spendProof = spend) :
     ∃ cw : CircuitWitness N S P, CircuitGates e cw ∧ cw.output = out ∧ cw.upsWitness = upsW := by
   obtain ⟨prevFull', senderFull', spend', checks', rfl⟩ := native_success_extracts e w out h
-  have hp : prevFull' = prevFull := by
-    have := checks'.prevParse.symm.trans checks.prevParse
-    exact Except.ok.inj this
-  subst hp
+  have hp : prevFull' = prevFull := Except.ok.inj (checks'.prevParse.symm.trans checks.prevParse)
+  subst prevFull'
   refine ⟨⟨w.prevProofWords, w.senderProofWords, prevFull, senderFull, w.senderUpdatePublicState,
-    ⟨UpdatePublicState.statesEqual _ _, !UpdatePublicState.statesEqual _ _,
+    ⟨UpdatePublicState.statesEqual w.senderUpdatePublicState.newState w.senderUpdatePublicState.oldState,
+      !UpdatePublicState.statesEqual w.senderUpdatePublicState.newState w.senderUpdatePublicState.oldState,
       UpdatePublicState.expectedOldRoot e.getRoot w.senderUpdatePublicState⟩,
     w.receiverUpdatePublicState,
-    ⟨UpdatePublicState.statesEqual _ _, !UpdatePublicState.statesEqual _ _,
+    ⟨UpdatePublicState.statesEqual w.receiverUpdatePublicState.newState w.receiverUpdatePublicState.oldState,
+      !UpdatePublicState.statesEqual w.receiverUpdatePublicState.newState w.receiverUpdatePublicState.oldState,
       UpdatePublicState.expectedOldRoot e.getRoot w.receiverUpdatePublicState⟩,
     w.newBlockR, w.accountState, w.txSettlement, w.transferWitness, w.transferSalt,
-    w.updatePrivateState.inputs, upsW, nativeOutput e w prevFull⟩, ?_, rfl⟩
+    w.updatePrivateState.inputs, upsW, nativeOutput e w prevFull⟩, ?_, rfl, rfl⟩
   refine ⟨prevTarget, senderTarget, checks.sharedVerifierData, prevVerified, senderVerified,
-    UpdatePublicState.target_witness_of_native_local_verification _ _ senderPath senderHistory,
-    UpdatePublicState.target_witness_of_native_local_verification _ _ receiverPath receiverHistory,
+    UpdatePublicState.target_witness_of_native_local_verification e.getRoot w.senderUpdatePublicState
+      senderPath senderHistory,
+    UpdatePublicState.target_witness_of_native_local_verification e.getRoot w.receiverUpdatePublicState
+      receiverPath receiverHistory,
     accountAccepted, settlementAccepted, transferAccepted, upsGadget,
     checks.receiverOld, checks.senderOld, checks.newStatesAgree, checks.accountChannel,
     checks.accountRoot, checks.settlementChannel, checks.settlementPublicState, checks.transferRoot,
     checks.recipient, ?_, ?_, fun p => (checks.outgoingWindow p).1, fun p => (checks.outgoingWindow p).2,
     ?_, ?_, ?_, checks.tokenIndex.symm, checks.amount.symm, ?_, checks.previousCommitment, ?_⟩
-  · have := checks.blockWindow; omega
-  · have := checks.blockWindow; simp only [publicStateOf]; omega
-  · have := checks.settlementBlock; omega
-  · rw [spendTarget]; exact checks.spendCommitment.symm
-  · rw [spendTarget]; exact checks.spendValid
-  · simp only [settledTransferOf, checks.settlementChannel]
-    exact checks.nullifier
-  · simp only [circuitOutput, nativeOutput, receiverId, publicStateOf, upsNext]
+  · show prevFull.pis.blockR ≤ w.newBlockR
+    have := checks.blockWindow; omega
+  · show w.newBlockR ≤ w.receiverUpdatePublicState.newState.blockNumber
+    have := checks.blockWindow; omega
+  · show txBlockNumber w.txSettlement ≤ w.newBlockR
+    have := checks.settlementBlock; omega
+  · show (e.spendPisTarget w.txSettlement.spendProof).prevPrivateCommitment =
+      senderFull.pis.privateCommitment
+    rw [spendTarget]; exact checks.spendCommitment.symm
+  · show (e.spendPisTarget w.txSettlement.spendProof).isValid = true
+    rw [spendTarget]; exact checks.spendValid
+  · show w.updatePrivateState.inputs.nullifier = e.nullifierOf (SettledTransfer.words
+      ⟨w.transferWitness.transfer, w.txSettlement.channelId, w.transferWitness.transferIndex,
+        w.txSettlement.tx.nonce⟩)
+    rw [checks.settlementChannel]; exact checks.nullifier
+  · show nativeOutput e w prevFull = ⟨⟨prevFull.pis.channelId, w.receiverUpdatePublicState.newState,
+      w.newBlockR, rootOfHash (PrivateState.commitment e.hash upsW.next),
+      foldChain e.keccak prevFull.pis.settledChain w.transferWitness.transfer.auxData⟩, prevFull.vd⟩
+    rw [upsNext]; rfl
 
 /-! ## Concrete normal trace -/
 
@@ -1039,13 +1074,22 @@ theorem normal_output_credits_receiver_at_block_5 :
   simp [nativeOutput, normalWitness, normalTransfer, normalAux, foldChain, chainPush,
     normalEnvironment, BalancePublicInputs.Bytes8.zero]
 
+/-- Small amounts (one nonzero low limb below `2^32`) pass the u32 limb range check. -/
+theorem small_amount_checked (n : Nat) (bound : n < U256Arithmetic.wordBase) :
+    UpdatePrivateState.Checked (UpdatePrivateState.fromSmall n) := by
+  intro d hd
+  simp only [UpdatePrivateState.fromSmall, UpdatePrivateState.amountWords, List.mem_cons,
+    List.mem_nil_iff, or_false] at hd
+  rcases hd with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals first | exact bound | decide
+
 /-- The same trace as an arbitrary-witness assignment: the credited leaf is the
 per-limb sum 7 + 2 = 9 of the imported AddGates relation. -/
 theorem normal_circuit_witness :
     ∃ cw : CircuitWitness Unit Unit Unit, CircuitGates normalEnvironment cw ∧
       cw.output = nativeOutput normalEnvironment normalWitness normalPrevFull ∧
       UpdatePrivateState.value cw.upsWitness.newLeaf = 9 := by
-  obtain ⟨cw, gates, hout⟩ := target_witness_of_native_success normalEnvironment normalWitness _
+  obtain ⟨cw, gates, hout, hnext⟩ := target_witness_of_native_success normalEnvironment normalWitness _
     normal_native_admission normalPrevFull normalSenderFull normalSpend normal_native_checks
     (BalancePublicInputs.full_target_roundtrip normalPrevFull)
     (BalancePublicInputs.full_target_roundtrip normalSenderFull) trivial trivial
@@ -1053,10 +1097,9 @@ theorem normal_circuit_witness :
     (UpdatePublicState.native_equal_verify_needs_no_root _ _ _)
     (UpdatePublicState.native_equal_verify_needs_no_root _ _ _) trivial trivial trivial
     ⟨UpdatePrivateState.fromSmall 9, PrivateState.zeroHash, normalNextState⟩
-    ⟨fun _ => ⟨by decide, by decide, by decide, by decide⟩, by simp, trivial, rfl,
+    ⟨fun _ => ⟨by decide, small_amount_checked 2 (by decide), small_amount_checked 5 (by decide),
+        small_amount_checked 7 (by decide)⟩, by decide, trivial, rfl,
       UpdatePrivateState.normal_credit_7_plus_2, rfl⟩ rfl rfl
-  exact ⟨cw, gates, hout, by
-    have := UpdatePrivateState.circuit_credits_exact_amount gates.privateUpdate
-    sorry⟩
+  exact ⟨cw, gates, hout, by rw [hnext]; exact UpdatePrivateState.normal_credit_value_9⟩
 
 end Zkp.Implementation.ReceiveTransferCircuit
