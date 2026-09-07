@@ -1,0 +1,991 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/receive_transfer_circuit.rs",
+  "source_sha256": "ee12486f9db02c5755ab6371cd8ba14072e0334068d724ddb4b46b813bc39fd5",
+  "source_lines": 1110,
+  "module": "Zkp.Implementation.ReceiveTransferCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/ReceiveTransferCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 46,
+      "status": "dependency-boundary",
+      "label": "Imports: plonky2 builder API, balance-PI codec, sub-gadgets, chain push, SettledTransfer, recipient hash",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Every imported callee is an opaque field or acceptance premise of `Environment`; the balance-PI codec and the public/private-state gadgets are the imported current modules."
+    },
+    {
+      "start": 47,
+      "end": 48,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 49,
+      "end": 73,
+      "status": "translated",
+      "label": "ReceiveTransferError variants in source order",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Error",
+        "Zkp.Implementation.ReceiveTransferCircuit.Result"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Variant order pinned; message payloads are opaque strings."
+    },
+    {
+      "start": 74,
+      "end": 75,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 76,
+      "end": 114,
+      "status": "translated",
+      "label": "ReceiveTransferWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Witness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Proof bodies are represented by their public-input words only; the native helper never reads proof bodies."
+    },
+    {
+      "start": 115,
+      "end": 120,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 121,
+      "end": 133,
+      "status": "translated",
+      "label": "to_public_inputs: parse both balance statements",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.nativeToPublicInputs",
+        "Zkp.Implementation.ReceiveTransferCircuit.parseFull"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.parse_ok_iff",
+        "Zkp.Implementation.ReceiveTransferCircuit.parse_error_maps_fault",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_prev_parse_failure_first",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_sender_parse_failure_second",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_ok_iff",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_extracts",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_ignores_gadget_semantics"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Uses the imported native 29-word decoder; `to_u64_vec`/field conversion is the `convertFields` boundary."
+    },
+    {
+      "start": 134,
+      "end": 147,
+      "status": "translated",
+      "label": "Shared verifier-data guard and channel ids",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.check",
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.check_ok_iff",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_verifier_data_mismatch_third"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Equality of the parsed verifier-data suffixes; no key is validated."
+    },
+    {
+      "start": 148,
+      "end": 148,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 149,
+      "end": 205,
+      "status": "translated",
+      "label": "Native connection guards: public-state updates, account state, tx settlement, transfer root",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks",
+        "Zkp.Implementation.ReceiveTransferCircuit.nativeToPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_output_shape"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Pure equality checks in source order with ConnectionError precedence; no Merkle path is opened natively."
+    },
+    {
+      "start": 206,
+      "end": 206,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 207,
+      "end": 215,
+      "status": "translated",
+      "label": "Native recipient (salt) check",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_recipient_is_receiver_channel_with_salt"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `calculate_recipient_from_user_id` is the opaque `recipientOf` callback."
+    },
+    {
+      "start": 216,
+      "end": 216,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 217,
+      "end": 245,
+      "status": "translated",
+      "label": "Native block window and outgoing-tx window",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.outgoingWindowCheck",
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.outgoing_ok_iff",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_block_window"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. u63 block numbers read as Nat; the extra window applies only when channel_leaf.prev != 0."
+    },
+    {
+      "start": 246,
+      "end": 249,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 250,
+      "end": 256,
+      "status": "translated",
+      "label": "Native tx_block_number <= new_block_r",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.txBlockNumber",
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_block_window"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `tx_block_number` is `account_state.send_leaf.cur` of the settlement."
+    },
+    {
+      "start": 257,
+      "end": 257,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 258,
+      "end": 274,
+      "status": "translated",
+      "label": "Native spend-PI parse, sender commitment and is_valid guards",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.spendOrError",
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.spend_ok_iff"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `spend_pis()` is the opaque native parse `spendPis`; no spend proof is verified natively."
+    },
+    {
+      "start": 275,
+      "end": 281,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 282,
+      "end": 316,
+      "status": "translated",
+      "label": "Native nullifier preimage and private-state input connections",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.SettledTransfer",
+        "Zkp.Implementation.ReceiveTransferCircuit.SettledTransfer.words",
+        "Zkp.Implementation.ReceiveTransferCircuit.nativeSettledTransfer",
+        "Zkp.Implementation.ReceiveTransferCircuit.NativeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.settled_transfer_has_28_words",
+        "Zkp.Implementation.ReceiveTransferCircuit.settled_transfer_words_injective",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_credits_transfer_token_and_amount",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_binds_nullifier_to_sender_index_nonce"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Preimage = (transfer, sender channel id, transfer_index, tx.nonce); Poseidon is the opaque `nullifierOf`. Injectivity is of the word layout only."
+    },
+    {
+      "start": 317,
+      "end": 318,
+      "status": "translated",
+      "label": "Native commitment of the supplied new_private_state",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.nativeOutput",
+        "Zkp.Implementation.ReceiveTransferCircuit.Witness.withNext"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.native_checks_ignore_next",
+        "Zkp.Implementation.ReceiveTransferCircuit.native_trusts_supplied_new_private_state"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The native helper trusts `new_private_state` and never recomputes the credit."
+    },
+    {
+      "start": 319,
+      "end": 321,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 322,
+      "end": 326,
+      "status": "translated",
+      "label": "Native settled-tx-chain fold gated on aux_data != 0",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.foldChain",
+        "Zkp.Implementation.ReceiveTransferCircuit.chainPush",
+        "Zkp.Implementation.ReceiveTransferCircuit.chainPreimage",
+        "Zkp.Implementation.ReceiveTransferCircuit.settledTxChainDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.fold_chain_unchanged_when_aux_zero",
+        "Zkp.Implementation.ReceiveTransferCircuit.fold_chain_pushes_when_aux_nonzero",
+        "Zkp.Implementation.ReceiveTransferCircuit.chain_preimage_has_17_words",
+        "Zkp.Implementation.ReceiveTransferCircuit.settled_tx_chain_domain_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. keccak is the opaque `keccak` callback; only the gating and preimage layout are modeled."
+    },
+    {
+      "start": 327,
+      "end": 327,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 328,
+      "end": 339,
+      "status": "translated",
+      "label": "Native output statement (29 words + shared verifier data)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.nativeOutput",
+        "Zkp.Implementation.ReceiveTransferCircuit.balanceLength"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.native_success_output_shape",
+        "Zkp.Implementation.ReceiveTransferCircuit.balance_length_pinned",
+        "Zkp.Implementation.ReceiveTransferCircuit.balance_length_matches_codec"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. channel_id from the receiver statement, public_state from the receiver update, block_r = new_block_r."
+    },
+    {
+      "start": 340,
+      "end": 342,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 343,
+      "end": 355,
+      "status": "translated",
+      "label": "ReceiveTransferTarget wires",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. One satisfying assignment lists the same wire families; proof wires are their statement words."
+    },
+    {
+      "start": 356,
+      "end": 367,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 368,
+      "end": 377,
+      "status": "translated",
+      "label": "Virtual balance proofs and target statement parse",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.buildPlan",
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. `add_virtual_proof_with_pis` is a builder allocation; `from_pis` is the imported total target decoder (`prevParse`/`senderParse`)."
+    },
+    {
+      "start": 378,
+      "end": 379,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 380,
+      "end": 381,
+      "status": "translated",
+      "label": "Single verifier key shared by both balance statements",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_keeps_receiver_channel_and_key"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `connect_verifier_data` read as equality of the parsed verifier data."
+    },
+    {
+      "start": 382,
+      "end": 383,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 384,
+      "end": 385,
+      "status": "dependency-boundary",
+      "label": "Recursive verification of both balance proofs",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.both_balance_proofs_verified_after_key_connection"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `verify_proof` is the acceptance premise `proofAccepted`; no soundness is asserted."
+    },
+    {
+      "start": 386,
+      "end": 386,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 387,
+      "end": 391,
+      "status": "translated",
+      "label": "Receiver / sender statement projections",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.receiverId",
+        "Zkp.Implementation.ReceiveTransferCircuit.senderId"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Channel ids are read from the two parsed statements."
+    },
+    {
+      "start": 392,
+      "end": 392,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 393,
+      "end": 394,
+      "status": "translated",
+      "label": "Public-state update gadgets (imported UpdatePublicState)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_public_updates_start_from_both_statements"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Modeled by the imported `UpdatePublicState.CircuitGates` on each update."
+    },
+    {
+      "start": 395,
+      "end": 399,
+      "status": "dependency-boundary",
+      "label": "Block-number, account-state, tx-settlement, transfer-witness and salt allocations",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Environment",
+        "Zkp.Implementation.ReceiveTransferCircuit.buildPlan"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.every_sub_gadget_is_checked_allocation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Sub-gadget Merkle/spend checks (including `spend_pis.tx == tx`) are opaque acceptance premises; u63 range checks are a lowering boundary."
+    },
+    {
+      "start": 400,
+      "end": 400,
+      "status": "translated",
+      "label": "Private-state credit gadget (imported UpdatePrivateState, checked)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_credits_exact_transfer_amount",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_credit_does_not_decrease_balance",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_credit_lands_at_transfer_token",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_keeps_sent_root_nonce_salt",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_invokes_nullifier_gadget_with_transfer_nullifier",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_range_checks_credit_inputs"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The credited leaf is exactly prev + amount through the imported per-limb AddGates relation."
+    },
+    {
+      "start": 401,
+      "end": 402,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 403,
+      "end": 412,
+      "status": "translated",
+      "label": "Public-state update connections",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveTransferCircuit.publicStateOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_public_state_is_the_settlement_state",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_public_updates_start_from_both_statements"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. receiver.old = prev statement, sender.old = sender statement, receiver.new = sender.new."
+    },
+    {
+      "start": 413,
+      "end": 414,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 415,
+      "end": 418,
+      "status": "translated",
+      "label": "Account-state connections",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_account_state_is_receivers_at_settlement_root"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. channel_id = receiver id, account_tree_root = new public state's root."
+    },
+    {
+      "start": 419,
+      "end": 420,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 421,
+      "end": 423,
+      "status": "translated",
+      "label": "Tx-settlement connections",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_transfer_leaf_belongs_to_senders_settled_tx",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_public_state_is_the_settlement_state"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. channel_id = sender id, public_state = new public state."
+    },
+    {
+      "start": 424,
+      "end": 425,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 426,
+      "end": 428,
+      "status": "translated",
+      "label": "Transfer witness root connection",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_transfer_leaf_belongs_to_senders_settled_tx"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. transfer_tree_root = settled tx's transfer_tree_root; the leaf opening itself is the opaque `transferWitnessAccepted`."
+    },
+    {
+      "start": 429,
+      "end": 430,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 431,
+      "end": 435,
+      "status": "dependency-boundary",
+      "label": "In-circuit recipient derivation (Poseidon + tag)",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. `calculate_recipient_from_user_id_circuit` is the opaque `recipientOf` callback shared with the native path."
+    },
+    {
+      "start": 436,
+      "end": 439,
+      "status": "translated",
+      "label": "Recipient connection",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_recipient_binds_receiver_channel_and_salt"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. transfer.recipient = recipientOf(receiver id, salt)."
+    },
+    {
+      "start": 440,
+      "end": 440,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 441,
+      "end": 464,
+      "status": "translated",
+      "label": "Block window, outgoing-tx window and tx_block_number gates",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveTransferCircuit.txBlockNumber"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_block_window",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_outgoing_window_when_prior_send"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `enforce_ge`/`conditional_ge`/`conditional_gt`/`is_zero`/`not` read as their integer relations (field lowering is a boundary)."
+    },
+    {
+      "start": 465,
+      "end": 466,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 467,
+      "end": 471,
+      "status": "translated",
+      "label": "Spend-PI commitment connection and is_valid assertion",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveTransferCircuit.SpendPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_sender_spend_authorizes_credit"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `spend_pis()` on the target is the total projection `spendPisTarget`; the spend proof itself is verified inside the opaque tx-settlement gadget."
+    },
+    {
+      "start": 472,
+      "end": 477,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 478,
+      "end": 484,
+      "status": "translated",
+      "label": "In-circuit settled-transfer nullifier preimage",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.settledTransferOf",
+        "Zkp.Implementation.ReceiveTransferCircuit.SettledTransfer",
+        "Zkp.Implementation.ReceiveTransferCircuit.SettledTransfer.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.settled_transfer_has_28_words",
+        "Zkp.Implementation.ReceiveTransferCircuit.settled_transfer_words_injective",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_nullifier_binds_sender_channel_index_nonce"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. from = tx_settlement.channel_id (connected to the sender id), nonce = tx.nonce; Poseidon is opaque."
+    },
+    {
+      "start": 485,
+      "end": 485,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 486,
+      "end": 500,
+      "status": "translated",
+      "label": "Private-state input connections and both commitments",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates",
+        "Zkp.Implementation.ReceiveTransferCircuit.rootOfHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_previous_state_opens_prev_statement",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_commits_the_gadget_output",
+        "Zkp.Implementation.ReceiveTransferCircuit.root_of_hash_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. token_index, amount, nullifier connected to the gadget inputs; prev commitment connected to the receiver statement."
+    },
+    {
+      "start": 501,
+      "end": 513,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 514,
+      "end": 526,
+      "status": "translated",
+      "label": "Settled-tx-chain fold gated on aux_data != 0",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.foldChain",
+        "Zkp.Implementation.ReceiveTransferCircuit.chainPush",
+        "Zkp.Implementation.ReceiveTransferCircuit.chainPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_chain_unchanged_when_aux_zero",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_chain_folds_aux_when_nonzero",
+        "Zkp.Implementation.ReceiveTransferCircuit.fold_chain_unchanged_when_aux_zero",
+        "Zkp.Implementation.ReceiveTransferCircuit.fold_chain_pushes_when_aux_nonzero"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `settled_tx_chain_push_circuit` is the opaque `keccak`; `is_zero`/`select` read as the integer gate."
+    },
+    {
+      "start": 527,
+      "end": 527,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 528,
+      "end": 538,
+      "status": "translated",
+      "label": "New balance statement wiring",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuitOutput",
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_keeps_receiver_channel_and_key",
+        "Zkp.Implementation.ReceiveTransferCircuit.circuit_output_statement_has_29_words",
+        "Zkp.Implementation.ReceiveTransferCircuit.target_witness_of_native_success"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. channel_id from the receiver statement, public_state = receiver update's new state, block_r = new_block_r, vd = prev statement's vd."
+    },
+    {
+      "start": 539,
+      "end": 539,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 540,
+      "end": 552,
+      "status": "translated",
+      "label": "Target struct assembly",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Field list only."
+    },
+    {
+      "start": 553,
+      "end": 554,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 555,
+      "end": 583,
+      "status": "translated",
+      "label": "set_witness: eleven writes in source order",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.Write",
+        "Zkp.Implementation.ReceiveTransferCircuit.witnessWrites",
+        "Zkp.Implementation.ReceiveTransferCircuit.witnessWriteCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.witness_write_count",
+        "Zkp.Implementation.ReceiveTransferCircuit.witness_write_count_pinned",
+        "Zkp.Implementation.ReceiveTransferCircuit.witness_writes_derived_statement_last"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the write order is modeled; the plonky2 witness-write effects are a boundary."
+    },
+    {
+      "start": 584,
+      "end": 586,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 587,
+      "end": 597,
+      "status": "untranslated",
+      "label": "ReceiveTransferCircuit struct",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit data / common data holders are not modeled."
+    },
+    {
+      "start": 598,
+      "end": 604,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 605,
+      "end": 611,
+      "status": "untranslated",
+      "label": "ReceiveTransferCircuit::new builder setup",
+      "declarations": [],
+      "theorems": [],
+      "note": "Builder construction and target instantiation are not modeled beyond `buildPlan`."
+    },
+    {
+      "start": 612,
+      "end": 612,
+      "status": "translated",
+      "label": "register_public_inputs of the new full statement",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.registeredPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.registered_statement_is_full_encoding",
+        "Zkp.Implementation.ReceiveTransferCircuit.registered_statement_width"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Registered words = 29 statement words + verifier-data words under the configured cap count."
+    },
+    {
+      "start": 613,
+      "end": 624,
+      "status": "untranslated",
+      "label": "Constant gate and circuit build",
+      "declarations": [],
+      "theorems": [],
+      "note": "`add_const_gate` and `builder.build()` are not modeled."
+    },
+    {
+      "start": 625,
+      "end": 625,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 626,
+      "end": 695,
+      "status": "untranslated",
+      "label": "Circuit serialization (to_bytes / from_bytes)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serialization is not modeled."
+    },
+    {
+      "start": 696,
+      "end": 696,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 697,
+      "end": 709,
+      "status": "translated",
+      "label": "prove: native admission then opaque prover",
+      "declarations": [
+        "Zkp.Implementation.ReceiveTransferCircuit.prove"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ReceiveTransferCircuit.prove_requires_native_admission",
+        "Zkp.Implementation.ReceiveTransferCircuit.prove_failure_precedence"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `to_public_inputs` runs first with its error precedence; witness writes and `data.prove` are the opaque `prover`."
+    },
+    {
+      "start": 710,
+      "end": 712,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 713,
+      "end": 718,
+      "status": "untranslated",
+      "label": "ReceiveTransferCircuitBytes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serialization container is not modeled."
+    },
+    {
+      "start": 719,
+      "end": 719,
+      "status": "non-executable",
+      "label": "Comment, attribute, header or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, derive/cfg attribute, impl/fn header or blank line; prose is not promoted to an executable guarantee."
+    },
+    {
+      "start": 720,
+      "end": 1110,
+      "status": "test-only",
+      "label": "Unit tests (end-to-end receive and serialization)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read but not translated; the normal trace in the model is an independent concrete example."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proof_verification",
+      "obligation": "`builder.verify_proof` of both balance proofs under the shared verifier data is the acceptance premise `proofAccepted`; plonky2 soundness, the balance verifier key and recursion correctness are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "sub_gadget_acceptance",
+      "obligation": "`AccountStateTarget::new`, `TxSettlementTarget::new` (tx Merkle opening, spend-proof verification, `tx.connect(spend_pis.tx)`) and `TransferWitnessTarget::new` (transfer-leaf opening incl. aux_data) are opaque acceptance premises; Merkle soundness is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "spend_pis_projection",
+      "obligation": "The target `spend_pis()` wire projection (`spendPisTarget`, total) and the native `spend_pis()` parse (`spendPis`, may fail) are opaque; agreement between them is a premise of `target_witness_of_native_success`.",
+      "discharged": false
+    },
+    {
+      "name": "recipient_hash",
+      "obligation": "`calculate_recipient_from_user_id(_circuit)` (Poseidon + tag byte) is the opaque `recipientOf`; no injectivity or salt-hiding property is proved.",
+      "discharged": false
+    },
+    {
+      "name": "nullifier_hash",
+      "obligation": "`SettledTransfer::nullifier` (Poseidon over the 28-word preimage) is the opaque `nullifierOf`; hash injectivity and nullifier freshness (no double credit) are not proved, only the preimage layout injectivity.",
+      "discharged": false
+    },
+    {
+      "name": "keccak_chain_push",
+      "obligation": "`settled_tx_chain_push(_circuit)` is the opaque `keccak` over the 17-word domain/chain/aux preimage; no collision or semantic property of aux_data (tx leaf hash) is proved.",
+      "discharged": false
+    },
+    {
+      "name": "imported_gadget_interfaces",
+      "obligation": "The public-state Merkle root call, asset-tree root and nullifier-insertion gadget are the imported `UpdatePublicState`/`UpdatePrivateState` interfaces (`getRoot`, `assetRoot`, `nullifierCall`); their tree semantics are premises of those modules.",
+      "discharged": false
+    },
+    {
+      "name": "field_and_gadget_lowering",
+      "obligation": "`enforce_ge`, `conditional_ge`, `conditional_gt`, `is_zero`, `not`, `select`, `assert_one`, `connect` and the u63/u32 checked allocations are read as integer relations on Nat; the field encoding and plonky2 gate lowering are not refined.",
+      "discharged": false
+    },
+    {
+      "name": "native_field_conversion",
+      "obligation": "`to_u64_vec` and `ToField::to_field_vec` on the verifier-data suffix are the opaque `convertFields`; canonical field/word conversion is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "witness_write_and_proving",
+      "obligation": "`set_witness` and `data.prove` are modeled as a write order and an opaque `prover`; that the written witness satisfies the constraints (and only then) is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "compiler_refinement",
+      "obligation": "The Lean structures are a handwritten reading of the Rust; no refinement between the model and the compiled plonky2 constraint system or the native binary is proved.",
+      "discharged": false
+    }
+  ]
+}
