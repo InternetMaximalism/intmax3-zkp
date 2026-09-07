@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/channel_reg_hash_chain/channel_reg_hash_chain_circuit.rs",
+  "source_sha256": "3bb0d8c7357a605fa37e8f14423855f7edb0f091d1c734754252b89086668a09",
+  "source_lines": 126,
+  "module": "Zkp.Implementation.ChannelRegChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ChannelRegChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "non-executable",
+      "label": "module docstring",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 3,
+      "end": 28,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports, including check_cyclic_proof_verifier_data and the recursion helpers",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.Environment",
+        "Zkp.Implementation.ChannelRegChain.verifyChainProof"
+      ],
+      "theorems": [],
+      "note": "Recursive verification enters the model as an opaque callback."
+    },
+    {
+      "start": 29,
+      "end": 38,
+      "status": "translated",
+      "label": "ChannelRegHashChainCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.VerifyError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 39,
+      "end": 48,
+      "status": "dependency-boundary",
+      "label": "ChannelRegHashChainCircuit struct: CircuitData and the step proof target",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.wrapperOutput"
+      ],
+      "theorems": [],
+      "note": "plonky2 circuit data is not modeled."
+    },
+    {
+      "start": 49,
+      "end": 54,
+      "status": "non-executable",
+      "label": "impl header and where clauses",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 55,
+      "end": 80,
+      "status": "translated",
+      "label": "new(): verify one step proof and re-register its public inputs verbatim; common-data equality assertion",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.wrapperOutput",
+        "Zkp.Implementation.ChannelRegChain.PublicInputs.fromPis",
+        "Zkp.Implementation.ChannelRegChain.Chain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.wrapper_forwards_step_public_inputs",
+        "Zkp.Implementation.ChannelRegChain.from_pis_reads_public_inputs",
+        "Zkp.Implementation.ChannelRegChain.chain_declares_single_vd"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 81,
+      "end": 95,
+      "status": "translated",
+      "label": "generate_cd(): num_public_inputs = CHANNEL_REG_CHAIN_PUBLIC_INPUTS_LEN + vd_vec_len, padded with 1<<12 noop gates",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.chainPublicInputCount",
+        "Zkp.Implementation.ChannelRegChain.vdVecLen",
+        "Zkp.Implementation.ChannelRegChain.noopGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.chain_public_input_count_pinned",
+        "Zkp.Implementation.ChannelRegChain.noop_gates_pinned",
+        "Zkp.Implementation.ChannelRegChain.wrapper_public_input_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 96,
+      "end": 107,
+      "status": "dependency-boundary",
+      "label": "prove(): PartialWitness assembly and CircuitData::prove",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.Environment"
+      ],
+      "theorems": [],
+      "note": "Proving is an opaque boundary."
+    },
+    {
+      "start": 108,
+      "end": 126,
+      "status": "translated",
+      "label": "verify(): check_cyclic_proof_verifier_data then CircuitData::verify",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.verifyChainProof",
+        "Zkp.Implementation.ChannelRegChain.VerifyError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.chain_verify_pins_declared_vd",
+        "Zkp.Implementation.ChannelRegChain.chain_verify_requires_accepted_proof",
+        "Zkp.Implementation.ChannelRegChain.verified_chain_uses_the_circuit_verifier_data"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "HashCallbacks",
+      "obligation": "`Environment.keccakWords` (plonky2_keccak / `builder.keccak256`), `poseidonWords` (`PoseidonHashOut::hash_inputs_u64`) and `twoToOne` are opaque callbacks; no injectivity or collision resistance is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "ProofSoundness",
+      "obligation": "`Environment.proofAccepted` is opaque plonky2 verification; that an accepted previous chain proof came from a gate-satisfying step is the premise encoded by the `Chain` inductive, never a theorem.",
+      "discharged": false
+    },
+    {
+      "name": "ConsumerVdPin",
+      "obligation": "An initial step's declared verifier data is a free witness (`initial_step_vd_unconstrained`); only `check_cyclic_proof_verifier_data` in a consumer pins it (`verified_chain_uses_the_circuit_verifier_data`).",
+      "discharged": false
+    },
+    {
+      "name": "InitialStatePin",
+      "obligation": "`initial_channel_reg_hash_chain` / `initial_channel_tree_root` / `initial_channel_reg_count` and an initial step's `block_number` are free inputs; binding them to the contract's pending registration chain, channel tree and count is a consumer obligation outside these files.",
+      "discharged": false
+    },
+    {
+      "name": "MerklePathBinding",
+      "obligation": "The channel Merkle siblings are prover-supplied; that the path is authentic and that re-rooting changes only slot `channel_id` rests on Poseidon collision resistance, which is not assumed.",
+      "discharged": false
+    },
+    {
+      "name": "PaddingRecipientNotPinned",
+      "obligation": "The circuit pins the identity components of inactive slots to zero but never their `recipient` limbs (and never any slot's recipient), so recipients are bound only by equality of the keccak chain with L1 (`gates_leave_recipients_free`); native `validate()` is stricter than the circuit here.",
+      "discharged": false
+    },
+    {
+      "name": "ContractDelegatedChecks",
+      "obligation": "Nonzero and pairwise-distinct active `pk_g` are not constrained in-circuit; the source delegates them to `IntmaxRollup.registerChannel` through equality of the keccak chain.",
+      "discharged": false
+    },
+    {
+      "name": "GoldilocksWitnessRange",
+      "obligation": "`PoseidonHashOut::try_from(Bytes32)` cannot fail (`native_canonicality_check_cannot_fail`), so a registration whose 64-bit identity halves exceed the Goldilocks modulus passes native validation and is only rejected by having no satisfying witness; the field range is a premise (`NativeWidths.identityFields`).",
+      "discharged": false
+    },
+    {
+      "name": "SolidityKeccakPacking",
+      "obligation": "`solidity_keccak256` packing each u32 word as four big-endian bytes is assumed (`KeccakBridge`, `RollupValue.HashEncodingAgrees`); under it the fold preimage is byte-identical to the IntmaxRollup model (`fold_preimage_matches_rollup_model`).",
+      "discharged": false
+    },
+    {
+      "name": "FieldAndGadgetLowering",
+      "obligation": "Goldilocks arithmetic, `range_check`, `split_le`, `safe_split_lo_and_hi`, `select`, `is_equal`, the keccak/Poseidon gadgets and `from_pis` slicing are modeled as Nat equations on reduced values; the plonky2 lowering is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "NativeProofNotChecked",
+      "obligation": "`to_public_inputs` never verifies the supplied previous proof, only parses its public inputs; verification is a premise of `native_assignment_satisfies_gates`.",
+      "discharged": false
+    },
+    {
+      "name": "VdCanonicity",
+      "obligation": "`vd_from_pis_slice` and `PoseidonHashOut::from_u64_slice` read field elements from u64 with no canonicity check; verifier-data words are carried as an opaque `List Nat`.",
+      "discharged": false
+    }
+  ]
+}

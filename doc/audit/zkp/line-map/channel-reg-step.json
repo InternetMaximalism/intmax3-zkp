@@ -1,0 +1,417 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/channel_reg_hash_chain/channel_reg_step.rs",
+  "source_sha256": "5198621137327edd7fd045058a8a0e4d7ea092d42f8a0bfd0d79306d8cbd08ec",
+  "source_lines": 982,
+  "module": "Zkp.Implementation.ChannelRegChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/ChannelRegChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 27,
+      "status": "non-executable",
+      "label": "module docstring and R2/R5/Option-B security notes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 28,
+      "end": 74,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports (keccak/Poseidon gadgets, Merkle trees, cyclic and dummy-proof helpers)",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.Environment",
+        "Zkp.Implementation.ChannelRegChain.merkleRoot",
+        "Zkp.Implementation.ChannelRegChain.memberLeafHash",
+        "Zkp.Implementation.ChannelRegChain.channelLeafHash"
+      ],
+      "theorems": [],
+      "note": "Gadget/hash semantics enter the model only as opaque callbacks."
+    },
+    {
+      "start": 75,
+      "end": 95,
+      "status": "translated",
+      "label": "ChannelRegStepError variants",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 96,
+      "end": 109,
+      "status": "non-executable",
+      "label": "doc comment for member_pubkeys_root_for (Option B scope)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 110,
+      "end": 122,
+      "status": "translated",
+      "label": "member_pubkeys_root_for: active slots then empty leaves, folded to the registered member root",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.nativeMemberRoot",
+        "Zkp.Implementation.ChannelRegChain.memberRootOfHashes",
+        "Zkp.Implementation.ChannelRegChain.memberLeafHash",
+        "Zkp.Implementation.ChannelRegChain.emptyMemberLeafHash",
+        "Zkp.Implementation.ChannelRegChain.RegEntry.toMember"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.native_member_root_matches",
+        "Zkp.Implementation.ChannelRegChain.demo_member_root_is_two_slots"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 123,
+      "end": 136,
+      "status": "translated",
+      "label": "ChannelRegStepWitness fields",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 137,
+      "end": 149,
+      "status": "translated",
+      "label": "to_public_inputs: record.validate() first, then the unchecked derivation",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepWitness.toPublicInputs",
+        "Zkp.Implementation.ChannelRegChain.Record.validate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_requires_valid_record",
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_rejects_nonzero_delegate_count",
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_effect",
+        "Zkp.Implementation.ChannelRegChain.validate_rejects_nonzero_delegate_count",
+        "Zkp.Implementation.ChannelRegChain.validate_bounds_member_count",
+        "Zkp.Implementation.ChannelRegChain.validate_padding_zero",
+        "Zkp.Implementation.ChannelRegChain.validate_all_slots_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 150,
+      "end": 154,
+      "status": "non-executable",
+      "label": "doc comment for the unchecked derivation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 155,
+      "end": 241,
+      "status": "translated",
+      "label": "to_public_inputs_unchecked: exactly-one input, previous public inputs and block-number match, R5 unregistered guard, new leaf and root, U63 count increment, keccak fold",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepWitness.toPublicInputsUnchecked",
+        "Zkp.Implementation.ChannelRegChain.StepWitness.prevPis",
+        "Zkp.Implementation.ChannelRegChain.parsePrev",
+        "Zkp.Implementation.ChannelRegChain.defaultChannelLeaf",
+        "Zkp.Implementation.ChannelRegChain.registeredChannelLeaf",
+        "Zkp.Implementation.ChannelRegChain.merkleRoot",
+        "Zkp.Implementation.ChannelRegChain.foldWords",
+        "Zkp.Implementation.ChannelRegChain.nativeMemberRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_unchecked_effect",
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_enforces_unregistered_leaf",
+        "Zkp.Implementation.ChannelRegChain.prev_pis_requires_matching_block_number",
+        "Zkp.Implementation.ChannelRegChain.prev_pis_initial",
+        "Zkp.Implementation.ChannelRegChain.to_public_inputs_increments_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 242,
+      "end": 243,
+      "status": "non-executable",
+      "label": "closing braces",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 244,
+      "end": 271,
+      "status": "translated",
+      "label": "ChannelRegStepTarget fields (witnessed step inputs)",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepInputs",
+        "Zkp.Implementation.ChannelRegChain.MemberEntry",
+        "Zkp.Implementation.ChannelRegChain.MemberEntry.regEntry"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 272,
+      "end": 299,
+      "status": "translated",
+      "label": "ChannelRegStepTarget::new: is_initial bool, initial-value targets, record header targets and their 32-bit range checks",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.CircuitGates",
+        "Zkp.Implementation.ChannelRegChain.StepInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.gates_bound_member_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 300,
+      "end": 323,
+      "status": "non-executable",
+      "label": "SECURITY comment arguing the delegate-count pin (Option B)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 324,
+      "end": 534,
+      "status": "translated",
+      "label": "the step's constraints: assert_zero(delegate_count), conditional proof verification and vd connect, previous/initial selection, member_count and bp-slot range checks, the is_active thermometer, padding zeroing, member root, keccak fold, R5 guard, leaf write, count increment and public-input assembly",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.CircuitGates",
+        "Zkp.Implementation.ChannelRegChain.ltConstThreshold",
+        "Zkp.Implementation.ChannelRegChain.memberPubkeysRoot",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.prevChain",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.prevRoot",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.prevCount",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.selectedInitialChain",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.selectedInitialRoot",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.selectedInitialCount",
+        "Zkp.Implementation.ChannelRegChain.StepInputs.record",
+        "Zkp.Implementation.ChannelRegChain.foldWords",
+        "Zkp.Implementation.ChannelRegChain.merkleRoot",
+        "Zkp.Implementation.ChannelRegChain.Hash4.toWords",
+        "Zkp.Implementation.ChannelRegChain.MemberEntry.regEntry",
+        "Zkp.Implementation.ChannelRegChain.wordsToBytes",
+        "Zkp.Implementation.ChannelRegChain.rollupRegFold"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.gates_force_active_equals_member_count",
+        "Zkp.Implementation.ChannelRegChain.gates_bp_slot_indexes_an_active_member",
+        "Zkp.Implementation.ChannelRegChain.gates_padding_slots_hash_to_empty_leaf",
+        "Zkp.Implementation.ChannelRegChain.gates_member_root_commits_exactly_member_count",
+        "Zkp.Implementation.ChannelRegChain.gates_leave_recipients_free",
+        "Zkp.Implementation.ChannelRegChain.initial_step_vd_unconstrained",
+        "Zkp.Implementation.ChannelRegChain.initial_step_initial_chain_unconstrained",
+        "Zkp.Implementation.ChannelRegChain.gates_record_cosigner_only",
+        "Zkp.Implementation.ChannelRegChain.reroot_of_equal_leaf_is_identity",
+        "Zkp.Implementation.ChannelRegChain.registered_leaf_differs_only_in_member_root",
+        "Zkp.Implementation.ChannelRegChain.circuit_member_words_canonical",
+        "Zkp.Implementation.ChannelRegChain.fold_preimage_matches_rollup_model",
+        "Zkp.Implementation.ChannelRegChain.chain_matches_rollup_fold",
+        "Zkp.Implementation.ChannelRegChain.record_slots_are_padded",
+        "Zkp.Implementation.ChannelRegChain.rollup_chain_step_matches_record",
+        "Zkp.Implementation.ChannelRegChain.fold_words_length",
+        "Zkp.Implementation.ChannelRegChain.reduce_to_words_roundtrip"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 535,
+      "end": 535,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 536,
+      "end": 600,
+      "status": "translated",
+      "label": "set_witness: is_initial, initial triple or defaults, previous proof or dummy, record header, the 8 slots reduced to Poseidon values, Merkle proof, block number and public inputs",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.nativeInputs",
+        "Zkp.Implementation.ChannelRegChain.NativeWidths",
+        "Zkp.Implementation.ChannelRegChain.RegEntry.toMember",
+        "Zkp.Implementation.ChannelRegChain.Words8.reduceToHash",
+        "Zkp.Implementation.ChannelRegChain.Words8.canonical",
+        "Zkp.Implementation.ChannelRegChain.Words8.goldilocksCanonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.native_slot",
+        "Zkp.Implementation.ChannelRegChain.native_record_is_the_record",
+        "Zkp.Implementation.ChannelRegChain.native_assignment_satisfies_gates",
+        "Zkp.Implementation.ChannelRegChain.native_canonicality_check_cannot_fail",
+        "Zkp.Implementation.ChannelRegChain.non_goldilocks_words_accepted_natively",
+        "Zkp.Implementation.ChannelRegChain.validated_record_roundtrips"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 601,
+      "end": 615,
+      "status": "non-executable",
+      "label": "closing braces and the lt_const_threshold doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 616,
+      "end": 632,
+      "status": "translated",
+      "label": "lt_const_threshold: sum of is_equal bits, asserted boolean",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.ltConstThreshold"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.lt_const_threshold_correct",
+        "Zkp.Implementation.ChannelRegChain.lt_const_threshold_is_boolean"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 633,
+      "end": 641,
+      "status": "non-executable",
+      "label": "doc comment for compute_member_tree_root",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments only."
+    },
+    {
+      "start": 642,
+      "end": 663,
+      "status": "translated",
+      "label": "compute_member_tree_root: pairwise two_to_one fold over the 8 leaf hashes",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.memberRootOfHashes",
+        "Zkp.Implementation.ChannelRegChain.foldLevel",
+        "Zkp.Implementation.ChannelRegChain.foldUp",
+        "Zkp.Implementation.ChannelRegChain.memberPubkeysRoot",
+        "Zkp.Implementation.ChannelRegChain.emptyMemberRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.gates_member_root_commits_exactly_member_count"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 664,
+      "end": 698,
+      "status": "dependency-boundary",
+      "label": "ChannelRegStepCircuit struct and new(): plonky2 builder, register_public_inputs, build and the dummy proof",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.PublicInputs.toU64Vec",
+        "Zkp.Implementation.ChannelRegChain.publicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.public_inputs_len_pinned"
+      ],
+      "note": "Circuit construction is a plonky2 boundary; only the public-input layout it registers is modeled."
+    },
+    {
+      "start": 699,
+      "end": 714,
+      "status": "translated",
+      "label": "prove(): native public-input derivation, then the witness assignment",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.StepWitness.toPublicInputs",
+        "Zkp.Implementation.ChannelRegChain.nativeInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelRegChain.native_assignment_satisfies_gates",
+        "Zkp.Implementation.ChannelRegChain.demo_chain_nonvacuous"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 715,
+      "end": 721,
+      "status": "dependency-boundary",
+      "label": "verify(): plonky2 CircuitData::verify",
+      "declarations": [
+        "Zkp.Implementation.ChannelRegChain.Environment"
+      ],
+      "theorems": [],
+      "note": "Proof verification is an opaque callback; soundness is not modeled."
+    },
+    {
+      "start": 722,
+      "end": 982,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: positive step, R5 negative, delegate-count negative and its cosigner control",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust tests; the Lean model has its own worked example."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "HashCallbacks",
+      "obligation": "`Environment.keccakWords` (plonky2_keccak / `builder.keccak256`), `poseidonWords` (`PoseidonHashOut::hash_inputs_u64`) and `twoToOne` are opaque callbacks; no injectivity or collision resistance is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "ProofSoundness",
+      "obligation": "`Environment.proofAccepted` is opaque plonky2 verification; that an accepted previous chain proof came from a gate-satisfying step is the premise encoded by the `Chain` inductive, never a theorem.",
+      "discharged": false
+    },
+    {
+      "name": "ConsumerVdPin",
+      "obligation": "An initial step's declared verifier data is a free witness (`initial_step_vd_unconstrained`); only `check_cyclic_proof_verifier_data` in a consumer pins it (`verified_chain_uses_the_circuit_verifier_data`).",
+      "discharged": false
+    },
+    {
+      "name": "InitialStatePin",
+      "obligation": "`initial_channel_reg_hash_chain` / `initial_channel_tree_root` / `initial_channel_reg_count` and an initial step's `block_number` are free inputs; binding them to the contract's pending registration chain, channel tree and count is a consumer obligation outside these files.",
+      "discharged": false
+    },
+    {
+      "name": "MerklePathBinding",
+      "obligation": "The channel Merkle siblings are prover-supplied; that the path is authentic and that re-rooting changes only slot `channel_id` rests on Poseidon collision resistance, which is not assumed.",
+      "discharged": false
+    },
+    {
+      "name": "PaddingRecipientNotPinned",
+      "obligation": "The circuit pins the identity components of inactive slots to zero but never their `recipient` limbs (and never any slot's recipient), so recipients are bound only by equality of the keccak chain with L1 (`gates_leave_recipients_free`); native `validate()` is stricter than the circuit here.",
+      "discharged": false
+    },
+    {
+      "name": "ContractDelegatedChecks",
+      "obligation": "Nonzero and pairwise-distinct active `pk_g` are not constrained in-circuit; the source delegates them to `IntmaxRollup.registerChannel` through equality of the keccak chain.",
+      "discharged": false
+    },
+    {
+      "name": "GoldilocksWitnessRange",
+      "obligation": "`PoseidonHashOut::try_from(Bytes32)` cannot fail (`native_canonicality_check_cannot_fail`), so a registration whose 64-bit identity halves exceed the Goldilocks modulus passes native validation and is only rejected by having no satisfying witness; the field range is a premise (`NativeWidths.identityFields`).",
+      "discharged": false
+    },
+    {
+      "name": "SolidityKeccakPacking",
+      "obligation": "`solidity_keccak256` packing each u32 word as four big-endian bytes is assumed (`KeccakBridge`, `RollupValue.HashEncodingAgrees`); under it the fold preimage is byte-identical to the IntmaxRollup model (`fold_preimage_matches_rollup_model`).",
+      "discharged": false
+    },
+    {
+      "name": "FieldAndGadgetLowering",
+      "obligation": "Goldilocks arithmetic, `range_check`, `split_le`, `safe_split_lo_and_hi`, `select`, `is_equal`, the keccak/Poseidon gadgets and `from_pis` slicing are modeled as Nat equations on reduced values; the plonky2 lowering is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "NativeProofNotChecked",
+      "obligation": "`to_public_inputs` never verifies the supplied previous proof, only parses its public inputs; verification is a premise of `native_assignment_satisfies_gates`.",
+      "discharged": false
+    },
+    {
+      "name": "VdCanonicity",
+      "obligation": "`vd_from_pis_slice` and `PoseidonHashOut::from_u64_slice` read field elements from u64 with no canonicity check; verifier-data words are carried as an opaque `List Nat`.",
+      "discharged": false
+    }
+  ]
+}

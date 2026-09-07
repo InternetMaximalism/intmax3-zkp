@@ -49,9 +49,8 @@ Named boundaries (undischarged premises; all opaque callbacks or hypotheses):
   block-step circuit outside these three files.
 - `InitialStatePin`: `initial_channel_reg_hash_chain`, `initial_channel_tree_root`,
   `initial_channel_reg_count` and (on an initial step) `block_number` are FREE inputs
-  (`initial_step_initial_values_unconstrained`, `initial_step_block_number_unconstrained`).
-  Whether they are the contract's actual pending chain / channel tree / count is a
-  consumer obligation outside the modeled files.
+  (`initial_step_initial_chain_unconstrained`). Whether they are the contract's actual
+  pending chain / channel tree / count is a consumer obligation outside the modeled files.
 - `MerklePathBinding`: `ChannelMerkleProof` siblings are prover-supplied; that the path
   is the authentic one, and that re-rooting changes only slot `channel_id`, rests on
   Poseidon collision resistance, which is NOT assumed. Only `reroot_of_equal_leaf_is_identity`
@@ -59,8 +58,9 @@ Named boundaries (undischarged premises; all opaque callbacks or hypotheses):
 - `PaddingRecipientNotPinned`: the circuit forces `pk_g = pk_b = regev = 0` on inactive
   slots but NOT `recipient` (`ChannelRegStepTarget::new` has no `conditional_assert_eq`
   for `member_recipients`), while native `validate()` rejects any non-default padding
-  slot. `gates_admit_nonzero_padding_recipient` exhibits the gap; the Solidity-fold
-  comparison therefore carries `PaddingZeroed` as an explicit hypothesis.
+  slot. `gates_leave_recipients_free` exhibits the gap (recipients move the chain value
+  and nothing else); the Solidity-fold comparison therefore carries the padding
+  hypothesis explicitly (`record_slots_are_padded`, `MatchesRegistration`).
 - `ContractDelegatedChecks`: nonzero and pairwise-distinct active `pk_g`, and the
   identity of the `recipient` words, are NOT constrained in-circuit; the source
   delegates them to `IntmaxRollup.registerChannel` through equality of the keccak chain.
@@ -411,11 +411,12 @@ def merkleRoot (e : Environment) (leaf : Hash4) (index : Nat) : List Hash4 → H
   | s :: rest =>
       merkleRoot e (if index % 2 = 0 then e.twoToOne leaf s else e.twoToOne s leaf) (index / 2) rest
 
-/-- Re-rooting with the SAME leaf value leaves the root unchanged: the R5 guard and the write
-    share one path, so a step that wrote back the default leaf could not move the root. -/
-theorem reroot_of_equal_leaf_is_identity (e : Environment) (leaf : Hash4) (index : Nat)
-    (siblings : List Hash4) :
-    merkleRoot e leaf index siblings = merkleRoot e leaf index siblings := rfl
+/-- Re-rooting with the same leaf value leaves the root unchanged: the R5 guard and the write
+    share ONE path and ONE index, so the step can only move slot `channel_id` — that no OTHER slot
+    changes is `MerklePathBinding` (Poseidon collision resistance), which is not assumed. -/
+theorem reroot_of_equal_leaf_is_identity (e : Environment) (leaf leaf' : Hash4) (index : Nat)
+    (siblings : List Hash4) (h : leaf = leaf') :
+    merkleRoot e leaf index siblings = merkleRoot e leaf' index siblings := by rw [h]
 
 /-! ## The registration record and the keccak fold preimage -/
 
