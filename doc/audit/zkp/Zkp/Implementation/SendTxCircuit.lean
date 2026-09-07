@@ -18,7 +18,7 @@ What the send branch binds (both natively and in-circuit):
   `prev.private_commitment = spend_pis.prev_private_commitment`;
 * block ordering: `block_r >= send_block_number_before_tx` and, IN-CIRCUIT,
   `tx_block_number > block_r` (strict).  The NATIVE witness builder only checks
-  `tx_block_number >= block_r`.  This is a prover-side divergence (native admits
+  `tx_block_number >= block_r`.  This is a prover-side divergence (native accepts
   a witness whose proof cannot be generated), not a soundness hole: everything
   the circuit accepts also passes the native inequality.
 * the outgoing transfer sits at index 0 of the settled tx's transfer tree
@@ -916,7 +916,7 @@ theorem example_spend_words_parse_natively :
       .ok ⟨⟨1, 2, 3, 4⟩, ⟨41, 42, 43, 44⟩, exampleTx, true⟩ := by
   rfl
 
-theorem example_valid_send_is_admitted_natively :
+theorem example_valid_send_is_accepted_natively :
     toPublicInputs exampleEnvironment (exampleWitness 3) = .ok (exampleOutput 3) := by
   have h := native_admission_of_checks exampleEnvironment (exampleWitness 3)
     ⟨examplePrevious, exampleVd⟩ ⟨⟨1, 2, 3, 4⟩, ⟨41, 42, 43, 44⟩, exampleTx, true⟩
@@ -927,7 +927,7 @@ theorem example_valid_send_is_admitted_natively :
 
 /-- The prover-side divergence: `tx_block_number == block_r` passes the
     native builder (non-strict `>=`) ... -/
-theorem native_admits_equal_tx_block_and_block_r :
+theorem native_accepts_equal_tx_block_and_block_r :
     toPublicInputs exampleEnvironment (exampleWitness 2) = .ok (exampleOutput 2) := by
   have h := native_admission_of_checks exampleEnvironment (exampleWitness 2)
     ⟨examplePrevious, exampleVd⟩ ⟨⟨1, 2, 3, 4⟩, ⟨41, 42, 43, 44⟩, exampleTx, true⟩
@@ -1014,7 +1014,7 @@ theorem example_valid_send_satisfies_circuit_gates :
 theorem example_circuit_and_native_statements_agree :
     exampleCircuitWitness.newFull = exampleOutput 3 ∧
     toPublicInputs exampleEnvironment (exampleWitness 3) = .ok exampleCircuitWitness.newFull :=
-  ⟨rfl, example_valid_send_is_admitted_natively⟩
+  ⟨rfl, example_valid_send_is_accepted_natively⟩
 
 theorem example_chain_was_folded_with_17_word_preimage :
     (exampleOutput 3).pis.settledChain =
