@@ -158,8 +158,7 @@ theorem typed_canonical_pair_passes_gate (a b : Nat) (ha : a < wordBase) (hb : b
       b = (a * wordBase + b) % goldilocks % wordBase ∧
       (a * wordBase + b) % goldilocks = a * wordBase + b := by
   rw [Nat.mod_eq_of_lt canon]
-  simp only [wordBase] at *
-  omega
+  refine ⟨?_, ?_, rfl⟩ <;> simp only [wordBase] at ha hb ⊢ <;> omega
 
 /-- The canonical gate forces u32 limbs, a canonical element and agreement
     between the target (field) reduction and the native (u64) reduction. -/
@@ -459,7 +458,7 @@ theorem verify_account_state_ok_iff {Path Proof : Type} (env : Environment Path 
       env.channelRoot a.channelLeaf a.channelId a.userMerkleProof = a.accountTreeRoot := by
   simp [verifyAccountState, unit_bind_ok_iff, check_ok_iff]
 
-/-- Exactly the two admitted witness layouts (lines 156-197). -/
+/-- Exactly the two accepted witness layouts (lines 156-197). -/
 def TxInclusionFacts {Path Proof : Type} (env : Environment Path Proof) (channelId : Nat) (tx : Tx)
     (txTreeRoot : Hash4) (txMerkleProof : Path) (txV2MerkleProof : Option Path)
     (txV2 : Option TxV2) : Prop :=
@@ -925,7 +924,9 @@ def examplePublicState : PublicState :=
 def exampleSettlement : Settlement Unit Unit :=
   ⟨1, Spend.emptyTx, examplePublicState, exampleAccountState, (), none, none, ()⟩
 
-theorem example_tx_tree_root_is_canonical : hashCanonical exampleTxTreeRoot := by decide
+theorem example_tx_tree_root_is_canonical : hashCanonical exampleTxTreeRoot := by
+  unfold hashCanonical exampleTxTreeRoot
+  decide
 
 theorem example_env_roots_are_canonical : CanonicalRoots exampleEnv :=
   ⟨fun _ _ _ => example_tx_tree_root_is_canonical, fun _ _ _ => example_tx_tree_root_is_canonical⟩

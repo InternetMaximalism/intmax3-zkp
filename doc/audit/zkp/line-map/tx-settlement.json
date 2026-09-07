@@ -1,0 +1,683 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/tx_settlement.rs",
+  "source_sha256": "21b70de9bac4ef11749eb0caf187fa944c904d616cf08025bb4c07901bfba25e",
+  "source_lines": 596,
+  "module": "Zkp.Implementation.TxSettlement",
+  "model": "doc/audit/zkp/Zkp/Implementation/TxSettlement.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 34,
+      "status": "dependency-boundary",
+      "label": "Imported crate types, plonky2 builder API and serde",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Environment",
+        "Zkp.Implementation.TxSettlement.FieldAndGadgetLowering",
+        "Zkp.Implementation.TxSettlement.CanonicalRoots",
+        "Zkp.Implementation.TxSettlement.SpendNonceWordTyped",
+        "Zkp.Implementation.TxSettlement.Hash4",
+        "Zkp.Implementation.TxSettlement.Tx",
+        "Zkp.Implementation.TxSettlement.PublicState",
+        "Zkp.Implementation.TxSettlement.rootToHash4"
+      ],
+      "theorems": [],
+      "note": "AccountState / SpendPublicInputs / ChannelId / PublicState / Tx / TxV2 / Merkle proofs / PoseidonHashOut / add_proof_target_and_verify are imported. Tx and PublicState reuse the registered Spend and BalancePublicInputs models; Merkle roots and the spend verifier are the opaque callbacks of Environment; plonky2 lowering is FieldAndGadgetLowering. No hash injectivity or proof soundness is assumed."
+    },
+    {
+      "start": 35,
+      "end": 35,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 36,
+      "end": 58,
+      "status": "translated",
+      "label": "TxSettlementError variants",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Fault",
+        "Zkp.Implementation.TxSettlement.Result",
+        "Zkp.Implementation.TxSettlement.check"
+      ],
+      "theorems": [],
+      "note": "Fault splits InvalidAccountState into the two AccountStateError shapes and InvalidSpendProof into verifier rejection / unparsable public inputs / tx mismatch so error precedence is observable. Error strings are not modeled. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 59,
+      "end": 59,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 60,
+      "end": 71,
+      "status": "translated",
+      "label": "TxSettlement value struct",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Settlement",
+        "Zkp.Implementation.TxSettlement.AccountState",
+        "Zkp.Implementation.TxSettlement.SendLeaf",
+        "Zkp.Implementation.TxSettlement.ChannelLeaf",
+        "Zkp.Implementation.TxSettlement.TxV2"
+      ],
+      "theorems": [],
+      "note": "Merkle proofs and the spend proof are opaque type parameters (Path, Proof). Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 72,
+      "end": 77,
+      "status": "non-executable",
+      "label": "Blank line and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 78,
+      "end": 99,
+      "status": "translated",
+      "label": "TxSettlement::new (legacy tx only)",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.acceptLegacy"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.wrapper_entry_points_fix_the_option_shape",
+        "Zkp.Implementation.TxSettlement.example_legacy_settlement_is_accepted"
+      ],
+      "note": "Both TxV2 options are None; the example theorem is a concrete accepted legacy settlement. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 100,
+      "end": 100,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 101,
+      "end": 123,
+      "status": "translated",
+      "label": "TxSettlement::new_with_tx_v2",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.acceptTxV2"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.wrapper_entry_points_fix_the_option_shape"
+      ],
+      "note": "Both TxV2 options are Some. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 124,
+      "end": 124,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 125,
+      "end": 135,
+      "status": "translated",
+      "label": "new_with_optional_tx_v2 signature",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.acceptSettlement",
+        "Zkp.Implementation.TxSettlement.NativeFacts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.native_acceptance_derives_checks"
+      ],
+      "note": "The Except-valued definition mirrors the source check order; NativeFacts is everything an Ok return establishes. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 136,
+      "end": 139,
+      "status": "translated",
+      "label": "Spend proof verification (first check)",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.acceptSettlement",
+        "Zkp.Implementation.TxSettlement.check"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.invalid_spend_proof_is_reported_first"
+      ],
+      "note": "spend_vd.verify is the opaque Environment.spendVerifies verdict; acceptance is not soundness. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 140,
+      "end": 140,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 141,
+      "end": 152,
+      "status": "translated",
+      "label": "AccountState::verify, channel_id and account_tree_root equality",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.verifyAccountState",
+        "Zkp.Implementation.TxSettlement.acceptSettlement",
+        "Zkp.Implementation.TxSettlement.rootToHash4"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.verify_account_state_ok_iff",
+        "Zkp.Implementation.TxSettlement.account_state_is_checked_before_channel_id",
+        "Zkp.Implementation.TxSettlement.native_settled_chain",
+        "Zkp.Implementation.TxSettlement.root_conversion_injective"
+      ],
+      "note": "verifyAccountState inlines account_state.rs:68-87 (send-leaf inclusion under the channel leaf send-tree root, then channel-leaf inclusion at index channel_id) with opaque Poseidon Merkle roots. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 153,
+      "end": 154,
+      "status": "non-executable",
+      "label": "Blank line and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 155,
+      "end": 155,
+      "status": "translated",
+      "label": "Bare reduce_to_hash_out of the send-leaf tx_tree_root (native u64 pairs)",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Bytes32",
+        "Zkp.Implementation.TxSettlement.Bytes32.limbs",
+        "Zkp.Implementation.TxSettlement.Bytes32.Typed",
+        "Zkp.Implementation.TxSettlement.Bytes32.reduceNative",
+        "Zkp.Implementation.TxSettlement.hashToBytes32",
+        "Zkp.Implementation.TxSettlement.Bytes32.tryToHashOut",
+        "Zkp.Implementation.TxSettlement.hashCanonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.native_try_from_never_rejects_u32_limbs",
+        "Zkp.Implementation.TxSettlement.modulus_encoding_passes_native_try_from",
+        "Zkp.Implementation.TxSettlement.noncanonical_native_hash_never_equals_a_canonical_root",
+        "Zkp.Implementation.TxSettlement.bytes32_typed_iff"
+      ],
+      "note": "Native reduction is high<<32 + low per pair with no field reduction, so a non-canonical Bytes32 yields a u64 >= p that can never equal a canonical Poseidon root (CanonicalRoots premise). The native TryFrom round trip never rejects u32 limbs. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 156,
+      "end": 197,
+      "status": "translated",
+      "label": "Tx inclusion: legacy / TxV2 / mixed witness match at index channel_id",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.verifyTxInclusion",
+        "Zkp.Implementation.TxSettlement.TxInclusionFacts",
+        "Zkp.Implementation.TxSettlement.userTransferTxV2",
+        "Zkp.Implementation.TxSettlement.TxV2",
+        "Zkp.Implementation.TxSettlement.userTransferClass",
+        "Zkp.Implementation.TxSettlement.channelActionClass"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.verify_tx_inclusion_ok_iff",
+        "Zkp.Implementation.TxSettlement.accepted_tx_v2_is_pinned_by_tx",
+        "Zkp.Implementation.TxSettlement.mixed_tx_v2_witness_is_never_accepted",
+        "Zkp.Implementation.TxSettlement.example_mixed_witness_is_rejected",
+        "Zkp.Implementation.TxSettlement.user_transfer_class_pinned"
+      ],
+      "note": "Exactly two accepted layouts: (None, None) with a legacy tx proof, or (Some, Some) with a TxV2 proof whose leaf must be UserTransfer, zero channel_action_root and the same transfer root and nonce as tx. Mixed options are rejected. Merkle verification is an opaque root equality. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 198,
+      "end": 198,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 199,
+      "end": 211,
+      "status": "translated",
+      "label": "Parse spend public inputs and compare tx",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.parseSpendPis",
+        "Zkp.Implementation.TxSettlement.acceptSettlement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.parse_spend_pis_ok_iff",
+        "Zkp.Implementation.TxSettlement.accepted_spend_pis_matches_tx",
+        "Zkp.Implementation.TxSettlement.native_spend_tx_match_is_modulo_word_base"
+      ],
+      "note": "from_pis_u64 is the registered Spend.parseNativePublicInputs (nonce truncated as u32), so the native equality is modulo 2^32 on the nonce word. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 212,
+      "end": 212,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 213,
+      "end": 223,
+      "status": "translated",
+      "label": "Accepted value construction",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.acceptSettlement",
+        "Zkp.Implementation.TxSettlement.Settlement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.accepted_settlement_returns_its_inputs"
+      ],
+      "note": "The returned struct is exactly the inputs. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 224,
+      "end": 224,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 225,
+      "end": 233,
+      "status": "translated",
+      "label": "tx_block_number / send_block_number_before_tx",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.AccountState.txBlockNumber",
+        "Zkp.Implementation.TxSettlement.AccountState.sendBlockNumberBeforeTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.block_number_accessors_read_the_send_leaf"
+      ],
+      "note": "Plain send-leaf field reads. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 234,
+      "end": 234,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 235,
+      "end": 243,
+      "status": "translated",
+      "label": "TxSettlement::spend_pis",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Settlement.spendPis",
+        "Zkp.Implementation.TxSettlement.parseSpendPis"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.accepted_spend_pis_matches_tx"
+      ],
+      "note": "Re-parses the stored proof public inputs. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 244,
+      "end": 245,
+      "status": "non-executable",
+      "label": "Closing brace and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 246,
+      "end": 258,
+      "status": "translated",
+      "label": "TxSettlementTarget wire struct",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Witness",
+        "Zkp.Implementation.TxSettlement.Allocation"
+      ],
+      "theorems": [],
+      "note": "use_tx_v2 is add_virtual_bool_target_safe and is modeled as a Bool. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 259,
+      "end": 270,
+      "status": "non-executable",
+      "label": "Blank line, impl header and TxSettlementTarget::new signature",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 271,
+      "end": 278,
+      "status": "translated",
+      "label": "Allocations and which receive is_checked",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.allocationPlan",
+        "Zkp.Implementation.TxSettlement.Allocation",
+        "Zkp.Implementation.TxSettlement.AllocationChecks",
+        "Zkp.Implementation.TxSettlement.AccountStateGates",
+        "Zkp.Implementation.TxSettlement.txTreeHeight",
+        "Zkp.Implementation.TxSettlement.channelIdBits",
+        "Zkp.Implementation.TxSettlement.sendTreeHeight",
+        "Zkp.Implementation.TxSettlement.channelTreeHeight",
+        "Zkp.Implementation.TxSettlement.SendLeaf.Typed",
+        "Zkp.Implementation.TxSettlement.ChannelLeaf.Typed",
+        "Zkp.Implementation.TxSettlement.AccountState.Typed",
+        "Zkp.Implementation.TxSettlement.PublicStateTyped"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.is_checked_reaches_only_channel_public_and_account",
+        "Zkp.Implementation.TxSettlement.tx_and_tx_v2_are_never_range_checked",
+        "Zkp.Implementation.TxSettlement.tx_tree_height_pinned",
+        "Zkp.Implementation.TxSettlement.send_and_channel_tree_heights_pinned"
+      ],
+      "note": "Only channel_id, public_state and account_state receive is_checked; tx, tx_v2, both Merkle proofs and use_tx_v2 are never range-checked here. AccountStateGates records the unconditional inclusion gates of AccountStateTarget::new (account_state.rs:110-135). Range-check gadgets are part of FieldAndGadgetLowering. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 279,
+      "end": 279,
+      "status": "dependency-boundary",
+      "label": "add_proof_target_and_verify of the spend proof",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Environment",
+        "Zkp.Implementation.TxSettlement.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "Recursive verification with the pinned spend verifier key is the opaque spendVerifies callback; CircuitGates.spendVerified is the verifier verdict, not soundness."
+    },
+    {
+      "start": 280,
+      "end": 280,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 281,
+      "end": 284,
+      "status": "translated",
+      "label": "connect channel_id and account_tree_root to public_state",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.settled_chain_binds_spend_tx_to_the_public_account_root"
+      ],
+      "note": "Gate equations channelConnect / rootConnect for an arbitrary witness. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 285,
+      "end": 293,
+      "status": "non-executable",
+      "label": "Blank line and SECURITY comment on to_hash_out",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 294,
+      "end": 294,
+      "status": "translated",
+      "label": "Canonicity-enforcing to_hash_out of the send-leaf tx_tree_root",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.ToHashOutGates",
+        "Zkp.Implementation.TxSettlement.Bytes32.fieldReduce",
+        "Zkp.Implementation.TxSettlement.hashToBytes32",
+        "Zkp.Implementation.TxSettlement.modulusBytes",
+        "Zkp.Implementation.TxSettlement.zeroBytes",
+        "Zkp.Implementation.TxSettlement.goldilocks",
+        "Zkp.Implementation.TxSettlement.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.pair_gate_forces_canonical_pair",
+        "Zkp.Implementation.TxSettlement.typed_canonical_pair_passes_gate",
+        "Zkp.Implementation.TxSettlement.canonical_gate_forces_native_agreement",
+        "Zkp.Implementation.TxSettlement.typed_canonical_bytes_pass_the_canonical_gate",
+        "Zkp.Implementation.TxSettlement.bare_reduction_aliases_noncanonical_bytes",
+        "Zkp.Implementation.TxSettlement.canonical_gate_rejects_the_modulus_encoding",
+        "Zkp.Implementation.TxSettlement.circuit_tx_tree_root_is_the_canonical_native_value",
+        "Zkp.Implementation.TxSettlement.goldilocks_pinned",
+        "Zkp.Implementation.TxSettlement.word_base_matches_spend_and_balance"
+      ],
+      "note": "ToHashOutGates is the semantic content of Bytes32Target::to_hash_out (field reduction, unique 32/32 split, connect back); it forces u32 limbs, a canonical element and agreement with the native reduction, and rejects the value+p aliasing the comment describes. The gadget lowering itself is a boundary. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 295,
+      "end": 296,
+      "status": "non-executable",
+      "label": "Comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 297,
+      "end": 312,
+      "status": "translated",
+      "label": "tx_index := channel_id and the two conditional_verify inclusion gates",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.CircuitGates",
+        "Zkp.Implementation.TxSettlement.txTreeHeight",
+        "Zkp.Implementation.TxSettlement.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.tx_tree_height_is_channel_id_bits",
+        "Zkp.Implementation.TxSettlement.settled_chain_binds_spend_tx_to_the_public_account_root",
+        "Zkp.Implementation.TxSettlement.channel_id_is_bounded_without_is_checked"
+      ],
+      "note": "Legacy inclusion is gated by not(use_tx_v2), TxV2 inclusion by use_tx_v2; both index the tx tree by the channel id wire and bound it below 2^TX_TREE_HEIGHT. Merkle gadgets are opaque roots. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 313,
+      "end": 313,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 314,
+      "end": 325,
+      "status": "translated",
+      "label": "Four TxV2 conditional assertions",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.CircuitGates",
+        "Zkp.Implementation.TxSettlement.userTransferTxV2",
+        "Zkp.Implementation.TxSettlement.userTransferClass"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.tx_v2_wire_is_pinned_by_tx_when_used",
+        "Zkp.Implementation.TxSettlement.user_transfer_class_pinned"
+      ],
+      "note": "When use_tx_v2 = 1 the TxV2 wire equals userTransferTxV2 tx exactly; when 0 nothing is asserted. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 326,
+      "end": 326,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 327,
+      "end": 328,
+      "status": "translated",
+      "label": "Connect tx to the verified spend statement tx",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.CircuitGates",
+        "Zkp.Implementation.TxSettlement.SpendNonceWordTyped"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.settled_chain_binds_spend_tx_to_the_public_account_root"
+      ],
+      "note": "from_pis is the registered Spend.parseTargetPublicInputs (raw nonce wire, no truncation); spendTxConnect is the connect. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 329,
+      "end": 329,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 330,
+      "end": 341,
+      "status": "translated",
+      "label": "Returned target struct",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.Witness"
+      ],
+      "theorems": [],
+      "note": "Struct literal of the allocated wires. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 342,
+      "end": 342,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 343,
+      "end": 368,
+      "status": "translated",
+      "label": "TxSettlementTarget::set_witness",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.fillWitness",
+        "Zkp.Implementation.TxSettlement.witnessWritePlan",
+        "Zkp.Implementation.TxSettlement.defaultTxV2",
+        "Zkp.Implementation.TxSettlement.NativeTyped"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.fill_flag_follows_tx_v2_presence_not_the_proof",
+        "Zkp.Implementation.TxSettlement.witness_write_covers_every_allocation_in_order",
+        "Zkp.Implementation.TxSettlement.native_acceptance_fills_a_satisfying_witness",
+        "Zkp.Implementation.TxSettlement.example_settlement_fills_a_satisfying_witness"
+      ],
+      "note": "No checks; use_tx_v2 := tx_v2.is_some(); a missing TxV2 proof becomes the dummy path and a missing leaf TxV2::default(). A natively accepted settlement fills a gate-satisfying witness under NativeTyped, CanonicalRoots and SpendNonceWordTyped. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 369,
+      "end": 369,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 370,
+      "end": 376,
+      "status": "translated",
+      "label": "Target block-number accessors",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.AccountState.txBlockNumber",
+        "Zkp.Implementation.TxSettlement.AccountState.sendBlockNumberBeforeTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.block_number_accessors_read_the_send_leaf"
+      ],
+      "note": "Same send-leaf field reads as the native accessors. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 377,
+      "end": 377,
+      "status": "non-executable",
+      "label": "Blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 378,
+      "end": 380,
+      "status": "translated",
+      "label": "Target spend_pis accessor",
+      "declarations": [
+        "Zkp.Implementation.TxSettlement.CircuitGates"
+      ],
+      "theorems": [],
+      "note": "SpendPublicInputsTarget::from_pis on the proof public inputs is the parse inside CircuitGates.spendTxConnect (registered Spend.parseTargetPublicInputs). Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 381,
+      "end": 382,
+      "status": "non-executable",
+      "label": "Closing brace and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read-only source commentary, attribute, blank line or closing brace; not promoted to an executable guarantee."
+    },
+    {
+      "start": 383,
+      "end": 596,
+      "status": "test-only",
+      "label": "cfg(test) legacy and TxV2 proving tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test fixtures are not part of the model; the positive example theorems in the module are independent concrete traces."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-merkle-roots",
+      "obligation": "Environment.txRoot / txV2Root / sendRoot / channelRoot are opaque callbacks; Poseidon collision resistance, hash injectivity and Merkle-gadget lowering equal to the native hash are never proved. Root equality is the only fact used.",
+      "discharged": false
+    },
+    {
+      "name": "spend-proof-verifier",
+      "obligation": "spend_vd.verify / add_proof_target_and_verify with the pinned spend verifier key is Environment.spendVerifies; the model records the verdict only. Proof soundness and key pinning are not assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "canonical-roots",
+      "obligation": "CanonicalRoots: Poseidon Merkle roots are canonical Goldilocks elements (to_canonical_u64), which is what makes the native bare reduction reject non-canonical tx-tree roots.",
+      "discharged": false
+    },
+    {
+      "name": "to-hash-out-gadget-lowering",
+      "obligation": "ToHashOutGates is the semantic content of Bytes32Target::to_hash_out (split_low_high plus the hi = 2^32-1 side constraint); the plonky2 lowering of that gadget to constraints is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-gadget-lowering",
+      "obligation": "FieldAndGadgetLowering: connect, is_equal, conditional_assert_eq, add_virtual_bool_target_safe, range checks and conditional_verify are assumed to enforce exactly the CircuitGates equations for every witness the builder accepts.",
+      "discharged": false
+    },
+    {
+      "name": "native-type-ranges",
+      "obligation": "NativeTyped: the Rust types ChannelId (u32), BlockNumber (u63), Bytes32 limbs (u32) and the leaf indices respect their ranges; enforced by the imported types, not here.",
+      "discharged": false
+    },
+    {
+      "name": "spend-nonce-word-domain",
+      "obligation": "SpendNonceWordTyped: the spend proof public-input nonce word is below 2^32. Natively the parser truncates with as u32 while the circuit connects the raw wire; the native-to-circuit bridge needs this premise.",
+      "discharged": false
+    },
+    {
+      "name": "no-safety-claim",
+      "obligation": "No signature validity, finality, freshness or acceptance-implies-funds-safe statement is made; the model only relates the accepted tx to the committed account root.",
+      "discharged": false
+    }
+  ]
+}
