@@ -1,0 +1,350 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/channel/e2e_flow.rs",
+  "source_sha256": "244562fcd68205776d24444570f2ee9e83464c0c2cf78bba3afce1073277c6b3",
+  "source_lines": 1428,
+  "module": "Zkp.Implementation.FlowHarness",
+  "model": "doc/audit/zkp/Zkp/Implementation/FlowHarness.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 31,
+      "status": "non-executable",
+      "label": "module doc: eight-step two-channel flow and the adversarial suite summary",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.FlowStep",
+        "Zkp.Implementation.FlowHarness.negativeSuite",
+        "Zkp.Implementation.FlowHarness.e2eFlowRole"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 32,
+      "end": 76,
+      "status": "test-only",
+      "label": "test-module imports (channel witnesses, common types, regev prover API)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 77,
+      "end": 95,
+      "status": "test-only",
+      "label": "config aliases and fixture constants: Test security level, amounts 7 and 5, 3 active members, genesis balances",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.inChannelAmount",
+        "Zkp.Implementation.FlowHarness.interChannelAmount",
+        "Zkp.Implementation.FlowHarness.e2eActive",
+        "Zkp.Implementation.FlowHarness.aGenesis",
+        "Zkp.Implementation.FlowHarness.bGenesis"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 96,
+      "end": 107,
+      "status": "test-only",
+      "label": "pad_pks / pad_hashes to MAX_CHANNEL_MEMBERS",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.maxChannelMembers"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 108,
+      "end": 115,
+      "status": "non-executable",
+      "label": "doc comment: the structural transport verifier is intentionally simple",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.structuralTransportVerify"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 116,
+      "end": 132,
+      "status": "test-only",
+      "label": "StructuralTransportVerifier: accept exactly an empty transport envelope",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.structuralTransportVerify",
+        "Zkp.Implementation.FlowHarness.FlowErrorKind"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 133,
+      "end": 136,
+      "status": "non-executable",
+      "label": "banner: fixture helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 137,
+      "end": 216,
+      "status": "test-only",
+      "label": "fixture helpers: deterministic member pk hashes, placeholder words/addresses, channel_record, placeholder cosignatures, envelopes",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.e2eActive",
+        "Zkp.Implementation.FlowHarness.channelA",
+        "Zkp.Implementation.FlowHarness.channelB"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 217,
+      "end": 279,
+      "status": "test-only",
+      "label": "genesis_state: fresh encryptions, version 0, chain 0, placeholder roots",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.aGenesis",
+        "Zkp.Implementation.FlowHarness.bGenesis",
+        "Zkp.Implementation.FlowHarness.aFund",
+        "Zkp.Implementation.FlowHarness.bFund"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 280,
+      "end": 283,
+      "status": "test-only",
+      "label": "u256_from_u64",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 284,
+      "end": 287,
+      "status": "non-executable",
+      "label": "banner: shared flow fixture",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 288,
+      "end": 309,
+      "status": "test-only",
+      "label": "FlowFixture and OnceLock accessor",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.FlowStep"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 310,
+      "end": 355,
+      "status": "test-only",
+      "label": "build_flow: keygen, channel records, genesis states for channels 5 and 7",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.channelA",
+        "Zkp.Implementation.FlowHarness.channelB",
+        "Zkp.Implementation.FlowHarness.aFund",
+        "Zkp.Implementation.FlowHarness.bFund",
+        "Zkp.Implementation.FlowHarness.aGenesis",
+        "Zkp.Implementation.FlowHarness.bGenesis"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 356,
+      "end": 423,
+      "status": "test-only",
+      "label": "step (a): in-channel transfer alice -> bob, E-1 proof, state a1 (version 1)",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition",
+        "Zkp.Implementation.FlowHarness.inChannelAmount",
+        "Zkp.Implementation.FlowHarness.bobFinal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 424,
+      "end": 554,
+      "status": "test-only",
+      "label": "step (b): inter-channel send alice -> dave, E-2 proof, chain push, signed small block, state a2 (version 2)",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition",
+        "Zkp.Implementation.FlowHarness.interChannelAmount",
+        "Zkp.Implementation.FlowHarness.aliceFinal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 555,
+      "end": 586,
+      "status": "test-only",
+      "label": "step (c): fund import on channel B, state b1 (version 1)",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 587,
+      "end": 629,
+      "status": "test-only",
+      "label": "step (d): receiver bundle apply, homomorphic add, state b2 (version 2)",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition",
+        "Zkp.Implementation.FlowHarness.daveFinal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 630,
+      "end": 675,
+      "status": "test-only",
+      "label": "step (e): balance refresh, state b3 (version 3); fixture assembly",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition",
+        "Zkp.Implementation.FlowHarness.expectedCloseVersionB"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 676,
+      "end": 687,
+      "status": "test-only",
+      "label": "close_withdrawal_for",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 688,
+      "end": 699,
+      "status": "non-executable",
+      "label": "banner and doc comment for the happy-path test",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.happyPathTests"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 700,
+      "end": 957,
+      "status": "test-only",
+      "label": "channel_native_regev_full_flow_e2e: verifier-checked transitions (a)-(e), close intent, withdrawal claim, cancel close, post-close claim",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.expectedTransition",
+        "Zkp.Implementation.FlowHarness.TransitionExpectation",
+        "Zkp.Implementation.FlowHarness.TransitionKind",
+        "Zkp.Implementation.FlowHarness.FlowStep",
+        "Zkp.Implementation.FlowHarness.aliceFinal",
+        "Zkp.Implementation.FlowHarness.bobFinal",
+        "Zkp.Implementation.FlowHarness.daveFinal",
+        "Zkp.Implementation.FlowHarness.expectedCloseVersionB",
+        "Zkp.Implementation.FlowHarness.happyPathTests"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 958,
+      "end": 969,
+      "status": "non-executable",
+      "label": "doc comment for the full close-circuit proof test",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.happyPathTests"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 970,
+      "end": 1014,
+      "status": "test-only",
+      "label": "channel_full_close_circuit_proof_e2e: real initial balance proof, fixture member auth, close circuit prove/verify",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.happyPathTests"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 1015,
+      "end": 1018,
+      "status": "non-executable",
+      "label": "banner: negative suite",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.negativeSuite",
+        "Zkp.Implementation.FlowHarness.NegativeCase",
+        "Zkp.Implementation.FlowHarness.Gate"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 1019,
+      "end": 1428,
+      "status": "test-only",
+      "label": "negative suite: 17 tamper-and-expect-error tests over clones of the fixture witnesses",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.negativeSuite",
+        "Zkp.Implementation.FlowHarness.NegativeCase",
+        "Zkp.Implementation.FlowHarness.Gate",
+        "Zkp.Implementation.FlowHarness.FlowErrorKind",
+        "Zkp.Implementation.FlowHarness.maxHomoAddsBeforeRefresh"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "regev-stark-verification",
+      "obligation": "E-1/E-2/E-3 Regev STARK proving and verification at RegevSecurityLevel::Test are opaque; nothing about their soundness or the Test-level parameters is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "structural-transport-verifier-verifies-nothing",
+      "obligation": "Every inter-channel test uses a verifier that accepts exactly the empty envelope; real intmax transport proof verification is never exercised by this file.",
+      "discharged": false
+    },
+    {
+      "name": "state-update-verifier-semantics",
+      "obligation": "The witness verifiers the tests call are modeled in Zkp.Implementation.ChannelStateUpdate (not imported here); this module records the expected outcomes as data and derives nothing about those verifiers.",
+      "discharged": false
+    },
+    {
+      "name": "close-circuit-proof-and-fixture",
+      "obligation": "The full close-circuit proof uses close_circuit::test_fixture artifacts and 3 fixture Falcon signatures; see the CloseCircuit model and its fixture boundary.",
+      "discharged": false
+    },
+    {
+      "name": "placeholder-member-signatures",
+      "obligation": "Channel states and the small block carry structural_cosign_placeholder signatures; the native flow does not verify member signatures, so nothing here is evidence about N-of-N authorization.",
+      "discharged": false
+    },
+    {
+      "name": "fixture-economic-consistency",
+      "obligation": "Fund amounts (100, 200) are not the sums of genesis balances (90, 60) and roots such as member_pubkeys_root, intmax_state_root and tx_tree_root are placeholder words; the fixture is structurally, not economically, consistent.",
+      "discharged": false
+    },
+    {
+      "name": "test-execution-not-attested",
+      "obligation": "All tests are ignored in debug builds and run only under --release; whether they were executed is not attested here.",
+      "discharged": false
+    }
+  ]
+}

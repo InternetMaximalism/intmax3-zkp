@@ -1,0 +1,463 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/validity/block_hash_chain/nofn_attack.rs",
+  "source_sha256": "097c911d715de249bf87aca52e2a5ef634c3029f12fef47ed033ec32e3470a91",
+  "source_lines": 708,
+  "module": "Zkp.Implementation.FlowHarness",
+  "model": "doc/audit/zkp/Zkp/Implementation/FlowHarness.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 51,
+      "status": "non-executable",
+      "label": "module doc: Phase 5 claim, pre-change evidence pointer, the A1/A2/A3 table, attribution discipline",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.RefusalSite",
+        "Zkp.Implementation.FlowHarness.AttackerCapabilities",
+        "Zkp.Implementation.FlowHarness.attacker",
+        "Zkp.Implementation.FlowHarness.AttackStep",
+        "Zkp.Implementation.FlowHarness.SigningShape",
+        "Zkp.Implementation.FlowHarness.shapeRefusal",
+        "Zkp.Implementation.FlowHarness.nofnAttackRole"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 52,
+      "end": 114,
+      "status": "test-only",
+      "label": "test-module imports (processors, circuits, test_utils witness generators, Falcon stack)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 115,
+      "end": 118,
+      "status": "test-only",
+      "label": "plonky2 config aliases D/F/C",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 119,
+      "end": 125,
+      "status": "test-only",
+      "label": "fixture constants: channel 1, member funds 6 and 4, theft = whole pool",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.attackChannelId",
+        "Zkp.Implementation.FlowHarness.member1Funds",
+        "Zkp.Implementation.FlowHarness.member2Funds",
+        "Zkp.Implementation.FlowHarness.theft"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 126,
+      "end": 128,
+      "status": "non-executable",
+      "label": "doc comment for update_tree_for",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 129,
+      "end": 165,
+      "status": "test-only",
+      "label": "update_tree_for: rebuild UpdateUserTree from a block witness (signer_count, member_leaves, prev leaves)",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.SignerSetWitness",
+        "Zkp.Implementation.FlowHarness.MemberLeaf"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 166,
+      "end": 169,
+      "status": "non-executable",
+      "label": "doc comment for assert_refused",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.AttributedRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 170,
+      "end": 191,
+      "status": "test-only",
+      "label": "assert_refused: strict mirror must reject naming the reason, circuit must reject unchecked PIs",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.AttributedRefusal",
+        "Zkp.Implementation.FlowHarness.attributedRefusal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 192,
+      "end": 194,
+      "status": "non-executable",
+      "label": "doc comment for member_root_matches",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 195,
+      "end": 202,
+      "status": "test-only",
+      "label": "member_root_matches: recompute MemberTree root over witnessed leaves vs committed root",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.memberRootMatches"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 203,
+      "end": 229,
+      "status": "test-only",
+      "label": "test entry: processors, spend/balance circuits, witness generator, attacker private state",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.supportedUserCounts",
+        "Zkp.Implementation.FlowHarness.attacker"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 230,
+      "end": 285,
+      "status": "test-only",
+      "label": "block 1 registration (3 cosigners, attacker slot 0); block 2 deposits by the other two members",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.registeredMembers",
+        "Zkp.Implementation.FlowHarness.attackerSlot",
+        "Zkp.Implementation.FlowHarness.member1Funds",
+        "Zkp.Implementation.FlowHarness.member2Funds"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 286,
+      "end": 293,
+      "status": "non-executable",
+      "label": "comment: step 1 still unblocked by design",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.AttackStep",
+        "Zkp.Implementation.FlowHarness.stepExpectation"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 294,
+      "end": 312,
+      "status": "test-only",
+      "label": "step 1: theft transfer with aux_data = 0, SpendCircuit proof expected to succeed",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.theftAuxData",
+        "Zkp.Implementation.FlowHarness.theft",
+        "Zkp.Implementation.FlowHarness.stepExpectation"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 313,
+      "end": 376,
+      "status": "test-only",
+      "label": "theft tx/tx_v2 trees; the honest 3-of-3 signing block added as control; IMCH digest",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.honestShape",
+        "Zkp.Implementation.FlowHarness.honestLeaves",
+        "Zkp.Implementation.FlowHarness.registeredMembers"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 377,
+      "end": 397,
+      "status": "test-only",
+      "label": "step 2: prove_send_tx expected to succeed",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.stepExpectation"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 398,
+      "end": 403,
+      "status": "non-executable",
+      "label": "comment: steps 4-5 still unblocked given a settled block",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.stepExpectation"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 404,
+      "end": 449,
+      "status": "test-only",
+      "label": "steps 4-5: single withdrawal, withdrawal chain and final proofs expected to succeed; payout to attacker",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.stepExpectation",
+        "Zkp.Implementation.FlowHarness.theft",
+        "Zkp.Implementation.FlowHarness.theftAuxData"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 450,
+      "end": 451,
+      "status": "non-executable",
+      "label": "banner: step 3",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 452,
+      "end": 466,
+      "status": "test-only",
+      "label": "control: honest 3-of-3 tree passes root match, native mirror and circuit",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.honestShape",
+        "Zkp.Implementation.FlowHarness.floorSatisfied",
+        "Zkp.Implementation.FlowHarness.slotsWellPadded",
+        "Zkp.Implementation.FlowHarness.memberRootMatches",
+        "Zkp.Implementation.FlowHarness.signingSlotMirror"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 467,
+      "end": 482,
+      "status": "non-executable",
+      "label": "comment: A1 named constraint and isolation caveat",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 483,
+      "end": 490,
+      "status": "test-only",
+      "label": "A1: signer_count = 1 over the real set; refused naming out of range 2..=8",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.a1Shape",
+        "Zkp.Implementation.FlowHarness.floorSatisfied",
+        "Zkp.Implementation.FlowHarness.memberRootMatches",
+        "Zkp.Implementation.FlowHarness.attributedRefusal",
+        "Zkp.Implementation.FlowHarness.signingSlotMirror"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 491,
+      "end": 506,
+      "status": "non-executable",
+      "label": "comment: A2 named constraint (member-root connect) and isolation",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 507,
+      "end": 547,
+      "status": "test-only",
+      "label": "A2: sock-puppet key, two genuine signatures, slot 2 blanked; padding/floor asserted; refused by root connect",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.a2Shape",
+        "Zkp.Implementation.FlowHarness.a2Leaves",
+        "Zkp.Implementation.FlowHarness.sockPuppetPkG",
+        "Zkp.Implementation.FlowHarness.floorSatisfied",
+        "Zkp.Implementation.FlowHarness.paddingViolation",
+        "Zkp.Implementation.FlowHarness.slotsWellPadded",
+        "Zkp.Implementation.FlowHarness.memberRootMatches",
+        "Zkp.Implementation.FlowHarness.attributedRefusal",
+        "Zkp.Implementation.FlowHarness.signingSlotMirror"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 548,
+      "end": 560,
+      "status": "non-executable",
+      "label": "comment: A3 and A3a named constraint",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 561,
+      "end": 584,
+      "status": "test-only",
+      "label": "A3a: victims pks under the attacker signature; FalconAggCircuit prove must fail or panic",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.a3Shape",
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 585,
+      "end": 593,
+      "status": "non-executable",
+      "label": "comment: A3b honest finding, refusal at the consumer",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 594,
+      "end": 612,
+      "status": "test-only",
+      "label": "A3b: genuine 1-of-N aggregate and list proof are provable; commitment differs from honest chain",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeSignerCount"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 613,
+      "end": 653,
+      "status": "test-only",
+      "label": "honest block-chain span and validity proof as control",
+      "declarations": [],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 654,
+      "end": 657,
+      "status": "non-executable",
+      "label": "comment: C == final.bp_sig_chain named constraint",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 658,
+      "end": 670,
+      "status": "test-only",
+      "label": "A3b: validity proof with the 1-of-N list must fail, panic or not verify",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.shapeRefusal"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 671,
+      "end": 680,
+      "status": "non-executable",
+      "label": "comment: production entry point prove_block",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.proveBlockRefusedShapes"
+      ],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    },
+    {
+      "start": 681,
+      "end": 699,
+      "status": "test-only",
+      "label": "prove_block control then A1/A2 witnesses must be refused by the production path",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.proveBlockRefusedShapes"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 700,
+      "end": 707,
+      "status": "test-only",
+      "label": "summary println",
+      "declarations": [
+        "Zkp.Implementation.FlowHarness.stepExpectation"
+      ],
+      "theorems": [],
+      "note": "Whole file is a #[cfg(test)] module (see its mod.rs); compiled only into the test binary. Read in full, not executed, not translated as production; listed declarations record the scenario structure of these lines as data. No theorem is linked."
+    },
+    {
+      "start": 708,
+      "end": 708,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, banner, blank or closing-brace lines; no executable constraint inferred."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "circuit-side-signer-set-constraints",
+      "obligation": "The in-circuit thermometer, occupancy and member-root connect (update_channel_tree.rs 1049-1260) and the BlockHashChainProcessor::prove_block path are not modeled; signingSlotMirror is a handwritten restatement of only the three native-mirror rules at update_channel_tree.rs 277-316. Nothing here shows the circuit refuses A1/A2.",
+      "discharged": false
+    },
+    {
+      "name": "member-root-poseidon-recompute",
+      "obligation": "The MemberTree Poseidon root is an opaque function. A2 is refused only under the explicit premise that the recomputed root over the tampered leaves differs from the committed root; the harness establishes this at runtime by hashing. No collision-freedom is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "falcon-signature-unforgeability",
+      "obligation": "A3a rests on the Falcon leaf circuit norm bound and signature unforgeability (falcon_sig::agg); recorded as data only.",
+      "discharged": false
+    },
+    {
+      "name": "agg-list-chain-binding",
+      "obligation": "A3b rests on validity_circuit.rs 242-262 (C == final.bp_sig_chain gated on the computed chain) and on the list chain commitment not colliding; recorded as data only.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-refusal-and-soundness",
+      "obligation": "Refused means prove returned Err or panicked, or verify failed, on an unsatisfiable witness; proof soundness and the prover/verifier implementation are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "pre-change-evidence-is-external",
+      "obligation": "The claim that the attack succeeded on the pre-Phase-3 code lives in doc/tasks and a historical worktree; it is not attested by this model.",
+      "discharged": false
+    },
+    {
+      "name": "test-execution-not-attested",
+      "obligation": "The test is ignored in debug builds and runs only under --release; whether it was executed is not attested here.",
+      "discharged": false
+    },
+    {
+      "name": "unblocked-steps-are-not-safety",
+      "obligation": "Steps 1, 2, 4 and 5 succeeding means the spend/withdrawal machinery pays the theft out GIVEN a settled block; the model records this expectation as data and derives no safety from it.",
+      "discharged": false
+    }
+  ]
+}

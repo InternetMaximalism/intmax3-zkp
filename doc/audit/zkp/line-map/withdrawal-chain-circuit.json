@@ -1,0 +1,441 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/withdrawal_chain_circuit.rs",
+  "source_sha256": "24ed20d9ed1e0900012d6efa8de42ea7809eca3ef5da89c7fbb9f2369c0d48c8",
+  "source_lines": 364,
+  "module": "Zkp.Implementation.WithdrawalChainCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalChainCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "Imports (plonky2 builder/verifier API, thiserror, crate step/cyclic helpers)",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.NativeEnvironment",
+        "Zkp.Implementation.WithdrawalChainCircuit.BuildEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. plonky2 types, the verify_proof gadget, PartialWitness and the crate helpers are opaque callbacks or re-modeled locally where called below."
+    },
+    {
+      "start": 27,
+      "end": 28,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 29,
+      "end": 35,
+      "status": "translated",
+      "label": "WithdrawalChainCircuitError enum",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.Error",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifyFailure"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. FailedToProve / ProofVerificationError; the model refines the second variant's message into the three cyclic-check outcomes plus the plonky2 rejection."
+    },
+    {
+      "start": 36,
+      "end": 36,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 37,
+      "end": 45,
+      "status": "dependency-boundary",
+      "label": "Circuit struct holding plonky2 CircuitData and the step proof target",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.NativeEnvironment",
+        "Zkp.Implementation.WithdrawalChainCircuit.BuildEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. `data` is exposed only through ownKey/proveData/verifyData callbacks; the step proof target only through its public-input wire ids."
+    },
+    {
+      "start": 46,
+      "end": 52,
+      "status": "non-executable",
+      "label": "Blank line and impl header with where clauses",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 53,
+      "end": 56,
+      "status": "translated",
+      "label": "`new` signature",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.newCircuit",
+        "Zkp.Implementation.WithdrawalChainCircuit.CommonData"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Inputs: chain common data (compared for equality) and the step verifier data (embedded as constants)."
+    },
+    {
+      "start": 57,
+      "end": 58,
+      "status": "dependency-boundary",
+      "label": "CircuitBuilder::new and add_proof_target_and_verify (constant verifier data + verify_proof gadget)",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.BuildOp",
+        "Zkp.Implementation.WithdrawalChainCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Recorded as program steps only; gadget soundness and constant embedding are plonky2 boundaries."
+    },
+    {
+      "start": 59,
+      "end": 63,
+      "status": "translated",
+      "label": "from_pis re-slicing of the step proof public inputs and register_public_inputs of to_vec",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.fromPis",
+        "Zkp.Implementation.WithdrawalChainCircuit.StepPisTarget",
+        "Zkp.Implementation.WithdrawalChainCircuit.StepPisTarget.toVec",
+        "Zkp.Implementation.WithdrawalChainCircuit.vdFromSlice",
+        "Zkp.Implementation.WithdrawalChainCircuit.keyTail",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifierKey",
+        "Zkp.Implementation.WithdrawalChainCircuit.chainPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.stepPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.vdVecLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.numCapElements",
+        "Zkp.Implementation.WithdrawalChainCircuit.isRegister"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.from_pis_forwards_step_prefix",
+        "Zkp.Implementation.WithdrawalChainCircuit.from_pis_short_panics",
+        "Zkp.Implementation.WithdrawalChainCircuit.from_pis_never_hits_vd_unwrap",
+        "Zkp.Implementation.WithdrawalChainCircuit.forwarded_vector_has_chain_length",
+        "Zkp.Implementation.WithdrawalChainCircuit.constructor_registers_exactly_once",
+        "Zkp.Implementation.WithdrawalChainCircuit.constructor_never_binds_verifier_data_in_circuit",
+        "Zkp.Implementation.WithdrawalChainCircuit.take_add_split",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_from_pis_round_trip",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_from_pis_takes_prefix_of_longer_vector",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_from_pis_short_panics",
+        "Zkp.Implementation.WithdrawalChainCircuit.chain_public_inputs_len_pinned",
+        "Zkp.Implementation.WithdrawalChainCircuit.step_public_inputs_len_pinned",
+        "Zkp.Implementation.WithdrawalChainCircuit.vd_vec_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The registered vector is exactly the first 23 + 4 + 4*2^cap_height step public-input targets in order; no connect/verifier-data-public-input call exists here."
+    },
+    {
+      "start": 64,
+      "end": 64,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 65,
+      "end": 65,
+      "status": "dependency-boundary",
+      "label": "try_build_with_options::<C>(true)",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.BuildEnvironment",
+        "Zkp.Implementation.WithdrawalChainCircuit.BuildReportsRegisteredCount"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. plonky2 compilation is the opaque `build` callback; that it reports the registered count as num_public_inputs is the named premise BuildReportsRegisteredCount."
+    },
+    {
+      "start": 66,
+      "end": 71,
+      "status": "translated",
+      "label": "assert_eq common data then assert build success",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.newCircuit",
+        "Zkp.Implementation.WithdrawalChainCircuit.Panic",
+        "Zkp.Implementation.WithdrawalChainCircuit.CommonData"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.constructor_panic_order",
+        "Zkp.Implementation.WithdrawalChainCircuit.short_step_vector_panics_in_from_pis",
+        "Zkp.Implementation.WithdrawalChainCircuit.common_mismatch_precedes_build_failure",
+        "Zkp.Implementation.WithdrawalChainCircuit.build_failure_panics_after_common_check",
+        "Zkp.Implementation.WithdrawalChainCircuit.new_circuit_registers_step_prefix",
+        "Zkp.Implementation.WithdrawalChainCircuit.new_circuit_common_data_has_chain_count",
+        "Zkp.Implementation.WithdrawalChainCircuit.registered_chain_vector_fails_rollup_gate"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Panic order: from_pis length (during build) < common-data mismatch < build failure. CommonCircuitData equality is collapsed to capHeight/numPublicInputs plus an opaque fingerprint."
+    },
+    {
+      "start": 72,
+      "end": 72,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 73,
+      "end": 76,
+      "status": "translated",
+      "label": "Return Self { data, withdrawal_step_proof }",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.newCircuit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.new_circuit_registers_step_prefix"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Successful construction returns the registered wire vector."
+    },
+    {
+      "start": 77,
+      "end": 78,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 79,
+      "end": 79,
+      "status": "translated",
+      "label": "`generate_cd` signature",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.generateCd",
+        "Zkp.Implementation.WithdrawalChainCircuit.generateCdProgram"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Returns the chain common data used by both the step circuit and `new`."
+    },
+    {
+      "start": 80,
+      "end": 89,
+      "status": "dependency-boundary",
+      "label": "simple_recursion_circuit_data, virtual proof/cap/hash, verify_proof, noop padding to 1<<12, build",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.CdOp",
+        "Zkp.Implementation.WithdrawalChainCircuit.generateCdProgram",
+        "Zkp.Implementation.WithdrawalChainCircuit.noopTargetGates",
+        "Zkp.Implementation.WithdrawalChainCircuit.defaultCapHeight"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Recorded as a program; gate counts, FRI parameters and the produced common data are the opaque `fingerprint`. noopTargetGates and the default cap height are pinned literals."
+    },
+    {
+      "start": 90,
+      "end": 91,
+      "status": "translated",
+      "label": "Overwrite num_public_inputs = WITHDRAWAL_STEP_PUBLIC_INPUTS_LEN + vd_vec_len and return",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.generateCd",
+        "Zkp.Implementation.WithdrawalChainCircuit.chainPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.vdVecLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.stepPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChainCircuit.publicStateU64Len",
+        "Zkp.Implementation.WithdrawalChainCircuit.bytes32Len",
+        "Zkp.Implementation.WithdrawalChainCircuit.u64Len",
+        "Zkp.Implementation.WithdrawalChainCircuit.poseidonHashOutLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.generate_cd_count_matches_registered_count",
+        "Zkp.Implementation.WithdrawalChainCircuit.generate_cd_count_is_overwritten_not_registered",
+        "Zkp.Implementation.WithdrawalChainCircuit.new_circuit_against_generate_cd_is_consistent",
+        "Zkp.Implementation.WithdrawalChainCircuit.noop_target_pinned",
+        "Zkp.Implementation.WithdrawalChainCircuit.vd_vec_len_at_least_eight",
+        "Zkp.Implementation.WithdrawalChainCircuit.chain_public_inputs_len_at_least_31"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The count is overwritten, not registered; it equals the prefix `new` registers."
+    },
+    {
+      "start": 92,
+      "end": 93,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 94,
+      "end": 97,
+      "status": "translated",
+      "label": "`prove` signature",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.prove",
+        "Zkp.Implementation.WithdrawalChainCircuit.Proof"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Takes an arbitrary step proof; no admission helper is called."
+    },
+    {
+      "start": 98,
+      "end": 99,
+      "status": "dependency-boundary",
+      "label": "PartialWitness::new and set_proof_with_pis_target",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.NativeEnvironment"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Witness assembly is folded into the opaque proveData callback."
+    },
+    {
+      "start": 100,
+      "end": 102,
+      "status": "translated",
+      "label": "self.data.prove mapped to FailedToProve",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.prove",
+        "Zkp.Implementation.WithdrawalChainCircuit.Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.prove_is_exactly_the_plonky2_prover",
+        "Zkp.Implementation.WithdrawalChainCircuit.prove_errors_are_only_failed_to_prove",
+        "Zkp.Implementation.WithdrawalChainCircuit.prove_performs_no_key_or_length_check",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_prove_is_transparent"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Acceptance is exactly the plonky2 prover's; no native key/length/verification check precedes it."
+    },
+    {
+      "start": 103,
+      "end": 104,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 105,
+      "end": 108,
+      "status": "translated",
+      "label": "`verify` signature",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.verify"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. Native verification entry point."
+    },
+    {
+      "start": 109,
+      "end": 114,
+      "status": "translated",
+      "label": "check_cyclic_proof_verifier_data (plonky2 from_slice on the last 4+4*2^cap_height limbs, cap then digest compared with self.data.verifier_only)",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.checkCyclicProofVerifierData",
+        "Zkp.Implementation.WithdrawalChainCircuit.vdFromSlice",
+        "Zkp.Implementation.WithdrawalChainCircuit.keyTail",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifierKey",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifierKey.limbs",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifierKey.WellFormed",
+        "Zkp.Implementation.WithdrawalChainCircuit.VerifyFailure",
+        "Zkp.Implementation.WithdrawalChainCircuit.verify",
+        "Zkp.Implementation.WithdrawalChainCircuit.exampleKey",
+        "Zkp.Implementation.WithdrawalChainCircuit.exampleChainVector",
+        "Zkp.Implementation.WithdrawalChainCircuit.exampleEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.cyclic_check_ok_binds_last_limbs",
+        "Zkp.Implementation.WithdrawalChainCircuit.own_key_passes_cyclic_check",
+        "Zkp.Implementation.WithdrawalChainCircuit.foreign_key_fails_cyclic_check",
+        "Zkp.Implementation.WithdrawalChainCircuit.short_vector_rejected_before_plonky2",
+        "Zkp.Implementation.WithdrawalChainCircuit.verify_ok_binds_last_limbs_to_own_key",
+        "Zkp.Implementation.WithdrawalChainCircuit.foreign_key_rejected_before_plonky2_verification",
+        "Zkp.Implementation.WithdrawalChainCircuit.vd_from_slice_reads_last_limbs",
+        "Zkp.Implementation.WithdrawalChainCircuit.vd_from_slice_short_rejected",
+        "Zkp.Implementation.WithdrawalChainCircuit.own_key_limbs_parse_back",
+        "Zkp.Implementation.WithdrawalChainCircuit.key_tail_length",
+        "Zkp.Implementation.WithdrawalChainCircuit.well_formed_key_limb_count",
+        "Zkp.Implementation.WithdrawalChainCircuit.forwarded_vector_key_slot",
+        "Zkp.Implementation.WithdrawalChainCircuit.verify_ok_forwarded_step_key_is_own",
+        "Zkp.Implementation.WithdrawalChainCircuit.example_key_well_formed",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_chain_proof_verifies",
+        "Zkp.Implementation.WithdrawalChainCircuit.normal_chain_vector_length",
+        "Zkp.Implementation.WithdrawalChainCircuit.foreign_digest_example_rejected",
+        "Zkp.Implementation.WithdrawalChainCircuit.foreign_cap_example_rejected_before_digest",
+        "Zkp.Implementation.WithdrawalChainCircuit.short_example_rejected"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Reads the tail of whatever vector is submitted; a short vector or a foreign key is rejected here, before plonky2 verification, and the result then does not depend on data.verify."
+    },
+    {
+      "start": 115,
+      "end": 119,
+      "status": "dependency-boundary",
+      "label": "self.data.verify mapped to ProofVerificationError",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChainCircuit.NativeEnvironment",
+        "Zkp.Implementation.WithdrawalChainCircuit.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChainCircuit.plonky2_rejection_surfaces_after_key_check"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. plonky2 verification (including its own proof-shape checks) is the opaque verifyData callback; only its error surfacing after the key check is stated."
+    },
+    {
+      "start": 120,
+      "end": 122,
+      "status": "non-executable",
+      "label": "Comment, attribute, blank line or closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only; no executable content."
+    },
+    {
+      "start": 123,
+      "end": 364,
+      "status": "test-only",
+      "label": "Release-only unit test (full withdrawal pipeline)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only. Not executed and not translated; its expected 17-limb final vector motivates rollupLimbGate but no test assertion is treated as a production gate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2_refinement",
+      "obligation": "Handwritten builder/prover/verifier programs must be linked to actual plonky2 compilation, proving and verification; soundness of the embedded verify_proof gadget and of data.verify (verifyData/proveData callbacks) is not discharged.",
+      "discharged": false
+    },
+    {
+      "name": "in_circuit_key_binding_elsewhere",
+      "obligation": "This file never connects the forwarded verifier-key limbs to its own key in-circuit; that binding is in withdrawal_step.rs (conditionally_connect_vd) and withdrawal_circuit.rs (add_proof_target_and_verify_cyclic) and must be audited there.",
+      "discharged": false
+    },
+    {
+      "name": "build_reports_registered_count",
+      "obligation": "BuildReportsRegisteredCount: plonky2 build must report num_public_inputs equal to the registered wire count for the common-data equality theorem to bind the count.",
+      "discharged": false
+    },
+    {
+      "name": "common_data_equality",
+      "obligation": "CommonCircuitData equality is modeled as capHeight/numPublicInputs plus an opaque fingerprint; the real comparison covers gates, selectors, FRI params and k_is.",
+      "discharged": false
+    },
+    {
+      "name": "forwarded_step_semantics",
+      "obligation": "The meaning of the first 23 forwarded limbs (withdrawal hash chain, public state) and the correctness of the step proof are withdrawal_step.rs obligations; this file forwards them without inspection.",
+      "discharged": false
+    },
+    {
+      "name": "field_representation",
+      "obligation": "Public-input limbs are Nat representatives; canonical Goldilocks encoding and hash-out equality are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "rollup_gate_cross_reference",
+      "obligation": "rollupLimbGate pins RollupValue.verifyWithdrawalSet's 17-limb requirement locally; the Solidity/Lean rollup model is not imported, so the mismatch theorem is a count comparison only.",
+      "discharged": false
+    },
+    {
+      "name": "fixtures",
+      "obligation": "The release-only unit test was read, not executed or translated.",
+      "discharged": false
+    }
+  ]
+}
