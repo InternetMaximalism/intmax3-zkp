@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/deposit_witness.rs",
+  "source_sha256": "0cf79c81944bc625ba6411f5595b5add4cbb47301a096a16ba97453402d7a91e",
+  "source_lines": 150,
+  "module": "Zkp.Implementation.BalanceWitnesses",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalanceWitnesses.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "plonky2, recipient helper, Deposit/Salt/ChannelId and deposit-tree imports",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.MerkleEnv",
+        "Zkp.Implementation.BalanceWitnesses.MerkleProof",
+        "Zkp.Implementation.BalanceWitnesses.Deposit",
+        "Zkp.Implementation.BalanceWitnesses.acceptingEnv"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. Deposit leaf layout is transcribed from src/common/deposit.rs; the tree and hash stay opaque."
+    },
+    {
+      "start": 26,
+      "end": 38,
+      "status": "translated",
+      "label": "DepositWitnessError enum",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitnessError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. thiserror Display formatting is not modelled."
+    },
+    {
+      "start": 39,
+      "end": 46,
+      "status": "translated",
+      "label": "DepositWitness struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitness",
+        "Zkp.Implementation.BalanceWitnesses.Deposit",
+        "Zkp.Implementation.BalanceWitnesses.depositWitnessAllocationOrder",
+        "Zkp.Implementation.BalanceWitnesses.Deposit.wordsNative",
+        "Zkp.Implementation.BalanceWitnesses.Deposit.nullifier"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_has_five_fields",
+        "Zkp.Implementation.BalanceWitnesses.deposit_nullifier_preimage_length",
+        "Zkp.Implementation.BalanceWitnesses.deposit_words_order_agrees",
+        "Zkp.Implementation.BalanceWitnesses.deposit_preimage_starts_with_index",
+        "Zkp.Implementation.BalanceWitnesses.deposit_preimage_block_number_second",
+        "Zkp.Implementation.BalanceWitnesses.deposit_nullifier_binds_deposit_index"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The deposit leaf's 32-word nullifier preimage is transcribed alongside the witness fields."
+    },
+    {
+      "start": 47,
+      "end": 56,
+      "status": "translated",
+      "label": "DepositWitnessTarget struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitnessGates"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The target struct is represented by the gate predicate over the same fields."
+    },
+    {
+      "start": 57,
+      "end": 75,
+      "status": "translated",
+      "label": "DepositWitness::new",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitness.new"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_new_returns_arguments"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `new` assembles, verifies and returns the arguments unchanged."
+    },
+    {
+      "start": 76,
+      "end": 101,
+      "status": "translated",
+      "label": "DepositWitness::verify (index range, opening, recipient binding)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitness.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_verify_ok_iff",
+        "Zkp.Implementation.BalanceWitnesses.deposit_index_checked_before_merkle",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_ok_implies_index_in_range",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_opening_index_is_leaf_field",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_ok_binds_recipient",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_recipient_is_never_an_address",
+        "Zkp.Implementation.BalanceWitnesses.deposit_tree_height_pinned",
+        "Zkp.Implementation.BalanceWitnesses.example_deposit_witness_accepted"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Check order and error precedence are modelled; the opening is an opaque callback."
+    },
+    {
+      "start": 102,
+      "end": 136,
+      "status": "translated",
+      "label": "DepositWitnessTarget::new (allocation, range checks, opening, recipient connect)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.DepositWitnessGates",
+        "Zkp.Implementation.BalanceWitnesses.depositWitnessRangeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_gates_imply_native_verify",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_unchecked_accepts_out_of_range_index",
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_range_checks_pinned",
+        "Zkp.Implementation.BalanceWitnesses.deposit_index_circuit_bound_matches_native",
+        "Zkp.Implementation.BalanceWitnesses.deposit_token_index_is_range_checked",
+        "Zkp.Implementation.BalanceWitnesses.example_deposit_witness_gates_satisfied"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Range checks are a declarative table; the recipient `connect` is an equality premise."
+    },
+    {
+      "start": 137,
+      "end": 149,
+      "status": "translated",
+      "label": "DepositWitnessTarget::set_witness",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.depositWitnessWitnessOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.deposit_witness_order_matches_allocation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the order in which fields are written is modelled."
+    },
+    {
+      "start": 150,
+      "end": 150,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or blank lines."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "merkle-opening",
+      "obligation": "IncrementalMerkleProof::verify over the deposit tree and its target counterpart are opaque decision callbacks.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-hash",
+      "obligation": "The recipient derivation and the deposit nullifier both call an opaque Poseidon callback; nullifier uniqueness statements carry an explicit injectivity premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "deposit-leaf-layout",
+      "obligation": "Deposit and DepositTarget word layouts are transcribed from src/common/deposit.rs by hand, not derived from that file's own model.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-index-truncation",
+      "obligation": "MerkleEnv.truncates is transcribed from BitPath::pop rather than proved about the Rust code.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "No proof that DepositWitnessGates corresponds to the constraints DepositWitnessTarget::new emits, including the U63 63-bit range check.",
+      "discharged": false
+    }
+  ]
+}

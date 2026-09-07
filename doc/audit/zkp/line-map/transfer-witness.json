@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/transfer_witness.rs",
+  "source_sha256": "d37031de232095b9ebdedb989bb454345cd52131277aaa04d38536b0191b0a60",
+  "source_lines": 118,
+  "module": "Zkp.Implementation.BalanceWitnesses",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalanceWitnesses.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 19,
+      "status": "dependency-boundary",
+      "label": "plonky2, Transfer and transfer-tree imports",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.MerkleEnv",
+        "Zkp.Implementation.BalanceWitnesses.MerkleProof",
+        "Zkp.Implementation.BalanceWitnesses.Transfer",
+        "Zkp.Implementation.BalanceWitnesses.acceptingEnv"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. Transfer leaf layout is transcribed from src/common/transfer.rs; the tree and hash stay opaque."
+    },
+    {
+      "start": 20,
+      "end": 26,
+      "status": "translated",
+      "label": "TransferWitnessError enum",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitnessError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. thiserror Display formatting is not modelled."
+    },
+    {
+      "start": 27,
+      "end": 33,
+      "status": "translated",
+      "label": "TransferWitness struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitness",
+        "Zkp.Implementation.BalanceWitnesses.Transfer",
+        "Zkp.Implementation.BalanceWitnesses.SettledTransfer",
+        "Zkp.Implementation.BalanceWitnesses.transferWitnessAllocationOrder",
+        "Zkp.Implementation.BalanceWitnesses.Transfer.wordsNative",
+        "Zkp.Implementation.BalanceWitnesses.SettledTransfer.wordsNative",
+        "Zkp.Implementation.BalanceWitnesses.SettledTransfer.nullifier"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_has_four_fields",
+        "Zkp.Implementation.BalanceWitnesses.transfer_words_length",
+        "Zkp.Implementation.BalanceWitnesses.transfer_words_order_agrees",
+        "Zkp.Implementation.BalanceWitnesses.transfer_len_pinned",
+        "Zkp.Implementation.BalanceWitnesses.settled_transfer_words_length",
+        "Zkp.Implementation.BalanceWitnesses.settled_transfer_words_order_agrees",
+        "Zkp.Implementation.BalanceWitnesses.settled_transfer_nullifier_is_settlement_independent",
+        "Zkp.Implementation.BalanceWitnesses.settled_transfer_preimage_binds_nonce"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The transfer leaf and the settled-transfer nullifier preimage are transcribed alongside the witness fields."
+    },
+    {
+      "start": 34,
+      "end": 51,
+      "status": "translated",
+      "label": "TransferWitness::new",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitness.new"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_new_returns_arguments"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `new` assembles, verifies and returns the arguments unchanged."
+    },
+    {
+      "start": 52,
+      "end": 62,
+      "status": "translated",
+      "label": "TransferWitness::verify (single Merkle opening, no index range check)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitness.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_verify_ok_iff",
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_native_accepts_aliased_index",
+        "Zkp.Implementation.BalanceWitnesses.example_transfer_witness_accepted",
+        "Zkp.Implementation.BalanceWitnesses.example_transfer_recipient_extracts"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The absence of any native index bound is recorded, using the BitPath truncation premise."
+    },
+    {
+      "start": 63,
+      "end": 71,
+      "status": "translated",
+      "label": "TransferWitnessTarget struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitnessGates"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The target struct is represented by the gate predicate over the same fields."
+    },
+    {
+      "start": 72,
+      "end": 102,
+      "status": "translated",
+      "label": "TransferWitnessTarget::new (allocation, 6-bit index range check, opening)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.TransferWitnessGates",
+        "Zkp.Implementation.BalanceWitnesses.transferWitnessRangeChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_gates_imply_native_verify",
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_gates_bound_index",
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_unchecked_accepts_out_of_range_index",
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_range_checks_pinned",
+        "Zkp.Implementation.BalanceWitnesses.transfer_token_index_is_not_range_checked",
+        "Zkp.Implementation.BalanceWitnesses.transfer_tree_height_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Range checks are a declarative table; note that token_index gets no bound here."
+    },
+    {
+      "start": 103,
+      "end": 117,
+      "status": "translated",
+      "label": "TransferWitnessTarget::set_witness",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.transferWitnessWitnessOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.transfer_witness_order_matches_allocation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the order in which fields are written is modelled."
+    },
+    {
+      "start": 118,
+      "end": 118,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or blank lines."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "merkle-opening",
+      "obligation": "IncrementalMerkleProof::verify over the transfer tree and its target counterpart are opaque decision callbacks.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-index-truncation",
+      "obligation": "MerkleEnv.truncates is transcribed from BitPath::pop rather than proved about the Rust code; the index-aliasing theorem depends on it.",
+      "discharged": false
+    },
+    {
+      "name": "transfer-leaf-layout",
+      "obligation": "Transfer / SettledTransfer word layouts are transcribed from src/common/transfer.rs by hand, not derived from that file's own model.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-hash",
+      "obligation": "The settled-transfer nullifier calls an opaque Poseidon callback; no collision resistance is established.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "No proof that TransferWitnessGates corresponds to the constraints TransferWitnessTarget::new emits, including split_le's implicit index decomposition.",
+      "discharged": false
+    },
+    {
+      "name": "transfer-token-index-bound",
+      "obligation": "TransferTarget::new emits no range check on token_index; any bound must come from callers and is not established here.",
+      "discharged": false
+    }
+  ]
+}

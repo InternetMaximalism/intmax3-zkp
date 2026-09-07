@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/account_state.rs",
+  "source_sha256": "2d36a6f004052a2619099581fa77770ddb8272d570f5c803b2aa83e02c34c474",
+  "source_lines": 163,
+  "module": "Zkp.Implementation.BalanceWitnesses",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalanceWitnesses.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "plonky2, channel-tree leaf/proof and constants imports",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.MerkleProof",
+        "Zkp.Implementation.BalanceWitnesses.MerkleEnv",
+        "Zkp.Implementation.BalanceWitnesses.SendLeaf",
+        "Zkp.Implementation.BalanceWitnesses.ChannelLeaf",
+        "Zkp.Implementation.BalanceWitnesses.acceptingEnv"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. Merkle openings and leaf hashing come from imported trees and stay opaque."
+    },
+    {
+      "start": 23,
+      "end": 32,
+      "status": "translated",
+      "label": "AccountStateError enum",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountStateError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. thiserror Display formatting is not modelled."
+    },
+    {
+      "start": 33,
+      "end": 43,
+      "status": "translated",
+      "label": "AccountState struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountState",
+        "Zkp.Implementation.BalanceWitnesses.accountStateAllocationOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.account_state_has_seven_fields"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Field order transcribed; leaf internals belong to channel_tree.rs."
+    },
+    {
+      "start": 44,
+      "end": 67,
+      "status": "translated",
+      "label": "AccountState::new",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountState.new"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.account_state_new_returns_arguments",
+        "Zkp.Implementation.BalanceWitnesses.account_state_new_ok_implies_verify"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. `new` assembles, verifies and returns the arguments unchanged."
+    },
+    {
+      "start": 68,
+      "end": 89,
+      "status": "translated",
+      "label": "AccountState::verify (send-leaf then channel-leaf inclusion)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountState.verify",
+        "Zkp.Implementation.BalanceWitnesses.check"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.account_state_verify_ok_iff",
+        "Zkp.Implementation.BalanceWitnesses.account_state_send_proof_checked_first",
+        "Zkp.Implementation.BalanceWitnesses.account_state_send_root_comes_from_channel_leaf",
+        "Zkp.Implementation.BalanceWitnesses.account_state_user_proof_index_is_channel_id",
+        "Zkp.Implementation.BalanceWitnesses.check_ok_iff",
+        "Zkp.Implementation.BalanceWitnesses.check_error_iff",
+        "Zkp.Implementation.BalanceWitnesses.unit_bind_ok_iff",
+        "Zkp.Implementation.BalanceWitnesses.example_account_state_accepted"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The two Merkle verifications are opaque callbacks; only their arguments, order and error precedence are modelled."
+    },
+    {
+      "start": 90,
+      "end": 101,
+      "status": "translated",
+      "label": "AccountStateTarget struct fields",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountStateGates"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The target struct is represented by the gate predicate over the same fields."
+    },
+    {
+      "start": 102,
+      "end": 146,
+      "status": "translated",
+      "label": "AccountStateTarget::new (allocation, range checks, two openings)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.AccountStateGates",
+        "Zkp.Implementation.BalanceWitnesses.accountStateRangeChecks",
+        "Zkp.Implementation.BalanceWitnesses.RangeCheckedField"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.account_state_gates_imply_native_verify",
+        "Zkp.Implementation.BalanceWitnesses.account_state_gates_accept_dummy_channel_id",
+        "Zkp.Implementation.BalanceWitnesses.account_state_range_checks_pinned",
+        "Zkp.Implementation.BalanceWitnesses.unchecked_targets_emit_no_range_checks",
+        "Zkp.Implementation.BalanceWitnesses.send_tree_height_pinned",
+        "Zkp.Implementation.BalanceWitnesses.channel_tree_height_pinned",
+        "Zkp.Implementation.BalanceWitnesses.channel_id_bits_pinned",
+        "Zkp.Implementation.BalanceWitnesses.example_account_state_gates_satisfied"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Range checks are a declarative table, not emitted gates; the openings are the same opaque callbacks."
+    },
+    {
+      "start": 147,
+      "end": 162,
+      "status": "translated",
+      "label": "AccountStateTarget::set_witness",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.accountStateWitnessOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.account_state_witness_order_matches_allocation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Only the order in which fields are written is modelled."
+    },
+    {
+      "start": 163,
+      "end": 163,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or blank lines."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "merkle-opening",
+      "obligation": "IncrementalMerkleProof::verify, SparseMerkleProof::verify and their target counterparts are opaque decision callbacks; no soundness of the openings is established.",
+      "discharged": false
+    },
+    {
+      "name": "leaf-hashing",
+      "obligation": "SendLeaf/ChannelLeaf Poseidon leaf hashing (including the CHANNEL_LEAF_DOMAIN tag) is not modelled; leaves are compared as structures.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-index-truncation",
+      "obligation": "MerkleEnv.truncates is transcribed from BitPath::pop rather than proved about the Rust code.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "No proof that AccountStateGates corresponds to the constraints AccountStateTarget::new emits.",
+      "discharged": false
+    },
+    {
+      "name": "channel-id-nonzero",
+      "obligation": "ChannelId::new rejects the reserved id 0 natively; nothing in the circuit does, and the model only exhibits that gap rather than resolving it.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/balance/common/recipient.rs",
+  "source_sha256": "dd352b2ef2b67ec2905aef571fe74f1cd04d85601264e65a5e44c9c7ba091a24",
+  "source_lines": 201,
+  "module": "Zkp.Implementation.BalanceWitnesses",
+  "model": "doc/audit/zkp/Zkp/Implementation/BalanceWitnesses.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "plonky2 builder, ChannelId/Salt/Address/Bytes32 and Poseidon imports",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.HashFn",
+        "Zkp.Implementation.BalanceWitnesses.Hash4Bounded",
+        "Zkp.Implementation.BalanceWitnesses.bytesOfLimbs",
+        "Zkp.Implementation.BalanceWitnesses.limbsOfBytes",
+        "Zkp.Implementation.BalanceWitnesses.MerkleProof"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. The u32-limb byte codec is transcribed; Poseidon and the builder API are not."
+    },
+    {
+      "start": 18,
+      "end": 22,
+      "status": "translated",
+      "label": "USER_ID_DOMAIN / USER_ID_TAG / ADDRESS_TAG constants",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.userIdDomain",
+        "Zkp.Implementation.BalanceWitnesses.userIdTag",
+        "Zkp.Implementation.BalanceWitnesses.addressTag"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.user_id_domain_pinned",
+        "Zkp.Implementation.BalanceWitnesses.user_id_tag_pinned",
+        "Zkp.Implementation.BalanceWitnesses.address_tag_pinned",
+        "Zkp.Implementation.BalanceWitnesses.user_id_domain_is_uid_ascii",
+        "Zkp.Implementation.BalanceWitnesses.recipient_tags_distinct"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Constants pinned as literals."
+    },
+    {
+      "start": 23,
+      "end": 28,
+      "status": "translated",
+      "label": "RecipientError enum",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.RecipientError"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement. The thiserror `Display` strings are not modelled beyond the two message literals."
+    },
+    {
+      "start": 29,
+      "end": 30,
+      "status": "translated",
+      "label": "calculate_recipient_from_user_id: Poseidon preimage assembly",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.userIdHashInputsNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.user_id_hash_inputs_length",
+        "Zkp.Implementation.BalanceWitnesses.user_id_hash_inputs_domain_first",
+        "Zkp.Implementation.BalanceWitnesses.user_id_hash_inputs_channel_id_second",
+        "Zkp.Implementation.BalanceWitnesses.user_id_hash_inputs_salt_last"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Six field elements: domain, channel id, four salt words."
+    },
+    {
+      "start": 31,
+      "end": 31,
+      "status": "dependency-boundary",
+      "label": "PoseidonHashOut::hash_inputs_u64 and Into<Bytes32>",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.HashFn",
+        "Zkp.Implementation.BalanceWitnesses.hashOutToBytes32Limbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.hash_out_to_bytes32_limbs_length",
+        "Zkp.Implementation.BalanceWitnesses.hash_out_to_bytes32_limbs_injective"
+      ],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. Only the [high, low] limb split of the hash output is transcribed; the hash itself is opaque."
+    },
+    {
+      "start": 32,
+      "end": 37,
+      "status": "translated",
+      "label": "tag byte replacement and Bytes32 reparse",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.retag",
+        "Zkp.Implementation.BalanceWitnesses.recipientFromUserIdNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.retag_cons",
+        "Zkp.Implementation.BalanceWitnesses.retag_ignores_top_byte",
+        "Zkp.Implementation.BalanceWitnesses.user_id_recipient_forgets_top_hash_byte",
+        "Zkp.Implementation.BalanceWitnesses.limbs_of_bytes_of_limbs",
+        "Zkp.Implementation.BalanceWitnesses.bytes_of_limbs_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The tag overwrites the top byte of limb 0; the model records that this loses 8 bits."
+    },
+    {
+      "start": 38,
+      "end": 49,
+      "status": "translated",
+      "label": "calculate_recipient_from_user_id_circuit: input target assembly",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.userIdHashInputsTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.user_id_hash_inputs_order_agrees"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Transcribed separately from the native path so the agreement theorem compares two transcriptions."
+    },
+    {
+      "start": 50,
+      "end": 51,
+      "status": "dependency-boundary",
+      "label": "PoseidonHashOutTarget::hash_inputs and Bytes32Target::from_hash_out",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.fromHashOutTargetLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.hash_out_limb_order_agrees"
+      ],
+      "note": "Semantics comes from an imported crate/gadget/hash; modelled as an opaque callback or premise. safe_split_lo_and_hi and the in-circuit Poseidon gadget are uninterpreted."
+    },
+    {
+      "start": 52,
+      "end": 55,
+      "status": "translated",
+      "label": "circuit tag byte replacement",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.recipientFromUserIdTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_user_id_native_target_agree"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Native and circuit constructions agree as value functions for one hash callback."
+    },
+    {
+      "start": 56,
+      "end": 64,
+      "status": "translated",
+      "label": "calculate_recipient_from_address",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.recipientFromAddressNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_native_form",
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_padding_is_zero",
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_length",
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_injective",
+        "Zkp.Implementation.BalanceWitnesses.example_address_recipient_matches_source_test"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Three zero limbs, then the five address limbs, then byte 0 is set to ADDRESS_TAG."
+    },
+    {
+      "start": 65,
+      "end": 68,
+      "status": "non-executable",
+      "label": "doc comment on canonical construction",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or blank lines."
+    },
+    {
+      "start": 69,
+      "end": 78,
+      "status": "translated",
+      "label": "calculate_recipient_from_address_circuit",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.recipientFromAddressTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_target_form",
+        "Zkp.Implementation.BalanceWitnesses.recipient_from_address_native_target_agree"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Builds the 32 bytes directly; agrees with the native construction."
+    },
+    {
+      "start": 79,
+      "end": 96,
+      "status": "translated",
+      "label": "extract_address_from_recipient (tag check, slice, canonicality re-check)",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.extractAddressFromRecipient"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.extract_ok_implies_canonical",
+        "Zkp.Implementation.BalanceWitnesses.extract_ok_recipient_unique",
+        "Zkp.Implementation.BalanceWitnesses.extract_of_recipient_from_address",
+        "Zkp.Implementation.BalanceWitnesses.extract_rejects_tag_one",
+        "Zkp.Implementation.BalanceWitnesses.extract_rejects_user_id_recipient",
+        "Zkp.Implementation.BalanceWitnesses.head_byte_of_tagged",
+        "Zkp.Implementation.BalanceWitnesses.example_address_recipient_extracts",
+        "Zkp.Implementation.BalanceWitnesses.example_nonzero_padding_rejected"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Error precedence is modelled: wrong tag before the canonicality comparison."
+    },
+    {
+      "start": 97,
+      "end": 108,
+      "status": "translated",
+      "label": "extract_address_from_recipient_circuit gate set",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.ExtractAddressGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BalanceWitnesses.extract_gates_imply_native_ok",
+        "Zkp.Implementation.BalanceWitnesses.example_nonzero_padding_unsatisfiable"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. The final `connect` is modelled as an equality premise; gate lowering is not modelled."
+    },
+    {
+      "start": 109,
+      "end": 201,
+      "status": "test-only",
+      "label": "#[cfg(test)] module",
+      "declarations": [
+        "Zkp.Implementation.BalanceWitnesses.exampleAddress",
+        "Zkp.Implementation.BalanceWitnesses.exampleAddressRecipient",
+        "Zkp.Implementation.BalanceWitnesses.exampleMalformedRecipient"
+      ],
+      "theorems": [],
+      "note": "Test-only code; the model states the same facts as standalone theorems instead. The same address/recipient vectors appear as module-level definitions."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash",
+      "obligation": "PoseidonHashOut::hash_inputs_u64 and PoseidonHashOutTarget::hash_inputs are opaque callbacks; no collision resistance, preimage resistance or injectivity is established here.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-hash-agreement",
+      "obligation": "That the native Poseidon and the in-circuit Poseidon gadget compute the same function is assumed by using one callback for both transcriptions.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "safe_split_lo_and_hi / split_le canonicality of field elements is uninterpreted; the model only assumes hash elements fit in u64.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "No proof that the Lean gate predicates correspond to the constraints the Rust builder emits (range_check, connect, split_le).",
+      "discharged": false
+    },
+    {
+      "name": "recipient-248-bit-commitment",
+      "obligation": "The tag overwrites the top byte of the hash output, so recipient equality only constrains 248 bits; collision resistance of that truncation is not established.",
+      "discharged": false
+    }
+  ]
+}
