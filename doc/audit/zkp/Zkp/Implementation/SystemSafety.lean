@@ -1076,4 +1076,133 @@ theorem normal_trace_nullifier_cannot_be_reused (ext : ManagerValue.External)
   (trace_nullifier_single_use ManagerValue.sampleConfig normal_payout_trace
     normal_claimed_payout_index).2.2 ext ManagerValue.sampleClaim proof out (by decide)
 
+/-! ### The latch conjunct is not degenerate
+
+`normalStart` has no materialized channel, so the third conjunct of
+`trace_channel_attribution` holds vacuously there. The witness below runs a
+modeled step from a state that DOES have a latched channel and reads the latch
+back through the theorem. -/
+
+def latchedFunding : CloseFunding.State :=
+  { CloseFunding.empty with
+    materializedChannelExit := CloseFunding.put CloseFunding.empty.materializedChannelExit 7 99 }
+
+def latchedStart : State := { normalStart with funding := latchedFunding }
+
+def latchedCredited : State := stepState ManagerValue.sampleConfig latchedStart FundFlow.normalCredited
+
+theorem accounts_of_latched_start :
+    accountsOf ManagerValue.sampleConfig latchedStart = FundFlow.normalBefore := rfl
+
+theorem latched_credit_step (base : RollupValue.Environment) :
+    Step ManagerValue.sampleConfig latchedStart latchedCredited zeroFlow zeroFlow := by
+  apply Step.accounting
+  rw [accounts_of_latched_start]
+  apply FundFlow.AccountingStep.credit (FundFlow.normalRollup base) FundFlow.normalBefore
+    FundFlow.normalCredited.rollup 0 100
+  apply (RollupValue.successful_close_credit_characterization _ _ _ _ _ _).mpr
+  refine ⟨rfl, rfl, ?_⟩
+  apply (RollupValue.successful_credit_characterization _ _ _ _ _).mpr
+  exact ⟨by decide, by decide, rfl⟩
+
+theorem latched_channel_survives_a_modeled_step (base : RollupValue.Environment) :
+    latchedCredited.funding.materializedChannelExit 7 = 99 :=
+  step_preserves_materialization_latch ManagerValue.sampleConfig (latched_credit_step base) 7 99
+    (by decide) (by rfl)
+
+/-! ### Acceptance is reachable
+
+`close_acceptance_binds_statement` and `claim_acceptance_binds_statement` are
+conditional on a successful modeled verification. The witnesses below show that
+hypothesis is satisfiable, so neither statement is vacuous: a concrete adapter
+view returning the encoded statement is accepted, and the unconditional half then
+pins exactly that word list. The premise-dependent half stays
+uninstantiated on purpose — premises (a) and (b1) are precisely what no model in
+this project can discharge. -/
+
+def sampleKeccak : SettlementVerifier.Keccak := fun _ => 0
+
+def sampleCloseFields : SettlementVerifier.CloseFields where
+  channelId := 1
+  closeNonce := 0
+  finalEpoch := 0
+  finalSmallBlockNumber := 0
+  closeFreezeNonce := 0
+  finalChannelStateDigest := 0
+  finalBalanceStateH1 := 0
+  channelFundAmounts := fun _ => 0
+  channelFundIntmaxStateRoot := 0
+  burnTxHash := 0
+  closeWithdrawalDigest := 0
+  snapshotMediumBlockNumber := 0
+  finalStateVersion := 0
+  finalSettledTxChain := 0
+  finalSettledTxAccumulatorRoot := 0
+  memberSetCommitment := 0
+  memberCount := 2
+  minDelegateCount := 0
+  tokenRegistry := fun _ => 0
+  tokenCount := 1
+
+def sampleWithdrawalFields : SettlementVerifier.WithdrawalFields where
+  channelId := 1
+  closeIntentDigest := 0
+  finalBalanceStateH1 := 0
+  memberPkG := 0
+  recipient := 0
+  userAmountDigest := 0
+  withdrawalNullifier := 0
+  amount := 0
+  tokenSlot := 0
+  tokenIndex := 0
+
+def sampleInstalled : SettlementVerifier.Installed := ⟨⟨0, 0, 0, 0⟩, ⟨0, 0, 0, 0⟩⟩
+
+/-- An adapter view that returns the encoded close statement. It is a model
+value, not a proof system: nothing here says the returned words are true. -/
+def closeAcceptingEvm : SettlementVerifier.EvmView where
+  chainId := 0
+  codeSize := fun _ => 0
+  allowedChainId := fun _ => .error []
+  core := fun _ => .error []
+  verifyCompactPublicInputs := fun _ _ =>
+    .ok (SettlementCloseBridge.statement sampleKeccak sampleCloseFields 0).words
+
+/-- The same for the withdrawal-claim endpoint. -/
+def withdrawalAcceptingEvm : SettlementVerifier.EvmView where
+  chainId := 0
+  codeSize := fun _ => 0
+  allowedChainId := fun _ => .error []
+  core := fun _ => .error []
+  verifyCompactPublicInputs := fun _ _ =>
+    .ok (ClaimSettlementBridge.withdrawalStatement sampleWithdrawalFields).words
+
+theorem sample_close_is_accepted :
+    SettlementVerifier.verifyCloseIntent closeAcceptingEvm sampleInstalled sampleKeccak
+      sampleCloseFields [] = .ok true := by rfl
+
+theorem sample_withdrawal_claim_is_accepted :
+    SettlementVerifier.verifyWithdrawalClaim withdrawalAcceptingEvm sampleInstalled
+      sampleWithdrawalFields [] = .ok true := by rfl
+
+/-- Non-vacuous instantiation of the unconditional half of
+`close_acceptance_binds_statement`. -/
+theorem sample_close_acceptance_pins_the_exact_statement :
+    closeAcceptingEvm.verifyCompactPublicInputs sampleInstalled.adapters.close [] =
+      .ok (SettlementCloseBridge.statement sampleKeccak sampleCloseFields
+        sampleCloseFields.minDelegateCount.val).words ∧
+    (SettlementCloseBridge.statement sampleKeccak sampleCloseFields
+        sampleCloseFields.minDelegateCount.val).words.length = CloseCircuit.publicInputsLength :=
+  ⟨SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt closeAcceptingEvm
+      sampleInstalled sampleKeccak sampleCloseFields [] sample_close_is_accepted,
+    CloseCircuit.public_input_word_count _⟩
+
+/-- Non-vacuous instantiation of the unconditional half of
+`claim_acceptance_binds_statement`. -/
+theorem sample_withdrawal_acceptance_pins_the_exact_statement :
+    withdrawalAcceptingEvm.verifyCompactPublicInputs sampleInstalled.adapters.withdrawal [] =
+      .ok (ClaimSettlementBridge.withdrawalStatement sampleWithdrawalFields).words :=
+  ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt withdrawalAcceptingEvm
+    sampleInstalled sampleWithdrawalFields [] sample_withdrawal_claim_is_accepted
+
 end Zkp.Implementation.SystemSafety
