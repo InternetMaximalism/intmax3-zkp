@@ -1,0 +1,352 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/withdrawal_circuit.rs",
+  "source_sha256": "f98200ad8c5570555f8134128d1c88a3ae267d89925ef61cbe88e20bed86d345",
+  "source_lines": 233,
+  "module": "Zkp.Implementation.WithdrawalChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 33,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak gadget, serde and crate imports",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Keccak",
+        "Zkp.Implementation.WithdrawalChain.Poseidon",
+        "Zkp.Implementation.WithdrawalChain.Proof"
+      ],
+      "theorems": [],
+      "note": "`use` lines. plonky2_keccak's solidity_keccak256 / BuilderKeccak256, the extended-public-state Poseidon commitment and the cyclic recursive-verification helper are opaque callbacks in the model."
+    },
+    {
+      "start": 34,
+      "end": 37,
+      "status": "translated",
+      "label": "BLOCK_NUMBER_U32_LEN and WITHDRAWAL_PROOF_PUBLIC_INPUTS_LEN",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.blockNumberU32Len",
+        "Zkp.Implementation.WithdrawalChain.withdrawalProofPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChain.bytes32Len",
+        "Zkp.Implementation.WithdrawalChain.addressLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.withdrawal_proof_preimage_len_pinned",
+        "Zkp.Implementation.WithdrawalChain.block_number_limbs_length",
+        "Zkp.Implementation.WithdrawalChain.address_limbs_length",
+        "Zkp.Implementation.WithdrawalChain.bytes32_limbs_length"
+      ],
+      "note": "Handwritten local semantics; the 8 + 5 + 8 + 2 keccak-preimage layout is pinned as a literal and proved equal to its component constants. Note this is the PREIMAGE length, not the registered public-input length."
+    },
+    {
+      "start": 38,
+      "end": 46,
+      "status": "translated",
+      "label": "WithdrawalCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the two failure modes map onto constructors of the module's Error type. Display strings are not modeled."
+    },
+    {
+      "start": 47,
+      "end": 55,
+      "status": "translated",
+      "label": "WithdrawalProofPublicInputs preimage record",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage",
+        "Zkp.Implementation.WithdrawalChain.Words8"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the serde attributes are not modeled."
+    },
+    {
+      "start": 56,
+      "end": 57,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl header with no executable content."
+    },
+    {
+      "start": 58,
+      "end": 68,
+      "status": "translated",
+      "label": "to_u32_vec preimage order and length assertion",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage.toU32Vec",
+        "Zkp.Implementation.WithdrawalChain.addressLimbs",
+        "Zkp.Implementation.WithdrawalChain.blockNumberU32Limbs",
+        "Zkp.Implementation.WithdrawalChain.Words8.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.proof_preimage_length"
+      ],
+      "note": "Handwritten local semantics; the concatenation order withdrawal_hash || prover || ext_commitment || block_number(hi,lo) and its 23-word length are modeled and proved."
+    },
+    {
+      "start": 69,
+      "end": 97,
+      "status": "translated",
+      "label": "from_u32_slice decoder",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.preimageFromU32Slice",
+        "Zkp.Implementation.WithdrawalChain.firstOutOfRange",
+        "Zkp.Implementation.WithdrawalChain.Words8.read",
+        "Zkp.Implementation.WithdrawalChain.limbsValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.preimage_from_u32_slice_rejects_wrong_length",
+        "Zkp.Implementation.WithdrawalChain.preimage_block_number_is_u63",
+        "Zkp.Implementation.WithdrawalChain.sample_preimage_roundtrip"
+      ],
+      "note": "Handwritten local semantics; the length guard, the infallible Bytes32/Address unwraps and the only fallible parse (BlockNumber's 31-bit high-word check) are modeled, and the resulting block number is proved to lie in the 63-bit U63 domain."
+    },
+    {
+      "start": 98,
+      "end": 115,
+      "status": "translated",
+      "label": "from_u64_slice with its u32 assert!",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.preimageFromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.preimage_from_u64_slice_rejects_wrong_length",
+        "Zkp.Implementation.WithdrawalChain.sample_preimage_u64_panics_on_wide_word"
+      ],
+      "note": "Handwritten local semantics; the source ASSERTS (panics) rather than erroring on an out-of-u32 word, which the model keeps as a distinct panicOutOfU32Range outcome."
+    },
+    {
+      "start": 116,
+      "end": 119,
+      "status": "dependency-boundary",
+      "label": "from_pis field-element conversion",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.preimageFromU64Slice"
+      ],
+      "theorems": [],
+      "note": "The plonky2 field-element to u64 conversion (ToU64) is assumed, not modeled."
+    },
+    {
+      "start": 120,
+      "end": 126,
+      "status": "translated",
+      "label": "hash: keccak of the preimage then remove_3bits",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage.hash",
+        "Zkp.Implementation.WithdrawalChain.Words8.removeThreeBits",
+        "Zkp.Implementation.WithdrawalChain.bytes32Of",
+        "Zkp.Implementation.WithdrawalChain.maskKeptBits",
+        "Zkp.Implementation.WithdrawalChain.maskModulus"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.remove_three_bits_top_limb",
+        "Zkp.Implementation.WithdrawalChain.remove_three_bits_keeps_low_limbs",
+        "Zkp.Implementation.WithdrawalChain.remove_three_bits_is_mask_2_253",
+        "Zkp.Implementation.WithdrawalChain.mask_modulus_pinned",
+        "Zkp.Implementation.WithdrawalChain.bytes32_of_value",
+        "Zkp.Implementation.WithdrawalChain.bytes32_of_canonical"
+      ],
+      "note": "Handwritten local semantics; the limb-level `limbs[0] &= (1<<29)-1` mask is modeled and PROVED equal to the Solidity model's integer `% 2^253`. The digest itself is an opaque callback and is never assumed injective."
+    },
+    {
+      "start": 127,
+      "end": 134,
+      "status": "translated",
+      "label": "WithdrawalProofPublicInputsTarget wires",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the in-circuit preimage carries the same four components as the native one."
+    },
+    {
+      "start": 135,
+      "end": 148,
+      "status": "translated",
+      "label": "target to_vec preimage order",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage.toU32Vec",
+        "Zkp.Implementation.WithdrawalChain.blockNumberU32Limbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.proof_preimage_length"
+      ],
+      "note": "Handwritten local semantics; the target serialization order matches the native one, including the split of the single 63-bit block-number wire into two u32 words for hashing."
+    },
+    {
+      "start": 149,
+      "end": 161,
+      "status": "dependency-boundary",
+      "label": "in-circuit keccak256 of the preimage",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Keccak",
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage.hash"
+      ],
+      "theorems": [],
+      "note": "builder.keccak256 is an opaque callback; the model assumes nothing about it beyond being a function of the word list, and states the agreement with the contract's abstract hash as an explicit premise."
+    },
+    {
+      "start": 162,
+      "end": 173,
+      "status": "dependency-boundary",
+      "label": "WithdrawalCircuit record of plonky2 artifacts",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.WrapperWitness"
+      ],
+      "theorems": [],
+      "note": "CircuitData, ProofWithPublicInputsTarget and the target records are compiler/proof-system artifacts held opaque."
+    },
+    {
+      "start": 174,
+      "end": 180,
+      "status": "non-executable",
+      "label": "impl header and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trait bounds and impl header with no executable content."
+    },
+    {
+      "start": 181,
+      "end": 183,
+      "status": "dependency-boundary",
+      "label": "builder creation and add_proof_target_and_verify_cyclic",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.WrapperGates",
+        "Zkp.Implementation.WithdrawalChain.Linked"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.chain_vd_anchored"
+      ],
+      "note": "Recursive verification is NOT modeled. What IS modeled is the anchor this helper installs: the verifier data embedded at the tail of the inner proof's public inputs is connected to the constant verifier data of the chain circuit, which the chain theorem then propagates to every step."
+    },
+    {
+      "start": 184,
+      "end": 196,
+      "status": "translated",
+      "label": "reading the chain statement, binding the extended public state and the prover",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs",
+        "Zkp.Implementation.WithdrawalChain.ExtendedPublicState",
+        "Zkp.Implementation.WithdrawalChain.ExtendedPublicState.toU64Vec",
+        "Zkp.Implementation.WithdrawalChain.ExtendedPublicState.commitment",
+        "Zkp.Implementation.WithdrawalChain.WrapperGates",
+        "Zkp.Implementation.WithdrawalChain.extendedPublicStateU64Len",
+        "Zkp.Implementation.WithdrawalChain.u63Limit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.wrapper_block_number_is_chain_block_number",
+        "Zkp.Implementation.WithdrawalChain.wrapper_commitment_covers_chain_state",
+        "Zkp.Implementation.WithdrawalChain.extended_public_state_vec_length",
+        "Zkp.Implementation.WithdrawalChain.extended_public_state_len_pinned",
+        "Zkp.Implementation.WithdrawalChain.step_public_inputs_len_pinned"
+      ],
+      "note": "Handwritten local semantics; the offsets 0..8 (withdrawal hash) and 8..23 (public state) into the chain proof's public inputs, the connect of ext_public_state.inner to that state, the Poseidon commitment preimage and the 63-bit range check inherited from the checked constructor are modeled. The Poseidon commitment itself is an opaque callback, and the remaining extended fields are free witnesses."
+    },
+    {
+      "start": 197,
+      "end": 208,
+      "status": "translated",
+      "label": "pis hash, remove_3bits and the FINAL 17-word registration",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.PublicInputs",
+        "Zkp.Implementation.WithdrawalChain.PublicInputs.toU64Vec",
+        "Zkp.Implementation.WithdrawalChain.fromU64Slice",
+        "Zkp.Implementation.WithdrawalChain.ProofPreimage.hash",
+        "Zkp.Implementation.WithdrawalChain.WrapperGates",
+        "Zkp.Implementation.WithdrawalChain.finalPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChain.decodeBytes32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.final_layout_length",
+        "Zkp.Implementation.WithdrawalChain.final_public_inputs_len_pinned",
+        "Zkp.Implementation.WithdrawalChain.wrapper_registers_seventeen_words",
+        "Zkp.Implementation.WithdrawalChain.wrapper_pis_hash_masked",
+        "Zkp.Implementation.WithdrawalChain.from_u64_slice_success",
+        "Zkp.Implementation.WithdrawalChain.from_u64_slice_roundtrip",
+        "Zkp.Implementation.WithdrawalChain.from_u64_slice_rejects_wrong_length",
+        "Zkp.Implementation.WithdrawalChain.limbs_match_of_bytes32_of",
+        "Zkp.Implementation.WithdrawalChain.limbs_match_final_layout",
+        "Zkp.Implementation.WithdrawalChain.limbs_to_bytes32_of_final_layout",
+        "Zkp.Implementation.WithdrawalChain.final_layout_block_word",
+        "Zkp.Implementation.WithdrawalChain.block_word_u64_cast_inert",
+        "Zkp.Implementation.WithdrawalChain.circuit_layout_matches_rollup_verifier",
+        "Zkp.Implementation.WithdrawalChain.chain_hash_matches_rollup_fold",
+        "Zkp.Implementation.WithdrawalChain.fold_chain_matches_rollup_fold",
+        "Zkp.Implementation.WithdrawalChain.fold_chain_from_zero_matches_rollup",
+        "Zkp.Implementation.WithdrawalChain.preimage_prover_slice",
+        "Zkp.Implementation.WithdrawalChain.wrapper_prover_enters_preimage_only",
+        "Zkp.Implementation.WithdrawalChain.rollup_rejects_empty_set",
+        "Zkp.Implementation.WithdrawalChain.sample_decoder_accepted",
+        "Zkp.Implementation.WithdrawalChain.sample_decoder_rejects_short",
+        "Zkp.Implementation.WithdrawalChain.sample_decoder_rejects_unmasked_top_limb",
+        "Zkp.Implementation.WithdrawalChain.sample_decoder_rejects_wide_block_number",
+        "Zkp.Implementation.WithdrawalChain.sample_final_words",
+        "Zkp.Implementation.WithdrawalChain.sample_wrapper_gates",
+        "Zkp.Implementation.WithdrawalChain.words8_words_length",
+        "Zkp.Implementation.WithdrawalChain.words8_read_of_words"
+      ],
+      "note": "Handwritten local semantics; the three register_public_inputs calls fix the order pis_hash(8) || ext_commitment(8) || block_number(1). An executable decoder for those 17 words is provided, and the layout is proved to be exactly what RollupValue.verifyWithdrawalSet recomputes (limbsMatchBytes32 at offset 0 against the masked pis hash, limbsToBytes32 at offset 8, and pi[16] % 2^64), given only the two named hash-agreement premises."
+    },
+    {
+      "start": 209,
+      "end": 216,
+      "status": "dependency-boundary",
+      "label": "builder.build and returned circuit record",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit compilation is a boundary; no gate count, constraint degree or configuration is modeled."
+    },
+    {
+      "start": 217,
+      "end": 233,
+      "status": "dependency-boundary",
+      "label": "prove entry point",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.WrapperGates"
+      ],
+      "theorems": [],
+      "note": "plonky2 proving and PartialWitness assignment are opaque. The free prover-address and extended-public-state witnesses assigned here are modeled only as witness values in WrapperGates."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-callback",
+      "obligation": "solidity_keccak256 and builder.keccak256 are opaque callbacks; injectivity and collision resistance are never assumed, so binding the registered pis hash to a particular chain/prover/root/block tuple is undischarged.",
+      "discharged": false
+    },
+    {
+      "name": "solidity-hash-agreement",
+      "obligation": "SolidityPisHashAgrees and LeafHashAgrees assert that the circuit's big-endian u32-word keccak preimages denote the same function as IntmaxRollup's abstract HashInput.withdrawalPis / .withdrawalLeaf. This ABI-level correspondence is assumed, not proved.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-commitment",
+      "obligation": "ExtendedPublicStateTarget::commitment (Poseidon over 48 u64 words, then the Bytes32 conversion) is an opaque callback; nothing binds the commitment to its preimage in this model.",
+      "discharged": false
+    },
+    {
+      "name": "ext-commitment-finalized",
+      "obligation": "The circuit does NOT prove that the emitted extended-state commitment is an on-chain finalized root; the block-hash-chain, deposit-hash-chain, deposit-count, channel-registration and block-producer-signature fields are free witnesses. Only IntmaxRollup's finalizedRoot check ties them to real history.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-recursion-soundness",
+      "obligation": "add_proof_target_and_verify_cyclic is modeled only by the verifier-data anchor it installs and by the statement the inner proof carries. That a verifying chain proof implies an accepting chain of steps is undischarged.",
+      "discharged": false
+    },
+    {
+      "name": "field-element-encoding",
+      "obligation": "from_pis' plonky2 field-element to u64 conversion, and the assumption that every registered word is a canonical u32 (or u63 for the block number), are boundaries of the gadget layer.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-compilation",
+      "obligation": "builder.build, CircuitConfig::default and gate lowering are not modeled; a satisfying WrapperGates witness is not shown to correspond to a real plonky2 witness.",
+      "discharged": false
+    }
+  ]
+}

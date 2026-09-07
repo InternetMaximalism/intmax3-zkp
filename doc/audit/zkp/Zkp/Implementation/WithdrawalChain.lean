@@ -849,6 +849,60 @@ def ProofPreimage.toU32Vec (p : ProofPreimage) : List Nat :=
 theorem proof_preimage_length (p : ProofPreimage) :
     p.toU32Vec.length = withdrawalProofPublicInputsLen := rfl
 
+/-- `WithdrawalProofPublicInputs::from_u32_slice`: the `Bytes32`/`Address` parses
+`unwrap()` (infallible at these fixed lengths); only `BlockNumber::from_u32_slice`
+can fail, when the high word exceeds 31 bits. -/
+def preimageFromU32Slice (slice : List Nat) : Result ProofPreimage := do
+  require (slice.length == withdrawalProofPublicInputsLen)
+    (.invalidLength withdrawalProofPublicInputsLen slice.length)
+  require (firstOutOfRange 0 slice).isNone
+    (.outOfU32Range ((firstOutOfRange 0 slice).getD 0))
+  let hi := slice.getD (bytes32Len + addressLen + bytes32Len) 0
+  let lo := slice.getD (bytes32Len + addressLen + bytes32Len + 1) 0
+  require (hi < 2 ^ 31) (.blockNumberOverflow hi)
+  pure { withdrawalHash := Words8.read slice 0
+       , withdrawalProver := limbsValue ((slice.drop bytes32Len).take addressLen)
+       , extCommitment := Words8.read slice (bytes32Len + addressLen)
+       , blockNumber := hi * limbBase + lo % limbBase }
+
+/-- `WithdrawalProofPublicInputs::from_u64_slice` first `assert!`s every word into
+u32 - a PANIC, not an error - and then defers to `from_u32_slice`. -/
+def preimageFromU64Slice (slice : List Nat) : Result ProofPreimage := do
+  require (slice.length == withdrawalProofPublicInputsLen)
+    (.invalidLength withdrawalProofPublicInputsLen slice.length)
+  match firstOutOfRange 0 slice with
+  | some i => .error (.panicOutOfU32Range i)
+  | none => pure ()
+  preimageFromU32Slice slice
+
+theorem preimage_from_u32_slice_rejects_wrong_length (slice : List Nat)
+    (bad : ¬ slice.length = withdrawalProofPublicInputsLen) :
+    preimageFromU32Slice slice
+      = .error (.invalidLength withdrawalProofPublicInputsLen slice.length) := by
+  simp [preimageFromU32Slice, require, bad, bind, Except.bind]
+
+theorem preimage_from_u64_slice_rejects_wrong_length (slice : List Nat)
+    (bad : ¬ slice.length = withdrawalProofPublicInputsLen) :
+    preimageFromU64Slice slice
+      = .error (.invalidLength withdrawalProofPublicInputsLen slice.length) := by
+  simp [preimageFromU64Slice, require, bad, bind, Except.bind]
+
+/-- The two-word block number joins back into a 63-bit value: the 31-bit high
+word check is exactly the `U63` domain. -/
+theorem preimage_block_number_is_u63 (slice : List Nat) (p : ProofPreimage)
+    (accepted : preimageFromU32Slice slice = .ok p) :
+    p.blockNumber
+      = slice.getD (bytes32Len + addressLen + bytes32Len) 0 * limbBase +
+          slice.getD (bytes32Len + addressLen + bytes32Len + 1) 0 % limbBase ∧
+      p.blockNumber < u63Limit := by
+  simp only [preimageFromU32Slice, unit_bind_ok_iff, require_ok_iff, pure_ok_iff,
+    beq_iff_eq, decide_eq_true_eq] at accepted
+  obtain ⟨-, -, high, final⟩ := accepted
+  subst final
+  refine ⟨rfl, ?_⟩
+  simp only [limbBase, u63Limit]
+  omega
+
 /-- `WithdrawalProofPublicInputs::hash` = `remove_3bits(keccak256(preimage))`, and
 the identical in-circuit `pis.hash::<F,C,D>(builder).remove_3bits(builder)`. -/
 def ProofPreimage.hash (K : Keccak) (p : ProofPreimage) : Words8 :=
@@ -1215,6 +1269,20 @@ theorem sample_decoder_rejects_unmasked_top_limb :
 theorem sample_decoder_rejects_wide_block_number :
     fromU64Slice [5, 1, 2, 3, 4, 5, 6, 7, 9, 8, 7, 6, 5, 4, 3, 2, 2 ^ 63]
       = .error (.blockNumberOverflow (2 ^ 63)) := by
+  rfl
+
+/-- The 23-word keccak preimage decoder round trips on a canonical preimage. -/
+theorem sample_preimage_roundtrip :
+    preimageFromU32Slice
+        (ProofPreimage.toU32Vec ⟨samplePisHash, 0xabcd, sampleExtCommitment, 7⟩)
+      = .ok ⟨samplePisHash, 0xabcd, sampleExtCommitment, 7⟩ := by
+  rfl
+
+theorem sample_preimage_u64_panics_on_wide_word :
+    preimageFromU64Slice
+        (2 ^ 32 ::
+          (ProofPreimage.toU32Vec ⟨samplePisHash, 0xabcd, sampleExtCommitment, 7⟩).drop 1)
+      = .error (.panicOutOfU32Range 0) := by
   rfl
 
 /-! ### Wrapper example -/

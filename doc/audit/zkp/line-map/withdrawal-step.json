@@ -1,0 +1,463 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/withdrawal_step.rs",
+  "source_sha256": "1a521d9ba077a69ea364b3a64d2e88ef85e65cad9f7a6267f1be9dc65a79a05f",
+  "source_lines": 649,
+  "module": "Zkp.Implementation.WithdrawalChain",
+  "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalChain.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 41,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Keccak",
+        "Zkp.Implementation.WithdrawalChain.Poseidon",
+        "Zkp.Implementation.WithdrawalChain.Proof",
+        "Zkp.Implementation.WithdrawalChain.VerifierEnv"
+      ],
+      "theorems": [],
+      "note": "`use` lines. plonky2 builder/proof/config API, the keccak gadget, the cyclic verifier-data helpers and the recursive-verification helpers are opaque callbacks or premises in the model; no lowering is refined."
+    },
+    {
+      "start": 42,
+      "end": 43,
+      "status": "translated",
+      "label": "WITHDRAWAL_STEP_PUBLIC_INPUTS_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.withdrawalStepPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChain.bytes32Len",
+        "Zkp.Implementation.WithdrawalChain.publicStateU64Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.step_public_inputs_len_pinned"
+      ],
+      "note": "Handwritten local semantics; the 8 + 15 word split is pinned as a literal and proved equal to its component constants."
+    },
+    {
+      "start": 44,
+      "end": 58,
+      "status": "translated",
+      "label": "WithdrawalStepPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the four failure modes are represented as constructors of the module's single Error type. Display strings are not modeled."
+    },
+    {
+      "start": 59,
+      "end": 70,
+      "status": "translated",
+      "label": "WithdrawalStepPublicInputs statement",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs",
+        "Zkp.Implementation.WithdrawalChain.Words8",
+        "Zkp.Implementation.WithdrawalChain.PublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the verifier-only data is carried as an opaque word list, not as a plonky2 structure."
+    },
+    {
+      "start": 71,
+      "end": 76,
+      "status": "non-executable",
+      "label": "impl header and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trait bounds and impl header with no executable content."
+    },
+    {
+      "start": 77,
+      "end": 84,
+      "status": "translated",
+      "label": "to_u64_vec serialization order",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs.toU64Vec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.step_public_inputs_length"
+      ],
+      "note": "Handwritten local semantics; the concatenation order hash-chain || public-state || vd is modeled and its length proved."
+    },
+    {
+      "start": 85,
+      "end": 120,
+      "status": "translated",
+      "label": "from_u64_slice decoder",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.stepFromU64Slice",
+        "Zkp.Implementation.WithdrawalChain.decodeBytes32",
+        "Zkp.Implementation.WithdrawalChain.decodePublicState",
+        "Zkp.Implementation.WithdrawalChain.vdVecLen",
+        "Zkp.Implementation.WithdrawalChain.firstOutOfRange"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.step_from_u64_slice_rejects_wrong_length",
+        "Zkp.Implementation.WithdrawalChain.vd_vec_len_pinned"
+      ],
+      "note": "Handwritten local semantics; length guard, u32 limb range checks, the 63-bit block-number check and the absence of a range check on the three Poseidon roots are all modeled. The field-element to u64 conversion is a boundary."
+    },
+    {
+      "start": 121,
+      "end": 127,
+      "status": "translated",
+      "label": "WithdrawalStepPublicInputsTarget statement",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the in-circuit statement carries the same three components as the native one. Target allocation itself is not modeled here."
+    },
+    {
+      "start": 128,
+      "end": 142,
+      "status": "untranslated",
+      "label": "target allocation (Bytes32 checked, PublicState unchecked, virtual verifier data)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: virtual-target allocation and the checked/unchecked flags of this constructor. This constructor is unused by the step circuit, which builds its statement from computed wires instead."
+    },
+    {
+      "start": 143,
+      "end": 151,
+      "status": "translated",
+      "label": "target to_vec serialization order",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs.toU64Vec"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the target serialization order matches the native one and is modeled by the same definition."
+    },
+    {
+      "start": 152,
+      "end": 177,
+      "status": "translated",
+      "label": "from_pis offsets",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.stepFromU64Slice",
+        "Zkp.Implementation.WithdrawalChain.Words8.read",
+        "Zkp.Implementation.WithdrawalChain.withdrawalStepPublicInputsLen",
+        "Zkp.Implementation.WithdrawalChain.vdVecLen"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the cursor offsets are modeled. The source's assert!/expect panics here are represented as decoder errors, not as a distinct panic outcome."
+    },
+    {
+      "start": 178,
+      "end": 196,
+      "status": "untranslated",
+      "label": "target set_witness plumbing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: PartialWitness assignment order for the statement targets."
+    },
+    {
+      "start": 197,
+      "end": 217,
+      "status": "translated",
+      "label": "WithdrawalStepError variants",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the six failure modes map onto constructors of the module's Error type, including the propagated UpdatePublicState error."
+    },
+    {
+      "start": 218,
+      "end": 229,
+      "status": "translated",
+      "label": "WithdrawalStepWitness fields",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepWitness",
+        "Zkp.Implementation.WithdrawalChain.Proof"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; proofs are opaque records carrying only their public-input words."
+    },
+    {
+      "start": 230,
+      "end": 235,
+      "status": "non-executable",
+      "label": "impl header and where clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trait bounds and impl header with no executable content."
+    },
+    {
+      "start": 236,
+      "end": 304,
+      "status": "translated",
+      "label": "to_public_inputs: native step admission and the WDR-CRIT-001 fold",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.stepToPublicInputs",
+        "Zkp.Implementation.WithdrawalChain.checkUpdate",
+        "Zkp.Implementation.WithdrawalChain.prevChainHash",
+        "Zkp.Implementation.WithdrawalChain.decodeSingle",
+        "Zkp.Implementation.WithdrawalChain.decodeWithdrawal",
+        "Zkp.Implementation.WithdrawalChain.hashWithPrevHash",
+        "Zkp.Implementation.WithdrawalChain.initialHashChain",
+        "Zkp.Implementation.WithdrawalChain.foldChain",
+        "Zkp.Implementation.WithdrawalChain.Withdrawal",
+        "Zkp.Implementation.WithdrawalChain.Withdrawal.toU32Vec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.native_step_success",
+        "Zkp.Implementation.WithdrawalChain.native_step_outputs_target_state",
+        "Zkp.Implementation.WithdrawalChain.native_step_publishes_chain_vd",
+        "Zkp.Implementation.WithdrawalChain.native_step_binds_single_state_to_update_old",
+        "Zkp.Implementation.WithdrawalChain.native_step_requires_public_state_transition",
+        "Zkp.Implementation.WithdrawalChain.native_step_initial_seeds_zero",
+        "Zkp.Implementation.WithdrawalChain.native_step_non_initial_pins_prev_state",
+        "Zkp.Implementation.WithdrawalChain.sample_step_accepted",
+        "Zkp.Implementation.WithdrawalChain.withdrawal_to_u32_vec_length"
+      ],
+      "note": "Handwritten local semantics in source order: update_public_state.verify, single-withdrawal proof verification, statement decode, old==single.public_state, the previous-chain branch forcing new==prev.public_state, the leaf fold and the emission of update.new. Proof verification itself is an opaque callback; nothing here asserts that a verifying proof is sound."
+    },
+    {
+      "start": 305,
+      "end": 306,
+      "status": "non-executable",
+      "label": "impl close and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Closing brace and whitespace."
+    },
+    {
+      "start": 307,
+      "end": 315,
+      "status": "translated",
+      "label": "WithdrawalStepTarget wires",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepWitnessTargets"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the target record is represented by the witness values its wires carry, not by plonky2 Target identities."
+    },
+    {
+      "start": 316,
+      "end": 332,
+      "status": "translated",
+      "label": "builder setup: is_initial, not_initial, UpdatePublicStateTarget",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepGates",
+        "Zkp.Implementation.WithdrawalChain.StepWitnessTargets"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.gates_imply_public_state_transition"
+      ],
+      "note": "Handwritten local semantics; the boolean-safe is_initial wire and the nested public-state update gate set are modeled. The nested gate set is reused from the imported UpdatePublicState module; its Merkle/hash lowering stays a boundary."
+    },
+    {
+      "start": 333,
+      "end": 344,
+      "status": "dependency-boundary",
+      "label": "previous chain proof target and conditionally_verify_proof",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.Proof",
+        "Zkp.Implementation.WithdrawalChain.VerifierEnv",
+        "Zkp.Implementation.WithdrawalChain.Linked"
+      ],
+      "theorems": [],
+      "note": "Recursive verification is NOT modeled. Only the statement a previous proof carries and the fact that verification is gated on not_initial are represented; cyclic soundness is an undischarged premise."
+    },
+    {
+      "start": 345,
+      "end": 352,
+      "status": "translated",
+      "label": "conditionally_connect_vd of the carried verifier data",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepGates",
+        "Zkp.Implementation.WithdrawalChain.Link",
+        "Zkp.Implementation.WithdrawalChain.LinkValid"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.gates_initial_leaves_vd_free",
+        "Zkp.Implementation.WithdrawalChain.chain_vd_constant",
+        "Zkp.Implementation.WithdrawalChain.chain_vd_anchored"
+      ],
+      "note": "Handwritten local semantics; the conditional equality is modeled exactly, including the fact that on the initial step it degenerates to a tautology and leaves the carried verifier data a free witness."
+    },
+    {
+      "start": 353,
+      "end": 354,
+      "status": "dependency-boundary",
+      "label": "add_proof_target_and_verify for the single-withdrawal proof",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.VerifierEnv"
+      ],
+      "theorems": [],
+      "note": "Unconditional recursive verification against a fixed verifier data; modeled only as an opaque predicate on the proof."
+    },
+    {
+      "start": 355,
+      "end": 357,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec offsets",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.SingleWithdrawalPublicInputs",
+        "Zkp.Implementation.WithdrawalChain.decodeSingle",
+        "Zkp.Implementation.WithdrawalChain.singleWithdrawalPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.single_withdrawal_len_pinned"
+      ],
+      "note": "Handwritten local semantics; the 15 + 30 word split of the single-withdrawal statement is modeled and pinned."
+    },
+    {
+      "start": 358,
+      "end": 362,
+      "status": "translated",
+      "label": "connect update_public_state.old to the single withdrawal public state",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepGates"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; the unconditional connect is the StepGates.oldConnectedToSingle equation."
+    },
+    {
+      "start": 363,
+      "end": 375,
+      "status": "translated",
+      "label": "WDR-CRIT-001 conditional_assert_eq of update.new against the previous statement",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepGates",
+        "Zkp.Implementation.WithdrawalChain.LinkValid",
+        "Zkp.Implementation.WithdrawalChain.Linked",
+        "Zkp.Implementation.WithdrawalChain.Link"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.gates_non_initial_binds_prev",
+        "Zkp.Implementation.WithdrawalChain.chain_states_constant"
+      ],
+      "note": "Handwritten local semantics; the conditional equality is modeled and the chain-level consequence (one canonical public state across every step) is derived by induction over a linked chain of statements."
+    },
+    {
+      "start": 376,
+      "end": 386,
+      "status": "translated",
+      "label": "zero-hash select and Withdrawal::hash_with_prev_hash",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.hashWithPrevHash",
+        "Zkp.Implementation.WithdrawalChain.initialHashChain",
+        "Zkp.Implementation.WithdrawalChain.optHash",
+        "Zkp.Implementation.WithdrawalChain.Link.prevHash",
+        "Zkp.Implementation.WithdrawalChain.foldChain",
+        "Zkp.Implementation.WithdrawalChain.bytes32Of"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.chain_hash_is_leaf_fold",
+        "Zkp.Implementation.WithdrawalChain.sample_link_valid",
+        "Zkp.Implementation.WithdrawalChain.sample_chain_hash_is_fold",
+        "Zkp.Implementation.WithdrawalChain.fold_chain_cons",
+        "Zkp.Implementation.WithdrawalChain.fold_chain_nil"
+      ],
+      "note": "Handwritten local semantics; the is_initial select onto Bytes32::default() and the keccak leaf fold are modeled. The keccak gadget is an opaque callback and is never assumed injective."
+    },
+    {
+      "start": 387,
+      "end": 406,
+      "status": "translated",
+      "label": "new_pis construction and returned target record",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepGates",
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalChain.gates_publish_target_state",
+        "Zkp.Implementation.WithdrawalChain.gates_of_native_step"
+      ],
+      "note": "Handwritten local semantics; the emitted statement is update_public_state.new (not .old) plus the conditionally connected verifier data, and a native accepting run is shown to give a satisfying local witness."
+    },
+    {
+      "start": 407,
+      "end": 444,
+      "status": "untranslated",
+      "label": "target set_witness plumbing and dummy-proof substitution",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: PartialWitness assignment order, the dummy-proof substitution on the initial step, and the fact that the natively computed statement is written onto wires the circuit also computes."
+    },
+    {
+      "start": 445,
+      "end": 458,
+      "status": "dependency-boundary",
+      "label": "WithdrawalStepCircuit record of plonky2 artifacts",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.VerifierEnv"
+      ],
+      "theorems": [],
+      "note": "CircuitData, ProofWithPublicInputs and VerifierCircuitData are compiler/proof-system artifacts held opaque."
+    },
+    {
+      "start": 459,
+      "end": 487,
+      "status": "dependency-boundary",
+      "label": "circuit construction, public-input registration and dummy proof",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.StepPublicInputs.toU64Vec"
+      ],
+      "theorems": [],
+      "note": "builder.build and DummyProof are boundaries. Only the ORDER in which register_public_inputs emits the statement words is modeled, by StepPublicInputs.toU64Vec."
+    },
+    {
+      "start": 488,
+      "end": 510,
+      "status": "dependency-boundary",
+      "label": "prove and verify entry points",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalChain.stepToPublicInputs"
+      ],
+      "theorems": [],
+      "note": "plonky2 proving/verification is opaque. Only the native statement construction that prove performs first is modeled."
+    },
+    {
+      "start": 511,
+      "end": 649,
+      "status": "test-only",
+      "label": "cfg(test) module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test harness with TestCyclicCircuit stand-ins; not a production constraint."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-callback",
+      "obligation": "solidity_keccak256 and builder.keccak256 are opaque callbacks; the model never assumes injectivity, collision resistance, or that the native and in-circuit digests coincide.",
+      "discharged": false
+    },
+    {
+      "name": "cyclic-recursion-soundness",
+      "obligation": "conditionally_verify_proof and add_proof_target_and_verify are modeled only by the statement each proof carries. That a verifying recursive proof implies its statement was produced by an accepting step is undischarged.",
+      "discharged": false
+    },
+    {
+      "name": "initial-step-free-verifier-data",
+      "obligation": "On the initial step conditionally_connect_vd degenerates to a tautology, so the carried verifier data is an unconstrained witness there. It is pinned only through a successor step or the outer wrapper anchor.",
+      "discharged": false
+    },
+    {
+      "name": "public-state-history",
+      "obligation": "UpdatePublicState's Merkle opening, hash lowering and the claim that a root belongs to real on-chain history are inherited as undischarged premises.",
+      "discharged": false
+    },
+    {
+      "name": "single-withdrawal-statement",
+      "obligation": "The single-withdrawal circuit's own soundness (that its statement really witnesses a spendable balance at that public state) is outside this model.",
+      "discharged": false
+    },
+    {
+      "name": "witness-assignment",
+      "obligation": "PartialWitness assignment, dummy-proof substitution and generator/gate lowering are not modeled; a satisfying StepGates witness is not shown to correspond to a real plonky2 witness.",
+      "discharged": false
+    },
+    {
+      "name": "field-element-encoding",
+      "obligation": "The u64/field-element correspondence used by to_u64_vec and to_field_vec is assumed, not proved.",
+      "discharged": false
+    }
+  ]
+}
