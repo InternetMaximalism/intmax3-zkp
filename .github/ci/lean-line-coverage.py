@@ -33,6 +33,10 @@ DEPENDENCIES = {
     "src/deprecated/": ".rs",
     SUBMODULE + "/mle/contracts/src/": ".sol",
     SUBMODULE + "/mle/src/": ".rs",
+    # Wallet-side durable member-signature ledger: the replay fence the
+    # state-update models name as a boundary. Only the .mjs ledger module is in
+    # scope; the surrounding relay/HTML/JS remain outside this inventory.
+    "hosting/wallet/": ".mjs",
 }
 EXTRA = {"src/constants.rs", "src/wrapper_config.rs"}
 STATUSES = {"translated", "non-executable", "test-only", "dependency-boundary", "untranslated"}

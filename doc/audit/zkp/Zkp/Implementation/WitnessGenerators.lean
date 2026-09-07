@@ -2672,7 +2672,8 @@ def commitReceiveTransfer (bd : BalanceDeps) (b : BalanceGen) (newPis : BalanceP
       assetTree := mapInsert b.priv.assetTree update.tokenIndex (prevBalance + update.amount),
       nullifiers := inserted.1,
       prevPrivateCommitment := bd.commitment update.prevPrivateState,
-      nonce := update.newPrivateState.nonce, salt := update.newPrivateState.salt }
+      nonce := update.newPrivateState.nonce,
+      salt := update.newPrivateState.salt }
   let _ ← check (bd.commitment update.newPrivateState == bd.commitment next)
     (panicWith .commitmentMismatchAssert)
   pure { b with balancePis := newPis, priv := next }
@@ -2828,7 +2829,9 @@ def commitSendTx (bd : BalanceDeps) (b : BalanceGen) (newPis : BalancePis)
       (fun tree p => mapInsert tree p.1.tokenIndex (p.2 - p.1.amount)) carried.priv.assetTree
     let _ ← check (carried.priv.sentTxLen + 1 == txNonce + 1) (panicWith .nonceMismatchAssert)
     let next : PrivateStateS :=
-      { carried.priv with assetTree := debited, sentTxLen := carried.priv.sentTxLen + 1,
+      { carried.priv with
+        assetTree := debited,
+        sentTxLen := carried.priv.sentTxLen + 1,
         prevPrivateCommitment := bd.commitment spend.prevPrivateState,
         nonce := spend.prevPrivateState.nonce + 1 }
     let _ ← check (bd.commitment next == newCommitment) (panicWith .commitmentMismatchAssert)
@@ -2926,6 +2929,141 @@ theorem single_withdrawal_opens_the_sent_tx_at_the_tx_nonce
   obtain ⟨transferWitness, _, stateEq⟩ := accepted
   subst stateEq
   exact ⟨rfl, rfl, rfl⟩
+
+
+
+/-! ## Positive examples (concrete normal traces)
+
+Concrete callbacks stand in for Poseidon/keccak/Falcon so that a whole normal
+run reduces in the kernel. They are ARBITRARY stand-ins: no theorem below says
+anything about the real hash or signature functions. -/
+
+def exampleDeps : Deps :=
+  { memberRoot := fun leaves => leaves.length + 100,
+    regevDigest := fun _ => 13,
+    reduceToHashOut := fun h => h,
+    validateRecord := fun _ => true,
+    hashRecordWithPrev := fun r prev => r.channelId + prev + 1,
+    hashBlockWithPrev := fun b prev => b.timestamp + prev + 2,
+    hashDepositWithPrev := fun dep prev => dep.amount + prev + 3,
+    depositNullifier := fun dep => dep.depositIndex + 500,
+    channelProof := fun _ i => i + 1000,
+    channelTreeRoot := fun t => t.length + 2000,
+    sendProof := fun _ i => i + 3000,
+    sendRootWith := fun _ _ i => i + 4000,
+    depositProof := fun _ i => i + 5000,
+    depositTreeRoot := fun t => t.length + 6000,
+    publicStateProof := fun _ i => i + 7000,
+    publicStateRoot := fun t => t.length + 8000,
+    signingDigest := fun f c h => f.stateVersion + c + h + 9000,
+    fromChannelState := fun st => { defaultChannelStateFields with stateVersion := st.channelId },
+    falconPkG := fun _ => 42,
+    falconPkCoefficients := fun _ => 43,
+    falconSign := fun _ _ => ⟨[1]⟩,
+    decodeCosignBlob := fun blob => some (blob, 44),
+    falconPkDigest := fun _ => 42,
+    aggListCommitment := fun entries => entries.length + 10000,
+    babyPkFromSeed := fun seed => seed + 11000 }
+
+def examplePk : RegevPk := ⟨[1], [2]⟩
+
+/-- One registered cosigner in slot 0, the remaining seven slots empty. -/
+def exampleRecord : ChannelRegRecord :=
+  { channelId := 7, bpMemberSlot := 0, memberCount := 1, delegateCount := 0,
+    members := ⟨21, 22, 13, 99⟩ :: (indices 7).map (fun _ => defaultMemberRegEntry) }
+
+def exampleStart : BlockGen := newBlockGen [1]
+
+/-- A complete production (keyless) registration followed by its registration
+block: the queue drains, the block number advances to 1, and the generator holds
+NO signing key for the channel. -/
+theorem example_public_registration_then_registration_block :
+    ((addChannelRegistrationPublic exampleDeps exampleStart exampleRecord [examplePk]).bind
+      (fun g => (addRegistrationBlock exampleDeps g 5).map
+        (fun out => (out.2, out.1.blockNumber, out.1.channelRegistrations.length,
+                     holdsLocalSigningKeys out.1 7))))
+      = .ok (7, 1, 0, false) := by
+  rfl
+
+/-- ...and the registered channel leaf really carries the member root the
+registration derived. -/
+theorem example_registration_writes_the_member_leaf :
+    ((addChannelRegistrationPublic exampleDeps exampleStart exampleRecord [examplePk]).bind
+      (fun g => (addRegistrationBlock exampleDeps g 5).map
+        (fun out => mapGet? out.1.channelTree 7)))
+      = .ok (some { index := 0, prev := 0, sendTreeRoot := defaultChannelLeaf.sendTreeRoot,
+                    memberRoot := 101 }) := by
+  rfl
+
+/-- A padding-only ordinary block (no active key slot, channel id 0) is
+producible with no signature at all, and records no signing event. -/
+theorem example_padding_only_block_needs_no_signature :
+    ((addChannelRegistrationPublic exampleDeps exampleStart exampleRecord [examplePk]).bind
+      (fun g => (addRegistrationBlock exampleDeps g 5).bind
+        (fun out => (addBlock exampleDeps out.1 0 [] 9 0).map
+          (fun g' => (g'.blockNumber, g'.bpSigEvents.length, g'.blocks.length)))))
+      = .ok (2, 0, 3) := by
+  rfl
+
+/-- A concrete admissible TxV2 witness: one user-transfer slot, no channel
+action, all arrays sized to `num_users`. -/
+def exampleTxV2Witness : BlockTxV2Witness :=
+  { txV2Indices := [7], txV2s := [defaultTxV2], txV2MerkleProofs := [0],
+    newMemberLeaves := none, channelActionIndices := none, channelActions := none,
+    channelActionMerkleProofs := none }
+
+theorem example_tx_v2_witness_is_admissible :
+    checkTxV2Witness 1 [1] exampleTxV2Witness = .ok () := by
+  rfl
+
+/-- The same witness with a `TxClass::ChannelAction` slot and no sub-witness is
+refused (M-2). -/
+theorem example_channel_action_without_subwitness_is_refused :
+    checkTxV2Witness 1 [1]
+      { exampleTxV2Witness with
+        txV2s := [{ defaultTxV2 with txClass := TxClass.channelAction }] }
+      = .error (refuse .channelActionSubwitnessMissing) := by
+  rfl
+
+/-- A concrete balance-side commit: a valid spend of one transfer increments the
+nonce and the sent-tx length together. -/
+def exampleBalanceDeps : BalanceDeps :=
+  { block := exampleDeps,
+    commitment := fun st => st.nonce + st.sentTxLen + 20000,
+    settledTransferNullifier := fun t c i n => t.tokenIndex + c + i + n + 30000,
+    assetProof := fun _ i => i + 40000,
+    sentTxProof := fun len i => len + i + 50000,
+    nullifierInsert := fun ns n => .ok (ns ++ [n], ns.length + 60000),
+    mkUpdatePrivateState := fun tokenIndex amount nullifier prev _ prevBalance _ =>
+      .ok { tokenIndex := tokenIndex, amount := amount, nullifier := nullifier,
+            prevPrivateState := prev,
+            newPrivateState := { prev with nonce := prev.nonce + 1 },
+            prevBalance := prevBalance },
+    mkTransferWitness := fun root transfer index proof => .ok ⟨root, transfer, index, proof⟩,
+    mkDepositWitness := fun channel root salt deposit proof =>
+      .ok ⟨channel, root, salt, deposit, proof⟩ }
+
+def examplePrivateState : PrivateStateS :=
+  { assetTree := [(0, 10)], nullifiers := [], sentTxLen := 0, nonce := 0, salt := 5,
+    prevPrivateCommitment := 0 }
+
+def exampleBalanceGen : BalanceGen :=
+  { channelId := 7, salt := 5,
+    balancePis := { channelId := 7, publicState := defaultPublicState, blockR := 0,
+                    privateCommitment := 0 },
+    priv := examplePrivateState, block := exampleStart }
+
+def exampleSpendWitness : SpendWitness :=
+  { txNonce := 0, prevPrivateState := examplePrivateState,
+    transfers := [{ tokenIndex := 0, amount := 4, recipient := 1, auxData := 0 }],
+    beforeBalances := [10], assetMerkleProofs := [40000], sentTxMerkleProof := 50000 }
+
+theorem example_commit_send_tx_advances_the_nonce :
+    (commitSendTx exampleBalanceDeps exampleBalanceGen exampleBalanceGen.balancePis 0
+      20000 20002 exampleSpendWitness true).map
+        (fun b => (b.priv.nonce, b.priv.sentTxLen, mapGet? b.priv.assetTree 0))
+      = .ok (1, 1, some 6) := by
+  rfl
 
 
 end Zkp.Implementation.WitnessGenerators

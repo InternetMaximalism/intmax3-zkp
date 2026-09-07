@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/witness/balance_witness_generator.rs",
+  "source_sha256": "fcd0e0556d15f57ed77e852cb624687c20507bd290310ae19246abd7a45ba249",
+  "source_lines": 1083,
+  "module": "Zkp.Implementation.WitnessGenerators",
+  "model": "doc/audit/zkp/Zkp/Implementation/WitnessGenerators.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 49,
+      "status": "dependency-boundary",
+      "label": "crate and plonky2 imports (balance processor, witness constructors, proof types)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BalanceDeps",
+        "Zkp.Implementation.WitnessGenerators.Deps"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 50,
+      "end": 50,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 51,
+      "end": 85,
+      "status": "translated",
+      "label": "`BalanceWitnessGeneratorError` variants",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.GenError",
+        "Zkp.Implementation.WitnessGenerators.Reason",
+        "Zkp.Implementation.WitnessGenerators.PanicReason"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 86,
+      "end": 101,
+      "status": "translated",
+      "label": "the `BalanceWitnessGenerator` state (proof modeled by its public inputs)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BalanceGen",
+        "Zkp.Implementation.WitnessGenerators.BalancePis",
+        "Zkp.Implementation.WitnessGenerators.PrivateStateS"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 102,
+      "end": 124,
+      "status": "dependency-boundary",
+      "label": "`new`: `balance_processor.prove_initial` and `FullPrivateState::new`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BalanceGen",
+        "Zkp.Implementation.WitnessGenerators.BalanceDeps"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 125,
+      "end": 131,
+      "status": "dependency-boundary",
+      "label": "`get_public_inputs`: `BalancePublicInputs::from_u64` decoding",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BalancePis"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 132,
+      "end": 171,
+      "status": "translated",
+      "label": "`spend_witness`: pad to `MAX_NUM_TRANSFERS_PER_TX`, per-token debit, nonce-indexed sent-tx opening",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.spendWitness",
+        "Zkp.Implementation.WitnessGenerators.spendFold",
+        "Zkp.Implementation.WitnessGenerators.padTransfers",
+        "Zkp.Implementation.WitnessGenerators.SpendWitness",
+        "Zkp.Implementation.WitnessGenerators.Transfer",
+        "Zkp.Implementation.WitnessGenerators.defaultTransfer",
+        "Zkp.Implementation.WitnessGenerators.maxTransfersPerTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.padded_transfers_reach_the_maximum",
+        "Zkp.Implementation.WitnessGenerators.spend_witness_uses_the_current_nonce_for_the_tx_and_the_sent_tx_opening",
+        "Zkp.Implementation.WitnessGenerators.constants_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 172,
+      "end": 313,
+      "status": "translated",
+      "label": "`receive_transfer_witness`: recipient assert, paired public-state witnesses, `new_block_r`, tx-block bound, root asserts, settlement-independent nullifier",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.receiveTransferWitness",
+        "Zkp.Implementation.WitnessGenerators.ReceiveTransferData",
+        "Zkp.Implementation.WitnessGenerators.ReceiveTransferWitnessW",
+        "Zkp.Implementation.WitnessGenerators.TxSettlementW",
+        "Zkp.Implementation.WitnessGenerators.TransferWitnessW",
+        "Zkp.Implementation.WitnessGenerators.UpdatePrivateStateW",
+        "Zkp.Implementation.WitnessGenerators.newBlockR"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.receive_transfer_requires_this_generator_to_be_the_recipient",
+        "Zkp.Implementation.WitnessGenerators.receive_transfer_admission_facts",
+        "Zkp.Implementation.WitnessGenerators.receive_transfer_nullifier_is_settlement_independent",
+        "Zkp.Implementation.WitnessGenerators.new_block_r_is_one_before_the_next_send_block",
+        "Zkp.Implementation.WitnessGenerators.new_block_r_without_a_next_send_is_the_head_block"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 314,
+      "end": 345,
+      "status": "translated",
+      "label": "`commit_receive_transfer`: credit the incoming amount, insert the nullifier, copy nonce/salt from the witness",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.commitReceiveTransfer"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.commit_receive_transfer_credits_the_incoming_amount_and_copies_the_nonce"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 346,
+      "end": 465,
+      "status": "translated",
+      "label": "`receive_deposit_witness` / `_at_index` / `_inner`: public-state agreement, `new_block_r`, deposit selection, deposit-block bound",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.receiveDepositWitness",
+        "Zkp.Implementation.WitnessGenerators.lookupDeposit",
+        "Zkp.Implementation.WitnessGenerators.ReceiveDepositData",
+        "Zkp.Implementation.WitnessGenerators.ReceiveDepositWitnessW",
+        "Zkp.Implementation.WitnessGenerators.DepositWitnessW"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deposit_admission_facts",
+        "Zkp.Implementation.WitnessGenerators.deposit_at_index_binds_both_the_index_and_the_recipient",
+        "Zkp.Implementation.WitnessGenerators.deposit_by_recipient_selects_the_first_match"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 466,
+      "end": 497,
+      "status": "translated",
+      "label": "`commit_receive_deposit`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.commitReceiveDeposit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.commit_receive_transfer_credits_the_incoming_amount_and_copies_the_nonce"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 498,
+      "end": 551,
+      "status": "translated",
+      "label": "`send_tx_witness`: public-state and account-root asserts, transfer opened at index 0",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.sendTxWitness",
+        "Zkp.Implementation.WitnessGenerators.SendTxData",
+        "Zkp.Implementation.WitnessGenerators.SendTxWitnessW"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.send_tx_opens_the_transfer_at_index_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 552,
+      "end": 602,
+      "status": "translated",
+      "label": "`commit_send_tx`: proof replaced before the `is_valid` test; nonce and sent-tx length advance together",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.commitSendTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.commit_send_tx_replaces_the_proof_even_when_the_spend_is_invalid",
+        "Zkp.Implementation.WitnessGenerators.commit_send_tx_is_a_private_state_noop_on_an_invalid_spend",
+        "Zkp.Implementation.WitnessGenerators.commit_send_tx_increments_the_nonce_and_the_sent_tx_length",
+        "Zkp.Implementation.WitnessGenerators.example_commit_send_tx_advances_the_nonce"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 603,
+      "end": 646,
+      "status": "translated",
+      "label": "`single_withdrawal_witness`: no root-agreement admission condition; sent-tx opened at the tx nonce",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.singleWithdrawalWitness",
+        "Zkp.Implementation.WitnessGenerators.SingleWithdrawalData",
+        "Zkp.Implementation.WitnessGenerators.SingleWithdrawalWitnessW"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.single_withdrawal_witness_performs_no_root_agreement_check",
+        "Zkp.Implementation.WitnessGenerators.single_withdrawal_opens_the_sent_tx_at_the_tx_nonce"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 647,
+      "end": 668,
+      "status": "translated",
+      "label": "`ReceiveTransferData`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.ReceiveTransferData",
+        "Zkp.Implementation.WitnessGenerators.Tx"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 669,
+      "end": 674,
+      "status": "translated",
+      "label": "`ReceiveDepositData`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.ReceiveDepositData"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 675,
+      "end": 693,
+      "status": "translated",
+      "label": "`SendTxData`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.SendTxData"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 694,
+      "end": 705,
+      "status": "translated",
+      "label": "`SingleWithdrawalData`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.SingleWithdrawalData"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 706,
+      "end": 706,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 707,
+      "end": 1083,
+      "status": "test-only",
+      "label": "`#[cfg(test)] mod tests` (release-only end-to-end proving test)",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code; not part of any production build and not modeled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "deterministic-harness-key-derivation-is-production-reachable",
+      "obligation": "`pub mod test_utils;` in src/circuits/mod.rs carries no cfg(test) and re-exports these generator modules, so `deterministic_member_falcon_keys`, `ChannelMemberKeys::deterministic`, `add_channel_registration` and `register_channel` compile into production builds. Every member Falcon signing key of a fixture-registered channel is a pure function of the PUBLIC channel id. Discharging this requires actually cfg-gating or extracting the harness key material; the model only records the reachability and the derivation.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-keccak-and-merkle-callbacks",
+      "obligation": "Member roots, channel/send/deposit/public-state roots and openings, the block and deposit keccak chain steps and the channel-registration chain step are opaque callbacks. Prove collision resistance, correct leaf hashing, path-index decomposition and real tree ownership; an equal returned root is not authenticated state.",
+      "discharged": false
+    },
+    {
+      "name": "falcon-signing-and-blob-decoding",
+      "obligation": "`FalconKeys::sign`, `decode_cosign_blob`, `falcon_pk_digest` and `FalconSigGadgetWitness::for_signature` are callbacks. A produced or decoded signature is not authorization, and `falcon_pk_digest(h) == pk_g` rebinds an identity only under hash injectivity, which is not assumed.",
+      "discharged": false
+    },
+    {
+      "name": "agg-list-commitment-and-plonky2-recursion",
+      "obligation": "`agg_list_commitment` and `build_agg_sig_list_proof`'s recursive FalconAggCircuit/AggListCircuit proving are not modeled beyond the refusal precondition. Prove that the folded commitment equals what the validity circuit asserts against `final.bp_sig_chain`.",
+      "discharged": false
+    },
+    {
+      "name": "pinned-callee-body",
+      "obligation": "`channel_leaf_member_root` (src/circuits/validity/block_hash_chain/update_channel_tree.rs:163-170) is pinned here as the identity on `prev_member_pubkeys_root`. `member_set_advance_is_unreachable_from_add_block` is only valid while that body is unchanged; re-verify on any change to that callee.",
+      "discharged": false
+    },
+    {
+      "name": "native-panics-are-not-recoverable",
+      "obligation": "Rust `assert!`/`assert_eq!`/`expect`/`panic!` and integer overflow abort the process; the model represents them as a distinguished `GenError.nativePanic` purely to keep their position in the check order visible. Prove that no modeled panic is reachable, or that aborting is acceptable at each site.",
+      "discharged": false
+    },
+    {
+      "name": "witness-construction-is-not-a-circuit-constraint",
+      "obligation": "Every check modeled here is a native admission condition of THIS builder. An adversary can hand an arbitrary witness to the prover; nothing in this module constrains that path. Any safety claim must come from the circuits, not from these generators.",
+      "discharged": false
+    },
+    {
+      "name": "nullifier-insertion-and-freshness",
+      "obligation": "`prove_and_insert` on the indexed nullifier tree and `UpdatePrivateState::new` are callbacks. A returned insertion proof is not no-reuse and a changed root is not freshness.",
+      "discharged": false
+    },
+    {
+      "name": "proof-values-and-public-input-parsing",
+      "obligation": "plonky2 `ProofWithPublicInputs` values are modeled only by their parsed `BalancePublicInputs`. Proof validity, `BalancePublicInputs::from_u64` decoding and the balance processor are out of scope.",
+      "discharged": false
+    }
+  ]
+}

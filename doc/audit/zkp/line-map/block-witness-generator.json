@@ -1,0 +1,786 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/witness/block_witness_generator.rs",
+  "source_sha256": "9e6d6b747ee9079dc1ecc820d84654d8dcc9e04ce0a6cb09f8b69c7ff582371a",
+  "source_lines": 2456,
+  "module": "Zkp.Implementation.WitnessGenerators",
+  "model": "doc/audit/zkp/Zkp/Implementation/WitnessGenerators.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 54,
+      "status": "dependency-boundary",
+      "label": "crate imports and target-conditional sync primitives",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.Deps",
+        "Zkp.Implementation.WitnessGenerators.BalanceDeps"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 55,
+      "end": 116,
+      "status": "untranslated",
+      "label": "`BlockWitnessGeneratorHandle`: the wasm `Rc<RefCell>` / native `Arc<RwLock>` shim and its guards",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 117,
+      "end": 136,
+      "status": "translated",
+      "label": "`BlockWitnessGeneratorError` variants",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.GenError",
+        "Zkp.Implementation.WitnessGenerators.Reason",
+        "Zkp.Implementation.WitnessGenerators.PanicReason",
+        "Zkp.Implementation.WitnessGenerators.refuse",
+        "Zkp.Implementation.WitnessGenerators.panicWith"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 137,
+      "end": 137,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 138,
+      "end": 143,
+      "status": "translated",
+      "label": "`TEST_ACTIVE_MEMBERS` (pad-to-MAX D6)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.testActiveMembers",
+        "Zkp.Implementation.WitnessGenerators.maxSigCluster",
+        "Zkp.Implementation.WitnessGenerators.memberTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.constants_pinned",
+        "Zkp.Implementation.WitnessGenerators.test_active_members_below_capacity",
+        "Zkp.Implementation.WitnessGenerators.member_tree_height_is_log_two_of_max_sig_cluster"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 144,
+      "end": 168,
+      "status": "translated",
+      "label": "`deterministic_member_falcon_keys`: the one canonical per-(channel, slot) seed and its single-byte slot assert",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.falconSeedByte",
+        "Zkp.Implementation.WitnessGenerators.falconSeed",
+        "Zkp.Implementation.WitnessGenerators.deterministicMemberFalconKeys",
+        "Zkp.Implementation.WitnessGenerators.FalconKey",
+        "Zkp.Implementation.WitnessGenerators.slotSeedLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deterministic_member_falcon_keys_slot_seed",
+        "Zkp.Implementation.WitnessGenerators.deterministic_member_falcon_keys_panics_above_the_byte_limit",
+        "Zkp.Implementation.WitnessGenerators.falcon_seed_byte_separates_slots_below_the_limit",
+        "Zkp.Implementation.WitnessGenerators.falcon_seed_byte_wraps_at_two_hundred_fifty_six"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 169,
+      "end": 177,
+      "status": "dependency-boundary",
+      "label": "`falcon_pk_g_hash_out`: the Falcon `pk_g = Poseidon(IMFK || encode(h))` identity",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.Deps"
+      ],
+      "theorems": [],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 178,
+      "end": 202,
+      "status": "translated",
+      "label": "`BpSigEvent` and its `AggListEntry` projection",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BpSigEvent",
+        "Zkp.Implementation.WitnessGenerators.SigWitness",
+        "Zkp.Implementation.WitnessGenerators.currentBpSigChain"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 203,
+      "end": 231,
+      "status": "translated",
+      "label": "`ChannelMemberKeys`: the fixture bundle that holds every member's Falcon key",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.ChannelMemberKeys",
+        "Zkp.Implementation.WitnessGenerators.MemberLeaf",
+        "Zkp.Implementation.WitnessGenerators.emptyMemberLeaf"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 232,
+      "end": 246,
+      "status": "translated",
+      "label": "`RegisteredChannelPublicData`: the secret-free per-channel material",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.RegisteredPublic"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 247,
+      "end": 250,
+      "status": "translated",
+      "label": "`LocalTestSigners` newtype \u2014 the fixture-only signer list",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BlockGen",
+        "Zkp.Implementation.WitnessGenerators.holdsLocalSigningKeys"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 251,
+      "end": 258,
+      "status": "untranslated",
+      "label": "redacting `Debug` impl for `LocalTestSigners`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 259,
+      "end": 317,
+      "status": "translated",
+      "label": "`from_record_and_regev_pks`: validate, reject delegates, match the Regev key count, then the per-slot digest, then build the member tree",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.fromRecordAndRegevPks",
+        "Zkp.Implementation.WitnessGenerators.regevDigestsMatch",
+        "Zkp.Implementation.WitnessGenerators.ChannelRegRecord",
+        "Zkp.Implementation.WitnessGenerators.MemberRegEntry",
+        "Zkp.Implementation.WitnessGenerators.RegevPk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.record_validation_precedes_every_other_registration_check",
+        "Zkp.Implementation.WitnessGenerators.delegates_are_refused_before_the_regev_count_check",
+        "Zkp.Implementation.WitnessGenerators.registration_admission_requires_all_four_checks",
+        "Zkp.Implementation.WitnessGenerators.member_tree_is_derived_from_the_record"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 318,
+      "end": 332,
+      "status": "untranslated",
+      "label": "key-count-only `Debug` impl for `ChannelMemberKeys`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 333,
+      "end": 380,
+      "status": "translated",
+      "label": "`ChannelMemberKeys::deterministic`: channel-id-derived Falcon/BabyBear/Regev material in slot order",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.channelMemberKeysDeterministic",
+        "Zkp.Implementation.WitnessGenerators.deterministicRegevPk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deterministic_member_keys_have_test_active_members_slots",
+        "Zkp.Implementation.WitnessGenerators.deterministic_member_set_is_determined_by_the_channel_id",
+        "Zkp.Implementation.WitnessGenerators.deterministic_regev_coefficients_are_canonical"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 381,
+      "end": 427,
+      "status": "untranslated",
+      "label": "`ChannelMemberKeys::from_member_keys` (real wallet keys, `MAX_SIG_CLUSTER` capacity assert)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 428,
+      "end": 487,
+      "status": "translated",
+      "label": "`to_reg_record` / `to_reg_record_split`: copy the member-tree prefix into the record, pin `bp_member_slot = 0`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.toRegRecord",
+        "Zkp.Implementation.WitnessGenerators.toRegRecordSplit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.reg_record_has_max_sig_cluster_slots",
+        "Zkp.Implementation.WitnessGenerators.reg_record_pins_block_proposer_slot_zero",
+        "Zkp.Implementation.WitnessGenerators.to_reg_record_uses_zero_delegates"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 488,
+      "end": 506,
+      "status": "translated",
+      "label": "`test_recipient_for`: the canonical deterministic per-(channel, slot) test L1 recipient",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.testRecipientLimb",
+        "Zkp.Implementation.WitnessGenerators.testRecipientFor",
+        "Zkp.Implementation.WitnessGenerators.testRecipientBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.test_recipient_limb_nonzero_without_wraparound",
+        "Zkp.Implementation.WitnessGenerators.test_recipient_is_a_public_function"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 507,
+      "end": 518,
+      "status": "translated",
+      "label": "`deterministic_regev_pk`: canonical coefficients below `REGEV_Q`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.deterministicRegevPk",
+        "Zkp.Implementation.WitnessGenerators.regevN",
+        "Zkp.Implementation.WitnessGenerators.regevQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deterministic_regev_coefficients_are_canonical",
+        "Zkp.Implementation.WitnessGenerators.regev_q_positive"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 519,
+      "end": 588,
+      "status": "translated",
+      "label": "the `BlockWitnessGenerator` state fields",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BlockGen",
+        "Zkp.Implementation.WitnessGenerators.ChannelLeaf",
+        "Zkp.Implementation.WitnessGenerators.SendLeaf",
+        "Zkp.Implementation.WitnessGenerators.Deposit",
+        "Zkp.Implementation.WitnessGenerators.Block",
+        "Zkp.Implementation.WitnessGenerators.BlockWitness"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 589,
+      "end": 599,
+      "status": "translated",
+      "label": "`ChannelCosignBundle`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.CosignBundle",
+        "Zkp.Implementation.WitnessGenerators.CosignedState",
+        "Zkp.Implementation.WitnessGenerators.MemberSignature",
+        "Zkp.Implementation.WitnessGenerators.CosignBlob"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 600,
+      "end": 626,
+      "status": "translated",
+      "label": "`BlockWitnessGenerator::new` (genesis placeholder block)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.newBlockGen",
+        "Zkp.Implementation.WitnessGenerators.genesisBlock"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.new_generator_is_empty_with_one_genesis_block"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 627,
+      "end": 670,
+      "status": "translated",
+      "label": "`add_channel_registration`: the fixture path that derives and RETAINS every member key",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addChannelRegistrationFixture"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.fixture_registration_retains_every_member_signing_key"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 671,
+      "end": 682,
+      "status": "untranslated",
+      "label": "`add_channel_registration_keys`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 683,
+      "end": 727,
+      "status": "untranslated",
+      "label": "`add_channel_registration_with_record`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 728,
+      "end": 759,
+      "status": "untranslated",
+      "label": "`add_channel_registration_keys_split`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 760,
+      "end": 772,
+      "status": "translated",
+      "label": "`add_channel_registration_public`: the keyless production entry point",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addChannelRegistrationPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.public_registration_holds_no_signing_key",
+        "Zkp.Implementation.WitnessGenerators.registration_is_queued_and_mirrored_without_touching_the_channel_tree",
+        "Zkp.Implementation.WitnessGenerators.public_registration_cannot_sign_a_block"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 773,
+      "end": 808,
+      "status": "translated",
+      "label": "`add_channel_registration_material`: duplicate/queued check first, then record admission, then the fixture signer count",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addChannelRegistrationMaterial",
+        "Zkp.Implementation.WitnessGenerators.mapInsert",
+        "Zkp.Implementation.WitnessGenerators.mapContains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.duplicate_registration_is_refused_before_record_validation"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 809,
+      "end": 813,
+      "status": "translated",
+      "label": "`holds_local_signing_keys` production introspection",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.holdsLocalSigningKeys"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 814,
+      "end": 829,
+      "status": "test-only",
+      "label": "`replace_local_test_signers` (`#[cfg(test)]`)",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code; not part of any production build and not modeled."
+    },
+    {
+      "start": 830,
+      "end": 892,
+      "status": "translated",
+      "label": "`advance_registered_member_set`: all-slot requirement, mirror update, fail-closed drop of stale fixture signers",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.advanceRegisteredMemberSet",
+        "Zkp.Implementation.WitnessGenerators.mapErase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.member_set_advance_requires_all_slots",
+        "Zkp.Implementation.WitnessGenerators.member_set_advance_drops_mismatched_fixture_signers"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 893,
+      "end": 1042,
+      "status": "translated",
+      "label": "`add_registration_block`: queue drain, R5 one-time guard, no-deposit rule, chain advance, member-root leaf write, all-padding witness",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addRegistrationBlock",
+        "Zkp.Implementation.WitnessGenerators.paddingWitness",
+        "Zkp.Implementation.WitnessGenerators.dummyProof",
+        "Zkp.Implementation.WitnessGenerators.dummyRegevPk",
+        "Zkp.Implementation.WitnessGenerators.mkBlock",
+        "Zkp.Implementation.WitnessGenerators.succBlockNumber",
+        "Zkp.Implementation.WitnessGenerators.resolveNumUsers",
+        "Zkp.Implementation.WitnessGenerators.getNumUsers"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.registration_block_requires_a_queued_registration",
+        "Zkp.Implementation.WitnessGenerators.registration_is_one_time_per_channel",
+        "Zkp.Implementation.WitnessGenerators.registration_block_accepts_no_deposits",
+        "Zkp.Implementation.WitnessGenerators.registration_block_writes_the_member_root_and_advances_both_chains",
+        "Zkp.Implementation.WitnessGenerators.registration_block_carries_no_member_set_and_no_signature",
+        "Zkp.Implementation.WitnessGenerators.block_key_ids_are_padded_to_num_users",
+        "Zkp.Implementation.WitnessGenerators.block_copies_the_supplied_chains",
+        "Zkp.Implementation.WitnessGenerators.succ_block_number_increments",
+        "Zkp.Implementation.WitnessGenerators.num_users_is_at_least_the_key_id_count",
+        "Zkp.Implementation.WitnessGenerators.example_public_registration_then_registration_block",
+        "Zkp.Implementation.WitnessGenerators.example_registration_writes_the_member_leaf"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1043,
+      "end": 1066,
+      "status": "untranslated",
+      "label": "`register_channel` convenience wrapper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled: no declaration of the mapped module corresponds to these lines."
+    },
+    {
+      "start": 1067,
+      "end": 1093,
+      "status": "translated",
+      "label": "`current_public_state` / `current_extended_public_state`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.currentPublicState",
+        "Zkp.Implementation.WitnessGenerators.currentExtendedPublicState",
+        "Zkp.Implementation.WitnessGenerators.PublicState",
+        "Zkp.Implementation.WitnessGenerators.ExtPublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1094,
+      "end": 1103,
+      "status": "translated",
+      "label": "`current_bp_sig_chain`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.currentBpSigChain"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1104,
+      "end": 1168,
+      "status": "dependency-boundary",
+      "label": "`build_agg_sig_list_proof`: plonky2 recursion over FalconAggCircuit/AggListCircuit; only the unsigned-staging refusal is modeled",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.aggSigListProofAdmissible"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.an_unsigned_staged_event_can_never_prove_a_validity_span"
+      ],
+      "note": "The imported operation or representation remains an explicit, undischarged dependency; a returned value is not evidence."
+    },
+    {
+      "start": 1169,
+      "end": 1200,
+      "status": "translated",
+      "label": "`add_deposit`: queue for the NEXT block, index = pre-call counter",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addDeposit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.queued_deposit_takes_the_next_index_and_next_block"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1201,
+      "end": 1246,
+      "status": "translated",
+      "label": "`add_block` / `add_block_with_tx_v2`: private-clone construction, commit only on success",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addBlock",
+        "Zkp.Implementation.WitnessGenerators.commitBlock",
+        "Zkp.Implementation.WitnessGenerators.BlockArgs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.add_block_passes_no_tx_v2_witness",
+        "Zkp.Implementation.WitnessGenerators.refused_block_leaves_generator_unchanged"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1247,
+      "end": 1766,
+      "status": "translated",
+      "label": "`add_block_with_tx_v2_inner`: the whole ordered block-construction plan",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.addBlockInner",
+        "Zkp.Implementation.WitnessGenerators.resolveChannel",
+        "Zkp.Implementation.WitnessGenerators.mkChannelId",
+        "Zkp.Implementation.WitnessGenerators.checkTxV2Option",
+        "Zkp.Implementation.WitnessGenerators.checkTxV2Witness",
+        "Zkp.Implementation.WitnessGenerators.hasChannelActionSlot",
+        "Zkp.Implementation.WitnessGenerators.actionLens",
+        "Zkp.Implementation.WitnessGenerators.firstActiveSlot",
+        "Zkp.Implementation.WitnessGenerators.stageMessage",
+        "Zkp.Implementation.WitnessGenerators.stageChannelStateFields",
+        "Zkp.Implementation.WitnessGenerators.recordSigEvent",
+        "Zkp.Implementation.WitnessGenerators.collectSigners",
+        "Zkp.Implementation.WitnessGenerators.collectCosignatures",
+        "Zkp.Implementation.WitnessGenerators.slotStep",
+        "Zkp.Implementation.WitnessGenerators.slotLoop",
+        "Zkp.Implementation.WitnessGenerators.SlotCtx",
+        "Zkp.Implementation.WitnessGenerators.SlotAcc",
+        "Zkp.Implementation.WitnessGenerators.emptySlotAcc",
+        "Zkp.Implementation.WitnessGenerators.transitionedLeaf",
+        "Zkp.Implementation.WitnessGenerators.resolvePostingRegev",
+        "Zkp.Implementation.WitnessGenerators.channelLeafMemberRoot",
+        "Zkp.Implementation.WitnessGenerators.ChannelStateFields",
+        "Zkp.Implementation.WitnessGenerators.defaultChannelStateFields"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.block_requires_a_supported_user_count",
+        "Zkp.Implementation.WitnessGenerators.user_count_check_precedes_channel_id_resolution",
+        "Zkp.Implementation.WitnessGenerators.an_active_slot_requires_a_nonzero_channel_id",
+        "Zkp.Implementation.WitnessGenerators.a_padding_only_block_never_constructs_a_channel_id",
+        "Zkp.Implementation.WitnessGenerators.channel_id_zero_is_rejected",
+        "Zkp.Implementation.WitnessGenerators.tx_v2_array_length_is_checked_first",
+        "Zkp.Implementation.WitnessGenerators.channel_action_slot_without_its_subwitness_is_refused",
+        "Zkp.Implementation.WitnessGenerators.accepted_tx_v2_witness_is_sized_to_num_users",
+        "Zkp.Implementation.WitnessGenerators.cosigned_state_must_authorise_this_block",
+        "Zkp.Implementation.WitnessGenerators.h2_tag_check_precedes_the_fund_channel_check",
+        "Zkp.Implementation.WitnessGenerators.projected_fields_are_derived_from_the_new_block_number",
+        "Zkp.Implementation.WitnessGenerators.updating_slot_on_an_unregistered_channel_is_refused",
+        "Zkp.Implementation.WitnessGenerators.staged_member_set_implies_a_registered_channel",
+        "Zkp.Implementation.WitnessGenerators.cosignature_slot_order_is_checked_before_the_blob_decode",
+        "Zkp.Implementation.WitnessGenerators.accepted_cosignatures_rebind_the_public_polynomial",
+        "Zkp.Implementation.WitnessGenerators.cosignature_count_must_equal_the_member_count",
+        "Zkp.Implementation.WitnessGenerators.unsigned_staging_records_the_registered_set_and_no_witness",
+        "Zkp.Implementation.WitnessGenerators.local_fallback_signs_with_every_held_key",
+        "Zkp.Implementation.WitnessGenerators.sig_event_is_recorded_only_when_a_slot_signs",
+        "Zkp.Implementation.WitnessGenerators.recorded_event_folds_the_block_digest",
+        "Zkp.Implementation.WitnessGenerators.padding_slot_writes_dummies_and_touches_no_tree",
+        "Zkp.Implementation.WitnessGenerators.slot_step_does_not_transition_an_already_updated_leaf",
+        "Zkp.Implementation.WitnessGenerators.non_posting_slots_carry_the_dummy_regev_key",
+        "Zkp.Implementation.WitnessGenerators.posting_slot_without_a_registered_regev_key_is_refused",
+        "Zkp.Implementation.WitnessGenerators.transition_threads_the_send_interval_and_increments_the_index",
+        "Zkp.Implementation.WitnessGenerators.block_leaf_transition_preserves_the_member_root",
+        "Zkp.Implementation.WitnessGenerators.member_set_advance_is_unreachable_from_add_block",
+        "Zkp.Implementation.WitnessGenerators.channel_leaf_member_root_is_the_identity",
+        "Zkp.Implementation.WitnessGenerators.accepted_block_threads_the_roots",
+        "Zkp.Implementation.WitnessGenerators.accepted_block_consumes_the_staged_cosign_and_h1",
+        "Zkp.Implementation.WitnessGenerators.stored_witness_pairs_the_member_set_with_the_signer_count",
+        "Zkp.Implementation.WitnessGenerators.example_padding_only_block_needs_no_signature",
+        "Zkp.Implementation.WitnessGenerators.example_tx_v2_witness_is_admissible",
+        "Zkp.Implementation.WitnessGenerators.example_channel_action_without_subwitness_is_refused"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1767,
+      "end": 1800,
+      "status": "translated",
+      "label": "`get_send_status`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getSendStatus",
+        "Zkp.Implementation.WitnessGenerators.SendStatus",
+        "Zkp.Implementation.WitnessGenerators.sendLeavesAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.send_status_of_an_unrecorded_channel_is_the_default"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1801,
+      "end": 1854,
+      "status": "translated",
+      "label": "`get_account_state` (future-block guard)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getAccountState",
+        "Zkp.Implementation.WitnessGenerators.AccountState",
+        "Zkp.Implementation.WitnessGenerators.findIndex",
+        "Zkp.Implementation.WitnessGenerators.channelLeafAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.account_state_refuses_a_future_block"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1855,
+      "end": 1900,
+      "status": "translated",
+      "label": "`get_account_state_for_tx` (selects by tx tree root; no block bound check)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getAccountStateForTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.account_state_for_tx_requires_a_recorded_send_leaf"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1901,
+      "end": 1922,
+      "status": "translated",
+      "label": "`get_update_public_state_witness`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getUpdatePublicStateWitness",
+        "Zkp.Implementation.WitnessGenerators.UpdatePublicState",
+        "Zkp.Implementation.WitnessGenerators.defaultPublicState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.update_public_state_at_the_head_is_a_self_transition"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1923,
+      "end": 1939,
+      "status": "translated",
+      "label": "`get_deposit_merkle_proof` (first recipient match \u2014 ambiguous)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getDepositMerkleProof",
+        "Zkp.Implementation.WitnessGenerators.defaultDeposit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deposit_by_recipient_selects_the_first_match"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1940,
+      "end": 1974,
+      "status": "translated",
+      "label": "`get_deposit_merkle_proof_at_index` (index then recipient binding)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.getDepositMerkleProofAtIndex",
+        "Zkp.Implementation.WitnessGenerators.lookupDeposit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.deposit_at_index_binds_both_the_index_and_the_recipient",
+        "Zkp.Implementation.WitnessGenerators.deposit_index_check_precedes_the_recipient_check"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 1975,
+      "end": 2003,
+      "status": "translated",
+      "label": "`BlockTxV2Witness` (the M-2 sub-witness fields)",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.BlockTxV2Witness",
+        "Zkp.Implementation.WitnessGenerators.TxV2",
+        "Zkp.Implementation.WitnessGenerators.TxClass",
+        "Zkp.Implementation.WitnessGenerators.ChannelAction",
+        "Zkp.Implementation.WitnessGenerators.ChannelActionKind",
+        "Zkp.Implementation.WitnessGenerators.defaultTxV2",
+        "Zkp.Implementation.WitnessGenerators.defaultChannelAction"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 2004,
+      "end": 2012,
+      "status": "translated",
+      "label": "`SendStatus`",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.SendStatus"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 2013,
+      "end": 2013,
+      "status": "non-executable",
+      "label": "structural spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 2014,
+      "end": 2083,
+      "status": "test-only",
+      "label": "`#[cfg(test)] mod production_boundary_tests`",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code; not part of any production build and not modeled."
+    },
+    {
+      "start": 2084,
+      "end": 2093,
+      "status": "non-executable",
+      "label": "doc comment introducing the member-set-update test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 2094,
+      "end": 2456,
+      "status": "test-only",
+      "label": "`#[cfg(all(test, feature = \"deprecated-msu\"))] mod member_set_update_production_path_tests`",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code; not part of any production build and not modeled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "deterministic-harness-key-derivation-is-production-reachable",
+      "obligation": "`pub mod test_utils;` in src/circuits/mod.rs carries no cfg(test) and re-exports these generator modules, so `deterministic_member_falcon_keys`, `ChannelMemberKeys::deterministic`, `add_channel_registration` and `register_channel` compile into production builds. Every member Falcon signing key of a fixture-registered channel is a pure function of the PUBLIC channel id. Discharging this requires actually cfg-gating or extracting the harness key material; the model only records the reachability and the derivation.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon-keccak-and-merkle-callbacks",
+      "obligation": "Member roots, channel/send/deposit/public-state roots and openings, the block and deposit keccak chain steps and the channel-registration chain step are opaque callbacks. Prove collision resistance, correct leaf hashing, path-index decomposition and real tree ownership; an equal returned root is not authenticated state.",
+      "discharged": false
+    },
+    {
+      "name": "falcon-signing-and-blob-decoding",
+      "obligation": "`FalconKeys::sign`, `decode_cosign_blob`, `falcon_pk_digest` and `FalconSigGadgetWitness::for_signature` are callbacks. A produced or decoded signature is not authorization, and `falcon_pk_digest(h) == pk_g` rebinds an identity only under hash injectivity, which is not assumed.",
+      "discharged": false
+    },
+    {
+      "name": "agg-list-commitment-and-plonky2-recursion",
+      "obligation": "`agg_list_commitment` and `build_agg_sig_list_proof`'s recursive FalconAggCircuit/AggListCircuit proving are not modeled beyond the refusal precondition. Prove that the folded commitment equals what the validity circuit asserts against `final.bp_sig_chain`.",
+      "discharged": false
+    },
+    {
+      "name": "pinned-callee-body",
+      "obligation": "`channel_leaf_member_root` (src/circuits/validity/block_hash_chain/update_channel_tree.rs:163-170) is pinned here as the identity on `prev_member_pubkeys_root`. `member_set_advance_is_unreachable_from_add_block` is only valid while that body is unchanged; re-verify on any change to that callee.",
+      "discharged": false
+    },
+    {
+      "name": "native-panics-are-not-recoverable",
+      "obligation": "Rust `assert!`/`assert_eq!`/`expect`/`panic!` and integer overflow abort the process; the model represents them as a distinguished `GenError.nativePanic` purely to keep their position in the check order visible. Prove that no modeled panic is reachable, or that aborting is acceptable at each site.",
+      "discharged": false
+    },
+    {
+      "name": "witness-construction-is-not-a-circuit-constraint",
+      "obligation": "Every check modeled here is a native admission condition of THIS builder. An adversary can hand an arbitrary witness to the prover; nothing in this module constrains that path. Any safety claim must come from the circuits, not from these generators.",
+      "discharged": false
+    },
+    {
+      "name": "nullifier-insertion-and-freshness",
+      "obligation": "`prove_and_insert` on the indexed nullifier tree and `UpdatePrivateState::new` are callbacks. A returned insertion proof is not no-reuse and a changed root is not freshness.",
+      "discharged": false
+    },
+    {
+      "name": "proof-values-and-public-input-parsing",
+      "obligation": "plonky2 `ProofWithPublicInputs` values are modeled only by their parsed `BalancePublicInputs`. Proof validity, `BalancePublicInputs::from_u64` decoding and the balance processor are out of scope.",
+      "discharged": false
+    }
+  ]
+}

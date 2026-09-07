@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/witness/mod.rs",
+  "source_sha256": "de0e07763888d429a02b7a1e76e437d277c690a6c9916cbf53a4e4e0311db612",
+  "source_lines": 18,
+  "module": "Zkp.Implementation.WitnessGenerators",
+  "model": "doc/audit/zkp/Zkp/Implementation/WitnessGenerators.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 16,
+      "status": "non-executable",
+      "label": "module docstring, including the retained harness-material boundary note",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 17,
+      "end": 18,
+      "status": "translated",
+      "label": "`pub mod balance_witness_generator; pub mod block_witness_generator;` \u2014 the two child declarations, neither cfg(test)-gated",
+      "declarations": [
+        "Zkp.Implementation.WitnessGenerators.moduleEdges",
+        "Zkp.Implementation.WitnessGenerators.childEdge",
+        "Zkp.Implementation.WitnessGenerators.reachableChain",
+        "Zkp.Implementation.WitnessGenerators.productionReachable"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WitnessGenerators.no_module_edge_is_cfg_test",
+        "Zkp.Implementation.WitnessGenerators.block_witness_generator_reachable_via_witness",
+        "Zkp.Implementation.WitnessGenerators.balance_witness_generator_reachable_via_test_utils",
+        "Zkp.Implementation.WitnessGenerators.test_utils_reexports_both_generators",
+        "Zkp.Implementation.WitnessGenerators.harness_key_material_is_production_reachable"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "deterministic-harness-key-derivation-is-production-reachable",
+      "obligation": "`pub mod test_utils;` in src/circuits/mod.rs carries no cfg(test) and re-exports these generator modules, so `deterministic_member_falcon_keys`, `ChannelMemberKeys::deterministic`, `add_channel_registration` and `register_channel` compile into production builds. Every member Falcon signing key of a fixture-registered channel is a pure function of the PUBLIC channel id. Discharging this requires actually cfg-gating or extracting the harness key material; the model only records the reachability and the derivation.",
+      "discharged": false
+    },
+    {
+      "name": "rustc-module-resolution",
+      "obligation": "The model records the declared module items and their cfg flags as data. rustc's actual module resolution, path attributes, feature gates and the contents of the child files are not modeled.",
+      "discharged": false
+    }
+  ]
+}
