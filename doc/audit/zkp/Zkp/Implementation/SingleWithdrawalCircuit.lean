@@ -877,7 +877,7 @@ theorem native_tx_is_anchored_to_account_state {Proof Path Leaf : Type}
         txV2.transferTreeRoot = w.tx.transferTreeRoot ∧ txV2.nonce = w.tx.nonce) ∨
       (w.txV2 = none ∧ w.txV2MerkleProof = none ∧
         e.txVerify w.txMerkleProof w.tx full.pis.channelId (reduceToHashOut w.accountState.sendLeaf.txTreeRoot) = true)) := by
-  obtain ⟨_, _, full, hfull, _, _, _, _, _, _, chan, aroot, acc, incl, r, hr, hp⟩ :=
+  obtain ⟨_, _, full, hfull, _, _, _, _, _, _, chan, aroot, acc, incl, r, _hr, hp⟩ :=
     native_admission_facts accepted
   subst hp
   exact ⟨full, hfull, chan, aroot, acc, (tx_inclusion_ok_iff e w _ _).mp incl⟩
@@ -890,7 +890,7 @@ theorem native_update_binds_balance_state {Proof Path Leaf : Type}
       w.updatePublicState.oldState = full.pis.publicState ∧
       UpdatePublicState.ValidUpdate e.updateRoot w.updatePublicState ∧
       p.publicState = w.updatePublicState.newState := by
-  obtain ⟨_, _, full, hfull, _, upd, old, _, _, _, _, _, _, _, r, hr, hp⟩ :=
+  obtain ⟨_, _, full, hfull, _, upd, old, _, _, _, _, _, _, _, r, _hr, hp⟩ :=
     native_admission_facts accepted
   subst hp
   exact ⟨full, hfull, old, (UpdatePublicState.native_verify_iff_local_history _ _).mp upd, rfl⟩
@@ -902,7 +902,7 @@ theorem native_nullifier_binds_sender_nonce_and_index {Proof Path Leaf : Type}
       BalancePublicInputs.fullFromNative pure e.capCount w.balancePis = .ok full ∧
       p.withdrawal.nullifier = bytes32OfHashOut (e.hashInputs (settledTransferWords
         w.transferWitness.transfer full.pis.channelId w.transferWitness.transferIndex w.tx.nonce)) := by
-  obtain ⟨_, _, full, hfull, _, _, _, _, _, _, _, _, _, _, r, hr, hp⟩ :=
+  obtain ⟨_, _, full, hfull, _, _, _, _, _, _, _, _, _, _, r, _hr, hp⟩ :=
     native_admission_facts accepted
   subst hp
   exact ⟨full, hfull, rfl⟩
@@ -1096,8 +1096,8 @@ theorem gates_withdrawal_is_checked {Proof Path Leaf : Type}
   · rcases hv with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
       rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
     all_goals first
-      | (refine t _ ?_; simp)
-      | (refine nullifierChecked _ ?_; simp)
+      | (refine t _ ?_; simp; done)
+      | (refine nullifierChecked _ ?_; simp; done)
 
 /-! ## Nullifier binding (representation, not hash injectivity) -/
 
