@@ -750,7 +750,7 @@ theorem extract_address_ok_iff (r : Bytes8) (a : Address) :
     rename_i canonical
     simp only [Except.ok.injEq] at h
     subst h
-    exact of_not_not canonical
+    exact Decidable.of_not_not canonical
   · rintro rfl
     obtain ⟨a0,a1,a2,a3,a4⟩ := a
     simp [extractAddress, recipientOfAddress, addressTagWord, addressTag]
@@ -764,23 +764,20 @@ theorem tx_inclusion_ok_iff {Proof Path Leaf : Type} (e : Environment Proof Path
         txV2.transferTreeRoot = w.tx.transferTreeRoot ∧ txV2.nonce = w.tx.nonce) ∨
       (w.txV2 = none ∧ w.txV2MerkleProof = none ∧
         e.txVerify w.txMerkleProof w.tx channelId txTreeRoot = true)) := by
-  unfold verifyTxInclusion
-  split
-  · rename_i txV2 proof hv hp
-    simp only [unit_bind_ok_iff, require_ok_iff, beq_iff_eq, hv, hp, Option.some.injEq,
-      reduceCtorEq, false_and, and_false, or_false]
-    constructor
-    · rintro ⟨a, b, c, d, f⟩
-      exact ⟨txV2, proof, rfl, rfl, a, b, c, d, f⟩
-    · rintro ⟨x, y, hx, hy, a, b, c, d, f⟩
-      cases hx; cases hy
-      exact ⟨a, b, c, d, f⟩
-  · rename_i hv hp
-    simp [require_ok_iff, hv, hp]
-  · rename_i txV2 hv hp
-    simp [hv, hp]
-  · rename_i proof hv hp
-    simp [hv, hp]
+  rcases hv : w.txV2 with _ | txV2
+  · rcases hp : w.txV2MerkleProof with _ | proof
+    · simp [verifyTxInclusion, hv, hp, require_ok_iff]
+    · simp [verifyTxInclusion, hv, hp]
+  · rcases hp : w.txV2MerkleProof with _ | proof
+    · simp [verifyTxInclusion, hv, hp]
+    · simp only [verifyTxInclusion, hv, hp, unit_bind_ok_iff, require_ok_iff, beq_iff_eq,
+        Option.some.injEq, reduceCtorEq, false_and, and_false, or_false]
+      constructor
+      · rintro ⟨a, b, c, d, f⟩
+        exact ⟨txV2, proof, rfl, rfl, a, b, c, d, f⟩
+      · rintro ⟨x, y, hx, hy, a, b, c, d, f⟩
+        cases hx; cases hy
+        exact ⟨a, b, c, d, f⟩
 
 /-- Everything native admission checked, in source order. `full` is the parsed
     balance public inputs; the output is assembled from `update_public_state.new`
