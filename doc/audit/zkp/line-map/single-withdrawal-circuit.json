@@ -1,0 +1,2167 @@
+{
+  "schema_version": 1,
+  "source": "src/circuits/withdraw/single_withdrawal_circuit.rs",
+  "source_sha256": "18c551ce8794ad4bf717e5c546c90d28060e00258a76ab9c2d0a6fce81815713",
+  "source_lines": 1037,
+  "module": "Zkp.Implementation.SingleWithdrawalCircuit",
+  "model": "doc/audit/zkp/Zkp/Implementation/SingleWithdrawalCircuit.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment",
+        "Zkp.Implementation.SingleWithdrawalCircuit.FieldLowering"
+      ],
+      "theorems": [],
+      "note": "Imported field/hash/gadget/proof interfaces stay opaque callbacks of Environment; FieldLowering is undischarged."
+    },
+    {
+      "start": 18,
+      "end": 18,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 19,
+      "end": 51,
+      "status": "dependency-boundary",
+      "label": "plonky2 and crate imports",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment",
+        "Zkp.Implementation.SingleWithdrawalCircuit.FieldLowering"
+      ],
+      "theorems": [],
+      "note": "Imported field/hash/gadget/proof interfaces stay opaque callbacks of Environment; FieldLowering is undischarged."
+    },
+    {
+      "start": 52,
+      "end": 52,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 53,
+      "end": 53,
+      "status": "translated",
+      "label": "SINGLE_WITHDRAWAL_PUBLIC_INPUTS_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.singleWithdrawalPublicInputsLen",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateU64Len",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalLen",
+        "Zkp.Implementation.SingleWithdrawalCircuit.addressLen",
+        "Zkp.Implementation.SingleWithdrawalCircuit.u256Len",
+        "Zkp.Implementation.SingleWithdrawalCircuit.bytes32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_len_pinned",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_len_pinned",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_len_pinned"
+      ],
+      "note": "Constant pinned as a literal-valued def with an equality theorem; no source/compiler refinement."
+    },
+    {
+      "start": 54,
+      "end": 54,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 55,
+      "end": 58,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs value type",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics of the limb codec; no source/compiler refinement."
+    },
+    {
+      "start": 59,
+      "end": 60,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PisFault"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; message strings are not modeled."
+    },
+    {
+      "start": 62,
+      "end": 62,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 63,
+      "end": 63,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PisFault"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; message strings are not modeled."
+    },
+    {
+      "start": 64,
+      "end": 65,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 66,
+      "end": 66,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PisFault"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; message strings are not modeled."
+    },
+    {
+      "start": 67,
+      "end": 68,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 69,
+      "end": 70,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PisFault"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; message strings are not modeled."
+    },
+    {
+      "start": 71,
+      "end": 72,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 73,
+      "end": 77,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::to_u64_vec (45-limb layout)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs.words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.amountValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_words_length",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_words_length",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_limbs_follow_public_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.recipient_limbs_at_offset_15",
+        "Zkp.Implementation.SingleWithdrawalCircuit.token_index_at_offset_20",
+        "Zkp.Implementation.SingleWithdrawalCircuit.amount_limbs_at_offset_21",
+        "Zkp.Implementation.SingleWithdrawalCircuit.nullifier_limbs_at_offset_29",
+        "Zkp.Implementation.SingleWithdrawalCircuit.aux_data_limbs_at_offset_37",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_encoding_injective",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_encoding_injective"
+      ],
+      "note": "Handwritten local semantics of the limb codec; no source/compiler refinement."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 79,
+      "end": 85,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::from_u64_slice (native decoder)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.NativeDomain",
+        "Zkp.Implementation.SingleWithdrawalCircuit.wordBase",
+        "Zkp.Implementation.SingleWithdrawalCircuit.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_length_guard",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_parse_is_target_read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.block_limit_pinned"
+      ],
+      "note": "Order of guards (length, then PublicState bounds, then the u32 assert inside Withdrawal) transcribed; no source/compiler refinement."
+    },
+    {
+      "start": 86,
+      "end": 86,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::from_u64_slice (native decoder)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.NativeDomain",
+        "Zkp.Implementation.SingleWithdrawalCircuit.wordBase",
+        "Zkp.Implementation.SingleWithdrawalCircuit.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_length_guard",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_parse_is_target_read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.block_limit_pinned"
+      ],
+      "note": "Order of guards (length, then PublicState bounds, then the u32 assert inside Withdrawal) transcribed; no source/compiler refinement."
+    },
+    {
+      "start": 88,
+      "end": 88,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 89,
+      "end": 91,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::from_u64_slice (native decoder)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.NativeDomain",
+        "Zkp.Implementation.SingleWithdrawalCircuit.wordBase",
+        "Zkp.Implementation.SingleWithdrawalCircuit.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_length_guard",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_parse_is_target_read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.block_limit_pinned"
+      ],
+      "note": "Order of guards (length, then PublicState bounds, then the u32 assert inside Withdrawal) transcribed; no source/compiler refinement."
+    },
+    {
+      "start": 92,
+      "end": 92,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 93,
+      "end": 95,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::from_u64_slice (native decoder)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.NativeDomain",
+        "Zkp.Implementation.SingleWithdrawalCircuit.wordBase",
+        "Zkp.Implementation.SingleWithdrawalCircuit.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_length_guard",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_parse_is_target_read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.block_limit_pinned"
+      ],
+      "note": "Order of guards (length, then PublicState bounds, then the u32 assert inside Withdrawal) transcribed; no source/compiler refinement."
+    },
+    {
+      "start": 96,
+      "end": 96,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 97,
+      "end": 101,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputs::from_u64_slice (native decoder)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.publicStateFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawalFromNative",
+        "Zkp.Implementation.SingleWithdrawalCircuit.NativeDomain",
+        "Zkp.Implementation.SingleWithdrawalCircuit.wordBase",
+        "Zkp.Implementation.SingleWithdrawalCircuit.blockLimit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_length_guard",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_parse_is_target_read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_from_native_ok",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.block_limit_pinned"
+      ],
+      "note": "Order of guards (length, then PublicState bounds, then the u32 assert inside Withdrawal) transcribed; no source/compiler refinement."
+    },
+    {
+      "start": 102,
+      "end": 104,
+      "status": "non-executable",
+      "label": "closing braces and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 105,
+      "end": 108,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget wires",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs"
+      ],
+      "theorems": [],
+      "note": "The same Lean record models the native value and the target wires; wires are integers."
+    },
+    {
+      "start": 109,
+      "end": 110,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 111,
+      "end": 113,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::to_vec (registered order)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs.words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.registeredPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.registered_public_input_count"
+      ],
+      "note": "Handwritten local semantics of the limb codec; no source/compiler refinement."
+    },
+    {
+      "start": 114,
+      "end": 114,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 115,
+      "end": 120,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec (assert_eq length, positional slices)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromVec",
+        "Zkp.Implementation.SingleWithdrawalCircuit.readPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_length_assert",
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.drop_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_withdrawal_words"
+      ],
+      "note": "The length assert is modeled as an error rather than a panic; slicing offsets transcribed."
+    },
+    {
+      "start": 121,
+      "end": 121,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 122,
+      "end": 122,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec (assert_eq length, positional slices)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromVec",
+        "Zkp.Implementation.SingleWithdrawalCircuit.readPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_length_assert",
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.drop_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_withdrawal_words"
+      ],
+      "note": "The length assert is modeled as an error rather than a panic; slicing offsets transcribed."
+    },
+    {
+      "start": 123,
+      "end": 123,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 124,
+      "end": 126,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec (assert_eq length, positional slices)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromVec",
+        "Zkp.Implementation.SingleWithdrawalCircuit.readPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_length_assert",
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.drop_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_withdrawal_words"
+      ],
+      "note": "The length assert is modeled as an error rather than a panic; slicing offsets transcribed."
+    },
+    {
+      "start": 127,
+      "end": 127,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 128,
+      "end": 128,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec (assert_eq length, positional slices)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromVec",
+        "Zkp.Implementation.SingleWithdrawalCircuit.readPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_length_assert",
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.drop_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_withdrawal_words"
+      ],
+      "note": "The length assert is modeled as an error rather than a panic; slicing offsets transcribed."
+    },
+    {
+      "start": 129,
+      "end": 129,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 130,
+      "end": 134,
+      "status": "translated",
+      "label": "SingleWithdawalPublicInputsTarget::from_vec (assert_eq length, positional slices)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.fromVec",
+        "Zkp.Implementation.SingleWithdrawalCircuit.readPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.read",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Address.read"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_length_assert",
+        "Zkp.Implementation.SingleWithdrawalCircuit.target_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_inputs_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.withdrawal_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.public_state_read_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.drop_public_state_words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.take_withdrawal_words"
+      ],
+      "note": "The length assert is modeled as an error rather than a panic; slicing offsets transcribed."
+    },
+    {
+      "start": 135,
+      "end": 143,
+      "status": "untranslated",
+      "label": "SingleWithdawalPublicInputsTarget::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Public-input witness writing is not modeled; prove only passes the computed PublicInputs to the opaque prover."
+    },
+    {
+      "start": 144,
+      "end": 146,
+      "status": "non-executable",
+      "label": "closing braces and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 147,
+      "end": 147,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 148,
+      "end": 148,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 149,
+      "end": 149,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 150,
+      "end": 151,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 152,
+      "end": 152,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 153,
+      "end": 154,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 155,
+      "end": 158,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 159,
+      "end": 160,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 161,
+      "end": 161,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 162,
+      "end": 163,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 164,
+      "end": 164,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 165,
+      "end": 166,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 167,
+      "end": 167,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 168,
+      "end": 169,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 170,
+      "end": 170,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 171,
+      "end": 172,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 173,
+      "end": 173,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 174,
+      "end": 175,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 176,
+      "end": 176,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 177,
+      "end": 178,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 179,
+      "end": 179,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 180,
+      "end": 181,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 182,
+      "end": 182,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 183,
+      "end": 184,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 185,
+      "end": 186,
+      "status": "translated",
+      "label": "SingleWithdawalWitnessError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Error variants transcribed as a Lean inductive; formatted messages are abstracted to short strings."
+    },
+    {
+      "start": 187,
+      "end": 187,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 188,
+      "end": 194,
+      "status": "dependency-boundary",
+      "label": "SingleWithdawalWitness generic parameters and hasher bounds",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "RichField/Extendable/GenericConfig/AlgebraicHasher are not modeled; the proof system is an Environment callback."
+    },
+    {
+      "start": 195,
+      "end": 196,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 197,
+      "end": 197,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 198,
+      "end": 199,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 200,
+      "end": 200,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 201,
+      "end": 202,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 203,
+      "end": 203,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 204,
+      "end": 205,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 206,
+      "end": 206,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 207,
+      "end": 208,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 209,
+      "end": 209,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 210,
+      "end": 211,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 212,
+      "end": 213,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 214,
+      "end": 215,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 216,
+      "end": 216,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 217,
+      "end": 218,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 219,
+      "end": 219,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 220,
+      "end": 221,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 222,
+      "end": 223,
+      "status": "translated",
+      "label": "SingleWithdawalWitness fields",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Tx",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer"
+      ],
+      "theorems": [],
+      "note": "Only the fields this file reads are modeled; Merkle proofs and the balance proof are abstract Path/Proof values."
+    },
+    {
+      "start": 224,
+      "end": 229,
+      "status": "non-executable",
+      "label": "impl header and where-clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 230,
+      "end": 233,
+      "status": "translated",
+      "label": "to_public_inputs signature (native admission entry point)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Result"
+      ],
+      "theorems": [],
+      "note": "Executable Except model of the native admission path."
+    },
+    {
+      "start": 234,
+      "end": 234,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 235,
+      "end": 249,
+      "status": "dependency-boundary",
+      "label": "check_cyclic_proof_verifier_data and balance_vd.verify",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.checkCyclicVerifierData",
+        "Zkp.Implementation.SingleWithdrawalCircuit.verifierTail",
+        "Zkp.Implementation.SingleWithdrawalCircuit.VerifierData",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_balance_proof_is_checked_against_fixed_key"
+      ],
+      "note": "Proof verification is an opaque Environment callback under the FIXED balance key; soundness is not claimed."
+    },
+    {
+      "start": 250,
+      "end": 250,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 251,
+      "end": 257,
+      "status": "translated",
+      "label": "BalanceFullPublicInputs::from_u64_slice and channel_id extraction",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.lift",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Error"
+      ],
+      "theorems": [],
+      "note": "Decoding is delegated to the imported Zkp.Implementation.BalancePublicInputs model; only the call site and error mapping are transcribed here."
+    },
+    {
+      "start": 258,
+      "end": 259,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 260,
+      "end": 267,
+      "status": "translated",
+      "label": "private-state commitment equality check",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.privateCommitment",
+        "Zkp.Implementation.SingleWithdrawalCircuit.hash4OfRoot",
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.private_commitment_is_private_state_commitment"
+      ],
+      "note": "Poseidon is an opaque callback; the check binds the compared pair only, never hash injectivity."
+    },
+    {
+      "start": 268,
+      "end": 269,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 270,
+      "end": 276,
+      "status": "translated",
+      "label": "update_public_state.verify, old == balance public state, output = new",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Update"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_update_binds_balance_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_output_state_is_updated_state"
+      ],
+      "note": "Uses the imported UpdatePublicState native verifier; the block-hash Merkle root stays an opaque RootCall."
+    },
+    {
+      "start": 277,
+      "end": 278,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 279,
+      "end": 285,
+      "status": "translated",
+      "label": "sent-tx Merkle opening of tx at index tx.nonce under private_state.sent_tx_tree_root",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 286,
+      "end": 287,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 288,
+      "end": 298,
+      "status": "translated",
+      "label": "transfer witness: transfer_tree_root == tx.transfer_tree_root, then verify",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TransferWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 299,
+      "end": 300,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 301,
+      "end": 322,
+      "status": "translated",
+      "label": "account state channel/root binding, verify, and send_leaf.tx_tree_root reduction",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.AccountState",
+        "Zkp.Implementation.SingleWithdrawalCircuit.SendLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.reduceToHashOut"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_tx_is_anchored_to_account_state"
+      ],
+      "note": "The native path uses the bare (many-to-one) reduce_to_hash_out; that is transcribed, not repaired. The account-tree opening is an opaque callback."
+    },
+    {
+      "start": 323,
+      "end": 324,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 325,
+      "end": 326,
+      "status": "translated",
+      "label": "tx / tx_v2 inclusion match (legacy path, typed UserTransfer path, half-supplied rejection)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.verifyTxInclusion",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.userTransferClass",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeHeight",
+        "Zkp.Implementation.SingleWithdrawalCircuit.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_inclusion_ok_iff",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_tx_is_anchored_to_account_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_half_supplied_tx_v2_is_rejected",
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_tree_height_is_channel_id_bits"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 327,
+      "end": 328,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 329,
+      "end": 331,
+      "status": "translated",
+      "label": "tx / tx_v2 inclusion match (legacy path, typed UserTransfer path, half-supplied rejection)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.verifyTxInclusion",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.userTransferClass",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeHeight",
+        "Zkp.Implementation.SingleWithdrawalCircuit.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_inclusion_ok_iff",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_tx_is_anchored_to_account_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_half_supplied_tx_v2_is_rejected",
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_tree_height_is_channel_id_bits"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 332,
+      "end": 332,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 333,
+      "end": 366,
+      "status": "translated",
+      "label": "tx / tx_v2 inclusion match (legacy path, typed UserTransfer path, half-supplied rejection)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.verifyTxInclusion",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.userTransferClass",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeHeight",
+        "Zkp.Implementation.SingleWithdrawalCircuit.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_inclusion_ok_iff",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_tx_is_anchored_to_account_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_half_supplied_tx_v2_is_rejected",
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_tree_height_is_channel_id_bits"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 367,
+      "end": 367,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 368,
+      "end": 370,
+      "status": "translated",
+      "label": "extract_address_from_recipient (canonical ADDRESS_TAG form)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.extractAddress",
+        "Zkp.Implementation.SingleWithdrawalCircuit.recipientOfAddress",
+        "Zkp.Implementation.SingleWithdrawalCircuit.addressTag",
+        "Zkp.Implementation.SingleWithdrawalCircuit.addressTagWord"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.extract_address_ok_iff",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_rejects_non_canonical_recipient",
+        "Zkp.Implementation.SingleWithdrawalCircuit.address_tag_word_pinned"
+      ],
+      "note": "Byte layout transcribed at 32-bit-limb granularity; the tag byte and the zero padding are both enforced."
+    },
+    {
+      "start": 371,
+      "end": 375,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 376,
+      "end": 381,
+      "status": "translated",
+      "label": "SettledTransfer::new nullifier preimage (transfer, channel, transfer_index, nonce)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.settledTransferWords",
+        "Zkp.Implementation.SingleWithdrawalCircuit.nullifierOf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Transfer.words",
+        "Zkp.Implementation.SingleWithdrawalCircuit.bytes32OfHashOut"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.settled_transfer_words_length",
+        "Zkp.Implementation.SingleWithdrawalCircuit.transfer_words_length",
+        "Zkp.Implementation.SingleWithdrawalCircuit.settled_words_bind_transfer_channel_index_nonce",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_nullifier_binds_sender_nonce_and_index",
+        "Zkp.Implementation.SingleWithdrawalCircuit.same_nullifier_inputs_have_same_nullifier",
+        "Zkp.Implementation.SingleWithdrawalCircuit.equal_nullifiers_bind_same_spend"
+      ],
+      "note": "Poseidon is opaque; equal nullifiers bind the same spend only under an explicit binding premise on the two compared preimages. Freshness/uniqueness is not claimed."
+    },
+    {
+      "start": 382,
+      "end": 383,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 384,
+      "end": 390,
+      "status": "translated",
+      "label": "Withdrawal construction and the returned SingleWithdawalPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal",
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.rollupLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.addressValue",
+        "Zkp.Implementation.SingleWithdrawalCircuit.bytes32Value",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.Checked"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_admission_facts",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_withdrawal_comes_from_sent_transfer",
+        "Zkp.Implementation.SingleWithdrawalCircuit.rollup_leaf_injective_on_checked",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_witness_is_admitted",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_nullifier_limbs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_rollup_leaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_public_inputs_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_half_supplied_pair_is_rejected"
+      ],
+      "note": "rollupLeaf projects the 30-limb withdrawal onto the 5-field leaf that RollupValue.foldWithdrawalLeaf consumes; keccak chaining itself lives in the RollupValue model."
+    },
+    {
+      "start": 391,
+      "end": 391,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 392,
+      "end": 397,
+      "status": "translated",
+      "label": "Withdrawal construction and the returned SingleWithdawalPublicInputs",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal",
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.toPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.rollupLeaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.addressValue",
+        "Zkp.Implementation.SingleWithdrawalCircuit.bytes32Value",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal.Checked"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_admission_facts",
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_withdrawal_comes_from_sent_transfer",
+        "Zkp.Implementation.SingleWithdrawalCircuit.rollup_leaf_injective_on_checked",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_witness_is_admitted",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_nullifier_limbs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_rollup_leaf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_public_inputs_native_roundtrip",
+        "Zkp.Implementation.SingleWithdrawalCircuit.normal_half_supplied_pair_is_rejected"
+      ],
+      "note": "rollupLeaf projects the 30-limb withdrawal onto the 5-field leaf that RollupValue.foldWithdrawalLeaf consumes; keccak chaining itself lives in the RollupValue model."
+    },
+    {
+      "start": 398,
+      "end": 399,
+      "status": "non-executable",
+      "label": "blank line and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 400,
+      "end": 413,
+      "status": "translated",
+      "label": "SingleWithdawalTarget wires",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Wires"
+      ],
+      "theorems": [],
+      "note": "Wires are integer representatives; each Merkle proof is an abstract Path."
+    },
+    {
+      "start": 414,
+      "end": 415,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 416,
+      "end": 424,
+      "status": "dependency-boundary",
+      "label": "SingleWithdawalTarget::new signature and CircuitBuilder generics",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment",
+        "Zkp.Implementation.SingleWithdrawalCircuit.FieldLowering"
+      ],
+      "theorems": [],
+      "note": "CircuitBuilder/VerifierCircuitData and gate lowering are not modeled; CircuitGates is stated over wire values."
+    },
+    {
+      "start": 425,
+      "end": 430,
+      "status": "dependency-boundary",
+      "label": "add_proof_target_and_verify_cyclic and BalanceFullPublicInputsTarget::from_pis",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.balancePisOf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.checkCyclicVerifierData",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_balance_proof_is_checked_against_fixed_key"
+      ],
+      "note": "In-circuit proof verification is an opaque callback; only the fixed-key connection and the pis read are stated."
+    },
+    {
+      "start": 431,
+      "end": 431,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 432,
+      "end": 442,
+      "status": "translated",
+      "label": "target allocations: nonce range check, use_tx_v2 bool, Merkle proof and witness targets",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Wires",
+        "Zkp.Implementation.SingleWithdrawalCircuit.sentTxTreeHeight",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeHeight",
+        "Zkp.Implementation.SingleWithdrawalCircuit.transferTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.sent_tx_tree_height_pinned"
+      ],
+      "note": "Allocation-time range checks appear as CircuitGates fields (nonceRange, transferChecked, transferIndexRange)."
+    },
+    {
+      "start": 443,
+      "end": 443,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 444,
+      "end": 445,
+      "status": "translated",
+      "label": "private_commitment.connect(balance_pis.private_commitment)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.privateCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 446,
+      "end": 446,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 447,
+      "end": 450,
+      "status": "translated",
+      "label": "update_public_state.old connect and public_state = update.new",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_update_binds_balance_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_output_state_is_updated_state"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 451,
+      "end": 451,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 452,
+      "end": 457,
+      "status": "translated",
+      "label": "account_state channel_id and account_tree_root connects",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_tx_is_anchored_to_account_state"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 458,
+      "end": 458,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 459,
+      "end": 464,
+      "status": "translated",
+      "label": "sent_tx_merkle_proof.verify(tx, tx.nonce, private_state.sent_tx_tree_root)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 465,
+      "end": 465,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 466,
+      "end": 468,
+      "status": "translated",
+      "label": "transfer_witness.transfer_tree_root connect to tx.transfer_tree_root",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 469,
+      "end": 476,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 477,
+      "end": 477,
+      "status": "translated",
+      "label": "send_leaf.tx_tree_root.to_hash_out canonicity (TODO-2 fix)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CanonicalBytes32",
+        "Zkp.Implementation.SingleWithdrawalCircuit.reduceToHashOut",
+        "Zkp.Implementation.SingleWithdrawalCircuit.bytes32OfHashOut",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeRootOf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.goldilocks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_tx_tree_root_bytes_are_recoverable",
+        "Zkp.Implementation.SingleWithdrawalCircuit.canonical_reduction_injective",
+        "Zkp.Implementation.SingleWithdrawalCircuit.split_of_canonical_reduction",
+        "Zkp.Implementation.SingleWithdrawalCircuit.reduce_of_split"
+      ],
+      "note": "Canonicity is modeled as a 32-bit-limb bound plus a Goldilocks bound on each recombined element, making the reduction injective on that domain."
+    },
+    {
+      "start": 478,
+      "end": 479,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 480,
+      "end": 495,
+      "status": "translated",
+      "label": "tx index = channel_id and conditional legacy / TxV2 inclusion",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.txTreeRootOf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_tx_is_anchored_to_account_state",
+        "Zkp.Implementation.SingleWithdrawalCircuit.tx_tree_height_is_channel_id_bits"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement. Merkle/Poseidon/plonky2 gadget results are opaque Environment callbacks, named in boundaries."
+    },
+    {
+      "start": 496,
+      "end": 496,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 497,
+      "end": 508,
+      "status": "translated",
+      "label": "TxV2 class, zero channel_action_root, transfer-root and nonce conditional asserts",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2",
+        "Zkp.Implementation.SingleWithdrawalCircuit.userTransferClass"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_tx_is_anchored_to_account_state"
+      ],
+      "note": "conditional_assert_eq is modeled as an implication guarded by the use_tx_v2 wire."
+    },
+    {
+      "start": 509,
+      "end": 509,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 510,
+      "end": 511,
+      "status": "translated",
+      "label": "extract_address_from_recipient_circuit",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.recipientOfAddress",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_comes_from_sent_transfer"
+      ],
+      "note": "The circuit connects the recipient to the canonical reconstruction, which the model states as an equation."
+    },
+    {
+      "start": 512,
+      "end": 517,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 518,
+      "end": 524,
+      "status": "translated",
+      "label": "SettledTransferTarget and in-circuit nullifier",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.settledTransferWords",
+        "Zkp.Implementation.SingleWithdrawalCircuit.nullifierOf",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_nullifier_binds_sender_nonce_and_index",
+        "Zkp.Implementation.SingleWithdrawalCircuit.equal_nullifiers_bind_same_spend"
+      ],
+      "note": "The nullifier binds tx.nonce (F-WD-2), which is range-checked and Merkle-opened at index = nonce."
+    },
+    {
+      "start": 525,
+      "end": 525,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 526,
+      "end": 532,
+      "status": "translated",
+      "label": "WithdrawalTarget and SingleWithdawalPublicInputsTarget assembly",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal",
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_is_checked"
+      ],
+      "note": "The output withdrawal limbs are copied from checked transfer wires; state/nullifier bounds stay hypotheses."
+    },
+    {
+      "start": 533,
+      "end": 533,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 534,
+      "end": 537,
+      "status": "translated",
+      "label": "WithdrawalTarget and SingleWithdawalPublicInputsTarget assembly",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Withdrawal",
+        "Zkp.Implementation.SingleWithdrawalCircuit.PublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.gates_withdrawal_is_checked"
+      ],
+      "note": "The output withdrawal limbs are copied from checked transfer wires; state/nullifier bounds stay hypotheses."
+    },
+    {
+      "start": 538,
+      "end": 538,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 539,
+      "end": 553,
+      "status": "translated",
+      "label": "returned SingleWithdawalTarget value",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Wires"
+      ],
+      "theorems": [],
+      "note": "Field-for-field wire record; no source/compiler refinement."
+    },
+    {
+      "start": 554,
+      "end": 561,
+      "status": "non-executable",
+      "label": "set_witness signature and generic bounds",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 562,
+      "end": 586,
+      "status": "translated",
+      "label": "SingleWithdawalTarget::set_witness (use_tx_v2 = tx_v2.is_some, dummy proof, default TxV2)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness.toWires",
+        "Zkp.Implementation.SingleWithdrawalCircuit.TxV2.default"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.native_fill_selects_typed_path_iff_supplied"
+      ],
+      "note": "WitnessWrite conversions are not modeled; only which wire gets which witness value."
+    },
+    {
+      "start": 587,
+      "end": 589,
+      "status": "non-executable",
+      "label": "closing braces and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 590,
+      "end": 590,
+      "status": "translated",
+      "label": "SingleWithdawalCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitError"
+      ],
+      "theorems": [],
+      "note": "Two-variant error transcribed; prover error strings are opaque."
+    },
+    {
+      "start": 591,
+      "end": 591,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 592,
+      "end": 592,
+      "status": "translated",
+      "label": "SingleWithdawalCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitError"
+      ],
+      "theorems": [],
+      "note": "Two-variant error transcribed; prover error strings are opaque."
+    },
+    {
+      "start": 593,
+      "end": 594,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 595,
+      "end": 596,
+      "status": "translated",
+      "label": "SingleWithdawalCircuitError variants",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitError"
+      ],
+      "theorems": [],
+      "note": "Two-variant error transcribed; prover error strings are opaque."
+    },
+    {
+      "start": 597,
+      "end": 597,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 598,
+      "end": 608,
+      "status": "dependency-boundary",
+      "label": "SingleWithdawalCircuit fields (CircuitData, target, public inputs, balance_vd)",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.Environment"
+      ],
+      "theorems": [],
+      "note": "CircuitData is opaque; the captured balance_vd is modeled only as the fixed Environment.balanceKey."
+    },
+    {
+      "start": 609,
+      "end": 615,
+      "status": "non-executable",
+      "label": "impl header and where-clause",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 616,
+      "end": 622,
+      "status": "translated",
+      "label": "SingleWithdawalCircuit::new: build target, register the 45 public inputs, keep balance_vd",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.registeredPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.FieldLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.registered_public_input_count"
+      ],
+      "note": "builder.build is opaque; only the registered public-input list and its length are modeled."
+    },
+    {
+      "start": 623,
+      "end": 623,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 624,
+      "end": 630,
+      "status": "translated",
+      "label": "SingleWithdawalCircuit::new: build target, register the 45 public inputs, keep balance_vd",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.registeredPublicInputs",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitGates",
+        "Zkp.Implementation.SingleWithdrawalCircuit.FieldLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.registered_public_input_count"
+      ],
+      "note": "builder.build is opaque; only the registered public-input list and its length are modeled."
+    },
+    {
+      "start": 631,
+      "end": 631,
+      "status": "non-executable",
+      "label": "Comment, blank line or attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 632,
+      "end": 643,
+      "status": "translated",
+      "label": "SingleWithdawalCircuit::prove: native admission, then fill, then the opaque prover",
+      "declarations": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.prove",
+        "Zkp.Implementation.SingleWithdrawalCircuit.CircuitError",
+        "Zkp.Implementation.SingleWithdrawalCircuit.Witness.toWires"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SingleWithdrawalCircuit.prove_requires_native_admission",
+        "Zkp.Implementation.SingleWithdrawalCircuit.prove_rejected_witness_never_reaches_prover"
+      ],
+      "note": "Proving is an opaque Except-valued callback; a rejected witness provably never reaches it."
+    },
+    {
+      "start": 644,
+      "end": 694,
+      "status": "untranslated",
+      "label": "to_bytes / from_bytes circuit serialization",
+      "declarations": [],
+      "theorems": [],
+      "note": "bincode/gate/generator serialization and verifier-data (de)serialization are not modeled."
+    },
+    {
+      "start": 695,
+      "end": 697,
+      "status": "non-executable",
+      "label": "closing braces and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 698,
+      "end": 703,
+      "status": "untranslated",
+      "label": "SingleWithdawalCircuitBytes serialization payload",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serialization payload shape is not modeled."
+    },
+    {
+      "start": 704,
+      "end": 704,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment, blank line, attribute, closing brace or signature-only text; carries no callee guarantee."
+    },
+    {
+      "start": 705,
+      "end": 1037,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Unit tests (legacy and TxV2 withdrawal proving, circuit serialization round trip) were read, not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust_plonky2_refinement",
+      "obligation": "The handwritten Lean control flow, wire records and CircuitGates must be linked to the actual Rust source and to plonky2 gate lowering; FieldLowering is not discharged.",
+      "discharged": false
+    },
+    {
+      "name": "balance_proof_soundness",
+      "obligation": "add_proof_target_and_verify_cyclic / VerifierCircuitData::verify under the fixed balance verifier key must actually imply that the balance public inputs describe a reachable balance state; the model only records that the callback returned true and that the trailing verifier-data limbs equal the pinned key.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon_hash",
+      "obligation": "PoseidonHashOut (private-state commitment, SettledTransfer nullifier, all tree hashing) must be collision resistant; the model treats it as an opaque callback and states binding only for explicitly compared preimage pairs.",
+      "discharged": false
+    },
+    {
+      "name": "merkle_openings",
+      "obligation": "SentTxMerkleProof, TxMerkleProof, TxV2MerkleProof, the transfer-tree proof and the AccountState openings must be sound Merkle-inclusion gadgets at the stated heights; the model consumes only their boolean results.",
+      "discharged": false
+    },
+    {
+      "name": "sent_tx_tree_contents",
+      "obligation": "That private_state.sent_tx_tree_root contains only transactions the sender actually funded and deducted is enforced by the balance/spend circuits, not here; this file only opens tx at index tx.nonce.",
+      "discharged": false
+    },
+    {
+      "name": "block_validity_anchoring",
+      "obligation": "That account_tree_root of the OUTPUT public state, and the send_leaf it opens, correspond to an on-chain posted block is discharged by the validity proof and by the withdrawal chain / IntmaxRollup, not by this circuit.",
+      "discharged": false
+    },
+    {
+      "name": "nullifier_freshness",
+      "obligation": "Double-withdrawal prevention is the L1 used[nullifier] ledger in IntmaxRollup; this circuit only computes the nullifier from a bound preimage and claims no freshness or uniqueness.",
+      "discharged": false
+    },
+    {
+      "name": "public_input_consumption",
+      "obligation": "The 45-limb layout must match what withdrawal_step.rs keccak-chains and what RollupValue.foldWithdrawalLeaf / verifyWithdrawalSet consume on L1; only the limb offsets and the 5-field leaf projection are stated here.",
+      "discharged": false
+    },
+    {
+      "name": "native_witness_effects",
+      "obligation": "WitnessWrite canonical field conversions, dummy TxV2 proof filling and the plonky2 prover are opaque; no admission check beyond to_public_inputs is invented.",
+      "discharged": false
+    },
+    {
+      "name": "serialization_and_fixtures",
+      "obligation": "to_bytes/from_bytes and the #[cfg(test)] witness generators were read, not translated; circuit-data equality after a round trip is not modeled.",
+      "discharged": false
+    }
+  ]
+}
