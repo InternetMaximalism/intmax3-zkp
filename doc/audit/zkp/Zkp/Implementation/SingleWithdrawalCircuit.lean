@@ -130,8 +130,8 @@ def Withdrawal.words (w : Withdrawal) : List Nat :=
 def Withdrawal.read (xs : List Nat) : Withdrawal :=
   ⟨Address.read xs 0, xs.getD 5 0, BalancePublicInputs.Bytes8.read xs 6,
     BalancePublicInputs.Bytes8.read xs 14, BalancePublicInputs.Bytes8.read xs 22⟩
-def Withdrawal.Checked (w : Withdrawal) : Prop :=
-  U256Arithmetic.Checked U256Arithmetic.wordBase w.words
+def Withdrawal.Checked (w : Withdrawal) : Prop := U256Arithmetic.Checked wordBase w.words
+theorem word_base_agrees : wordBase = U256Arithmetic.wordBase := rfl
 def Withdrawal.amountValue (w : Withdrawal) : Nat := U256Arithmetic.valueBE w.amount.words
 
 /-- `SingleWithdawalPublicInputs`: public state (15 limbs) then withdrawal (30). -/
@@ -152,6 +152,10 @@ inductive PisFault where
   | u32Panic
   | targetLengthAssert
   deriving DecidableEq, Repr
+
+theorem except_bind_ok_iff {ε α β : Type} (r : Except ε α) (f : α → Except ε β) (value : β) :
+    (r >>= f) = .ok value ↔ ∃ x, r = .ok x ∧ f x = .ok value := by
+  cases r <;> simp [Bind.bind, Except.bind]
 
 /-- `PublicState::from_u64_slice`: exact length, `BlockNumber::new` (< 2^63),
     `U64::from_u64_slice` (two u32 limbs); Poseidon roots are copied without a
@@ -218,8 +222,10 @@ theorem drop_public_state_words (ps : PublicState) (suffix : List Nat) :
   obtain ⟨b, hi, lo, ⟨a0,a1,a2,a3⟩, ⟨d0,d1,d2,d3⟩, ⟨p0,p1,p2,p3⟩⟩ := ps
   rfl
 
-theorem take_withdrawal_words (w : Withdrawal) : w.words.take withdrawalLen = w.words :=
-  List.take_of_length_le (by rw [withdrawal_words_length])
+theorem take_withdrawal_words (w : Withdrawal) : w.words.take withdrawalLen = w.words := by
+  obtain ⟨⟨a0,a1,a2,a3,a4⟩, t, ⟨m0,m1,m2,m3,m4,m5,m6,m7⟩, ⟨n0,n1,n2,n3,n4,n5,n6,n7⟩,
+    ⟨x0,x1,x2,x3,x4,x5,x6,x7⟩⟩ := w
+  rfl
 
 theorem public_inputs_read_words (p : PublicInputs) : readPublicInputs p.words = p := by
   obtain ⟨ps, w⟩ := p
@@ -291,16 +297,22 @@ theorem target_roundtrip (p : PublicInputs) : fromVec p.words = .ok p := by
 theorem withdrawal_native_roundtrip (w : Withdrawal) (checked : w.Checked) :
     withdrawalFromNative w.words = .ok w := by
   have none : w.words.any (fun x => decide (x ≥ wordBase)) = false := by
-    simp only [List.any_eq_false, decide_eq_true_eq, not_le]
-    intro x hx
-    exact checked x hx
+    cases h : w.words.any (fun x => decide (x ≥ wordBase)) with
+    | false => rfl
+    | true =>
+      obtain ⟨x, hx, hb⟩ := List.any_eq_true.mp h
+      simp only [decide_eq_true_eq] at hb
+      exact absurd (checked x hx) (Nat.not_lt.mpr hb)
   simp [withdrawalFromNative, none, withdrawal_words_length, withdrawal_read_words]
 
 theorem public_state_native_roundtrip (ps : PublicState) (block : ps.blockNumber < blockLimit)
     (hi : ps.timestampHi < wordBase) (lo : ps.timestampLo < wordBase) :
     publicStateFromNative ps.words = .ok ps := by
+  have b' : ¬ blockLimit ≤ ps.blockNumber := Nat.not_le.mpr block
+  have h' : ¬ wordBase ≤ ps.timestampHi := Nat.not_le.mpr hi
+  have l' : ¬ wordBase ≤ ps.timestampLo := Nat.not_le.mpr lo
   simp [publicStateFromNative, BalancePublicInputs.public_state_word_count, publicStateU64Len,
-    public_state_read_words, block, hi, lo]
+    public_state_read_words, b', h', l']
 
 theorem native_roundtrip (p : PublicInputs) (domain : NativeDomain p) : fromNative p.words = .ok p := by
   obtain ⟨ps, w⟩ := p
@@ -309,6 +321,39 @@ theorem native_roundtrip (p : PublicInputs) (domain : NativeDomain p) : fromNati
     PublicInputs.words, take_public_state_words, drop_public_state_words, take_withdrawal_words,
     public_state_native_roundtrip ps block hi lo, withdrawal_native_roundtrip w checked]
   rfl
+
+theorem public_state_from_native_ok (xs : List Nat) (ps : PublicState)
+    (ok : publicStateFromNative xs = .ok ps) :
+    ps = BalancePublicInputs.PublicState.read xs ∧ xs.length = publicStateU64Len ∧
+    ps.blockNumber < blockLimit ∧ ps.timestampHi < wordBase ∧ ps.timestampLo < wordBase := by
+  unfold publicStateFromNative at ok
+  split at ok
+  · exact absurd ok (by simp)
+  split at ok
+  · exact absurd ok (by simp)
+  split at ok
+  · exact absurd ok (by simp)
+  rename_i len block ts
+  simp only [Except.ok.injEq] at ok
+  subst ok
+  exact ⟨rfl, by omega, by omega, by omega, by omega⟩
+
+theorem withdrawal_from_native_ok (xs : List Nat) (w : Withdrawal)
+    (ok : withdrawalFromNative xs = .ok w) :
+    w = Withdrawal.read xs ∧ xs.length = withdrawalLen ∧ ∀ x ∈ xs, x < wordBase := by
+  unfold withdrawalFromNative at ok
+  split at ok
+  · exact absurd ok (by simp)
+  split at ok
+  · exact absurd ok (by simp)
+  rename_i none len
+  simp only [Except.ok.injEq] at ok
+  subst ok
+  refine ⟨rfl, by omega, ?_⟩
+  intro x hx
+  refine Nat.not_le.mp ?_
+  intro ge
+  exact none (List.any_eq_true.mpr ⟨x, hx, decide_eq_true ge⟩)
 
 /-- Native parsing agrees with the target reader wherever it succeeds: the
     native path only adds the exact-length and range guards. -/
@@ -319,21 +364,11 @@ theorem native_parse_is_target_read (xs : List Nat) (p : PublicInputs)
   split at ok
   · exact absurd ok (by simp)
   · rename_i len
-    refine ⟨?_, by omega⟩
-    simp only [publicStateFromNative, withdrawalFromNative] at ok
-    split at ok
-    · exact absurd ok (by simp)
-    split at ok
-    · exact absurd ok (by simp)
-    split at ok
-    · exact absurd ok (by simp)
-    simp only [bind, Except.bind] at ok
-    split at ok
-    · exact absurd ok (by simp)
-    split at ok
-    · exact absurd ok (by simp)
-    simp only [pure, Except.pure, Except.ok.injEq] at ok
-    exact ok.symm
+    simp only [except_bind_ok_iff, pure, Except.pure, Except.ok.injEq] at ok
+    obtain ⟨ps, hps, w, hw, rfl⟩ := ok
+    obtain ⟨rfl, _⟩ := public_state_from_native_ok _ _ hps
+    obtain ⟨rfl, _⟩ := withdrawal_from_native_ok _ _ hw
+    exact ⟨rfl, by omega⟩
 
 /-! ## Bridge to the L1 withdrawal leaf (RollupValue.foldWithdrawalLeaf) -/
 
@@ -392,7 +427,7 @@ theorem rollup_leaf_injective_on_checked {w v : Withdrawal} (cw : w.Checked) (cv
   obtain ⟨hr, ht, ha, hn, hx⟩ := same
   have sub : ∀ part : List Nat, ∀ {u : Withdrawal}, u.Checked →
       (∀ x ∈ part, x ∈ u.words) → U256Arithmetic.Checked U256Arithmetic.wordBase part :=
-    fun part _ cu mem d hd => cu d (mem d hd)
+    fun part _ cu mem d hd => word_base_agrees ▸ cu d (mem d hd)
   have rec := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))
     (sub _ cv (by simp [Withdrawal.words])) (by simp [Address.words]) hr
   have amt := value_be_injective_on_checked (sub _ cw (by simp [Withdrawal.words]))

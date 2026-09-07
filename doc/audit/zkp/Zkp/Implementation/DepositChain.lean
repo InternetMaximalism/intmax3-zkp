@@ -323,9 +323,10 @@ def parseVd (cap : Nat) (xs : List Nat) : Except ParseError (List Nat) :=
   else .ok (xs.drop (xs.length - vdVecLen cap))
 
 /-- `DepositChainPublicInputs::from_u64_slice` (exact length, then cursor order of the source). -/
-def parseU64 (cap : Nat) (inputs : List Nat) : Except ParseError PublicInputs := do
-  let expected := publicInputsLen + vdVecLen cap
-  if inputs.length ≠ expected then throw (.invalidLength expected inputs.length)
+def parseU64 (cap : Nat) (inputs : List Nat) : Except ParseError PublicInputs :=
+  if inputs.length ≠ publicInputsLen + vdVecLen cap then
+    .error (.invalidLength (publicInputsLen + vdVecLen cap) inputs.length)
+  else do
   let initialDepositHashChain ← parseBytes32 "initial_deposit_hash_chain" (slice inputs 0 bytes32Len)
   let initialDepositTreeRoot ← parseHashOut "initial_deposit_tree_root" (slice inputs 8 poseidonHashOutLen)
   let initialDepositCount ← parseU63 "initial_deposit_count" (inputs.getD 12 0)
@@ -350,186 +351,177 @@ def parseTargets (cap : Nat) (pis : List Nat) : Option PublicInputs :=
               blockNumber := pis.getD 26 0
               vd := slice pis 27 (vdVecLen cap) }
 
-theorem bind_ok_iff {ε α β : Type} (r : Except ε α) (f : α → Except ε β) (value : β) :
-    (r >>= f) = .ok value ↔ ∃ x, r = .ok x ∧ f x = .ok value := by
-  cases r <;> simp [Bind.bind, Except.bind]
+/-- The unchecked slice record read by `from_pis` (and the value `from_u64_slice` returns when it accepts). -/
+def sliceRecord (n : Nat) (inputs : List Nat) : PublicInputs :=
+  { initialDepositHashChain := Words8.ofList (slice inputs 0 bytes32Len)
+    initialDepositTreeRoot := Hash4.ofList (slice inputs 8 poseidonHashOutLen)
+    initialDepositCount := inputs.getD 12 0
+    depositHashChain := Words8.ofList (slice inputs 13 bytes32Len)
+    depositTreeRoot := Hash4.ofList (slice inputs 21 poseidonHashOutLen)
+    depositCount := inputs.getD 25 0
+    blockNumber := inputs.getD 26 0
+    vd := slice inputs 27 n }
 
-theorem pure_ok_iff {ε α : Type} (a value : α) : (pure a : Except ε α) = .ok value ↔ a = value := by
-  simp [Pure.pure, Except.pure]
+theorem parse_targets_eq_slice_record (cap : Nat) (pis : List Nat)
+    (h : ¬ pis.length < publicInputsLen + vdVecLen cap) :
+    parseTargets cap pis = some (sliceRecord (vdVecLen cap) pis) := by
+  unfold parseTargets sliceRecord
+  exact if_neg h
 
-theorem throw_ok_iff_false {ε α : Type} (err : ε) (value : α) : (throw err : Except ε α) = .ok value ↔ False := by
-  simp [throw, throwThe, MonadExcept.throw, Except.error]
+/-! Fixed-offset reads of the registered layout (`to_u64_vec` / `to_vec` cursor positions). -/
 
-theorem parse_bytes32_ok_iff (field : String) (xs : List Nat) (w : Words8) :
-    parseBytes32 field xs = .ok w ↔ CheckedWords xs ∧ xs.length = bytes32Len ∧ w = Words8.ofList xs := by
-  unfold parseBytes32
-  split
-  · rename_i h
-    simp only [Bool.and_eq_true, beq_iff_eq, limbs_checked_iff] at h
-    simp [h, eq_comm]
-  · rename_i h
-    simp only [Bool.and_eq_true, beq_iff_eq, limbs_checked_iff, not_and] at h
-    constructor
-    · intro contra; cases contra
-    · intro ⟨h1, h2, _⟩; exact absurd h2 (h h1)
+theorem slice_initial_chain (p : PublicInputs) : slice p.words 0 bytes32Len = p.initialDepositHashChain.words := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem slice_initial_root (p : PublicInputs) :
+    slice p.words 8 poseidonHashOutLen = p.initialDepositTreeRoot.words := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem get_initial_count (p : PublicInputs) : p.words.getD 12 0 = p.initialDepositCount := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem slice_chain (p : PublicInputs) : slice p.words 13 bytes32Len = p.depositHashChain.words := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem slice_root (p : PublicInputs) : slice p.words 21 poseidonHashOutLen = p.depositTreeRoot.words := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem get_count (p : PublicInputs) : p.words.getD 25 0 = p.depositCount := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem get_block (p : PublicInputs) : p.words.getD 26 0 = p.blockNumber := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd => cases ic; cases ir; cases c; cases r; rfl
+theorem slice_vd (n : Nat) (p : PublicInputs) (h : p.vd.length = n) : slice p.words 27 n = p.vd := by
+  cases p with
+  | mk ic ir icnt c r cnt blk vd =>
+  cases ic; cases ir; cases c; cases r
+  simp only at h
+  show List.take n vd = vd
+  rw [← h]
+  exact List.take_length vd
 
-theorem parse_hash_out_ok_iff (field : String) (xs : List Nat) (h : Hash4) :
-    parseHashOut field xs = .ok h ↔ xs.length = poseidonHashOutLen ∧ h = Hash4.ofList xs := by
-  unfold parseHashOut
-  split
-  · rename_i hl; simp only [beq_iff_eq] at hl; simp [hl, eq_comm]
-  · rename_i hl; simp only [beq_iff_eq] at hl
-    constructor
-    · intro contra; cases contra
-    · intro ⟨h1, _⟩; exact absurd h1 hl
+/-- Any word vector of the registered length IS the layout of its slice record. -/
+theorem slice_record_words (n : Nat) (inputs : List Nat) (h : inputs.length = publicInputsLen + n) :
+    (sliceRecord n inputs).words = inputs := by
+  have hlen : inputs.length = 27 + n := by
+    simp only [publicInputsLen, bytes32Len, poseidonHashOutLen] at h; omega
+  obtain ⟨x0, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x1, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x2, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x3, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x4, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x5, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x6, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x7, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x8, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x9, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x10, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x11, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x12, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x13, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x14, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x15, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x16, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x17, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x18, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x19, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x20, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x21, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x22, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x23, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x24, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x25, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  obtain ⟨x26, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
+    cases inputs with | nil => (simp at hlen <;> omega) | cons x xs => exact ⟨x, xs, rfl⟩
+  simp only [List.length_cons] at hlen
+  have hvd : inputs.length = n := by omega
+  have h27 : slice (x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: x6 :: x7 :: x8 :: x9 :: x10 :: x11 :: x12 :: x13 ::
+      x14 :: x15 :: x16 :: x17 :: x18 :: x19 :: x20 :: x21 :: x22 :: x23 :: x24 :: x25 :: x26 :: inputs)
+      27 n = inputs := by
+    show List.take n inputs = inputs
+    rw [← hvd]
+    exact List.take_length inputs
+  simp only [PublicInputs.words, sliceRecord, h27]
+  rfl
 
-theorem parse_u63_ok_iff (field : String) (x v : Nat) : parseU63 field x = .ok v ↔ x < u63Limit ∧ v = x := by
-  unfold parseU63
-  split
-  · rename_i hl; simp [hl, eq_comm]
-  · rename_i hl
-    constructor
-    · intro contra; cases contra
-    · intro ⟨h1, _⟩; exact absurd h1 hl
-
-theorem parse_vd_ok_iff (cap : Nat) (xs vd : List Nat) :
-    parseVd cap xs = .ok vd ↔ vdVecLen cap ≤ xs.length ∧ vd = xs.drop (xs.length - vdVecLen cap) := by
-  unfold parseVd
-  split
-  · rename_i hl
-    constructor
-    · intro contra; cases contra
-    · intro ⟨h1, _⟩; omega
-  · rename_i hl; simp [eq_comm]; omega
+/-- `from_u64_slice` on a laid-out vector: accepts iff the fields are canonical, returning them. -/
+theorem parse_words_ok_iff (cap : Nat) (q : PublicInputs) (hvd : q.vd.length = vdVecLen cap) (p : PublicInputs) :
+    parseU64 cap q.words = .ok p ↔ q.Canonical cap ∧ p = q := by
+  have hl : q.words.length = publicInputsLen + vdVecLen cap := by rw [words_length, hvd]
+  have hsv := slice_vd (vdVecLen cap) q hvd
+  cases q with
+  | mk ic ir icnt c r cnt blk vd =>
+  simp only at hvd
+  simp only [parseU64, hl, ne_eq, eq_self_iff_true, not_true_eq_false, ite_false, slice_initial_chain,
+    slice_initial_root, get_initial_count, slice_chain, slice_root, get_count, get_block,
+    hsv, parseBytes32, parseHashOut, parseU63, parseVd, words8_length,
+    hash4_length, words8_of_list_words, hash4_of_list_words, hvd, Nat.lt_irrefl, Nat.sub_self,
+    List.drop_zero, beq_self_eq_true, Bool.and_true, ite_true, PublicInputs.Canonical]
+  by_cases c1 : limbsChecked ic.words = true <;> by_cases c2 : icnt < u63Limit <;>
+    by_cases c3 : limbsChecked c.words = true <;> by_cases c4 : cnt < u63Limit <;>
+    by_cases c5 : blk < u63Limit <;>
+    simp [c1, c2, c3, c4, c5, ← limbs_checked_iff, Bind.bind, Except.bind, pure, Except.pure] <;>
+    exact ⟨Eq.symm, Eq.symm⟩
 
 /-- Exact-length guard: `InvalidLength` before any field parse. -/
 theorem parse_rejects_wrong_length (cap : Nat) (inputs : List Nat)
     (h : inputs.length ≠ publicInputsLen + vdVecLen cap) :
     parseU64 cap inputs = .error (.invalidLength (publicInputsLen + vdVecLen cap) inputs.length) := by
-  simp [parseU64, h, throw, throwThe, MonadExcept.throw, Bind.bind, Except.bind]
+  simp [parseU64, h]
 
 /-- Whatever `from_u64_slice` returns satisfies the Rust field types (chain limbs u32, counts u63,
-    exact vd length) — and nothing more: tree roots are NOT range checked. -/
+    exact vd length) and re-serializes to its input; tree roots and vd words are NOT range checked. -/
 theorem parse_gives_canonical (cap : Nat) (inputs : List Nat) (p : PublicInputs)
     (accepted : parseU64 cap inputs = .ok p) : p.Canonical cap ∧ p.words = inputs := by
   by_cases hl : inputs.length = publicInputsLen + vdVecLen cap
-  · simp only [parseU64, hl, ne_eq, not_true_eq_false, ite_false, bind_ok_iff, pure_ok_iff,
-      parse_bytes32_ok_iff, parse_hash_out_ok_iff, parse_u63_ok_iff, parse_vd_ok_iff] at accepted
-    obtain ⟨_, ⟨c1, l1, e1⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨l2, e2⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨c3, e3⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨c4, l4, e4⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨l5, e5⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨c6, e6⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨c7, e7⟩, accepted⟩ := accepted
-    obtain ⟨_, ⟨l8, e8⟩, accepted⟩ := accepted
-    subst e1 e2 e3 e4 e5 e6 e7 e8
-    subst accepted
-    have hlen : publicInputsLen + vdVecLen cap = 27 + vdVecLen cap := by
-      simp [publicInputsLen, bytes32Len, poseidonHashOutLen]
-    rw [hlen] at hl
-    -- expose the 27 leading words
-    obtain ⟨x0, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x1, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x2, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x3, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x4, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x5, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x6, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x7, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x8, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x9, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x10, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x11, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x12, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x13, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x14, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x15, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x16, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x17, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x18, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x19, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x20, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x21, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x22, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x23, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x24, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x25, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    obtain ⟨x26, inputs, rfl⟩ : ∃ x xs, inputs = x :: xs := by
-      cases inputs with | nil => simp at hl | cons x xs => exact ⟨x, xs, rfl⟩
-    simp only [List.length_cons] at hl
-    have hvd : inputs.length = vdVecLen cap := by omega
-    have hsl : slice (x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: x6 :: x7 :: x8 :: x9 :: x10 :: x11 :: x12 :: x13 ::
-        x14 :: x15 :: x16 :: x17 :: x18 :: x19 :: x20 :: x21 :: x22 :: x23 :: x24 :: x25 :: x26 :: inputs)
-        27 (vdVecLen cap) = inputs := by
-      simp only [slice, List.drop_succ_cons, List.drop_zero]
-      rw [← hvd, List.take_length]
-    refine ⟨⟨?_, ?_, ?_, ?_, ?_, ?_⟩, ?_⟩
-    · simpa [slice, Words8.ofList, Words8.words] using c1
-    · simpa using c3
-    · simpa [slice, Words8.ofList, Words8.words] using c4
-    · simpa using c6
-    · simpa using c7
-    · rw [hsl] at l8 ⊢
-      simp only [Nat.sub_self, List.drop_zero]
-      exact hvd
-    · rw [hsl]
-      simp [PublicInputs.words, Words8.words, Hash4.words, Words8.ofList, Hash4.ofList, slice,
-        Nat.sub_self]
+  · have hw := slice_record_words (vdVecLen cap) inputs hl
+    have hvd : (sliceRecord (vdVecLen cap) inputs).vd.length = vdVecLen cap := by
+      simp only [sliceRecord, slice, List.length_take, List.length_drop, hl, publicInputsLen, bytes32Len,
+        poseidonHashOutLen]
+      omega
+    rw [← hw] at accepted
+    obtain ⟨hc, hp⟩ := (parse_words_ok_iff cap _ hvd p).mp accepted
+    subst hp
+    exact ⟨hc, hw⟩
   · rw [parse_rejects_wrong_length cap inputs hl] at accepted
     cases accepted
 
 /-- Canonical values round-trip through `to_u64_vec` / `from_u64_slice`. -/
 theorem parse_round_trip (cap : Nat) (p : PublicInputs) (h : p.Canonical cap) :
-    parseU64 cap p.words = .ok p := by
-  obtain ⟨c1, c2, c3, c4, c5, c6⟩ := h
-  have hl : p.words.length = publicInputsLen + vdVecLen cap := by rw [words_length, c6]
-  have c1' := (limbs_checked_iff _).mpr c1
-  have c3' := (limbs_checked_iff _).mpr c3
-  cases p with
-  | mk ic ir icnt c r cnt blk vd =>
-  simp only at c1' c2 c3' c4 c5 c6 hl ⊢
-  cases ic; cases ir; cases c; cases r
-  simp only [PublicInputs.words, Words8.words, Hash4.words, List.cons_append, List.nil_append] at hl ⊢
-  simp only [parseU64, hl, ne_eq, not_true_eq_false, ite_false, slice, List.drop_succ_cons, List.drop_zero,
-    List.take_succ_cons, List.take_zero, List.getD_cons_zero, List.getD_cons_succ, parseBytes32,
-    parseHashOut, parseU63, parseVd, Words8.words] at c1' c3' ⊢
-  rw [← c6, List.take_length]
-  simp only [c1', c3', c2, c4, c5, Words8.ofList, Hash4.ofList, List.getD_cons_zero, List.getD_cons_succ,
-    List.length_cons, List.length_nil, Bool.and_self, bytes32Len, poseidonHashOutLen, beq_self_eq_true,
-    ite_true, Nat.sub_self, List.drop_zero, Bind.bind, Except.bind, pure, Except.pure]
+    parseU64 cap p.words = .ok p :=
+  (parse_words_ok_iff cap p h.2.2.2.2.2 p).mpr ⟨h, rfl⟩
 
 /-- `from_pis` is a pure slice: any sufficiently long word vector parses, unchecked. -/
 theorem parse_targets_of_length (cap : Nat) (pis : List Nat)
-    (h : publicInputsLen + vdVecLen cap ≤ pis.length) : ∃ p, parseTargets cap pis = some p := by
-  refine ⟨_, ?_⟩
-  simp [parseTargets, Nat.not_lt.mpr h]
+    (h : publicInputsLen + vdVecLen cap ≤ pis.length) : ∃ p, parseTargets cap pis = some p :=
+  ⟨_, parse_targets_eq_slice_record cap pis (Nat.not_lt.mpr h)⟩
 
 theorem parse_targets_rejects_short (cap : Nat) (pis : List Nat)
     (h : pis.length < publicInputsLen + vdVecLen cap) : parseTargets cap pis = none := by
@@ -539,15 +531,9 @@ theorem parse_targets_rejects_short (cap : Nat) (pis : List Nat)
 theorem parse_targets_round_trip (cap : Nat) (p : PublicInputs) (h : p.vd.length = vdVecLen cap) :
     parseTargets cap p.words = some p := by
   have hl : p.words.length = publicInputsLen + vdVecLen cap := by rw [words_length, h]
-  cases p with
-  | mk ic ir icnt c r cnt blk vd =>
-  simp only at h hl ⊢
-  cases ic; cases ir; cases c; cases r
-  simp only [PublicInputs.words, Words8.words, Hash4.words, List.cons_append, List.nil_append] at hl ⊢
-  simp only [parseTargets, hl, Nat.lt_irrefl, ite_false, slice, List.drop_succ_cons, List.drop_zero,
-    List.take_succ_cons, List.take_zero, List.getD_cons_zero, List.getD_cons_succ, Words8.ofList,
-    Hash4.ofList, bytes32Len, poseidonHashOutLen, Option.some.injEq]
-  rw [← h, List.take_length]
+  rw [parse_targets_eq_slice_record cap p.words (by rw [hl]; exact Nat.lt_irrefl _)]
+  simp only [sliceRecord, slice_initial_chain, slice_initial_root, get_initial_count, slice_chain,
+    slice_root, get_count, get_block, slice_vd (vdVecLen cap) p h, words8_of_list_words, hash4_of_list_words]
 
 /-- Native parse success ⇒ the in-circuit slice of the same words agrees (same values, no gates). -/
 theorem parse_targets_agrees_with_native (cap : Nat) (inputs : List Nat) (p : PublicInputs)
@@ -704,19 +690,16 @@ theorem finish_step_ok_iff (e : Environment) (prev : PublicInputs) (w : NativeWi
       · intro contra; cases contra
       · intro ⟨_, h2, _⟩; exact absurd h2 h
     · rename_i h2
-      simp only [ne_eq, not_not] at h1 h2
-      unfold u63Add
-      split
-      · rename_i h3
-        simp only [Except.ok.injEq]
-        constructor
-        · intro contra; cases contra
-        · intro ⟨_, _, _, _⟩; assumption
-      · rename_i h3
-        simp only [Except.ok.injEq]
+      simp only [ne_eq, Classical.not_not] at h1 h2
+      by_cases h3 : prev.depositCount + 1 < u63Limit
+      · simp only [u63Add, if_pos h3, Except.ok.injEq]
         constructor
         · intro h4; subst h4; exact ⟨h1, h2, h3, rfl⟩
         · intro ⟨_, _, _, h4⟩; subst h4; rfl
+      · simp only [u63Add, if_neg h3]
+        constructor
+        · intro contra; cases contra
+        · intro ⟨_, _, h, _⟩; exact absurd h h3
 
 theorem source_count_one_iff (w : NativeWitness) :
     sourceCount w = 1 ↔ (w.initialValue.isSome = true ∧ w.prevProofPis = none) ∨
@@ -768,7 +751,7 @@ theorem native_initial_step (e : Environment) (cap : Nat) (chainVd : List Nat) (
   simp only [previousPis, hinit, Except.ok.injEq] at hprev
   subst hprev
   subst hp
-  simp only [initialPis] at hi hm hb ⊢
+  simp only [initialPis] at hi hm hb
   exact ⟨rfl, hi, hb, hm, rfl⟩
 
 /-- Continued step: previous public inputs are parsed (canonical), block numbers must agree,
@@ -790,13 +773,15 @@ theorem native_continued_step (e : Environment) (cap : Nat) (chainVd : List Nat)
     split at hp
     · cases hp
     · rename_i hblk
-      simp only [ne_eq, not_not] at hblk
+      simp only [ne_eq, Classical.not_not] at hblk
       simp only [Except.ok.injEq] at hp
-      subst hp
       have hparse' : parseU64 cap prevWords = .ok prev := by
-        cases h : parseU64 cap prevWords <;> simp [liftParse, h] at hparse <;> simp [hparse]
+        rw [← hp]
+        cases h : parseU64 cap prevWords with
+        | error err => simp [liftParse, h] at hparse
+        | ok a => simp [liftParse, h] at hparse; rw [hparse]
       obtain ⟨hc, hw⟩ := parse_gives_canonical cap prevWords prev hparse'
-      exact ⟨prev, hparse', hc, hw, hblk, hi, hb, hm, hout⟩
+      exact ⟨prev, hparse', hc, hw, hp ▸ hblk, hi, hb, hm, hout⟩
 
 /-- Positive example (also `NativeMerkleHeight`): native `verify` uses `siblings.len()` as height, so an
     EMPTY sibling list with the empty-leaf hash as root is accepted natively; the target would reject it
@@ -915,11 +900,12 @@ theorem step_count_increments {e : Environment} {cap : Nat} {w : Witness} {out :
     apply Nat.mod_eq_of_lt
     have := u63_limit_below_goldilocks
     omega
-  have hr := g.incrementedRange
-  rw [hmod] at hr
   rw [g.registered]
-  simp only [stepOutput, hmod]
-  exact ⟨rfl, hr, g.indexPinned⟩
+  refine ⟨?_, ?_, g.indexPinned⟩
+  · show (w.prevCount + 1) % goldilocks = w.prevCount + 1
+    exact hmod
+  · show (w.prevCount + 1) % goldilocks < u63Limit
+    exact g.incrementedRange
 
 /-- Chain output = keccak of the fold preimage over the SELECTED previous chain. -/
 theorem step_fold_is_keccak_of_previous_chain {e : Environment} {cap : Nat} {w : Witness} {out : PublicInputs}
@@ -953,8 +939,9 @@ theorem continued_step_binds_previous_proof {e : Environment} {cap : Nat} {w : W
       w.prevCount = w.prevPis.depositCount := by
   have hvd := g.vdConnected h
   have hblk := g.blockPinned h
+  refine ⟨g.prevProofVerified h, ?_⟩
   rw [g.registered]
-  simp [stepOutput, Witness.prevChain, Witness.prevRoot, Witness.prevCount, h, g.prevProofVerified h, hvd, hblk]
+  simp [stepOutput, Witness.prevChain, Witness.prevRoot, Witness.prevCount, h, hvd, hblk]
 
 /-- Initial step: initial values are the free (range-checked) inputs and `vd` is the free virtual target. -/
 theorem initial_step_outputs {e : Environment} {cap : Nat} {w : Witness} {out : PublicInputs}
@@ -967,30 +954,32 @@ theorem initial_step_outputs {e : Environment} {cap : Nat} {w : Witness} {out : 
   rw [g.registered]
   simp [stepOutput, Witness.prevChain, Witness.prevRoot, Witness.prevCount, h]
 
+/-- An initial-step witness declaring an arbitrary verifier-data vector `vd`. -/
+def exampleGateWitness (e : Environment) (cap : Nat) (vd : List Nat) : Witness :=
+  { isInitial := true, initialDepositHashChain := Words8.zero,
+    initialDepositTreeRoot := merkleRoot e exampleSiblings (emptyLeafHash e) 0,
+    initialDepositCount := 0, prevPis := PublicInputs.dummy cap, deposit := exampleDeposit,
+    siblings := exampleSiblings, chainVd := vd }
+
 /-- SECURITY (ConsumerVdPin): on an initial step NOTHING in this circuit constrains `new_pis.vd`. For
     every verifier-data vector there is a gate-satisfying witness declaring it. -/
 theorem initial_step_vd_unconstrained (e : Environment) (cap : Nat) (vd : List Nat) :
     ∃ w out, CircuitGates e cap w out ∧ w.isInitial = true ∧ out.vd = vd := by
-  let w : Witness :=
-    { isInitial := true, initialDepositHashChain := Words8.zero,
-      initialDepositTreeRoot := merkleRoot e exampleSiblings (emptyLeafHash e) 0,
-      initialDepositCount := 0, prevPis := PublicInputs.dummy cap, deposit := exampleDeposit,
-      siblings := exampleSiblings, chainVd := vd }
-  refine ⟨w, stepOutput e w, ?_, rfl, rfl⟩
+  refine ⟨exampleGateWitness e cap vd, stepOutput e (exampleGateWitness e cap vd), ?_, rfl, rfl⟩
   have hlen : exampleSiblings.length = depositTreeHeight := List.length_replicate _ _
   refine ⟨?_, ?_, ?_, hlen, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, rfl⟩
-  · simp [w, CheckedWords, Words8.zero, Words8.words, limbBase]
-  · decide
-  · simp [w, exampleDeposit, Deposit.NativeWidths, CheckedWords, Words5.zero, Words8.zero, Words5.words,
-      Words8.words, u63Limit, limbBase]
-  · simp [w, PublicInputs.dummy]
-  · intro h; cases h
-  · intro h; cases h
+  · simp [exampleGateWitness, CheckedWords, Words8.zero, Words8.words, limbBase]
+  · show (0 : Nat) < u63Limit; decide
+  · simp [exampleGateWitness, exampleDeposit, Deposit.NativeWidths, CheckedWords, Words5.zero, Words8.zero,
+      Words5.words, Words8.words, u63Limit, limbBase]
+  · simp [exampleGateWitness, PublicInputs.dummy]
+  · intro h; simp [exampleGateWitness] at h
+  · intro h; simp [exampleGateWitness] at h
   · rfl
-  · intro h; cases h
-  · simp [w, Witness.prevCount]
-  · rfl
-  · simp [w, Witness.prevCount]; decide
+  · intro h; simp [exampleGateWitness] at h
+  · simp [exampleGateWitness, Witness.prevCount, hlen]; decide
+  · simp [exampleGateWitness, Witness.prevCount, Witness.prevRoot]
+  · simp [exampleGateWitness, Witness.prevCount]; decide
 
 /-! ### `set_witness` and the native ⇒ gates link -/
 
@@ -1065,17 +1054,17 @@ theorem native_assignment_satisfies_gates (e : Environment) (cap : Nat) (chainVd
       split at hprev
       · cases hprev
       · simp only [Except.ok.injEq] at hprev; exact hprev
-    subst hsame
-    have hnat : nativeAssignment cap w prev' p =
+    rw [hsame] at hparse hcanon hwords hblk hp'
+    have hnat : nativeAssignment cap w prev p =
         { isInitial := false, initialDepositHashChain := Words8.zero, initialDepositTreeRoot := Hash4.zero,
-          initialDepositCount := 0, prevPis := prev', deposit := w.deposit,
+          initialDepositCount := 0, prevPis := prev, deposit := w.deposit,
           siblings := w.siblings, chainVd := p.vd } := by
       simp [nativeAssignment, hnone, hpw]
     rw [hnat]
-    have hpvd : p.vd = prev'.vd := by subst hp; rfl
+    have hpvd : p.vd = prev.vd := by subst hp; rfl
     refine ⟨?_, ?_, hw, hsib, hcanon.2.2.2.2.2, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · simp [CheckedWords, Words8.zero, Words8.words, limbBase]
-    · decide
+    · show (0 : Nat) < u63Limit; decide
     · intro _; exact hacc
     · intro _; exact hpvd.symm
     · simpa [Witness.prevCount] using hi
@@ -1122,7 +1111,7 @@ theorem chain_verify_pins_declared_vd (e : Environment) (cap : Nat) (ownVd : Lis
   split at accepted
   · cases accepted
   · rename_i hvd
-    simp only [ne_eq, not_not] at hvd
+    simp only [ne_eq, Classical.not_not] at hvd
     split at accepted
     · rename_i hacc; exact ⟨hvd, hacc⟩
     · cases accepted
@@ -1149,7 +1138,7 @@ theorem chain_declares_single_vd {e : Environment} {cap : Nat} {baseVd : List Na
   induction h with
   | step w out g base prev ih =>
     cases hi : w.isInitial with
-    | true => rw [(initial_step_outputs g hi).2.2.2]; exact base hi
+    | true => rw [(initial_step_outputs g hi).2.2.2.1]; exact base hi
     | false =>
       rw [(continued_step_binds_previous_proof g hi).2.1]
       exact ih hi
@@ -1177,32 +1166,30 @@ theorem chain_is_trace {e : Environment} {cap : Nat} {baseVd : List Nat} {out : 
       out.blockNumber ds out.depositHashChain out.depositTreeRoot out.depositCount := by
   induction h with
   | step w out g base prev ih =>
-    obtain ⟨hcount, _, hidx⟩ := step_count_increments g
+    obtain ⟨hcount, hlt, hidx⟩ := step_count_increments g
     have hfold := step_fold_is_keccak_of_previous_chain g
     obtain ⟨hlen, hopen, hroot⟩ := step_root_appends_at_count g
     have hblk := step_block_number_is_deposit_block g
     have hrs : RootStep e w.prevRoot w.prevCount w.deposit out.depositTreeRoot :=
-      ⟨w.siblings, hlen, hopen, hroot⟩
+      ⟨w.siblings, hlen, hopen, hroot.symm⟩
+    have hbound : w.prevCount + 1 < u63Limit := by rw [← hcount]; exact hlt
     cases hi : w.isInitial with
     | true =>
       obtain ⟨h1, h2, h3, _, hc, hr, hn⟩ := initial_step_outputs g hi
       refine ⟨[w.deposit], ?_⟩
       rw [h1, h2, h3, hcount, hfold, hn, hc]
       rw [hr, hn] at hrs
-      have := Trace.snoc (e := e) (chain0 := w.initialDepositHashChain) (root0 := w.initialDepositTreeRoot)
-        (count0 := w.initialDepositCount) (block := out.blockNumber) [] _ _ _ w.deposit out.depositTreeRoot
-        Trace.nil g.depositChecked (hidx.trans hn) hblk.symm hrs (hn ▸ (step_count_increments g).2.1 ▸
-          (by rw [hcount, hn] at *; exact (by have := (step_count_increments g).2.1; rw [hcount, hn] at this; exact this)))
-      simpa using this
+      rw [hn] at hbound
+      exact Trace.snoc [] _ _ _ w.deposit out.depositTreeRoot Trace.nil g.depositChecked (hidx.trans hn)
+        hblk.symm hrs hbound
     | false =>
       obtain ⟨_, _, h1, h2, h3, hb, hc, hr, hn⟩ := continued_step_binds_previous_proof g hi
       obtain ⟨ds, tr⟩ := ih hi
-      rw [h1, h2, h3, hb] at tr
+      rw [← h1, ← h2, ← h3, hb] at tr
       refine ⟨ds ++ [w.deposit], ?_⟩
       rw [hcount, hfold, hn, hc]
       rw [hr, hn] at hrs
-      have hbound : w.prevPis.depositCount + 1 < u63Limit := by
-        have := (step_count_increments g).2.1; rw [hcount, hn] at this; exact this
+      rw [hn] at hbound
       exact Trace.snoc ds _ _ _ w.deposit out.depositTreeRoot tr g.depositChecked (hidx.trans hn)
         hblk.symm hrs hbound
 
@@ -1218,10 +1205,15 @@ def Indexed : Nat → List Deposit → Prop
 theorem indexed_snoc (n : Nat) (ds : List Deposit) (d : Deposit) (h : Indexed n ds)
     (hd : d.depositIndex = n + ds.length) : Indexed n (ds ++ [d]) := by
   induction ds generalizing n with
-  | nil => simp [Indexed] at hd ⊢; exact hd
+  | nil =>
+    show d.depositIndex = n ∧ True
+    simp only [List.length_nil, Nat.add_zero] at hd
+    exact ⟨hd, trivial⟩
   | cons x xs ih =>
-    obtain ⟨hx, hxs⟩ := h
+    have h' : x.depositIndex = n ∧ Indexed (n + 1) xs := h
+    obtain ⟨hx, hxs⟩ := h'
     simp only [List.length_cons] at hd
+    show x.depositIndex = n ∧ Indexed (n + 1) (xs ++ [d])
     exact ⟨hx, ih (n + 1) hxs (by omega)⟩
 
 theorem fold_chain_snoc (e : Environment) (start : Words8) (ds : List Deposit) (d : Deposit) :
@@ -1235,12 +1227,12 @@ theorem trace_is_fold {e : Environment} {chain0 : Words8} {root0 : Hash4} {count
     chain = foldChain e chain0 ds ∧ count = count0 + ds.length ∧ Indexed count0 ds ∧
       (∀ d ∈ ds, d.NativeWidths ∧ d.blockNumber = block) := by
   induction h with
-  | nil => exact ⟨rfl, rfl, trivial, fun _ h => nomatch h⟩
+  | nil => exact ⟨rfl, rfl, trivial, fun _ h => absurd h (List.not_mem_nil _)⟩
   | snoc ds chain root count d root' _ widths index blk _ _ ih =>
     obtain ⟨hc, hn, hix, hall⟩ := ih
     refine ⟨?_, ?_, ?_, ?_⟩
     · rw [fold_chain_snoc, hc]
-    · simp [hn]
+    · rw [hn]; simp only [List.length_append, List.length_singleton]; omega
     · exact indexed_snoc count0 ds d hix (by omega)
     · intro x hx
       simp only [List.mem_append, List.mem_singleton] at hx
@@ -1260,37 +1252,45 @@ def wordsToBytes (ws : List Nat) : RollupValue.Bytes := ws.bind (RollupValue.wor
 theorem words_to_bytes_append (xs ys : List Nat) : wordsToBytes (xs ++ ys) = wordsToBytes xs ++ wordsToBytes ys := by
   simp [wordsToBytes, List.append_bind]
 
+theorem bytes32_of_limbs_raw (w0 w1 w2 w3 w4 w5 w6 w7 : Nat)
+    (h1 : w1 < limbBase) (h2 : w2 < limbBase) (h3 : w3 < limbBase)
+    (h4 : w4 < limbBase) (h5 : w5 < limbBase) (h6 : w6 < limbBase) (h7 : w7 < limbBase) :
+    RollupValue.wordBytes 32 (limbValue [w0, w1, w2, w3, w4, w5, w6, w7]) =
+      [w0, w1, w2, w3, w4, w5, w6, w7].bind (RollupValue.wordBytes 4) := by
+  have hr32 : List.range 32 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31] := rfl
+  have hr4 : List.range 4 = [0,1,2,3] := rfl
+  simp only [RollupValue.wordBytes, hr32, hr4, List.map, List.bind_cons, List.bind_nil, List.append_nil,
+    List.cons_append, List.nil_append, limbValue, List.foldl, limbBase] at *
+  simp only [List.cons.injEq, and_true]
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;>
+    (congr 1; omega)
+
+theorem address_of_limbs_raw (a0 a1 a2 a3 a4 : Nat)
+    (h1 : a1 < limbBase) (h2 : a2 < limbBase) (h3 : a3 < limbBase) (h4 : a4 < limbBase) :
+    RollupValue.wordBytes 20 (limbValue [a0, a1, a2, a3, a4]) =
+      [a0, a1, a2, a3, a4].bind (RollupValue.wordBytes 4) := by
+  have hr20 : List.range 20 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19] := rfl
+  have hr4 : List.range 4 = [0,1,2,3] := rfl
+  simp only [RollupValue.wordBytes, hr20, hr4, List.map, List.bind_cons, List.bind_nil, List.append_nil,
+    List.cons_append, List.nil_append, limbValue, List.foldl, limbBase] at *
+  simp only [List.cons.injEq, and_true]
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;>
+    (congr 1; omega)
+
 theorem bytes32_of_limbs (x : Words8) (h : CheckedWords x.words) :
     RollupValue.wordBytes 32 x.value = wordsToBytes x.words := by
   cases x with
   | mk w0 w1 w2 w3 w4 w5 w6 w7 =>
-  simp only [CheckedWords, Words8.words, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
-    forall_eq_or_imp, forall_eq, limbBase] at h
-  obtain ⟨_, h1, h2, h3, h4, h5, h6, h7⟩ := h
-  have hr32 : List.range 32 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31] := rfl
-  have hr4 : List.range 4 = [0,1,2,3] := rfl
-  simp only [RollupValue.wordBytes, wordsToBytes, Words8.value, Words8.words, hr32, hr4, List.map,
-    List.bind_cons, List.bind_nil, List.append_nil, List.cons_append, List.nil_append, limbValue,
-    List.foldl, limbBase]
-  simp only [List.cons.injEq, and_true]
-  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;>
-    (congr 1; omega)
+  exact bytes32_of_limbs_raw w0 w1 w2 w3 w4 w5 w6 w7 (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words]))
+    (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words]))
+    (h _ (by simp [Words8.words])) (h _ (by simp [Words8.words]))
 
 theorem address_of_limbs (x : Words5) (h : CheckedWords x.words) :
     RollupValue.wordBytes 20 x.value = wordsToBytes x.words := by
   cases x with
   | mk a0 a1 a2 a3 a4 =>
-  simp only [CheckedWords, Words5.words, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
-    forall_eq_or_imp, forall_eq, limbBase] at h
-  obtain ⟨_, h1, h2, h3, h4⟩ := h
-  have hr20 : List.range 20 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19] := rfl
-  have hr4 : List.range 4 = [0,1,2,3] := rfl
-  simp only [RollupValue.wordBytes, wordsToBytes, Words5.value, Words5.words, hr20, hr4, List.map,
-    List.bind_cons, List.bind_nil, List.append_nil, List.cons_append, List.nil_append, limbValue,
-    List.foldl, limbBase]
-  simp only [List.cons.injEq, and_true]
-  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;>
-    (congr 1; omega)
+  exact address_of_limbs_raw a0 a1 a2 a3 a4 (h _ (by simp [Words5.words])) (h _ (by simp [Words5.words]))
+    (h _ (by simp [Words5.words])) (h _ (by simp [Words5.words]))
 
 theorem token_word_bytes (t : Nat) : wordsToBytes [t] = RollupValue.wordBytes 4 t := by
   simp [wordsToBytes]
@@ -1349,7 +1349,7 @@ theorem fold_chain_matches_rollup_fold (e : Environment) (re : RollupValue.Envir
     (hds : ∀ d ∈ ds, d.NativeWidths) :
     (foldChain e start ds).value = rollupFold re start.value (ds.map Deposit.toRecord) := by
   induction ds generalizing start with
-  | nil => rfl
+  | nil => simp [foldChain, rollupFold]
   | cons d ds ih =>
     have hd := hds d (List.mem_cons_self d ds)
     have hrest : ∀ x ∈ ds, x.NativeWidths := fun x hx => hds x (List.mem_cons_of_mem d hx)
