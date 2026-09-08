@@ -1,0 +1,605 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/mod.rs",
+  "source_sha256": "af39be10fb4f11df694a46b5f3e226255e7164c914d89c1fb47bb3a1de9c0f7c",
+  "source_lines": 1300,
+  "module": "Zkp.Implementation.FalconCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 29,
+      "status": "non-executable",
+      "label": "Module docstring: scheme, wire format, randomness policy",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 30,
+      "end": 36,
+      "status": "non-executable",
+      "label": "Submodule declarations",
+      "declarations": [],
+      "theorems": [],
+      "note": "Module structure only."
+    },
+    {
+      "start": 37,
+      "end": 51,
+      "status": "dependency-boundary",
+      "label": "Imports of the vendored Falcon math, Poseidon and Bytes32",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.HashEnvironment",
+        "Zkp.Implementation.FalconCore.PolynomialProduct"
+      ],
+      "theorems": [],
+      "note": "The vendored NTT, hash-to-point and Poseidon enter the model only as opaque callbacks."
+    },
+    {
+      "start": 52,
+      "end": 59,
+      "status": "non-executable",
+      "label": "Domain-constant section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 60,
+      "end": 73,
+      "status": "translated",
+      "label": "IMFH / IMFK / IMFG / IMFB domain constants",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.domainFalconH2P",
+        "Zkp.Implementation.FalconCore.domainFalconPk",
+        "Zkp.Implementation.FalconCore.domainFalconKeygen",
+        "Zkp.Implementation.FalconCore.domainFalconBatch"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.domain_falcon_h2p_pinned",
+        "Zkp.Implementation.FalconCore.domain_falcon_pk_pinned",
+        "Zkp.Implementation.FalconCore.domain_falcon_keygen_pinned",
+        "Zkp.Implementation.FalconCore.domain_falcon_batch_pinned",
+        "Zkp.Implementation.FalconCore.falcon_domains_pairwise_distinct"
+      ],
+      "note": "Values pinned as literals; collision-freedom is modelled only among the four Falcon domains."
+    },
+    {
+      "start": 74,
+      "end": 77,
+      "status": "non-executable",
+      "label": "Wire-format section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 78,
+      "end": 81,
+      "status": "translated",
+      "label": "FALCON_SIG_V1 version byte",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconSigV1"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_sig_v1_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 82,
+      "end": 91,
+      "status": "translated",
+      "label": "FALCON_SIG_BYTES = 1 + 40 + 625",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconSigBytes",
+        "Zkp.Implementation.FalconCore.sigNonceLen",
+        "Zkp.Implementation.FalconCore.sigPolyByteLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_sig_bytes_pinned",
+        "Zkp.Implementation.FalconCore.sig_nonce_len_pinned",
+        "Zkp.Implementation.FalconCore.sig_poly_byte_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 92,
+      "end": 94,
+      "status": "translated",
+      "label": "FALCON_N",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_n_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 95,
+      "end": 98,
+      "status": "translated",
+      "label": "FALCON_PK_H_BYTES = 2 * 512",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconPkHBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_pk_h_bytes_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 99,
+      "end": 103,
+      "status": "translated",
+      "label": "FALCON_COSIGN_BLOB_BYTES = 666 + 1024",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconCosignBlobBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_cosign_blob_bytes_pinned",
+        "Zkp.Implementation.FalconCore.falcon_cosign_blob_bytes_decomposes"
+      ],
+      "note": "Cross-checked against the 1690 pinned independently in the ChannelTypes model."
+    },
+    {
+      "start": 104,
+      "end": 106,
+      "status": "translated",
+      "label": "FALCON_Q",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_q_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 107,
+      "end": 110,
+      "status": "translated",
+      "label": "FALCON_SIG_L2_BOUND = beta^2",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconSigL2Bound"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_sig_l2_bound_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 111,
+      "end": 114,
+      "status": "non-executable",
+      "label": "Errors section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 115,
+      "end": 146,
+      "status": "translated",
+      "label": "FalconSigError variants and their doc",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.FalconSigError",
+        "Zkp.Implementation.FalconCore.S2Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.decode_signature_empty"
+      ],
+      "note": "Variant shapes modelled, including the (actual, expected) length pair shared by two gates."
+    },
+    {
+      "start": 147,
+      "end": 158,
+      "status": "untranslated",
+      "label": "FalconKeys struct and its secret-handling doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Key material, zeroization and Debug redaction are outside the model."
+    },
+    {
+      "start": 159,
+      "end": 241,
+      "status": "untranslated",
+      "label": "FalconKeys::from_seed / pk_coefficients / pk_g / sign",
+      "declarations": [],
+      "theorems": [],
+      "note": "Keygen, the ChaCha20 seed derivation, salt sampling, the trapdoor sampler and the self-verify retry loop are not modelled."
+    },
+    {
+      "start": 242,
+      "end": 260,
+      "status": "non-executable",
+      "label": "falcon_pk_digest doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 261,
+      "end": 276,
+      "status": "translated",
+      "label": "falcon_pk_digest: 14-bit-lane packing then Poseidon",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.pkLanePacked",
+        "Zkp.Implementation.FalconCore.packPkChunks",
+        "Zkp.Implementation.FalconCore.pkDigestInputs",
+        "Zkp.Implementation.FalconCore.falconPkDigest",
+        "Zkp.Implementation.FalconCore.falconPkDigestChecked",
+        "Zkp.Implementation.FalconCore.lane1",
+        "Zkp.Implementation.FalconCore.lane2",
+        "Zkp.Implementation.FalconCore.lane3"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.pk_lane_packed_injective",
+        "Zkp.Implementation.FalconCore.pack_pk_chunks_injective",
+        "Zkp.Implementation.FalconCore.pk_digest_inputs_injective",
+        "Zkp.Implementation.FalconCore.pk_lane_packed_lt",
+        "Zkp.Implementation.FalconCore.pk_lane_packed_canonical_in_field",
+        "Zkp.Implementation.FalconCore.lane_weights_are_14_bit_powers",
+        "Zkp.Implementation.FalconCore.equal_pk_digest_binds_public_polynomial"
+      ],
+      "note": "The packing and the canonicity assertion are modelled; the Poseidon call itself is an opaque callback and hash injectivity is never assumed."
+    },
+    {
+      "start": 277,
+      "end": 291,
+      "status": "non-executable",
+      "label": "falcon_padding_pk_g doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 292,
+      "end": 294,
+      "status": "translated",
+      "label": "falcon_padding_pk_g",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconPaddingPkG"
+      ],
+      "theorems": [],
+      "note": "Models only the value; the argument that this digest must not be accepted as an identity is a consumer obligation."
+    },
+    {
+      "start": 295,
+      "end": 303,
+      "status": "non-executable",
+      "label": "Signature section comment and FalconSignature doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 304,
+      "end": 309,
+      "status": "translated",
+      "label": "FalconSignature struct (private salt and s2)",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.SignatureParts",
+        "Zkp.Implementation.FalconCore.SignatureWellFormed"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 310,
+      "end": 327,
+      "status": "translated",
+      "label": "salt() and s2_coefficients() accessors",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.SignatureParts",
+        "Zkp.Implementation.FalconCore.centeredValue",
+        "Zkp.Implementation.FalconCore.s2WitnessResidue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.centered_of_s2_witness_residue",
+        "Zkp.Implementation.FalconCore.s2_witness_residue_canonical"
+      ],
+      "note": "balanced_value() is modelled by centeredValue; the model stores s2 in balanced form."
+    },
+    {
+      "start": 328,
+      "end": 337,
+      "status": "translated",
+      "label": "to_bytes: version || salt || compressed s2",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.encodeSignature",
+        "Zkp.Implementation.FalconCore.encodeS2Bytes",
+        "Zkp.Implementation.FalconCore.encodeS2Bits",
+        "Zkp.Implementation.FalconCore.encodeCoeffs",
+        "Zkp.Implementation.FalconCore.encodeCoeff",
+        "Zkp.Implementation.FalconCore.bitsToBytes",
+        "Zkp.Implementation.FalconCore.lowBits7",
+        "Zkp.Implementation.FalconCore.packByte"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.encode_signature_length",
+        "Zkp.Implementation.FalconCore.encode_signature_layout",
+        "Zkp.Implementation.FalconCore.encode_coeff_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 338,
+      "end": 344,
+      "status": "non-executable",
+      "label": "from_bytes doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 345,
+      "end": 379,
+      "status": "translated",
+      "label": "from_bytes: version gate, exact length, canonical s2 decode, re-encode check",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.decodeSignature",
+        "Zkp.Implementation.FalconCore.decodeS2Bytes",
+        "Zkp.Implementation.FalconCore.decodeS2FromBits",
+        "Zkp.Implementation.FalconCore.decodeCoeffs",
+        "Zkp.Implementation.FalconCore.decodeCoeff",
+        "Zkp.Implementation.FalconCore.readBit",
+        "Zkp.Implementation.FalconCore.readLow7",
+        "Zkp.Implementation.FalconCore.readUnary",
+        "Zkp.Implementation.FalconCore.bytesToBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.decode_encode_signature",
+        "Zkp.Implementation.FalconCore.decode_signature_determines_bytes",
+        "Zkp.Implementation.FalconCore.decode_signature_injective",
+        "Zkp.Implementation.FalconCore.decode_signature_length",
+        "Zkp.Implementation.FalconCore.decode_signature_version_gate_first",
+        "Zkp.Implementation.FalconCore.decode_signature_empty",
+        "Zkp.Implementation.FalconCore.decode_signature_enforces_transport_band",
+        "Zkp.Implementation.FalconCore.legacy_proof_blob_rejected_on_version_gate",
+        "Zkp.Implementation.FalconCore.decode_encode_coeff",
+        "Zkp.Implementation.FalconCore.decode_encode_coeffs",
+        "Zkp.Implementation.FalconCore.decode_s2_bytes_encode",
+        "Zkp.Implementation.FalconCore.decode_coeff_in_band",
+        "Zkp.Implementation.FalconCore.decode_coeffs_in_band",
+        "Zkp.Implementation.FalconCore.decode_coeffs_length",
+        "Zkp.Implementation.FalconCore.decode_s2_bytes_facts",
+        "Zkp.Implementation.FalconCore.read_unary_bound",
+        "Zkp.Implementation.FalconCore.read_low7_lt_128"
+      ],
+      "note": "Order of checks, every decoder range check, and the re-encoding bijectivity check are modelled at bit level."
+    },
+    {
+      "start": 380,
+      "end": 383,
+      "status": "non-executable",
+      "label": "Cosign blob section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 384,
+      "end": 413,
+      "status": "non-executable",
+      "label": "encode_cosign_blob doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 414,
+      "end": 426,
+      "status": "translated",
+      "label": "encode_cosign_blob: 666-byte signature followed by 1024 bytes of h",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.encodeCosignBlob",
+        "Zkp.Implementation.FalconCore.encodePkH"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.encode_cosign_blob_length",
+        "Zkp.Implementation.FalconCore.encode_pk_h_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 427,
+      "end": 434,
+      "status": "non-executable",
+      "label": "decode_cosign_blob doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 435,
+      "end": 463,
+      "status": "translated",
+      "label": "decode_cosign_blob: version gate, 1690-byte length, signature prefix, canonical h",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.decodeCosignBlob",
+        "Zkp.Implementation.FalconCore.decodePkH"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.decode_encode_cosign_blob",
+        "Zkp.Implementation.FalconCore.decode_cosign_blob_length",
+        "Zkp.Implementation.FalconCore.decode_cosign_blob_version_gate_first",
+        "Zkp.Implementation.FalconCore.decode_cosign_blob_length_gate",
+        "Zkp.Implementation.FalconCore.decode_encode_pk_h"
+      ],
+      "note": "The first non-canonical coefficient index is the reported one, as in the source's early return."
+    },
+    {
+      "start": 464,
+      "end": 470,
+      "status": "non-executable",
+      "label": "verify_cosign_blob doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 471,
+      "end": 481,
+      "status": "translated",
+      "label": "verify_cosign_blob: decode then verify_with_pk_g",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.verifyCosignBlob"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.verify_cosign_blob_ok_implies",
+        "Zkp.Implementation.FalconCore.verify_cosign_blob_version_gate"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 482,
+      "end": 503,
+      "status": "non-executable",
+      "label": "Verification section comment and verify doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 504,
+      "end": 511,
+      "status": "translated",
+      "label": "verify: h canonicity, recomputed c, norm bound",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.verify",
+        "Zkp.Implementation.FalconCore.allCanonical",
+        "Zkp.Implementation.FalconCore.recomputedNormSquared"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.verify_rejects_non_canonical_pk",
+        "Zkp.Implementation.FalconCore.all_canonical_iff"
+      ],
+      "note": "The hash-to-point call and the polynomial product are opaque; the check order and the canonicity gate are modelled."
+    },
+    {
+      "start": 512,
+      "end": 518,
+      "status": "non-executable",
+      "label": "verify_with_pk_g doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 519,
+      "end": 532,
+      "status": "translated",
+      "label": "verify_with_pk_g: identity binding inside the call",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.verifyWithPkG"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.verify_with_pk_g_implies_digest_match",
+        "Zkp.Implementation.FalconCore.verify_with_pk_g_implies_verify"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 533,
+      "end": 538,
+      "status": "translated",
+      "label": "norm_within_bound: inclusive beta^2 comparison",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.normWithinBound"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.norm_bound_accepts_beta_squared",
+        "Zkp.Implementation.FalconCore.norm_bound_rejects_beta_squared_plus_one",
+        "Zkp.Implementation.FalconCore.crafted_boundary_hits_beta_squared",
+        "Zkp.Implementation.FalconCore.crafted_boundary_plus_one_exceeds"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 539,
+      "end": 549,
+      "status": "dependency-boundary",
+      "label": "recomputed_norm_squared: exact NTT product then centered norms",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.PolynomialProduct",
+        "Zkp.Implementation.FalconCore.reconstructS1",
+        "Zkp.Implementation.FalconCore.recomputedNormSquared",
+        "Zkp.Implementation.FalconCore.normSquared",
+        "Zkp.Implementation.FalconCore.sumSquares",
+        "Zkp.Implementation.FalconCore.subModQ"
+      ],
+      "theorems": [],
+      "note": "fft/ifft/hadamard_mul come from the vendored math; the model treats the negacyclic product as an opaque interface."
+    },
+    {
+      "start": 550,
+      "end": 560,
+      "status": "translated",
+      "label": "s2_fits_padded_encoding: 9 + (|c| >> 7) bits per coefficient",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.s2FitsPaddedEncoding",
+        "Zkp.Implementation.FalconCore.encodeCoeffs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.encode_coeff_length",
+        "Zkp.Implementation.FalconCore.encode_s2_bits_length",
+        "Zkp.Implementation.FalconCore.encode_s2_bytes_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 561,
+      "end": 564,
+      "status": "non-executable",
+      "label": "Tests section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 565,
+      "end": 1300,
+      "status": "test-only",
+      "label": "#[cfg(test)] suites: round trips, tamper suite, downgrade gate, norm boundary, KATs",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; the model states the corresponding properties as theorems, not as a refinement of these tests."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "LatticeHardness",
+      "obligation": "NTRU/GPV unforgeability: nothing in the model implies that a witness passing the norm bound was produced by the key holder.",
+      "discharged": false
+    },
+    {
+      "name": "PoseidonCallback",
+      "obligation": "Poseidon collision and preimage resistance under IMFK; identity-binding theorems carry injectivity on the compared pair as an explicit premise.",
+      "discharged": false
+    },
+    {
+      "name": "HashToPointCallback",
+      "obligation": "hash_to_point_poseidon is an opaque function of (salt elements, message digest); its sponge layout, uniformity and 2^-50 bias bound are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "PolynomialProductNTT",
+      "obligation": "The vendored FastFft product equals the negacyclic product in Z_q[X]/(X^512+1) that the model abstracts as PolynomialProduct.mul.",
+      "discharged": false
+    },
+    {
+      "name": "KeygenAndSampler",
+      "obligation": "Key generation, the ChaCha20 seed derivation, salt freshness and the ffSampling trapdoor sampler are outside the model.",
+      "discharged": false
+    },
+    {
+      "name": "NativeRustRefinement",
+      "obligation": "The Rust code compiles to the modelled semantics (integer widths, panic=abort behaviour, slice indexing).",
+      "discharged": false
+    }
+  ]
+}

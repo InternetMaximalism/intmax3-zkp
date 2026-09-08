@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/compat.rs",
+  "source_sha256": "8f27826819c899bfd36e723d5c4c2612883d4fa47bcc3eec7977b3324627e55f",
+  "source_lines": 212,
+  "module": "Zkp.Implementation.FalconCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "non-executable",
+      "label": "Module docstring: the vendored-type adaptation layer",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 23,
+      "end": 27,
+      "status": "dependency-boundary",
+      "label": "alloc, plonky2 Goldilocks and Bytes32 imports",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.fieldModulus"
+      ],
+      "theorems": [],
+      "note": "The Goldilocks field and the crate digest type are imported primitives."
+    },
+    {
+      "start": 28,
+      "end": 33,
+      "status": "dependency-boundary",
+      "label": "zeroize re-export",
+      "declarations": [],
+      "theorems": [],
+      "note": "Secret-material zeroization is outside the model."
+    },
+    {
+      "start": 34,
+      "end": 46,
+      "status": "dependency-boundary",
+      "label": "Felt / ZERO / Word type aliases",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.fieldModulus",
+        "Zkp.Implementation.FalconCore.HashEnvironment"
+      ],
+      "theorems": [],
+      "note": "Goldilocks canonical-value semantics and the 32-byte digest type are assumed, not modelled."
+    },
+    {
+      "start": 47,
+      "end": 50,
+      "status": "non-executable",
+      "label": "Serialization section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 51,
+      "end": 69,
+      "status": "translated",
+      "label": "DeserializationError variants and Display",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.S2Error",
+        "Zkp.Implementation.FalconCore.FalconSigError"
+      ],
+      "theorems": [],
+      "note": "Only the two variants the s2 decoder raises (InvalidValue, UnexpectedEof) are modelled, as S2Error constructors."
+    },
+    {
+      "start": 70,
+      "end": 107,
+      "status": "untranslated",
+      "label": "ByteWriter and ByteReader traits and their default methods",
+      "declarations": [],
+      "theorems": [],
+      "note": "Byte-sink/source plumbing; the model encodes and decodes lists directly."
+    },
+    {
+      "start": 108,
+      "end": 144,
+      "status": "translated",
+      "label": "SliceReader: remaining, read_u8, read_slice with its bounds check",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.decodeS2Bytes",
+        "Zkp.Implementation.FalconCore.readBit",
+        "Zkp.Implementation.FalconCore.readLow7",
+        "Zkp.Implementation.FalconCore.S2Error"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.decode_s2_bytes_facts"
+      ],
+      "note": "The short-input rejection that read_slice performs is modelled as the length gate of decodeS2Bytes and the eof cases of the bit readers."
+    },
+    {
+      "start": 145,
+      "end": 176,
+      "status": "untranslated",
+      "label": "Serializable / Deserializable traits and the [u8; N] and u8 impls",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trait plumbing with no cryptographic content."
+    },
+    {
+      "start": 177,
+      "end": 189,
+      "status": "untranslated",
+      "label": "read_sensitive_array",
+      "declarations": [],
+      "theorems": [],
+      "note": "Zeroize-on-drop secret buffer handling is outside the model."
+    },
+    {
+      "start": 190,
+      "end": 198,
+      "status": "untranslated",
+      "label": "write_hex",
+      "declarations": [],
+      "theorems": [],
+      "note": "Formatting helper."
+    },
+    {
+      "start": 199,
+      "end": 212,
+      "status": "test-only",
+      "label": "prng_array test helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test-only deterministic expansion."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "GoldilocksFieldSemantics",
+      "obligation": "plonky2's GoldilocksField has the canonical-value semantics the vendored math assumes (p = 2^64 - 2^32 + 1).",
+      "discharged": false
+    },
+    {
+      "name": "Bytes32DigestType",
+      "obligation": "Every signed message is a domain-separated 32-byte keccak digest; the model treats digests as opaque values.",
+      "discharged": false
+    },
+    {
+      "name": "ZeroizeSecretHandling",
+      "obligation": "Secret material is wiped as claimed; not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "ByteIoRefinement",
+      "obligation": "The trait-based byte plumbing refines the list-level encode/decode functions the model uses.",
+      "discharged": false
+    }
+  ]
+}

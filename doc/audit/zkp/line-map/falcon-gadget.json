@@ -1,0 +1,507 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/gadget.rs",
+  "source_sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
+  "source_lines": 1766,
+  "module": "Zkp.Implementation.FalconCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 91,
+      "status": "non-executable",
+      "label": "Module docstring: gadget contract, s2 representation, reduction discipline",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 92,
+      "end": 124,
+      "status": "dependency-boundary",
+      "label": "plonky2 and in-crate imports",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.HashEnvironment",
+        "Zkp.Implementation.FalconCore.PolynomialProduct"
+      ],
+      "theorems": [],
+      "note": "CircuitBuilder, Poseidon, Bytes32Target and the range-check gates are imported primitives the model abstracts."
+    },
+    {
+      "start": 125,
+      "end": 128,
+      "status": "non-executable",
+      "label": "Parameters section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 129,
+      "end": 140,
+      "status": "translated",
+      "label": "Q, N, LOG_N, POW32_MOD_Q, PSI, N_INV, H2P_SQUEEZES",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.falconQ",
+        "Zkp.Implementation.FalconCore.falconN",
+        "Zkp.Implementation.FalconCore.pow32ModQ",
+        "Zkp.Implementation.FalconCore.ntoPsi",
+        "Zkp.Implementation.FalconCore.ntoNInv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.falcon_q_pinned",
+        "Zkp.Implementation.FalconCore.falcon_n_pinned",
+        "Zkp.Implementation.FalconCore.pow32_mod_q_pinned",
+        "Zkp.Implementation.FalconCore.nto_psi_pinned",
+        "Zkp.Implementation.FalconCore.nto_n_inv_pinned"
+      ],
+      "note": "Constants pinned as literals; the root-of-unity identities themselves are not proved here."
+    },
+    {
+      "start": 141,
+      "end": 144,
+      "status": "non-executable",
+      "label": "Twiddle tables section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 145,
+      "end": 185,
+      "status": "untranslated",
+      "label": "pow_mod_q, bit_reverse_9, twiddle_tables and their build-time assertions",
+      "declarations": [],
+      "theorems": [],
+      "note": "The bit-reversed psi power tables and the primitivity assertions are not modelled."
+    },
+    {
+      "start": 186,
+      "end": 189,
+      "status": "non-executable",
+      "label": "Mod-q reduction section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 190,
+      "end": 231,
+      "status": "untranslated",
+      "label": "ModQGenerator and its SimpleGenerator impl",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness generation and generator serialization are plonky2 plumbing (completeness only)."
+    },
+    {
+      "start": 232,
+      "end": 272,
+      "status": "translated",
+      "label": "constrain_mod_q_decomposition: t = k*q + r with both ranges checked",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.modQGates",
+        "Zkp.Implementation.FalconCore.canonicalCoeffGates",
+        "Zkp.Implementation.FalconCore.fieldSub"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.mod_q_decomposition_unique",
+        "Zkp.Implementation.FalconCore.mod_q_quotient_cheating_rejected",
+        "Zkp.Implementation.FalconCore.mod_q_no_field_wrap",
+        "Zkp.Implementation.FalconCore.canonical_coeff_gates_iff"
+      ],
+      "note": "The uniqueness and no-wrap arguments are modelled; lowering of range_check/connect to gates is a boundary."
+    },
+    {
+      "start": 273,
+      "end": 286,
+      "status": "translated",
+      "label": "reduce_mod_q: allocate, install the honest generator, constrain",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.modQGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.mod_q_decomposition_unique"
+      ],
+      "note": "Only the constraint content is modelled; target allocation and generator installation are plonky2 plumbing."
+    },
+    {
+      "start": 287,
+      "end": 298,
+      "status": "translated",
+      "label": "assert_canonical_coeff: the two 14-bit checks that mean v < q",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.canonicalCoeffGates",
+        "Zkp.Implementation.FalconCore.fieldSub"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.canonical_coeff_gates_iff"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 299,
+      "end": 310,
+      "status": "non-executable",
+      "label": "Goldilocks-to-Zq section comment and doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 311,
+      "end": 333,
+      "status": "translated",
+      "label": "goldilocks_mod_q_block: canonical 32/32 split then t = hi*10952 + lo",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.goldilocksSplitReduce",
+        "Zkp.Implementation.FalconCore.pow32ModQ",
+        "Zkp.Implementation.FalconCore.modQGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.goldilocks_split_reduce_bound",
+        "Zkp.Implementation.FalconCore.naive_single_stage_reduction_would_wrap",
+        "Zkp.Implementation.FalconCore.mod_q_no_field_wrap"
+      ],
+      "note": "The bound arithmetic and the reason the single-stage form was rejected are modelled; Bytes32Target::from_hash_out is an imported split primitive."
+    },
+    {
+      "start": 334,
+      "end": 352,
+      "status": "non-executable",
+      "label": "Hash-to-point section comment and doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 353,
+      "end": 391,
+      "status": "dependency-boundary",
+      "label": "h2p_circuit: Poseidon sponge mirror with 40-bit salt range checks",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.HashEnvironment",
+        "Zkp.Implementation.FalconCore.saltToElements",
+        "Zkp.Implementation.FalconCore.saltElement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.salt_to_elements_injective",
+        "Zkp.Implementation.FalconCore.salt_element_lt_2_40",
+        "Zkp.Implementation.FalconCore.salt_element_injective"
+      ],
+      "note": "The sponge is opaque; only the salt-packing injectivity that the 40-bit range checks buy is modelled."
+    },
+    {
+      "start": 392,
+      "end": 400,
+      "status": "non-executable",
+      "label": "Pk digest section comment and doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 401,
+      "end": 422,
+      "status": "translated",
+      "label": "pk_digest_circuit: Horner 14-bit-lane packing then Poseidon",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.pkDigestInputs",
+        "Zkp.Implementation.FalconCore.pkLanePacked",
+        "Zkp.Implementation.FalconCore.packPkChunks",
+        "Zkp.Implementation.FalconCore.falconPkDigest",
+        "Zkp.Implementation.FalconCore.lane1",
+        "Zkp.Implementation.FalconCore.lane2",
+        "Zkp.Implementation.FalconCore.lane3"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.pk_lane_packed_injective",
+        "Zkp.Implementation.FalconCore.pack_pk_chunks_injective",
+        "Zkp.Implementation.FalconCore.pk_digest_inputs_injective",
+        "Zkp.Implementation.FalconCore.pk_lane_packed_canonical_in_field",
+        "Zkp.Implementation.FalconCore.canonical_coeff_is_lane",
+        "Zkp.Implementation.FalconCore.lane_weights_are_14_bit_powers"
+      ],
+      "note": "The packing mirrors the native one exactly; the Poseidon call is an opaque callback."
+    },
+    {
+      "start": 423,
+      "end": 433,
+      "status": "non-executable",
+      "label": "NTT section comment and doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 434,
+      "end": 527,
+      "status": "dependency-boundary",
+      "label": "ntt_forward, ntt_inverse, pointwise_mul",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.PolynomialProduct",
+        "Zkp.Implementation.FalconCore.reconstructS1",
+        "Zkp.Implementation.FalconCore.modQGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.mod_q_decomposition_unique"
+      ],
+      "note": "The in-circuit NTT is abstracted as the polynomial-product interface; only the per-butterfly reduction primitive it uses is modelled."
+    },
+    {
+      "start": 528,
+      "end": 531,
+      "status": "non-executable",
+      "label": "Centered square section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 532,
+      "end": 556,
+      "status": "translated",
+      "label": "CenterBitGenerator: the honest bit b = (v > q/2)",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.centeredMagnitude",
+        "Zkp.Implementation.FalconCore.circuitCenteredSquare"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.centering_bit_honest",
+        "Zkp.Implementation.FalconCore.centered_value_nat_abs",
+        "Zkp.Implementation.FalconCore.centered_square_eq"
+      ],
+      "note": "Only the value rule is modelled; the generator's dependency plumbing is not."
+    },
+    {
+      "start": 557,
+      "end": 567,
+      "status": "untranslated",
+      "label": "CenterBitGenerator serialize / deserialize",
+      "declarations": [],
+      "theorems": [],
+      "note": "Generator serialization is plonky2 plumbing."
+    },
+    {
+      "start": 568,
+      "end": 584,
+      "status": "translated",
+      "label": "centered_square: (v - b*q)^2 with a prover-free boolean b",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.circuitCenteredSquare",
+        "Zkp.Implementation.FalconCore.centeredSquare",
+        "Zkp.Implementation.FalconCore.centeredMagnitude"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.centering_bit_lie_only_inflates",
+        "Zkp.Implementation.FalconCore.circuit_centered_square_eq",
+        "Zkp.Implementation.FalconCore.circuit_centered_square_bound",
+        "Zkp.Implementation.FalconCore.centering_bit_honest",
+        "Zkp.Implementation.FalconCore.centered_square_bound",
+        "Zkp.Implementation.FalconCore.centered_magnitude_bound"
+      ],
+      "note": "The soundness argument (a lying bit can only inflate the square) is proved on the model."
+    },
+    {
+      "start": 585,
+      "end": 588,
+      "status": "non-executable",
+      "label": "The gadget section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 589,
+      "end": 606,
+      "status": "translated",
+      "label": "FalconSigVerifyTarget: inputs and witnesses",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Field roles (input vs witness) are modelled as fields of the witness record; target allocation is not."
+    },
+    {
+      "start": 607,
+      "end": 619,
+      "status": "translated",
+      "label": "FalconSigVerifyTarget::new (unconditional variant)",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitSatisfied"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_verify",
+        "Zkp.Implementation.FalconCore.active_slot_gate_set_is_satisfiable"
+      ],
+      "note": "new corresponds to the gate set with the verify wire fixed to 1."
+    },
+    {
+      "start": 620,
+      "end": 649,
+      "status": "translated",
+      "label": "new_conditional: only the norm comparison is gated",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitSatisfied",
+        "Zkp.Implementation.FalconCore.circuitNorm",
+        "Zkp.Implementation.FalconCore.falconPaddingPkG"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.padding_slot_norm_gate_is_trivial",
+        "Zkp.Implementation.FalconCore.padding_slot_still_binds_pk_and_equation",
+        "Zkp.Implementation.FalconCore.padding_slot_gate_set_is_satisfiable"
+      ],
+      "note": "The gate wire is not constrained by the gadget; binding it is a consumer obligation named as a boundary."
+    },
+    {
+      "start": 650,
+      "end": 736,
+      "status": "translated",
+      "label": "build: range checks, pk binding, H2P, NTT equation, centered norm, 26-bit slack",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitSatisfied",
+        "Zkp.Implementation.FalconCore.circuitNorm",
+        "Zkp.Implementation.FalconCore.circuitSumSquares",
+        "Zkp.Implementation.FalconCore.fieldSub",
+        "Zkp.Implementation.FalconCore.reconstructS1",
+        "Zkp.Implementation.FalconCore.subModQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.circuit_norm_ceiling",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_norm_bound",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_verify",
+        "Zkp.Implementation.FalconCore.slack_range_check_is_exact",
+        "Zkp.Implementation.FalconCore.beta_squared_fits_26_bits",
+        "Zkp.Implementation.FalconCore.honest_and_adversarial_norm_ceilings",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_ge_native",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_bound",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_cons",
+        "Zkp.Implementation.FalconCore.circuit_accepts_s2_outside_transport_band",
+        "Zkp.Implementation.FalconCore.band_divergence_witness_satisfied",
+        "Zkp.Implementation.FalconCore.max_norm_no_field_wrap",
+        "Zkp.Implementation.FalconCore.norm_squared_no_field_wrap",
+        "Zkp.Implementation.FalconCore.sub_mod_q_lt",
+        "Zkp.Implementation.FalconCore.sum_squares_bound"
+      ],
+      "note": "Gate set modelled over arbitrary witnesses, not only the ones the Rust generator produces."
+    },
+    {
+      "start": 737,
+      "end": 795,
+      "status": "untranslated",
+      "label": "set_witness and set_signature_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "PartialWitness plumbing; the model reasons about witness values directly."
+    },
+    {
+      "start": 796,
+      "end": 856,
+      "status": "translated",
+      "label": "FalconSigGadgetWitness::for_signature and ::padding",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.s2WitnessResidue",
+        "Zkp.Implementation.FalconCore.zeroWitness",
+        "Zkp.Implementation.FalconCore.falconPaddingPkG",
+        "Zkp.Implementation.FalconCore.saltToElements"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.s2_witness_residue_canonical",
+        "Zkp.Implementation.FalconCore.centered_of_s2_witness_residue",
+        "Zkp.Implementation.FalconCore.zero_witness_satisfied",
+        "Zkp.Implementation.FalconCore.padding_slot_gate_set_is_satisfiable",
+        "Zkp.Implementation.FalconCore.reconstruct_s1_zero",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_replicate_zero",
+        "Zkp.Implementation.FalconCore.nat_sum_replicate_zero",
+        "Zkp.Implementation.FalconCore.zip_with_replicate"
+      ],
+      "note": "The balanced-to-residue map and the all-zero padding witness are modelled and shown to satisfy the gate set."
+    },
+    {
+      "start": 857,
+      "end": 868,
+      "status": "translated",
+      "label": "salt_to_elements: 5 little-endian bytes per element",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.saltToElements",
+        "Zkp.Implementation.FalconCore.saltElement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.salt_to_elements_injective",
+        "Zkp.Implementation.FalconCore.salt_element_lt_2_40",
+        "Zkp.Implementation.FalconCore.salt_element_injective",
+        "Zkp.Implementation.FalconCore.exists_five_prefix"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 869,
+      "end": 928,
+      "status": "untranslated",
+      "label": "FalconSigCircuit standalone harness (build, public inputs, prove)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit building, public-input registration and proving are outside the model."
+    },
+    {
+      "start": 929,
+      "end": 932,
+      "status": "non-executable",
+      "label": "Tests section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 933,
+      "end": 1766,
+      "status": "test-only",
+      "label": "#[cfg(test)] suite: bound ledger, NTT oracle, KAT mirrors, adversarial cases, measurement",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; the model states the corresponding properties as theorems."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "Plonky2GateLowering",
+      "obligation": "range_check, connect, mul_const_add, select and assert_bool lower to constraints with the semantics the model assigns them.",
+      "discharged": false
+    },
+    {
+      "name": "PoseidonPermutationInCircuit",
+      "obligation": "The in-circuit Poseidon permutation computes the same function as the native sponge (the O-2 mirror obligation); both are the same opaque callback here.",
+      "discharged": false
+    },
+    {
+      "name": "InCircuitNTT",
+      "obligation": "The range-checked in-circuit NTT computes the negacyclic product in Z_q[X]/(X^512+1), i.e. agrees with PolynomialProduct.mul.",
+      "discharged": false
+    },
+    {
+      "name": "ConsumerDigestBinding",
+      "obligation": "Every consumer must connect message_digest to a digest recomputed in-circuit for its own context; the gadget leaves it a free input.",
+      "discharged": false
+    },
+    {
+      "name": "ConsumerVerifyGateBinding",
+      "obligation": "Every consumer of new_conditional must bind the verify wire to an authenticated member_count decomposition; the gadget does not constrain it.",
+      "discharged": false
+    },
+    {
+      "name": "WitnessGeneratorCompleteness",
+      "obligation": "ModQGenerator and CenterBitGenerator produce satisfying values for honest inputs; only their value rules are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "LatticeHardness",
+      "obligation": "NTRU/GPV unforgeability: satisfying the gate set does not imply the key holder produced the witness.",
+      "discharged": false
+    },
+    {
+      "name": "ProofSystemSoundness",
+      "obligation": "A verifying plonky2 proof implies a satisfying witness exists.",
+      "discharged": false
+    }
+  ]
+}
