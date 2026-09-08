@@ -1,0 +1,531 @@
+{
+  "schema_version": 1,
+  "source": "src/common/tx.rs",
+  "source_sha256": "ff25b5de01aaa6d5426f3d80b773fcd5faa327b3a0ab99e5cc5df2eb77fbd13c",
+  "source_lines": 582,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "plonky2 / serde / ethereum-type / poseidon imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 27,
+      "end": 29,
+      "status": "translated",
+      "label": "TX_LEN, CHANNEL_ACTION_LEN, TX_V2_LEN constants",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txLen",
+        "Zkp.Implementation.CommonValues.channelActionLen",
+        "Zkp.Implementation.CommonValues.txV2Len",
+        "Zkp.Implementation.CommonValues.poseidonHashOutLen",
+        "Zkp.Implementation.CommonValues.bytes32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_len_pinned",
+        "Zkp.Implementation.CommonValues.channel_action_len_pinned",
+        "Zkp.Implementation.CommonValues.tx_v2_len_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 30,
+      "end": 33,
+      "status": "non-executable",
+      "label": "doc comment and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 34,
+      "end": 41,
+      "status": "translated",
+      "label": "Tx fields (transfer tree root + u32 nonce)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.Tx",
+        "Zkp.Implementation.CommonValues.txWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_words_length",
+        "Zkp.Implementation.CommonValues.tx_nonce_at_offset_4"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 42,
+      "end": 52,
+      "status": "translated",
+      "label": "Tx::to_u64_vec word layout and length assertion",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_words_length",
+        "Zkp.Implementation.CommonValues.tx_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.tx_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 53,
+      "end": 68,
+      "status": "translated",
+      "label": "Tx::from_u64_slice: length check, unreachable unwrap, nonce truncation",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txFromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_from_u64_slice_length_check",
+        "Zkp.Implementation.CommonValues.tx_roundtrip_on_canonical_nonce",
+        "Zkp.Implementation.CommonValues.tx_from_u64_slice_truncates_the_nonce",
+        "Zkp.Implementation.CommonValues.tx_hash_unwrap_is_unreachable",
+        "Zkp.Implementation.CommonValues.tx_from_u64_slice_accepts_non_canonical_hash_words"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 69,
+      "end": 76,
+      "status": "untranslated",
+      "label": "Tx::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 77,
+      "end": 83,
+      "status": "translated",
+      "label": "TxTarget field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 84,
+      "end": 93,
+      "status": "dependency-boundary",
+      "label": "TxTarget::new virtual target allocation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 94,
+      "end": 103,
+      "status": "translated",
+      "label": "TxTarget::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 104,
+      "end": 113,
+      "status": "untranslated",
+      "label": "TxTarget::from_slice (assert-based target slicing)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 114,
+      "end": 140,
+      "status": "dependency-boundary",
+      "label": "TxTarget connect / constant / set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 141,
+      "end": 152,
+      "status": "dependency-boundary",
+      "label": "Leafable for Tx: empty leaf and Poseidon leaf hash",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txDefault",
+        "Zkp.Implementation.CommonValues.firstChunkState",
+        "Zkp.Implementation.CommonValues.spongeRate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_with_zero_nonce_absorbs_like_its_bare_root",
+        "Zkp.Implementation.CommonValues.tx_zero_nonce_hash_equals_root_hash",
+        "Zkp.Implementation.CommonValues.poseidon_preimage_lengths_are_pairwise_distinct"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 153,
+      "end": 172,
+      "status": "dependency-boundary",
+      "label": "LeafableTarget for TxTarget: in-circuit hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 173,
+      "end": 181,
+      "status": "translated",
+      "label": "TxClass enum and its repr(u8) tags",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.TxClass",
+        "Zkp.Implementation.CommonValues.txClassAsU32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_class_tags_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 182,
+      "end": 197,
+      "status": "translated",
+      "label": "TxClass::as_u32 / from_u32 validation",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txClassFromU32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_class_from_u32_roundtrip",
+        "Zkp.Implementation.CommonValues.tx_class_from_u32_rejects_two"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 198,
+      "end": 211,
+      "status": "translated",
+      "label": "ChannelActionKind enum and tags",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.ChannelActionKind",
+        "Zkp.Implementation.CommonValues.channelActionKindAsU32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_kind_tags_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 212,
+      "end": 228,
+      "status": "translated",
+      "label": "ChannelActionKind::as_u32 / from_u32 validation",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionKindFromU32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_kind_from_u32_roundtrip",
+        "Zkp.Implementation.CommonValues.channel_action_kind_from_u32_rejects_three"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 229,
+      "end": 239,
+      "status": "translated",
+      "label": "ChannelAction fields",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.ChannelAction",
+        "Zkp.Implementation.CommonValues.channelActionWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 240,
+      "end": 246,
+      "status": "non-executable",
+      "label": "detail2 Q-3 doc comment for the member-set-update payload",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 247,
+      "end": 255,
+      "status": "translated",
+      "label": "member_set_update_payload preimage and IMMS domain word",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.memberSetUpdatePreimage",
+        "Zkp.Implementation.CommonValues.memberSetUpdateDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.member_set_update_domain_is_imms",
+        "Zkp.Implementation.CommonValues.member_set_update_preimage_length",
+        "Zkp.Implementation.CommonValues.member_set_update_preimage_starts_with_domain",
+        "Zkp.Implementation.CommonValues.member_set_update_preimage_injective",
+        "Zkp.Implementation.CommonValues.member_set_update_payload_binds_this_pair"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 256,
+      "end": 268,
+      "status": "translated",
+      "label": "ChannelAction::to_u64_vec word layout (no length assertion)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_words_length",
+        "Zkp.Implementation.CommonValues.channel_action_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.channel_action_words_injective",
+        "Zkp.Implementation.CommonValues.example_channel_action_encodes_to_23_words"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 269,
+      "end": 302,
+      "status": "translated",
+      "label": "ChannelAction::from_u64_slice check order and per-field validation",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionFromU64Slice",
+        "Zkp.Implementation.CommonValues.limbs8FromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_from_u64_slice_length_check",
+        "Zkp.Implementation.CommonValues.channel_action_roundtrip_example",
+        "Zkp.Implementation.CommonValues.channel_action_kind_tag_truncation",
+        "Zkp.Implementation.CommonValues.channel_action_rejects_out_of_u32_tx_hash"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 303,
+      "end": 315,
+      "status": "translated",
+      "label": "Default for ChannelAction (dummy channel ids)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionDefault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_default_encoding_is_not_decodable"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 316,
+      "end": 327,
+      "status": "dependency-boundary",
+      "label": "Leafable for ChannelAction: Poseidon leaf hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 328,
+      "end": 338,
+      "status": "translated",
+      "label": "ChannelActionTarget field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 339,
+      "end": 370,
+      "status": "dependency-boundary",
+      "label": "ChannelActionTarget::new / constant (range-checked targets)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck",
+        "Zkp.Implementation.CommonValues.channelIdBits"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 371,
+      "end": 381,
+      "status": "translated",
+      "label": "ChannelActionTarget::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelActionTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_action_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 382,
+      "end": 413,
+      "status": "dependency-boundary",
+      "label": "ChannelActionTarget::set_witness and LeafableTarget hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 414,
+      "end": 422,
+      "status": "translated",
+      "label": "TxV2 fields",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.TxV2",
+        "Zkp.Implementation.CommonValues.txV2Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_v2_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 423,
+      "end": 433,
+      "status": "translated",
+      "label": "TxV2::to_u64_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txV2Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_v2_words_length",
+        "Zkp.Implementation.CommonValues.tx_v2_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.tx_v2_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 434,
+      "end": 459,
+      "status": "translated",
+      "label": "TxV2::from_u64_slice: class tag and nonce truncation",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txV2FromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_v2_from_u64_slice_length_check",
+        "Zkp.Implementation.CommonValues.tx_v2_roundtrip_on_canonical_nonce",
+        "Zkp.Implementation.CommonValues.tx_v2_class_tag_truncation_bypasses_validation",
+        "Zkp.Implementation.CommonValues.tx_v2_from_u64_slice_rejects_class_two"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 460,
+      "end": 471,
+      "status": "dependency-boundary",
+      "label": "Leafable for TxV2: Poseidon leaf hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 472,
+      "end": 479,
+      "status": "translated",
+      "label": "TxV2Target field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txV2TargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_v2_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 480,
+      "end": 507,
+      "status": "dependency-boundary",
+      "label": "TxV2Target::new / constant",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 508,
+      "end": 516,
+      "status": "translated",
+      "label": "TxV2Target::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.txV2TargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.tx_v2_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 517,
+      "end": 549,
+      "status": "dependency-boundary",
+      "label": "TxV2Target::set_witness and LeafableTarget hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 550,
+      "end": 582,
+      "status": "test-only",
+      "label": "cfg(test) round-trip tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test-only code; not part of the modeled production semantics."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-opacity",
+      "obligation": "Poseidon `hash_inputs_u64` / `hash_no_pad` is an opaque callback; no collision resistance or injectivity is proved, and every binding statement is conditioned on an explicit premise about the two concrete compared preimages.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`builder.range_check(x, b)` is modeled as the predicate `x < 2 ^ b` on the canonical representative; the gate lowering that must implement it is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-leafable-semantics",
+      "obligation": "`Leafable`/`LeafableTarget` tree membership, indexing and root semantics are out of scope; only the leaf preimage is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

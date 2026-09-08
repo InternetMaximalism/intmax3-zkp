@@ -823,11 +823,9 @@ theorem tx_roundtrip_on_canonical_nonce {t : Tx} (h : t.nonce < twoPow32) :
     cases r with
     | mk w0 w1 w2 w3 =>
       simp only [] at h
-      have hlen : ¬ ((txWords ⟨⟨w0, w1, w2, w3⟩, n⟩).length ≠ txLen) := by
-        simp [txWords, hashWords, txLen, poseidonHashOutLen]
-      simp only [txFromU64Slice, if_neg hlen, txWords, hashWords, List.cons_append,
-        List.nil_append]
+      simp only [txFromU64Slice, txWords, hashWords, List.cons_append, List.nil_append]
       rw [Nat.mod_eq_of_lt h]
+      rfl
 
 /-- **Many-to-one.** `input[4] as u32` truncates, so distinct word vectors decode
 to the same `Tx`; the decoder accepts a nonce word no encoder can produce. -/

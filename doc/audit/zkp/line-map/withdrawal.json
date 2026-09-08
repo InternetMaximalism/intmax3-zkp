@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "source": "src/common/withdrawal.rs",
+  "source_sha256": "a1bb3ed40d6d3d8fc51bb948adb93b00e6b73ce7cc1cd85577d34f7926b95c34",
+  "source_lines": 192,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 19,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak and ethereum-type imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 20,
+      "end": 20,
+      "status": "translated",
+      "label": "WITHDRAWAL_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_len_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 21,
+      "end": 31,
+      "status": "translated",
+      "label": "Withdrawal fields",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.Withdrawal",
+        "Zkp.Implementation.CommonValues.withdrawalWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 32,
+      "end": 40,
+      "status": "translated",
+      "label": "WithdrawalTarget field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 41,
+      "end": 54,
+      "status": "translated",
+      "label": "Withdrawal::to_u32_vec limb layout and length assertion",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_words_length",
+        "Zkp.Implementation.CommonValues.withdrawal_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 55,
+      "end": 84,
+      "status": "translated",
+      "label": "Withdrawal::from_u32_slice: length check then unreachable unwraps",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalFromU32Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_from_u32_slice_length_check",
+        "Zkp.Implementation.CommonValues.withdrawal_u32_roundtrip",
+        "Zkp.Implementation.CommonValues.example_withdrawal_decodes"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 85,
+      "end": 95,
+      "status": "translated",
+      "label": "Withdrawal::from_u64_slice: assert! panics before the length check",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalFromU64Slice",
+        "Zkp.Implementation.CommonValues.Outcome"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_from_u64_panics_before_the_length_check",
+        "Zkp.Implementation.CommonValues.withdrawal_from_u64_panics_on_out_of_u32_word",
+        "Zkp.Implementation.CommonValues.withdrawal_from_u64_agrees_on_canonical_words"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 96,
+      "end": 100,
+      "status": "dependency-boundary",
+      "label": "hash_with_prev_hash: keccak over the 38-word chain preimage",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalChainPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_chain_preimage_length",
+        "Zkp.Implementation.CommonValues.deposit_and_withdrawal_chain_preimages_can_coincide",
+        "Zkp.Implementation.CommonValues.deposit_and_withdrawal_chain_preimages_have_equal_length"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 101,
+      "end": 111,
+      "status": "untranslated",
+      "label": "Withdrawal::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 112,
+      "end": 126,
+      "status": "translated",
+      "label": "WithdrawalTarget::to_vec limb layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.withdrawalTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.withdrawal_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 127,
+      "end": 147,
+      "status": "dependency-boundary",
+      "label": "WithdrawalTarget::new (range-checked limbs)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 148,
+      "end": 168,
+      "status": "untranslated",
+      "label": "WithdrawalTarget::from_slice (assert-based target slicing)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 169,
+      "end": 184,
+      "status": "dependency-boundary",
+      "label": "WithdrawalTarget::hash_with_prev_hash (in-circuit keccak)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 185,
+      "end": 192,
+      "status": "dependency-boundary",
+      "label": "WithdrawalTarget::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-opacity",
+      "obligation": "`solidity_keccak256` and the in-circuit `builder.keccak256` are opaque; only the 32-bit word preimage they are fed is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`builder.range_check(x, b)` is modeled as the predicate `x < 2 ^ b` on the canonical representative; the gate lowering that must implement it is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

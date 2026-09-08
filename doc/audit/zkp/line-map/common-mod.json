@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "source": "src/common/mod.rs",
+  "source_sha256": "c161fb07474b28ecff52a4502ca7cb53c497054a0f7cc7cba505bc55b9db80c3",
+  "source_lines": 16,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 16,
+      "status": "translated",
+      "label": "module declarations of the common value layer",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.commonModules",
+        "Zkp.Implementation.CommonValues.modeledHere"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.common_mod_declares_sixteen_modules",
+        "Zkp.Implementation.CommonValues.modeled_files_are_declared_in_common_mod"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

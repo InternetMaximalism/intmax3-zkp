@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "source": "src/common/transfer.rs",
+  "source_sha256": "9504f60b348673ccb145eac0db3f28ab186e69d0084fbcac5c475f124646f0e1",
+  "source_lines": 288,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "imports of ethereum types, poseidon and plonky2",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 26,
+      "end": 26,
+      "status": "translated",
+      "label": "TRANSFER_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.transferLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.transfer_len_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 27,
+      "end": 36,
+      "status": "translated",
+      "label": "Transfer fields",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.Transfer",
+        "Zkp.Implementation.CommonValues.transferWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.transfer_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 37,
+      "end": 54,
+      "status": "translated",
+      "label": "SettledTransfer fields and the F-WD-2 nonce binding",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.SettledTransfer",
+        "Zkp.Implementation.CommonValues.settledTransferWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.settled_transfer_words_length",
+        "Zkp.Implementation.CommonValues.settled_transfer_nullifier_preimage_ends_with_nonce"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 55,
+      "end": 70,
+      "status": "translated",
+      "label": "TransferTarget / SettledTransferTarget field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.transferTargetWords",
+        "Zkp.Implementation.CommonValues.settledTransferTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.transfer_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.settled_transfer_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 71,
+      "end": 84,
+      "status": "translated",
+      "label": "Transfer::to_u64_vec word layout and length assertion",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.transferWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.transfer_words_length",
+        "Zkp.Implementation.CommonValues.transfer_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 85,
+      "end": 93,
+      "status": "untranslated",
+      "label": "Transfer::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 94,
+      "end": 98,
+      "status": "dependency-boundary",
+      "label": "Transfer::poseidon_hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 99,
+      "end": 118,
+      "status": "translated",
+      "label": "SettledTransfer::new and its nullifier word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.settledTransferWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.settled_transfer_words_length",
+        "Zkp.Implementation.CommonValues.settled_transfer_words_injective",
+        "Zkp.Implementation.CommonValues.settled_transfer_nullifier_preimage_has_sender_at_25",
+        "Zkp.Implementation.CommonValues.settled_transfer_accepts_dummy_sender"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 119,
+      "end": 127,
+      "status": "dependency-boundary",
+      "label": "SettledTransfer::poseidon_hash and nullifier (hash then Bytes32 split)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.settledTransferNullifier",
+        "Zkp.Implementation.CommonValues.hashToBytes32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.hash_to_bytes32_injective_on_u64_words",
+        "Zkp.Implementation.CommonValues.settled_transfer_nullifier_binds_this_pair"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 128,
+      "end": 141,
+      "status": "translated",
+      "label": "TransferTarget::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.transferTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.transfer_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 142,
+      "end": 192,
+      "status": "dependency-boundary",
+      "label": "TransferTarget new / connect / constant / set_witness / in-circuit hash",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 193,
+      "end": 223,
+      "status": "dependency-boundary",
+      "label": "SettledTransferTarget::new and constant (nonce deliberately unchecked)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 224,
+      "end": 232,
+      "status": "translated",
+      "label": "SettledTransferTarget::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.settledTransferTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.settled_transfer_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 233,
+      "end": 255,
+      "status": "dependency-boundary",
+      "label": "SettledTransferTarget::nullifier and set_witness",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.settledTransferNullifier"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 256,
+      "end": 288,
+      "status": "dependency-boundary",
+      "label": "Leafable / LeafableTarget impls for Transfer",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-opacity",
+      "obligation": "Poseidon `hash_inputs_u64` / `hash_no_pad` is an opaque callback; no collision resistance or injectivity is proved, and every binding statement is conditioned on an explicit premise about the two concrete compared preimages.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-leafable-semantics",
+      "obligation": "`Leafable`/`LeafableTarget` tree membership, indexing and root semantics are out of scope; only the leaf preimage is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

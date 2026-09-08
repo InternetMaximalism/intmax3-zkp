@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "source": "src/common/salt.rs",
+  "source_sha256": "ab6062c106eda04a08bb9444dc2869fe4bf29e8dc25ce1bf8631cf6b43adec77",
+  "source_lines": 84,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 14,
+      "status": "dependency-boundary",
+      "label": "plonky2 / serde / poseidon imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 15,
+      "end": 15,
+      "status": "translated",
+      "label": "SALT_LEN constant",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.saltLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.salt_len_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 16,
+      "end": 19,
+      "status": "translated",
+      "label": "Salt newtype over PoseidonHashOut",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.Salt",
+        "Zkp.Implementation.CommonValues.saltWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.salt_words_length",
+        "Zkp.Implementation.CommonValues.salt_encoding_is_transparent"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 20,
+      "end": 32,
+      "status": "untranslated",
+      "label": "hand-written Serialize / Deserialize forwarding",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 33,
+      "end": 39,
+      "status": "untranslated",
+      "label": "Display impl",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 40,
+      "end": 42,
+      "status": "translated",
+      "label": "SaltTarget newtype layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.saltTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.salt_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 43,
+      "end": 47,
+      "status": "translated",
+      "label": "Salt::to_u64_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.saltWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.salt_words_length",
+        "Zkp.Implementation.CommonValues.salt_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 48,
+      "end": 51,
+      "status": "untranslated",
+      "label": "Salt::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 52,
+      "end": 60,
+      "status": "dependency-boundary",
+      "label": "SaltTarget::new target allocation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 61,
+      "end": 64,
+      "status": "translated",
+      "label": "SaltTarget::to_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.saltTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.salt_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 65,
+      "end": 84,
+      "status": "dependency-boundary",
+      "label": "SaltTarget connect / constant / set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-opacity",
+      "obligation": "Poseidon `hash_inputs_u64` / `hash_no_pad` is an opaque callback; no collision resistance or injectivity is proved, and every binding statement is conditioned on an explicit premise about the two concrete compared preimages.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    }
+  ]
+}

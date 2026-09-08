@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "source": "src/common/channel_id.rs",
+  "source_sha256": "3c6ae42c121274821bccb473ac0e289413c4376ad863dcc85ef6f47aef68f8be",
+  "source_lines": 312,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 15,
+      "status": "dependency-boundary",
+      "label": "plonky2 / serde / thiserror imports and CHANNEL_ID_BITS",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_bits_pinned"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 16,
+      "end": 23,
+      "status": "translated",
+      "label": "ChannelIdError variants",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.ChannelIdError",
+        "Zkp.Implementation.CommonValues.errZeroReserved",
+        "Zkp.Implementation.CommonValues.errNotFourBytes",
+        "Zkp.Implementation.CommonValues.errSliceLength"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 24,
+      "end": 39,
+      "status": "translated",
+      "label": "ChannelId carrier (single u32 limb) and its byte-compatibility contract",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.ChannelId",
+        "Zkp.Implementation.CommonValues.channelIdWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 40,
+      "end": 52,
+      "status": "translated",
+      "label": "ChannelId::new: 32-bit bound then reserved-0 rejection",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_new_ok_iff",
+        "Zkp.Implementation.CommonValues.channel_id_new_rejects_zero",
+        "Zkp.Implementation.CommonValues.channel_id_new_rejects_two_pow_32",
+        "Zkp.Implementation.CommonValues.channel_id_new_range_error_precedes_zero_error",
+        "Zkp.Implementation.CommonValues.channel_id_new_max_accepted",
+        "Zkp.Implementation.CommonValues.example_channel_id_is_accepted"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 53,
+      "end": 68,
+      "status": "translated",
+      "label": "dummy / channel_id / as_u63 / as_u64 accessors",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdDummy"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_dummy_is_unreachable_from_new"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 69,
+      "end": 83,
+      "status": "translated",
+      "label": "as_bytes / from_bytes big-endian keccak byte layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdBytes",
+        "Zkp.Implementation.CommonValues.channelIdFromBytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_bytes_roundtrip",
+        "Zkp.Implementation.CommonValues.channel_id_from_bytes_rejects_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 84,
+      "end": 99,
+      "status": "translated",
+      "label": "to_u32_vec / to_u64_vec / from_u63 / from_u64",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdWords",
+        "Zkp.Implementation.CommonValues.channelIdFromU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_words_length",
+        "Zkp.Implementation.CommonValues.channel_id_words_roundtrip",
+        "Zkp.Implementation.CommonValues.channel_id_words_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 100,
+      "end": 110,
+      "status": "translated",
+      "label": "from_u64_slice single-limb parser",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdFromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_from_u64_slice_length_check"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 111,
+      "end": 119,
+      "status": "translated",
+      "label": "validate_components: channel_id 0 is reserved",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdValidate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_new_rejects_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 120,
+      "end": 139,
+      "status": "translated",
+      "label": "From / TryFrom conversions forwarding to new",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdFromU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_new_ok_iff"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 140,
+      "end": 145,
+      "status": "translated",
+      "label": "ChannelIdTarget single-target layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 146,
+      "end": 178,
+      "status": "dependency-boundary",
+      "label": "ChannelIdTarget new / constant / from_parts (range_check to CHANNEL_ID_BITS)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck",
+        "Zkp.Implementation.CommonValues.channelIdBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_bits_pinned"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 179,
+      "end": 200,
+      "status": "untranslated",
+      "label": "target from_slice / from_u32_slice / from_u64_slice assertions",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 201,
+      "end": 222,
+      "status": "translated",
+      "label": "target to_vec / to_u32_vec / to_u64_vec / channel_id",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.channelIdTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.channel_id_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.channel_id_words_length"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 223,
+      "end": 246,
+      "status": "dependency-boundary",
+      "label": "connect / is_equal / is_zero builder calls",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 247,
+      "end": 268,
+      "status": "translated",
+      "label": "enforce_ge / enforce_gt as a 32-bit range check on a field difference",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.enforceGeAccepts",
+        "Zkp.Implementation.CommonValues.enforceGtAccepts",
+        "Zkp.Implementation.CommonValues.fieldSub",
+        "Zkp.Implementation.CommonValues.fieldAddOne",
+        "Zkp.Implementation.CommonValues.rangeCheck"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.field_sub_of_ge",
+        "Zkp.Implementation.CommonValues.field_sub_of_lt",
+        "Zkp.Implementation.CommonValues.channel_id_enforce_ge_sound_when_range_checked"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 269,
+      "end": 297,
+      "status": "translated",
+      "label": "conditional_ge / conditional_gt selector semantics",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.conditionalGeAccepts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.conditional_ge_is_vacuous_when_false"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 298,
+      "end": 312,
+      "status": "dependency-boundary",
+      "label": "select and set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`builder.range_check(x, b)` is modeled as the predicate `x < 2 ^ b` on the canonical representative; the gate lowering that must implement it is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "source": "src/common/deposit.rs",
+  "source_sha256": "397513c3a13553df4902041677bf287eccfcdb8f537ff6e74263a2c06a83ce51",
+  "source_lines": 253,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 28,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak, serde and ethereum-type imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 29,
+      "end": 53,
+      "status": "translated",
+      "label": "Deposit fields and the deposit-index uniqueness comment",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.Deposit",
+        "Zkp.Implementation.CommonValues.depositWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_words_length",
+        "Zkp.Implementation.CommonValues.deposit_words_copy_raw_u63_carrier"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 54,
+      "end": 66,
+      "status": "translated",
+      "label": "DepositTarget field layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 67,
+      "end": 78,
+      "status": "translated",
+      "label": "Deposit::to_u64_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_words_length",
+        "Zkp.Implementation.CommonValues.deposit_words_injective",
+        "Zkp.Implementation.CommonValues.deposit_native_target_layout_agrees",
+        "Zkp.Implementation.CommonValues.example_trace_lengths"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 79,
+      "end": 90,
+      "status": "untranslated",
+      "label": "Deposit::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 91,
+      "end": 99,
+      "status": "dependency-boundary",
+      "label": "Deposit::poseidon_hash and nullifier",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositNullifier",
+        "Zkp.Implementation.CommonValues.hashToBytes32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.hash_to_bytes32_injective_on_u64_words",
+        "Zkp.Implementation.CommonValues.deposit_default_index_collapses_nullifier_preimage"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 100,
+      "end": 113,
+      "status": "translated",
+      "label": "hash_with_prev_hash keccak preimage (omits index and block number)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositChainPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_chain_preimage_length",
+        "Zkp.Implementation.CommonValues.deposit_chain_preimage_ignores_index_and_block",
+        "Zkp.Implementation.CommonValues.deposit_words_split",
+        "Zkp.Implementation.CommonValues.deposit_nullifier_preimage_depends_on_index"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 114,
+      "end": 127,
+      "status": "translated",
+      "label": "DepositTarget::to_u64_vec word layout",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositTargetWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_native_target_layout_agrees"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 128,
+      "end": 175,
+      "status": "dependency-boundary",
+      "label": "DepositTarget::new / constant (range-checked limbs)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 176,
+      "end": 200,
+      "status": "dependency-boundary",
+      "label": "DepositTarget poseidon_hash / nullifier / set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 201,
+      "end": 221,
+      "status": "dependency-boundary",
+      "label": "DepositTarget::hash_with_prev_hash (in-circuit keccak)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 222,
+      "end": 234,
+      "status": "translated",
+      "label": "Leafable for Deposit: empty leaf is Default",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.depositDefault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.deposit_default_index_is_zero"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 235,
+      "end": 253,
+      "status": "dependency-boundary",
+      "label": "LeafableTarget for DepositTarget",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-opacity",
+      "obligation": "Poseidon `hash_inputs_u64` / `hash_no_pad` is an opaque callback; no collision resistance or injectivity is proved, and every binding statement is conditioned on an explicit premise about the two concrete compared preimages.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-opacity",
+      "obligation": "`solidity_keccak256` and the in-circuit `builder.keccak256` are opaque; only the 32-bit word preimage they are fed is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`builder.range_check(x, b)` is modeled as the predicate `x < 2 ^ b` on the canonical representative; the gate lowering that must implement it is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "merkle-leafable-semantics",
+      "obligation": "`Leafable`/`LeafableTarget` tree membership, indexing and root semantics are out of scope; only the leaf preimage is modeled.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "source": "src/common/error.rs",
+  "source_sha256": "14c267ee03d16720e671cff129b459921ea01457e285b3649e520cbe4231f506",
+  "source_lines": 29,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "non-executable",
+      "label": "derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, annotation, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 2,
+      "end": 29,
+      "status": "translated",
+      "label": "CommonError variants and their display strings",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.CommonError",
+        "Zkp.Implementation.CommonValues.commonErrorTag",
+        "Zkp.Implementation.CommonValues.commonErrorSamples",
+        "Zkp.Implementation.CommonValues.parseErrorsUsedInCommonValues"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.common_error_has_nine_variants",
+        "Zkp.Implementation.CommonValues.common_error_tags_are_distinct",
+        "Zkp.Implementation.CommonValues.common_values_parse_errors_are_one_variant"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}

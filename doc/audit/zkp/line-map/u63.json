@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "source": "src/common/u63.rs",
+  "source_sha256": "68aaf8eda66740a8c648a62775a5329444841bbaf2843db82347f28372d5c971",
+  "source_lines": 289,
+  "module": "Zkp.Implementation.CommonValues",
+  "model": "doc/audit/zkp/Zkp/Implementation/CommonValues.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 13,
+      "status": "dependency-boundary",
+      "label": "plonky2 / rand / serde / thiserror imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 14,
+      "end": 19,
+      "status": "translated",
+      "label": "U63 bit-width constants and their maxima",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63Bits",
+        "Zkp.Implementation.CommonValues.u63LowBits",
+        "Zkp.Implementation.CommonValues.u63HighBits",
+        "Zkp.Implementation.CommonValues.u63MaxValue",
+        "Zkp.Implementation.CommonValues.u63HighMax"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_bits_pinned",
+        "Zkp.Implementation.CommonValues.u63_high_bits_pinned",
+        "Zkp.Implementation.CommonValues.u63_max_value_pinned",
+        "Zkp.Implementation.CommonValues.u63_high_max_pinned"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 20,
+      "end": 31,
+      "status": "translated",
+      "label": "U63Error variants and payloads",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.U63Error"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 32,
+      "end": 36,
+      "status": "translated",
+      "label": "U63 carrier (private u64, serde-derived)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.U63",
+        "Zkp.Implementation.CommonValues.U63.Canonical",
+        "Zkp.Implementation.CommonValues.U63.NativeRep"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 37,
+      "end": 43,
+      "status": "translated",
+      "label": "U63::new and the 2^63 bound",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63New"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_new_ok_iff",
+        "Zkp.Implementation.CommonValues.u63_new_rejects_two_pow_63",
+        "Zkp.Implementation.CommonValues.u63_new_accepts_max",
+        "Zkp.Implementation.CommonValues.u63_new_ok_values_are_below_two_pow_63"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 44,
+      "end": 51,
+      "status": "translated",
+      "label": "U63::from_parts: high bound makes the inner range check unreachable",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63FromParts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_from_parts_inner_new_check_is_unreachable",
+        "Zkp.Implementation.CommonValues.u63_from_parts_error_is_always_invalid_high",
+        "Zkp.Implementation.CommonValues.u63_from_parts_rejects_high_2_pow_31"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 52,
+      "end": 56,
+      "status": "untranslated",
+      "label": "U63::rand test/data helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 57,
+      "end": 72,
+      "status": "translated",
+      "label": "as_u64 / high / low / to_u32_parts (the high mask drops bit 63)",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63High",
+        "Zkp.Implementation.CommonValues.u63Low"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_to_u32_vec_is_many_to_one_on_raw_carrier"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 73,
+      "end": 81,
+      "status": "translated",
+      "label": "to_u32_vec / to_u64_vec",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63ToU32Vec",
+        "Zkp.Implementation.CommonValues.u63ToU64Vec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_to_u32_vec_length",
+        "Zkp.Implementation.CommonValues.u63_to_u64_vec_length",
+        "Zkp.Implementation.CommonValues.u63_to_u64_vec_injective"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 82,
+      "end": 95,
+      "status": "translated",
+      "label": "from_u32_slice / from_u64_slice parsers",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63FromU32Slice",
+        "Zkp.Implementation.CommonValues.u63FromU64Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_from_u32_slice_length_check",
+        "Zkp.Implementation.CommonValues.u63_from_u64_slice_length_check",
+        "Zkp.Implementation.CommonValues.u63_u32_roundtrip_on_canonical",
+        "Zkp.Implementation.CommonValues.u63_from_u64_slice_rejects_non_canonical"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 96,
+      "end": 104,
+      "status": "translated",
+      "label": "U63::add: checked_add then the range check",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.u63Add"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_add_no_wraparound",
+        "Zkp.Implementation.CommonValues.u63_add_ok_iff",
+        "Zkp.Implementation.CommonValues.u63_add_result_canonical",
+        "Zkp.Implementation.CommonValues.u63_add_at_boundary_reports_the_sum",
+        "Zkp.Implementation.CommonValues.u63_add_u64_overflow_reports_receiver_not_sum",
+        "Zkp.Implementation.CommonValues.u63_add_two_error_paths_are_distinguishable",
+        "Zkp.Implementation.CommonValues.example_u63_add_succeeds"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 105,
+      "end": 114,
+      "status": "untranslated",
+      "label": "BlockNumber aliases and the U63Target struct declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 115,
+      "end": 126,
+      "status": "dependency-boundary",
+      "label": "U63Target::new with a 63-bit range check",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.rangeCheck",
+        "Zkp.Implementation.CommonValues.u63Bits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.u63_bits_pinned"
+      ],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 127,
+      "end": 154,
+      "status": "dependency-boundary",
+      "label": "U63Target constant / from_parts (shift, mul, add, range checks)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 155,
+      "end": 199,
+      "status": "untranslated",
+      "label": "target to_vec / from_slice / split_parts / u32 limb conversions",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled in this module."
+    },
+    {
+      "start": 200,
+      "end": 224,
+      "status": "dependency-boundary",
+      "label": "connect / is_equal / is_zero builder calls",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    },
+    {
+      "start": 225,
+      "end": 247,
+      "status": "translated",
+      "label": "enforce_ge / enforce_gt as a 63-bit range check on a field difference",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.enforceGeAccepts",
+        "Zkp.Implementation.CommonValues.enforceGtAccepts",
+        "Zkp.Implementation.CommonValues.fieldSub",
+        "Zkp.Implementation.CommonValues.fieldAddOne",
+        "Zkp.Implementation.CommonValues.goldilocksOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.goldilocks_order_pinned",
+        "Zkp.Implementation.CommonValues.field_sub_of_ge",
+        "Zkp.Implementation.CommonValues.field_sub_of_lt",
+        "Zkp.Implementation.CommonValues.u63_enforce_ge_unsound_window",
+        "Zkp.Implementation.CommonValues.u63_enforce_ge_accepts_a_strictly_smaller_value",
+        "Zkp.Implementation.CommonValues.u63_enforce_ge_unsound_window_size",
+        "Zkp.Implementation.CommonValues.u63_enforce_gt_wraps_when_lower_is_field_max"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 248,
+      "end": 275,
+      "status": "translated",
+      "label": "conditional_ge / conditional_gt selector semantics",
+      "declarations": [
+        "Zkp.Implementation.CommonValues.conditionalGeAccepts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CommonValues.conditional_ge_is_vacuous_when_false"
+      ],
+      "note": "Handwritten local semantics and named kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 276,
+      "end": 289,
+      "status": "dependency-boundary",
+      "label": "select and set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate, hash, or the plonky2 builder API; the model treats it as an opaque callback or explicit premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-range-check-lowering",
+      "obligation": "`builder.range_check(x, b)` is modeled as the predicate `x < 2 ^ b` on the canonical representative; the gate lowering that must implement it is not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-canonicality",
+      "obligation": "Word values are `Nat`s here; that a native `u64` word is a canonical Goldilocks element (and how `from_canonical_u64` behaves otherwise) is assumed only where stated.",
+      "discharged": false
+    },
+    {
+      "name": "serde-bypasses-constructors",
+      "obligation": "Derived `Deserialize` on the private carriers (`U63(u64)`, `ChannelId(u32)`, `PoseidonHashOut`) can produce values that never passed `new`/`validate_components`; canonicality is a stated premise, never an invariant of the type.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` and target `to_vec` are transcribed separately and only compared; that the compiled circuit lays out the same words is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-builder-api",
+      "obligation": "`add_virtual_target`, `connect`, `constant`, `select`, `split_low_high` and witness writing are opaque; no circuit satisfiability consequence is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "caller-imposed-constraints",
+      "obligation": "Whether a nullifier, channel id or nonce is compared against the right set, and whether unchecked targets are range-checked by their callers, is decided outside these files and is not modeled.",
+      "discharged": false
+    }
+  ]
+}
