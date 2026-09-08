@@ -1,0 +1,1036 @@
+{
+  "schema_version": 1,
+  "source": "src/common/channel.rs",
+  "source_sha256": "1fb8dfef97d0fb9faf975d88986203db075eae9334859f9714e6739fd368d235",
+  "source_lines": 3005,
+  "module": "Zkp.Implementation.ChannelTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/ChannelTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "Crate imports and the canonical ChannelId re-export",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Env"
+      ],
+      "theorems": [],
+      "note": "`use` lines. Everything imported here (keccak, Regev, BalanceState, ChannelId, the constants module) enters the model as an opaque field of `Env` or as a pinned literal; no source/compiler refinement."
+    },
+    {
+      "start": 23,
+      "end": 28,
+      "status": "non-executable",
+      "label": "SignatureBytes alias and drift-hazard comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Type alias plus comments; signature blobs are modeled as `List Nat` inside `MemberSignature`."
+    },
+    {
+      "start": 29,
+      "end": 74,
+      "status": "translated",
+      "label": "Domain separators and channel-layer caps",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.channelStateDomain",
+        "Zkp.Implementation.ChannelTypes.smallBlockDomain",
+        "Zkp.Implementation.ChannelTypes.signedSmallBlockDomain",
+        "Zkp.Implementation.ChannelTypes.closeTxDomain",
+        "Zkp.Implementation.ChannelTypes.closeStateIdDomain",
+        "Zkp.Implementation.ChannelTypes.specialCloseDomain",
+        "Zkp.Implementation.ChannelTypes.cancelCloseDomain",
+        "Zkp.Implementation.ChannelTypes.postCloseClaimDomain",
+        "Zkp.Implementation.ChannelTypes.burnDescriptorDomain",
+        "Zkp.Implementation.ChannelTypes.postCloseNullifierDomain",
+        "Zkp.Implementation.ChannelTypes.withdrawalClaimDomain",
+        "Zkp.Implementation.ChannelTypes.channelBalanceLeafDomain",
+        "Zkp.Implementation.ChannelTypes.channelRecordDomain",
+        "Zkp.Implementation.ChannelTypes.closeMemberSetDomain",
+        "Zkp.Implementation.ChannelTypes.payDomainV2",
+        "Zkp.Implementation.ChannelTypes.l1DepositImportDomainV2",
+        "Zkp.Implementation.ChannelTypes.withdrawalClaimDomainV2",
+        "Zkp.Implementation.ChannelTypes.interChannelTxDomainV5",
+        "Zkp.Implementation.ChannelTypes.tokenFundsDigestDomain",
+        "Zkp.Implementation.ChannelTypes.maxCloseTransfers",
+        "Zkp.Implementation.ChannelTypes.specialCloseMediumBlockWindow",
+        "Zkp.Implementation.ChannelTypes.asciiTag",
+        "Zkp.Implementation.ChannelTypes.pairwiseDistinct"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.channel_domains_pairwise_distinct",
+        "Zkp.Implementation.ChannelTypes.channel_state_domain_is_imch",
+        "Zkp.Implementation.ChannelTypes.channel_record_domain_is_imcr",
+        "Zkp.Implementation.ChannelTypes.close_state_id_domain_is_imcs",
+        "Zkp.Implementation.ChannelTypes.close_member_set_domain_is_imcm",
+        "Zkp.Implementation.ChannelTypes.token_funds_domain_is_imtf",
+        "Zkp.Implementation.ChannelTypes.max_close_transfers_pinned",
+        "Zkp.Implementation.ChannelTypes.special_close_window_pinned"
+      ],
+      "note": "Every domain literal is pinned and proved pairwise distinct; the retired-tag comments are narrative only. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 75,
+      "end": 98,
+      "status": "translated",
+      "label": "ChannelError variants",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Error",
+        "Zkp.Implementation.ChannelTypes.RecordFault",
+        "Zkp.Implementation.ChannelTypes.SigFault",
+        "Zkp.Implementation.ChannelTypes.CloseFault",
+        "Zkp.Implementation.ChannelTypes.Result"
+      ],
+      "theorems": [],
+      "note": "Error categories are modeled with per-message sub-faults; the `thiserror` Display strings themselves are not modeled."
+    },
+    {
+      "start": 99,
+      "end": 138,
+      "status": "translated",
+      "label": "ChannelStatus / ProofBackend / TransitionProofRole / ChannelTransitionKind",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.ChannelStatus",
+        "Zkp.Implementation.ChannelTypes.ChannelStatus.code",
+        "Zkp.Implementation.ChannelTypes.ProofBackend",
+        "Zkp.Implementation.ChannelTypes.ProofBackend.code",
+        "Zkp.Implementation.ChannelTypes.TransitionProofRole",
+        "Zkp.Implementation.ChannelTypes.TransitionProofRole.code",
+        "Zkp.Implementation.ChannelTypes.TransitionKind"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.status_codes_distinct",
+        "Zkp.Implementation.ChannelTypes.role_codes_distinct"
+      ],
+      "note": "Discriminant codes are the `as u32` values that enter the envelope digest. serde renaming is not modeled."
+    },
+    {
+      "start": 139,
+      "end": 171,
+      "status": "translated",
+      "label": "required_state_backend / required_transport_backend",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.TransitionKind.requiredStateBackend",
+        "Zkp.Implementation.ChannelTypes.TransitionKind.requiredTransportBackend"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.plonky3_state_kinds",
+        "Zkp.Implementation.ChannelTypes.plonky2_transport_kinds",
+        "Zkp.Implementation.ChannelTypes.backend_roles_never_cross",
+        "Zkp.Implementation.ChannelTypes.token_register_requires_no_proof"
+      ],
+      "note": "The kind-to-backend map is total and the two backends never cross roles. This says nothing about any proof actually verifying."
+    },
+    {
+      "start": 172,
+      "end": 182,
+      "status": "translated",
+      "label": "ChannelProofEnvelope struct",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Envelope"
+      ],
+      "theorems": [],
+      "note": "Proof bytes are an opaque `List Nat` payload."
+    },
+    {
+      "start": 183,
+      "end": 201,
+      "status": "translated",
+      "label": "ChannelProofEnvelope::to_digest_words",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Envelope.digestWords",
+        "Zkp.Implementation.ChannelTypes.bytesToWords",
+        "Zkp.Implementation.ChannelTypes.blobWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.envelope_digest_words_tag_prefix",
+        "Zkp.Implementation.ChannelTypes.bytes_to_words_not_injective"
+      ],
+      "note": "Role and backend tags precede the length-prefixed proof bytes. The byte-to-word packing is proved NOT injective, which is why the length prefix is load-bearing."
+    },
+    {
+      "start": 202,
+      "end": 208,
+      "status": "non-executable",
+      "label": "ChannelId re-export commentary",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment block."
+    },
+    {
+      "start": 209,
+      "end": 270,
+      "status": "translated",
+      "label": "ChannelRecord layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.ChannelRecord"
+      ],
+      "theorems": [],
+      "note": "The 1024-wide pubkey array is a total index function; the digest reads exactly the first MAX_CHANNEL_MEMBERS positions. Field widths (u8/u16/u64) are represented as Nat plus the range checks the source itself performs."
+    },
+    {
+      "start": 271,
+      "end": 344,
+      "status": "translated",
+      "label": "ChannelRecord::validate",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.validateRecord",
+        "Zkp.Implementation.ChannelTypes.slotLoop",
+        "Zkp.Implementation.ChannelTypes.scanDistinct",
+        "Zkp.Implementation.ChannelTypes.activeSlots",
+        "Zkp.Implementation.ChannelTypes.maxChannelMembers",
+        "Zkp.Implementation.ChannelTypes.maxSigCluster",
+        "Zkp.Implementation.ChannelTypes.burnChannelId"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.validate_forces_scalar_bounds",
+        "Zkp.Implementation.ChannelTypes.validate_runs_slot_loop",
+        "Zkp.Implementation.ChannelTypes.validate_forces_zero_padding",
+        "Zkp.Implementation.ChannelTypes.validate_forces_active_nonzero",
+        "Zkp.Implementation.ChannelTypes.validate_forces_active_distinct",
+        "Zkp.Implementation.ChannelTypes.validate_cosigner_prefix",
+        "Zkp.Implementation.ChannelTypes.validate_accepts_well_shaped",
+        "Zkp.Implementation.ChannelTypes.validate_accepts_substituted_member_set",
+        "Zkp.Implementation.ChannelTypes.member_root_unconstrained_by_validate",
+        "Zkp.Implementation.ChannelTypes.regev_root_only_checked_nonzero",
+        "Zkp.Implementation.ChannelTypes.record_metadata_unconstrained_by_validate",
+        "Zkp.Implementation.ChannelTypes.scan_distinct_ok_of_fresh",
+        "Zkp.Implementation.ChannelTypes.scan_distinct_forces_fresh",
+        "Zkp.Implementation.ChannelTypes.slot_loop_ok_of_shape",
+        "Zkp.Implementation.ChannelTypes.slot_loop_forces_padding",
+        "Zkp.Implementation.ChannelTypes.slot_loop_forces_active_nonzero",
+        "Zkp.Implementation.ChannelTypes.slot_loop_forces_distinct",
+        "Zkp.Implementation.ChannelTypes.sample_record_validates",
+        "Zkp.Implementation.ChannelTypes.duplicate_active_key_rejected",
+        "Zkp.Implementation.ChannelTypes.nonzero_padding_rejected",
+        "Zkp.Implementation.ChannelTypes.single_member_record_rejected",
+        "Zkp.Implementation.ChannelTypes.oversized_sig_cluster_rejected",
+        "Zkp.Implementation.ChannelTypes.burn_channel_record_rejected",
+        "Zkp.Implementation.ChannelTypes.over_capacity_record_rejected",
+        "Zkp.Implementation.ChannelTypes.max_channel_members_pinned",
+        "Zkp.Implementation.ChannelTypes.max_sig_cluster_pinned",
+        "Zkp.Implementation.ChannelTypes.burn_channel_id_pinned"
+      ],
+      "note": "Executable translation in the source's early-return order, including the O(n^2) active-key scan. The extraction theorems state EXACTLY what acceptance forces; the three `*_unconstrained_*` / `*_substituted_*` theorems state what it does NOT force (no link between the recorded keys and either committed root, no key authenticity)."
+    },
+    {
+      "start": 345,
+      "end": 387,
+      "status": "translated",
+      "label": "ChannelRecord::signing_digest (IMCR preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.recordPreimage",
+        "Zkp.Implementation.ChannelTypes.ChannelRecord.signingDigest",
+        "Zkp.Implementation.ChannelTypes.joinHashWords",
+        "Zkp.Implementation.ChannelTypes.indexList",
+        "Zkp.Implementation.ChannelTypes.Hash",
+        "Zkp.Implementation.ChannelTypes.Hash.words",
+        "Zkp.Implementation.ChannelTypes.Hash.zero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.record_preimage_length",
+        "Zkp.Implementation.ChannelTypes.record_preimage_counts_precede_all_slots",
+        "Zkp.Implementation.ChannelTypes.record_preimage_regev_root_last",
+        "Zkp.Implementation.ChannelTypes.join_hash_words_length",
+        "Zkp.Implementation.ChannelTypes.index_list_length",
+        "Zkp.Implementation.ChannelTypes.hash_words_length",
+        "Zkp.Implementation.ChannelTypes.hash_words_injective"
+      ],
+      "note": "The 8226-word preimage is reproduced limb for limb; both counts precede all 1024 hashes and regev_pk_root is last. The keccak application itself is the `Env.hash` boundary \u2014 no digest-level injectivity is claimed."
+    },
+    {
+      "start": 388,
+      "end": 394,
+      "status": "translated",
+      "label": "MerkleInclusionProof",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.MerkleInclusionProof"
+      ],
+      "theorems": [],
+      "note": "Sibling list plus a 256-bit leaf index."
+    },
+    {
+      "start": 395,
+      "end": 409,
+      "status": "translated",
+      "label": "SmallBlockRootMessage layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.SmallBlockRootMessage"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 410,
+      "end": 432,
+      "status": "translated",
+      "label": "SmallBlockRootMessage::signing_digest (IMSB preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.smallBlockPreimage",
+        "Zkp.Implementation.ChannelTypes.SmallBlockRootMessage.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.small_block_preimage_length"
+      ],
+      "note": "41-word preimage. The claim that it matches the in-circuit recompute limb-for-limb is NOT proved here; the circuit side is modeled in Zkp.Implementation.BlockMessages."
+    },
+    {
+      "start": 433,
+      "end": 445,
+      "status": "translated",
+      "label": "MemberSignature layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.MemberSignature"
+      ],
+      "theorems": [],
+      "note": "Slot, claimed pubkey hash and an opaque blob."
+    },
+    {
+      "start": 446,
+      "end": 455,
+      "status": "translated",
+      "label": "SignedSmallBlock layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.SignedSmallBlock"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 456,
+      "end": 485,
+      "status": "translated",
+      "label": "SignedSmallBlock::signing_digest (IMSS preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.signedSmallBlockPreimage",
+        "Zkp.Implementation.ChannelTypes.SignedSmallBlock.signingDigest",
+        "Zkp.Implementation.ChannelTypes.memberSignatureWords",
+        "Zkp.Implementation.ChannelTypes.joinSignatureWords"
+      ],
+      "theorems": [],
+      "note": "Includes the later-attached signature and proof blobs, each length-prefixed. This is why InterChannelTx binds the block MESSAGE digest instead."
+    },
+    {
+      "start": 486,
+      "end": 510,
+      "status": "translated",
+      "label": "ChannelFund and single_token_amounts",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Fund",
+        "Zkp.Implementation.ChannelTypes.singleTokenAmounts",
+        "Zkp.Implementation.ChannelTypes.Ten",
+        "Zkp.Implementation.ChannelTypes.Ten.values",
+        "Zkp.Implementation.ChannelTypes.Ten.replicate",
+        "Zkp.Implementation.ChannelTypes.maxChannelTokens"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.single_token_amounts_layout",
+        "Zkp.Implementation.ChannelTypes.fund_vector_always_full_width",
+        "Zkp.Implementation.ChannelTypes.ten_values_length",
+        "Zkp.Implementation.ChannelTypes.max_channel_tokens_pinned"
+      ],
+      "note": "The per-token fund vector is always full ten-lane width. Cross-lane summation is absent from the model exactly as it is absent from the source."
+    },
+    {
+      "start": 511,
+      "end": 535,
+      "status": "translated",
+      "label": "token_funds_digest (IMTF, fixed 92-word preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.tokenFundsPreimage",
+        "Zkp.Implementation.ChannelTypes.tokenFundsDigest",
+        "Zkp.Implementation.ChannelTypes.tokenFundsDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.token_funds_preimage_length",
+        "Zkp.Implementation.ChannelTypes.token_funds_preimage_roundtrip",
+        "Zkp.Implementation.ChannelTypes.token_funds_preimage_injective",
+        "Zkp.Implementation.ChannelTypes.token_funds_preimage_all_lanes"
+      ],
+      "note": "PREIMAGE injectivity in (registry, token_count, amounts) is proved by an explicit decoder. Digest-level non-aliasing would additionally need keccak collision resistance, which is a boundary and is NOT assumed."
+    },
+    {
+      "start": 536,
+      "end": 560,
+      "status": "translated",
+      "label": "close_state_id (IMCS)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.closeStateIdPreimage",
+        "Zkp.Implementation.ChannelTypes.closeStateId",
+        "Zkp.Implementation.ChannelTypes.closeStateIdDecode",
+        "Zkp.Implementation.ChannelTypes.splitU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.close_state_id_preimage_length",
+        "Zkp.Implementation.ChannelTypes.close_state_id_roundtrip",
+        "Zkp.Implementation.ChannelTypes.close_state_id_preimage_injective",
+        "Zkp.Implementation.ChannelTypes.split_u64_is_big_endian_pair",
+        "Zkp.Implementation.ChannelTypes.split_u64_injective"
+      ],
+      "note": "The identity is a function only of channel, member-signed final IMCH digest and freeze nonce; the preimage is injective in all three on the native u64 range."
+    },
+    {
+      "start": 561,
+      "end": 580,
+      "status": "untranslated",
+      "label": "ChannelBalance and ChannelMember structs",
+      "declarations": [],
+      "theorems": [],
+      "note": "Neither wire struct has a counterpart in this module. `channel_balance_leaf_digest` (the only function that consumes ChannelBalance-shaped data) IS modeled, at lines 1623-1646."
+    },
+    {
+      "start": 581,
+      "end": 603,
+      "status": "translated",
+      "label": "ChannelState layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.ChannelState",
+        "Zkp.Implementation.ChannelTypes.Balance",
+        "Zkp.Implementation.ChannelTypes.Ciphertext"
+      ],
+      "theorems": [],
+      "note": "`Balance` carries only the three BalanceState fields channel.rs reads (h1 via the Env callback, state_version, settled_tx_chain) plus the registry/count that apply_token_register mutates; the rest of the BalanceState body is an opaque payload modeled in Zkp.Implementation.H1Gadget."
+    },
+    {
+      "start": 604,
+      "end": 647,
+      "status": "translated",
+      "label": "ChannelState::signing_digest (IMCH preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.channelStatePreimage",
+        "Zkp.Implementation.ChannelTypes.ChannelState.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.channel_state_preimage_length",
+        "Zkp.Implementation.ChannelTypes.channel_state_preimage_full_fund_width",
+        "Zkp.Implementation.ChannelTypes.channel_state_preimage_h2_and_version_tail",
+        "Zkp.Implementation.ChannelTypes.channel_state_preimage_ignores_digest_and_signatures"
+      ],
+      "note": "139-word preimage: the ten-lane fund vector at full width, balance h1 in the legacy balance-root slot, h2_tag and state_version appended at the end. That signing this digest covers both H1 and H2 is a statement about the PREIMAGE only; signature validity is a boundary."
+    },
+    {
+      "start": 648,
+      "end": 653,
+      "status": "translated",
+      "label": "ChannelState::with_computed_digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.ChannelState.withComputedDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.with_computed_digest_sets_digest",
+        "Zkp.Implementation.ChannelTypes.with_computed_digest_preserves_everything_else"
+      ],
+      "note": "The digest field is not part of its own preimage, so the assignment is not self-referential."
+    },
+    {
+      "start": 654,
+      "end": 680,
+      "status": "untranslated",
+      "label": "Reject and RejectReason",
+      "declarations": [],
+      "theorems": [],
+      "note": "Off-chain rejection telemetry; no counterpart in this module and no digest depends on it."
+    },
+    {
+      "start": 681,
+      "end": 714,
+      "status": "untranslated",
+      "label": "ChannelTx struct",
+      "declarations": [],
+      "theorems": [],
+      "note": "The wire struct itself is not re-modeled here (Zkp.Implementation.ChannelStateUpdate carries its own view of it); only its signing preimage is modeled, at lines 715-754."
+    },
+    {
+      "start": 715,
+      "end": 754,
+      "status": "translated",
+      "label": "ChannelTx::signing_digest (IMPA-v2, 43 words)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.channelTxPreimage",
+        "Zkp.Implementation.ChannelTypes.channelTxSigningDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.channel_tx_preimage_length",
+        "Zkp.Implementation.ChannelTypes.channel_tx_token_slot_own_limb",
+        "Zkp.Implementation.ChannelTypes.channel_tx_token_slot_separates"
+      ],
+      "note": "token_slot occupies limb 26 alone; two otherwise identical transfers with different token slots have different preimages. The proof envelope is deliberately outside the preimage."
+    },
+    {
+      "start": 755,
+      "end": 762,
+      "status": "translated",
+      "label": "ReceiverBalanceDelta",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.ReceiverBalanceDelta"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 763,
+      "end": 820,
+      "status": "translated",
+      "label": "InterChannelTx layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.InterChannelTx",
+        "Zkp.Implementation.ChannelTypes.Salt",
+        "Zkp.Implementation.ChannelTypes.Salt.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.salt_words_length"
+      ],
+      "note": "One scalar token_index and one receiver-delta list per descriptor, exactly as in the source. That a descriptor carries exactly ONE real receiver is a caller convention, not a type constraint, and is not asserted here."
+    },
+    {
+      "start": 821,
+      "end": 876,
+      "status": "translated",
+      "label": "InterChannelTx::signing_digest (IMI5 preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.interChannelTxPreimage",
+        "Zkp.Implementation.ChannelTypes.InterChannelTx.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.inter_channel_preimage_excludes_sender_sig"
+      ],
+      "note": "Binds the block MESSAGE digest (not the SignedSmallBlock digest) and excludes the sender's own hash-signature fields. Hash-signature validity is a boundary."
+    },
+    {
+      "start": 877,
+      "end": 893,
+      "status": "translated",
+      "label": "InterChannelTx::tx_leaf_hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.InterChannelTx.txLeafHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.tx_leaf_hash_uses_only_first_delta"
+      ],
+      "note": "Only receiver_deltas[0] is read; trailing deltas are ignored and an empty list is an error. `tx_leaf_hash` itself is the imported balance_state boundary."
+    },
+    {
+      "start": 894,
+      "end": 910,
+      "status": "translated",
+      "label": "InterChannelTx::compute_tx_hash",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.InterChannelTx.computeTxHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.tx_hash_tracks_token"
+      ],
+      "note": "Single-sources token_index from the descriptor's own field; the token-bearing hash moves with it."
+    },
+    {
+      "start": 911,
+      "end": 929,
+      "status": "translated",
+      "label": "InterChannelTx::replay_identity",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.InterChannelTx.replayIdentity"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.replay_identity_drops_token",
+        "Zkp.Implementation.ChannelTypes.empty_receiver_deltas_rejected"
+      ],
+      "note": "The identity is invariant under the token limb, which is what makes two token variants of one debit collide in an identity-keyed ledger. Whether any ledger actually keys on it is outside this file."
+    },
+    {
+      "start": 930,
+      "end": 959,
+      "status": "translated",
+      "label": "burn_descriptor (IMD2)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.burnDescriptorPreimage",
+        "Zkp.Implementation.ChannelTypes.burnDescriptor",
+        "Zkp.Implementation.ChannelTypes.burnDescriptorDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.burn_descriptor_preimage_length",
+        "Zkp.Implementation.ChannelTypes.burn_descriptor_roundtrip",
+        "Zkp.Implementation.ChannelTypes.burn_descriptor_preimage_injective"
+      ],
+      "note": "28-word preimage, injective in all six inputs (source channel and base nonce included). The Solidity abi.encodePacked mirror is not proved equal."
+    },
+    {
+      "start": 960,
+      "end": 997,
+      "status": "translated",
+      "label": "inter_channel_tx_hash and its ids word",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.interChannelIdsWord",
+        "Zkp.Implementation.ChannelTypes.interChannelTxHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.ids_word_layout",
+        "Zkp.Implementation.ChannelTypes.ids_word_injective"
+      ],
+      "note": "The ids word layout [0,0,0,0,0,token,dest,source] is pinned and injective. The two-step keccak fold uses the imported settled_tx_chain_push boundary."
+    },
+    {
+      "start": 998,
+      "end": 1016,
+      "status": "translated",
+      "label": "inter_channel_tx_identity",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.interChannelTxIdentity"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.replay_identity_is_zero_token_hash"
+      ],
+      "note": "Definitionally the token-bearing fold at token limb zero."
+    },
+    {
+      "start": 1017,
+      "end": 1047,
+      "status": "translated",
+      "label": "CloseWithdrawal and its IMCL digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.CloseWithdrawal",
+        "Zkp.Implementation.ChannelTypes.closeWithdrawalPreimage",
+        "Zkp.Implementation.ChannelTypes.CloseWithdrawal.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.close_withdrawal_preimage_length",
+        "Zkp.Implementation.ChannelTypes.close_withdrawal_preimage_excludes_proof"
+      ],
+      "note": "42-word preimage; the zkp bytes are outside it."
+    },
+    {
+      "start": 1048,
+      "end": 1078,
+      "status": "translated",
+      "label": "CloseIntent layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.CloseIntent"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1079,
+      "end": 1171,
+      "status": "translated",
+      "label": "CloseIntent::new binding checks",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.CloseIntent.new",
+        "Zkp.Implementation.ChannelTypes.closeBindingChecks",
+        "Zkp.Implementation.ChannelTypes.checkedAddOneU64"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.close_binding_checks_conditions",
+        "Zkp.Implementation.ChannelTypes.close_intent_new_enforced_bindings",
+        "Zkp.Implementation.ChannelTypes.close_intent_rejects_nonzero_burn_tx_hash",
+        "Zkp.Implementation.ChannelTypes.close_intent_rejects_unallocated_incoming",
+        "Zkp.Implementation.ChannelTypes.close_binding_checks_ignore_non_genesis_lanes"
+      ],
+      "note": "All seven checks in source order plus the checked freeze-nonce increment. The last theorem records the scope limit: only the genesis fund lane is compared with burn_amount; the other nine ride into the snapshot unchecked here."
+    },
+    {
+      "start": 1172,
+      "end": 1189,
+      "status": "translated",
+      "label": "CloseIntent::state_id / signing_digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.CloseIntent.stateId",
+        "Zkp.Implementation.ChannelTypes.CloseIntent.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.close_intent_signing_digest_is_state_id"
+      ],
+      "note": "The legacy name is definitionally the state id."
+    },
+    {
+      "start": 1190,
+      "end": 1206,
+      "status": "translated",
+      "label": "WithdrawalClaim layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.WithdrawalClaim",
+        "Zkp.Implementation.ChannelTypes.Addr",
+        "Zkp.Implementation.ChannelTypes.Addr.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.addr_words_length",
+        "Zkp.Implementation.ChannelTypes.addr_words_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1207,
+      "end": 1249,
+      "status": "translated",
+      "label": "WithdrawalClaim::derive_nullifier (IMW2, 18 limbs)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.withdrawalNullifierPreimage",
+        "Zkp.Implementation.ChannelTypes.deriveWithdrawalNullifier",
+        "Zkp.Implementation.ChannelTypes.withdrawalNullifierDecode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.withdrawal_nullifier_preimage_length",
+        "Zkp.Implementation.ChannelTypes.withdrawal_nullifier_roundtrip",
+        "Zkp.Implementation.ChannelTypes.withdrawal_nullifier_preimage_injective",
+        "Zkp.Implementation.ChannelTypes.withdrawal_nullifier_ignores_member_pk"
+      ],
+      "note": "The preimage is keyed on the slot Regev pk digest and carries token_slot as its own limb; member_pk_g never appears. That the Regev digest is leaf-bound is a property of the withdrawal-claim proof, not of this function."
+    },
+    {
+      "start": 1250,
+      "end": 1282,
+      "status": "translated",
+      "label": "WithdrawalClaim::signing_digest (IMCW)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.withdrawalClaimPreimage",
+        "Zkp.Implementation.ChannelTypes.WithdrawalClaim.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.withdrawal_claim_token_slot_position"
+      ],
+      "note": "token_slot sits at limb 17, immediately after member_pk_g. The source's own note that a v1 and a v2 preimage can share a total length under a realigned parse is NOT contradicted here: no cross-version non-aliasing is claimed."
+    },
+    {
+      "start": 1283,
+      "end": 1318,
+      "status": "translated",
+      "label": "SpecialClose and its IMSC digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.SpecialClose",
+        "Zkp.Implementation.ChannelTypes.specialClosePreimage",
+        "Zkp.Implementation.ChannelTypes.SpecialClose.signingDigest"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1319,
+      "end": 1362,
+      "status": "translated",
+      "label": "CancelClose, CancelClose::new and its IMCN digest",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.CancelClose",
+        "Zkp.Implementation.ChannelTypes.CancelClose.new",
+        "Zkp.Implementation.ChannelTypes.cancelClosePreimage",
+        "Zkp.Implementation.ChannelTypes.CancelClose.signingDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.cancel_close_new_fields"
+      ],
+      "note": "The constructor binds the revived tx by block-message digest, IMI5 digest, tx_hash and seal."
+    },
+    {
+      "start": 1363,
+      "end": 1377,
+      "status": "translated",
+      "label": "PostCloseIncomingClaim layout",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.PostCloseIncomingClaim"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1378,
+      "end": 1427,
+      "status": "translated",
+      "label": "derive_shared_native_nullifier (IMCK)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.sharedNativeNullifierPreimage",
+        "Zkp.Implementation.ChannelTypes.deriveSharedNativeNullifier"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.shared_native_nullifier_preimage_length",
+        "Zkp.Implementation.ChannelTypes.shared_native_nullifier_has_no_token_limb"
+      ],
+      "note": "The 25-limb preimage carries no token limb; the source's argument that token separation follows transitively from incoming_tx_hash is recorded structurally and is NOT proved (it depends on the accumulator and the replay ledger, both outside this file)."
+    },
+    {
+      "start": 1428,
+      "end": 1447,
+      "status": "translated",
+      "label": "PostCloseIncomingClaim::signing_digest (IMCP)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.postCloseClaimPreimage",
+        "Zkp.Implementation.ChannelTypes.PostCloseIncomingClaim.signingDigest"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1448,
+      "end": 1462,
+      "status": "untranslated",
+      "label": "TokenRegister payload struct",
+      "declarations": [],
+      "theorems": [],
+      "note": "The single-field payload wrapper is not modeled; its token_index is threaded directly into tokenRegisterNextState at lines 1463-1495."
+    },
+    {
+      "start": 1463,
+      "end": 1495,
+      "status": "translated",
+      "label": "token_register_next_state",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.tokenRegisterNextState",
+        "Zkp.Implementation.ChannelTypes.addOneU64",
+        "Zkp.Implementation.ChannelTypes.OverflowMode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.token_register_next_state_shape",
+        "Zkp.Implementation.ChannelTypes.token_register_digest_is_recomputed",
+        "Zkp.Implementation.ChannelTypes.token_register_epoch_increment",
+        "Zkp.Implementation.ChannelTypes.token_register_propagates_balance_error"
+      ],
+      "note": "The canonical builder's carry-over set is pinned field by field. `apply_token_register` (append-at-token_count, injectivity, version bump) is an Env boundary, so the registry invariants themselves are NOT proved here."
+    },
+    {
+      "start": 1496,
+      "end": 1534,
+      "status": "untranslated",
+      "label": "ChannelTransition enum and its delegating accessors",
+      "declarations": [],
+      "theorems": [],
+      "note": "The payload-carrying wrapper and its kind()/backend delegations are not modeled; the underlying kind-to-backend map IS modeled, at lines 139-171."
+    },
+    {
+      "start": 1535,
+      "end": 1554,
+      "status": "translated",
+      "label": "structural_cosign_placeholder",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.structuralCosignPlaceholder",
+        "Zkp.Implementation.ChannelTypes.falconCosignBlobBytes",
+        "Zkp.Implementation.ChannelTypes.falconSigV1"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.structural_placeholder_length",
+        "Zkp.Implementation.ChannelTypes.structural_placeholder_head",
+        "Zkp.Implementation.ChannelTypes.structural_placeholder_nonempty",
+        "Zkp.Implementation.ChannelTypes.falcon_cosign_blob_bytes_pinned",
+        "Zkp.Implementation.ChannelTypes.falcon_sig_v1_pinned"
+      ],
+      "note": "An explicit non-signature of exactly the cosign blob length. Falcon decoding and verification are boundaries; nothing here says the blob is or is not a valid signature beyond its shape."
+    },
+    {
+      "start": 1555,
+      "end": 1580,
+      "status": "translated",
+      "label": "validate_all_member_signatures (structural length gate)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.validateAllMemberSignatures",
+        "Zkp.Implementation.ChannelTypes.lengthChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.all_signature_validation_shape",
+        "Zkp.Implementation.ChannelTypes.length_checks_forces_length",
+        "Zkp.Implementation.ChannelTypes.signature_validation_ignores_blob_contents",
+        "Zkp.Implementation.ChannelTypes.structural_placeholder_passes_both_gates"
+      ],
+      "note": "Adds only the fixed blob LENGTH on top of the slot check. Proved to be independent of the blob BYTES, and the source's own meaningless placeholder is proved to pass: acceptance here is NOT evidence of any signature."
+    },
+    {
+      "start": 1581,
+      "end": 1622,
+      "status": "translated",
+      "label": "validate_member_signature_slots (structural slot gate)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.validateMemberSignatureSlots",
+        "Zkp.Implementation.ChannelTypes.slotChecks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.slot_validation_shape",
+        "Zkp.Implementation.ChannelTypes.slot_checks_forces_shape",
+        "Zkp.Implementation.ChannelTypes.signature_set_covers_cosigners_only",
+        "Zkp.Implementation.ChannelTypes.sample_signature_slots_accepted",
+        "Zkp.Implementation.ChannelTypes.short_signature_set_rejected",
+        "Zkp.Implementation.ChannelTypes.unregistered_key_in_slot_rejected",
+        "Zkp.Implementation.ChannelTypes.out_of_order_signature_set_rejected"
+      ],
+      "note": "Runs record.validate() first, then one entry per cosigner slot, in slot order, with the registered pk_g and a non-empty blob. It constrains no slot at or above member_count, and performs no cryptographic verification."
+    },
+    {
+      "start": 1623,
+      "end": 1646,
+      "status": "translated",
+      "label": "channel_balance_leaf_digest / user_fund_leaf_digest (IMUF)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.channelBalanceLeafPreimage",
+        "Zkp.Implementation.ChannelTypes.channelBalanceLeafDigest",
+        "Zkp.Implementation.ChannelTypes.userFundLeafDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.channel_balance_leaf_preimage_length",
+        "Zkp.Implementation.ChannelTypes.user_fund_leaf_is_channel_balance_leaf"
+      ],
+      "note": "18-word preimage; the ciphertext enters only through the opaque digest boundary."
+    },
+    {
+      "start": 1647,
+      "end": 1662,
+      "status": "translated",
+      "label": "merkle_root_from_proof",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.merkleRootFromProof",
+        "Zkp.Implementation.ChannelTypes.merkleFold",
+        "Zkp.Implementation.ChannelTypes.pathBit",
+        "Zkp.Implementation.ChannelTypes.indexLimb"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.merkle_root_empty_proof",
+        "Zkp.Implementation.ChannelTypes.merkle_pair_width",
+        "Zkp.Implementation.ChannelTypes.merkle_deep_proof_panics"
+      ],
+      "note": "Bit selection from the big-endian index limbs is reproduced, INCLUDING the usize underflow for depth >= 256 (a panic, modeled as such). No Merkle soundness or inclusion property is claimed; the node hash is the Env.hash boundary."
+    },
+    {
+      "start": 1663,
+      "end": 1666,
+      "status": "translated",
+      "label": "split_u64",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.splitU64",
+        "Zkp.Implementation.ChannelTypes.splitU64Lo",
+        "Zkp.Implementation.ChannelTypes.scalarLimit",
+        "Zkp.Implementation.ChannelTypes.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.split_u64_length",
+        "Zkp.Implementation.ChannelTypes.split_u64_lo_length",
+        "Zkp.Implementation.ChannelTypes.split_u64_orders_are_reversed",
+        "Zkp.Implementation.ChannelTypes.word_base_pinned",
+        "Zkp.Implementation.ChannelTypes.scalar_limit_pinned"
+      ],
+      "note": "The big-endian pair, kept distinct from the low-limb-first split that the IML2 digest uses."
+    },
+    {
+      "start": 1667,
+      "end": 1676,
+      "status": "translated",
+      "label": "bytes_to_u32_words",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.bytesToWords",
+        "Zkp.Implementation.ChannelTypes.bytesToWordsAux",
+        "Zkp.Implementation.ChannelTypes.beWord"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.bytes_to_words_not_injective",
+        "Zkp.Implementation.ChannelTypes.length_prefix_separates_padded_blobs"
+      ],
+      "note": "Right-zero-padded 4-byte big-endian chunks; proved non-injective, which is the reason every variable-length blob in this file is length-prefixed."
+    },
+    {
+      "start": 1677,
+      "end": 1680,
+      "status": "dependency-boundary",
+      "label": "hash_words / solidity_keccak256",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.Env"
+      ],
+      "theorems": [],
+      "note": "Modeled as the opaque `Env.hash` callback. NOT assumed injective or collision-resistant, and the `expect(\"keccak output must be bytes32\")` panic path is not modeled."
+    },
+    {
+      "start": 1681,
+      "end": 1728,
+      "status": "translated",
+      "label": "close_member_set_commitment (IMCM, fixed 66-word preimage)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.closeMemberSetPreimage",
+        "Zkp.Implementation.ChannelTypes.closeMemberSetCommitment"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.close_member_set_preimage_length",
+        "Zkp.Implementation.ChannelTypes.close_member_set_covers_only_cosigner_slots",
+        "Zkp.Implementation.ChannelTypes.close_member_set_zeroes_padding",
+        "Zkp.Implementation.ChannelTypes.sig_cluster_below_member_capacity"
+      ],
+      "note": "Fixed-width over the MAX_SIG_CLUSTER cosigner slots with zeroed padding; delegates never enter it. Agreement with the in-circuit keccak gadget and the Solidity mirror is NOT proved."
+    },
+    {
+      "start": 1729,
+      "end": 1760,
+      "status": "translated",
+      "label": "l1_deposit_import_digest (IML2, 14 words)",
+      "declarations": [
+        "Zkp.Implementation.ChannelTypes.l1DepositImportPreimage",
+        "Zkp.Implementation.ChannelTypes.l1DepositImportDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.ChannelTypes.l1_deposit_import_preimage_length",
+        "Zkp.Implementation.ChannelTypes.l1_deposit_import_token_and_slot_own_limbs"
+      ],
+      "note": "token_index (limb 10) and depositor_slot (limb 13) are separate canonical limbs; the amount is split LOW LIMB FIRST here, unlike split_u64."
+    },
+    {
+      "start": 1761,
+      "end": 3005,
+      "status": "test-only",
+      "label": "#[cfg(test)] module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust unit tests and fixtures, including the frozen cross-language golden vectors. Not a production constraint; the module's own example theorems are separate."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-hash-words",
+      "obligation": "`hash_words`/`solidity_keccak256` is an opaque `Env.hash` callback; no injectivity, collision resistance or preimage resistance is assumed, so no theorem here upgrades preimage distinctness into digest distinctness.",
+      "discharged": false
+    },
+    {
+      "name": "regev-ciphertext-digest",
+      "obligation": "`RegevCiphertext::digest` is the opaque `Env.ctDigest`; nothing binds it to the ciphertext contents or to any decryptable amount.",
+      "discharged": false
+    },
+    {
+      "name": "balance-state-h1",
+      "obligation": "`BalanceState::h1` is the opaque `Env.balanceH1`; the registry/token_count commitment it is claimed to carry is modeled in Zkp.Implementation.H1Gadget, not here.",
+      "discharged": false
+    },
+    {
+      "name": "balance-state-tx-leaf-and-chain-push",
+      "obligation": "`tx_leaf_hash` and `settled_tx_chain_push` are imported opaque callbacks; the fold structure is modeled, the hash is not.",
+      "discharged": false
+    },
+    {
+      "name": "balance-state-apply-token-register",
+      "obligation": "`BalanceState::apply_token_register` is an opaque callback; append-at-token_count, registry injectivity, the MAX_CHANNEL_TOKENS bound and the state_version bump are NOT proved in this module.",
+      "discharged": false
+    },
+    {
+      "name": "falcon-signature-validity",
+      "obligation": "`validate_all_member_signatures` and `validate_member_signature_slots` are proved to check only slot order, registered pk_g and blob length. Actual N-of-N authorization rests on `wallet_core::verify_all_signatures` and the close/cancel aggregation circuits, which are outside this file.",
+      "discharged": false
+    },
+    {
+      "name": "sender-hash-signature-and-a11-membership",
+      "obligation": "`sender_hash_sig` / `sender_pk_b` on ChannelTx and InterChannelTx are opaque bytes here; the Poseidon2-BabyBear STARK check and the (pk_g, pk_b, regev_pk) MemberLeaf membership proof are the wallet's and the verifier's obligation.",
+      "discharged": false
+    },
+    {
+      "name": "registered-member-set-binding",
+      "obligation": "`ChannelRecord::validate` is proved NOT to relate `member_pk_gs` to `member_pubkeys_root`, to `regev_pk_root`, or to any on-chain registration. Binding the recorded keys to the registered cosigner set is done elsewhere (the IMCM public input matched on L1, the wallet member tree).",
+      "discharged": false
+    },
+    {
+      "name": "merkle-tree-soundness",
+      "obligation": "`merkle_root_from_proof` is modeled as a fold; no statement is made that a matching root implies membership, nor that the leaf index is in range beyond the modeled panic.",
+      "discharged": false
+    },
+    {
+      "name": "channel-id-validity",
+      "obligation": "`ChannelId` construction (nonzero, 32-bit range) lives in `common::channel_id`; this module represents a channel id as a bare Nat and only models the reserved-burn-id check that channel.rs itself performs.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-and-solidity-mirrors",
+      "obligation": "Claims that IMSB, IMCM, IMCK, IMTF or IML2 preimages match their in-circuit or Solidity recomputes limb-for-limb are documentation in the source; no cross-language equality is proved here.",
+      "discharged": false
+    },
+    {
+      "name": "rust-runtime-and-serde",
+      "obligation": "serde encoding, allocation failure, error Display strings, integer-overflow build profile (modeled only as an explicit OverflowMode choice) and Rust compiler refinement are all outside the model.",
+      "discharged": false
+    }
+  ]
+}
