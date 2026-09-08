@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "source": "src/common/trees/nullifier_tree.rs",
+  "source_sha256": "6f0a2467c6a98d211a2e12e811a9c505b7a2ab2459c310e497f50160b775bd87",
+  "source_lines": 159,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 27,
+      "status": "dependency-boundary",
+      "label": "Imports: `IndexedMerkleTree`, its insertion proofs, `NULLIFIER_TREE_HEIGHT`, plonky2",
+      "declarations": [],
+      "theorems": [],
+      "note": "Ordered-set semantics come from the registered `Zkp.Implementation.IndexedMerkleTree` model."
+    },
+    {
+      "start": 28,
+      "end": 34,
+      "status": "translated",
+      "label": "The three newtype wrappers over `IndexedMerkleTree` / `IndexedInsertionProof`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.TreeInstance",
+        "Zkp.Implementation.TreeInstances.backingOf",
+        "Zkp.Implementation.TreeInstances.nullifierTreeInit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.backing_of_each_instance",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_is_the_only_indexed_tree",
+        "Zkp.Implementation.TreeInstances.private_state_trees_use_three_different_backings"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 35,
+      "end": 63,
+      "status": "translated",
+      "label": "`NullifierTree::init/get_root/nullifiers/prove_and_insert` (insertion always with `value = 0`)",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.nullifierTreeInit",
+        "Zkp.Implementation.TreeInstances.nullifiersOf",
+        "Zkp.Implementation.TreeInstances.insertNullifier",
+        "Zkp.Implementation.TreeInstances.nullifierInsertValue",
+        "Zkp.Implementation.TreeInstances.heightOf",
+        "Zkp.Implementation.TreeInstances.capacityOf",
+        "Zkp.Implementation.TreeInstances.nullifierExampleTree"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.nullifier_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.nullifier_height_agrees_with_util_gadgets",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_init_height",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_init_capacity",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_capacity_is_two_pow_32",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_init_holds_only_the_sentinel",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_init_is_well_formed",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_init_has_no_nullifiers",
+        "Zkp.Implementation.TreeInstances.nullifier_insert_value_pinned",
+        "Zkp.Implementation.TreeInstances.nullifier_reinsertion_fails",
+        "Zkp.Implementation.TreeInstances.nullifier_insert_ok_implies_the_nullifier_was_absent",
+        "Zkp.Implementation.TreeInstances.the_all_zero_nullifier_can_never_be_inserted",
+        "Zkp.Implementation.TreeInstances.nullifier_tree_stays_well_formed",
+        "Zkp.Implementation.TreeInstances.nullifier_first_insert_example",
+        "Zkp.Implementation.TreeInstances.nullifier_example_tree_is_well_formed",
+        "Zkp.Implementation.TreeInstances.nullifier_example_tree_records_the_nullifier",
+        "Zkp.Implementation.TreeInstances.nullifier_reinsert_example",
+        "Zkp.Implementation.TreeInstances.private_state_trees_share_height_32",
+        "Zkp.Implementation.TreeInstances.genesis_nullifier_tree_is_the_sentinel_tree"
+      ],
+      "note": "`get_root` is the `IndexedMerkleTree` commitment layer and is not separately modelled; the key-set effect of `prove_and_insert` is. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 64,
+      "end": 93,
+      "status": "untranslated",
+      "label": "`NullifierInsertionProof::get_new_root` / `verify`: native root recomputation and comparison",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modelled in this module; the corresponding semantics lives in `Zkp.Implementation.IndexedMerkleTree` but no declaration here mirrors this wrapper or its `CommonError` remapping."
+    },
+    {
+      "start": 94,
+      "end": 159,
+      "status": "untranslated",
+      "label": "`NullifierInsertionProofTarget`: the in-circuit insertion-proof wrapper and its `get_new_root`/`verify` gadgets",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modelled in this module."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "`PoseidonHashOut::hash_inputs_u64` and `PoseidonLeafableHasher::two_to_one` are opaque functions here. No collision resistance, preimage resistance or injectivity is assumed; every statement that needs two digests to differ carries that as an explicit premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "backing-tree-model-import",
+      "obligation": "Merkle-tree behaviour is taken from the registered `Zkp.Implementation.SparseTrees` and `Zkp.Implementation.IndexedMerkleTree` models of `src/utils/trees/`, which are themselves handwritten models of that Rust code, not refinements of it.",
+      "discharged": false
+    },
+    {
+      "name": "constants-transcription",
+      "obligation": "Every pinned height is taken from the registered `Zkp.Implementation.UtilGadgets` transcription of `src/constants.rs`. That the transcription matches the Rust constants is checked by review, not by a proof.",
+      "discharged": false
+    },
+    {
+      "name": "panics",
+      "obligation": "Rust `assert!`/`unwrap`/index panics (`IncrementalMerkleTree::push` capacity, `HashMap` indexing) are modelled as explicit error or outcome values; the partially mutated state a real panic leaves behind is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "nullifier-set-circuit-side",
+      "obligation": "Only the NATIVE key-set behaviour of the nullifier tree is modelled. The in-circuit insertion proof (`IndexedInsertionProofTarget`) and the binding of a circuit commitment to a concrete tree are premises of `Zkp.Implementation.IndexedMerkleTree`, not facts proved here.",
+      "discharged": false
+    }
+  ]
+}

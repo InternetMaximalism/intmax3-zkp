@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/cyclic_chain_circuit.rs",
+  "source_sha256": "74c4367d3377e88c0629b52cccd9868e9bfb1729c209320965218052246e4133",
+  "source_lines": 149,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 29,
+      "status": "dependency-boundary",
+      "label": "plonky2 recursion imports: `cyclic_base_proof`, `NoopGate`, `vd_vec_len`, `add_proof_target_and_verify`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Recursive verification and dummy-proof construction are premises."
+    },
+    {
+      "start": 30,
+      "end": 48,
+      "status": "dependency-boundary",
+      "label": "The `CyclicChainCircuit` struct: `is_first_step`, the inner and previous proof targets, the verifier-data target",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.CyclicAccepts"
+      ],
+      "theorems": [],
+      "note": "Proof targets are not modelled; only the relation on published hashes is."
+    },
+    {
+      "start": 49,
+      "end": 86,
+      "status": "translated",
+      "label": "`CyclicChainCircuit::new`: publish only the new hash, connect the previous proof's published hash to the inner `prev_hash`, and assert `prev_hash = 0` on the first step",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.CyclicAccepts",
+        "Zkp.Implementation.TreeInstances.cyclicHashPublicInputLen",
+        "Zkp.Implementation.TreeInstances.chainHash",
+        "Zkp.Implementation.TreeInstances.chainFoldFrom",
+        "Zkp.Implementation.TreeInstances.constantChainEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.cyclic_hash_public_input_len_pinned",
+        "Zkp.Implementation.TreeInstances.cyclic_accepts_first_step",
+        "Zkp.Implementation.TreeInstances.cyclic_accepts_later_step",
+        "Zkp.Implementation.TreeInstances.cyclic_chain_is_never_empty",
+        "Zkp.Implementation.TreeInstances.cyclic_accepts_determines_the_hash",
+        "Zkp.Implementation.TreeInstances.first_step_hash_is_keccak_of_zero_prev_hash",
+        "Zkp.Implementation.TreeInstances.any_nonempty_suffix_is_itself_an_accepted_chain",
+        "Zkp.Implementation.TreeInstances.chain_hash_does_not_commit_the_chain_length",
+        "Zkp.Implementation.TreeInstances.chain_hash_does_not_commit_the_contents"
+      ],
+      "note": "`is_first_step` is a prover-chosen witness, so any nonempty suffix of a run is itself an accepted chain; and no gate bounds the chain length. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 87,
+      "end": 114,
+      "status": "dependency-boundary",
+      "label": "`CyclicChainCircuit::prove`: witness assignment and the `cyclic_base_proof` dummy for the first step",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.CyclicAccepts"
+      ],
+      "theorems": [],
+      "note": "Proof generation is outside the model; only the first-step/later-step split is reflected in the accept relation."
+    },
+    {
+      "start": 115,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "`common_data_for_hash_chain_circuit`: gate-count padding and `num_public_inputs = BYTES32_LEN + vd_vec_len(config)`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.cyclicPublicInputCount",
+        "Zkp.Implementation.TreeInstances.cyclicHashPublicInputLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.cyclic_public_inputs_start_with_the_running_hash"
+      ],
+      "note": "Only the public-input LAYOUT this function pins is modelled; the plonky2 common-data construction is a premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-callback",
+      "obligation": "`solidity_keccak256` / `BuilderKeccak256::keccak256` is an opaque function. Nothing here assumes collision resistance, so the chain hash pins neither the contents nor the length of a chain except under that unproved assumption.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    },
+    {
+      "name": "recursive-verifier-data-binding",
+      "obligation": "That the cyclic circuit's verifier data really pins the recursion to itself (`connect_hashes`/`connect_merkle_caps` in `add_proof_target_and_verify_cyclic`, and `common_data_for_hash_chain_circuit`'s gate padding) is assumed, not modelled.",
+      "discharged": false
+    }
+  ]
+}

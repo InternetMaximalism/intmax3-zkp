@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "source": "src/common/trees/key_tree.rs",
+  "source_sha256": "a8df3f844b9cf173db9174d74ab9bac95aebfae1b4143ee25a652c7b18ab9577",
+  "source_lines": 190,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "non-executable",
+      "label": "Module doc comment: the two DISTINCT `MemberTree` instantiations and the cross-tree domain-separation rationale",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 27,
+      "end": 49,
+      "status": "dependency-boundary",
+      "label": "plonky2, serde and crate imports (`MEMBER_TREE_HEIGHT`, `WALLET_MEMBER_TREE_HEIGHT`, `IncrementalMerkleTree`, Poseidon)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Heights come from the registered UtilGadgets transcription; the tree from SparseTrees."
+    },
+    {
+      "start": 50,
+      "end": 52,
+      "status": "translated",
+      "label": "`MEMBER_LEAF_DOMAIN` = ASCII \"MBLF\"",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberLeafDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.member_leaf_domain_is_mblf",
+        "Zkp.Implementation.TreeInstances.leaf_domain_tags_are_distinct",
+        "Zkp.Implementation.TreeInstances.leaf_domain_tags_fit_in_a_u32_limb"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 53,
+      "end": 70,
+      "status": "non-executable",
+      "label": "Section banner and the `MemberLeaf` doc comment (A11 three-key joint binding)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 71,
+      "end": 77,
+      "status": "translated",
+      "label": "`MemberLeaf { pk_g, pk_b, regev_pk_digest }` and its derived `Default` (= the empty leaf)",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.MemberLeaf",
+        "Zkp.Implementation.TreeInstances.emptyMemberLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.empty_member_leaf_words",
+        "Zkp.Implementation.TreeInstances.empty_member_leaf_preimage_is_not_all_zero"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 78,
+      "end": 84,
+      "status": "dependency-boundary",
+      "label": "`MemberLeafTarget`: the in-circuit mirror",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberLeafTargetWords"
+      ],
+      "theorems": [],
+      "note": "Targets represented by their word lists."
+    },
+    {
+      "start": 85,
+      "end": 96,
+      "status": "translated",
+      "label": "`MemberLeaf::to_u64_vec`: the domain tag leads the thirteen-word preimage",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberLeafWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.member_leaf_preimage_length",
+        "Zkp.Implementation.TreeInstances.channel_and_member_leaf_preimages_never_coincide"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 97,
+      "end": 108,
+      "status": "translated",
+      "label": "`<MemberLeaf as Leafable>`: `empty_leaf = default`, `hash = Poseidon(to_u64_vec)`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberSpec",
+        "Zkp.Implementation.TreeInstances.emptyMemberLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.empty_member_leaf_words"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 109,
+      "end": 148,
+      "status": "dependency-boundary",
+      "label": "`MemberLeafTarget::new/to_vec/constant/set_witness` (plonky2 builder API)",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberLeafTargetWords"
+      ],
+      "theorems": [],
+      "note": "Only the `to_vec` layout is modelled."
+    },
+    {
+      "start": 149,
+      "end": 171,
+      "status": "dependency-boundary",
+      "label": "`<MemberLeafTarget as LeafableTarget>`: the domain tag is prepended in-circuit",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.memberLeafTargetWords",
+        "Zkp.Implementation.TreeInstances.memberLeafDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.member_leaf_circuit_preimage_matches_native"
+      ],
+      "note": "Layout agreement between the in-circuit and the native preimage only."
+    },
+    {
+      "start": 172,
+      "end": 175,
+      "status": "translated",
+      "label": "`MemberTree = IncrementalMerkleTree<MemberLeaf>` and its proof aliases",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.TreeInstance",
+        "Zkp.Implementation.TreeInstances.backingOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.backing_of_each_instance"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 176,
+      "end": 190,
+      "status": "translated",
+      "label": "The two instantiations: `init()` at `MEMBER_TREE_HEIGHT` (registered cosigners) and `init_wallet_membership()` at `WALLET_MEMBER_TREE_HEIGHT` (wallet-side live tree)",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.heightOf",
+        "Zkp.Implementation.TreeInstances.capacityOf",
+        "Zkp.Implementation.TreeInstances.memberTreeInit",
+        "Zkp.Implementation.TreeInstances.walletMemberTreeInit",
+        "Zkp.Implementation.TreeInstances.memberSpec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.member_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.wallet_member_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.member_height_agrees_with_util_gadgets",
+        "Zkp.Implementation.TreeInstances.wallet_member_height_agrees_with_util_gadgets",
+        "Zkp.Implementation.TreeInstances.member_tree_init_height",
+        "Zkp.Implementation.TreeInstances.wallet_member_tree_init_height",
+        "Zkp.Implementation.TreeInstances.member_tree_init_is_empty",
+        "Zkp.Implementation.TreeInstances.member_tree_init_root",
+        "Zkp.Implementation.TreeInstances.wallet_member_tree_init_root_extends_the_registered_one",
+        "Zkp.Implementation.TreeInstances.registered_member_tree_capacity_is_the_sig_cluster",
+        "Zkp.Implementation.TreeInstances.wallet_member_tree_capacity_is_max_channel_members",
+        "Zkp.Implementation.TreeInstances.member_tree_instantiations_have_different_heights",
+        "Zkp.Implementation.TreeInstances.member_tree_instantiations_have_different_capacities",
+        "Zkp.Implementation.TreeInstances.wallet_member_tree_and_balance_slot_tree_share_a_height",
+        "Zkp.Implementation.TreeInstances.member_tree_push_fails_past_the_sig_cluster",
+        "Zkp.Implementation.TreeInstances.unregistered_channel_member_slots_all_read_as_the_zero_leaf"
+      ],
+      "note": "Same alias, same leaf type, two heights (3 vs 10) so that conflating the roots fails loudly. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "`PoseidonHashOut::hash_inputs_u64` and `PoseidonLeafableHasher::two_to_one` are opaque functions here. No collision resistance, preimage resistance or injectivity is assumed; every statement that needs two digests to differ carries that as an explicit premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "backing-tree-model-import",
+      "obligation": "Merkle-tree behaviour is taken from the registered `Zkp.Implementation.SparseTrees` and `Zkp.Implementation.IndexedMerkleTree` models of `src/utils/trees/`, which are themselves handwritten models of that Rust code, not refinements of it.",
+      "discharged": false
+    },
+    {
+      "name": "constants-transcription",
+      "obligation": "Every pinned height is taken from the registered `Zkp.Implementation.UtilGadgets` transcription of `src/constants.rs`. That the transcription matches the Rust constants is checked by review, not by a proof.",
+      "discharged": false
+    },
+    {
+      "name": "panics",
+      "obligation": "Rust `assert!`/`unwrap`/index panics (`IncrementalMerkleTree::push` capacity, `HashMap` indexing) are modelled as explicit error or outcome values; the partially mutated state a real panic leaves behind is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "membership-gating",
+      "obligation": "An empty registered member tree reads back the all-zero `MemberLeaf` at every one of its eight slots. Whether such a slot can be used as a signing identity is decided by the validity circuit's activeness gating, which this module does not model.",
+      "discharged": false
+    }
+  ]
+}

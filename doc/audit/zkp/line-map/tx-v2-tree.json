@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "source": "src/common/trees/tx_v2_tree.rs",
+  "source_sha256": "8dcdcf6fd0028e2265543a19e4e5cd42aa272d463c45749d0aea638c1ade6ef9",
+  "source_lines": 90,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 9,
+      "status": "dependency-boundary",
+      "label": "Imports: `TxV2`/`ChannelAction` leaf types, `SparseMerkleTree`, `TX_TREE_HEIGHT`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.txV2Spec"
+      ],
+      "theorems": [],
+      "note": "The `TxV2` leaf hash is the opaque Poseidon callback applied to the preimage words modelled here."
+    },
+    {
+      "start": 10,
+      "end": 16,
+      "status": "translated",
+      "label": "`TxV2Tree` and `ChannelActionTree` aliases over `SparseMerkleTree`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.TreeInstance",
+        "Zkp.Implementation.TreeInstances.backingOf",
+        "Zkp.Implementation.TreeInstances.txV2Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.backing_of_each_instance",
+        "Zkp.Implementation.TreeInstances.tx_v2_preimage_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 17,
+      "end": 28,
+      "status": "translated",
+      "label": "Both `init()`s pin `TX_TREE_HEIGHT`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.heightOf",
+        "Zkp.Implementation.TreeInstances.txV2TreeInit",
+        "Zkp.Implementation.TreeInstances.txV2Spec",
+        "Zkp.Implementation.TreeInstances.emptyTxV2Words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.tx_v2_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.channel_action_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.tx_v2_tree_init_height",
+        "Zkp.Implementation.TreeInstances.tx_v2_tree_init_root",
+        "Zkp.Implementation.TreeInstances.empty_send_tree_root_equals_empty_tx_v2_tree_root",
+        "Zkp.Implementation.TreeInstances.empty_send_leaf_and_empty_tx_v2_share_a_preimage",
+        "Zkp.Implementation.TreeInstances.untagged_ten_word_leaf_encodings_can_coincide"
+      ],
+      "note": "The `TxV2` empty leaf has the same ten-zero Poseidon preimage as the `SendLeaf` empty leaf, so these two height-32 trees have the same empty root. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 29,
+      "end": 44,
+      "status": "untranslated",
+      "label": "`compute_channel_action_root` / `compute_tx_v2_root`: build a tree by repeated `update` and return the root",
+      "declarations": [],
+      "theorems": [],
+      "note": "The repeated-update root construction is not modelled in this module."
+    },
+    {
+      "start": 45,
+      "end": 90,
+      "status": "test-only",
+      "label": "`#[cfg(test)] mod tests`: determinism and the `tx_tree_root != 0` reservation test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Tests are not part of the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "`PoseidonHashOut::hash_inputs_u64` and `PoseidonLeafableHasher::two_to_one` are opaque functions here. No collision resistance, preimage resistance or injectivity is assumed; every statement that needs two digests to differ carries that as an explicit premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "backing-tree-model-import",
+      "obligation": "Merkle-tree behaviour is taken from the registered `Zkp.Implementation.SparseTrees` and `Zkp.Implementation.IndexedMerkleTree` models of `src/utils/trees/`, which are themselves handwritten models of that Rust code, not refinements of it.",
+      "discharged": false
+    },
+    {
+      "name": "constants-transcription",
+      "obligation": "Every pinned height is taken from the registered `Zkp.Implementation.UtilGadgets` transcription of `src/constants.rs`. That the transcription matches the Rust constants is checked by review, not by a proof.",
+      "discharged": false
+    },
+    {
+      "name": "panics",
+      "obligation": "Rust `assert!`/`unwrap`/index panics (`IncrementalMerkleTree::push` capacity, `HashMap` indexing) are modelled as explicit error or outcome values; the partially mutated state a real panic leaves behind is not modelled.",
+      "discharged": false
+    }
+  ]
+}

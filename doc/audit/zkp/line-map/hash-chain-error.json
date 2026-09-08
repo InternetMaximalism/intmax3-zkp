@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/error.rs",
+  "source_sha256": "5b18a2770c54c55c531a3f97c8a74a66f50de18c99f77cc8fd7551cf525ee54c",
+  "source_lines": 24,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 20,
+      "status": "translated",
+      "label": "`HashChainError`: the six variants of the hash-chain family",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.HashChainError",
+        "Zkp.Implementation.TreeInstances.hashChainErrorTag",
+        "Zkp.Implementation.TreeInstances.hashChainErrorSamples"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.hash_chain_error_has_six_variants",
+        "Zkp.Implementation.TreeInstances.hash_chain_error_tags_are_distinct"
+      ],
+      "note": "Only the variant set and its distinctness are modelled; the `thiserror` display strings are not. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 21,
+      "end": 24,
+      "status": "dependency-boundary",
+      "label": "The crate-wide `UtilsResult` alias re-exported as this module's `Result`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Error conversion into `UtilsError` is outside the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    },
+    {
+      "name": "error-conversion",
+      "obligation": "`HashChainError` values are converted into the crate-wide `UtilsError` at every call site (`.map_err(...)`). The model keeps the six variants but does not track that conversion, so an error's identity at the caller is not proved.",
+      "discharged": false
+    }
+  ]
+}

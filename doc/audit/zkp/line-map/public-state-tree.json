@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "source": "src/common/trees/public_state_tree.rs",
+  "source_sha256": "8d5b0652e8bf2e61d272192c5df3ae3b47cae874c8ba7288f50774fb8a4b0e0b",
+  "source_lines": 17,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 8,
+      "status": "dependency-boundary",
+      "label": "Imports: the backing tree from `src/utils/trees/`, the leaf type, and the height constant",
+      "declarations": [],
+      "theorems": [],
+      "note": "The backing structure and the leaf semantics come from imported crates/modules; only the height the alias pins is modelled here."
+    },
+    {
+      "start": 9,
+      "end": 12,
+      "status": "translated",
+      "label": "`PublicStateTree` = `IncrementalMerkleTree<PublicState>` and its two proof aliases",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.TreeInstance",
+        "Zkp.Implementation.TreeInstances.backingOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.backing_of_each_instance"
+      ],
+      "note": "Only the CHOICE of backing structure is modelled; the structure itself is `Zkp.Implementation.SparseTrees`. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 13,
+      "end": 17,
+      "status": "translated",
+      "label": "`PublicStateTree::init()` pins `PUBLIC_STATE_TREE_HEIGHT`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.heightOf",
+        "Zkp.Implementation.TreeInstances.capacityOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.public_state_tree_height_pinned",
+        "Zkp.Implementation.TreeInstances.public_state_height_agrees_with_util_gadgets",
+        "Zkp.Implementation.TreeInstances.public_state_tree_is_indexed_by_block_number",
+        "Zkp.Implementation.TreeInstances.deposit_and_public_state_are_the_two_height_63_trees"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "`PoseidonHashOut::hash_inputs_u64` and `PoseidonLeafableHasher::two_to_one` are opaque functions here. No collision resistance, preimage resistance or injectivity is assumed; every statement that needs two digests to differ carries that as an explicit premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "backing-tree-model-import",
+      "obligation": "Merkle-tree behaviour is taken from the registered `Zkp.Implementation.SparseTrees` and `Zkp.Implementation.IndexedMerkleTree` models of `src/utils/trees/`, which are themselves handwritten models of that Rust code, not refinements of it.",
+      "discharged": false
+    },
+    {
+      "name": "constants-transcription",
+      "obligation": "Every pinned height is taken from the registered `Zkp.Implementation.UtilGadgets` transcription of `src/constants.rs`. That the transcription matches the Rust constants is checked by review, not by a proof.",
+      "discharged": false
+    },
+    {
+      "name": "panics",
+      "obligation": "Rust `assert!`/`unwrap`/index panics (`IncrementalMerkleTree::push` capacity, `HashMap` indexing) are modelled as explicit error or outcome values; the partially mutated state a real panic leaves behind is not modelled.",
+      "discharged": false
+    }
+  ]
+}

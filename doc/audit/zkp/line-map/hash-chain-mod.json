@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/mod.rs",
+  "source_sha256": "9ed4b4b9871dd955bb3bcd14b1f27da8fd514b732012a06d40313fca80cd6167",
+  "source_lines": 42,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 16,
+      "status": "dependency-boundary",
+      "label": "plonky2 and `plonky2_keccak` imports: `solidity_keccak256` and `BuilderKeccak256` are the opaque keccak callback",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEnv"
+      ],
+      "theorems": [],
+      "note": "Keccak is opaque; no collision or preimage resistance is assumed."
+    },
+    {
+      "start": 17,
+      "end": 22,
+      "status": "non-executable",
+      "label": "The five submodule declarations of the hash-chain family",
+      "declarations": [],
+      "theorems": [],
+      "note": "Module declarations only."
+    },
+    {
+      "start": 23,
+      "end": 27,
+      "status": "translated",
+      "label": "`hash_with_prev_hash`: `keccak(prev_hash.to_u32_vec() ++ content)` — the chain step",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEnv",
+        "Zkp.Implementation.TreeInstances.hashWithPrevHash",
+        "Zkp.Implementation.TreeInstances.stepPreimage",
+        "Zkp.Implementation.TreeInstances.chainFoldFrom",
+        "Zkp.Implementation.TreeInstances.chainHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.step_preimage_puts_prev_hash_first",
+        "Zkp.Implementation.TreeInstances.step_preimage_length",
+        "Zkp.Implementation.TreeInstances.chain_fold_nil",
+        "Zkp.Implementation.TreeInstances.chain_fold_cons",
+        "Zkp.Implementation.TreeInstances.chain_fold_append",
+        "Zkp.Implementation.TreeInstances.chain_hash_nil",
+        "Zkp.Implementation.TreeInstances.chain_hash_singleton",
+        "Zkp.Implementation.TreeInstances.chain_hash_snoc"
+      ],
+      "note": "The fold algebra of the whole family is derived from this one step function. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 28,
+      "end": 42,
+      "status": "dependency-boundary",
+      "label": "`hash_with_prev_hash_circuit`: the same preimage built in-circuit via `builder.keccak256`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.hashWithPrevHash",
+        "Zkp.Implementation.TreeInstances.stepPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.native_and_circuit_step_preimages_agree"
+      ],
+      "note": "Only that the native and the in-circuit preimage lists coincide is stated; the keccak gadget itself is a premise."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-callback",
+      "obligation": "`solidity_keccak256` / `BuilderKeccak256::keccak256` is an opaque function. Nothing here assumes collision resistance, so the chain hash pins neither the contents nor the length of a chain except under that unproved assumption.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    }
+  ]
+}

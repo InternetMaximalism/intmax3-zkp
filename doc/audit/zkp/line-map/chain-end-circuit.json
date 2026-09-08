@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/chain_end_circuit.rs",
+  "source_sha256": "a13b3564666683588f94322c74b4b6600d2ae5bfa241c0baafc8ed0d61e43355",
+  "source_lines": 164,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 28,
+      "status": "dependency-boundary",
+      "label": "plonky2, `plonky2_keccak`, serde and crate imports; `add_proof_target_and_verify_cyclic`",
+      "declarations": [],
+      "theorems": [],
+      "note": "Keccak and cyclic verification are premises."
+    },
+    {
+      "start": 29,
+      "end": 30,
+      "status": "translated",
+      "label": "`CHAIN_END_PROOF_PUBLIC_INPUTS_LEN = BYTES32_LEN + ADDRESS_LEN`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.chainEndPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.chain_end_public_inputs_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 31,
+      "end": 37,
+      "status": "translated",
+      "label": "`ChainEndProofPublicInputs { last_hash, proof_submitter }`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEndPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.chain_end_to_u32_vec_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 38,
+      "end": 91,
+      "status": "translated",
+      "label": "`to_u32_vec` / `from_u32_slice` / `from_u64_slice` / `from_pis` / `hash`: the codec, its length check, and the `assert!(x <= u32::MAX)` PANIC",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.chainEndToU32Vec",
+        "Zkp.Implementation.TreeInstances.chainEndFromU32Slice",
+        "Zkp.Implementation.TreeInstances.chainEndFromU64Slice",
+        "Zkp.Implementation.TreeInstances.U64ParseOutcome",
+        "Zkp.Implementation.TreeInstances.chainEndStatement",
+        "Zkp.Implementation.TreeInstances.HashChainError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.chain_end_to_u32_vec_length",
+        "Zkp.Implementation.TreeInstances.chain_end_codec_roundtrips",
+        "Zkp.Implementation.TreeInstances.chain_end_parse_ok_pins_the_layout",
+        "Zkp.Implementation.TreeInstances.chain_end_parse_ok_forces_length_13",
+        "Zkp.Implementation.TreeInstances.chain_end_parse_error_is_always_invalid_data",
+        "Zkp.Implementation.TreeInstances.chain_end_from_u64_slice_matches_u32_on_canonical_input",
+        "Zkp.Implementation.TreeInstances.chain_end_from_u64_slice_panics_on_an_oversized_word",
+        "Zkp.Implementation.TreeInstances.chain_end_length_error_precedes_the_panic"
+      ],
+      "note": "The length check returns `InvalidData`, but an oversized u64 word aborts the process instead of erroring. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 92,
+      "end": 113,
+      "status": "dependency-boundary",
+      "label": "`ChainEndProofPublicInputsTarget`: the in-circuit mirror and its keccak gadget",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.chainEndToU32Vec",
+        "Zkp.Implementation.TreeInstances.chainEndStatement"
+      ],
+      "theorems": [],
+      "note": "Layout only; the in-circuit keccak is the opaque callback."
+    },
+    {
+      "start": 114,
+      "end": 130,
+      "status": "dependency-boundary",
+      "label": "The `ChainEndCircuit` struct: circuit data, the cyclic proof target, the `proof_submitter` target",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEndGates"
+      ],
+      "theorems": [],
+      "note": "Circuit data is a compiler artefact."
+    },
+    {
+      "start": 131,
+      "end": 149,
+      "status": "translated",
+      "label": "`ChainEndCircuit::new`: read `last_hash` off the cyclic proof's public inputs `0..BYTES32_LEN`, take a fresh range-checked `proof_submitter`, publish `keccak(last_hash ++ proof_submitter)`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEndGates",
+        "Zkp.Implementation.TreeInstances.chainEndStatement",
+        "Zkp.Implementation.TreeInstances.cyclicHashPublicInputLen",
+        "Zkp.Implementation.TreeInstances.CyclicAccepts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.chain_end_binds_the_last_hash_to_the_chain_fold",
+        "Zkp.Implementation.TreeInstances.chain_end_requires_at_least_one_step",
+        "Zkp.Implementation.TreeInstances.chain_end_accepts_any_proof_submitter",
+        "Zkp.Implementation.TreeInstances.chain_end_statement_covers_the_submitter"
+      ],
+      "note": "`proof_submitter` is connected to nothing else, so the statement holds for every address. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 150,
+      "end": 164,
+      "status": "translated",
+      "label": "`ChainEndCircuit::prove`: the NATIVE admission path",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.proveEnd"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.prove_end_of_a_native_run"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-callback",
+      "obligation": "`solidity_keccak256` / `BuilderKeccak256::keccak256` is an opaque function. Nothing here assumes collision resistance, so the chain hash pins neither the contents nor the length of a chain except under that unproved assumption.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    },
+    {
+      "name": "recursive-verifier-data-binding",
+      "obligation": "That the cyclic circuit's verifier data really pins the recursion to itself (`connect_hashes`/`connect_merkle_caps` in `add_proof_target_and_verify_cyclic`, and `common_data_for_hash_chain_circuit`'s gate padding) is assumed, not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "reward-attribution",
+      "obligation": "`proof_submitter` is an unconstrained circuit witness. Who is entitled to the aggregation reward must be enforced by the consumer of the chain-end proof; this model proves only that the statement accepts any address.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/hash_inner_circuit.rs",
+  "source_sha256": "73bcf2c90b32aa6a1a33af877306ee146c61f9b74ddc940f58ebd1d9394e5429",
+  "source_lines": 70,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "plonky2 imports and `add_proof_target_and_verify` (recursive verification of the single proof)",
+      "declarations": [],
+      "theorems": [],
+      "note": "That a verified single proof exists is a premise; the model only carries its public inputs."
+    },
+    {
+      "start": 23,
+      "end": 39,
+      "status": "dependency-boundary",
+      "label": "The `HashInnerCircuit` struct: `CircuitData` and the two target handles",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.InnerWitness"
+      ],
+      "theorems": [],
+      "note": "Circuit data is a compiler artefact and is not modelled."
+    },
+    {
+      "start": 40,
+      "end": 55,
+      "status": "translated",
+      "label": "`HashInnerCircuit::new`: hash the verified proof's public inputs with `prev_hash` and register `(prev_hash, hash)` as public inputs; `prev_hash` is created with `is_checked = false`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.InnerGates",
+        "Zkp.Implementation.TreeInstances.innerPublicInputs",
+        "Zkp.Implementation.TreeInstances.innerPrevHashIsRangeChecked",
+        "Zkp.Implementation.TreeInstances.hashWithPrevHash",
+        "Zkp.Implementation.TreeInstances.InnerWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.inner_public_inputs_length",
+        "Zkp.Implementation.TreeInstances.inner_public_inputs_prev_hash_comes_first",
+        "Zkp.Implementation.TreeInstances.inner_public_inputs_hash_comes_second",
+        "Zkp.Implementation.TreeInstances.inner_prev_hash_is_not_range_checked",
+        "Zkp.Implementation.TreeInstances.inner_gates_accept_any_prev_hash",
+        "Zkp.Implementation.TreeInstances.inner_prev_hash_is_pinned_only_by_the_cyclic_wrapper"
+      ],
+      "note": "The inner circuit alone constrains nothing about `prev_hash`; the cyclic wrapper is what pins it. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 56,
+      "end": 70,
+      "status": "translated",
+      "label": "`HashInnerCircuit::prove`: the NATIVE admission path (witness assignment)",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.innerProve"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.native_inner_prove_satisfies_the_gates"
+      ],
+      "note": "Native admission is modelled as a witness constructor; the resulting plonky2 proof is a premise. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-callback",
+      "obligation": "`solidity_keccak256` / `BuilderKeccak256::keccak256` is an opaque function. Nothing here assumes collision resistance, so the chain hash pins neither the contents nor the length of a chain except under that unproved assumption.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    }
+  ]
+}

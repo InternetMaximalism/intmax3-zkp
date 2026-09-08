@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "source": "src/common/trees/mod.rs",
+  "source_sha256": "910c0c1eaa5a427a099a8d4c278b864f4b6f6813e6513ec8c46e0094af49b2b7",
+  "source_lines": 10,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 10,
+      "status": "translated",
+      "label": "The ten tree submodules of `src/common/trees/`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.TreeInstance",
+        "Zkp.Implementation.TreeInstances.sourceFileOf",
+        "Zkp.Implementation.TreeInstances.allInstances",
+        "Zkp.Implementation.TreeInstances.backingOf",
+        "Zkp.Implementation.TreeInstances.heightOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.all_instances_length",
+        "Zkp.Implementation.TreeInstances.all_instances_is_complete",
+        "Zkp.Implementation.TreeInstances.all_instances_lists_each_tree_once",
+        "Zkp.Implementation.TreeInstances.height_thirty_two_family"
+      ],
+      "note": "The Lean enumeration has 13 entries for these 10 modules because `channel_tree.rs` and `key_tree.rs` each instantiate two trees. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "`PoseidonHashOut::hash_inputs_u64` and `PoseidonLeafableHasher::two_to_one` are opaque functions here. No collision resistance, preimage resistance or injectivity is assumed; every statement that needs two digests to differ carries that as an explicit premise on the compared pair.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "backing-tree-model-import",
+      "obligation": "Merkle-tree behaviour is taken from the registered `Zkp.Implementation.SparseTrees` and `Zkp.Implementation.IndexedMerkleTree` models of `src/utils/trees/`, which are themselves handwritten models of that Rust code, not refinements of it.",
+      "discharged": false
+    },
+    {
+      "name": "constants-transcription",
+      "obligation": "Every pinned height is taken from the registered `Zkp.Implementation.UtilGadgets` transcription of `src/constants.rs`. That the transcription matches the Rust constants is checked by review, not by a proof.",
+      "discharged": false
+    }
+  ]
+}

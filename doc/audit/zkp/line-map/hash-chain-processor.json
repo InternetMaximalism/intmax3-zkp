@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/hash_chain/hash_chain_processor.rs",
+  "source_sha256": "ed24520a2fbd8a9d844a65b3cbae6d2971ca8656704ef6ddfcd0ce35baa08a5f",
+  "source_lines": 89,
+  "module": "Zkp.Implementation.TreeInstances",
+  "model": "doc/audit/zkp/Zkp/Implementation/TreeInstances.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "Imports of the three circuits and the plonky2 proof types",
+      "declarations": [],
+      "theorems": [],
+      "note": "The circuits are premises; only the processor's data flow is modelled."
+    },
+    {
+      "start": 26,
+      "end": 41,
+      "status": "dependency-boundary",
+      "label": "The `HashChainProcessor` struct: the three stacked circuits",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.ChainEnv"
+      ],
+      "theorems": [],
+      "note": "Circuit data is a compiler artefact."
+    },
+    {
+      "start": 42,
+      "end": 52,
+      "status": "dependency-boundary",
+      "label": "`HashChainProcessor::new`: circuit construction and verifier-data threading (inner -> cyclic -> chain end)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit construction is outside the model."
+    },
+    {
+      "start": 53,
+      "end": 77,
+      "status": "translated",
+      "label": "`prove_chain`: `prev_hash` from the previous cyclic proof's public inputs `0..BYTES32_LEN`, else `Bytes32::default()`; then inner, then cyclic",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.proveChainStep",
+        "Zkp.Implementation.TreeInstances.proveChainAll",
+        "Zkp.Implementation.TreeInstances.chainHash",
+        "Zkp.Implementation.TreeInstances.CyclicAccepts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.prove_chain_none_uses_a_zero_prev_hash",
+        "Zkp.Implementation.TreeInstances.prove_chain_some_uses_the_previous_published_hash",
+        "Zkp.Implementation.TreeInstances.prove_chain_all_from_some",
+        "Zkp.Implementation.TreeInstances.prove_chain_all_matches_the_chain_hash",
+        "Zkp.Implementation.TreeInstances.prove_chain_all_of_the_empty_run_is_none",
+        "Zkp.Implementation.TreeInstances.native_run_is_accepted_at_every_step",
+        "Zkp.Implementation.TreeInstances.toy_chain_first_step",
+        "Zkp.Implementation.TreeInstances.toy_chain_two_steps",
+        "Zkp.Implementation.TreeInstances.toy_native_run_reaches_the_accepted_hash",
+        "Zkp.Implementation.TreeInstances.toy_chain_two_steps_is_accepted",
+        "Zkp.Implementation.TreeInstances.toy_chain_order_is_not_separated_by_a_weak_hash"
+      ],
+      "note": "The native driver reproduces exactly the fold the cyclic accept relation states. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 78,
+      "end": 89,
+      "status": "translated",
+      "label": "`prove_end`: wrap the cyclic proof into the chain-end statement for a chosen `proof_submitter`",
+      "declarations": [
+        "Zkp.Implementation.TreeInstances.proveEnd",
+        "Zkp.Implementation.TreeInstances.chainEndStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.TreeInstances.prove_end_of_a_native_run",
+        "Zkp.Implementation.TreeInstances.toy_chain_end_statement"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "native-target-refinement",
+      "obligation": "Native `to_u64_vec` word lists and in-circuit `to_vec` target lists are represented by the same Lean lists. That the plonky2 builder emits exactly those wires, and that `builder.constant`/`range_check` behave as modelled, is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "field-and-range-discipline",
+      "obligation": "`Nat` stands for Goldilocks field elements, `u32` limbs and `u64` values. Canonicality and range checks appear as explicit hypotheses, never as type invariants; field arithmetic is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-callback",
+      "obligation": "`solidity_keccak256` / `BuilderKeccak256::keccak256` is an opaque function. Nothing here assumes collision resistance, so the chain hash pins neither the contents nor the length of a chain except under that unproved assumption.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-proof-soundness",
+      "obligation": "No proof object exists in this model. `verify_proof`, `conditionally_verify_cyclic_proof_or_dummy`, `add_verifier_data_public_inputs` and `cyclic_base_proof` are premises: the cyclic wrapper is modelled by its accept relation on public inputs, and a satisfied relation is NOT evidence that a proof exists or is sound.",
+      "discharged": false
+    },
+    {
+      "name": "recursive-verifier-data-binding",
+      "obligation": "That the cyclic circuit's verifier data really pins the recursion to itself (`connect_hashes`/`connect_merkle_caps` in `add_proof_target_and_verify_cyclic`, and `common_data_for_hash_chain_circuit`'s gate padding) is assumed, not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "reward-attribution",
+      "obligation": "`proof_submitter` is an unconstrained circuit witness. Who is entitled to the aggregation reward must be enforced by the consumer of the chain-end proof; this model proves only that the statement accepts any address.",
+      "discharged": false
+    }
+  ]
+}
