@@ -451,8 +451,7 @@ def sampleSerializedRow : SerializedGateRow :=
     gateRowIndex := some 2, numConstraints := some 20 }
 
 theorem fixture_gates_accepts_matching_row :
-    checkFixtureJsonGates (some [sampleSerializedRow]) [sampleExpectedRow] = .ok () := by
-  decide
+    checkFixtureJsonGates (some [sampleSerializedRow]) [sampleExpectedRow] = .ok () := rfl
 
 theorem fixture_gates_rejects_sentinel_row :
     checkFixtureJsonGates (some [{ sampleSerializedRow with gateId := some 255 }])
@@ -508,5 +507,996 @@ theorem v2_gate_check_enforces_coset_envelope (row : Nat) (b c : Nat) :
   simp [checkV2GateRow, checkCosetEnvelope, cosetInterpolationGateId, cosetMinSubgroupBits,
     cosetMaxSubgroupBits]
   decide
+
+/-! ## 4. Deployment-configuration artifacts (lines 383-769)
+
+Every submodule codec is a PARAMETER here: `parseConfig` models
+`MleVerifierV2ConfigFixture::from_canonical_json`, `toJson` models `to_canonical_json`, and
+`parseJson` models `serde_json::from_str`. None of their internals are modelled. -/
+
+/-- A `bytes` + recorded `byteLength` + recorded `keccak256` record, as carried by
+`compactProof`, `solidityAbiProof` and `solidityAbiVerificationConfig`. -/
+structure EncodedRecord where
+  label : String
+  byteLength : Nat
+  keccak : Bytes
+  bytes : Bytes
+  deriving DecidableEq
+
+/-- The documented contract of the submodule's `decode_and_validate`: the recorded encoding
+label, the recorded byte length and the recorded Keccak digest must all authenticate the bytes.
+The submodule implementation itself is a boundary. -/
+def decodeAndValidate (keccakOf : Bytes → Bytes) (r : EncodedRecord) (expectedLabel : String) :
+    Except String Bytes :=
+  if r.label ≠ expectedLabel then .error "encoding label mismatch"
+  else if r.byteLength ≠ r.bytes.length then .error "recorded byte length mismatch"
+  else if r.keccak ≠ keccakOf r.bytes then .error "recorded keccak digest mismatch"
+  else .ok r.bytes
+
+theorem decode_and_validate_ok_binds_label_length_and_digest (keccakOf : Bytes → Bytes)
+    (r : EncodedRecord) (label : String) (bytes : Bytes)
+    (h : decodeAndValidate keccakOf r label = .ok bytes) :
+    r.label = label ∧ r.byteLength = bytes.length ∧ r.keccak = keccakOf bytes ∧
+      r.bytes = bytes := by
+  simp only [decodeAndValidate] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i hl hlen hk
+        injection h with hb
+        subst hb
+        exact ⟨Decidable.of_not_not hl, Decidable.of_not_not hlen, Decidable.of_not_not hk, rfl⟩
+
+/-- The proof-free, circuit-derived deployment configuration. -/
+structure ConfigBody where
+  circuitDigest : Bytes
+  gates : List V2GateRow
+  publicInputWireMap : List Nat
+  deriving DecidableEq
+
+structure ConfigFixture where
+  body : ConfigBody
+  solidityAbiVerificationConfig : EncodedRecord
+  pinnedVerificationConfigDigest : Bytes
+  deriving DecidableEq
+
+structure ProofView where
+  publicInputs : List Nat
+  payload : Bytes
+  deriving DecidableEq
+
+structure FullFixture where
+  config : ConfigFixture
+  proof : ProofView
+  compactProof : EncodedRecord
+  compactShape : Shape
+  solidityAbiProof : EncodedRecord
+  deriving DecidableEq
+
+inductive ConfigExportError where
+  | derivationRefused (message : String)
+  | gateGuard (error : GateGuardError)
+  | canonicalJsonFailed (message : String)
+  deriving DecidableEq
+
+/-- `export_mle_v2_config_json` (lines 384-400). The gate guard runs BEFORE the canonical JSON
+is produced, so a circuit carrying a gate the deployed Ext3 evaluator lacks never yields an
+artifact at all. -/
+def exportMleV2ConfigJson (derived : Except String ConfigFixture)
+    (toJson : ConfigFixture → Except String String) : Except ConfigExportError String :=
+  match derived with
+  | .error m => .error (.derivationRefused m)
+  | .ok fixture =>
+    match checkV2GateRows 0 fixture.body.gates with
+    | .error e => .error (.gateGuard e)
+    | .ok _ =>
+      match toJson fixture with
+      | .error m => .error (.canonicalJsonFailed m)
+      | .ok json => .ok json
+
+theorem export_config_gate_guard_precedes_serialisation (fixture : ConfigFixture)
+    (toJson : ConfigFixture → Except String String) (e : GateGuardError)
+    (h : checkV2GateRows 0 fixture.body.gates = .error e) :
+    exportMleV2ConfigJson (.ok fixture) toJson = .error (.gateGuard e) := by
+  simp [exportMleV2ConfigJson, h]
+
+theorem export_config_derivation_refusal_propagates (m : String)
+    (toJson : ConfigFixture → Except String String) :
+    exportMleV2ConfigJson (.error m) toJson = .error (.derivationRefused m) := rfl
+
+theorem export_config_ok_implies_gates_accepted (fixture : ConfigFixture)
+    (toJson : ConfigFixture → Except String String) (json : String)
+    (h : exportMleV2ConfigJson (.ok fixture) toJson = .ok json) :
+    checkV2GateRows 0 fixture.body.gates = .ok () ∧ toJson fixture = .ok json := by
+  simp only [exportMleV2ConfigJson] at h
+  split at h
+  · cases h
+  · rename_i hu
+    split at h
+    · cases h
+    · rename_i hj
+      injection h with h'
+      exact ⟨hu, by rw [hj, h']⟩
+
+/-! ### 4.1 Generator mode switches (lines 402-428) -/
+
+def mleV2ConfigOnlyFlag : String := "--mle-config-only"
+def mleV3ConfigCutoverEnv : String := "MLE_ALLOW_WIRE_V3_CONFIG_CUTOVER"
+
+theorem generator_switches_pinned :
+    mleV2ConfigOnlyFlag = "--mle-config-only" ∧
+      mleV3ConfigCutoverEnv = "MLE_ALLOW_WIRE_V3_CONFIG_CUTOVER" := ⟨rfl, rfl⟩
+
+def mleV2ConfigOnlyRequested (args : List String) : Bool :=
+  args.any (fun a => a == mleV2ConfigOnlyFlag)
+
+/-- `std::env::var_os(..).is_some_and(|v| v == OsStr::new("1"))` — only the exact value `1`
+enables the one-release cutover. -/
+def allowV3Cutover : Option String → Bool
+  | none => false
+  | some v => v == "1"
+
+theorem cutover_env_requires_the_exact_value_one :
+    allowV3Cutover none = false ∧ allowV3Cutover (some "0") = false ∧
+      allowV3Cutover (some "true") = false ∧ allowV3Cutover (some "1") = true := by
+  refine ⟨rfl, ?_, ?_, ?_⟩ <;> simp [allowV3Cutover]
+
+/-! ### 4.2 The reviewed wire-v2 -> wire-v3 cutover (lines 626-712) -/
+
+inductive JsonVal where
+  | str (s : String)
+  | num (n : Nat)
+  | other (tag : String)
+  deriving DecidableEq
+
+/-- A parsed document, viewed only through JSON-pointer lookups. -/
+abbrev JsonDoc := String → Option JsonVal
+
+def asStr : Option JsonVal → Option String
+  | some (.str s) => some s
+  | _ => none
+
+def asNat : Option JsonVal → Option Nat
+  | some (.num n) => some n
+  | _ => none
+
+/-- Retired wire-v2 / PoW-20 identity (lines 644-666). -/
+def retiredConfigSchema : String := "plonky2-mle-v2-solidity-config"
+def retiredSchemaVersion : Nat := 2
+def retiredProtocolVersion : Nat := 2
+def retiredCompactProofEncoding : String := "MLEWHIR2"
+def retiredWhirPowBits : Nat := 20
+
+/-- Reviewed wire-v3 / PoW-22 identity (lines 667-689). -/
+def currentConfigSchema : String := "plonky2-mle-v3-solidity-config"
+def currentSchemaVersion : Nat := 3
+def currentProtocolVersion : Nat := 3
+def currentCompactProofEncoding : String := "MLEWHIR3"
+def currentWhirPowBits : Nat := 22
+
+theorem retired_identity_pinned :
+    retiredConfigSchema = "plonky2-mle-v2-solidity-config" ∧ retiredSchemaVersion = 2 ∧
+      retiredProtocolVersion = 2 ∧ retiredCompactProofEncoding = "MLEWHIR2" ∧
+      retiredWhirPowBits = 20 := ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+theorem current_identity_pinned :
+    currentConfigSchema = "plonky2-mle-v3-solidity-config" ∧ currentSchemaVersion = 3 ∧
+      currentProtocolVersion = 3 ∧ currentCompactProofEncoding = "MLEWHIR3" ∧
+      currentWhirPowBits = 22 := ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The WHIR proof-of-work bits move from 20 to 22 across the cutover; both are pinned
+literals, so a WHIR profile change is a different (fresh-cohort) operation. -/
+theorem cutover_changes_whir_pow_bits : retiredWhirPowBits ≠ currentWhirPowBits := by decide
+
+def retiredIdentityOk (d : JsonDoc) : Bool :=
+  asStr (d "/schema") == some retiredConfigSchema &&
+  asNat (d "/schemaVersion") == some retiredSchemaVersion &&
+  asNat (d "/protocolVersion") == some retiredProtocolVersion &&
+  asStr (d "/compactProofEncoding") == some retiredCompactProofEncoding &&
+  asNat (d "/whirPowBits") == some retiredWhirPowBits
+
+def currentIdentityOk (d : JsonDoc) : Bool :=
+  asStr (d "/schema") == some currentConfigSchema &&
+  asNat (d "/schemaVersion") == some currentSchemaVersion &&
+  asNat (d "/protocolVersion") == some currentProtocolVersion &&
+  asStr (d "/compactProofEncoding") == some currentCompactProofEncoding &&
+  asNat (d "/whirPowBits") == some currentWhirPowBits
+
+/-- The twelve pointers whose equality means "the same underlying circuit" (lines 691-704). -/
+def circuitIdentityPointers : List String :=
+  [ "/verificationConfig/circuit",
+    "/verificationKey/circuitDigest",
+    "/verificationKey/preprocessedCommitmentRoot",
+    "/verificationKey/numSelectors",
+    "/verificationKey/numGateConstraints",
+    "/verificationKey/quotientDegreeFactor",
+    "/verificationKey/gates",
+    "/verificationKey/numConstants",
+    "/verificationKey/numRoutedWires",
+    "/verificationKey/numWires",
+    "/verificationKey/kIs",
+    "/verificationKey/subgroupGenPowers" ]
+
+theorem circuit_identity_pointer_count : circuitIdentityPointers.length = 12 := rfl
+
+/-- `existing.pointer(p).is_some() && existing.pointer(p) == generated.pointer(p)`. -/
+def circuitIdentityAgreesAt (e g : JsonDoc) (p : String) : Bool :=
+  (e p).isSome && (e p == g p)
+
+theorem circuit_identity_agrees_iff (e g : JsonDoc) (p : String) :
+    circuitIdentityAgreesAt e g p = true ↔ ((e p).isSome = true ∧ e p = g p) := by
+  simp [circuitIdentityAgreesAt]
+
+def circuitIdentityDriftAt (e g : JsonDoc) : Option String :=
+  circuitIdentityPointers.find? (fun p => !circuitIdentityAgreesAt e g p)
+
+theorem find_forall_none {α : Type} (p : α → Bool) :
+    ∀ l : List α, (∀ a ∈ l, p a = false) → l.find? p = none := by
+  intro l
+  induction l with
+  | nil => intro _; rfl
+  | cons x xs ih =>
+    intro h
+    rw [List.find?, h x (by simp)]
+    simp only
+    exact ih (fun a ha => h a (by simp [ha]))
+
+inductive CutoverError where
+  | notCanonicalConfigArtifact
+  | legacyNotJson
+  | generatedNotJson
+  | retiredIdentityDrift
+  | currentIdentityDrift
+  | circuitIdentityDrift (pointer : String)
+  deriving DecidableEq
+
+def isCanonicalConfigFileName (n : String) : Bool :=
+  n.endsWith "_mle_config.json" || n == "mle_fixture_config.json"
+
+/-- Lines 644-710: retired identity, then reviewed identity, then the twelve circuit pointers. -/
+def cutoverIdentityCheck (e g : JsonDoc) : Except CutoverError Unit :=
+  if !retiredIdentityOk e then .error .retiredIdentityDrift
+  else if !currentIdentityOk g then .error .currentIdentityDrift
+  else
+    match circuitIdentityDriftAt e g with
+    | some p => .error (.circuitIdentityDrift p)
+    | none => .ok ()
+
+/-- `validate_protocol_v2_config_cutover` (lines 629-712). Order: file-name envelope, then both
+parses, then the identity/circuit checks. -/
+def validateProtocolV2ConfigCutover (fileName : String) (existing generated : Option JsonDoc) :
+    Except CutoverError Unit :=
+  if !isCanonicalConfigFileName fileName then .error .notCanonicalConfigArtifact
+  else
+    match existing, generated with
+    | none, _ => .error .legacyNotJson
+    | _, none => .error .generatedNotJson
+    | some e, some g => cutoverIdentityCheck e g
+
+theorem cutover_file_name_checked_first (fileName : String) (existing generated : Option JsonDoc)
+    (h : isCanonicalConfigFileName fileName = false) :
+    validateProtocolV2ConfigCutover fileName existing generated =
+      .error .notCanonicalConfigArtifact := by
+  simp [validateProtocolV2ConfigCutover, h]
+
+theorem cutover_named_artifact_reduces_to_identity_check (fileName : String) (e g : JsonDoc)
+    (h : isCanonicalConfigFileName fileName = true) :
+    validateProtocolV2ConfigCutover fileName (some e) (some g) = cutoverIdentityCheck e g := by
+  simp [validateProtocolV2ConfigCutover, h]
+
+theorem cutover_identity_ok_implies_pins (e g : JsonDoc)
+    (h : cutoverIdentityCheck e g = .ok ()) :
+    retiredIdentityOk e = true ∧ currentIdentityOk g = true ∧
+      ∀ p ∈ circuitIdentityPointers, circuitIdentityAgreesAt e g p = true := by
+  simp only [cutoverIdentityCheck] at h
+  split at h
+  · cases h
+  · rename_i hr
+    split at h
+    · cases h
+    · rename_i hc
+      split at h
+      · cases h
+      · rename_i hdrift
+        refine ⟨by simpa using hr, by simpa using hc, ?_⟩
+        intro p hp
+        have hfalse := find_none_forall _ circuitIdentityPointers hdrift p hp
+        simpa using hfalse
+
+/-- Whatever the cutover accepts, it accepts BECAUSE those twelve pointers agree: any document
+pair that agrees there and carries the two pinned identities is admitted, no matter how it
+differs elsewhere. `publicInputWireMap`, the layout pins, the protocol/session values and the
+encoded-config bytes are deliberately outside the pinned set — a cutover may change them. -/
+theorem cutover_accepts_when_only_unpinned_fields_differ (e g : JsonDoc)
+    (hr : retiredIdentityOk e = true) (hc : currentIdentityOk g = true)
+    (hp : ∀ p ∈ circuitIdentityPointers, circuitIdentityAgreesAt e g p = true) :
+    cutoverIdentityCheck e g = .ok () := by
+  have hdrift : circuitIdentityDriftAt e g = none := by
+    refine find_forall_none _ circuitIdentityPointers (fun p hp' => ?_)
+    simp [hp p hp']
+  simp [cutoverIdentityCheck, hr, hc, hdrift]
+
+theorem public_input_wire_map_is_not_a_pinned_circuit_identity :
+    "/verificationKey/publicInputWireMap" ∉ circuitIdentityPointers ∧
+      "/verificationConfig/publicInputWireMap" ∉ circuitIdentityPointers := by decide
+
+/-! ### 4.3 create-once / compare-later persistence (lines 416-476) -/
+
+inductive ConfigReadResult where
+  | contents (json : String)
+  | notFound
+  | ioError (message : String)
+  deriving DecidableEq
+
+inductive PersistAction where
+  | keptExistingIdentical
+  | createdNew
+  | atomicallyReplaced (json : String)
+  deriving DecidableEq
+
+inductive PersistError where
+  | generatedNotCanonical (message : String)
+  | existingDiffers (path : String)
+  | existingNotStrictCurrent (path : String) (message : String)
+  | cutoverRefused (path : String) (error : CutoverError)
+  | readFailed (path : String) (message : String)
+  deriving DecidableEq
+
+/-- `persist_or_validate_mle_v2_config_json_inner` (lines 430-476). -/
+def persistOrValidateMleV2ConfigJsonInner (parseConfig : String → Except String ConfigFixture)
+    (parseJson : String → Option JsonDoc) (path fileName : String) (read : ConfigReadResult)
+    (generatedJson : String) (allowCutover : Bool) : Except PersistError PersistAction :=
+  match parseConfig generatedJson with
+  | .error m => .error (.generatedNotCanonical m)
+  | .ok generated =>
+    match read with
+    | .contents existingJson =>
+      match parseConfig existingJson with
+      | .ok existing =>
+        if existing = generated ∧ existingJson = generatedJson then .ok .keptExistingIdentical
+        else .error (.existingDiffers path)
+      | .error parseError =>
+        if allowCutover then
+          match validateProtocolV2ConfigCutover fileName (parseJson existingJson)
+              (parseJson generatedJson) with
+          | .error e => .error (.cutoverRefused path e)
+          | .ok _ => .ok (.atomicallyReplaced generatedJson)
+        else .error (.existingNotStrictCurrent path parseError)
+    | .notFound => .ok .createdNew
+    | .ioError m => .error (.readFailed path m)
+
+/-- The generated document is parsed first: nothing on disk is read when the generator's own
+canonical JSON is not strict. -/
+theorem persist_parses_generated_before_touching_disk
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName : String) (read : ConfigReadResult) (generatedJson : String)
+    (allowCutover : Bool) (m : String) (h : parseConfig generatedJson = .error m) :
+    persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName read generatedJson
+      allowCutover = .error (.generatedNotCanonical m) := by
+  simp [persistOrValidateMleV2ConfigJsonInner, h]
+
+/-- A replacement happens only for a parseable-generated / unparseable-existing pair, only with
+the explicit one-release switch on, and only after the reviewed cutover validation accepted. -/
+theorem persist_replacement_requires_validated_cutover
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName existingJson generatedJson j : String) (allowCutover : Bool)
+    (h : persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName
+      (.contents existingJson) generatedJson allowCutover = .ok (.atomicallyReplaced j)) :
+    allowCutover = true ∧ j = generatedJson ∧
+      validateProtocolV2ConfigCutover fileName (parseJson existingJson)
+        (parseJson generatedJson) = .ok () := by
+  simp only [persistOrValidateMleV2ConfigJsonInner] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+    · split at h
+      · rename_i hallow
+        split at h
+        · cases h
+        · rename_i hu
+          refine ⟨hallow, ?_, hu⟩
+          simp only [Except.ok.injEq, PersistAction.atomicallyReplaced.injEq] at h
+          exact h.symm
+      · cases h
+
+/-- Ordinary generation is create-once / compare-only: without the explicit switch an existing
+artifact is never replaced. -/
+theorem persist_contents_never_replaced_without_the_explicit_switch
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName existingJson generatedJson j : String) :
+    persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName
+      (.contents existingJson) generatedJson false ≠ .ok (.atomicallyReplaced j) := by
+  intro h
+  exact Bool.noConfusion
+    (persist_replacement_requires_validated_cutover parseConfig parseJson path fileName
+      existingJson generatedJson j false h).1
+
+/-- Accepting an artifact already on disk requires BYTE equality, not merely a document that
+parses to the same configuration. -/
+theorem persist_keeps_existing_only_on_exact_bytes
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName existingJson generatedJson : String) (allowCutover : Bool)
+    (h : persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName
+      (.contents existingJson) generatedJson allowCutover = .ok .keptExistingIdentical) :
+    existingJson = generatedJson ∧ parseConfig existingJson = parseConfig generatedJson := by
+  simp only [persistOrValidateMleV2ConfigJsonInner] at h
+  split at h
+  · cases h
+  · rename_i generated hgen
+    split at h
+    · rename_i existing hex
+      split at h
+      · rename_i heq
+        exact ⟨heq.2, by rw [hex, hgen, heq.1]⟩
+      · cases h
+    · split at h
+      · split at h
+        · cases h
+        · cases h
+      · cases h
+
+/-- An absent artifact is created; the read error path is never silently treated as absence. -/
+theorem persist_missing_artifact_is_created
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName generatedJson : String) (allowCutover : Bool) (generated : ConfigFixture)
+    (h : parseConfig generatedJson = .ok generated) :
+    persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName .notFound
+      generatedJson allowCutover = .ok .createdNew := by
+  simp [persistOrValidateMleV2ConfigJsonInner, h]
+
+theorem persist_read_error_is_not_absence
+    (parseConfig : String → Except String ConfigFixture) (parseJson : String → Option JsonDoc)
+    (path fileName generatedJson m : String) (allowCutover : Bool) (generated : ConfigFixture)
+    (h : parseConfig generatedJson = .ok generated) :
+    persistOrValidateMleV2ConfigJsonInner parseConfig parseJson path fileName (.ioError m)
+      generatedJson allowCutover = .error (.readFailed path m) := by
+  simp [persistOrValidateMleV2ConfigJsonInner, h]
+
+/-! ### 4.4 The no-clobber publish and its staging discipline (lines 486-624, 714-769) -/
+
+def configStagingAttempts : Nat := 64
+def cutoverStagingAttempts : Nat := 32
+
+theorem staging_attempt_counts_pinned :
+    configStagingAttempts = 64 ∧ cutoverStagingAttempts = 32 := by decide
+
+inductive PublishError where
+  | concurrentTargetNotRegularFile
+  | concurrentDifferentBytes
+  | stagingUnavailable
+  | stagingWriteFailed
+  | interruptedBeforePublish
+  | cleanupFailed
+  | publishAndCleanupFailed
+  deriving DecidableEq
+
+/-- `create_new_or_validate_config`'s publish step (lines 552-565, 586-624). `target` is the
+state of the path at the moment `hard_link` runs: `none` when it does not exist (the link
+succeeds), otherwise its regular-file flag and its complete bytes. -/
+def publishNoClobber (contents : String) (target : Option (Bool × String)) :
+    Except PublishError Unit :=
+  match target with
+  | none => .ok ()
+  | some (isRegularFile, existing) =>
+    if !isRegularFile then .error .concurrentTargetNotRegularFile
+    else if existing ≠ contents then .error .concurrentDifferentBytes
+    else .ok ()
+
+theorem publish_never_overwrites_differing_bytes (contents existing : String)
+    (h : existing ≠ contents) :
+    publishNoClobber contents (some (true, existing)) = .error .concurrentDifferentBytes := by
+  simp [publishNoClobber, h]
+
+theorem publish_accepts_only_identical_concurrent_bytes (contents : String)
+    (isRegularFile : Bool) (existing : String)
+    (h : publishNoClobber contents (some (isRegularFile, existing)) = .ok ()) :
+    isRegularFile = true ∧ existing = contents := by
+  simp only [publishNoClobber] at h
+  split at h
+  · cases h
+  · rename_i hreg
+    split at h
+    · cases h
+    · rename_i hbytes
+      exact ⟨by simpa using hreg, Decidable.of_not_not hbytes⟩
+
+/-- Lines 576-583: the publish result and the staging-cleanup result are combined, so a
+successful publish followed by a failed cleanup is still reported as an error. -/
+def combinePublishAndCleanup (publish cleanup : Except PublishError Unit) :
+    Except PublishError Unit :=
+  match publish, cleanup with
+  | .ok _, .ok _ => .ok ()
+  | .error e, .ok _ => .error e
+  | .ok _, .error c => .error c
+  | .error _, .error _ => .error .publishAndCleanupFailed
+
+theorem create_config_ok_iff_publish_and_cleanup_ok (publish cleanup : Except PublishError Unit) :
+    combinePublishAndCleanup publish cleanup = .ok () ↔ publish = .ok () ∧ cleanup = .ok () := by
+  constructor
+  · intro h
+    cases publish with
+    | error e => cases cleanup <;> cases h
+    | ok u =>
+      cases u
+      cases cleanup with
+      | error c => cases h
+      | ok v => cases v; exact ⟨rfl, rfl⟩
+  · intro h
+    rw [h.1, h.2]
+    rfl
+
+/-- Staging-file allocation: the first free nonce below the attempt budget, or failure. -/
+def allocateStagingNonce (attempts : Nat) (taken : Nat → Bool) : Option Nat :=
+  (List.range attempts).find? (fun n => !(taken n))
+
+theorem staging_allocation_fails_when_every_nonce_is_taken (attempts : Nat) :
+    allocateStagingNonce attempts (fun _ => true) = none := by
+  refine find_forall_none _ (List.range attempts) (fun a _ => ?_)
+  simp
+
+/-! ## 5. The compact proof: the one calldata / Proof-DA payload (lines 771-949)
+
+`MleEnv` collects every `plonky2_mle` operation this file calls. They are parameters, never
+definitions: the model proves how `mle_prover.rs` COMBINES them, not what they compute. -/
+
+structure MleEnv where
+  /-- `keccak_hash::keccak`. Opaque; no injectivity is used anywhere. -/
+  keccak : Bytes → Bytes
+  /-- `MAX_COMPACT_PROOF_BYTES_V2`. -/
+  maxCompactProofBytes : Nat
+  /-- `COMPACT_MAGIC_V2`, read as UTF-8 (line 896). -/
+  compactMagic : String
+  /-- `SOLIDITY_MLE_PROOF_ENCODING_V2`. -/
+  solidityProofEncoding : String
+  /-- `SOLIDITY_MLE_VERIFICATION_CONFIG_ENCODING_V2`. -/
+  solidityConfigEncoding : String
+  parseFull : String → Except String FullFixture
+  parseConfig : String → Except String ConfigFixture
+  decodeCompact : Bytes → Shape → Except String ProofView
+  encodeCompact : ProofView → Shape → Except String Bytes
+  /-- `MleProofV2Fixture::encode`: the structured JSON view of a decoded proof. -/
+  encodeProofFixture : ProofView → ProofView
+  abiEncodeProof : ProofView → Except String Bytes
+  abiEncodeConfig : ConfigBody → Except String Bytes
+
+inductive MleError where
+  | fullNotCanonical (message : String)
+  | configNotCanonical (message : String)
+  | configFixtureDiffers
+  | compactIntegrity (message : String)
+  | compactLengthOutsideEnvelope (length : Nat)
+  | compactGrammar (message : String)
+  | compactReencodingFailed (message : String)
+  | compactNotUniqueCanonicalEncoding
+  | structuredProofDisagrees
+  | proofAbiIntegrity (message : String)
+  | proofAbiReencodingFailed (message : String)
+  | proofAbiNotCanonical
+  | configAbiIntegrity (message : String)
+  | configAbiReencodingFailed (message : String)
+  | configAbiNotCanonical
+  | pinnedConfigDigestDisagrees
+  | compactLengthDoesNotFitU32
+  | circuitConfigDiffers
+  | gateGuard (error : GateGuardError)
+  | nativeVerificationFailed (message : String)
+  | fullExportRefused (message : String)
+  | configDerivationFailed (message : String)
+  | canonicalJsonFailed (message : String)
+  | canonicalJsonRoundTripChanged
+  deriving DecidableEq
+
+/-- `compact_mle_v2_bytes_from_fixture` (lines 895-908): authenticate the record, then bound the
+length by `1..=MAX_COMPACT_PROOF_BYTES_V2`. -/
+def compactMleV2BytesFromFixture (env : MleEnv) (full : FullFixture) : Except MleError Bytes :=
+  match decodeAndValidate env.keccak full.compactProof env.compactMagic with
+  | .error m => .error (.compactIntegrity m)
+  | .ok compact =>
+    if compact.length = 0 ∨ compact.length > env.maxCompactProofBytes then
+      .error (.compactLengthOutsideEnvelope compact.length)
+    else .ok compact
+
+theorem compact_bytes_ok_binds_magic_length_and_digest (env : MleEnv) (full : FullFixture)
+    (compact : Bytes) (h : compactMleV2BytesFromFixture env full = .ok compact) :
+    full.compactProof.label = env.compactMagic ∧
+      full.compactProof.byteLength = compact.length ∧
+      full.compactProof.keccak = env.keccak compact ∧
+      0 < compact.length ∧ compact.length ≤ env.maxCompactProofBytes := by
+  simp only [compactMleV2BytesFromFixture] at h
+  split at h
+  · cases h
+  · rename_i bytes hrec
+    split at h
+    · cases h
+    · rename_i henv
+      injection h with hb
+      subst hb
+      obtain ⟨hl, hlen, hk, _⟩ := decode_and_validate_ok_binds_label_length_and_digest
+        env.keccak full.compactProof env.compactMagic bytes hrec
+      simp only [not_or, Nat.not_lt] at henv
+      exact ⟨hl, hlen, hk, Nat.pos_of_ne_zero henv.1, by omega⟩
+
+/-- `validate_mle_v2_full_against_config_json` (lines 779-844). The check order is exactly the
+source's: canonical parses, then full-vs-config configuration equality, then the compact record,
+then the compact grammar/canonicity, then the structured view, then the two Solidity ABI views,
+then the pinned verification-config digest. -/
+def validateMleV2FullAgainstConfigJson (env : MleEnv) (fullJson configJson : String) :
+    Except MleError Bytes :=
+  match env.parseFull fullJson with
+  | .error m => .error (.fullNotCanonical m)
+  | .ok full =>
+    match env.parseConfig configJson with
+    | .error m => .error (.configNotCanonical m)
+    | .ok config =>
+      if full.config ≠ config then .error .configFixtureDiffers
+      else
+        match compactMleV2BytesFromFixture env full with
+        | .error e => .error e
+        | .ok compact =>
+          match env.decodeCompact compact full.compactShape with
+          | .error m => .error (.compactGrammar m)
+          | .ok decoded =>
+            match env.encodeCompact decoded full.compactShape with
+            | .error m => .error (.compactReencodingFailed m)
+            | .ok reencoded =>
+              if reencoded ≠ compact then .error .compactNotUniqueCanonicalEncoding
+              else if env.encodeProofFixture decoded ≠ full.proof then
+                .error .structuredProofDisagrees
+              else
+                match decodeAndValidate env.keccak full.solidityAbiProof
+                    env.solidityProofEncoding with
+                | .error m => .error (.proofAbiIntegrity m)
+                | .ok recordedProofAbi =>
+                  match env.abiEncodeProof full.proof with
+                  | .error m => .error (.proofAbiReencodingFailed m)
+                  | .ok canonicalProofAbi =>
+                    if recordedProofAbi ≠ canonicalProofAbi then .error .proofAbiNotCanonical
+                    else
+                      match decodeAndValidate env.keccak config.solidityAbiVerificationConfig
+                          env.solidityConfigEncoding with
+                      | .error m => .error (.configAbiIntegrity m)
+                      | .ok recordedConfigAbi =>
+                        match env.abiEncodeConfig config.body with
+                        | .error m => .error (.configAbiReencodingFailed m)
+                        | .ok canonicalConfigAbi =>
+                          if recordedConfigAbi ≠ canonicalConfigAbi then
+                            .error .configAbiNotCanonical
+                          else if config.pinnedVerificationConfigDigest ≠
+                              config.solidityAbiVerificationConfig.keccak then
+                            .error .pinnedConfigDigestDisagrees
+                          else .ok compact
+
+/-- One extraction of everything the acceptance establishes; the corollaries below are named
+views of it. -/
+theorem validate_full_ok_extracts (env : MleEnv) (fullJson configJson : String) (compact : Bytes)
+    (h : validateMleV2FullAgainstConfigJson env fullJson configJson = .ok compact) :
+    ∃ full config decoded,
+      env.parseFull fullJson = .ok full ∧
+      env.parseConfig configJson = .ok config ∧
+      full.config = config ∧
+      compactMleV2BytesFromFixture env full = .ok compact ∧
+      env.decodeCompact compact full.compactShape = .ok decoded ∧
+      env.encodeCompact decoded full.compactShape = .ok compact ∧
+      env.encodeProofFixture decoded = full.proof ∧
+      decodeAndValidate env.keccak full.solidityAbiProof env.solidityProofEncoding =
+        env.abiEncodeProof full.proof ∧
+      decodeAndValidate env.keccak config.solidityAbiVerificationConfig
+        env.solidityConfigEncoding = env.abiEncodeConfig config.body ∧
+      config.pinnedVerificationConfigDigest = config.solidityAbiVerificationConfig.keccak := by
+  simp only [validateMleV2FullAgainstConfigJson] at h
+  split at h
+  · cases h
+  · rename_i full hfull
+    split at h
+    · cases h
+    · rename_i config hconfig
+      split at h
+      · cases h
+      · rename_i hcfg
+        split at h
+        · cases h
+        · rename_i compact' hcompact
+          split at h
+          · cases h
+          · rename_i decoded hdecoded
+            split at h
+            · cases h
+            · rename_i reencoded hreencoded
+              split at h
+              · cases h
+              · rename_i hcanon
+                split at h
+                · cases h
+                · rename_i hstruct
+                  split at h
+                  · cases h
+                  · rename_i recordedProofAbi hrecProof
+                    split at h
+                    · cases h
+                    · rename_i canonicalProofAbi hcanProof
+                      split at h
+                      · cases h
+                      · rename_i hproofAbi
+                        split at h
+                        · cases h
+                        · rename_i recordedConfigAbi hrecConfig
+                          split at h
+                          · cases h
+                          · rename_i canonicalConfigAbi hcanConfig
+                            split at h
+                            · cases h
+                            · rename_i hconfigAbi
+                              split at h
+                              · cases h
+                              · rename_i hdigest
+                                injection h with hc
+                                subst hc
+                                refine ⟨full, config, decoded, hfull, hconfig,
+                                  Decidable.of_not_not hcfg, hcompact, hdecoded, ?_, ?_, ?_, ?_,
+                                  Decidable.of_not_not hdigest⟩
+                                · rw [hreencoded, Decidable.of_not_not hcanon]
+                                · exact Decidable.of_not_not hstruct
+                                · rw [hrecProof, hcanProof, Decidable.of_not_not hproofAbi]
+                                · rw [hrecConfig, hcanConfig, Decidable.of_not_not hconfigAbi]
+
+/-- The accepted bytes are the UNIQUE canonical encoding of a proof that actually decodes: the
+compact stream is re-decoded and re-encoded with the pinned shape and must come back identical. -/
+theorem validate_full_ok_compact_is_the_unique_canonical_encoding (env : MleEnv)
+    (fullJson configJson : String) (compact : Bytes)
+    (h : validateMleV2FullAgainstConfigJson env fullJson configJson = .ok compact) :
+    ∃ full decoded, env.parseFull fullJson = .ok full ∧
+      env.decodeCompact compact full.compactShape = .ok decoded ∧
+      env.encodeCompact decoded full.compactShape = .ok compact := by
+  obtain ⟨full, _, decoded, hfull, _, _, _, hdec, henc, _, _, _, _⟩ :=
+    validate_full_ok_extracts env fullJson configJson compact h
+  exact ⟨full, decoded, hfull, hdec, henc⟩
+
+/-- PUBLIC-INPUT PLUMBING. The JSON's structured `proof` view — the one a human or a tool reads,
+including its `publicInputs` — is required to be the re-encoding of the proof carried by the
+authoritative compact bytes. Editing the readable view without the stream is rejected. -/
+theorem validate_full_ok_public_inputs_come_from_the_compact_bytes (env : MleEnv)
+    (fullJson configJson : String) (compact : Bytes)
+    (h : validateMleV2FullAgainstConfigJson env fullJson configJson = .ok compact) :
+    ∃ full decoded, env.parseFull fullJson = .ok full ∧
+      env.decodeCompact compact full.compactShape = .ok decoded ∧
+      (env.encodeProofFixture decoded).publicInputs = full.proof.publicInputs := by
+  obtain ⟨full, _, decoded, hfull, _, _, _, hdec, _, hstruct, _, _, _⟩ :=
+    validate_full_ok_extracts env fullJson configJson compact h
+  exact ⟨full, decoded, hfull, hdec, by rw [hstruct]⟩
+
+/-- The pinned constructor-argument digest equals the Keccak of the canonical ABI bytes of the
+very configuration the artifact carries. -/
+theorem validate_full_ok_pins_verification_config_digest (env : MleEnv)
+    (fullJson configJson : String) (compact : Bytes)
+    (h : validateMleV2FullAgainstConfigJson env fullJson configJson = .ok compact) :
+    ∃ config, env.parseConfig configJson = .ok config ∧
+      config.pinnedVerificationConfigDigest = config.solidityAbiVerificationConfig.keccak ∧
+      decodeAndValidate env.keccak config.solidityAbiVerificationConfig
+        env.solidityConfigEncoding = env.abiEncodeConfig config.body := by
+  obtain ⟨_, config, _, _, hconfig, _, _, _, _, _, _, hcfgAbi, hdigest⟩ :=
+    validate_full_ok_extracts env fullJson configJson compact h
+  exact ⟨config, hconfig, hdigest, hcfgAbi⟩
+
+/-- The full artifact's embedded configuration must be the separately persisted deployment
+config; this is checked BEFORE any compact byte is looked at. -/
+theorem validate_full_rejects_config_mismatch (env : MleEnv) (fullJson configJson : String)
+    (full : FullFixture) (config : ConfigFixture) (hf : env.parseFull fullJson = .ok full)
+    (hc : env.parseConfig configJson = .ok config) (hne : full.config ≠ config) :
+    validateMleV2FullAgainstConfigJson env fullJson configJson = .error .configFixtureDiffers := by
+  simp [validateMleV2FullAgainstConfigJson, hf, hc, hne]
+
+/-- `mle_v2_compact_submission_metadata` (lines 851-860): the submission commitment is
+`keccak256(compactProof.bytes)` over the VALIDATED bytes plus their exact length. JSON bytes are
+never hashed. -/
+def mleV2CompactSubmissionMetadata (env : MleEnv) (fullJson configJson : String) :
+    Except MleError (Bytes × Nat) :=
+  match validateMleV2FullAgainstConfigJson env fullJson configJson with
+  | .error e => .error e
+  | .ok compact =>
+    if compact.length > u32Max then .error .compactLengthDoesNotFitU32
+    else .ok (env.keccak compact, compact.length)
+
+theorem submission_metadata_is_keccak_of_validated_compact_bytes (env : MleEnv)
+    (fullJson configJson : String) (digest : Bytes) (length : Nat)
+    (h : mleV2CompactSubmissionMetadata env fullJson configJson = .ok (digest, length)) :
+    ∃ compact, validateMleV2FullAgainstConfigJson env fullJson configJson = .ok compact ∧
+      digest = env.keccak compact ∧ length = compact.length ∧ length ≤ u32Max := by
+  simp only [mleV2CompactSubmissionMetadata] at h
+  split at h
+  · cases h
+  · rename_i compact hvalid
+    split at h
+    · cases h
+    · rename_i hfit
+      injection h with hpair
+      have hd : digest = env.keccak compact := (congrArg Prod.fst hpair).symm
+      have hl : length = compact.length := (congrArg Prod.snd hpair).symm
+      exact ⟨compact, hvalid, hd, hl, by rw [hl]; exact Nat.not_lt.mp hfit⟩
+
+/-- `validated_compact_mle_v2_bytes` (lines 868-893): the fixture is authenticated against the
+SUPPLIED circuit (config/VK equality), then the repository gate guard runs, then native
+verification, and only then are the compact bytes produced. -/
+def validatedCompactMleV2Bytes (env : MleEnv) (json : String)
+    (derivedConfig : Except String ConfigFixture) (validateAgainstCommon : Except String Unit) :
+    Except MleError Bytes :=
+  match env.parseFull json with
+  | .error m => .error (.fullNotCanonical m)
+  | .ok fixture =>
+    match derivedConfig with
+    | .error m => .error (.configDerivationFailed m)
+    | .ok expected =>
+      if fixture.config ≠ expected then .error .circuitConfigDiffers
+      else
+        match checkV2GateRows 0 expected.body.gates with
+        | .error e => .error (.gateGuard e)
+        | .ok _ =>
+          match validateAgainstCommon with
+          | .error m => .error (.nativeVerificationFailed m)
+          | .ok _ => compactMleV2BytesFromFixture env fixture
+
+theorem validated_compact_ok_implies_circuit_binding_and_guards (env : MleEnv) (json : String)
+    (fixture : FullFixture) (expected : ConfigFixture) (validateAgainstCommon : Except String Unit)
+    (compact : Bytes) (hfix : env.parseFull json = .ok fixture)
+    (h : validatedCompactMleV2Bytes env json (.ok expected) validateAgainstCommon = .ok compact) :
+    fixture.config = expected ∧ checkV2GateRows 0 expected.body.gates = .ok () ∧
+      validateAgainstCommon = .ok () ∧
+      compactMleV2BytesFromFixture env fixture = .ok compact := by
+  simp only [validatedCompactMleV2Bytes, hfix] at h
+  split at h
+  · cases h
+  · rename_i hcfg
+    split at h
+    · cases h
+    · rename_i hgate
+      split at h
+      · cases h
+      · rename_i u
+        cases u
+        exact ⟨Decidable.of_not_not hcfg, hgate, rfl, h⟩
+
+/-- `export_mle_v2_json` (lines 917-949): export, compare the proof's VK against a fresh
+proof-free derivation from the complete circuit, run the gate guard, serialize, re-parse, and
+require the round-trip to be the identity, then re-check the compact record. -/
+def exportMleV2Json (env : MleEnv) (exported : Except String FullFixture)
+    (derivedConfig : Except String ConfigFixture)
+    (toJson : FullFixture → Except String String) : Except MleError String :=
+  match exported with
+  | .error m => .error (.fullExportRefused m)
+  | .ok fixture =>
+    match derivedConfig with
+    | .error m => .error (.configDerivationFailed m)
+    | .ok expected =>
+      if fixture.config ≠ expected then .error .circuitConfigDiffers
+      else
+        match checkV2GateRows 0 expected.body.gates with
+        | .error e => .error (.gateGuard e)
+        | .ok _ =>
+          match toJson fixture with
+          | .error m => .error (.canonicalJsonFailed m)
+          | .ok json =>
+            match env.parseFull json with
+            | .error m => .error (.fullNotCanonical m)
+            | .ok reparsed =>
+              if reparsed ≠ fixture then .error .canonicalJsonRoundTripChanged
+              else
+                match compactMleV2BytesFromFixture env reparsed with
+                | .error e => .error e
+                | .ok _ => .ok json
+
+theorem export_full_ok_round_trips_and_carries_a_valid_compact_record (env : MleEnv)
+    (fixture : FullFixture) (expected : ConfigFixture)
+    (toJson : FullFixture → Except String String) (json : String)
+    (h : exportMleV2Json env (.ok fixture) (.ok expected) toJson = .ok json) :
+    fixture.config = expected ∧ checkV2GateRows 0 expected.body.gates = .ok () ∧
+      toJson fixture = .ok json ∧ env.parseFull json = .ok fixture ∧
+      ∃ compact, compactMleV2BytesFromFixture env fixture = .ok compact := by
+  simp only [exportMleV2Json] at h
+  split at h
+  · cases h
+  · rename_i hcfg
+    split at h
+    · cases h
+    · rename_i hgate
+      split at h
+      · cases h
+      · rename_i j hj
+        split at h
+        · cases h
+        · rename_i reparsed hrep
+          split at h
+          · cases h
+          · rename_i hround
+            split at h
+            · cases h
+            · rename_i compact hcompact
+              injection h with hjson
+              subst hjson
+              have hre : reparsed = fixture := Decidable.of_not_not hround
+              subst hre
+              exact ⟨Decidable.of_not_not hcfg, hgate, hj, hrep, compact, hcompact⟩
+
+/-- The gate guard runs before the artifact is serialized, so `export_mle_v2_json` never returns
+JSON for a circuit whose gates the deployed evaluator lacks. -/
+theorem export_full_gate_guard_precedes_serialisation (env : MleEnv) (fixture : FullFixture)
+    (expected : ConfigFixture) (toJson : FullFixture → Except String String)
+    (e : GateGuardError) (hcfg : fixture.config = expected)
+    (h : checkV2GateRows 0 expected.body.gates = .error e) :
+    exportMleV2Json env (.ok fixture) (.ok expected) toJson = .error (.gateGuard e) := by
+  simp [exportMleV2Json, hcfg, h]
+
+/-! ### 5.1 A concrete accepting trace
+
+The opaque callbacks are instantiated with trivial stand-ins ONLY to witness that the acceptance
+path is reachable; nothing about the real codecs is claimed. -/
+
+def sampleProofView : ProofView := { publicInputs := [7, 9], payload := [1, 2, 3] }
+
+def sampleCompact : Bytes := [1, 2, 3]
+
+def sampleGateRow : V2GateRow :=
+  { gateId := 0, numOrConsts := 20, param2 := 0, param3 := 0 }
+
+def sampleConfigBody : ConfigBody :=
+  { circuitDigest := [4], gates := [sampleGateRow], publicInputWireMap := [0, 1] }
+
+def sampleConfigAbiRecord : EncodedRecord :=
+  { label := "CFGV2", byteLength := 1, keccak := [8], bytes := [8] }
+
+def sampleProofAbiRecord : EncodedRecord :=
+  { label := "PRFV2", byteLength := 1, keccak := [9], bytes := [9] }
+
+def sampleCompactRecord : EncodedRecord :=
+  { label := "MLEWHIR3", byteLength := 3, keccak := sampleCompact, bytes := sampleCompact }
+
+def sampleConfigFixture : ConfigFixture :=
+  { body := sampleConfigBody, solidityAbiVerificationConfig := sampleConfigAbiRecord,
+    pinnedVerificationConfigDigest := [8] }
+
+def sampleFullFixture : FullFixture :=
+  { config := sampleConfigFixture, proof := sampleProofView, compactProof := sampleCompactRecord,
+    compactShape := 0, solidityAbiProof := sampleProofAbiRecord }
+
+def sampleTamperedFullFixture : FullFixture :=
+  { sampleFullFixture with proof := { publicInputs := [0, 9], payload := [1, 2, 3] } }
+
+def sampleEnv : MleEnv :=
+  { keccak := fun b => b
+    maxCompactProofBytes := 1024
+    compactMagic := "MLEWHIR3"
+    solidityProofEncoding := "PRFV2"
+    solidityConfigEncoding := "CFGV2"
+    parseFull := fun _ => .ok sampleFullFixture
+    parseConfig := fun _ => .ok sampleConfigFixture
+    decodeCompact := fun _ _ => .ok sampleProofView
+    encodeCompact := fun _ _ => .ok sampleCompact
+    encodeProofFixture := fun p => p
+    abiEncodeProof := fun _ => .ok [9]
+    abiEncodeConfig := fun _ => .ok [8] }
+
+def sampleTamperedEnv : MleEnv := { sampleEnv with parseFull := fun _ => .ok sampleTamperedFullFixture }
+
+theorem sample_full_artifact_is_accepted :
+    validateMleV2FullAgainstConfigJson sampleEnv "full" "config" = .ok sampleCompact := by
+  simp [validateMleV2FullAgainstConfigJson, compactMleV2BytesFromFixture, decodeAndValidate,
+    sampleEnv, sampleFullFixture, sampleConfigFixture, sampleCompactRecord, sampleProofAbiRecord,
+    sampleConfigAbiRecord, sampleCompact, sampleProofView, sampleConfigBody]
+
+theorem sample_submission_metadata_is_the_compact_commitment :
+    mleV2CompactSubmissionMetadata sampleEnv "full" "config" = .ok (sampleCompact, 3) := by
+  simp [mleV2CompactSubmissionMetadata, sample_full_artifact_is_accepted, sampleEnv,
+    sampleCompact, u32Max]
+
+theorem sample_tampered_structured_proof_is_rejected :
+    validateMleV2FullAgainstConfigJson sampleTamperedEnv "full" "config" =
+      .error .structuredProofDisagrees := by
+  simp [validateMleV2FullAgainstConfigJson, compactMleV2BytesFromFixture, decodeAndValidate,
+    sampleTamperedEnv, sampleEnv, sampleTamperedFullFixture, sampleFullFixture,
+    sampleConfigFixture, sampleCompactRecord, sampleCompact, sampleProofView]
 
 end Zkp.Implementation.MleProverBridge

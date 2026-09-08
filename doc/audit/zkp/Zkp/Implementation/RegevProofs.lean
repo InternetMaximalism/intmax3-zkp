@@ -684,4 +684,818 @@ theorem encode_amount_high_zero (v : Nat) :
             ((List.range amountBits).map (bitAt v)).length := by rw [encodeAmount, hlen]
     _ = List.replicate (regevN - amountBits) 0 := List.drop_left _ _
 
+/-! ## Evaluation arguments and aux-column layout (transfer_stark.rs lines 348-394,
+1457-1501)
+
+Each lookup's aux column index equals its position in the spec list, so this list
+IS the aux layout and the order of the published evaluations. -/
+
+inductive LookupKind where
+  | globalEval (name : String)
+  | localEval
+  deriving DecidableEq, Repr
+
+def LookupKind.isGlobal : LookupKind → Bool
+  | .globalEval _ => true
+  | .localEval => false
+
+def ctLookupKinds (s : AirShape) (j : Nat) : List LookupKind :=
+  [ .globalEval s!"eval:c1:ct{j}", .globalEval s!"eval:c2:ct{j}", .localEval, .localEval,
+    .localEval,
+    (if s.exposeM.getD j false then .globalEval s!"eval:m:ct{j}" else .localEval),
+    .localEval, .localEval ]
+
+def dualKeyLookupKinds (s : AirShape) : List LookupKind :=
+  [ .globalEval "eval:a_s", .globalEval "eval:b_s", .globalEval "eval:a_r",
+    .globalEval "eval:b_r" ] ++ (List.range s.numCts).bind (ctLookupKinds s)
+
+def decryptionCoreLookupKinds (exposeBit : Bool) : List LookupKind :=
+  [ .globalEval "eval:a", .globalEval "eval:b", .globalEval "eval:c1", .globalEval "eval:c2",
+    .localEval, .localEval, .localEval, .localEval, .localEval,
+    (if exposeBit then .globalEval "eval:amount_bits" else .localEval) ]
+
+def refreshLookupKinds : List LookupKind :=
+  decryptionCoreLookupKinds false ++
+    [ .globalEval "eval:c1_new", .globalEval "eval:c2_new", .localEval, .localEval, .localEval,
+      .localEval, .localEval ]
+
+/-- Each ciphertext contributes exactly `CT_AUX = 8` aux columns, so the aux layout
+`auxBase j + AOFF_*` is the position of the corresponding lookup. -/
+theorem dual_key_lookup_layout :
+    (dualKeyLookupKinds e1Shape).length = e1Shape.numAuxCols ∧
+      (dualKeyLookupKinds e2Shape).length = e2Shape.numAuxCols ∧
+      (decryptionCoreLookupKinds true).length = decCoreAux ∧
+      refreshLookupKinds.length = refreshAuxCols := by
+  refine ⟨by decide, by decide, by decide, by decide⟩
+
+/-- The verifier's published-evaluation shape check counts exactly the `Kind::Global`
+lookups of the AIR it is verifying. -/
+theorem published_eval_counts_match_lookups :
+    ((dualKeyLookupKinds e1Shape).filter LookupKind.isGlobal).length = e1Shape.numPublishedEvals ∧
+      ((dualKeyLookupKinds e2Shape).filter LookupKind.isGlobal).length = e2Shape.numPublishedEvals ∧
+      ((decryptionCoreLookupKinds true).filter LookupKind.isGlobal).length = decNumPublished ∧
+      (refreshLookupKinds.filter LookupKind.isGlobal).length = rfNumPublished := by
+  refine ⟨by decide, by decide, by decide, by decide⟩
+
+/-- Privacy side of the layout: in E-1 no message evaluation is published, and in
+the refresh AIR the normalized bit column (the SECRET balance) stays `Kind::Local`.
+This is a statement about which evaluations the AIR exposes, not a zero-knowledge
+claim (see the `StarkSoundness` boundary). -/
+theorem secret_message_columns_not_published :
+    (∀ j, j < e1Shape.numCts → LookupKind.localEval ∈ ctLookupKinds e1Shape j) ∧
+      (decryptionCoreLookupKinds false).getD 9 .localEval = .localEval ∧
+      refreshLookupKinds.getD 9 .localEval = .localEval := by
+  refine ⟨?_, by decide, by decide⟩
+  intro j _
+  simp [ctLookupKinds]
+
+/-- In E-2 exactly the two delta ciphertexts expose their message evaluation, which
+is what lets the verifier pin them to the PUBLIC amount. -/
+theorem e2_exposed_messages_are_the_deltas :
+    e2Shape.exposeM = [false, false, true, true] ∧
+      e2Shape.carryDelta = 2 ∧ e2Shape.recipientCt.getD 3 false = true := by
+  refine ⟨rfl, rfl, by decide⟩
+
+/-! ## Ring identities at the shared challenge (transfer_stark.rs lines 443-482)
+
+Each ciphertext is bound to ONE of the two key pairs; that selection is what makes
+the statement dual-key. The equations themselves are recorded structurally (which
+aux columns each identity reads); the extension-field arithmetic and the
+Schwartz-Zippel step stay the `EvaluationArgumentSoundness` boundary. -/
+
+structure RingEq where
+  keyAux : Nat
+  rAux : Nat
+  eAux : Nat
+  ctAux : Nat
+  quotientAux : Nat
+  scaledMessageAux : Option Nat
+  deriving DecidableEq, Repr, Inhabited
+
+def dualKeyRingEqs (s : AirShape) : List RingEq :=
+  (List.range s.numCts).bind (fun j =>
+    let recip := s.recipientCt.getD j false
+    [ { keyAux := if recip then auxAR else auxAS, rAux := auxBase j + aoffR,
+        eAux := auxBase j + aoffE1, ctAux := auxBase j + aoffC1,
+        quotientAux := auxBase j + aoffK1, scaledMessageAux := none },
+      { keyAux := if recip then auxBR else auxBS, rAux := auxBase j + aoffR,
+        eAux := auxBase j + aoffE2, ctAux := auxBase j + aoffC2,
+        quotientAux := auxBase j + aoffK2,
+        scaledMessageAux := some (auxBase j + aoffM) } ])
+
+/-- E-1: `before` and `after` are bound to the SENDER key pair, `enc_amount` (index
+1) to the RECIPIENT pair. -/
+theorem e1_key_binding_selection :
+    ((dualKeyRingEqs e1Shape).map (fun e => e.keyAux)) =
+      [auxAS, auxBS, auxAR, auxBR, auxAS, auxBS] := by
+  decide
+
+/-- E-2: `before`, `after`, `sender_delta` under the sender pair; `receiver_delta`
+(index 3) under the recipient pair. -/
+theorem e2_key_binding_selection :
+    ((dualKeyRingEqs e2Shape).map (fun e => e.keyAux)) =
+      [auxAS, auxBS, auxAS, auxBS, auxAS, auxBS, auxAR, auxBR] := by
+  decide
+
+theorem ring_eq_count :
+    (dualKeyRingEqs e1Shape).length = 2 * e1Shape.numCts ∧
+      (dualKeyRingEqs e2Shape).length = 2 * e2Shape.numCts := by
+  refine ⟨by decide, by decide⟩
+
+/-! ## Field-level gates (transfer_stark.rs lines 407-441, 1522-1592)
+
+Column values are `Int` representatives; a constraint "holds" when its expression is
+zero modulo q. `FieldProducts` (q prime) is the premise that turns a vanishing
+product into a vanishing factor; it is never proved here. -/
+
+def FZero (x : Int) : Prop := x % (regevQ : Int) = 0
+def Canonical (x : Int) : Prop := 0 ≤ x ∧ x < (regevQ : Int)
+def FieldProducts : Prop := ∀ x y : Int, FZero (x * y) → FZero x ∨ FZero y
+
+/-- `builder.assert_bool(m)`. -/
+def BoolGate (x : Int) : Prop := FZero (x * (x - 1))
+/-- `r * (r - 1) * (r + 1) = 0`: ternary randomness / secret key. -/
+def TernaryGate (x : Int) : Prop := FZero (x * ((x - 1) * (x + 1)))
+/-- `x * (x - 1) * (x - 2) = 0`: a CBD(2) noise half. -/
+def CbdHalfGate (x : Int) : Prop := FZero (x * ((x - 1) * (x - 2)))
+
+theorem small_fzero_eq_zero (x : Int) (h : FZero x) (hlo : -(regevQ : Int) < x)
+    (hhi : x < (regevQ : Int)) : x = 0 := by
+  unfold FZero at h
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  rw [hq] at h hlo hhi
+  omega
+
+theorem bool_gate_forces_bit (hf : FieldProducts) (x : Int) (hc : Canonical x)
+    (h : BoolGate x) : x = 0 ∨ x = 1 := by
+  obtain ⟨hc0, hc1⟩ := hc
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  rw [hq] at hc1
+  rcases hf _ _ h with h0 | h1
+  · exact Or.inl (small_fzero_eq_zero x h0 (by rw [hq]; omega) (by rw [hq]; omega))
+  · have h1' := small_fzero_eq_zero (x - 1) h1 (by rw [hq]; omega) (by rw [hq]; omega)
+    exact Or.inr (by omega)
+
+theorem ternary_gate_forces (hf : FieldProducts) (x : Int) (hc : Canonical x)
+    (h : TernaryGate x) : x = 0 ∨ x = 1 ∨ x = (regevQ : Int) - 1 := by
+  obtain ⟨hc0, hc1⟩ := hc
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  rw [hq] at hc1
+  rcases hf _ _ h with h0 | hrest
+  · exact Or.inl (small_fzero_eq_zero x h0 (by rw [hq]; omega) (by rw [hq]; omega))
+  · rcases hf _ _ hrest with h1 | h2
+    · have h1' := small_fzero_eq_zero (x - 1) h1 (by rw [hq]; omega) (by rw [hq]; omega)
+      exact Or.inr (Or.inl (by omega))
+    · have h2' : (x + 1) % (2013265921 : Int) = 0 := by
+        simp only [FZero] at h2
+        rw [hq] at h2
+        exact h2
+      exact Or.inr (Or.inr (by rw [hq]; omega))
+
+theorem cbd_half_gate_forces (hf : FieldProducts) (x : Int) (hc : Canonical x)
+    (h : CbdHalfGate x) : x = 0 ∨ x = 1 ∨ x = 2 := by
+  obtain ⟨hc0, hc1⟩ := hc
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  rw [hq] at hc1
+  rcases hf _ _ h with h0 | hrest
+  · exact Or.inl (small_fzero_eq_zero x h0 (by rw [hq]; omega) (by rw [hq]; omega))
+  · rcases hf _ _ hrest with h1 | h2
+    · have h1' := small_fzero_eq_zero (x - 1) h1 (by rw [hq]; omega) (by rw [hq]; omega)
+      exact Or.inr (Or.inl (by omega))
+    · have h2' := small_fzero_eq_zero (x - 2) h2 (by rw [hq]; omega) (by rw [hq]; omega)
+      exact Or.inr (Or.inr (by omega))
+
+/-! ## Ripple-carry chains (transfer_stark.rs lines 423-441 and 1566-1575)
+
+Both AIRs use the same shape: `src_i + c_i = out_i + 2*c_{i+1}` with `c_0 = 0` and a
+last-row form that forces the final carry to zero, so the identity holds over the
+integers. -/
+
+/-- Little-endian value of a column over its first `k` rows. -/
+def colValue (f : Nat → Int) : Nat → Int
+  | 0 => 0
+  | k + 1 => f 0 + 2 * colValue (fun i => f (i + 1)) k
+
+theorem col_value_add (f g : Nat → Int) :
+    ∀ k, colValue (fun i => f i + g i) k = colValue f k + colValue g k := by
+  intro k
+  induction k generalizing f g with
+  | zero => simp [colValue]
+  | succ k ih =>
+    show f 0 + g 0 + 2 * colValue (fun i => f (i + 1) + g (i + 1)) k = _
+    rw [ih (fun i => f (i + 1)) (fun i => g (i + 1))]
+    show _ = (f 0 + 2 * colValue (fun i => f (i + 1)) k) + (g 0 + 2 * colValue (fun i => g (i + 1)) k)
+    omega
+
+theorem col_value_nonneg (f : Nat → Int) :
+    ∀ k, (∀ i, i < k → 0 ≤ f i) → 0 ≤ colValue f k := by
+  intro k
+  induction k generalizing f with
+  | zero => intro _; simp [colValue]
+  | succ k ih =>
+    intro h
+    have h0 : 0 ≤ f 0 := h 0 (by omega)
+    have hrest : 0 ≤ colValue (fun i => f (i + 1)) k :=
+      ih (fun i => f (i + 1)) (fun i hi => h (i + 1) (by omega))
+    show 0 ≤ f 0 + 2 * colValue (fun i => f (i + 1)) k
+    omega
+
+/-- The generic ripple-carry soundness statement: with `c_0` free, the chain forces
+`value(src) + c_0 = value(out)` over the INTEGERS. Applied twice: to the
+`before = after + delta` conservation chain and to the digit-to-bit normalization
+adder. -/
+theorem carry_chain_value :
+    ∀ (n : Nat) (src out carry : Nat → Int),
+      (∀ i, i + 1 < n + 1 → src i + carry i - out i - 2 * carry (i + 1) = 0) →
+      (src n + carry n - out n = 0) →
+      colValue src (n + 1) + carry 0 = colValue out (n + 1) := by
+  intro n
+  induction n with
+  | zero =>
+    intro src out carry _ hlast
+    show src 0 + 2 * colValue (fun i => src (i + 1)) 0 + carry 0 =
+      out 0 + 2 * colValue (fun i => out (i + 1)) 0
+    simp only [colValue]
+    omega
+  | succ n ih =>
+    intro src out carry htrans hlast
+    have h0 : src 0 + carry 0 - out 0 - 2 * carry 1 = 0 := htrans 0 (by omega)
+    have hshift := ih (fun i => src (i + 1)) (fun i => out (i + 1)) (fun i => carry (i + 1))
+      (fun i hi => htrans (i + 1) (by omega)) hlast
+    simp only [Nat.zero_add] at hshift h0
+    show src 0 + 2 * colValue (fun i => src (i + 1)) (n + 1) + carry 0 =
+      out 0 + 2 * colValue (fun i => out (i + 1)) (n + 1)
+    omega
+
+/-! ### E-1/E-2 conservation: `before = after + delta` over the integers -/
+
+structure ConservationChain (n : Nat) where
+  before : Nat → Int
+  delta : Nat → Int
+  after : Nat → Int
+  carry : Nat → Int
+  /-- `builder.assert_bool` on every message column and on the carry column. -/
+  messagesBoolean : ∀ i, i ≤ n → (before i = 0 ∨ before i = 1) ∧ (delta i = 0 ∨ delta i = 1) ∧
+    (after i = 0 ∨ after i = 1)
+  carryBoolean : ∀ i, i ≤ n → carry i = 0 ∨ carry i = 1
+  /-- `builder.when_first_row().assert_zero(carry)`. -/
+  firstCarryZero : carry 0 = 0
+  /-- `when_transition`: `after + delta + carry - before = 2 * carry_next`. -/
+  transitionGate : ∀ i, i + 1 < n + 1 →
+    FZero (after i + delta i + carry i - before i - 2 * carry (i + 1))
+  /-- `when_last_row`: the same expression without the next carry. -/
+  lastRowGate : FZero (after n + delta n + carry n - before n)
+
+/-- Step 1: each field constraint of the chain also holds over the integers, because
+every term is a bit and `|expr| <= 4 < q`. This is the source's SECURITY note at
+line 424 made explicit. -/
+theorem conservation_gates_integral {n : Nat} (c : ConservationChain n) :
+    (∀ i, i + 1 < n + 1 →
+        c.after i + c.delta i + c.carry i - c.before i - 2 * c.carry (i + 1) = 0) ∧
+      (c.after n + c.delta n + c.carry n - c.before n = 0) := by
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  constructor
+  · intro i hi
+    have hb := c.messagesBoolean i (by omega)
+    have hc := c.carryBoolean i (by omega)
+    have hc' := c.carryBoolean (i + 1) (by omega)
+    refine small_fzero_eq_zero _ (c.transitionGate i hi) ?_ ?_ <;> rw [hq] <;> omega
+  · have hb := c.messagesBoolean n (by omega)
+    have hc := c.carryBoolean n (by omega)
+    refine small_fzero_eq_zero _ c.lastRowGate ?_ ?_ <;> rw [hq] <;> omega
+
+/-- CONSERVATION (fund safety, detail2 E-1.2): the committed message columns satisfy
+`value(before) = value(after) + value(delta)` over the integers. -/
+theorem conservation_over_integers {n : Nat} (c : ConservationChain n) :
+    colValue c.before (n + 1) = colValue c.after (n + 1) + colValue c.delta (n + 1) := by
+  obtain ⟨htrans, hlast⟩ := conservation_gates_integral c
+  have hsum := carry_chain_value n (fun i => c.after i + c.delta i) c.before c.carry
+    (by
+      intro i hi
+      have h := htrans i hi
+      show c.after i + c.delta i + c.carry i - c.before i - 2 * c.carry (i + 1) = 0
+      omega)
+    (by
+      show c.after n + c.delta n + c.carry n - c.before n = 0
+      omega)
+  rw [col_value_add] at hsum
+  rw [c.firstCarryZero] at hsum
+  omega
+
+/-- NO UNDERFLOW: because every plaintext is a committed bit vector (hence
+non-negative) and the final carry is zero, the spent delta can never exceed the
+balance. -/
+theorem conservation_no_underflow {n : Nat} (c : ConservationChain n) :
+    colValue c.delta (n + 1) ≤ colValue c.before (n + 1) := by
+  have hafter : 0 ≤ colValue c.after (n + 1) := by
+    refine col_value_nonneg _ _ (fun i hi => ?_)
+    rcases (c.messagesBoolean i (by omega)).2.2 with h | h <;> omega
+  have := conservation_over_integers c
+  omega
+
+/-! ### Digit extraction and the digit-to-bit normalization adder
+(transfer_stark.rs lines 1304-1343, 1550-1575) -/
+
+/-- Uniqueness of the digit/noise decomposition `v + delta/2 = delta*d + ns (mod q)`:
+the ranges `d < 256` and `ns < delta` make the residue determine BOTH. This is the
+no-wrap analysis of lines 1315-1327; it is the reason the shifted noise is
+decomposed as `lo + (u+v)*2^19` rather than as a plain 23-bit value. -/
+theorem digit_decomposition_unique (d d' ns ns' : Int)
+    (hd : 0 ≤ d) (hd2 : d < 256) (hd' : 0 ≤ d') (hd'2 : d' < 256)
+    (hns : 0 ≤ ns) (hns2 : ns < (deltaU32 : Int))
+    (hns' : 0 ≤ ns') (hns'2 : ns' < (deltaU32 : Int))
+    (h : FZero ((deltaU32 : Int) * d + ns - ((deltaU32 : Int) * d' + ns'))) :
+    d = d' ∧ ns = ns' := by
+  have hdelta : ((deltaU32 : Nat) : Int) = 7864320 := by decide
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  rw [hdelta] at hns2 hns'2 h
+  have hzero : (7864320 : Int) * d + ns - (7864320 * d' + ns') = 0 := by
+    refine small_fzero_eq_zero _ h ?_ ?_ <;> rw [hq] <;> omega
+  omega
+
+/-- The 23-bit alternative the source rejects really is unsound: with `ns` merely
+`< 2^23` the same residue admits two different digits (`d` and `d + 255` shifted by
+one), so the `lo + (u+v)*2^19` shape is load-bearing. -/
+theorem digit_decomposition_wrap_witness :
+    (7864320 : Int) * 255 + 7864321 - ((7864320 : Int) * 0 + 0) = (regevQ : Int) ∧
+      (7864321 : Int) < 2 ^ 23 := by
+  refine ⟨by decide, by decide⟩
+
+/-- The normalization adder binds the digit column and the bit column to the SAME
+integer value (constraint (4) of the decryption core). -/
+structure NormalizationChain (n : Nat) where
+  digit : Nat → Int
+  bit : Nat → Int
+  carry : Nat → Int
+  digitRange : ∀ i, i ≤ n → 0 ≤ digit i ∧ digit i < 256
+  bitBoolean : ∀ i, i ≤ n → bit i = 0 ∨ bit i = 1
+  carryRange : ∀ i, i ≤ n → 0 ≤ carry i ∧ carry i < 256
+  firstCarryZero : carry 0 = 0
+  transitionGate : ∀ i, i + 1 < n + 1 →
+    FZero (digit i + carry i - bit i - 2 * carry (i + 1))
+  lastRowGate : FZero (digit n + carry n - bit n)
+
+theorem normalization_binds_digits_to_bits {n : Nat} (c : NormalizationChain n) :
+    colValue c.digit (n + 1) = colValue c.bit (n + 1) := by
+  have hq : ((regevQ : Nat) : Int) = 2013265921 := by decide
+  have htrans : ∀ i, i + 1 < n + 1 →
+      c.digit i + c.carry i - c.bit i - 2 * c.carry (i + 1) = 0 := by
+    intro i hi
+    have hd := c.digitRange i (by omega)
+    have hb := c.bitBoolean i (by omega)
+    have hc := c.carryRange i (by omega)
+    have hc' := c.carryRange (i + 1) (by omega)
+    refine small_fzero_eq_zero _ (c.transitionGate i hi) ?_ ?_ <;> rw [hq] <;> omega
+  have hlast : c.digit n + c.carry n - c.bit n = 0 := by
+    have hd := c.digitRange n (by omega)
+    have hb := c.bitBoolean n (by omega)
+    have hc := c.carryRange n (by omega)
+    refine small_fzero_eq_zero _ c.lastRowGate ?_ ?_ <;> rw [hq] <;> omega
+  have := carry_chain_value n c.digit c.bit c.carry htrans hlast
+  rw [c.firstCarryZero] at this
+  omega
+
+/-- The carry bound of lines 1337-1343: with `d <= 255`, `bit <= 1` and `c_0 = 0`
+every carry stays below 256, so `CARRY_BITS = 8` boolean columns are enough (and 7
+would not be: `c` can exceed 127). -/
+theorem normalization_carry_bound (d c bit cnext : Int)
+    (hd : 0 ≤ d ∧ d < 256) (hc : 0 ≤ c ∧ c < 256) (hb : bit = 0 ∨ bit = 1)
+    (h : d + c - bit - 2 * cnext = 0) : 0 ≤ cnext ∧ cnext < 256 := by
+  omega
+
+theorem normalization_carry_can_exceed_half :
+    ∃ d c bit cnext : Int, (0 ≤ d ∧ d < 256) ∧ (0 ≤ c ∧ c < 256) ∧ (bit = 0 ∨ bit = 1) ∧
+      d + c - bit - 2 * cnext = 0 ∧ 127 < cnext := by
+  refine ⟨255, 255, 0, 255, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, Or.inl rfl,
+    by decide, by decide⟩
+
+/-! ## Evaluation of a public polynomial at the shared challenge
+(transfer_stark.rs lines 996-1031)
+
+`Chal` is `Int` here: the model reproduces the Horner recursion and the positional
+comparison, NOT the quartic BabyBear extension arithmetic or the Schwartz-Zippel
+step (`EvaluationArgumentSoundness`). -/
+
+abbrev Chal := Int
+
+def evalAt : List Nat → Chal → Chal
+  | [], _ => 0
+  | c :: cs, z => (c : Chal) + z * evalAt cs z
+
+/-- The source's `eval_at`: fold `acc * z + c` over the REVERSED coefficients. -/
+def evalAtFold (coeffs : List Nat) (z : Chal) : Chal :=
+  List.foldl (fun (acc : Chal) (c : Nat) => acc * z + (c : Chal)) (0 : Chal) coeffs.reverse
+
+theorem eval_at_matches_fold (z : Chal) : ∀ coeffs, evalAtFold coeffs z = evalAt coeffs z := by
+  intro coeffs
+  induction coeffs with
+  | nil => rfl
+  | cons c cs ih =>
+    have hstep : evalAtFold (c :: cs) z = evalAtFold cs z * z + (c : Chal) := by
+      simp [evalAtFold, List.reverse_cons, List.foldl_append]
+    rw [hstep, ih]
+    show evalAt cs z * z + (c : Chal) = (c : Chal) + z * evalAt cs z
+    rw [Int.mul_comm]
+    exact Int.add_comm _ _
+
+/-! ## Proof, backend and the shape checks (transfer_stark.rs lines 822-894) -/
+
+inductive RegevSecurityLevel where
+  | test
+  | production
+  deriving DecidableEq, Repr
+
+/-- The parts of a `BatchProof` this model reads: the per-instance degree bits and
+the first instance's published (`Kind::Global`) evaluations. Everything else is an
+opaque payload. -/
+structure ProofM where
+  degreeBits : List Nat
+  publishedEvals : List Chal
+  payload : Nat
+  deriving DecidableEq, Repr
+
+/-- The plonky3 backend as an opaque callback pair: `postcard::from_bytes` and
+`stark::verify_batch` (which returns the shared evaluation challenge `z`). No
+property of either is assumed — this is the `StarkSoundness` boundary. -/
+structure Backend where
+  decode : List Nat → Except RegevError ProofM
+  verifyBatch : RegevSecurityLevel → Nat → List Nat → ProofM → Except RegevError Chal
+
+/-- Which AIR (and hence which lookup set) the verifier instantiates. -/
+def airChannelTx : Nat := 1
+def airChannelUpdate : Nat := 2
+def airWithdrawClaim : Nat := 3
+def airBalanceRefresh : Nat := 4
+def airHashSig : Nat := 5
+
+def logRingN : Nat := 11
+/-- `config.is_zk()` is 1 for both levels (both are hiding configs) — an
+`UpstreamRegev` boundary value, pinned here. -/
+def configIsZk : Nat := 1
+def expectedDegreeBits : Nat := logRingN + configIsZk
+
+theorem expected_degree_bits_pinned : expectedDegreeBits = 12 := by decide
+
+/-- `r` then `k`, propagating `r`'s error: the `?` sequencing of the source. -/
+def ensure (r : Except RegevError Unit) (k : Except RegevError Unit) : Except RegevError Unit :=
+  match r with
+  | .error e => .error e
+  | .ok _ => k
+
+theorem ensure_error {r : Except RegevError Unit} {e : RegevError}
+    (h : r = .error e) (k : Except RegevError Unit) : ensure r k = .error e := by
+  rw [h]; rfl
+
+theorem ensure_ok_iff (r k : Except RegevError Unit) :
+    ensure r k = .ok () ↔ r = .ok () ∧ k = .ok () := by
+  cases r with
+  | error e => simp [ensure]
+  | ok u => cases u; simp [ensure]
+
+def verifyOne (bk : Backend) (level : RegevSecurityLevel) (airId : Nat) (proofBytes : List Nat)
+    (pvs : List Nat) (numPublished expectedDb : Nat) : Except RegevError (Chal × ProofM) :=
+  match bk.decode proofBytes with
+  | .error e => .error e
+  | .ok p =>
+      if p.degreeBits ≠ [expectedDb] then .error .proofVerification
+      else if p.publishedEvals.length ≠ numPublished then .error .proofVerification
+      else
+        match bk.verifyBatch level airId pvs p with
+        | .error e => .error e
+        | .ok z => .ok (z, p)
+
+theorem verify_one_ok {bk : Backend} {level : RegevSecurityLevel} {airId : Nat}
+    {proofBytes pvs : List Nat} {numPublished expectedDb : Nat} {z : Chal} {p : ProofM}
+    (h : verifyOne bk level airId proofBytes pvs numPublished expectedDb = .ok (z, p)) :
+    bk.decode proofBytes = .ok p ∧ p.degreeBits = [expectedDb] ∧
+      p.publishedEvals.length = numPublished ∧ bk.verifyBatch level airId pvs p = .ok z := by
+  unfold verifyOne at h
+  cases hd : bk.decode proofBytes with
+  | error e => rw [hd] at h; exact absurd h (by simp)
+  | ok p' =>
+    rw [hd] at h
+    dsimp only at h
+    by_cases h1 : p'.degreeBits ≠ [expectedDb]
+    · rw [if_pos h1] at h; exact absurd h (by simp)
+    · rw [if_neg h1] at h
+      by_cases h2 : p'.publishedEvals.length ≠ numPublished
+      · rw [if_pos h2] at h; exact absurd h (by simp)
+      · rw [if_neg h2] at h
+        cases hv : bk.verifyBatch level airId pvs p' with
+        | error e => rw [hv] at h; exact absurd h (by simp)
+        | ok z' =>
+          rw [hv] at h
+          have heq : (z', p') = (z, p) := by
+            simpa using h
+          have hz : z' = z := congrArg Prod.fst heq
+          have hp : p' = p := congrArg Prod.snd heq
+          rw [← hz, ← hp]
+          refine ⟨?_, by simpa using h1, by simpa using h2, ?_⟩
+          · first | exact hd | rfl
+          · first | exact hv | rfl
+
+def checkPublishedEvals (p : ProofM) (expected : List Chal) : Except RegevError Unit :=
+  if p.publishedEvals = expected then .ok () else .error .proofVerification
+
+/-- Expected published evaluations in lookup order (lines 1003-1031): the four key
+polynomials, then per ciphertext `c1, c2` and — where the shape exposes it — the
+PUBLIC message polynomial. -/
+def expectedPublishedEvals (s : AirShape) (spk rpk : RegevPkM) (cts : List RegevCtM)
+    (mPub : List Nat) (z : Chal) : List Chal :=
+  [evalAt spk.a z, evalAt spk.b z, evalAt rpk.a z, evalAt rpk.b z] ++
+    (List.range s.numCts).bind (fun j =>
+      let ct := cts.getD j ⟨[], []⟩
+      [evalAt ct.c1 z, evalAt ct.c2 z] ++
+        (if s.exposeM.getD j false then [evalAt mPub z] else []))
+
+/-! ## The four verifiers (transfer_stark.rs lines 1128-1159, 1238-1284, 2063-2104,
+2181-2208)
+
+Each rebuilds the public values from the CLAIMED statement with ITS OWN purpose
+domain word, after validating every key and ciphertext canonically. -/
+
+def verifyChannelTx (bk : Backend) (level : RegevSecurityLevel) (spk rpk : RegevPkM)
+    (before encAmount after : RegevCtM) (proofBytes : List Nat) : Except RegevError Unit :=
+  ensure (pkValidate spk) (ensure (pkValidate rpk) (ensure (ctValidate before)
+    (ensure (ctValidate encAmount) (ensure (ctValidate after)
+      (match verifyOne bk level airChannelTx proofBytes
+          (channelTxPublicValues spk rpk before encAmount after)
+          e1Shape.numPublishedEvals expectedDegreeBits with
+       | .error e => .error e
+       | .ok (z, p) =>
+           checkPublishedEvals p
+             (expectedPublishedEvals e1Shape spk rpk [before, encAmount, after] [] z))))))
+
+def verifyChannelUpdate (bk : Backend) (level : RegevSecurityLevel) (spk rpk : RegevPkM)
+    (before after senderDelta receiverDelta : RegevCtM) (amount tokenIndex : Nat)
+    (proofBytes : List Nat) : Except RegevError Unit :=
+  ensure (pkValidate spk) (ensure (pkValidate rpk) (ensure (ctValidate before)
+    (ensure (ctValidate after) (ensure (ctValidate senderDelta) (ensure (ctValidate receiverDelta)
+      (match verifyOne bk level airChannelUpdate proofBytes
+          (channelUpdatePublicValues spk rpk before after senderDelta receiverDelta amount
+            tokenIndex)
+          e2Shape.numPublishedEvals expectedDegreeBits with
+       | .error e => .error e
+       | .ok (z, p) =>
+           checkPublishedEvals p
+             (expectedPublishedEvals e2Shape spk rpk [before, after, senderDelta, receiverDelta]
+               (encodeAmount amount) z)))))))
+
+def verifyWithdrawClaim (bk : Backend) (level : RegevSecurityLevel) (pk : RegevPkM)
+    (ct : RegevCtM) (amount : Nat) (proofBytes : List Nat) : Except RegevError Unit :=
+  ensure (pkValidate pk) (ensure (ctValidate ct)
+    (match verifyOne bk level airWithdrawClaim proofBytes
+        (decryptionPublicValues withdrawClaimZkpDomain amount pk ct)
+        decNumPublished expectedDegreeBits with
+     | .error e => .error e
+     | .ok (z, p) =>
+         checkPublishedEvals p
+           [evalAt pk.a z, evalAt pk.b z, evalAt ct.c1 z, evalAt ct.c2 z,
+             evalAt (encodeAmount amount) z]))
+
+def verifyBalanceRefresh (bk : Backend) (level : RegevSecurityLevel) (pk : RegevPkM)
+    (oldCt newCt : RegevCtM) (proofBytes : List Nat) : Except RegevError Unit :=
+  ensure (pkValidate pk) (ensure (ctValidate oldCt) (ensure (ctValidate newCt)
+    (match verifyOne bk level airBalanceRefresh proofBytes
+        (refreshPublicValues balanceRefreshZkpDomain pk oldCt newCt)
+        rfNumPublished expectedDegreeBits with
+     | .error e => .error e
+     | .ok (z, p) =>
+         checkPublishedEvals p
+           [evalAt pk.a z, evalAt pk.b z, evalAt oldCt.c1 z, evalAt oldCt.c2 z,
+             evalAt newCt.c1 z, evalAt newCt.c2 z])))
+
+/-! ## Statement-level verifier (transfer_stark.rs lines 2214-2336) -/
+
+inductive RegevStatement where
+  | channelTx (senderPk recipientPk : RegevPkM) (before encAmount after : RegevCtM)
+  | channelUpdate (senderPk recipientPk : RegevPkM)
+      (before after senderDelta receiverDelta : RegevCtM) (amount tokenIndex : Nat)
+  | withdrawClaim (userPk : RegevPkM) (userAmountCt : RegevCtM) (amount : Nat)
+  | balanceRefresh (pk : RegevPkM) (oldCt newCt : RegevCtM)
+  deriving Repr
+
+def RegevStatement.variant : RegevStatement → RegevProofPurpose
+  | .channelTx .. => .channelTx
+  | .channelUpdate .. => .channelUpdate
+  | .withdrawClaim .. => .withdrawClaim
+  | .balanceRefresh .. => .balanceRefresh
+
+def realRegevProofVerify (bk : Backend) (level : RegevSecurityLevel)
+    (purpose : RegevProofPurpose) (proofBytes : List Nat) (statement : RegevStatement) :
+    Except RegevError Unit :=
+  match purpose, statement with
+  | .channelTx, .channelTx spk rpk before encAmount after =>
+      verifyChannelTx bk level spk rpk before encAmount after proofBytes
+  | .channelUpdate, .channelUpdate spk rpk before after sd rd amount tokenIndex =>
+      verifyChannelUpdate bk level spk rpk before after sd rd amount tokenIndex proofBytes
+  | .withdrawClaim, .withdrawClaim pk ct amount =>
+      verifyWithdrawClaim bk level pk ct amount proofBytes
+  | .balanceRefresh, .balanceRefresh pk oldCt newCt =>
+      verifyBalanceRefresh bk level pk oldCt newCt proofBytes
+  | _, _ => .error .purposeMismatch
+
+/-- The structural half of the F2-B defense: a purpose that does not match the
+statement variant is rejected before any proof work, for EVERY backend. -/
+theorem purpose_mismatch_rejected (bk : Backend) (level : RegevSecurityLevel)
+    (purpose : RegevProofPurpose) (proofBytes : List Nat) (statement : RegevStatement)
+    (h : purpose ≠ statement.variant) :
+    realRegevProofVerify bk level purpose proofBytes statement = .error .purposeMismatch := by
+  cases purpose <;> cases statement <;> first | rfl | exact absurd rfl h
+
+/-! ### What acceptance does and does not establish -/
+
+theorem verify_channel_tx_rejects_noncanonical_key (bk : Backend) (level : RegevSecurityLevel)
+    {spk : RegevPkM} (rpk : RegevPkM) (before encAmount after : RegevCtM) (proofBytes : List Nat)
+    (h : pkValidate spk = .error .invalidPk) :
+    verifyChannelTx bk level spk rpk before encAmount after proofBytes = .error .invalidPk := by
+  unfold verifyChannelTx
+  exact ensure_error h _
+
+theorem verify_channel_tx_rejects_noncanonical_ciphertext (bk : Backend)
+    (level : RegevSecurityLevel) (spk rpk : RegevPkM) {before : RegevCtM}
+    (encAmount after : RegevCtM) (proofBytes : List Nat)
+    (hs : pkValidate spk = .ok ()) (hr : pkValidate rpk = .ok ())
+    (h : ctValidate before = .error .invalidCiphertext) :
+    verifyChannelTx bk level spk rpk before encAmount after proofBytes =
+      .error .invalidCiphertext := by
+  unfold verifyChannelTx
+  rw [hs, hr]
+  show ensure (ctValidate before) _ = _
+  exact ensure_error h _
+
+theorem verify_withdraw_claim_rejects_noncanonical_key (bk : Backend)
+    (level : RegevSecurityLevel) {pk : RegevPkM} (ct : RegevCtM) (amount : Nat)
+    (proofBytes : List Nat) (h : pkValidate pk = .error .invalidPk) :
+    verifyWithdrawClaim bk level pk ct amount proofBytes = .error .invalidPk := by
+  unfold verifyWithdrawClaim
+  exact ensure_error h _
+
+/-- Acceptance of an E-1 proof means exactly: the statement was canonical, the proof
+decoded, its trace height and published-evaluation count had the expected shape, the
+opaque backend accepted the public values REBUILT FROM THE STATEMENT with the E-1
+domain word, and its published evaluations equal the ones recomputed from that same
+statement. It does NOT mean the underlying ring identities hold — that is the
+`StarkSoundness` / `EvaluationArgumentSoundness` boundary. -/
+theorem verify_channel_tx_binds_statement (bk : Backend) (level : RegevSecurityLevel)
+    (spk rpk : RegevPkM) (before encAmount after : RegevCtM) (proofBytes : List Nat)
+    (h : verifyChannelTx bk level spk rpk before encAmount after proofBytes = .ok ()) :
+    ∃ p z, bk.decode proofBytes = .ok p ∧
+      p.degreeBits = [expectedDegreeBits] ∧
+      p.publishedEvals.length = e1Shape.numPublishedEvals ∧
+      bk.verifyBatch level airChannelTx (channelTxPublicValues spk rpk before encAmount after) p
+        = .ok z ∧
+      p.publishedEvals = expectedPublishedEvals e1Shape spk rpk [before, encAmount, after] [] z := by
+  simp only [verifyChannelTx, ensure_ok_iff] at h
+  obtain ⟨_, _, _, _, _, hfin⟩ := h
+  cases hv : verifyOne bk level airChannelTx proofBytes
+      (channelTxPublicValues spk rpk before encAmount after) e1Shape.numPublishedEvals
+      expectedDegreeBits with
+  | error e => rw [hv] at hfin; exact absurd hfin (by simp)
+  | ok zp =>
+    obtain ⟨z, p⟩ := zp
+    rw [hv] at hfin
+    dsimp only at hfin
+    obtain ⟨hdec, hdb, hlen, hvb⟩ := verify_one_ok hv
+    refine ⟨p, z, hdec, hdb, hlen, hvb, ?_⟩
+    unfold checkPublishedEvals at hfin
+    by_cases hc : p.publishedEvals =
+        expectedPublishedEvals e1Shape spk rpk [before, encAmount, after] [] z
+    · exact hc
+    · rw [if_neg hc] at hfin; exact absurd hfin (by simp)
+
+/-- F2-C (E-2 public-amount binding): acceptance forces BOTH delta ciphertexts'
+published message evaluations to equal the evaluation of `encode_amount(amount)`
+recomputed by the verifier from the PUBLIC amount. Positions 10 and 13 are the two
+`expose_m` slots of the E-2 lookup order. -/
+theorem verify_channel_update_pins_delta_messages (bk : Backend) (level : RegevSecurityLevel)
+    (spk rpk : RegevPkM) (before after senderDelta receiverDelta : RegevCtM)
+    (amount tokenIndex : Nat) (proofBytes : List Nat)
+    (h : verifyChannelUpdate bk level spk rpk before after senderDelta receiverDelta amount
+      tokenIndex proofBytes = .ok ()) :
+    ∃ p z, bk.decode proofBytes = .ok p ∧
+      bk.verifyBatch level airChannelUpdate
+        (channelUpdatePublicValues spk rpk before after senderDelta receiverDelta amount
+          tokenIndex) p = .ok z ∧
+      p.publishedEvals.getD 10 0 = evalAt (encodeAmount amount) z ∧
+      p.publishedEvals.getD 13 0 = evalAt (encodeAmount amount) z := by
+  simp only [verifyChannelUpdate, ensure_ok_iff] at h
+  obtain ⟨_, _, _, _, _, _, hfin⟩ := h
+  cases hv : verifyOne bk level airChannelUpdate proofBytes
+      (channelUpdatePublicValues spk rpk before after senderDelta receiverDelta amount tokenIndex)
+      e2Shape.numPublishedEvals expectedDegreeBits with
+  | error e => rw [hv] at hfin; exact absurd hfin (by simp)
+  | ok zp =>
+    obtain ⟨z, p⟩ := zp
+    rw [hv] at hfin
+    dsimp only at hfin
+    obtain ⟨hdec, _, _, hvb⟩ := verify_one_ok hv
+    unfold checkPublishedEvals at hfin
+    by_cases hc : p.publishedEvals =
+        expectedPublishedEvals e2Shape spk rpk [before, after, senderDelta, receiverDelta]
+          (encodeAmount amount) z
+    · refine ⟨p, z, hdec, hvb, ?_, ?_⟩ <;> rw [hc] <;>
+        simp [expectedPublishedEvals, e2Shape, List.range, List.range.loop, List.bind]
+    · rw [if_neg hc] at hfin; exact absurd hfin (by simp)
+
+/-! ## Prove-side conservation checks (transfer_stark.rs lines 1102-1112, 1196-1211)
+
+The native refusals that keep the prover from building an unsatisfiable trace. They
+are the SAME arithmetic the in-circuit ripple carry enforces, over u64. -/
+
+def u64Limit : Nat := 18446744073709551616
+
+def proveConservationCheck (beforeAmt afterAmt amount : Nat) : Except RegevError Unit :=
+  if afterAmt + amount < u64Limit ∧ afterAmt + amount = beforeAmt then .ok ()
+  else .error .invalidWitness
+
+def proveDeltaAmountCheck (senderDeltaAmt receiverDeltaAmt amount : Nat) :
+    Except RegevError Unit :=
+  if senderDeltaAmt = amount ∧ receiverDeltaAmt = amount then .ok ()
+  else .error .invalidWitness
+
+theorem prove_conservation_check_sound {b a m : Nat} (h : proveConservationCheck b a m = .ok ()) :
+    b = a + m ∧ m ≤ b := by
+  unfold proveConservationCheck at h
+  split at h
+  · next hc => exact ⟨hc.2.symm, by omega⟩
+  · exact absurd h (by simp)
+
+theorem prove_conservation_check_rejects_underflow (b a m : Nat) (h : b < m) :
+    proveConservationCheck b a m = .error .invalidWitness := by
+  unfold proveConservationCheck
+  split
+  · next hc => omega
+  · rfl
+
+theorem prove_delta_amount_check_sound {sd rd m : Nat} (h : proveDeltaAmountCheck sd rd m = .ok ()) :
+    sd = m ∧ rd = m := by
+  unfold proveDeltaAmountCheck at h
+  split at h
+  · next hc => exact hc
+  · exact absurd h (by simp)
+
+/-! ## A concrete accepting run (non-vacuity)
+
+The canonical all-zero key and the canonical zero ciphertext (`RegevPk::padding` /
+`RegevCiphertext::padding`) form a well-shaped E-1 statement, and with a stub
+backend that decodes to a shape-correct proof whose published evaluations are the
+recomputed ones, `verifyChannelTx` returns `ok`. This shows the verifier model is
+not vacuously rejecting; it establishes nothing about real proofs. -/
+
+theorem all_replicate_below_q (n c : Nat) (h : c < regevQ) :
+    (List.replicate n c).all (fun x => decide (x < regevQ)) = true := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp [List.replicate, List.all_cons, h, ih]
+
+theorem all_append_true (f : Nat → Bool) :
+    ∀ xs ys : List Nat, xs.all f = true → ys.all f = true → (xs ++ ys).all f = true
+  | [], ys, _, hy => by simpa using hy
+  | x :: xs, ys, hx, hy => by
+      simp only [List.cons_append, List.all_cons, Bool.and_eq_true] at hx ⊢
+      exact ⟨hx.1, all_append_true f xs ys hx.2 hy⟩
+
+theorem zero_polys_canonical :
+    ((List.replicate regevN 0 ++ List.replicate regevN 0).all
+      (fun c => decide (c < regevQ))) = true :=
+  all_append_true _ _ _ (all_replicate_below_q regevN 0 (by decide))
+    (all_replicate_below_q regevN 0 (by decide))
+
+def zeroPk : RegevPkM := ⟨List.replicate regevN 0, List.replicate regevN 0⟩
+def zeroCt : RegevCtM := ⟨List.replicate regevN 0, List.replicate regevN 0⟩
+
+theorem zero_pk_validates : pkValidate zeroPk = .ok () := by
+  simp [pkValidate, zeroPk, canonicalPoly, zero_polys_canonical]
+  intro _
+  decide
+
+theorem zero_ct_validates : ctValidate zeroCt = .ok () := by
+  simp [ctValidate, zeroCt, canonicalPoly, zero_polys_canonical]
+  intro _
+  decide
+
+def exampleChallenge : Chal := 7
+
+def exampleExpectedEvals : List Chal :=
+  expectedPublishedEvals e1Shape zeroPk zeroPk [zeroCt, zeroCt, zeroCt] [] exampleChallenge
+
+def exampleProof : ProofM :=
+  { degreeBits := [expectedDegreeBits], publishedEvals := exampleExpectedEvals, payload := 0 }
+
+def stubBackend : Backend :=
+  { decode := fun _ => .ok exampleProof
+    verifyBatch := fun _ _ _ _ => .ok exampleChallenge }
+
+theorem example_expected_evals_length : exampleExpectedEvals.length = 10 := by
+  simp [exampleExpectedEvals, expectedPublishedEvals, e1Shape, List.range, List.range.loop,
+    List.bind]
+
+theorem channel_tx_example_accepts :
+    verifyChannelTx stubBackend .test zeroPk zeroPk zeroCt zeroCt zeroCt [] = .ok () := by
+  simp only [verifyChannelTx, zero_pk_validates, zero_ct_validates, bind, Except.bind, verifyOne,
+    stubBackend, exampleProof, checkPublishedEvals]
+  simp only [e1_layout_pinned, example_expected_evals_length]
+  norm_cast
+
 end Zkp.Implementation.RegevProofs

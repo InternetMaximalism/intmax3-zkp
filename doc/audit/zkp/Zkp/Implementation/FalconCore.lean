@@ -727,4 +727,614 @@ theorem decode_cosign_blob_length_gate (rest : List Nat)
   simp only [decodeCosignBlob, ne_eq, not_true_eq_false, if_false]
   rw [if_pos hl]
 
+/-! ## 7. `encode(h)`, the identity digest, and the salt packing -/
+
+/-- Lane weights of the 4-per-element 14-bit packing. -/
+def lane1 : Nat := 16384
+def lane2 : Nat := 268435456
+def lane3 : Nat := 4398046511104
+
+theorem lane_weights_are_14_bit_powers :
+    lane1 = 2 ^ 14 ∧ lane2 = 2 ^ 28 ∧ lane3 = 2 ^ 42 := by
+  refine ⟨?_, ?_, ?_⟩ <;> decide
+
+/-- `packed |= coeff << (14 * lane)`, little-lane-first. -/
+def pkLanePacked (c0 c1 c2 c3 : Nat) : Nat := c0 + c1 * lane1 + c2 * lane2 + c3 * lane3
+
+def packPkChunks : List Nat → List Nat
+  | c0 :: c1 :: c2 :: c3 :: rest => pkLanePacked c0 c1 c2 c3 :: packPkChunks rest
+  | _ => []
+
+/-- The Poseidon input vector of `falcon_pk_digest`: the domain constant, then 128 packed
+elements. -/
+def pkDigestInputs (h : List Nat) : List Nat := domainFalconPk :: packPkChunks h
+
+/-- 5 little-endian bytes per element (`Nonce::to_elements` / `salt_to_elements`). -/
+def saltElement (b0 b1 b2 b3 b4 : Nat) : Nat :=
+  b0 + 256 * b1 + 65536 * b2 + 16777216 * b3 + 4294967296 * b4
+
+def saltToElements : List Nat → List Nat
+  | b0 :: b1 :: b2 :: b3 :: b4 :: rest => saltElement b0 b1 b2 b3 b4 :: saltToElements rest
+  | _ => []
+
+theorem exists_four_prefix (l : List Nat) (k : Nat) (h : l.length = 4 * (k + 1)) :
+    ∃ x0 x1 x2 x3 r, l = x0 :: x1 :: x2 :: x3 :: r ∧ r.length = 4 * k := by
+  rcases l with _ | ⟨x0, l⟩
+  · simp only [List.length_nil] at h; omega
+  rcases l with _ | ⟨x1, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  rcases l with _ | ⟨x2, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  rcases l with _ | ⟨x3, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  exact ⟨x0, x1, x2, x3, l, rfl, by simp only [List.length_cons] at h; omega⟩
+
+theorem exists_five_prefix (l : List Nat) (k : Nat) (h : l.length = 5 * (k + 1)) :
+    ∃ x0 x1 x2 x3 x4 r, l = x0 :: x1 :: x2 :: x3 :: x4 :: r ∧ r.length = 5 * k := by
+  rcases l with _ | ⟨x0, l⟩
+  · simp only [List.length_nil] at h; omega
+  rcases l with _ | ⟨x1, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  rcases l with _ | ⟨x2, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  rcases l with _ | ⟨x3, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  rcases l with _ | ⟨x4, l⟩
+  · simp only [List.length_cons, List.length_nil] at h; omega
+  exact ⟨x0, x1, x2, x3, x4, l, rfl, by simp only [List.length_cons] at h; omega⟩
+
+/-- Each packed element is `< 2^56`, hence canonical in Goldilocks — the premise that makes
+the digest input vector well defined. -/
+theorem pk_lane_packed_lt (c0 c1 c2 c3 : Nat) (h0 : c0 < lane1) (h1 : c1 < lane1)
+    (h2 : c2 < lane1) (h3 : c3 < lane1) : pkLanePacked c0 c1 c2 c3 < 72057594037927936 := by
+  simp only [pkLanePacked, lane1, lane2, lane3] at *
+  omega
+
+theorem pk_lane_packed_canonical_in_field (c0 c1 c2 c3 : Nat) (h0 : c0 < lane1)
+    (h1 : c1 < lane1) (h2 : c2 < lane1) (h3 : c3 < lane1) :
+    pkLanePacked c0 c1 c2 c3 < fieldModulus := by
+  have := pk_lane_packed_lt c0 c1 c2 c3 h0 h1 h2 h3
+  simp only [fieldModulus]
+  omega
+
+/-- Lane packing is injective on 14-bit lanes: this is exactly the argument that one `pk_g`
+digest binds one `h` (given a Poseidon injectivity premise supplied separately). -/
+theorem pk_lane_packed_injective (a0 a1 a2 a3 b0 b1 b2 b3 : Nat)
+    (ha0 : a0 < lane1) (ha1 : a1 < lane1) (ha2 : a2 < lane1) (ha3 : a3 < lane1)
+    (hb0 : b0 < lane1) (hb1 : b1 < lane1) (hb2 : b2 < lane1) (hb3 : b3 < lane1)
+    (h : pkLanePacked a0 a1 a2 a3 = pkLanePacked b0 b1 b2 b3) :
+    a0 = b0 ∧ a1 = b1 ∧ a2 = b2 ∧ a3 = b3 := by
+  simp only [pkLanePacked, lane1, lane2, lane3] at *
+  omega
+
+/-- Canonical coefficients (`< q < 2^14`) are 14-bit lanes. -/
+theorem canonical_coeff_is_lane (c : Nat) (h : c < falconQ) : c < lane1 := by
+  simp only [falconQ, lane1] at *; omega
+
+theorem pack_pk_chunks_injective :
+    ∀ (k : Nat) (a b : List Nat), a.length = 4 * k → b.length = 4 * k →
+      (∀ c ∈ a, c < lane1) → (∀ c ∈ b, c < lane1) → packPkChunks a = packPkChunks b → a = b := by
+  intro k
+  induction k with
+  | zero =>
+      intro a b ha hb _ _ _
+      simp only [Nat.mul_zero, List.length_eq_zero] at ha hb
+      subst ha; subst hb; rfl
+  | succ k ih =>
+      intro a b ha hb hca hcb heq
+      obtain ⟨a0, a1, a2, a3, ra, rfl, hra⟩ := exists_four_prefix a k ha
+      obtain ⟨b0, b1, b2, b3, rb, rfl, hrb⟩ := exists_four_prefix b k hb
+      simp only [packPkChunks, List.cons.injEq] at heq
+      obtain ⟨hhead, htail⟩ := heq
+      obtain ⟨e0, e1, e2, e3⟩ := pk_lane_packed_injective a0 a1 a2 a3 b0 b1 b2 b3
+        (hca a0 (by simp)) (hca a1 (by simp)) (hca a2 (by simp)) (hca a3 (by simp))
+        (hcb b0 (by simp)) (hcb b1 (by simp)) (hcb b2 (by simp)) (hcb b3 (by simp)) hhead
+      have hrest : ra = rb :=
+        ih ra rb hra hrb (fun c hc => hca c (by simp [hc])) (fun c hc => hcb c (by simp [hc])) htail
+      subst e0; subst e1; subst e2; subst e3; subst hrest
+      rfl
+
+/-- `encode(h)` is injective on the ACCEPTED (canonical) domain. -/
+theorem pk_digest_inputs_injective (a b : List Nat) (ha : a.length = falconN)
+    (hb : b.length = falconN) (hca : ∀ c ∈ a, c < falconQ) (hcb : ∀ c ∈ b, c < falconQ)
+    (h : pkDigestInputs a = pkDigestInputs b) : a = b := by
+  simp only [pkDigestInputs, List.cons.injEq, true_and] at h
+  exact pack_pk_chunks_injective 128 a b (by simpa [falconN] using ha) (by simpa [falconN] using hb)
+    (fun c hc => canonical_coeff_is_lane c (hca c hc))
+    (fun c hc => canonical_coeff_is_lane c (hcb c hc)) h
+
+theorem salt_element_lt_2_40 (b0 b1 b2 b3 b4 : Nat) (h0 : b0 < 256) (h1 : b1 < 256)
+    (h2 : b2 < 256) (h3 : b3 < 256) (h4 : b4 < 256) :
+    saltElement b0 b1 b2 b3 b4 < 1099511627776 := by
+  simp only [saltElement]; omega
+
+theorem salt_element_injective (a0 a1 a2 a3 a4 b0 b1 b2 b3 b4 : Nat)
+    (ha0 : a0 < 256) (ha1 : a1 < 256) (ha2 : a2 < 256) (ha3 : a3 < 256) (ha4 : a4 < 256)
+    (hb0 : b0 < 256) (hb1 : b1 < 256) (hb2 : b2 < 256) (hb3 : b3 < 256) (hb4 : b4 < 256)
+    (h : saltElement a0 a1 a2 a3 a4 = saltElement b0 b1 b2 b3 b4) :
+    a0 = b0 ∧ a1 = b1 ∧ a2 = b2 ∧ a3 = b3 ∧ a4 = b4 := by
+  simp only [saltElement] at h
+  omega
+
+/-- SECURITY (in-circuit salt injectivity): the 40-byte salt has exactly one 8-element
+packing, which is what the gadget's `< 2^40` range checks buy. -/
+theorem salt_to_elements_injective :
+    ∀ (k : Nat) (a b : List Nat), a.length = 5 * k → b.length = 5 * k →
+      (∀ c ∈ a, c < 256) → (∀ c ∈ b, c < 256) → saltToElements a = saltToElements b → a = b := by
+  intro k
+  induction k with
+  | zero =>
+      intro a b ha hb _ _ _
+      simp only [Nat.mul_zero, List.length_eq_zero] at ha hb
+      subst ha; subst hb; rfl
+  | succ k ih =>
+      intro a b ha hb hca hcb heq
+      obtain ⟨a0, a1, a2, a3, a4, ra, rfl, hra⟩ := exists_five_prefix a k ha
+      obtain ⟨b0, b1, b2, b3, b4, rb, rfl, hrb⟩ := exists_five_prefix b k hb
+      simp only [saltToElements, List.cons.injEq] at heq
+      obtain ⟨hhead, htail⟩ := heq
+      obtain ⟨e0, e1, e2, e3, e4⟩ := salt_element_injective a0 a1 a2 a3 a4 b0 b1 b2 b3 b4
+        (hca a0 (by simp)) (hca a1 (by simp)) (hca a2 (by simp)) (hca a3 (by simp))
+        (hca a4 (by simp)) (hcb b0 (by simp)) (hcb b1 (by simp)) (hcb b2 (by simp))
+        (hcb b3 (by simp)) (hcb b4 (by simp)) hhead
+      have hrest : ra = rb :=
+        ih ra rb hra hrb (fun c hc => hca c (by simp [hc])) (fun c hc => hcb c (by simp [hc])) htail
+      subst e0; subst e1; subst e2; subst e3; subst e4; subst hrest
+      rfl
+
+/-! ## 8. Hash boundary and the identity digest -/
+
+/-- The two opaque hash callbacks. NOTHING below assumes they are injective, collision
+resistant or uniform; every binding statement takes injectivity on the concrete compared
+pair as an explicit premise. -/
+structure HashEnvironment where
+  /-- `PoseidonHashOut::hash_inputs_u64` over field elements, output as a digest value. -/
+  poseidon : List Nat → Nat
+  /-- `hash_to_point_poseidon(message_digest, nonce)`, given (salt bytes, message digest). -/
+  hashToPoint : List Nat → Nat → List Nat
+
+/-- `pk_g = Poseidon(IMFK || encode(h))`. -/
+def falconPkDigest (e : HashEnvironment) (h : List Nat) : Nat := e.poseidon (pkDigestInputs h)
+
+/-- The native function ASSERTS canonicity and panics otherwise; only `verify` /
+`decode_cosign_blob` see untrusted encodings, and both gate them first. -/
+def falconPkDigestChecked (e : HashEnvironment) (h : List Nat) : Option Nat :=
+  if h.all (fun c => decide (c < falconQ)) then some (falconPkDigest e h) else none
+
+/-- `falcon_padding_pk_g()`: the digest of the all-zero polynomial. It is a PUBLIC value and
+carries no signing capability; consumers must keep it out of identity-bearing structures. -/
+def falconPaddingPkG (e : HashEnvironment) : Nat :=
+  falconPkDigest e (List.replicate falconN 0)
+
+/-- Identity binding, with the Poseidon injectivity premise made explicit on the compared
+pair (the model does NOT assume hash injectivity). -/
+theorem equal_pk_digest_binds_public_polynomial (e : HashEnvironment) (a b : List Nat)
+    (ha : a.length = falconN) (hb : b.length = falconN)
+    (hca : ∀ c ∈ a, c < falconQ) (hcb : ∀ c ∈ b, c < falconQ)
+    (binding : e.poseidon (pkDigestInputs a) = e.poseidon (pkDigestInputs b) →
+      pkDigestInputs a = pkDigestInputs b)
+    (heq : falconPkDigest e a = falconPkDigest e b) : a = b :=
+  pk_digest_inputs_injective a b ha hb hca hcb (binding heq)
+
+/-! ## 9. The norm predicate -/
+
+def natSum : List Nat → Nat
+  | [] => 0
+  | x :: xs => x + natSum xs
+
+/-- `FalconFelt::balanced_value()`: `value - q * (value > q / 2)`. -/
+def centeredValue (v : Nat) : Int := if v > falconQ / 2 then (v : Int) - (falconQ : Int) else (v : Int)
+
+def centeredSquare (v : Nat) : Nat := (centeredValue v).natAbs ^ 2
+
+def sumSquares (l : List Nat) : Nat := natSum (l.map centeredSquare)
+
+/-- `||(s1, s2)||^2` over centered coefficient values. -/
+def normSquared (s1 s2 : List Nat) : Nat := sumSquares s1 + sumSquares s2
+
+/-- `norm_within_bound`: SECURITY — inclusive `<=` per the threat model; the upstream miden
+verifier used a strict `<` and wrongly rejected the boundary. -/
+def normWithinBound (n : Nat) : Bool := decide (n ≤ falconSigL2Bound)
+
+theorem norm_bound_accepts_beta_squared : normWithinBound falconSigL2Bound = true := by decide
+
+theorem norm_bound_rejects_beta_squared_plus_one :
+    normWithinBound (falconSigL2Bound + 1) = false := by decide
+
+/-- The crafted boundary witness of `norm_boundary_beta_squared_accepts_and_plus_one_rejects`:
+centered coefficients `{5833, 104, 4, 2, 1}` square to exactly `beta^2`. -/
+theorem crafted_boundary_hits_beta_squared :
+    sumSquares [5833, 104, 4, 2, 1] = falconSigL2Bound := by decide
+
+theorem crafted_boundary_plus_one_exceeds :
+    sumSquares [5833, 104, 4, 2, 1, 1] = falconSigL2Bound + 1 := by decide
+
+/-- Every canonical residue centers to magnitude at most `q / 2 = 6144`. -/
+theorem centered_magnitude_bound (v : Nat) (h : v < falconQ) :
+    (centeredValue v).natAbs ≤ maxCenteredMagnitude := by
+  simp only [centeredValue, falconQ, maxCenteredMagnitude] at *
+  split <;> omega
+
+theorem centered_square_bound (v : Nat) (h : v < falconQ) :
+    centeredSquare v ≤ maxCenteredMagnitude ^ 2 :=
+  Nat.pow_le_pow_left (centered_magnitude_bound v h) 2
+
+theorem sum_squares_bound :
+    ∀ (l : List Nat), (∀ v ∈ l, v < falconQ) →
+      sumSquares l ≤ l.length * maxCenteredMagnitude ^ 2 := by
+  intro l
+  induction l with
+  | nil => intro _; simp [sumSquares, natSum]
+  | cons x xs ih =>
+      intro hall
+      have hx := centered_square_bound x (hall x (by simp))
+      have htail := ih (fun v hv => hall v (by simp [hv]))
+      simp only [sumSquares, List.map_cons, natSum, List.length_cons] at *
+      have hmul : (xs.length + 1) * maxCenteredMagnitude ^ 2 =
+          xs.length * maxCenteredMagnitude ^ 2 + maxCenteredMagnitude ^ 2 := Nat.succ_mul _ _
+      omega
+
+/-- SECURITY (no field wrap): the largest possible norm of 1024 canonical coefficients is
+`1024 * 6144^2 < 2^36`, far below the Goldilocks prime — the sum is exact integer
+arithmetic in circuit and native alike. -/
+theorem max_norm_no_field_wrap :
+    1024 * maxCenteredMagnitude ^ 2 = 38654705664 ∧ 38654705664 < 2 ^ 36 + 1 ∧
+      38654705664 < fieldModulus := by
+  refine ⟨by decide, by decide, by decide⟩
+
+/-- The norm of a full signature pair never wraps. -/
+theorem norm_squared_no_field_wrap (s1 s2 : List Nat) (h1 : s1.length = falconN)
+    (h2 : s2.length = falconN) (c1 : ∀ v ∈ s1, v < falconQ) (c2 : ∀ v ∈ s2, v < falconQ) :
+    normSquared s1 s2 < fieldModulus := by
+  have b1 := sum_squares_bound s1 c1
+  have b2 := sum_squares_bound s2 c2
+  rw [h1] at b1
+  rw [h2] at b2
+  simp only [normSquared, falconN, maxCenteredMagnitude, fieldModulus] at *
+  omega
+
+/-! ## 10. The native verifier
+
+`verify`, `verify_with_pk_g`, `verify_cosign_blob`. The polynomial product is a BOUNDARY:
+the native path computes `s2 * h` with the exact NTT of `FastFft`, the circuit with an
+in-circuit NTT; neither is modelled, only their common interface. -/
+
+/-- BOUNDARY: the negacyclic product in `Z_q[X]/(X^512 + 1)`. -/
+structure PolynomialProduct where
+  mul : List Nat → List Nat → List Nat
+
+/-- BOUNDARY: NTRU/GPV unforgeability. Carried as an explicit premise wherever a statement
+would otherwise read as "acceptance implies the key holder signed". -/
+structure LatticeHardness (e : HashEnvironment) (p : PolynomialProduct) : Prop where
+  /-- For an unforgeability argument a consumer must supply: no efficient party produces a
+  short `(s1, s2)` for a target `c` without the trapdoor. Nothing in this file derives it. -/
+  shortVectorsAreHard : True
+
+def subModQ (a b : Nat) : Nat := (a + falconQ - b % falconQ) % falconQ
+
+theorem sub_mod_q_lt (a b : Nat) : subModQ a b < falconQ := by
+  simp only [subModQ, falconQ]
+  omega
+
+/-- `s1 = c - s2 * h`, coefficientwise mod q. -/
+def reconstructS1 (p : PolynomialProduct) (c s2 h : List Nat) : List Nat :=
+  List.zipWith subModQ c (p.mul s2 h)
+
+/-- `FalconSigGadgetWitness::for_signature`'s balanced -> canonical residue map. -/
+def s2WitnessResidue (c : Int) : Nat :=
+  if c < 0 then (c + (falconQ : Int)).toNat else c.toNat
+
+theorem s2_witness_residue_canonical (c : Int) (h : c.natAbs ≤ s2CoeffBand) :
+    s2WitnessResidue c < falconQ := by
+  simp only [s2CoeffBand] at h
+  by_cases hn : c < 0
+  · have hz : ((c + (falconQ : Int)).toNat : Int) = c + (falconQ : Int) :=
+      Int.toNat_of_nonneg (by simp only [falconQ]; omega)
+    simp only [s2WitnessResidue, if_pos hn, falconQ] at *
+    omega
+  · have hz : ((c.toNat : Int)) = c := Int.toNat_of_nonneg (by omega)
+    simp only [s2WitnessResidue, if_neg hn, falconQ] at *
+    omega
+
+/-- The residue witness centers back to the balanced value the wire decoder produced: the
+native and in-circuit representations of `s2` denote the same coefficient. -/
+theorem centered_of_s2_witness_residue (c : Int) (h : c.natAbs ≤ s2CoeffBand) :
+    centeredValue (s2WitnessResidue c) = c := by
+  simp only [s2CoeffBand] at h
+  by_cases hn : c < 0
+  · have hz : ((c + (falconQ : Int)).toNat : Int) = c + (falconQ : Int) :=
+      Int.toNat_of_nonneg (by simp only [falconQ]; omega)
+    simp only [s2WitnessResidue, if_pos hn, centeredValue, falconQ] at *
+    rw [if_pos (by omega)]
+    omega
+  · have hz : ((c.toNat : Int)) = c := Int.toNat_of_nonneg (by omega)
+    simp only [s2WitnessResidue, if_neg hn, centeredValue, falconQ] at *
+    rw [if_neg (by omega)]
+    omega
+
+def allCanonical (l : List Nat) : Bool := l.all (fun c => decide (c < falconQ))
+
+theorem all_canonical_iff (l : List Nat) : allCanonical l = true ↔ ∀ c ∈ l, c < falconQ := by
+  simp [allCanonical, List.all_eq_true]
+
+def recomputedNormSquared (p : PolynomialProduct) (c s2 h : List Nat) : Nat :=
+  normSquared (reconstructS1 p c s2 h) s2
+
+/-- `falcon_sig::verify`, in source order: canonicity of `h`, then `c` recomputed from the
+salt and the message digest (never caller supplied), then the inclusive norm bound. -/
+def verify (e : HashEnvironment) (p : PolynomialProduct) (pkH : List Nat)
+    (messageDigest : Nat) (sig : SignatureParts) : Bool :=
+  if allCanonical pkH = false then false
+  else
+    normWithinBound (recomputedNormSquared p
+      (e.hashToPoint (saltToElements sig.salt) messageDigest)
+      (sig.s2.map s2WitnessResidue) pkH)
+
+/-- `verify_with_pk_g`: the identity binding happens INSIDE the call (review F-2). -/
+def verifyWithPkG (e : HashEnvironment) (p : PolynomialProduct) (pkG : Nat) (pkH : List Nat)
+    (messageDigest : Nat) (sig : SignatureParts) : Bool :=
+  if allCanonical pkH = false then false
+  else if falconPkDigest e pkH ≠ pkG then false
+  else verify e p pkH messageDigest sig
+
+/-- `verify_cosign_blob`: the only sanctioned entry point for a `MemberSignature.signature`. -/
+def verifyCosignBlob (e : HashEnvironment) (p : PolynomialProduct) (pkG : Nat)
+    (messageDigest : Nat) (blob : List Nat) : Except FalconSigError Unit :=
+  match decodeCosignBlob blob with
+  | .error err => .error err
+  | .ok (sig, pkH) =>
+      if verifyWithPkG e p pkG pkH messageDigest sig then .ok ()
+      else .error .verificationFailed
+
+/-- SECURITY (`encode(h)` canonicity): a mod-q-equivalent but non-canonical `h` — the sharp
+case `h[i] + q`, which satisfies the algebraic check with the same norm — is rejected by the
+canonicity gate before any arithmetic runs. -/
+theorem verify_rejects_non_canonical_pk (e : HashEnvironment) (p : PolynomialProduct)
+    (pkH : List Nat) (messageDigest : Nat) (sig : SignatureParts) (c : Nat) (hc : c ∈ pkH)
+    (hge : falconQ ≤ c) : verify e p pkH messageDigest sig = false := by
+  have hnc : allCanonical pkH ≠ true := by
+    intro hall
+    exact absurd ((all_canonical_iff pkH).mp hall c hc) (by omega)
+  simp only [verify]
+  rw [if_pos (by simpa using hnc)]
+
+theorem verify_with_pk_g_implies_digest_match (e : HashEnvironment) (p : PolynomialProduct)
+    (pkG : Nat) (pkH : List Nat) (messageDigest : Nat) (sig : SignatureParts)
+    (h : verifyWithPkG e p pkG pkH messageDigest sig = true) : falconPkDigest e pkH = pkG := by
+  simp only [verifyWithPkG] at h
+  by_cases h1 : allCanonical pkH = false
+  · rw [if_pos h1] at h; simp at h
+  rw [if_neg h1] at h
+  by_cases h2 : falconPkDigest e pkH = pkG
+  · exact h2
+  · rw [if_pos (by simpa using h2)] at h; simp at h
+
+theorem verify_with_pk_g_implies_verify (e : HashEnvironment) (p : PolynomialProduct)
+    (pkG : Nat) (pkH : List Nat) (messageDigest : Nat) (sig : SignatureParts)
+    (h : verifyWithPkG e p pkG pkH messageDigest sig = true) :
+    verify e p pkH messageDigest sig = true := by
+  simp only [verifyWithPkG] at h
+  by_cases h1 : allCanonical pkH = false
+  · rw [if_pos h1] at h; simp at h
+  rw [if_neg h1] at h
+  by_cases h2 : falconPkDigest e pkH = pkG
+  · rw [if_neg (by simpa using h2)] at h; exact h
+  · rw [if_pos (by simpa using h2)] at h; simp at h
+
+/-- SECURITY (fund safety, the cosign entry point): acceptance forces ALL of — the exact
+1690-byte length, the v1 version byte, canonicity of the transported `h`, the identity
+binding `Poseidon(IMFK || encode(h)) = pk_g`, and the norm bound. -/
+theorem verify_cosign_blob_ok_implies (e : HashEnvironment) (p : PolynomialProduct) (pkG : Nat)
+    (messageDigest : Nat) (blob : List Nat)
+    (h : verifyCosignBlob e p pkG messageDigest blob = .ok ()) :
+    blob.length = falconCosignBlobBytes ∧
+    ∃ sig pkH, decodeCosignBlob blob = .ok (sig, pkH) ∧
+      falconPkDigest e pkH = pkG ∧ verify e p pkH messageDigest sig = true := by
+  simp only [verifyCosignBlob] at h
+  cases hd : decodeCosignBlob blob with
+  | error err => rw [hd] at h; simp at h
+  | ok r =>
+      obtain ⟨sig, pkH⟩ := r
+      rw [hd] at h
+      simp only at h
+      by_cases hv : verifyWithPkG e p pkG pkH messageDigest sig = true
+      · refine ⟨decode_cosign_blob_length blob (sig, pkH) hd, sig, pkH, rfl, ?_, ?_⟩
+        · exact verify_with_pk_g_implies_digest_match e p pkG pkH messageDigest sig hv
+        · exact verify_with_pk_g_implies_verify e p pkG pkH messageDigest sig hv
+      · rw [if_neg hv] at h; simp at h
+
+/-- The version gate fires before any key or norm arithmetic on the cosign path too. -/
+theorem verify_cosign_blob_version_gate (e : HashEnvironment) (p : PolynomialProduct)
+    (pkG messageDigest : Nat) (v : Nat) (rest : List Nat) (hv : v ≠ falconSigV1) :
+    verifyCosignBlob e p pkG messageDigest (v :: rest) = .error (.unsupportedVersion v) := by
+  simp only [verifyCosignBlob, decode_cosign_blob_version_gate_first v rest hv]
+
+/-! ### The transport band the NATIVE decoder enforces -/
+
+theorem read_low7_lt_128 (bits : List Bool) (v : Nat) (rest : List Bool)
+    (h : readLow7 bits = .ok (v, rest)) : v < 128 := by
+  rcases bits with _ | ⟨b6, t1⟩
+  · simp [readLow7] at h
+  rcases t1 with _ | ⟨b5, t2⟩
+  · simp [readLow7] at h
+  rcases t2 with _ | ⟨b4, t3⟩
+  · simp [readLow7] at h
+  rcases t3 with _ | ⟨b3, t4⟩
+  · simp [readLow7] at h
+  rcases t4 with _ | ⟨b2, t5⟩
+  · simp [readLow7] at h
+  rcases t5 with _ | ⟨b1, t6⟩
+  · simp [readLow7] at h
+  rcases t6 with _ | ⟨b0, t7⟩
+  · simp [readLow7] at h
+  simp only [readLow7, Except.ok.injEq, Prod.mk.injEq] at h
+  have h6 := bv_lt_two b6; have h5 := bv_lt_two b5; have h4 := bv_lt_two b4
+  have h3 := bv_lt_two b3; have h2 := bv_lt_two b2; have h1 := bv_lt_two b1
+  have h0 := bv_lt_two b0
+  omega
+
+/-- The `m >= 2048` gate: whatever the unary run does, the returned magnitude is either the
+starting one or strictly below 2048. -/
+theorem read_unary_bound :
+    ∀ (bits : List Bool) (m m' : Nat) (rest : List Bool),
+      readUnary m bits = .ok (m', rest) → m' = m ∨ m' < 2048 := by
+  intro bits
+  induction bits with
+  | nil => intro m m' rest h; simp [readUnary] at h
+  | cons b bs ih =>
+      intro m m' rest h
+      cases b with
+      | true => simp only [readUnary, Except.ok.injEq, Prod.mk.injEq] at h; exact Or.inl h.1.symm
+      | false =>
+          simp only [readUnary] at h
+          by_cases hg : m + 128 ≥ 2048
+          · rw [if_pos hg] at h; simp at h
+          rw [if_neg hg] at h
+          rcases ih (m + 128) m' rest h with h' | h'
+          · exact Or.inr (by omega)
+          · exact Or.inr h'
+
+/-- SECURITY: every coefficient the wire decoder produces is inside the transport band
+`[-2047, 2047]`. This is the check the in-circuit gadget does NOT have. -/
+theorem decode_coeff_in_band (bits : List Bool) (c : Int) (rest : List Bool)
+    (h : decodeCoeff bits = .ok (c, rest)) : c.natAbs ≤ s2CoeffBand := by
+  simp only [decodeCoeff] at h
+  cases hb : readBit bits with
+  | error e => rw [hb] at h; simp at h
+  | ok sb =>
+      obtain ⟨s, r1⟩ := sb
+      rw [hb] at h
+      simp only at h
+      cases hl : readLow7 r1 with
+      | error e => rw [hl] at h; simp at h
+      | ok lr =>
+          obtain ⟨low, r2⟩ := lr
+          rw [hl] at h
+          simp only at h
+          cases hu : readUnary low r2 with
+          | error e => rw [hu] at h; simp at h
+          | ok mr =>
+              obtain ⟨m, r3⟩ := mr
+              rw [hu] at h
+              simp only at h
+              have hlow : low < 128 := read_low7_lt_128 r1 low r2 hl
+              have hm : m < 2048 := by
+                rcases read_unary_bound r2 low m r3 hu with h' | h'
+                · omega
+                · exact h'
+              by_cases hs : s = true
+              · rw [if_pos hs] at h
+                by_cases hz : m = 0
+                · rw [if_pos hz] at h; simp at h
+                rw [if_neg hz] at h
+                simp only [Except.ok.injEq, Prod.mk.injEq] at h
+                have hcv : c = -(m : Int) := h.1.symm
+                simp only [s2CoeffBand]
+                omega
+              · rw [if_neg hs] at h
+                simp only [Except.ok.injEq, Prod.mk.injEq] at h
+                have hcv : c = (m : Int) := h.1.symm
+                simp only [s2CoeffBand]
+                omega
+
+theorem decode_coeffs_in_band :
+    ∀ (n : Nat) (bits : List Bool) (cs : List Int) (rest : List Bool),
+      decodeCoeffs n bits = .ok (cs, rest) → ∀ c ∈ cs, c.natAbs ≤ s2CoeffBand := by
+  intro n
+  induction n with
+  | zero => intro bits cs rest h; simp only [decodeCoeffs, Except.ok.injEq, Prod.mk.injEq] at h
+            rw [← h.1]; intro c hc; simp at hc
+  | succ n ih =>
+      intro bits cs rest h
+      simp only [decodeCoeffs] at h
+      cases hc : decodeCoeff bits with
+      | error e => rw [hc] at h; simp at h
+      | ok cr =>
+          obtain ⟨c0, r0⟩ := cr
+          rw [hc] at h
+          simp only at h
+          cases hcs : decodeCoeffs n r0 with
+          | error e => rw [hcs] at h; simp at h
+          | ok csr =>
+              obtain ⟨cs0, r1⟩ := csr
+              rw [hcs] at h
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h
+              rw [← h.1]
+              intro c hmem
+              rcases List.mem_cons.mp hmem with hh | ht
+              · rw [hh]; exact decode_coeff_in_band bits c0 r0 hc
+              · exact ih r0 cs0 r1 hcs c ht
+
+theorem decode_coeffs_length :
+    ∀ (n : Nat) (bits : List Bool) (cs : List Int) (rest : List Bool),
+      decodeCoeffs n bits = .ok (cs, rest) → cs.length = n := by
+  intro n
+  induction n with
+  | zero => intro bits cs rest h
+            simp only [decodeCoeffs, Except.ok.injEq, Prod.mk.injEq] at h
+            rw [← h.1]; rfl
+  | succ n ih =>
+      intro bits cs rest h
+      simp only [decodeCoeffs] at h
+      cases hc : decodeCoeff bits with
+      | error e => rw [hc] at h; simp at h
+      | ok cr =>
+          obtain ⟨c0, r0⟩ := cr
+          rw [hc] at h
+          simp only at h
+          cases hcs : decodeCoeffs n r0 with
+          | error e => rw [hcs] at h; simp at h
+          | ok csr =>
+              obtain ⟨cs0, r1⟩ := csr
+              rw [hcs] at h
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h
+              rw [← h.1, List.length_cons, ih r0 cs0 r1 hcs]
+
+theorem decode_s2_bytes_facts (wire : List Nat) (cs : List Int)
+    (h : decodeS2Bytes wire = .ok cs) :
+    cs.length = falconN ∧ ∀ c ∈ cs, c.natAbs ≤ s2CoeffBand := by
+  simp only [decodeS2Bytes] at h
+  by_cases hl : wire.length < sigPolyByteLen
+  · rw [if_pos hl] at h; simp at h
+  rw [if_neg hl] at h
+  simp only [decodeS2FromBits] at h
+  cases hd : decodeCoeffs falconN (bytesToBits (wire.take sigPolyByteLen)) with
+  | error e => rw [hd] at h; simp at h
+  | ok cr =>
+      obtain ⟨cs0, rest⟩ := cr
+      rw [hd] at h
+      simp only at h
+      by_cases hp : ((rest.take ((8 - ((bytesToBits (wire.take sigPolyByteLen)).length -
+          rest.length) % 8) % 8)).all (fun b => !b)) = true
+      · rw [if_pos hp] at h
+        simp only [Except.ok.injEq] at h
+        rw [← h]
+        exact ⟨decode_coeffs_length falconN _ cs0 rest hd,
+          decode_coeffs_in_band falconN _ cs0 rest hd⟩
+      · rw [if_neg hp] at h; simp at h
+
+/-- SECURITY (native-only gate): an accepted 666-byte wire blob yields exactly 512
+coefficients, every one inside the Golomb-Rice transport band. -/
+theorem decode_signature_enforces_transport_band (bytes : List Nat) (s : SignatureParts)
+    (h : decodeSignature bytes = .ok s) :
+    s.s2.length = falconN ∧ ∀ c ∈ s.s2, c.natAbs ≤ s2CoeffBand := by
+  rcases bytes with _ | ⟨v, rest⟩
+  · simp [decodeSignature] at h
+  simp only [decodeSignature] at h
+  by_cases hv : v = falconSigV1
+  case neg => rw [if_pos hv] at h; simp at h
+  rw [if_neg (by intro hc; exact hc hv)] at h
+  by_cases hl : (v :: rest).length = falconSigBytes
+  case neg => rw [if_pos hl] at h; simp at h
+  rw [if_neg (by intro hc; exact hc hl)] at h
+  split at h
+  · simp at h
+  · rename_i cs hd
+    by_cases hre : encodeS2Bytes cs = rest.drop sigNonceLen
+    case neg => rw [if_pos hre] at h; simp at h
+    rw [if_neg (by intro hc; exact hc hre)] at h
+    simp only [Except.ok.injEq] at h
+    subst h
+    exact decode_s2_bytes_facts (rest.drop sigNonceLen) cs hd
+
 end Zkp.Implementation.FalconCore
