@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "source": "src/ethereum_types/bytes32.rs",
+  "source_sha256": "44aee98cdc11a8a3ebab630ce0161435f858d65b0ec4a07cb6666e91fd1458b9",
+  "source_lines": 325,
+  "module": "Zkp.Implementation.EthereumTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/EthereumTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 13,
+      "status": "dependency-boundary",
+      "label": "std, plonky2, serde and sibling-module imports",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.TargetAlloc",
+        "Zkp.Implementation.EthereumTypes.EthError"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 14,
+      "end": 14,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 15,
+      "end": 15,
+      "status": "translated",
+      "label": "pub const BYTES32_LEN: usize = U256_LEN",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.bytes32Len",
+        "Zkp.Implementation.EthereumTypes.u256Len",
+        "Zkp.Implementation.EthereumTypes.byteWidth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.bytes32_len_pinned",
+        "Zkp.Implementation.EthereumTypes.bytes32_len_is_u256_len",
+        "Zkp.Implementation.EthereumTypes.bytes32_len_matches_u256_model",
+        "Zkp.Implementation.EthereumTypes.bytes32_is_thirty_two_bytes",
+        "Zkp.Implementation.EthereumTypes.bytes32_holds_two_hundred_fifty_six_bits",
+        "Zkp.Implementation.EthereumTypes.word_base_matches_u256_model"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 16,
+      "end": 19,
+      "status": "non-executable",
+      "label": "blank lines, comments and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 20,
+      "end": 22,
+      "status": "translated",
+      "label": "struct Bytes32 { limbs: [u32; 8] } stored big-endian",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.bytes32Len",
+        "Zkp.Implementation.EthereumTypes.Canonical",
+        "Zkp.Implementation.EthereumTypes.fromU32Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_result_has_exact_limb_count"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 23,
+      "end": 24,
+      "status": "non-executable",
+      "label": "blank line and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 25,
+      "end": 27,
+      "status": "dependency-boundary",
+      "label": "struct Bytes32Target { limbs: [Target; 8] }",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.TargetAlloc"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 28,
+      "end": 28,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 29,
+      "end": 35,
+      "status": "translated",
+      "label": "Bytes32::remove_3bits masks the top three bits of the most significant limb",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.remove3Bits",
+        "Zkp.Implementation.EthereumTypes.top3BitMask"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.top_3_bit_mask_pinned",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_clears_the_top_three_bits",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_preserves_the_other_limbs",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_preserves_length",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_is_idempotent",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_is_eight_to_one",
+        "Zkp.Implementation.EthereumTypes.remove_3bits_concrete_collision"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 36,
+      "end": 36,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 37,
+      "end": 48,
+      "status": "dependency-boundary",
+      "label": "Bytes32Target::remove_3bits re-sums the low 29 bits of split_le(limb, 32)",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.targetRemove3Bits"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 49,
+      "end": 49,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 50,
+      "end": 60,
+      "status": "translated",
+      "label": "Debug and Display print the fixed-width hex form",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.toHexChars",
+        "Zkp.Implementation.EthereumTypes.hexEncode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.to_hex_is_fixed_width"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 62,
+      "end": 70,
+      "status": "translated",
+      "label": "FromStr parses hex; the model does not reproduce the HexParseError re-wrap",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.fromHexChars",
+        "Zkp.Implementation.EthereumTypes.fromHex"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.from_hex_rejects_odd_length",
+        "Zkp.Implementation.EthereumTypes.from_hex_ignores_leading_zero_nibbles"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 71,
+      "end": 71,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 72,
+      "end": 84,
+      "status": "dependency-boundary",
+      "label": "Serialize/Deserialize through the hex printer and parser",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.toHexChars",
+        "Zkp.Implementation.EthereumTypes.fromHexChars"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 85,
+      "end": 85,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 86,
+      "end": 98,
+      "status": "translated",
+      "label": "From<U256> for Bytes32 and back: equal limb counts make both expects unreachable",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.bytes32ToU256",
+        "Zkp.Implementation.EthereumTypes.u256ToBytes32",
+        "Zkp.Implementation.EthereumTypes.expectOk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.bytes32_u256_conversions_never_panic",
+        "Zkp.Implementation.EthereumTypes.bytes32_u256_conversion_is_the_identity_on_limbs"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 99,
+      "end": 99,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 100,
+      "end": 115,
+      "status": "translated",
+      "label": "impl U32LimbTrait<8> for Bytes32",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.toU32Vec",
+        "Zkp.Implementation.EthereumTypes.fromU32Slice",
+        "Zkp.Implementation.EthereumTypes.bytes32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_ok_iff",
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_rejects_wrong_length",
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_round_trip",
+        "Zkp.Implementation.EthereumTypes.normal_bytes32_bytes_round_trip"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 116,
+      "end": 116,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 117,
+      "end": 128,
+      "status": "translated",
+      "label": "impl U32LimbTargetTrait<8> for Bytes32Target: to_vec and the asserting from_slice",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.targetFromSlice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.target_from_slice_panics_on_wrong_length"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 129,
+      "end": 129,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 130,
+      "end": 325,
+      "status": "test-only",
+      "label": "cfg(test) hex, serde, byte/bit round-trip, U256 and circuit tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code: not a production constraint and no theorem coverage is claimed."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "range_check, split_le, le_sum, mul_const_add, add_many_u32, sub_u32, connect_u32, select, is_equal and list_le_circuit are treated as an interface; their emitted Goldilocks gates and the compiler that lowers them are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "field-embedding-and-canonical-u64",
+      "obligation": "The Goldilocks embedding of limbs, to_canonical_u64 and F::from_canonical_u32 are modeled as Nat operations; that the field really represents a 32-bit limb is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "hex-crate-contract",
+      "obligation": "hex::decode/encode are modeled by the odd-length and invalid-character contract stated here; the real crate implementation, its UTF-8 handling and its error indices are not verified.",
+      "discharged": false
+    },
+    {
+      "name": "serde-round-trip",
+      "obligation": "Serialize/Deserialize go through the hex printer/parser or a u64; serde's own encoding and error paths are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "rust-fixed-width-and-cast-semantics",
+      "obligation": "Rust u32/u64/usize wrapping, `as` casts, slice indexing panics and try_into are modeled by explicit Nat arithmetic and explicit panic outcomes, not derived from Rust semantics.",
+      "discharged": false
+    },
+    {
+      "name": "no-authorization-or-value-claim",
+      "obligation": "These codecs move bytes; nothing here says a decoded Address, Bytes32 or U64 is authorized, funded, signed or proof-backed.",
+      "discharged": false
+    }
+  ]
+}

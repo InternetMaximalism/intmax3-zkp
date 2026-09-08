@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "source": "src/ethereum_types/error.rs",
+  "source_sha256": "7ff214db2553200ac8059186b3f53514cee807ab61f396a88608b256357160e3",
+  "source_lines": 107,
+  "module": "Zkp.Implementation.EthereumTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/EthereumTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "dependency-boundary",
+      "label": "thiserror derive macro import",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.EthError"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 2,
+      "end": 3,
+      "status": "non-executable",
+      "label": "blank line and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 4,
+      "end": 22,
+      "status": "translated",
+      "label": "EthereumTypeError variants and their Display format strings",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.EthError",
+        "Zkp.Implementation.EthereumTypes.EthError.display",
+        "Zkp.Implementation.EthereumTypes.EthResult"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.out_of_u32_range_display"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 23,
+      "end": 24,
+      "status": "dependency-boundary",
+      "label": "InvalidHex wraps hex::FromHexError via #[from]",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.HexError",
+        "Zkp.Implementation.EthereumTypes.EthError"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 25,
+      "end": 28,
+      "status": "translated",
+      "label": "ConversionError variant and enum close",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.EthError",
+        "Zkp.Implementation.EthereumTypes.EthError.display"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.invalid_hex_display_erases_cause",
+        "Zkp.Implementation.EthereumTypes.invalid_hex_is_still_injective_as_a_value"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 29,
+      "end": 29,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 30,
+      "end": 107,
+      "status": "test-only",
+      "label": "cfg(test) Display assertions",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code: not a production constraint and no theorem coverage is claimed."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "hex-crate-contract",
+      "obligation": "hex::decode/encode are modeled by the odd-length and invalid-character contract stated here; the real crate implementation, its UTF-8 handling and its error indices are not verified.",
+      "discharged": false
+    },
+    {
+      "name": "rust-fixed-width-and-cast-semantics",
+      "obligation": "Rust u32/u64/usize wrapping, `as` casts, slice indexing panics and try_into are modeled by explicit Nat arithmetic and explicit panic outcomes, not derived from Rust semantics.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,417 @@
+{
+  "schema_version": 1,
+  "source": "src/ethereum_types/u64.rs",
+  "source_sha256": "49ce460bf481f1487a4cfd1b8e048c9e78116eadd25769869bca1dd33c887487",
+  "source_lines": 357,
+  "module": "Zkp.Implementation.EthereumTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/EthereumTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 18,
+      "status": "dependency-boundary",
+      "label": "plonky2, plonky2_bn254, plonky2_u32, rand and serde imports",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.TargetAlloc",
+        "Zkp.Implementation.EthereumTypes.EthError"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 19,
+      "end": 19,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 20,
+      "end": 20,
+      "status": "translated",
+      "label": "pub const U64_LEN: usize = 2",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Len",
+        "Zkp.Implementation.EthereumTypes.byteWidth"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_len_pinned",
+        "Zkp.Implementation.EthereumTypes.u64_is_eight_bytes"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 21,
+      "end": 23,
+      "status": "non-executable",
+      "label": "blank lines, doc comment and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 24,
+      "end": 26,
+      "status": "translated",
+      "label": "struct U64 { limbs: [u32; 2] }",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Len",
+        "Zkp.Implementation.EthereumTypes.Canonical",
+        "Zkp.Implementation.EthereumTypes.fromU32Slice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_result_has_exact_limb_count"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 27,
+      "end": 27,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 28,
+      "end": 42,
+      "status": "translated",
+      "label": "From<u64> for U64 and From<U64> for u64: the hi/lo split convention",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Split",
+        "Zkp.Implementation.EthereumTypes.u64Join",
+        "Zkp.Implementation.EthereumTypes.u64Limit",
+        "Zkp.Implementation.EthereumTypes.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_hi_lo_convention",
+        "Zkp.Implementation.EthereumTypes.u64_split_has_two_limbs",
+        "Zkp.Implementation.EthereumTypes.u64_split_is_canonical",
+        "Zkp.Implementation.EthereumTypes.u64_split_of_u64_range_is_canonical",
+        "Zkp.Implementation.EthereumTypes.u64_from_to_round_trip",
+        "Zkp.Implementation.EthereumTypes.u64_to_from_round_trip",
+        "Zkp.Implementation.EthereumTypes.u64_join_is_injective_on_canonical",
+        "Zkp.Implementation.EthereumTypes.word_base_pinned",
+        "Zkp.Implementation.EthereumTypes.u64_limit_pinned"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 43,
+      "end": 44,
+      "status": "non-executable",
+      "label": "blank line and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 45,
+      "end": 47,
+      "status": "dependency-boundary",
+      "label": "struct U64Target { limbs: [Target; 2] }",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.TargetAlloc"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 48,
+      "end": 48,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 49,
+      "end": 60,
+      "status": "translated",
+      "label": "U64Target::from_u32_target: range check then zero high limb",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64TargetFromU32Target"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_target_from_u32_target_is_the_low_limb"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 61,
+      "end": 61,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 62,
+      "end": 72,
+      "status": "untranslated",
+      "label": "Debug and Display formatting of the joined u64 value",
+      "declarations": [],
+      "theorems": [],
+      "note": "Nothing in the Lean module corresponds to these lines."
+    },
+    {
+      "start": 73,
+      "end": 73,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 74,
+      "end": 85,
+      "status": "dependency-boundary",
+      "label": "Serialize/Deserialize through the u64 join and split",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Join",
+        "Zkp.Implementation.EthereumTypes.u64Split"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 86,
+      "end": 86,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 87,
+      "end": 99,
+      "status": "translated",
+      "label": "PartialOrd/Ord: lexicographic [hi, lo] comparison",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Join",
+        "Zkp.Implementation.EthereumTypes.wordBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_lexicographic_order_is_numeric"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 100,
+      "end": 100,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 101,
+      "end": 111,
+      "status": "dependency-boundary",
+      "label": "From<U64Target> for BigUintTarget: limb reversal into the bn254 gadget",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Join"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 112,
+      "end": 112,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 113,
+      "end": 126,
+      "status": "translated",
+      "label": "impl U32LimbTrait<2> for U64: to_u32_vec and from_u32_slice",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.toU32Vec",
+        "Zkp.Implementation.EthereumTypes.fromU32Slice",
+        "Zkp.Implementation.EthereumTypes.u64Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_ok_iff",
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_rejects_wrong_length",
+        "Zkp.Implementation.EthereumTypes.from_u32_slice_round_trip"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 127,
+      "end": 127,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 128,
+      "end": 162,
+      "status": "translated",
+      "label": "Add/AddAssign/Sub/SubAssign: checked arithmetic that panics, never wraps",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.u64Add",
+        "Zkp.Implementation.EthereumTypes.u64Sub",
+        "Zkp.Implementation.EthereumTypes.u64Limit",
+        "Zkp.Implementation.EthereumTypes.Fault"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_add_is_exact_when_it_returns",
+        "Zkp.Implementation.EthereumTypes.u64_add_panics_on_overflow",
+        "Zkp.Implementation.EthereumTypes.u64_sub_panics_on_underflow",
+        "Zkp.Implementation.EthereumTypes.u64_sub_is_exact_when_it_returns"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 163,
+      "end": 163,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 164,
+      "end": 168,
+      "status": "translated",
+      "label": "U64::rand: two arbitrary u32 limbs, bypassing the trait default",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.randNative"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.rand_native_never_fails"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 169,
+      "end": 169,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 170,
+      "end": 179,
+      "status": "translated",
+      "label": "impl U32LimbTargetTrait<2> for U64Target: to_vec and the panicking from_slice",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.targetFromSlice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.target_from_slice_panics_on_wrong_length"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 180,
+      "end": 180,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 181,
+      "end": 236,
+      "status": "translated",
+      "label": "U64Target::add and ::sub: reversed carry/borrow chain with a final connect to zero",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.U64AddGates",
+        "Zkp.Implementation.EthereumTypes.U64SubGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_target_add_is_exact",
+        "Zkp.Implementation.EthereumTypes.u64_target_sub_cannot_underflow",
+        "Zkp.Implementation.EthereumTypes.u64_target_sub_is_the_difference",
+        "Zkp.Implementation.EthereumTypes.normal_u64_target_add",
+        "Zkp.Implementation.EthereumTypes.normal_u64_target_sub",
+        "Zkp.Implementation.EthereumTypes.normal_u64_target_add_with_inter_limb_carry"
+      ],
+      "note": "Handwritten local semantics only; no Rust/plonky2/compiler refinement is proved."
+    },
+    {
+      "start": 237,
+      "end": 263,
+      "status": "dependency-boundary",
+      "label": "is_le delegates to the imported list_le_circuit; is_lt is that AND not-equal",
+      "declarations": [
+        "Zkp.Implementation.EthereumTypes.ListLeSpec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.EthereumTypes.u64_is_lt_is_le_and_not_equal"
+      ],
+      "note": "Semantics comes from an imported crate/gadget the model treats as an opaque interface or premise."
+    },
+    {
+      "start": 264,
+      "end": 264,
+      "status": "non-executable",
+      "label": "blank separator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, attributes, blank lines and closing braces carry no executable constraint."
+    },
+    {
+      "start": 265,
+      "end": 357,
+      "status": "test-only",
+      "label": "cfg(test) display, ordering, add/sub and circuit proving tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "cfg(test) code: not a production constraint and no theorem coverage is claimed."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "range_check, split_le, le_sum, mul_const_add, add_many_u32, sub_u32, connect_u32, select, is_equal and list_le_circuit are treated as an interface; their emitted Goldilocks gates and the compiler that lowers them are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "field-embedding-and-canonical-u64",
+      "obligation": "The Goldilocks embedding of limbs, to_canonical_u64 and F::from_canonical_u32 are modeled as Nat operations; that the field really represents a 32-bit limb is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "rust-fixed-width-and-cast-semantics",
+      "obligation": "Rust u32/u64/usize wrapping, `as` casts, slice indexing panics and try_into are modeled by explicit Nat arithmetic and explicit panic outcomes, not derived from Rust semantics.",
+      "discharged": false
+    },
+    {
+      "name": "serde-round-trip",
+      "obligation": "Serialize/Deserialize go through the hex printer/parser or a u64; serde's own encoding and error paths are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "rng-quality",
+      "obligation": "rand::Rng::gen is modeled as an arbitrary limb sample; uniformity, entropy and unpredictability are not established.",
+      "discharged": false
+    },
+    {
+      "name": "no-authorization-or-value-claim",
+      "obligation": "These codecs move bytes; nothing here says a decoded Address, Bytes32 or U64 is authorized, funded, signed or proof-backed.",
+      "discharged": false
+    }
+  ]
+}
