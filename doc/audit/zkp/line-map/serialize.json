@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/serialize.rs",
+  "source_sha256": "c1f98db406b1b42f86f56847904cb87606f7560cc0366f066fac9f516e43ac8d",
+  "source_lines": 195,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 55,
+      "status": "dependency-boundary",
+      "label": "imports of every registered gate and generator type",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 56,
+      "end": 81,
+      "status": "translated",
+      "label": "AllGateSerializer gate registry",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.allGateTags",
+        "Zkp.Implementation.UtilGadgets.u32GateTags"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.gate_registries_agree",
+        "Zkp.Implementation.UtilGadgets.gate_registry_size"
+      ],
+      "note": "The registry is modelled as its tag list; the impl_gate_serializer! expansion and wire format are opaque. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 82,
+      "end": 101,
+      "status": "untranslated",
+      "label": "AllGeneratorSerializer struct, Default impl and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "PhantomData plumbing with no protocol content."
+    },
+    {
+      "start": 102,
+      "end": 137,
+      "status": "translated",
+      "label": "AllGeneratorSerializer generator registry",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.allGeneratorTags"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.generator_registry_size",
+        "Zkp.Implementation.UtilGadgets.keccak_generators_are_registered"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 138,
+      "end": 165,
+      "status": "translated",
+      "label": "serialize_verifier_data / deserialize_verifier_data",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.serializeVerifierData",
+        "Zkp.Implementation.UtilGadgets.deserializeVerifierData",
+        "Zkp.Implementation.UtilGadgets.SerializeError",
+        "Zkp.Implementation.UtilGadgets.SerdeEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.serialize_error_labels",
+        "Zkp.Implementation.UtilGadgets.serialize_round_trip_under_codec_premise"
+      ],
+      "note": "The codec is an opaque callback; only the error labelling and a premised round trip are stated. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 166,
+      "end": 195,
+      "status": "translated",
+      "label": "CircuitSerializationError constructors",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.CircuitSerializationError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.circuit_serialization_error_keeps_context"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "serializerMacroOpaque",
+      "obligation": "impl_gate_serializer!/impl_generator_serializer! expansion, tag numbering and bincode framing are outside the model.",
+      "discharged": false
+    },
+    {
+      "name": "serdeRoundTrip",
+      "obligation": "No round-trip property of the real codec is proved; it is an explicit premise.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/wrapper.rs",
+  "source_sha256": "81d36a6b126e0dd3b91c53ea994029895dbcf4b0bc49965c6218b2ff1487d428",
+  "source_lines": 58,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2 circuit data, witness, recursively_verifiable)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 18,
+      "end": 35,
+      "status": "untranslated",
+      "label": "WrapperCircuit struct and impl header (PhantomData plumbing)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Type-level wiring with no modelled content."
+    },
+    {
+      "start": 36,
+      "end": 46,
+      "status": "translated",
+      "label": "WrapperCircuit::new: verify inner proof, republish all inner public inputs",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.wrapperPublicInputs",
+        "Zkp.Implementation.UtilGadgets.addProofTargetAndVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.wrapper_republishes_inner_public_inputs",
+        "Zkp.Implementation.UtilGadgets.wrapper_verifies_under_constant_inner_key"
+      ],
+      "note": "Every inner public input is re-registered in order; none is filtered, reordered or added. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 47,
+      "end": 58,
+      "status": "translated",
+      "label": "WrapperCircuit::prove error mapping",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.wrapperProve",
+        "Zkp.Implementation.UtilGadgets.WrapperError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.wrapper_prove_collapses_failures"
+      ],
+      "note": "Any inner proving failure collapses to WrapperError::ProofGenerationFailed. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "The inner proof's verification is opaque; the wrapper is not shown to preserve soundness.",
+      "discharged": false
+    },
+    {
+      "name": "outerConfigOpaque",
+      "obligation": "The outer CircuitConfig::default() and the OuterC generic config are not modelled.",
+      "discharged": false
+    }
+  ]
+}

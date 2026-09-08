@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/logic.rs",
+  "source_sha256": "dbadf925ad6681a8893d045fe8502daee95cdb4ef811f200f3ecfe7e85b5b145",
+  "source_lines": 302,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 7,
+      "status": "dependency-boundary",
+      "label": "plonky2 imports (CircuitBuilder, BoolTarget, Target)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 8,
+      "end": 21,
+      "status": "translated",
+      "label": "BuilderLogic trait surface",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.builderLogicMethods"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.builder_logic_methods_pinned"
+      ],
+      "note": "The three method names are pinned; their semantics are modelled in the impl spans below. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 22,
+      "end": 23,
+      "status": "non-executable",
+      "label": "impl header for CircuitBuilder",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 24,
+      "end": 35,
+      "status": "translated",
+      "label": "conditional_assert_true: condition*(1-target)=0",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.conditionalAssertTrueResidue",
+        "Zkp.Implementation.UtilGadgets.ConditionalAssertTrueHolds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditional_assert_true_iff_implication",
+        "Zkp.Implementation.UtilGadgets.conditional_assert_true_is_vacuous_when_condition_false",
+        "Zkp.Implementation.UtilGadgets.conditional_assert_true_forces_target",
+        "Zkp.Implementation.UtilGadgets.conditional_assert_true_residue_int"
+      ],
+      "note": "The emitted arithmetic gate is modelled on integer representatives of the two BoolTargets; gate lowering itself is a boundary. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 36,
+      "end": 46,
+      "status": "translated",
+      "label": "conditional_and: select(condition, x&&y, x) via new_unsafe",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.conditionalAnd",
+        "Zkp.Implementation.UtilGadgets.selectVal"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditional_and_true",
+        "Zkp.Implementation.UtilGadgets.conditional_and_false",
+        "Zkp.Implementation.UtilGadgets.conditional_and_implies_x",
+        "Zkp.Implementation.UtilGadgets.conditional_and_value_is_boolean",
+        "Zkp.Implementation.UtilGadgets.conditional_and_matches_source_tests",
+        "Zkp.Implementation.UtilGadgets.select_val_true",
+        "Zkp.Implementation.UtilGadgets.select_val_false",
+        "Zkp.Implementation.UtilGadgets.select_val_of_bit"
+      ],
+      "note": "BoolTarget::new_unsafe adds no Boolean constraint; the model derives only the propagation of booleanness through select. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 47,
+      "end": 78,
+      "status": "translated",
+      "label": "select_vec: three asserts then the one-hot product sum",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.selectVec",
+        "Zkp.Implementation.UtilGadgets.selectVecCore",
+        "Zkp.Implementation.UtilGadgets.selectFold",
+        "Zkp.Implementation.UtilGadgets.accumulate",
+        "Zkp.Implementation.UtilGadgets.selectWidth",
+        "Zkp.Implementation.UtilGadgets.allWidth",
+        "Zkp.Implementation.UtilGadgets.SelectVecPanic",
+        "Zkp.Implementation.UtilGadgets.selectVec4",
+        "Zkp.Implementation.UtilGadgets.bit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.select_vec_rejects_empty",
+        "Zkp.Implementation.UtilGadgets.select_vec_rejects_length_mismatch",
+        "Zkp.Implementation.UtilGadgets.select_vec_rejects_ragged",
+        "Zkp.Implementation.UtilGadgets.accumulate_false",
+        "Zkp.Implementation.UtilGadgets.accumulate_zeros_true",
+        "Zkp.Implementation.UtilGadgets.select_fold_replicate_false",
+        "Zkp.Implementation.UtilGadgets.select_fold_false_prefix",
+        "Zkp.Implementation.UtilGadgets.select_fold_one_hot",
+        "Zkp.Implementation.UtilGadgets.select_width_of_uniform",
+        "Zkp.Implementation.UtilGadgets.select_vec_ok_of_well_formed",
+        "Zkp.Implementation.UtilGadgets.select_vec_one_hot_selects_candidate",
+        "Zkp.Implementation.UtilGadgets.select_vec_all_false_is_zero",
+        "Zkp.Implementation.UtilGadgets.select_vec_two_hot_is_a_sum",
+        "Zkp.Implementation.UtilGadgets.select_vec_matches_source_test",
+        "Zkp.Implementation.UtilGadgets.select_vec4_entry_is_four_product_sum",
+        "Zkp.Implementation.UtilGadgets.select_vec4_one_hot_selects",
+        "Zkp.Implementation.UtilGadgets.select_vec_mod_selects_candidate",
+        "Zkp.Implementation.UtilGadgets.all_width_iff"
+      ],
+      "note": "The three Rust asserts are panics, modelled as an Except in source order. select_vec itself does NOT enforce one-hotness; that remains a caller obligation. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 79,
+      "end": 80,
+      "status": "non-executable",
+      "label": "closing braces",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 81,
+      "end": 302,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit-building proof tests; behaviour they assert is covered by theorems on the impl spans."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "No proof that plonky2's arithmetic/mul/add/select gates lower to the modelled integer arithmetic.",
+      "discharged": false
+    },
+    {
+      "name": "boolTargetWellFormed",
+      "obligation": "BoolTarget arguments are assumed Boolean; the source never re-constrains them and conditional_and returns BoolTarget::new_unsafe.",
+      "discharged": false
+    },
+    {
+      "name": "fieldRepresentativeAbstraction",
+      "obligation": "Field elements are modelled by integer representatives; no modular-reduction reasoning is performed.",
+      "discharged": false
+    },
+    {
+      "name": "callerOneHotObligation",
+      "obligation": "select_vec adds no sum-to-one constraint; one-hotness of the indicator is discharged only by callers such as SwitchBoard.",
+      "discharged": false
+    }
+  ]
+}

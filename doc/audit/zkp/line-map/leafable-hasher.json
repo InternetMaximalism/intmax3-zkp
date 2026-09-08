@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/leafable_hasher.rs",
+  "source_sha256": "f416a0ae1b160e66927a816b2ba3ca6f22466c214f1871fea9db222258dd4160",
+  "source_lines": 262,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 18,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2, plonky2_keccak, serde)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 19,
+      "end": 88,
+      "status": "untranslated",
+      "label": "LeafableHasher trait signatures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Associated types, target allocation and witness setters are not modelled; only the two two_to_one* semantics are, via the concrete impls below."
+    },
+    {
+      "start": 89,
+      "end": 96,
+      "status": "non-executable",
+      "label": "derive, unit struct and impl header/type aliases",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 97,
+      "end": 104,
+      "status": "translated",
+      "label": "PoseidonLeafableHasher::two_to_one(left, right)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.poseidonTwoToOne",
+        "Zkp.Implementation.UtilGadgets.HashEnv",
+        "Zkp.Implementation.UtilGadgets.HashEnvShape"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.two_to_one_determines_children_under_injectivity",
+        "Zkp.Implementation.UtilGadgets.list_chain_step_is_poseidon_two_to_one"
+      ],
+      "note": "The hash is an opaque callback; only the argument order and concatenation are modelled. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 105,
+      "end": 143,
+      "status": "dependency-boundary",
+      "label": "target allocation, witness setting, connect and conditional equality",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 144,
+      "end": 174,
+      "status": "translated",
+      "label": "two_to_one_target and two_to_one_swapped (Poseidon)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.poseidonTwoToOneSwapped"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.poseidon_two_to_one_swapped_true_reverses",
+        "Zkp.Implementation.UtilGadgets.poseidon_two_to_one_swapped_false_keeps_order",
+        "Zkp.Implementation.UtilGadgets.two_to_one_swap_convention_agrees"
+      ],
+      "note": "The source routes the swap through PoseidonHash::permute_swapped's swap wire; the model states the intended semantics only. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 175,
+      "end": 182,
+      "status": "non-executable",
+      "label": "derive, unit struct and impl header/type aliases",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 183,
+      "end": 186,
+      "status": "translated",
+      "label": "KeccakLeafableHasher::two_to_one(left, right)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.keccakTwoToOne"
+      ],
+      "theorems": [],
+      "note": "solidity_keccak256 over the concatenated u32 limbs; the hash is opaque. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 187,
+      "end": 204,
+      "status": "dependency-boundary",
+      "label": "connect_hash and conditional_assert_eq_hash for Bytes32Target",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 205,
+      "end": 219,
+      "status": "translated",
+      "label": "KeccakLeafableHasher::two_to_one_target",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.keccakTwoToOne"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 220,
+      "end": 237,
+      "status": "translated",
+      "label": "KeccakLeafableHasher::two_to_one_swapped (explicit selects)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.keccakTwoToOneSwapped"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.keccak_two_to_one_swapped_true_reverses",
+        "Zkp.Implementation.UtilGadgets.keccak_two_to_one_swapped_false_keeps_order"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 238,
+      "end": 262,
+      "status": "dependency-boundary",
+      "label": "hash_out_target, constant_hash_out_target, set_hash_out_target",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon and keccak are opaque callbacks; no collision or preimage resistance is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "permute_swapped's swap wire is assumed to realise the modelled swap semantics.",
+      "discharged": false
+    },
+    {
+      "name": "boolTargetWellFormed",
+      "obligation": "The swap bit is assumed Boolean.",
+      "discharged": false
+    }
+  ]
+}

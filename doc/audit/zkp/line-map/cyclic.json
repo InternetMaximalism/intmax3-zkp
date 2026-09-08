@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/cyclic.rs",
+  "source_sha256": "3eb7043a3ff6c25118a22411174d421394f220aab224ccd5d0a4fc8e3cbce0a8",
+  "source_lines": 295,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2 circuit data, Merkle caps, cyclic_base_proof)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 26,
+      "end": 28,
+      "status": "translated",
+      "label": "vd_vec_len = 4 + 4*num_cap_elements()",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.vdVecLen",
+        "Zkp.Implementation.UtilGadgets.numCapElements"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.vd_vec_len_pinned",
+        "Zkp.Implementation.UtilGadgets.vd_vec_len_for_cap_height_four"
+      ],
+      "note": "The cap count itself comes from the caller's CircuitConfig and is carried symbolically. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 29,
+      "end": 49,
+      "status": "translated",
+      "label": "vd_to_vec / vd_to_vec_target: digest then cap elements in index order",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.VerifierData",
+        "Zkp.Implementation.UtilGadgets.VerifierDataWF",
+        "Zkp.Implementation.UtilGadgets.vdToVec",
+        "Zkp.Implementation.UtilGadgets.flattenHashes",
+        "Zkp.Implementation.UtilGadgets.Hash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.vd_to_vec_length",
+        "Zkp.Implementation.UtilGadgets.flatten_hashes_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 50,
+      "end": 102,
+      "status": "translated",
+      "label": "vd_from_pis_slice / _target: parse the encoding out of the slice TAIL",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.vdFromPisSlice",
+        "Zkp.Implementation.UtilGadgets.chunks4",
+        "Zkp.Implementation.UtilGadgets.CyclicError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.vd_from_pis_slice_of_tail",
+        "Zkp.Implementation.UtilGadgets.vd_from_pis_slice_rejects_short_slice",
+        "Zkp.Implementation.UtilGadgets.vd_round_trip",
+        "Zkp.Implementation.UtilGadgets.vd_round_trip_example",
+        "Zkp.Implementation.UtilGadgets.vd_from_pis_slice_ignores_any_prefix",
+        "Zkp.Implementation.UtilGadgets.chunks4_flatten"
+      ],
+      "note": "The source's index arithmetic addresses exactly the last 4+4*cap_len words; the model takes that tail and splits it, and proves the round trip against vd_to_vec. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 103,
+      "end": 112,
+      "status": "translated",
+      "label": "conditionally_connect_vd",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.ConditionallyConnectVdHolds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditionally_connect_vd_iff",
+        "Zkp.Implementation.UtilGadgets.conditionally_connect_vd_is_vacuous_when_false"
+      ],
+      "note": "select_verifier_data then connect: the equality is forced only when the condition is set. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 113,
+      "end": 127,
+      "status": "translated",
+      "label": "add_noop_gates / add_const_gate padding",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.padGateCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.pad_gate_count_never_shrinks",
+        "Zkp.Implementation.UtilGadgets.pad_gate_count_reaches_target"
+      ],
+      "note": "Only the padding arithmetic is modelled; gate contents and degree effects are opaque. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 128,
+      "end": 147,
+      "status": "dependency-boundary",
+      "label": "simple_recursion_circuit_data: pure plonky2 builder calls",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 148,
+      "end": 166,
+      "status": "untranslated",
+      "label": "TestCyclicCircuit struct and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test scaffolding type; the model covers only its public-input layout below."
+    },
+    {
+      "start": 167,
+      "end": 186,
+      "status": "translated",
+      "label": "TestCyclicCircuit::new public-input parse and registration",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.vdFromPisSlice",
+        "Zkp.Implementation.UtilGadgets.generatedNumPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.cyclic_public_input_layout_round_trip"
+      ],
+      "note": "Payload prefix then a vd_vec_len-long verifier-data block; the tail-addressing parser reads the whole block. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 187,
+      "end": 206,
+      "status": "dependency-boundary",
+      "label": "conditionally_verify_cyclic_proof_or_dummy and try_build_with_options",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 207,
+      "end": 234,
+      "status": "untranslated",
+      "label": "TestCyclicCircuit::prove witness assembly",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness setting and cyclic_base_proof construction are not modelled."
+    },
+    {
+      "start": 235,
+      "end": 248,
+      "status": "dependency-boundary",
+      "label": "generate_cd circuit construction",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 249,
+      "end": 251,
+      "status": "translated",
+      "label": "generate_cd: num_public_inputs = pis_len + vd_vec_len",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.generatedNumPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.generated_num_public_inputs_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 252,
+      "end": 253,
+      "status": "non-executable",
+      "label": "closing brace and blank",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 254,
+      "end": 295,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Release-only multi-step cyclic proving test."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "capCountFromPlonky2Config",
+      "obligation": "num_cap_elements() is supplied by plonky2's CircuitConfig; the model carries it symbolically.",
+      "discharged": false
+    },
+    {
+      "name": "merkleCapStructureOpaque",
+      "obligation": "MerkleCap/HashOut internals and their commitment properties are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Proof verification is recorded as a constraint, never as soundness of the verified proof.",
+      "discharged": false
+    },
+    {
+      "name": "degreeAndGateCountOpaque",
+      "obligation": "Gate counts, degree and common-data equality checks are outside the model.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "source": "src/poseidon_sig/list.rs",
+  "source_sha256": "f84a82e9c574b04b10644c803db4b30759741da3fb81f44f3a6ef795c2246db3",
+  "source_lines": 140,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 23,
+      "status": "non-executable",
+      "label": "module documentation of the IMLL chain format",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 24,
+      "end": 36,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2, ethereum_types, poseidon_hash_out)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 37,
+      "end": 38,
+      "status": "translated",
+      "label": "LIST_LEAF_DOMAIN constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listLeafDomain",
+        "Zkp.Implementation.UtilGadgets.asciiBE"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_leaf_domain_pinned",
+        "Zkp.Implementation.UtilGadgets.list_leaf_domain_is_ascii_imll",
+        "Zkp.Implementation.UtilGadgets.list_leaf_domain_distinct_from_retired_sig_domains"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 39,
+      "end": 43,
+      "status": "non-executable",
+      "label": "section banner comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 44,
+      "end": 52,
+      "status": "translated",
+      "label": "list_leaf: Poseidon([domain] || message || public_key)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listLeaf",
+        "Zkp.Implementation.UtilGadgets.listLeafPreimage",
+        "Zkp.Implementation.UtilGadgets.bytes32Len",
+        "Zkp.Implementation.UtilGadgets.HashEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_leaf_preimage_is_domain_message_key",
+        "Zkp.Implementation.UtilGadgets.list_leaf_preimage_length",
+        "Zkp.Implementation.UtilGadgets.bytes32_len_pinned"
+      ],
+      "note": "The Poseidon call is an opaque callback; the model pins the preimage layout (message before public key) and its width. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 53,
+      "end": 60,
+      "status": "translated",
+      "label": "list_chain_step: Poseidon(prev || leaf)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listChainStep",
+        "Zkp.Implementation.UtilGadgets.poseidonTwoToOne",
+        "Zkp.Implementation.UtilGadgets.poseidonHashOutLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_chain_step_is_poseidon_two_to_one",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_len_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 61,
+      "end": 70,
+      "status": "translated",
+      "label": "list_commitment: fold from the zero chain",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listCommitment",
+        "Zkp.Implementation.UtilGadgets.zeroHash",
+        "Zkp.Implementation.UtilGadgets.toyEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_commitment_empty_is_zero",
+        "Zkp.Implementation.UtilGadgets.list_commitment_cons",
+        "Zkp.Implementation.UtilGadgets.list_commitment_append",
+        "Zkp.Implementation.UtilGadgets.list_commitment_snoc",
+        "Zkp.Implementation.UtilGadgets.list_commitment_order_sensitive_under_injectivity",
+        "Zkp.Implementation.UtilGadgets.list_commitment_folds_duplicates_without_rejection",
+        "Zkp.Implementation.UtilGadgets.toy_list_commitment_example"
+      ],
+      "note": "Order sensitivity is stated only under an explicit injectivity premise on the opaque hash; the chain performs no distinctness check. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 71,
+      "end": 83,
+      "status": "non-executable",
+      "label": "section banner and doc comments",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 84,
+      "end": 95,
+      "status": "translated",
+      "label": "leaf_target: in-circuit twin of list_leaf",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listLeafPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_leaf_preimage_is_domain_message_key"
+      ],
+      "note": "The gadget computes the same preimage; its lowering to gates is a boundary. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 96,
+      "end": 105,
+      "status": "translated",
+      "label": "chain_step_target: in-circuit two_to_one",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.listChainStep",
+        "Zkp.Implementation.UtilGadgets.poseidonTwoToOne"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.list_chain_step_is_poseidon_two_to_one"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 106,
+      "end": 140,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Order-sensitivity, empty-chain and duplicate-acceptance tests; the corresponding model theorems are attached to the definition spans."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon is an opaque callback; no collision resistance or injectivity is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "consumerDistinctnessObligation",
+      "obligation": "The chain binds ordered pairs only; pubkey distinctness, all-members-present and pk-in-member-set are consumer obligations.",
+      "discharged": false
+    },
+    {
+      "name": "nativeCircuitAgreement",
+      "obligation": "Bit-for-bit agreement between the native reference and the in-circuit gadget is asserted by the source, not proved here.",
+      "discharged": false
+    }
+  ]
+}

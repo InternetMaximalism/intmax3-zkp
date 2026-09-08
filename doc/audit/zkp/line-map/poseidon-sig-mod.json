@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "source": "src/poseidon_sig/mod.rs",
+  "source_sha256": "9971c6a2953957b977cb25ad366cfefe5bb339b1075aa152c844094fb9bc4b9b",
+  "source_lines": 37,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 25,
+      "status": "non-executable",
+      "label": "retirement-status module documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 26,
+      "end": 26,
+      "status": "translated",
+      "label": "pub mod list",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.poseidonSigModules"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.poseidon_sig_modules_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 27,
+      "end": 33,
+      "status": "translated",
+      "label": "DOMAIN_PK_G (retired, reserved)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.domainPkG"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.domain_pk_g_pinned",
+        "Zkp.Implementation.UtilGadgets.domain_pk_g_is_ascii_impg",
+        "Zkp.Implementation.UtilGadgets.list_leaf_domain_distinct_from_retired_sig_domains"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 34,
+      "end": 37,
+      "status": "translated",
+      "label": "DOMAIN_SIG_G (retired, reserved)",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.domainSigG"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.domain_sig_g_pinned",
+        "Zkp.Implementation.UtilGadgets.domain_sig_g_is_ascii_imsg",
+        "Zkp.Implementation.UtilGadgets.list_leaf_domain_distinct_from_retired_sig_domains"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "retiredDomainsReserved",
+      "obligation": "The two retired domains are assumed never reused; this is enforced only by the repo-wide distinctness test.",
+      "discharged": false
+    }
+  ]
+}

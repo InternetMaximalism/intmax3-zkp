@@ -1,0 +1,837 @@
+{
+  "schema_version": 1,
+  "source": "src/constants.rs",
+  "source_sha256": "b7cdc6258ee67b3726ce13674711f2671a691572e8d19a697749150ba9106fe7",
+  "source_lines": 522,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "non-executable",
+      "label": "section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 2,
+      "end": 2,
+      "status": "translated",
+      "label": "TOKEN_INDEX_BITS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.tokenIndexBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.token_index_bits_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 3,
+      "end": 10,
+      "status": "translated",
+      "label": "TOKEN_DECIMALS and TOKEN_UNIT",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.tokenDecimals",
+        "Zkp.Implementation.UtilGadgets.tokenUnit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.token_decimals_pinned",
+        "Zkp.Implementation.UtilGadgets.token_unit_pinned",
+        "Zkp.Implementation.UtilGadgets.token_unit_is_ten_pow_decimals"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 11,
+      "end": 12,
+      "status": "non-executable",
+      "label": "blank and section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 13,
+      "end": 17,
+      "status": "translated",
+      "label": "BLOCK_NUMBER_BITS, PUBLIC_STATE_TREE_HEIGHT, DEPOSIT_TREE_HEIGHT, CHANNEL_ID_BITS, SEND_TREE_HEIGHT",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.blockNumberBits",
+        "Zkp.Implementation.UtilGadgets.publicStateTreeHeight",
+        "Zkp.Implementation.UtilGadgets.depositTreeHeight",
+        "Zkp.Implementation.UtilGadgets.channelIdBits",
+        "Zkp.Implementation.UtilGadgets.sendTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.block_number_bits_pinned",
+        "Zkp.Implementation.UtilGadgets.public_state_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.deposit_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.channel_id_bits_pinned",
+        "Zkp.Implementation.UtilGadgets.send_tree_height_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 18,
+      "end": 20,
+      "status": "non-executable",
+      "label": "security comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 21,
+      "end": 21,
+      "status": "translated",
+      "label": "CHANNEL_TREE_HEIGHT = CHANNEL_ID_BITS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.channelTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.channel_tree_height_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 22,
+      "end": 24,
+      "status": "non-executable",
+      "label": "portability comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 25,
+      "end": 25,
+      "status": "translated",
+      "label": "MAX_NUM_CHANNELS = 1u64 << CHANNEL_ID_BITS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.maxNumChannels"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.max_num_channels_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 26,
+      "end": 33,
+      "status": "non-executable",
+      "label": "BURN_CHANNEL_ID documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 34,
+      "end": 34,
+      "status": "translated",
+      "label": "BURN_CHANNEL_ID sentinel",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.burnChannelId"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.burn_channel_id_pinned",
+        "Zkp.Implementation.UtilGadgets.burn_channel_id_is_all_ones"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 35,
+      "end": 36,
+      "status": "non-executable",
+      "label": "blank and section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 37,
+      "end": 39,
+      "status": "translated",
+      "label": "ASSET_TREE_HEIGHT, NULLIFIER_TREE_HEIGHT, SENT_TX_TREE_HEIGHT",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.assetTreeHeight",
+        "Zkp.Implementation.UtilGadgets.nullifierTreeHeight",
+        "Zkp.Implementation.UtilGadgets.sentTxTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.asset_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.nullifier_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.sent_tx_tree_height_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 40,
+      "end": 61,
+      "status": "non-executable",
+      "label": "member tree security documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 62,
+      "end": 66,
+      "status": "translated",
+      "label": "MEMBER_TREE_HEIGHT and its const assert",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.memberTreeHeight",
+        "Zkp.Implementation.UtilGadgets.maxSigCluster"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.member_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.member_tree_height_is_log2_sig_cluster",
+        "Zkp.Implementation.UtilGadgets.member_and_balance_slot_tree_heights_differ"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 67,
+      "end": 78,
+      "status": "non-executable",
+      "label": "wallet member tree documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 79,
+      "end": 83,
+      "status": "translated",
+      "label": "WALLET_MEMBER_TREE_HEIGHT and its const assert",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.walletMemberTreeHeight",
+        "Zkp.Implementation.UtilGadgets.maxChannelMembers"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.wallet_member_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.wallet_member_tree_height_is_log2_channel_members"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 84,
+      "end": 95,
+      "status": "non-executable",
+      "label": "MAX_CHANNEL_MEMBERS documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 96,
+      "end": 96,
+      "status": "translated",
+      "label": "MAX_CHANNEL_MEMBERS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.maxChannelMembers"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.max_channel_members_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 97,
+      "end": 109,
+      "status": "non-executable",
+      "label": "BALANCE_SLOT_TREE_HEIGHT documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 110,
+      "end": 114,
+      "status": "translated",
+      "label": "BALANCE_SLOT_TREE_HEIGHT and its const assert",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.balanceSlotTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.balance_slot_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.balance_slot_tree_height_is_log2_channel_members",
+        "Zkp.Implementation.UtilGadgets.member_and_balance_slot_tree_heights_differ"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 115,
+      "end": 134,
+      "status": "non-executable",
+      "label": "MAX_SIG_CLUSTER documentation and terminology note",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 135,
+      "end": 135,
+      "status": "translated",
+      "label": "MAX_SIG_CLUSTER",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.maxSigCluster"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.max_sig_cluster_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 136,
+      "end": 157,
+      "status": "non-executable",
+      "label": "MEMBER_DISTINCTNESS_TREE_HEIGHT documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 158,
+      "end": 168,
+      "status": "translated",
+      "label": "MEMBER_DISTINCTNESS_TREE_HEIGHT ceil-log2 loop",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.memberDistinctnessTreeHeight",
+        "Zkp.Implementation.UtilGadgets.ceilLog2Loop"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.member_distinctness_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.member_distinctness_tree_has_room_for_sentinel_and_cluster"
+      ],
+      "note": "The unbounded Rust while-loop is modelled with a fuel bound sufficient for any u64 target. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 169,
+      "end": 171,
+      "status": "non-executable",
+      "label": "SIGN_TIMEOUT_SECS documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 172,
+      "end": 172,
+      "status": "translated",
+      "label": "SIGN_TIMEOUT_SECS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.signTimeoutSecs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.sign_timeout_secs_pinned",
+        "Zkp.Implementation.UtilGadgets.close_timeline_windows_are_increasing"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 173,
+      "end": 174,
+      "status": "non-executable",
+      "label": "GRACE_BEFORE_PROCESS_SECS documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 175,
+      "end": 175,
+      "status": "translated",
+      "label": "GRACE_BEFORE_PROCESS_SECS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.graceBeforeProcessSecs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.grace_before_process_secs_pinned",
+        "Zkp.Implementation.UtilGadgets.close_timeline_windows_are_increasing"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 176,
+      "end": 176,
+      "status": "non-executable",
+      "label": "CHALLENGE_PERIOD_SECS documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 177,
+      "end": 177,
+      "status": "translated",
+      "label": "CHALLENGE_PERIOD_SECS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.challengePeriodSecs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.challenge_period_secs_pinned",
+        "Zkp.Implementation.UtilGadgets.close_timeline_windows_are_increasing"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 178,
+      "end": 188,
+      "status": "non-executable",
+      "label": "multi-token section comments",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 189,
+      "end": 189,
+      "status": "translated",
+      "label": "MAX_CHANNEL_TOKENS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.maxChannelTokens"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.max_channel_tokens_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 190,
+      "end": 202,
+      "status": "non-executable",
+      "label": "TM-15 domain re-versioning documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 203,
+      "end": 203,
+      "status": "translated",
+      "label": "IMB2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.balanceStateDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.balance_state_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 204,
+      "end": 206,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 207,
+      "end": 207,
+      "status": "translated",
+      "label": "IMS2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.balanceSlotLeafDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.balance_slot_leaf_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 208,
+      "end": 210,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 211,
+      "end": 211,
+      "status": "translated",
+      "label": "IMP2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.payDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.pay_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 212,
+      "end": 214,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 215,
+      "end": 215,
+      "status": "translated",
+      "label": "IML2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.l1DepositImportDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.l1_deposit_import_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 216,
+      "end": 219,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 220,
+      "end": 220,
+      "status": "translated",
+      "label": "IMW2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.withdrawalClaimDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.withdrawal_claim_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 221,
+      "end": 224,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 225,
+      "end": 225,
+      "status": "translated",
+      "label": "IMU2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.channelUpdateZkpDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.channel_update_zkp_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 226,
+      "end": 238,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 239,
+      "end": 239,
+      "status": "translated",
+      "label": "IMI2 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.interChannelTxDomainV2",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.inter_channel_tx_domain_v2_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 240,
+      "end": 244,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 245,
+      "end": 245,
+      "status": "translated",
+      "label": "IMI3 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.interChannelTxDomainV3",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.inter_channel_tx_domain_v3_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 246,
+      "end": 250,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 251,
+      "end": 251,
+      "status": "translated",
+      "label": "IMI4 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.interChannelTxDomainV4",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.inter_channel_tx_domain_v4_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 252,
+      "end": 256,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 257,
+      "end": 257,
+      "status": "translated",
+      "label": "IMI5 domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.interChannelTxDomainV5",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.inter_channel_tx_domain_v5_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 258,
+      "end": 261,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 262,
+      "end": 262,
+      "status": "translated",
+      "label": "IMMS domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.memberSetUpdateDomain",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.member_set_update_domain_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 263,
+      "end": 266,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 267,
+      "end": 267,
+      "status": "translated",
+      "label": "IMKR domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.keyRotationConsentDomain",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.key_rotation_consent_domain_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 268,
+      "end": 270,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 271,
+      "end": 271,
+      "status": "translated",
+      "label": "IMJC domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.joinerConsentDomain",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.joiner_consent_domain_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 272,
+      "end": 275,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 276,
+      "end": 276,
+      "status": "translated",
+      "label": "IMTF domain constant",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.tokenFundsDigestDomain",
+        "Zkp.Implementation.UtilGadgets.constantsFileDomains"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.token_funds_digest_domain_pinned",
+        "Zkp.Implementation.UtilGadgets.constants_domains_are_ascii_tags",
+        "Zkp.Implementation.UtilGadgets.constants_file_domains_pairwise_distinct"
+      ],
+      "note": "Pinned as a literal, checked against its ASCII tag and against pairwise distinctness with the other domains defined in this file. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 277,
+      "end": 278,
+      "status": "non-executable",
+      "label": "blank and section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 279,
+      "end": 280,
+      "status": "translated",
+      "label": "TRANSFER_TREE_HEIGHT and MAX_NUM_TRANSFERS_PER_TX",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.transferTreeHeight",
+        "Zkp.Implementation.UtilGadgets.maxNumTransfersPerTx"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.transfer_tree_height_pinned",
+        "Zkp.Implementation.UtilGadgets.max_num_transfers_per_tx_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 281,
+      "end": 281,
+      "status": "non-executable",
+      "label": "comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 282,
+      "end": 282,
+      "status": "translated",
+      "label": "TX_TREE_HEIGHT = CHANNEL_ID_BITS",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.txTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.tx_tree_height_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 283,
+      "end": 283,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 284,
+      "end": 522,
+      "status": "test-only",
+      "label": "#[cfg(test)] domain ASCII-tag and pairwise-distinctness tests",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.registryDomains"
+      ],
+      "theorems": [],
+      "note": "The registry list is reproduced in the model as registryDomains (declaration only). Both tests are #[cfg_attr(debug_assertions, ignore)], so they run only in release-mode test runs."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "domainRegistryIsTestOnly",
+      "obligation": "Pairwise distinctness of the repo-wide domain registry is enforced only by a release-gated #[cfg(test)] test, not by the built artefact.",
+      "discharged": false
+    },
+    {
+      "name": "crossFileConstantValues",
+      "obligation": "Registry entries owned by other files (channel.rs, wallet_core.rs, regev, falcon_sig, channel_message.rs) are pinned at the values the test pins; no cross-file check is performed here.",
+      "discharged": false
+    },
+    {
+      "name": "constAssertsAreCompileTime",
+      "obligation": "The const _ asserts are compile-time only; the model restates them as theorems about the pinned values.",
+      "discharged": false
+    }
+  ]
+}

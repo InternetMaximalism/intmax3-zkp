@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/recursively_verifiable.rs",
+  "source_sha256": "7c2b8859d5b0084c3014108ff573b9df7ca0c10423fcc19f345c695ab523ce89",
+  "source_lines": 87,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 16,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2 verifier data, cyclic and dummy helpers)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 17,
+      "end": 30,
+      "status": "translated",
+      "label": "add_proof_target_and_verify: verify under a constant verifier key",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.addProofTargetAndVerify",
+        "Zkp.Implementation.UtilGadgets.ProofCheck",
+        "Zkp.Implementation.UtilGadgets.VerifierData"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.wrapper_verifies_under_constant_inner_key"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 31,
+      "end": 46,
+      "status": "translated",
+      "label": "add_proof_target_and_conditionally_verify",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.addProofTargetAndConditionallyVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditional_verify_emits_no_key_binding"
+      ],
+      "note": "This variant emits NO binding between the constant key and the key the proof carries in its own public inputs. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 47,
+      "end": 68,
+      "status": "translated",
+      "label": "add_proof_target_and_verify_cyclic: connect the embedded verifier key",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.addProofTargetAndVerifyCyclic",
+        "Zkp.Implementation.UtilGadgets.vdFromPisSlice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.cyclic_verify_binds_embedded_key"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 69,
+      "end": 87,
+      "status": "translated",
+      "label": "add_proof_target_and_conditionally_verify_cyclic",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.addProofTargetAndConditionallyVerifyCyclic",
+        "Zkp.Implementation.UtilGadgets.ConditionallyConnectVdHolds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditional_cyclic_binds_key_only_when_condition_true"
+      ],
+      "note": "The key binding is conditional: with the condition clear the embedded key is unconstrained and the proof is verified under the dummy key. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Recursive verification is recorded as a constraint; nothing about proof soundness is claimed.",
+      "discharged": false
+    },
+    {
+      "name": "capCountFromPlonky2Config",
+      "obligation": "The cyclic variants call vd_from_pis_slice_target with unwrap(); the cap count and public-input length come from the caller's common data.",
+      "discharged": false
+    }
+  ]
+}

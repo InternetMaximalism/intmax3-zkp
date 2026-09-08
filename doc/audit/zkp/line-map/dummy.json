@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/dummy.rs",
+  "source_sha256": "329ae3ff43dc34159b81f5d6960064f34473f5718caf5a9f9691d6574733af28",
+  "source_lines": 92,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 14,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2 dummy_circuit/dummy_proof)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 15,
+      "end": 35,
+      "status": "dependency-boundary",
+      "label": "DummyProof struct and new (plonky2 dummy_circuit + dummy_proof)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 36,
+      "end": 39,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 40,
+      "end": 58,
+      "status": "translated",
+      "label": "conditionally_verify_proof: select the verifier data, then verify",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.conditionallyVerifyProof",
+        "Zkp.Implementation.UtilGadgets.selectedVerifierData",
+        "Zkp.Implementation.UtilGadgets.ProofCheck"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.conditionally_verify_proof_uses_real_key",
+        "Zkp.Implementation.UtilGadgets.conditionally_verify_proof_uses_dummy_key",
+        "Zkp.Implementation.UtilGadgets.conditionally_verify_proof_always_verifies"
+      ],
+      "note": "Verification is recorded as a constraint against a selected key, never as proof soundness. With the condition clear the proof must still verify under the fixed dummy key. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 59,
+      "end": 77,
+      "status": "translated",
+      "label": "internal_dummy_circuit sizing: degree - num_public_inputs.div_ceil(8) - 2",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.internalDummyNoopCount",
+        "Zkp.Implementation.UtilGadgets.publicInputGateCount",
+        "Zkp.Implementation.UtilGadgets.DummySizingError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.internal_dummy_noop_count_example",
+        "Zkp.Implementation.UtilGadgets.internal_dummy_noop_count_underflows_when_degree_too_small"
+      ],
+      "note": "The usize subtraction has no guard; the model makes the underflow case explicit. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 78,
+      "end": 92,
+      "status": "dependency-boundary",
+      "label": "noop/gate-set/public-input construction and the common-data assert",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Proof verification and the dummy proof's own validity are opaque.",
+      "discharged": false
+    },
+    {
+      "name": "degreeAndGateCountOpaque",
+      "obligation": "Circuit degree, gate sets and the common-data equality assert are outside the model.",
+      "discharged": false
+    },
+    {
+      "name": "dummyVerifierKeyIsConstant",
+      "obligation": "The dummy verifier data is assumed to be a constant derived from the inner common data, not prover-chosen.",
+      "discharged": false
+    }
+  ]
+}

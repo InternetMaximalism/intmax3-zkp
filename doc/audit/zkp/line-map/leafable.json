@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/leafable.rs",
+  "source_sha256": "afbb7bcfccc7f729a3e885a645ecb01aa2b00a8d97633cad4413a2428051bd40",
+  "source_lines": 194,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 23,
+      "status": "dependency-boundary",
+      "label": "imports (ethereum_types, plonky2, serde, poseidon_hash_out)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 24,
+      "end": 33,
+      "status": "translated",
+      "label": "Leafable trait: empty_leaf and hash",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.LeafKind",
+        "Zkp.Implementation.UtilGadgets.emptyLeaf",
+        "Zkp.Implementation.UtilGadgets.leafHash",
+        "Zkp.Implementation.UtilGadgets.leafHasherOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.every_leafable_uses_poseidon_hasher"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 34,
+      "end": 51,
+      "status": "untranslated",
+      "label": "LeafableTarget trait signatures",
+      "declarations": [],
+      "theorems": [],
+      "note": "In-circuit trait signatures; only the concrete empty-leaf constants below are modelled."
+    },
+    {
+      "start": 52,
+      "end": 54,
+      "status": "non-executable",
+      "label": "section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 55,
+      "end": 66,
+      "status": "translated",
+      "label": "Leafable for PoseidonHashOut: empty_leaf = default, hash = identity",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeaf",
+        "Zkp.Implementation.UtilGadgets.leafHash",
+        "Zkp.Implementation.UtilGadgets.zeroHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.poseidon_leaf_hash_is_identity",
+        "Zkp.Implementation.UtilGadgets.poseidon_empty_leaf_hash_is_zero",
+        "Zkp.Implementation.UtilGadgets.empty_leaf_is_all_zero",
+        "Zkp.Implementation.UtilGadgets.zero_hash_length"
+      ],
+      "note": "hash is the identity here, so a leaf and an inner-node digest are the same object; no domain separation is provided by this trait. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 67,
+      "end": 86,
+      "status": "translated",
+      "label": "LeafableTarget for PoseidonHashOutTarget: constant default empty leaf",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeafTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_target_matches_native"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 87,
+      "end": 90,
+      "status": "non-executable",
+      "label": "section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 91,
+      "end": 102,
+      "status": "translated",
+      "label": "Leafable for Bytes32: empty_leaf = default, hash = Poseidon of u32 limbs",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeaf",
+        "Zkp.Implementation.UtilGadgets.leafHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_is_all_zero"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 103,
+      "end": 122,
+      "status": "translated",
+      "label": "LeafableTarget for Bytes32Target",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeafTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_target_matches_native"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 123,
+      "end": 126,
+      "status": "non-executable",
+      "label": "section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 127,
+      "end": 138,
+      "status": "translated",
+      "label": "Leafable for U256",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeaf",
+        "Zkp.Implementation.UtilGadgets.leafHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_is_all_zero"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 139,
+      "end": 158,
+      "status": "translated",
+      "label": "LeafableTarget for U256Target (constant built from Bytes32::default())",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeafTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_target_matches_native"
+      ],
+      "note": "leafable.rs:146 builds the U256Target constant from Bytes32::default(); the model records that this is the same all-zero 8-limb value. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 159,
+      "end": 162,
+      "status": "non-executable",
+      "label": "section comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, blank lines, attributes and closing braces."
+    },
+    {
+      "start": 163,
+      "end": 174,
+      "status": "translated",
+      "label": "Leafable for u32",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeaf",
+        "Zkp.Implementation.UtilGadgets.leafHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_is_all_zero"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 175,
+      "end": 194,
+      "status": "translated",
+      "label": "LeafableTarget for Target: empty leaf is builder.zero()",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.emptyLeafTarget"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.empty_leaf_target_matches_native"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "hashOpaque",
+      "obligation": "Leaf hashing is an opaque Poseidon callback; no injectivity between distinct leaf types is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "leafInnerNodeSeparation",
+      "obligation": "For PoseidonHashOut leaves, hash is the identity; whatever prevents a leaf from being read as an inner node is the tree gadget's structural discipline, not this file.",
+      "discharged": false
+    },
+    {
+      "name": "serdeDerivedCodecs",
+      "obligation": "Serialize/Deserialize bounds on the traits are not modelled.",
+      "discharged": false
+    }
+  ]
+}

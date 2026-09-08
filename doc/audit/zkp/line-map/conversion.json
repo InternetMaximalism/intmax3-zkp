@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/conversion.rs",
+  "source_sha256": "77675761a786d8be90d09480c06757b64d0ac74281bd75a86c9963ad52f2e80c",
+  "source_lines": 59,
+  "module": "Zkp.Implementation.UtilGadgets",
+  "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 4,
+      "status": "dependency-boundary",
+      "label": "imports (plonky2 Field / PrimeField64)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by plonky2/imported crates; opaque to the model."
+    },
+    {
+      "start": 5,
+      "end": 11,
+      "status": "translated",
+      "label": "ToU64 and ToField trait declarations",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.toU64Vec",
+        "Zkp.Implementation.UtilGadgets.toFieldVec"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 12,
+      "end": 43,
+      "status": "translated",
+      "label": "ToU64 impls for &[F], [F], Iter and Vec<F>",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.toU64Vec",
+        "Zkp.Implementation.UtilGadgets.goldilocksModulus"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.to_u64_vec_length",
+        "Zkp.Implementation.UtilGadgets.goldilocks_modulus_pinned",
+        "Zkp.Implementation.UtilGadgets.goldilocks_modulus_is_two_pow_64_minus_two_pow_32_plus_one"
+      ],
+      "note": "All four impls are the same map of to_canonical_u64. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 44,
+      "end": 59,
+      "status": "translated",
+      "label": "ToField impls for &[u64] and Vec<u64>",
+      "declarations": [
+        "Zkp.Implementation.UtilGadgets.toFieldVec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.to_field_vec_to_u64_vec_round_trip",
+        "Zkp.Implementation.UtilGadgets.to_field_vec_reduces_non_canonical"
+      ],
+      "note": "from_canonical_u64 requires a below-order input; the model reduces, which is release behaviour, and records that non-canonical inputs are silently reduced. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "fieldRepresentativeAbstraction",
+      "obligation": "Goldilocks elements are modelled by their canonical Nat representatives; no field-arithmetic laws are used.",
+      "discharged": false
+    },
+    {
+      "name": "fromCanonicalPrecondition",
+      "obligation": "plonky2's from_canonical_u64 only debug-asserts its below-order precondition; nothing in this file enforces it.",
+      "discharged": false
+    }
+  ]
+}
