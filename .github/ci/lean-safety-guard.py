@@ -84,6 +84,13 @@ CURRENT = {
         "Zkp.Implementation.MerkleTrees",
         "Zkp.Implementation.SparseTrees",
         "Zkp.Implementation.UtilGadgets",
+        "Zkp.Implementation.FalconAggregate",
+        "Zkp.Implementation.FalconCore",
+        "Zkp.Implementation.FalconVendor",
+        "Zkp.Implementation.MleProverBridge",
+        "Zkp.Implementation.RegevCore",
+        "Zkp.Implementation.RegevProofs",
+        "Zkp.Implementation.TreeInstances",
     ),
 }
 ARCH_ROOTS = frozenset({
