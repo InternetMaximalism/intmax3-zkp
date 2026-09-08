@@ -18,11 +18,30 @@ Everything cryptographic is an opaque callback: `solidity_keccak256`, the Poseid
 the tree `init()/get_root()` environment, `compute_channel_action_root` and the
 `Bytes32 -> PoseidonHashOut` canonicality predicate. No collision resistance, no
 signature validity, no membership and no on-chain authenticity is asserted anywhere;
-where the source's security argument needs injectivity of a hash, the corresponding
-theorem takes injectivity ON THE CONCRETE COMPARED PAIR as an explicit premise.
+where the source's security argument needs injectivity of a hash, that injectivity is
+taken ON THE CONCRETE COMPARED PAIR as an explicit premise of the statement.
 
 `Nat` is a representative word domain. Range membership of a word (u32, u64, 63-bit
 block number) is an explicit premise, never an enforced invariant of the model.
+
+Named undischarged boundaries (also listed in the line maps):
+* `keccak_callback` — `solidity_keccak256` / `builder.keccak256` are opaque functions
+  `List Nat -> Bytes32`; no collision resistance, no Solidity byte-equality.
+* `poseidon_callback` — `PoseidonHashOut::hash_inputs_u64/u32` and the in-circuit gadget
+  are opaque `List Nat -> Root`.
+* `tree_root_environment` — `ChannelTree/DepositTree/PublicStateTree::init().get_root()`
+  and `push` are opaque; no Merkle soundness is claimed.
+* `channel_action_root_callback` — `compute_channel_action_root` / `compute_tx_v2_root`.
+* `bytes32_canonicality_callback` — `PoseidonHashOut::try_from(Bytes32)` is an opaque
+  `Bytes32 -> Bool`; the model proves only that `validate`'s three "non-canonical"
+  rejections are exactly as strong as that callback.
+* `native_target_refinement` — target definitions are word-level transcriptions of the
+  builder code; plonky2 gate lowering, range checks and witness generation are not modeled.
+* `word_domain_representation` — `Nat` stands for u32/u64/field words.
+* `solidity_differential_pins` — the pinned Rust/Solidity differential hash constants are
+  not recomputed here.
+* `signature_and_membership` — sig-cluster signatures, member-tree inclusion, block
+  producer authority and on-chain authenticity are outside this model.
 -/
 namespace Zkp.Implementation.BlockTypes
 

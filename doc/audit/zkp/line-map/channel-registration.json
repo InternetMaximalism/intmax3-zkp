@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "source": "src/common/channel_registration.rs",
+  "source_sha256": "4ba96dd871c1c72f5228a6e1b42d288e7d004c031539ce25f42d99b0d58115d0",
+  "source_lines": 421,
+  "module": "Zkp.Implementation.BlockTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 15,
+      "status": "non-executable",
+      "label": "module-level SECURITY doc comment and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 16,
+      "end": 37,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak, address/bytes32 and Poseidon imports",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Bytes32",
+        "Zkp.Implementation.BlockTypes.Address",
+        "Zkp.Implementation.BlockTypes.addressZero"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 38,
+      "end": 62,
+      "status": "non-executable",
+      "label": "spacing and the MemberRegEntry doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 63,
+      "end": 70,
+      "status": "translated",
+      "label": "MemberRegEntry fields (pk_g, pk_b, regev digest, recipient)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.MemberRegEntry",
+        "Zkp.Implementation.BlockTypes.memberZero"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.address_words_length",
+        "Zkp.Implementation.BlockTypes.address_words_injective"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 71,
+      "end": 72,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 73,
+      "end": 78,
+      "status": "dependency-boundary",
+      "label": "MemberRegEntryTarget wire fields",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.memberTargetStream"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 79,
+      "end": 89,
+      "status": "non-executable",
+      "label": "spacing, doc comment and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 90,
+      "end": 102,
+      "status": "translated",
+      "label": "ChannelRegRecord fields: channel id, bp slot, member and delegate counts, fixed 8-slot member array",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelRegRecord",
+        "Zkp.Implementation.BlockTypes.maxSigCluster"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.max_sig_cluster_pinned"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 103,
+      "end": 103,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 104,
+      "end": 124,
+      "status": "translated",
+      "label": "ChannelRegRecordError variants",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelRegFault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 125,
+      "end": 130,
+      "status": "non-executable",
+      "label": "spacing, impl header and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 131,
+      "end": 180,
+      "status": "translated",
+      "label": "ChannelRegRecord::validate in source check order: counts, zero/canonical/duplicate active slots, zero padding slots, bp slot range",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.validateChannelReg",
+        "Zkp.Implementation.BlockTypes.checkActiveSlot",
+        "Zkp.Implementation.BlockTypes.checkActiveSlots",
+        "Zkp.Implementation.BlockTypes.checkPaddingSlots",
+        "Zkp.Implementation.BlockTypes.CanonicalCheck",
+        "Zkp.Implementation.BlockTypes.exampleMember",
+        "Zkp.Implementation.BlockTypes.exampleRecord"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.channel_reg_rejects_small_member_count",
+        "Zkp.Implementation.BlockTypes.channel_reg_rejects_oversized_member_count",
+        "Zkp.Implementation.BlockTypes.channel_reg_rejects_nonzero_delegate_count",
+        "Zkp.Implementation.BlockTypes.channel_reg_member_count_checked_before_delegate_count",
+        "Zkp.Implementation.BlockTypes.channel_reg_rejects_bp_slot_out_of_range",
+        "Zkp.Implementation.BlockTypes.canonicality_rejections_come_only_from_the_callback",
+        "Zkp.Implementation.BlockTypes.channel_reg_example_validates",
+        "Zkp.Implementation.BlockTypes.channel_reg_example_has_full_slot_width"
+      ],
+      "note": "Control flow and error precedence are modeled; PoseidonHashOut::try_from is an opaque canonicality callback."
+    },
+    {
+      "start": 181,
+      "end": 199,
+      "status": "non-executable",
+      "label": "spacing and the R3 preimage doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 200,
+      "end": 215,
+      "status": "translated",
+      "label": "ChannelRegRecord::hash_with_prev_hash word-aligned keccak preimage",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelRegRecord.hashPreimage",
+        "Zkp.Implementation.BlockTypes.memberStream",
+        "Zkp.Implementation.BlockTypes.MemberRegEntry.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.channel_reg_preimage_width",
+        "Zkp.Implementation.BlockTypes.channel_reg_preimage_header_offsets",
+        "Zkp.Implementation.BlockTypes.channel_reg_preimage_injective",
+        "Zkp.Implementation.BlockTypes.channel_reg_chain_binds_member_set",
+        "Zkp.Implementation.BlockTypes.member_words_length",
+        "Zkp.Implementation.BlockTypes.member_words_injective",
+        "Zkp.Implementation.BlockTypes.member_stream_length",
+        "Zkp.Implementation.BlockTypes.member_stream_injective"
+      ],
+      "note": "The 244-word preimage layout is modeled exactly; solidity_keccak256 stays an opaque callback."
+    },
+    {
+      "start": 216,
+      "end": 219,
+      "status": "non-executable",
+      "label": "closing braces, spacing and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 220,
+      "end": 221,
+      "status": "translated",
+      "label": "CHANNEL_REG_PREIMAGE_U32_LEN",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.channelRegPreimageU32Len",
+        "Zkp.Implementation.BlockTypes.memberSlotU32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.channel_reg_preimage_u32_len_pinned",
+        "Zkp.Implementation.BlockTypes.member_slot_u32_len_pinned"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 222,
+      "end": 225,
+      "status": "non-executable",
+      "label": "spacing, impl header and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 226,
+      "end": 234,
+      "status": "translated",
+      "label": "MemberRegEntryTarget::to_u32_stream (separately transcribed)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.memberTargetStream"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.member_target_stream_agrees"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 235,
+      "end": 243,
+      "status": "non-executable",
+      "label": "closing brace, spacing and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 244,
+      "end": 269,
+      "status": "translated",
+      "label": "channel_reg_hash_with_prev_hash_circuit input stream",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.channelRegCircuitInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.channel_reg_native_and_circuit_inputs_agree"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 270,
+      "end": 270,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 271,
+      "end": 295,
+      "status": "dependency-boundary",
+      "label": "MemberRegEntryTarget::new and ::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 296,
+      "end": 296,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 297,
+      "end": 421,
+      "status": "test-only",
+      "label": "#[cfg(test)] module with the pinned MC2/MC8 differential constants",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; carries no proved property in the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak_callback",
+      "obligation": "solidity_keccak256 / builder.keccak256 are opaque functions from word lists to Bytes32; no collision resistance and no Rust/Solidity byte-equality is proved.",
+      "discharged": false
+    },
+    {
+      "name": "bytes32_canonicality_callback",
+      "obligation": "PoseidonHashOut::try_from(Bytes32) is modeled as an opaque predicate; the model proves only that validate's non-canonical rejections are exactly as strong as that callback.",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "Target-side definitions are word-level transcriptions of the builder code; plonky2 gate lowering, range checks and witness generation are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "word_domain_representation",
+      "obligation": "Nat represents u32/u64/63-bit/field words; range membership is an explicit premise, never an enforced invariant.",
+      "discharged": false
+    },
+    {
+      "name": "solidity_differential_pins",
+      "obligation": "The pinned Rust/Solidity differential hash constants are not recomputed in Lean; layout equality with the deployed contract remains asserted by those tests only.",
+      "discharged": false
+    },
+    {
+      "name": "signature_and_membership",
+      "obligation": "Sig-cluster signatures, member-tree inclusion, block-producer authority and on-chain registration authenticity are outside this model.",
+      "discharged": false
+    }
+  ]
+}

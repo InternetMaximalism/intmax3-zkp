@@ -1,0 +1,704 @@
+{
+  "schema_version": 1,
+  "source": "src/common/public_state.rs",
+  "source_sha256": "dd5468f550eeee2d0027a12fabfe1c55975f9676d113f9fea0e52513ec148925",
+  "source_lines": 703,
+  "module": "Zkp.Implementation.BlockTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 46,
+      "status": "dependency-boundary",
+      "label": "plonky2, tree, ethereum-type and Poseidon imports",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Root",
+        "Zkp.Implementation.BlockTypes.Bytes32",
+        "Zkp.Implementation.BlockTypes.TargetState",
+        "Zkp.Implementation.BlockTypes.rootZero",
+        "Zkp.Implementation.BlockTypes.bytes32Zero",
+        "Zkp.Implementation.BlockTypes.wordBase",
+        "Zkp.Implementation.BlockTypes.blockLimit",
+        "Zkp.Implementation.BlockTypes.scalarLimit"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 47,
+      "end": 47,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 48,
+      "end": 48,
+      "status": "translated",
+      "label": "PUBLIC_STATE_U64_LEN = 1 + U64_LEN + 3*POSEIDON_HASH_OUT_LEN",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.publicStateU64Len",
+        "Zkp.Implementation.BlockTypes.u64Len",
+        "Zkp.Implementation.BlockTypes.poseidonHashOutLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.public_state_u64_len_pinned",
+        "Zkp.Implementation.BlockTypes.u64_len_pinned",
+        "Zkp.Implementation.BlockTypes.poseidon_hash_out_len_pinned"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 49,
+      "end": 49,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 50,
+      "end": 67,
+      "status": "translated",
+      "label": "PublicStateError variants",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.PublicStateFault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 68,
+      "end": 70,
+      "status": "non-executable",
+      "label": "spacing and derive/serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 71,
+      "end": 77,
+      "status": "translated",
+      "label": "PublicState fields (block number, u64 timestamp, three roots)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.NativePublicState"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 78,
+      "end": 78,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 79,
+      "end": 89,
+      "status": "translated",
+      "label": "Default for PublicState: zero height/timestamp and the three tree init roots",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.defaultPublicState",
+        "Zkp.Implementation.BlockTypes.TreeRoots"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.default_public_state_has_zero_height_and_timestamp",
+        "Zkp.Implementation.BlockTypes.default_public_state_is_in_domain"
+      ],
+      "note": "Tree init roots are an opaque environment; the zero height/timestamp and the field wiring are modeled."
+    },
+    {
+      "start": 90,
+      "end": 90,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 91,
+      "end": 98,
+      "status": "translated",
+      "label": "PublicStateTarget fields; the timestamp is two wires",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.TargetState",
+        "Zkp.Implementation.BlockTypes.NativePublicState.view"
+      ],
+      "theorems": [],
+      "note": "The word-level target view is shared with BalancePublicInputs.PublicState; wires themselves are a boundary."
+    },
+    {
+      "start": 99,
+      "end": 100,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 101,
+      "end": 110,
+      "status": "translated",
+      "label": "PublicState::to_u64_vec (15-word layout)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.NativePublicState.toU64Vec",
+        "Zkp.Implementation.BlockTypes.u64Words",
+        "Zkp.Implementation.BlockTypes.splitHi",
+        "Zkp.Implementation.BlockTypes.splitLo"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.public_state_encoding_width",
+        "Zkp.Implementation.BlockTypes.public_state_field_offsets",
+        "Zkp.Implementation.BlockTypes.public_state_encoding_injective"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 111,
+      "end": 111,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 112,
+      "end": 158,
+      "status": "translated",
+      "label": "PublicState::from_u64_slice with its length, block-number and u32-range guards",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.publicStateFromU64Slice",
+        "Zkp.Implementation.BlockTypes.readRoot",
+        "Zkp.Implementation.BlockTypes.joinWords",
+        "Zkp.Implementation.BlockTypes.PublicStateDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.public_state_native_roundtrip",
+        "Zkp.Implementation.BlockTypes.public_state_length_guard",
+        "Zkp.Implementation.BlockTypes.public_state_rejects_overflowing_block_number",
+        "Zkp.Implementation.BlockTypes.public_state_rejects_wide_timestamp_word",
+        "Zkp.Implementation.BlockTypes.public_state_accepts_non_field_root_words",
+        "Zkp.Implementation.BlockTypes.public_state_decode_example",
+        "Zkp.Implementation.BlockTypes.join_split",
+        "Zkp.Implementation.BlockTypes.split_hi_lt",
+        "Zkp.Implementation.BlockTypes.split_lo_lt"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 159,
+      "end": 159,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 160,
+      "end": 163,
+      "status": "dependency-boundary",
+      "label": "PublicState::poseidon_hash over the 15 words",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.NativePublicState.toU64Vec"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 164,
+      "end": 164,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 165,
+      "end": 181,
+      "status": "translated",
+      "label": "Leafable for PublicState: empty_leaf uses the DEFAULT (zero) roots",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.emptyLeafPublicState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.empty_leaf_native_and_target_differ"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 182,
+      "end": 183,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 184,
+      "end": 193,
+      "status": "translated",
+      "label": "PublicStateTarget::to_vec (separately transcribed)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.targetToVec"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.public_state_native_and_target_encoders_agree"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 194,
+      "end": 194,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 195,
+      "end": 224,
+      "status": "translated",
+      "label": "PublicStateTarget::from_slice: assert_eq width then wire slicing",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.targetFromSlice"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.public_state_target_roundtrip",
+        "Zkp.Implementation.BlockTypes.public_state_target_asserts_exact_width"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 225,
+      "end": 225,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 226,
+      "end": 253,
+      "status": "dependency-boundary",
+      "label": "PublicStateTarget::new and ::constant (builder allocation and constants)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 254,
+      "end": 254,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 255,
+      "end": 293,
+      "status": "untranslated",
+      "label": "PublicStateTarget::select",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 294,
+      "end": 294,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 295,
+      "end": 305,
+      "status": "dependency-boundary",
+      "label": "PublicStateTarget::set_witness (witness writing)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 306,
+      "end": 306,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 307,
+      "end": 328,
+      "status": "translated",
+      "label": "PublicStateTarget::is_equal: five field comparisons, timestamp limb-wise",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.publicStateIsEqual",
+        "Zkp.Implementation.BlockTypes.u64IsEqual",
+        "Zkp.Implementation.BlockTypes.rootIsEqual",
+        "Zkp.Implementation.BlockTypes.blockNumberIsEqual"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.is_equal_compares_exactly_five_fields",
+        "Zkp.Implementation.BlockTypes.is_equal_iff_states_equal",
+        "Zkp.Implementation.BlockTypes.root_is_equal_iff",
+        "Zkp.Implementation.BlockTypes.is_equal_timestamp_split_matches_u64_equality",
+        "Zkp.Implementation.BlockTypes.is_equal_detects_high_timestamp_limb",
+        "Zkp.Implementation.BlockTypes.is_equal_detects_previous_root",
+        "Zkp.Implementation.BlockTypes.split_pair_eq_iff"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 329,
+      "end": 329,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 330,
+      "end": 343,
+      "status": "translated",
+      "label": "PublicStateTarget::connect",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Connect"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.connect_forces_equality"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 344,
+      "end": 346,
+      "status": "non-executable",
+      "label": "spacing and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 347,
+      "end": 369,
+      "status": "translated",
+      "label": "PublicStateTarget::conditional_assert_eq",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ConditionalAssertEq"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.conditional_assert_eq_is_vacuous_when_false",
+        "Zkp.Implementation.BlockTypes.conditional_assert_eq_true_forces_equality"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 370,
+      "end": 371,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 372,
+      "end": 379,
+      "status": "translated",
+      "label": "LeafableTarget::empty_leaf = constant(PublicState::default())",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.targetEmptyLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.target_empty_leaf_is_the_default_state",
+        "Zkp.Implementation.BlockTypes.empty_leaf_native_and_target_differ"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 380,
+      "end": 390,
+      "status": "dependency-boundary",
+      "label": "LeafableTarget::hash (in-circuit Poseidon gadget)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 391,
+      "end": 391,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 392,
+      "end": 402,
+      "status": "translated",
+      "label": "FullPublicStateError variants",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.FullFault"
+      ],
+      "theorems": [],
+      "note": "Models TooManyKeyIds and the wrapped BlockError; the ChannelId error variant is not modeled."
+    },
+    {
+      "start": 403,
+      "end": 403,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 404,
+      "end": 420,
+      "status": "translated",
+      "label": "FullPublicState fields",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.FullState"
+      ],
+      "theorems": [],
+      "note": "Trees, block and deposit vectors are abstracted to their roots, the last block timestamp and one send-leaf list."
+    },
+    {
+      "start": 421,
+      "end": 422,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 423,
+      "end": 439,
+      "status": "translated",
+      "label": "FullPublicState::new: height 0, init roots, zero chains, genesis Block::default()",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.genesisFullState",
+        "Zkp.Implementation.BlockTypes.defaultBlock"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.genesis_full_state_is_zero_height"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 440,
+      "end": 440,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 441,
+      "end": 455,
+      "status": "translated",
+      "label": "FullPublicState::to_public_state (timestamp of the last block)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.FullState.toPublicState"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.genesis_public_state_is_the_default",
+        "Zkp.Implementation.BlockTypes.add_block_snapshots_the_previous_state"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 456,
+      "end": 456,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 457,
+      "end": 572,
+      "status": "translated",
+      "label": "add_block / add_block_with_channel: user count, block build, history push, chain fold and the send-leaf loop",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.addBlockWithChannel",
+        "Zkp.Implementation.BlockTypes.SendLeaf",
+        "Zkp.Implementation.BlockTypes.lastCur",
+        "Zkp.Implementation.BlockTypes.pushSendLeaf",
+        "Zkp.Implementation.BlockTypes.applySendLeaves"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.add_block_step",
+        "Zkp.Implementation.BlockTypes.add_block_increments_height",
+        "Zkp.Implementation.BlockTypes.add_block_rejects_too_many_key_ids",
+        "Zkp.Implementation.BlockTypes.send_leaf_skips_zero_key_id",
+        "Zkp.Implementation.BlockTypes.send_leaf_noop_when_saturated",
+        "Zkp.Implementation.BlockTypes.send_leaves_fold_noop_when_saturated",
+        "Zkp.Implementation.BlockTypes.send_leaf_appended_at_most_once_per_block",
+        "Zkp.Implementation.BlockTypes.send_leaves_unchanged_when_all_key_ids_zero",
+        "Zkp.Implementation.BlockTypes.send_leaves_example",
+        "Zkp.Implementation.BlockTypes.last_cur_append"
+      ],
+      "note": "The channel-tree update and the assert_eq! leaf sanity check are an opaque environment; the send-leaf list semantics and the chain fold are modeled."
+    },
+    {
+      "start": 573,
+      "end": 573,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 574,
+      "end": 592,
+      "status": "dependency-boundary",
+      "label": "add_block_with_tx_tree_root_v2 / add_block_with_tx_v2s (tx-v2 root callback)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 593,
+      "end": 593,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 594,
+      "end": 605,
+      "status": "untranslated",
+      "label": "add_channel_close_block (composition of the close tx and the block step)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 606,
+      "end": 606,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 607,
+      "end": 634,
+      "status": "untranslated",
+      "label": "add_deposit",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modeled by this module."
+    },
+    {
+      "start": 635,
+      "end": 637,
+      "status": "non-executable",
+      "label": "closing braces, spacing and comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 638,
+      "end": 643,
+      "status": "translated",
+      "label": "get_num_users: first supported count that fits",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.getNumUsers"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.get_num_users_fits",
+        "Zkp.Implementation.BlockTypes.get_num_users_none_when_all_too_small",
+        "Zkp.Implementation.BlockTypes.get_num_users_example",
+        "Zkp.Implementation.BlockTypes.get_num_users_overflow_example"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 644,
+      "end": 644,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 645,
+      "end": 703,
+      "status": "test-only",
+      "label": "#[cfg(test)] module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; carries no proved property in the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak_callback",
+      "obligation": "solidity_keccak256 / builder.keccak256 are opaque functions from word lists to Bytes32; no collision resistance and no Rust/Solidity byte-equality is proved.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon_callback",
+      "obligation": "PoseidonHashOut::hash_inputs_u64/u32 and the in-circuit Poseidon gadget are opaque; digests are not assumed injective.",
+      "discharged": false
+    },
+    {
+      "name": "tree_root_environment",
+      "obligation": "ChannelTree/DepositTree/PublicStateTree init(), get_root(), push() and the Merkle machinery are opaque; no Merkle soundness or history authenticity follows.",
+      "discharged": false
+    },
+    {
+      "name": "channel_action_root_callback",
+      "obligation": "compute_channel_action_root and compute_tx_v2_root are opaque callbacks; nothing about tx-tree binding is proved here.",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "Target-side definitions are word-level transcriptions of the builder code; plonky2 gate lowering, range checks and witness generation are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "word_domain_representation",
+      "obligation": "Nat represents u32/u64/63-bit/field words; range membership is an explicit premise, never an enforced invariant.",
+      "discharged": false
+    },
+    {
+      "name": "signature_and_membership",
+      "obligation": "Sig-cluster signatures, member-tree inclusion, block-producer authority and on-chain registration authenticity are outside this model.",
+      "discharged": false
+    }
+  ]
+}

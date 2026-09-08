@@ -1,0 +1,330 @@
+{
+  "schema_version": 1,
+  "source": "src/common/block.rs",
+  "source_sha256": "7278bb99f67f36cc1d9553339bbda14351ff7114e19b0a25da58e2b0180be58e",
+  "source_lines": 450,
+  "module": "Zkp.Implementation.BlockTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak, serde and ethereum-type imports",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Bytes32",
+        "Zkp.Implementation.BlockTypes.bytes32Zero"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 22,
+      "end": 22,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 23,
+      "end": 27,
+      "status": "translated",
+      "label": "BlockError::InvalidNumUsers",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.BlockFault"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 28,
+      "end": 29,
+      "status": "non-executable",
+      "label": "spacing and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 30,
+      "end": 60,
+      "status": "translated",
+      "label": "Block fields (num_users, channel id, timestamp, key-id slots, three Bytes32 chains) with their SECURITY doc comments",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Block"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 61,
+      "end": 62,
+      "status": "non-executable",
+      "label": "spacing and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 63,
+      "end": 73,
+      "status": "dependency-boundary",
+      "label": "BlockTarget wire fields",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.blockTargetHashInputs"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 74,
+      "end": 76,
+      "status": "non-executable",
+      "label": "spacing, impl header and lint attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 77,
+      "end": 95,
+      "status": "dependency-boundary",
+      "label": "Block::new_with_tx_v2s (compute_tx_v2_root callback)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 96,
+      "end": 97,
+      "status": "non-executable",
+      "label": "spacing and lint attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 98,
+      "end": 116,
+      "status": "translated",
+      "label": "Block::new_with_channel delegating to Block::new",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.blockNew"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 117,
+      "end": 118,
+      "status": "non-executable",
+      "label": "spacing and lint attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 119,
+      "end": 148,
+      "status": "translated",
+      "label": "Block::new: key-id count guard and zero padding to num_users",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.blockNew",
+        "Zkp.Implementation.BlockTypes.padKeyIds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.block_new_pads_to_num_users",
+        "Zkp.Implementation.BlockTypes.block_new_keeps_given_key_ids",
+        "Zkp.Implementation.BlockTypes.block_new_padding_is_zero",
+        "Zkp.Implementation.BlockTypes.block_new_rejects_overlong_key_ids",
+        "Zkp.Implementation.BlockTypes.block_new_padding_example"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 149,
+      "end": 149,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 150,
+      "end": 156,
+      "status": "translated",
+      "label": "channel_id / key_ids accessors",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Block"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 157,
+      "end": 157,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 158,
+      "end": 178,
+      "status": "translated",
+      "label": "Block::hash_with_prev_hash: padding guard and the block-hash preimage",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Block.hashPreimage",
+        "Zkp.Implementation.BlockTypes.Block.hashWithPrevHash",
+        "Zkp.Implementation.BlockTypes.defaultBlock"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.block_preimage_width",
+        "Zkp.Implementation.BlockTypes.block_preimage_prefix",
+        "Zkp.Implementation.BlockTypes.block_preimage_prefix_length",
+        "Zkp.Implementation.BlockTypes.block_hash_requires_padded_key_ids",
+        "Zkp.Implementation.BlockTypes.block_hash_of_padded_block",
+        "Zkp.Implementation.BlockTypes.genesis_block_hashes",
+        "Zkp.Implementation.BlockTypes.block_preimage_injective",
+        "Zkp.Implementation.BlockTypes.reg_chain_binds_block_hash",
+        "Zkp.Implementation.BlockTypes.append_inj_bytes32",
+        "Zkp.Implementation.BlockTypes.bytes32_words_length",
+        "Zkp.Implementation.BlockTypes.bytes32_words_injective"
+      ],
+      "note": "The preimage layout is modeled exactly; solidity_keccak256 itself stays an opaque callback."
+    },
+    {
+      "start": 179,
+      "end": 181,
+      "status": "non-executable",
+      "label": "closing brace, spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 182,
+      "end": 219,
+      "status": "dependency-boundary",
+      "label": "BlockTarget::new (virtual targets and range checks)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 220,
+      "end": 220,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 221,
+      "end": 248,
+      "status": "translated",
+      "label": "BlockTarget::constant, including its num_users panic",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.blockTargetConstant"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 249,
+      "end": 249,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 250,
+      "end": 270,
+      "status": "translated",
+      "label": "BlockTarget::hash_with_prev_hash input vector (separately transcribed)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.blockTargetHashInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.block_native_and_target_preimages_agree"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 271,
+      "end": 279,
+      "status": "dependency-boundary",
+      "label": "BlockTarget accessors over wires",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 280,
+      "end": 293,
+      "status": "dependency-boundary",
+      "label": "BlockTarget::set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 294,
+      "end": 295,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 296,
+      "end": 450,
+      "status": "test-only",
+      "label": "#[cfg(test)] module with the pinned G6 differential vector",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; carries no proved property in the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak_callback",
+      "obligation": "solidity_keccak256 / builder.keccak256 are opaque functions from word lists to Bytes32; no collision resistance and no Rust/Solidity byte-equality is proved.",
+      "discharged": false
+    },
+    {
+      "name": "channel_action_root_callback",
+      "obligation": "compute_channel_action_root and compute_tx_v2_root are opaque callbacks; nothing about tx-tree binding is proved here.",
+      "discharged": false
+    },
+    {
+      "name": "native_target_refinement",
+      "obligation": "Target-side definitions are word-level transcriptions of the builder code; plonky2 gate lowering, range checks and witness generation are not modeled.",
+      "discharged": false
+    },
+    {
+      "name": "word_domain_representation",
+      "obligation": "Nat represents u32/u64/63-bit/field words; range membership is an explicit premise, never an enforced invariant.",
+      "discharged": false
+    },
+    {
+      "name": "solidity_differential_pins",
+      "obligation": "The pinned Rust/Solidity differential hash constants are not recomputed in Lean; layout equality with the deployed contract remains asserted by those tests only.",
+      "discharged": false
+    },
+    {
+      "name": "signature_and_membership",
+      "obligation": "Sig-cluster signatures, member-tree inclusion, block-producer authority and on-chain registration authenticity are outside this model.",
+      "discharged": false
+    }
+  ]
+}

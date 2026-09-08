@@ -1,0 +1,302 @@
+{
+  "schema_version": 1,
+  "source": "src/common/channel_message.rs",
+  "source_sha256": "d6d6093702518c1c5961b0aa8950a1d40d0daa7c8136fc178bb3a1232fd7e357",
+  "source_lines": 361,
+  "module": "Zkp.Implementation.BlockTypes",
+  "model": "doc/audit/zkp/Zkp/Implementation/BlockTypes.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 12,
+      "status": "dependency-boundary",
+      "label": "keccak, serde, tx-v2 and Poseidon imports",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Bytes32",
+        "Zkp.Implementation.BlockTypes.Root"
+      ],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 13,
+      "end": 13,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 14,
+      "end": 16,
+      "status": "translated",
+      "label": "CHANNEL_MESSAGE_MAGIC domain separator",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.channelMessageMagic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.channel_message_magic_pinned",
+        "Zkp.Implementation.BlockTypes.channel_message_magic_is_impc_ascii"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 17,
+      "end": 21,
+      "status": "non-executable",
+      "label": "spacing, doc comment and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 22,
+      "end": 31,
+      "status": "translated",
+      "label": "Allocation fields (recipient, token index, amount)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Allocation"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 32,
+      "end": 33,
+      "status": "non-executable",
+      "label": "spacing and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 34,
+      "end": 40,
+      "status": "translated",
+      "label": "Allocation::to_u32_vec (17 words)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.Allocation.words"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.allocation_words_width",
+        "Zkp.Implementation.BlockTypes.allocation_u32_len_pinned"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 41,
+      "end": 47,
+      "status": "non-executable",
+      "label": "spacing, doc comment and derive attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 48,
+      "end": 61,
+      "status": "translated",
+      "label": "ChannelMessage fields (channel id, u64 sequence, allocations, tx tree root)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 62,
+      "end": 72,
+      "status": "non-executable",
+      "label": "spacing, impl header and the signing-hash doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 73,
+      "end": 86,
+      "status": "translated",
+      "label": "ChannelMessage::signing_hash preimage: magic, channel id, LOW-word-first sequence, allocations hash, tx tree root",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage.signingPreimage",
+        "Zkp.Implementation.BlockTypes.ChannelMessage.signingHash",
+        "Zkp.Implementation.BlockTypes.sequenceWords",
+        "Zkp.Implementation.BlockTypes.signingPreimageU32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.signing_preimage_width",
+        "Zkp.Implementation.BlockTypes.signing_preimage_u32_len_pinned",
+        "Zkp.Implementation.BlockTypes.sequence_word_order_is_low_word_first",
+        "Zkp.Implementation.BlockTypes.sequence_word_order_differs_from_u64_encoder",
+        "Zkp.Implementation.BlockTypes.signing_preimage_injective",
+        "Zkp.Implementation.BlockTypes.signing_preimage_sees_allocations_only_through_their_hash",
+        "Zkp.Implementation.BlockTypes.signing_preimage_example"
+      ],
+      "note": "The preimage layout is modeled exactly; keccak stays an opaque callback and no collision resistance is claimed."
+    },
+    {
+      "start": 87,
+      "end": 87,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 88,
+      "end": 101,
+      "status": "translated",
+      "label": "ChannelMessage::allocations_hash, including the empty short-circuit to zero",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage.allocationsHash",
+        "Zkp.Implementation.BlockTypes.allocationsStream"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.allocations_stream_width",
+        "Zkp.Implementation.BlockTypes.empty_allocations_hash_is_the_zero_default"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 102,
+      "end": 102,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 103,
+      "end": 113,
+      "status": "translated",
+      "label": "close_action_payload_hash: the same stream WITHOUT the magic word, hashed with Poseidon",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage.closePayloadPreimage",
+        "Zkp.Implementation.BlockTypes.ChannelMessage.closePayloadHash",
+        "Zkp.Implementation.BlockTypes.closePayloadU32Len"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.close_payload_width",
+        "Zkp.Implementation.BlockTypes.close_payload_u32_len_pinned",
+        "Zkp.Implementation.BlockTypes.close_payload_is_signing_preimage_without_magic"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 114,
+      "end": 114,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 115,
+      "end": 124,
+      "status": "translated",
+      "label": "to_channel_close_action (kind, source channel, dummy destination, signing hash, seal, payload hash)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage.toChannelCloseAction",
+        "Zkp.Implementation.BlockTypes.ChannelAction",
+        "Zkp.Implementation.BlockTypes.ChannelActionKind",
+        "Zkp.Implementation.BlockTypes.dummyChannelId"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.close_action_shape"
+      ],
+      "note": "Handwritten local semantics with kernel-checked consequences; no source/compiler refinement certificate."
+    },
+    {
+      "start": 125,
+      "end": 125,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 126,
+      "end": 135,
+      "status": "translated",
+      "label": "to_channel_close_tx_v2 (ChannelAction class, zero transfer root, nonce)",
+      "declarations": [
+        "Zkp.Implementation.BlockTypes.ChannelMessage.toChannelCloseTxV2",
+        "Zkp.Implementation.BlockTypes.TxV2",
+        "Zkp.Implementation.BlockTypes.TxClass"
+      ],
+      "theorems": [
+        "Zkp.Implementation.BlockTypes.close_tx_shape"
+      ],
+      "note": "compute_channel_action_root is an opaque callback; the tx shape around it is modeled."
+    },
+    {
+      "start": 136,
+      "end": 136,
+      "status": "non-executable",
+      "label": "spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 137,
+      "end": 141,
+      "status": "dependency-boundary",
+      "label": "channel_close_tx_v2_root (compute_tx_v2_root callback)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics comes from an imported crate/gadget/builder treated as an opaque callback or premise; undischarged."
+    },
+    {
+      "start": 142,
+      "end": 143,
+      "status": "non-executable",
+      "label": "closing brace and spacing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, attribute, comment or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 144,
+      "end": 361,
+      "status": "test-only",
+      "label": "#[cfg(test)] module (magic, determinism, lifecycle)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; carries no proved property in the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak_callback",
+      "obligation": "solidity_keccak256 / builder.keccak256 are opaque functions from word lists to Bytes32; no collision resistance and no Rust/Solidity byte-equality is proved.",
+      "discharged": false
+    },
+    {
+      "name": "poseidon_callback",
+      "obligation": "PoseidonHashOut::hash_inputs_u64/u32 and the in-circuit Poseidon gadget are opaque; digests are not assumed injective.",
+      "discharged": false
+    },
+    {
+      "name": "channel_action_root_callback",
+      "obligation": "compute_channel_action_root and compute_tx_v2_root are opaque callbacks; nothing about tx-tree binding is proved here.",
+      "discharged": false
+    },
+    {
+      "name": "word_domain_representation",
+      "obligation": "Nat represents u32/u64/63-bit/field words; range membership is an explicit premise, never an enforced invariant.",
+      "discharged": false
+    },
+    {
+      "name": "signature_and_membership",
+      "obligation": "Sig-cluster signatures, member-tree inclusion, block-producer authority and on-chain registration authenticity are outside this model.",
+      "discharged": false
+    }
+  ]
+}
