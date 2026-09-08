@@ -349,8 +349,9 @@ theorem get_elem_snoc {α : Type} (l : List α) (a : α) (j : Nat) :
   · subst hj
     rw [List.getElem?_append_right (Nat.le_refl _), if_pos rfl]
     simp
-  · rw [List.getElem?_append_right (by omega), if_neg (by omega),
-      List.getElem?_eq_none (by omega), List.getElem?_eq_none (by simp; omega)]
+  · have h1 : [a].length ≤ j - l.length := by simp; omega
+    rw [List.getElem?_append_right (by omega), if_neg (by omega),
+      List.getElem?_eq_none h1, List.getElem?_eq_none (by omega)]
 
 /-- Reading back a write: the model's single structural lemma about slots. -/
 theorem get_leaf_set_leaf {t : Tree} {i j : Nat} {L : Leaf} (h : i ≤ t.size) :
@@ -359,17 +360,21 @@ theorem get_leaf_set_leaf {t : Tree} {i j : Nat} {L : Leaf} (h : i ≤ t.size) :
   · have hlt' : i < t.leaves.length := hlt
     simp only [Tree.setLeaf, if_pos hlt', Tree.getLeaf]
     rw [List.getElem?_set]
-    split
-    · next hij => subst hij; rw [if_pos hlt', if_pos rfl]; rfl
-    · next hij => rw [if_neg (fun hc => hij hc.symm)]
+    by_cases hij : i = j
+    · subst hij; simp [hlt']
+    · simp [hij, Ne.symm hij]
   · have hi : i = t.size := Nat.le_antisymm h hge
     subst hi
-    have hnl : ¬ (t.size < t.leaves.length) := by simp [Tree.size]
-    simp only [Tree.setLeaf, if_neg hnl, if_pos (rfl : t.size = t.leaves.length), Tree.getLeaf]
-    rw [get_elem_snoc]
-    split
-    · next hj => rw [if_pos (by simpa [Tree.size] using hj)]; rfl
-    · next hj => rw [if_neg (by simpa [Tree.size] using hj)]
+    have hnl : ¬ (t.size < t.leaves.length) := Nat.lt_irrefl _
+    have hpos : t.size = t.leaves.length := rfl
+    have heq : (t.setLeaf t.size L).leaves = t.leaves ++ [L] := by
+      unfold Tree.setLeaf
+      rw [if_neg hnl, if_pos hpos]
+    show (t.setLeaf t.size L).leaves[j]?.getD emptyLeaf = _
+    rw [heq, get_elem_snoc]
+    by_cases hj : j = t.leaves.length
+    · rw [if_pos hj, if_pos (show j = t.size from hj)]; rfl
+    · rw [if_neg hj, if_neg (show ¬ (j = t.size) from hj)]; rfl
 
 theorem set_leaf_self {t : Tree} {i : Nat} (h : i < t.size) :
     t.setLeaf i (t.getLeaf i) = t := by
@@ -379,11 +384,10 @@ theorem set_leaf_self {t : Tree} {i : Nat} (h : i < t.size) :
     apply List.ext_getElem?
     intro n
     rw [List.getElem?_set]
-    split
-    · next hin =>
-        subst hin
-        rw [if_pos hlt, get_leaf_of_lt h, List.getElem?_eq_getElem hlt]
-    · rfl
+    by_cases hin : i = n
+    · subst hin
+      rw [if_pos rfl, if_pos hlt, get_leaf_of_lt h, List.getElem?_eq_getElem hlt]
+    · rw [if_neg hin]
   rw [hset]
 
 /-! ## Key membership and the ordered-set invariant -/
@@ -438,7 +442,7 @@ theorem wf_new (h : Nat) : Wf (Tree.new h) := by
     have : i = 0 := by omega
     subst this
     exact tree_new_leaf_zero h
-  refine ⟨by omega, by rw [tree_new_leaf_zero], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨by omega, by rw [tree_new_leaf_zero]; rfl, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro i hi; rw [hleaf i hi]; exact ⟨by decide, by decide⟩
   · intro i j hi hj _; rw [hsize] at hi hj; omega
   · intro i hi hne; rw [hleaf i hi] at hne; exact absurd rfl hne
@@ -458,6 +462,489 @@ theorem new_tree_key_set (h : Nat) (k : Nat) : MemKey (Tree.new h) k ↔ k = 0 :
     rw [tree_new_leaf_zero] at hk
     exact hk.symm ▸ rfl
   · intro hk
-    exact ⟨0, by omega, by rw [tree_new_leaf_zero]; exact hk.symm ▸ rfl⟩
+    refine ⟨0, ?_, ?_⟩
+    · rw [tree_new_size]; omega
+    · rw [tree_new_leaf_zero]; exact hk.symm ▸ rfl
+
+/-! ## Index lists and the candidate filter
+
+`.leaves().into_iter().enumerate().filter(..)` in mod.rs is modelled as a filter
+over the ascending index list. `List.range` has no lemmas in this toolchain, so
+the index list and its three lemmas are local. -/
+
+def indices : Nat → List Nat
+  | 0 => []
+  | n + 1 => indices n ++ [n]
+
+theorem mem_indices {i n : Nat} : i ∈ indices n ↔ i < n := by
+  induction n with
+  | zero => simp [indices]
+  | succ m ih => simp [indices, ih]; omega
+
+theorem filter_indices_eq_nil {p : Nat → Bool} {n : Nat} (h : ∀ i, i < n → p i = false) :
+    (indices n).filter p = [] := by
+  rw [List.filter_eq_nil]
+  intro a ha
+  rw [mem_indices] at ha
+  simp [h a ha]
+
+theorem filter_indices_unique {p : Nat → Bool} {n i : Nat} (hi : i < n) (hp : p i = true)
+    (hu : ∀ j, j < n → p j = true → j = i) : (indices n).filter p = [i] := by
+  induction n with
+  | zero => omega
+  | succ m ih =>
+    rw [indices, List.filter_append]
+    by_cases him : i = m
+    · subst him
+      have h0 : (indices i).filter p = [] := by
+        refine filter_indices_eq_nil ?_
+        intro j _hj
+        cases hpj : p j with
+        | false => rfl
+        | true => exact absurd (hu j (by omega) hpj) (by omega)
+      rw [h0, List.filter_cons_of_pos _ hp]
+      rfl
+    · have him' : i < m := by omega
+      have hm : p m = false := by
+        cases hpm : p m with
+        | false => rfl
+        | true => exact absurd (hu m (by omega) hpm) (by omega)
+      rw [ih him' (fun j hj hpj => hu j (by omega) hpj),
+        List.filter_cons_of_neg _ (by simp [hm])]
+      rfl
+
+/-! ## Predecessor search (`IndexedMerkleTree::low_index`, mod.rs 44-64) -/
+
+/-- The `low_index` filter predicate: `leaf.key < key && (key < leaf.next_key ||
+leaf.next_key == U256::default())`. -/
+def isLowLeaf (key : Nat) (L : Leaf) : Bool :=
+  (L.key < key) && ((key < L.nextKey) || (L.nextKey == 0))
+
+theorem is_low_leaf_iff {key : Nat} {L : Leaf} :
+    isLowLeaf key L = true ↔ L.key < key ∧ (key < L.nextKey ∨ L.nextKey = 0) := by
+  simp [isLowLeaf]
+
+def lowCandidates (t : Tree) (key : Nat) : List Nat :=
+  (indices t.size).filter (fun i => isLowLeaf key (t.getLeaf i))
+
+/-- `low_index`: empty candidate set is reported as `KeyAlreadyExists`, more than
+one candidate as `TooManyCandidates("low_index")`. -/
+def lowIndex (t : Tree) (key : Nat) : Except Error Nat :=
+  match lowCandidates t key with
+  | [] => .error (.keyAlreadyExists key)
+  | [i] => .ok i
+  | _ => .error (.tooManyCandidates "low_index")
+
+theorem low_index_ok_iff {t : Tree} {key i : Nat} :
+    lowIndex t key = .ok i ↔ lowCandidates t key = [i] := by
+  unfold lowIndex
+  cases h : lowCandidates t key with
+  | nil => simp
+  | cons a as =>
+    cases as with
+    | nil => simp [eq_comm]
+    | cons b bs => simp
+
+theorem low_index_lt {t : Tree} {key i : Nat} (h : lowIndex t key = .ok i) : i < t.size := by
+  have hc : lowCandidates t key = [i] := low_index_ok_iff.1 h
+  have : i ∈ lowCandidates t key := by rw [hc]; simp
+  rw [lowCandidates, List.mem_filter, mem_indices] at this
+  exact this.1
+
+theorem low_index_is_low {t : Tree} {key i : Nat} (h : lowIndex t key = .ok i) :
+    isLowLeaf key (t.getLeaf i) = true := by
+  have hc : lowCandidates t key = [i] := low_index_ok_iff.1 h
+  have : i ∈ lowCandidates t key := by rw [hc]; simp
+  rw [lowCandidates, List.mem_filter] at this
+  exact this.2
+
+theorem low_index_unique {t : Tree} {key i : Nat} (h : lowIndex t key = .ok i) :
+    ∀ j, j < t.size → isLowLeaf key (t.getLeaf j) = true → j = i := by
+  intro j hj hp
+  have hc : lowCandidates t key = [i] := low_index_ok_iff.1 h
+  have hmem : j ∈ lowCandidates t key := by
+    rw [lowCandidates, List.mem_filter, mem_indices]
+    exact ⟨hj, hp⟩
+  rw [hc] at hmem
+  simpa using hmem
+
+/-- ORDERED-SET SOUNDNESS, hash-free half: on a well-formed tree a key that is
+already present has NO predecessor candidate. `dense` is what rules out a
+candidate below the present key. -/
+theorem present_key_has_no_low_candidate {t : Tree} {key : Nat} (hw : Wf t)
+    (h : MemKey t key) : lowCandidates t key = [] := by
+  obtain ⟨m, hm, hkm⟩ := h
+  refine filter_indices_eq_nil ?_
+  intro i hi
+  cases hp : isLowLeaf key (t.getLeaf i) with
+  | false => rfl
+  | true =>
+    exfalso
+    obtain ⟨hlt, hup⟩ := is_low_leaf_iff.1 hp
+    have hlt' : (t.getLeaf i).key < (t.getLeaf m).key := by rw [hkm]; exact hlt
+    obtain ⟨hne, hle⟩ := hw.dense i m hi hm hlt'
+    rw [hkm] at hle
+    rcases hup with hup | hup
+    · omega
+    · exact hne hup
+
+/-- No candidate below a present key means the tree's OWN leaves cannot witness
+the two bound checks for that key. -/
+theorem present_key_has_no_bounding_leaf {t : Tree} {key : Nat} (hw : Wf t)
+    (h : MemKey t key) :
+    ∀ i, i < t.size → ¬ ((t.getLeaf i).key < key ∧
+      (key < (t.getLeaf i).nextKey ∨ (t.getLeaf i).nextKey = 0)) := by
+  intro i hi hbad
+  have hnil := present_key_has_no_low_candidate hw h
+  have hmem : i ∈ lowCandidates t key := by
+    rw [lowCandidates, List.mem_filter, mem_indices]
+    exact ⟨hi, is_low_leaf_iff.2 hbad⟩
+  rw [hnil] at hmem
+  simp at hmem
+
+/-! ## Native insertion (insertion.rs 52-70) and the other `mod.rs` writers -/
+
+/-- `IndexedMerkleLeaf { next_index: index, next_key: key, ..prev_low_leaf }`. -/
+def newLowLeaf (prevLow : Leaf) (index key : Nat) : Leaf :=
+  { prevLow with nextIndex := index, nextKey := key }
+
+/-- The appended leaf `IndexedMerkleLeaf { next_index: prev_low_leaf.next_index,
+key, next_key: prev_low_leaf.next_key, value }`. -/
+def insertedLeaf (prevLow : Leaf) (key value : Nat) : Leaf :=
+  { nextIndex := prevLow.nextIndex, key := key, nextKey := prevLow.nextKey, value := value }
+
+theorem new_low_leaf_key (prevLow : Leaf) (index key : Nat) :
+    (newLowLeaf prevLow index key).key = prevLow.key := rfl
+
+theorem new_low_leaf_next_key (prevLow : Leaf) (index key : Nat) :
+    (newLowLeaf prevLow index key).nextKey = key := rfl
+
+theorem new_low_leaf_next_index (prevLow : Leaf) (index key : Nat) :
+    (newLowLeaf prevLow index key).nextIndex = index := rfl
+
+theorem inserted_leaf_key (prevLow : Leaf) (key value : Nat) :
+    (insertedLeaf prevLow key value).key = key := rfl
+
+theorem inserted_leaf_next_key (prevLow : Leaf) (key value : Nat) :
+    (insertedLeaf prevLow key value).nextKey = prevLow.nextKey := rfl
+
+theorem inserted_leaf_next_index (prevLow : Leaf) (key value : Nat) :
+    (insertedLeaf prevLow key value).nextIndex = prevLow.nextIndex := rfl
+
+/-- The tree after `update(low, new_low_leaf); push(leaf)`. -/
+def insertResult (t : Tree) (low key value : Nat) : Tree :=
+  (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)).setLeaf t.size
+    (insertedLeaf (t.getLeaf low) key value)
+
+/-- `IndexedMerkleTree::insert`. The capacity `assert!` of
+`IncrementalMerkleTree::push` is NOT modelled as an error (see header). -/
+def insert (t : Tree) (key value : Nat) : Except Error Tree := do
+  let low ← lowIndex t key
+  return insertResult t low key value
+
+/-- `IndexedMerkleTree::index` (mod.rs 66-82). The source PANICS on more than
+one candidate; the panic is modelled as an error value, not as an `Option`. -/
+def indexOfKey (t : Tree) (key : Nat) : Except Error (Option Nat) :=
+  match (indices t.size).filter (fun i => (t.getLeaf i).key == key) with
+  | [] => .ok none
+  | [i] => .ok (some i)
+  | _ => .error (.tooManyCandidates "index")
+
+/-- `IndexedMerkleTree::update` (mod.rs 88-96): value-only write on an existing
+key; it never touches `key`, `next_key` or `next_index`. -/
+def update (t : Tree) (key value : Nat) : Except Error Tree := do
+  match ← indexOfKey t key with
+  | none => .error (.keyDoesNotExist key)
+  | some i => .ok (t.setLeaf i { t.getLeaf i with value := value })
+
+theorem index_of_key_ok_some {t : Tree} {key i : Nat} (h : indexOfKey t key = .ok (some i)) :
+    i < t.size ∧ (t.getLeaf i).key = key := by
+  unfold indexOfKey at h
+  split at h
+  · simp at h
+  · rename_i j heq
+    have hmem : j ∈ (indices t.size).filter (fun m => (t.getLeaf m).key == key) := by
+      rw [heq]; simp
+    rw [List.mem_filter, mem_indices] at hmem
+    simp only [Except.ok.injEq, Option.some.injEq] at h
+    subst h
+    exact ⟨hmem.1, by simpa using hmem.2⟩
+  · simp at h
+
+/-- Two trees with the same occupancy and the same key at every slot carry the
+same modelled set. -/
+theorem mem_key_congr {t t' : Tree} (hsize : t'.size = t.size)
+    (hkeys : ∀ j, j < t.size → (t'.getLeaf j).key = (t.getLeaf j).key) (k : Nat) :
+    MemKey t' k ↔ MemKey t k := by
+  constructor
+  · rintro ⟨i, hi, hk⟩
+    rw [hsize] at hi
+    exact ⟨i, hi, by rw [← hkeys i hi]; exact hk⟩
+  · rintro ⟨i, hi, hk⟩
+    exact ⟨i, by omega, by rw [hkeys i hi]; exact hk⟩
+
+/-- `update` is a value-only write: it changes no key, so the modelled SET is
+untouched (only the per-leaf payload moves). -/
+theorem update_preserves_key_set {t t' : Tree} {key value : Nat}
+    (h : update t key value = .ok t') (k : Nat) : MemKey t' k ↔ MemKey t k := by
+  unfold update at h
+  cases hidx : indexOfKey t key with
+  | error e => rw [hidx] at h; simp [bind, Except.bind] at h
+  | ok o =>
+    rw [hidx] at h
+    cases o with
+    | none => simp [bind, Except.bind] at h
+    | some i =>
+      have hi := (index_of_key_ok_some hidx).1
+      simp only [bind, Except.bind, Except.ok.injEq] at h
+      subst h
+      refine mem_key_congr (set_leaf_size hi) ?_ k
+      intro j _hj
+      rw [get_leaf_set_leaf (Nat.le_of_lt hi)]
+      by_cases hji : j = i
+      · rw [if_pos hji, hji]
+      · rw [if_neg hji]
+
+/-! ## Structure of the tree after a native insertion -/
+
+theorem insert_ok_iff {t t' : Tree} {key value : Nat} :
+    insert t key value = .ok t' ↔ ∃ low, lowIndex t key = .ok low ∧ t' = insertResult t low key value := by
+  unfold insert
+  cases h : lowIndex t key with
+  | error e => simp [h, bind, Except.bind]
+  | ok low =>
+    simp only [h, bind, Except.bind, pure]
+    constructor
+    · intro hh; exact ⟨low, rfl, by injection hh with hh; exact hh.symm⟩
+    · rintro ⟨l, hl, rfl⟩
+      injection hl with hl
+      subst hl
+      rfl
+
+theorem push_size_of_eq {t : Tree} {i : Nat} {L : Leaf} (h : i = t.size) :
+    (t.setLeaf i L).size = t.size + 1 := by
+  subst h; exact push_size
+
+theorem insert_result_size {t : Tree} {low key value : Nat} (hlow : low < t.size) :
+    (insertResult t low key value).size = t.size + 1 := by
+  unfold insertResult
+  have h1 : (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)).size = t.size :=
+    set_leaf_size hlow
+  have h2 := push_size_of_eq (t := t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key))
+    (i := t.size) (L := insertedLeaf (t.getLeaf low) key value) h1.symm
+  rw [h2, h1]
+
+theorem insert_result_get {t : Tree} {low key value : Nat} (hlow : low < t.size) (j : Nat) :
+    (insertResult t low key value).getLeaf j =
+      if j = t.size then insertedLeaf (t.getLeaf low) key value
+      else if j = low then newLowLeaf (t.getLeaf low) t.size key
+      else t.getLeaf j := by
+  unfold insertResult
+  rw [get_leaf_set_leaf (Nat.le_of_eq (set_leaf_size hlow).symm)]
+  by_cases hj : j = t.size
+  · rw [if_pos hj, if_pos hj]
+  · rw [if_neg hj, if_neg hj, get_leaf_set_leaf (Nat.le_of_lt hlow)]
+
+theorem insert_result_height {t : Tree} {low key value : Nat} :
+    (insertResult t low key value).height = t.height := by
+  unfold insertResult
+  rw [set_leaf_height, set_leaf_height]
+
+/-- Old slots keep their keys: an insertion only ever rewrites the low leaf's
+`next_index` / `next_key`, never any key. -/
+theorem insert_result_old_key {t : Tree} {low key value j : Nat} (hlow : low < t.size)
+    (hj : j < t.size) :
+    ((insertResult t low key value).getLeaf j).key = (t.getLeaf j).key := by
+  rw [insert_result_get hlow, if_neg (by omega)]
+  by_cases hjl : j = low
+  · rw [if_pos hjl, hjl]; rfl
+  · rw [if_neg hjl]
+
+theorem insert_result_new_key {t : Tree} {low key value : Nat} (hlow : low < t.size) :
+    ((insertResult t low key value).getLeaf t.size).key = key := by
+  rw [insert_result_get hlow, if_pos rfl]; rfl
+
+/-- The key set after an insertion is exactly the old set plus the new key. -/
+theorem insert_key_set {t : Tree} {low key value k : Nat} (hlow : low < t.size) :
+    MemKey (insertResult t low key value) k ↔ (MemKey t k ∨ k = key) := by
+  constructor
+  · rintro ⟨i, hi, hk⟩
+    rw [insert_result_size hlow] at hi
+    by_cases hin : i = t.size
+    · subst hin
+      exact Or.inr (by rw [← hk, insert_result_new_key hlow])
+    · have hi' : i < t.size := by omega
+      exact Or.inl ⟨i, hi', by rw [← hk, insert_result_old_key hlow hi']⟩
+  · rintro (⟨i, hi, hk⟩ | hk)
+    · exact ⟨i, by rw [insert_result_size hlow]; omega,
+        by rw [insert_result_old_key hlow hi]; exact hk⟩
+    · exact ⟨t.size, by rw [insert_result_size hlow]; omega,
+        by rw [insert_result_new_key hlow]; exact hk.symm⟩
+
+/-- A native insertion cannot be built for a key that is already present:
+`low_index` reports `KeyAlreadyExists`. -/
+theorem insert_present_key_fails {t : Tree} {key value : Nat} (hw : Wf t) (h : MemKey t key) :
+    insert t key value = .error (.keyAlreadyExists key) := by
+  have hnil := present_key_has_no_low_candidate hw h
+  unfold insert lowIndex
+  rw [hnil]
+  rfl
+
+/-- Contrapositive, in the shape the callers of this file need: a NATIVE
+insertion that succeeded proves the key was absent. No hash assumption. -/
+theorem insert_ok_implies_absent {t t' : Tree} {key value : Nat} (hw : Wf t)
+    (h : insert t key value = .ok t') : ¬ MemKey t key := by
+  intro hmem
+  rw [insert_present_key_fails hw hmem] at h
+  simp at h
+
+/-- The all-zero sentinel key is present in every well-formed tree, so key `0`
+can never be inserted. (`next_key == 0` is the "no successor" marker, so a real
+key `0` would break the encoding.) -/
+theorem zero_key_can_never_be_inserted {t : Tree} {value : Nat} (hw : Wf t) :
+    insert t 0 value = .error (.keyAlreadyExists 0) :=
+  insert_present_key_fails hw ⟨0, hw.size_pos, hw.sentinel⟩
+
+/-- ORDERED-SET INVARIANT PRESERVATION. Together with `wf_new` this is what lets
+a chain of insertions be reasoned about: every intermediate tree is `Wf`, so
+`insert_ok_implies_absent` applies at every step. -/
+theorem wf_insert {t t' : Tree} {key value : Nat} (hw : Wf t) (hkey : key < keyBound)
+    (hcap : t.size < t.capacity) (h : insert t key value = .ok t') : Wf t' := by
+  obtain ⟨low, hlow, rfl⟩ := insert_ok_iff.1 h
+  have hlt : low < t.size := low_index_lt hlow
+  have hbounds := is_low_leaf_iff.1 (low_index_is_low hlow)
+  have huniq := low_index_unique hlow
+  have habs : ¬ MemKey t key := by
+    intro hmem
+    rw [insert_present_key_fails hw hmem] at h
+    simp at h
+  have hkey0 : 0 < key := by omega
+  have hsize' : (insertResult t low key value).size = t.size + 1 := insert_result_size hlt
+  have hget := insert_result_get (t := t) (low := low) (key := key) (value := value) hlt
+  have hkeyold : ∀ {j : Nat}, j < t.size →
+      ((insertResult t low key value).getLeaf j).key = (t.getLeaf j).key :=
+    fun {_} hj => insert_result_old_key hlt hj
+  have hkeynew := insert_result_new_key (t := t) (low := low) (key := key) (value := value) hlt
+  have hmono : ∀ k, MemKey t k → MemKey (insertResult t low key value) k := by
+    intro k hk; exact (insert_key_set hlt).2 (Or.inl hk)
+  refine ⟨by omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · -- sentinel
+    rw [hkeyold hw.size_pos]
+    exact hw.sentinel
+  · -- in_range
+    intro i hi
+    rw [hsize'] at hi
+    by_cases hin : i = t.size
+    · subst hin
+      rw [hget, if_pos rfl, inserted_leaf_key, inserted_leaf_next_key]
+      exact ⟨hkey, (hw.in_range low hlt).2⟩
+    · have hi' : i < t.size := by omega
+      refine ⟨by rw [hkeyold hi']; exact (hw.in_range i hi').1, ?_⟩
+      rw [hget, if_neg hin]
+      by_cases hil : i = low
+      · rw [if_pos hil, new_low_leaf_next_key]; exact hkey
+      · rw [if_neg hil]; exact (hw.in_range i hi').2
+  · -- distinct
+    intro i j hi hj hij
+    rw [hsize'] at hi hj
+    by_cases hin : i = t.size <;> by_cases hjn : j = t.size
+    · rw [hin, hjn]
+    · exfalso
+      have hj' : j < t.size := by omega
+      rw [hin, hkeynew, hkeyold hj'] at hij
+      exact habs ⟨j, hj', hij.symm⟩
+    · exfalso
+      have hi' : i < t.size := by omega
+      rw [hjn, hkeynew, hkeyold hi'] at hij
+      exact habs ⟨i, hi', hij⟩
+    · have hi' : i < t.size := by omega
+      have hj' : j < t.size := by omega
+      rw [hkeyold hi', hkeyold hj'] at hij
+      exact hw.distinct i j hi' hj' hij
+  · -- succ_gt
+    intro i hi hne
+    rw [hsize'] at hi
+    by_cases hin : i = t.size
+    · subst hin
+      rw [hget, if_pos rfl] at hne ⊢
+      rw [inserted_leaf_next_key] at hne ⊢
+      rw [inserted_leaf_key]
+      rcases hbounds.2 with hup | hup
+      · exact hup
+      · exact absurd hup hne
+    · have hi' : i < t.size := by omega
+      rw [hkeyold hi']
+      rw [hget, if_neg hin] at hne ⊢
+      by_cases hil : i = low
+      · rw [if_pos hil] at hne ⊢
+        rw [new_low_leaf_next_key] at hne ⊢
+        rw [hil]
+        exact hbounds.1
+      · rw [if_neg hil] at hne ⊢
+        exact hw.succ_gt i hi' hne
+  · -- succ_mem
+    intro i hi hne
+    rw [hsize'] at hi
+    by_cases hin : i = t.size
+    · subst hin
+      rw [hget, if_pos rfl] at hne ⊢
+      rw [inserted_leaf_next_key] at hne ⊢
+      exact hmono _ (hw.succ_mem low hlt hne)
+    · have hi' : i < t.size := by omega
+      rw [hget, if_neg hin] at hne ⊢
+      by_cases hil : i = low
+      · rw [if_pos hil] at hne ⊢
+        rw [new_low_leaf_next_key] at hne ⊢
+        exact ⟨t.size, by rw [hsize']; omega, hkeynew⟩
+      · rw [if_neg hil] at hne ⊢
+        exact hmono _ (hw.succ_mem i hi' hne)
+  · -- dense
+    intro i j hi hj hlti
+    rw [hsize'] at hi hj
+    by_cases hjn : j = t.size
+    · -- inserting above i
+      subst hjn
+      rw [hkeynew] at hlti
+      have hin : i ≠ t.size := by
+        intro hc; rw [hc, hkeynew] at hlti; omega
+      have hi' : i < t.size := by omega
+      rw [hkeynew]
+      rw [hget, if_neg hin]
+      by_cases hil : i = low
+      · rw [if_pos hil, new_low_leaf_next_key]
+        exact ⟨by omega, Nat.le_refl _⟩
+      · rw [if_neg hil]
+        rw [hkeyold hi'] at hlti
+        have hnc : isLowLeaf key (t.getLeaf i) ≠ true := by
+          intro hc; exact hil (huniq i hi' hc)
+        have := is_low_leaf_iff (key := key) (L := t.getLeaf i)
+        by_cases hd : (t.getLeaf i).nextKey = 0
+        · exact absurd (is_low_leaf_iff.2 ⟨hlti, Or.inr hd⟩) hnc
+        · by_cases hd2 : key < (t.getLeaf i).nextKey
+          · exact absurd (is_low_leaf_iff.2 ⟨hlti, Or.inl hd2⟩) hnc
+          · exact ⟨hd, by omega⟩
+    · have hj' : j < t.size := by omega
+      rw [hkeyold hj'] at hlti ⊢
+      by_cases hin : i = t.size
+      · subst hin
+        rw [hkeynew] at hlti
+        rw [hget, if_pos rfl, inserted_leaf_next_key]
+        have hPj : (t.getLeaf low).key < (t.getLeaf j).key := by omega
+        exact hw.dense low j hlt hj' hPj
+      · have hi' : i < t.size := by omega
+        rw [hkeyold hi'] at hlti
+        rw [hget, if_neg hin]
+        by_cases hil : i = low
+        · rw [if_pos hil, new_low_leaf_next_key]
+          have hPj : (t.getLeaf low).key < (t.getLeaf j).key := by rw [← hil]; exact hlti
+          obtain ⟨hne, hle⟩ := hw.dense low j hlt hj' hPj
+          rcases hbounds.2 with hup | hup
+          · exact ⟨by omega, by omega⟩
+          · exact absurd hup hne
+        · rw [if_neg hil]
+          exact hw.dense i j hi' hj' hlti
+  · -- capacity
+    rw [hsize', Tree.capacity, insert_result_height]
+    exact hcap
 
 end Zkp.Implementation.IndexedMerkleTree
