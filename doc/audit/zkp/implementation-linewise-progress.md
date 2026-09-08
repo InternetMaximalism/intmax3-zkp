@@ -1,4 +1,4 @@
-# 実装の行対応 Lean 化 — 2026-09-07 作業記録
+# 実装の行対応 Lean 化 — 2026-09-08 作業記録
 
 ## 結論と対象
 
@@ -146,6 +146,77 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 実装に新たな盗難脆弱性を発見したという報告ではありません。
 
 ## 再検証
+
+### 2026-09-08：依存層と暗号層の翻訳、実在するテスト失敗 3 件
+
+- **125 Lean モジュール**を build。現行 **72 モジュール**、**470 reviewed-source hashes**、
+  **169 source maps** を検証して main guard・line guard とも成功。
+- 物理行分類：手書き翻訳 **31,085**、依存境界 **10,850**、非実行 **9,816**、
+  テスト専用 **23,834**、未翻訳 **41,783**。前回 checkpoint から翻訳が 19,450 → 31,085 に増加。
+- 追加 module は 15 件・約 1,790 定理です。木（Merkle / sparse / incremental / indexed）、
+  ethereum_types codec、common の値型と channel.rs、block 系の型、utils gadgets と constants、
+  Falcon（集約・core・vendor）、Regev（暗号化・transfer STARK・hash 署名）、木の具体化と
+  hash chain、MLE prover bridge です。
+
+**前提が実装から導出されたもの。**
+
+| 前提 | 結果 |
+|---|---|
+| nullifier freshness | `IndexedMerkleTree.accepted_insertion_implies_key_absent`。受理された挿入証明は key の不在を含意します。前提は Poseidon の衝突耐性（葉の 18 語符号化の単射性は証明済み）、順序集合不変条件（空木で成立・挿入で保存）、key の範囲の 3 つのみ。hash 仮定なしでも `insert_fails_iff_key_present` が成立します |
+| `select_vec` の選択意味論 | `UtilGadgets.select_vec_one_hot_selects_candidate`。SwitchBoard が仮定していた 4 積和選択を実装から証明。ただし one-hot 性は `select_vec` 自身では強制されません |
+| Regev の定数と符号化 | `RegevCore.constants_agree_with_decryption_gadget`。N=2048、q=2013265921、Δ=(q−1)/256 が回路側と一致。金額符号化は u64 上で単射 |
+| 木の高さと backing | `TreeInstances` が全 13 木を確定。既登録 module が固定する値との数値不一致はゼロ |
+| 定数 | `UtilGadgets` が constants.rs の全定数を固定。他 module の主張との不一致はゼロ |
+
+**リポジトリ自身のテスト失敗 3 件（CI は `cargo test --lib` を実行しないため未検出）。**
+
+1. **実在の不具合。** `common::channel_registration::tests::test_channel_reg_validate_rejects_noncanonical_identity_encodings` が失敗します。`ChannelRegRecord::validate` の非 canonical identity 拒否は到達不能で、`PoseidonHashOut::try_from(Bytes32)` が同じ 32/32 分割を組み直す全域関数であることが原因です。テストは正しい意図を主張しており、コード側の欠陥です。Lean 側でも
+   `ChannelRegChain.native_canonicality_check_cannot_fail` と
+   `BlockTypes.canonicality_rejections_come_only_from_the_callback` が独立に同じ結論に達しています。
+2. **古いテスト。** `common::balance_state::tests::balance_state_validate_multi_n` と
+   `balance_state_delegate_count_regions_and_h1` は member_count 16 が通ることを主張しますが、
+   `fd467ea`（sig-cluster を 8 に制限）以降 2..=8 が正です。テスト側の更新漏れです。
+3. **CI の盲点そのもの。** `.github/workflows/ci.yml` は個別の統合テストのみを実行し `--lib` を
+   一度も走らせません。上記 3 件はいずれもこの盲点に落ちています。なお lib 全体の実行は
+   重い回路テストで OOM により SIGKILL されるため、測定系を除いた分割実行が必要です。
+
+**暗号層で確定した認可の連鎖（人間の判断が必要）。**
+
+- **Falcon 検証器は vendor 木に存在しません。** `src/falcon_sig/vendor/` に `fn verify` は 0 件で、
+  検証は `mod.rs` と回路側 `batch.rs` にあります。復号器が許す最大係数 2047 が 512 個並ぶと
+  二乗ノルムは約 21.5 億で `beta^2 = 34,034,726` を大きく超えます
+  （`FalconVendor.decode_range_does_not_imply_norm_bound`）。境界検査は呼び出し側の責務です。
+- **回路 gadget が署名を検証するかは、gadget 自身が制約しない 1 本の wire 次第です。**
+  wire が 1 なら native の述語全体を検証し、0 なら鍵 commitment と代数関係のみが残り、
+  方式唯一の受理判定であるノルム境界検査が定数 0 の範囲検査に置き換わります
+  （`FalconCore.padding_slot_norm_gate_is_trivial`）。close / cancel-close は `member_count` に束縛します。
+- **受理された集約証明は署名者の相異性も member 集合への所属も示しません。**
+  署名者数が実際に受理した slot 数と一致すること、鍵リストが左詰めで残りが厳密に零であること、
+  全 slot が同一メッセージに対して評価されたことは証明されています
+  （`FalconAggregate.agg_tree_ok_characterization`）。
+- **`agg_list.rs:329` の `range_check(count_minus_one, 4)` は署名者数 1〜16 を許します。**
+  上限 8 は集約回路の構造からのみ来ており、この検査からは来ていません。
+- **hash 署名は再生可能なトークンです。** 検証が確立するのは公開値 `pk_b` の Poseidon2 原像の知識と
+  メッセージの Fiat-Shamir 束縛だけで、公開値ベクタに nonce も期限も含まれません。健全性には
+  依拠側が `pk_b` を登録済み member leaf から解決し、IMPA digest を一意にして高々一度受理する
+  ことが必要ですが、どちらも当該ファイルでは強制されていません。
+- **transfer STARK の桁上げ制約族は整数上で健全です。** `value(before) = value(after) + value(delta)`
+  と underflow の不在を field 制約から導出しています（`RegevProofs.conservation_over_integers`）。
+
+**その他の source 上の観察。**
+
+- 葉と節点で domain 分離がなく、高さ 32 の空 SendTree と空 TxV2Tree の root が hash 仮定なしで一致します
+  （`TreeInstances.empty_send_tree_root_equals_empty_tx_v2_tree_root`）。分離は消費側の回路に依存します。
+- `channel_tree.rs` のコメントは member_pubkeys_root を 1024 slot と書きますが、実際は高さ 3 の 8 slot です。
+- `channel.rs` の `validate()` は構造のみを制約し、両 root を保ったまま鍵集合全体を差し替えても通ります
+  （`ChannelTypes.validate_accepts_substituted_member_set`）。署名検証器は blob の内容に反応しません。
+- domain 非衝突の検査は test 専用かつ release で無効です。Lean 側で 63 個の値の非衝突を証明しました。
+- `U32LimbTargetTrait::get_witness` は field wire を 2^32 で黙って切り捨てます。
+- sparse 木の範囲外 index 更新は葉を記録しつつ root を変えません。
+- retired な member-set-update 経路は既定 build では compile されません（`deprecated-msu` feature）。
+  ただしこれは manifest の記述のモデル化であり、経路が安全であるという主張ではありません。
+- `agg.rs` のコメントは `AGG_LEVELS = 4`・公開入力 137 と書きますが、コードは 3 と 73 です。
+  `batch.rs:695` の assert メッセージも 137 のままで、これは assert 発火時に運用者が読む文言です。
 
 ### 2026-09-07：全 core file 対応・信頼境界の集約・全 entrypoint 合成の checkpoint
 
@@ -383,8 +454,11 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 
 ## 続きで必要なこと
 
-0. **core 71 file の対応表は完了しました（未対応 core 0 行）。** 残る主作業は依存側 72,211 行の
-   翻訳です。Poseidon / keccak / Merkle / Falcon / Regev の実装が現在の opaque callback を
+0. **core 71 file と依存側の主要部の対応表が完了しました。** 未翻訳は 41,783 行で、
+   その大半は MLE サブモジュール（34,000 行弱）です。残る主作業はそこと、
+   `channel_registration` の到達不能な canonicality 検査の修正、`balance_state` の古いテスト 2 件の
+   更新、そして CI に `cargo test --lib` を追加することです。
+1. （履歴）残る依存側の翻訳。Poseidon / keccak / Merkle / Falcon / Regev の実装が現在の opaque callback を
    置き換えるまで、hash binding と署名妥当性は前提のままです。
 1. （履歴）残る validity / deposit / transfer / withdrawal 回路と、Balance の send / receive 各回路の
    手書き翻訳を追加する。`state_update_verifier.rs` と `decryption_gadget.rs` の本体、

@@ -1073,77 +1073,77 @@
       "sha256": "673f2c3559c4b6e4838ccc8ab82f739a92af1d0aa66fc65c421955e7bc267947",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/asset-tree.json"
     },
     {
       "path": "src/common/trees/channel_tree.rs",
       "sha256": "97506bd8355cef6e16b692d1c0c575525ac43244c6d9eb456d1c13bb16845e89",
       "lines": 295,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/channel-tree.json"
     },
     {
       "path": "src/common/trees/deposit_tree.rs",
       "sha256": "31dc96e2fb61f0d95004804343292e80e3bb4cc38a24e3acb718d6dab372350b",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deposit-tree.json"
     },
     {
       "path": "src/common/trees/key_tree.rs",
       "sha256": "a8df3f844b9cf173db9174d74ab9bac95aebfae1b4143ee25a652c7b18ab9577",
       "lines": 190,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/key-tree.json"
     },
     {
       "path": "src/common/trees/mod.rs",
       "sha256": "910c0c1eaa5a427a099a8d4c278b864f4b6f6813e6513ec8c46e0094af49b2b7",
       "lines": 10,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/common-trees-mod.json"
     },
     {
       "path": "src/common/trees/nullifier_tree.rs",
       "sha256": "6f0a2467c6a98d211a2e12e811a9c505b7a2ab2459c310e497f50160b775bd87",
       "lines": 159,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/nullifier-tree.json"
     },
     {
       "path": "src/common/trees/public_state_tree.rs",
       "sha256": "8d5b0652e8bf2e61d272192c5df3ae3b47cae874c8ba7288f50774fb8a4b0e0b",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/public-state-tree.json"
     },
     {
       "path": "src/common/trees/sent_tx_tree.rs",
       "sha256": "a4f2585dd5cc8873b218fb7a354676d41fcc183d1559818b9a833a1f9a2871f9",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/sent-tx-tree.json"
     },
     {
       "path": "src/common/trees/transfer_tree.rs",
       "sha256": "bb6061dd9b64c13e8292aeedccb6575845ad902ac9f386d2f212801db6f597ed",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/transfer-tree.json"
     },
     {
       "path": "src/common/trees/tx_tree.rs",
       "sha256": "491d462b64c8bd5d84fb4004cd5f43f057ae8687afbbe120f73570199dfe108b",
       "lines": 17,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/tx-tree.json"
     },
     {
       "path": "src/common/trees/tx_v2_tree.rs",
       "sha256": "8dcdcf6fd0028e2265543a19e4e5cd42aa272d463c45749d0aea638c1ade6ef9",
       "lines": 90,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/tx-v2-tree.json"
     },
     {
       "path": "src/common/tx.rs",
@@ -1178,28 +1178,28 @@
       "sha256": "b2b1c786dd58f11784fa540d7409e34039cde96fa3ecf2d319ad8de06e323121",
       "lines": 597,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/msu-circuit.json"
     },
     {
       "path": "src/deprecated/member_set_update/generate_fixture.rs",
       "sha256": "920399e3969ca2f05b591521e53f27a8ca982348ae5d54b06e4408450f01b65f",
       "lines": 203,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/msu-generate-fixture.json"
     },
     {
       "path": "src/deprecated/member_set_update/mod.rs",
       "sha256": "1cc1a23c4f4f9e48ba041bf76cf033d258f6aa70c81e601b67d8bc3d21941271",
       "lines": 8,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/msu-mod.json"
     },
     {
       "path": "src/deprecated/mod.rs",
       "sha256": "6a2672468fb00f3a903458e5bf60e04c92f9c4691199e0f80858069f645a0240",
       "lines": 6,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/deprecated-mod.json"
     },
     {
       "path": "src/ethereum_types/address.rs",
@@ -1262,133 +1262,133 @@
       "sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
       "lines": 1201,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-agg.json"
     },
     {
       "path": "src/falcon_sig/agg_list.rs",
       "sha256": "f68281dd2ea7f6bbdde2a92cdb9e9733657486af48852baad851d76b32e0232e",
       "lines": 912,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-agg-list.json"
     },
     {
       "path": "src/falcon_sig/batch.rs",
       "sha256": "a04a278402fea31288431979182bedaf113d268c26734b4316cf9f18fd852a09",
       "lines": 1170,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-batch.json"
     },
     {
       "path": "src/falcon_sig/compat.rs",
       "sha256": "8f27826819c899bfd36e723d5c4c2612883d4fa47bcc3eec7977b3324627e55f",
       "lines": 212,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-compat.json"
     },
     {
       "path": "src/falcon_sig/gadget.rs",
       "sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
       "lines": 1766,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-gadget.json"
     },
     {
       "path": "src/falcon_sig/list.rs",
       "sha256": "7560fd10bc072ed4751b6d2fdb9ea3c09c5a7ba09e680d2559547b8ce7975a45",
       "lines": 528,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-list.json"
     },
     {
       "path": "src/falcon_sig/mod.rs",
       "sha256": "af39be10fb4f11df694a46b5f3e226255e7164c914d89c1fb47bb3a1de9c0f7c",
       "lines": 1300,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-mod.json"
     },
     {
       "path": "src/falcon_sig/vendor/hash_to_point.rs",
       "sha256": "d3a0944ec37bb8d2214f2cb9acc92b36638d01751508a7138ff6ba48009915ba",
       "lines": 101,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-hash-to-point.json"
     },
     {
       "path": "src/falcon_sig/vendor/keys/mod.rs",
       "sha256": "d8d4a83bc1eba3ce0c464ae28d3b4fb58afda14c25050b8d7919d2e0b7dddd38",
       "lines": 15,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-keys-mod.json"
     },
     {
       "path": "src/falcon_sig/vendor/keys/public_key.rs",
       "sha256": "427c573daef5fedffeb83d3fc79b8b75f6185abc08fbeb230d229936aa9730a7",
       "lines": 122,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-public-key.json"
     },
     {
       "path": "src/falcon_sig/vendor/keys/secret_key.rs",
       "sha256": "f4006db53dbf5e89ae81a470511d029e49e376386ca15063245bfb54fff4e4ff",
       "lines": 457,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-secret-key.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/ffsampling.rs",
       "sha256": "f18b3489c8dab056a54eeaf7a3bdc93fd59b04e92e710159072bca38712e6347",
       "lines": 329,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-ffsampling.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/fft.rs",
       "sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd",
       "lines": 1917,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-fft.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/field.rs",
       "sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20",
       "lines": 174,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-field.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/mod.rs",
       "sha256": "ff44e7d17138ad4fddc8c3cc1607221a714fd86c1d177fb566a6f97642c59f5c",
       "lines": 326,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-math-mod.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/polynomial.rs",
       "sha256": "a2616bf7ca36c920b34b471ce37d09dd5336900ab4d3c506888961b3f0c5d82a",
       "lines": 685,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-polynomial.json"
     },
     {
       "path": "src/falcon_sig/vendor/math/samplerz.rs",
       "sha256": "8d738ed329af385159161461c865d4c92a2c1438f267d60595ba9eeb707ac19a",
       "lines": 172,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-samplerz.json"
     },
     {
       "path": "src/falcon_sig/vendor/mod.rs",
       "sha256": "51630877113af960074ae9508fb679067f5fa0ca54dbf4a9441f2ff5b6291058",
       "lines": 141,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-mod.json"
     },
     {
       "path": "src/falcon_sig/vendor/signature.rs",
       "sha256": "eb8ed7567777196558a96dfee98af0443241191582a750f42e4bb81a2b3f3a7f",
       "lines": 352,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/falcon-vendor-signature.json"
     },
     {
       "path": "src/poseidon_sig/list.rs",
@@ -1409,42 +1409,42 @@
       "sha256": "1257e98bf94edade055a9b8c3a52904a85fe7f99a9c095e865af1db65e906003",
       "lines": 439,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-encrypt.json"
     },
     {
       "path": "src/regev/hash_sig.rs",
       "sha256": "1e331db3ad612cdd98512d1c9725f536b9dbdf2115ba54d1cefc2c4988370753",
       "lines": 1313,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-hash-sig.json"
     },
     {
       "path": "src/regev/keys.rs",
       "sha256": "ce8e44d82ee9c1b496e2f8776c7aa00cd7fad6ff3ccc92a491a9aed2b2eb41ef",
       "lines": 205,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-keys.json"
     },
     {
       "path": "src/regev/mod.rs",
       "sha256": "d1ec8aecd6cd4b8e4b23b34a41c90faeda3e2e72d7cac1523e932f5766d83d14",
       "lines": 49,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-mod.json"
     },
     {
       "path": "src/regev/params.rs",
       "sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
       "lines": 84,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-params.json"
     },
     {
       "path": "src/regev/transfer_stark.rs",
       "sha256": "497240642178a23e06ddab549411772046d5916f7bec4ea2fdbd67369b25ae08",
       "lines": 3206,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/regev-transfer-stark.json"
     },
     {
       "path": "src/utils/conversion.rs",
@@ -1479,42 +1479,42 @@
       "sha256": "a13b3564666683588f94322c74b4b6600d2ae5bfa241c0baafc8ed0d61e43355",
       "lines": 164,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/chain-end-circuit.json"
     },
     {
       "path": "src/utils/hash_chain/cyclic_chain_circuit.rs",
       "sha256": "74c4367d3377e88c0629b52cccd9868e9bfb1729c209320965218052246e4133",
       "lines": 149,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/cyclic-chain-circuit.json"
     },
     {
       "path": "src/utils/hash_chain/error.rs",
       "sha256": "5b18a2770c54c55c531a3f97c8a74a66f50de18c99f77cc8fd7551cf525ee54c",
       "lines": 24,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/hash-chain-error.json"
     },
     {
       "path": "src/utils/hash_chain/hash_chain_processor.rs",
       "sha256": "ed24520a2fbd8a9d844a65b3cbae6d2971ca8656704ef6ddfcd0ce35baa08a5f",
       "lines": 89,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/hash-chain-processor.json"
     },
     {
       "path": "src/utils/hash_chain/hash_inner_circuit.rs",
       "sha256": "73bcf2c90b32aa6a1a33af877306ee146c61f9b74ddc940f58ebd1d9394e5429",
       "lines": 70,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/hash-inner-circuit.json"
     },
     {
       "path": "src/utils/hash_chain/mod.rs",
       "sha256": "9ed4b4b9871dd955bb3bcd14b1f27da8fd514b732012a06d40313fca80cd6167",
       "lines": 42,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/hash-chain-mod.json"
     },
     {
       "path": "src/utils/leafable.rs",
@@ -1542,7 +1542,7 @@
       "sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
       "lines": 1399,
       "category": "dependency",
-      "line_map": null
+      "line_map": "doc/audit/zkp/line-map/mle-prover.json"
     },
     {
       "path": "src/utils/mod.rs",

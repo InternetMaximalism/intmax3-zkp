@@ -103,3 +103,10 @@ import Zkp.Implementation.IndexedMerkleTree
 import Zkp.Implementation.MerkleTrees
 import Zkp.Implementation.SparseTrees
 import Zkp.Implementation.UtilGadgets
+import Zkp.Implementation.FalconAggregate
+import Zkp.Implementation.FalconCore
+import Zkp.Implementation.FalconVendor
+import Zkp.Implementation.MleProverBridge
+import Zkp.Implementation.RegevCore
+import Zkp.Implementation.RegevProofs
+import Zkp.Implementation.TreeInstances
