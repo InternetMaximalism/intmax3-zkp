@@ -365,32 +365,32 @@ theorem update_up_eq_fold (hs : HashSpec V H) (height index : Nat) (zeros : List
     have hcomb : combineAt hs height index zeros nodes lvl h
         = combineAt hs height index zeros orig lvl h := by
       simp only [combineAt, node_at_congr hs height zeros nodes orig _ hsib]
-    set h' := combineAt hs height index zeros nodes lvl h with hh'
-    have hwrote' : setNode nodes (ancPath height index (lvl + 1)) h'
-        (ancPath height index (lvl + 1)) = some h' := set_node_eq _ _ _
+    have hwrote' : setNode nodes (ancPath height index (lvl + 1))
+        (combineAt hs height index zeros nodes lvl h) (ancPath height index (lvl + 1))
+        = some (combineAt hs height index zeros nodes lvl h) := set_node_eq _ _ _
     have hagree' : ∀ q, (∀ k, k ≤ lvl + 1 → q ≠ ancPath height index k) →
-        setNode nodes (ancPath height index (lvl + 1)) h' q = orig q := by
+        setNode nodes (ancPath height index (lvl + 1))
+          (combineAt hs height index zeros nodes lvl h) q = orig q := by
       intro q hq
       have hne : q ≠ ancPath height index (lvl + 1) := hq (lvl + 1) (by omega)
-      rw [set_node_ne nodes _ q h' hne]
+      rw [set_node_ne nodes _ q _ hne]
       exact hagree q (fun k hk => hq k (by omega))
-    have hIH := ih (lvl + 1) h' _ (by omega) hwrote' hagree'
+    have hIH := ih (lvl + 1) (combineAt hs height index zeros nodes lvl h) _
+      (by omega) hwrote' hagree'
     have hlevel : lvl + (fuel + 1) = lvl + 1 + fuel := by omega
     have hdiv : index / 2 ^ lvl / 2 = index / 2 ^ (lvl + 1) := by
       rw [Nat.div_div_eq_div_mul, ← Nat.pow_succ]
-    calc
-      updateUp hs height index zeros (fuel + 1) lvl h nodes
-          (ancPath height index (lvl + (fuel + 1)))
-          = updateUp hs height index zeros fuel (lvl + 1) h'
-              (setNode nodes (ancPath height index (lvl + 1)) h')
-              (ancPath height index (lvl + 1 + fuel)) := by
-            rw [hlevel]; rfl
-      _ = some (proofFold hs (proveLoop hs height index zeros orig fuel (lvl + 1)) h'
-            (index / 2 ^ (lvl + 1))) := hIH
-      _ = some (proofFold hs (proveLoop hs height index zeros orig (fuel + 1) lvl) h
-            (index / 2 ^ lvl)) := by
-            simp only [proveLoop, proofFold, hdiv, hh', hcomb, combineAt]
-            split <;> rfl
+    rw [hlevel]
+    have hstep : updateUp hs height index zeros (fuel + 1) lvl h nodes
+          (ancPath height index (lvl + 1 + fuel))
+        = updateUp hs height index zeros fuel (lvl + 1)
+            (combineAt hs height index zeros nodes lvl h)
+            (setNode nodes (ancPath height index (lvl + 1))
+              (combineAt hs height index zeros nodes lvl h))
+            (ancPath height index (lvl + 1 + fuel)) := by
+      simp only [updateUp]
+    rw [hstep, hIH, hcomb, ← hdiv]
+    simp only [proveLoop, proofFold, combineAt]
 
 /-- `update_leaf` touches no node outside the ancestor path of its own index. -/
 theorem mt_update_leaf_frame (hs : HashSpec V H) (t : MTree H) (index : Nat) (lh : H)
@@ -455,8 +455,10 @@ theorem mt_update_leaf_out_of_range_root (hs : HashSpec V H) (t : MTree H)
     · have hlen := congrArg BitPath.length hcontra
       simp [BitPath.rootPath, ancPath] at hlen
       omega
-  have := mt_update_leaf_frame hs t index lh BitPath.rootPath hq
-  simp [mtRoot, mtNode, nodeAt, this]
+  have hframe := mt_update_leaf_frame hs t index lh BitPath.rootPath hq
+  have hz : (mtUpdateLeaf hs t index lh).zeros = t.zeros := rfl
+  have hh : (mtUpdateLeaf hs t index lh).height = t.height := rfl
+  simp [mtRoot, mtNode, nodeAt, hframe, hz, hh]
 
 /-! ## Empty trees: the ladder is the whole state -/
 
@@ -558,7 +560,8 @@ theorem find_insert_ne (l : List (Nat × V)) (k j : Nat) (v : V) (hj : j ≠ k) 
     · subst h
       simp [insertEntry, findEntry, Ne.symm hj]
     · by_cases h2 : k' = j
-      · simp [insertEntry, findEntry, h, h2]
+      · subst h2
+        simp [insertEntry, findEntry, h]
       · simp [insertEntry, findEntry, h, h2, ih]
 
 theorem length_insert_present (l : List (Nat × V)) (k : Nat) (v : V) (w : V)
@@ -854,10 +857,12 @@ theorem inc_push_root (hs : HashSpec V H) (t t' : IncTree V H) (leaf : V)
 theorem inc_push_preserves_ladder (hs : HashSpec V H) (t t' : IncTree V H) (leaf : V)
     (h : incPush hs t leaf = .ok t') : t'.tree.zeros = t.tree.zeros := by
   rw [inc_push_eq hs t t' leaf h]
+  rfl
 
 theorem inc_push_preserves_height (hs : HashSpec V H) (t t' : IncTree V H) (leaf : V)
     (h : incPush hs t leaf = .ok t') : incHeight t' = incHeight t := by
   rw [inc_push_eq hs t t' leaf h]
+  rfl
 
 /-- A full tree refuses further appends instead of wrapping around. -/
 theorem inc_push_full (hs : HashSpec V H) (t : IncTree V H) (leaf : V)
@@ -883,6 +888,11 @@ theorem inc_update_len (hs : HashSpec V H) (t t' : IncTree V H) (index : Nat) (l
 
 The following is not a defect of the model, it is the point of the boundary. -/
 
+/-- A hash callback that collapses everything to one value. Only used to exhibit
+the missing premise. -/
+def constSpec : HashSpec Nat Nat :=
+  { emptyLeaf := 0, leafHash := fun _ => 0, twoToOne := fun _ _ => 0 }
+
 /-- With a constant hash callback, a Merkle proof verifies for a leaf that was
 never inserted, at an index that was never written, on a fresh tree. Every
 membership-flavoured reading of `proofVerify` therefore REQUIRES collision
@@ -892,8 +902,11 @@ theorem constant_hash_forges_membership :
       forged ≠ hs.emptyLeaf ∧
       proofVerify hs (sparseProve hs (sparseNew hs height : SparseTree Nat Nat) index)
         forged index (sparseRoot hs (sparseNew hs height : SparseTree Nat Nat)) = .ok () := by
-  refine ⟨{ emptyLeaf := 0, leafHash := fun _ => 0, twoToOne := fun _ _ => 0 }, 3, 5, 1,
-    by decide, by decide⟩
+  refine ⟨constSpec, 3, 5, 1, by decide, ?_⟩
+  have hroot : proofRoot constSpec
+      (sparseProve constSpec (sparseNew constSpec 3 : SparseTree Nat Nat) 5) 1 5
+      = sparseRoot constSpec (sparseNew constSpec 3 : SparseTree Nat Nat) := by decide
+  simp [proofVerify, hroot]
 
 /-! ## A concrete non-vacuous trace
 
@@ -920,13 +933,15 @@ the live root. -/
 theorem demo_proof_verifies :
     proofVerify demoSpec (sparseProve demoSpec demoTree 5)
       (sparseGetLeaf demoSpec demoTree 5) 5 (sparseRoot demoSpec demoTree) = .ok () := by
-  decide
+  have hroot : proofRoot demoSpec (sparseProve demoSpec demoTree 5)
+      (sparseGetLeaf demoSpec demoTree 5) 5 = sparseRoot demoSpec demoTree := by decide
+  simp [proofVerify, hroot]
 
 /-- The same tree, reached by `push` on the incremental type. -/
 def demoIncTree : Except IncError (IncTree Nat Nat) := do
   let t ← incPush demoSpec (incNew demoSpec 3) 11
   incPush demoSpec t 12
 
-theorem demo_inc_len : (demoIncTree.map incLen) = .ok 2 := by decide
+theorem demo_inc_len : (demoIncTree.toOption.map incLen) = some 2 := by decide
 
 end Zkp.Implementation.SparseTrees

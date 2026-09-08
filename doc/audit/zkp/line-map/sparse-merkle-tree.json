@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/sparse_merkle_tree.rs",
+  "source_sha256": "5e93681dc2389a77faee7f1500d6b24be769d12a3f4c687fbf74edc3d0d829ac",
+  "source_lines": 799,
+  "module": "Zkp.Implementation.SparseTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/SparseTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "Imports: std HashMap, plonky2 field/builder/witness types, serde, the private MerkleTree/MerkleProof/BitPath of merkle_tree.rs, and the Leafable/LeafableTarget traits",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.HashSpec",
+        "Zkp.Implementation.SparseTrees.MTree",
+        "Zkp.Implementation.SparseTrees.BitPath"
+      ],
+      "theorems": [],
+      "note": "V::empty_leaf/hash and LeafableHasher::two_to_one become the opaque HashSpec callbacks; the backing MerkleTree and BitPath are re-modelled locally (MTree, BitPath) rather than imported. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 23,
+      "end": 25,
+      "status": "non-executable",
+      "label": "Doc comment and #[derive(Debug, Clone)]",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines and a derive attribute carry no modelled behaviour."
+    },
+    {
+      "start": 26,
+      "end": 29,
+      "status": "translated",
+      "label": "struct SparseMerkleTree { merkle_tree, leaves: HashMap<u64, V> }",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.SparseTree",
+        "Zkp.Implementation.SparseTrees.findEntry",
+        "Zkp.Implementation.SparseTrees.insertEntry"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.find_insert_eq",
+        "Zkp.Implementation.SparseTrees.find_insert_ne",
+        "Zkp.Implementation.SparseTrees.length_insert_present",
+        "Zkp.Implementation.SparseTrees.length_insert_absent"
+      ],
+      "note": "The HashMap is modelled by an insert-or-replace association list, faithful for len/is_empty and lookup but not for iteration order. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 30,
+      "end": 31,
+      "status": "non-executable",
+      "label": "Blank line and inherent impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 32,
+      "end": 39,
+      "status": "translated",
+      "label": "SparseMerkleTree::new(height): builds the backing tree (which caches the zero-hash ladder) and an empty leaf map",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.sparseNew",
+        "Zkp.Implementation.SparseTrees.mtNew",
+        "Zkp.Implementation.SparseTrees.ladder",
+        "Zkp.Implementation.SparseTrees.ladderFrom",
+        "Zkp.Implementation.SparseTrees.zeroAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.ladder_length_pinned",
+        "Zkp.Implementation.SparseTrees.ladder_get",
+        "Zkp.Implementation.SparseTrees.zero_at_succ",
+        "Zkp.Implementation.SparseTrees.mt_new_root",
+        "Zkp.Implementation.SparseTrees.ladder_prefix_agreement",
+        "Zkp.Implementation.SparseTrees.sparse_new_len",
+        "Zkp.Implementation.SparseTrees.sparse_new_is_empty"
+      ],
+      "note": "The empty-subtree root ladder built inside MerkleTree::new is modelled as the pure function zeroAt of the level; height+1 entries. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 40,
+      "end": 66,
+      "status": "translated",
+      "label": "Accessors: height, get_leaf (absent key returns V::empty_leaf), get_root, leaves, len, is_empty",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.sparseHeight",
+        "Zkp.Implementation.SparseTrees.sparseGetLeaf",
+        "Zkp.Implementation.SparseTrees.sparseRoot",
+        "Zkp.Implementation.SparseTrees.sparseLen",
+        "Zkp.Implementation.SparseTrees.sparseIsEmpty",
+        "Zkp.Implementation.SparseTrees.mtRoot",
+        "Zkp.Implementation.SparseTrees.mtNode",
+        "Zkp.Implementation.SparseTrees.nodeAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.sparse_get_leaf_absent",
+        "Zkp.Implementation.SparseTrees.sparse_new_get_leaf",
+        "Zkp.Implementation.SparseTrees.sparse_new_height",
+        "Zkp.Implementation.SparseTrees.mt_new_node_absent",
+        "Zkp.Implementation.SparseTrees.demo_get_written",
+        "Zkp.Implementation.SparseTrees.demo_get_absent",
+        "Zkp.Implementation.SparseTrees.demo_len"
+      ],
+      "note": "get_leaf cannot distinguish an unwritten key from a key explicitly set to the empty leaf; get_root reads the BitPath::default() slot and falls back to the cached ladder. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 67,
+      "end": 72,
+      "status": "translated",
+      "label": "SparseMerkleTree::update(index, leaf): update_leaf on the backing tree, then leaves.insert",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.sparseUpdate",
+        "Zkp.Implementation.SparseTrees.mtUpdateLeaf",
+        "Zkp.Implementation.SparseTrees.updateUp",
+        "Zkp.Implementation.SparseTrees.combineAt",
+        "Zkp.Implementation.SparseTrees.setNode",
+        "Zkp.Implementation.SparseTrees.ancPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.sparse_update_get_leaf",
+        "Zkp.Implementation.SparseTrees.sparse_update_other_leaf",
+        "Zkp.Implementation.SparseTrees.sparse_update_node_frame",
+        "Zkp.Implementation.SparseTrees.sparse_update_root",
+        "Zkp.Implementation.SparseTrees.sparse_update_len_present",
+        "Zkp.Implementation.SparseTrees.sparse_update_len_absent",
+        "Zkp.Implementation.SparseTrees.sparse_update_preserves_ladder",
+        "Zkp.Implementation.SparseTrees.sparse_update_preserves_height",
+        "Zkp.Implementation.SparseTrees.sparse_update_out_of_range_root_unchanged",
+        "Zkp.Implementation.SparseTrees.sparse_update_out_of_range_leaf_recorded",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_frame",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_root",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_out_of_range_root",
+        "Zkp.Implementation.SparseTrees.update_up_frame",
+        "Zkp.Implementation.SparseTrees.update_up_eq_fold",
+        "Zkp.Implementation.SparseTrees.anc_sibling_ne_anc",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_preserves_zeros",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_preserves_height",
+        "Zkp.Implementation.SparseTrees.anc_path_zero",
+        "Zkp.Implementation.SparseTrees.anc_path_length",
+        "Zkp.Implementation.SparseTrees.set_node_eq",
+        "Zkp.Implementation.SparseTrees.set_node_ne",
+        "Zkp.Implementation.SparseTrees.node_at_congr"
+      ],
+      "note": "No bound on index is checked here or in update_leaf; the frame theorems and the out-of-range theorems are structural facts about which map slots move. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 73,
+      "end": 75,
+      "status": "translated",
+      "label": "SparseMerkleTree::prove(index): wraps MerkleTree::prove, sibling list bottom-up",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.sparseProve",
+        "Zkp.Implementation.SparseTrees.mtProve",
+        "Zkp.Implementation.SparseTrees.proveLoop"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.prove_length_pinned",
+        "Zkp.Implementation.SparseTrees.prove_loop_length",
+        "Zkp.Implementation.SparseTrees.sparse_new_prove",
+        "Zkp.Implementation.SparseTrees.mt_new_prove",
+        "Zkp.Implementation.SparseTrees.prove_loop_new"
+      ],
+      "note": "prove succeeds for absent keys and for out-of-range indices; on a fresh tree it returns exactly the cached ladder. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 76,
+      "end": 78,
+      "status": "non-executable",
+      "label": "Closing brace, blank line, #[derive(Debug, Clone)]",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 79,
+      "end": 102,
+      "status": "dependency-boundary",
+      "label": "SparseMerkleProof newtype over MerkleProof plus the dummy / get_root / verify / from_siblings delegations",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.proofFold",
+        "Zkp.Implementation.SparseTrees.proofRoot",
+        "Zkp.Implementation.SparseTrees.proofVerify",
+        "Zkp.Implementation.SparseTrees.proofDummy",
+        "Zkp.Implementation.SparseTrees.ProofError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.proof_dummy_length",
+        "Zkp.Implementation.SparseTrees.sparse_new_absent_proof_verifies",
+        "Zkp.Implementation.SparseTrees.constant_hash_forges_membership",
+        "Zkp.Implementation.SparseTrees.demo_proof_length",
+        "Zkp.Implementation.SparseTrees.demo_proof_verifies",
+        "Zkp.Implementation.SparseTrees.fold_zero_siblings"
+      ],
+      "note": "Every method here is a one-line delegation whose semantics lives in merkle_tree.rs; the local re-model implements the delegated fold and root comparison, and its agreement with the real MerkleProof is not proved. The verification theorems here are about the interface only: verification is a hash comparison and implies membership only under collision resistance, which constant_hash_forges_membership shows is genuinely required."
+    },
+    {
+      "start": 103,
+      "end": 127,
+      "status": "untranslated",
+      "label": "Serialize / Deserialize impls for SparseMerkleProof (raw sibling vector)",
+      "declarations": [],
+      "theorems": [],
+      "note": "The serde wire format, its error handling and the length of the deserialized sibling vector are not modelled; a deserialized proof of the wrong length is not ruled out here."
+    },
+    {
+      "start": 128,
+      "end": 208,
+      "status": "untranslated",
+      "label": "SparseMerkleProofTarget: in-circuit proof target, new / constant / set_witness / get_root / verify / conditional_verify",
+      "declarations": [],
+      "theorems": [],
+      "note": "plonky2 CircuitBuilder gate emission is not modelled at all. Nothing in this module constrains an arbitrary in-circuit witness; the module covers only the native path."
+    },
+    {
+      "start": 209,
+      "end": 212,
+      "status": "non-executable",
+      "label": "Blank line, `// serialization` comment, derive and serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 213,
+      "end": 233,
+      "status": "translated",
+      "label": "SparseMerkleTreePacked plus pack / unpack (unpack replays update for every stored entry)",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.sparsePack",
+        "Zkp.Implementation.SparseTrees.sparseUnpack"
+      ],
+      "theorems": [],
+      "note": "pack/unpack are modelled as a height/entry-list pair and a fold of sparseUpdate; the HashMap iteration order that decides the packed order is not modelled, and no round-trip theorem is claimed. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 234,
+      "end": 254,
+      "status": "untranslated",
+      "label": "Serialize / Deserialize impls for SparseMerkleTree",
+      "declarations": [],
+      "theorems": [],
+      "note": "serde plumbing; the wire format is not modelled."
+    },
+    {
+      "start": 255,
+      "end": 255,
+      "status": "non-executable",
+      "label": "Blank line before the test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 256,
+      "end": 799,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: basic, circuit, serialization, new, height, get_leaf, get_root, leaves, len/is_empty, update, prove, proof helpers and edge cases",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code is not part of the modelled production behaviour. The model does mirror two of the properties these tests exercise (absent keys read as the empty leaf, and a fresh tree's proof for a non-existent leaf verifies), but the tests themselves are not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "backing-merkle-tree-remodel",
+      "obligation": "MTree/BitPath/updateUp/proveLoop are a handwritten local re-model of the private MerkleTree and BitPath of src/utils/trees/merkle_tree.rs and src/utils/trees/bit_path.rs. That the re-model agrees with those files (and with the separate Zkp.Implementation.MerkleTrees module, which is deliberately not imported) is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "hash-collision-resistance",
+      "obligation": "The hash is an opaque callback. No theorem here says a verifying Merkle proof implies membership, that distinct leaf sets have distinct roots, or that a changed root implies a changed leaf. Those require collision resistance of the concrete Poseidon instance; constant_hash_forges_membership exhibits a callback under which they fail.",
+      "discharged": false
+    },
+    {
+      "name": "leafable-trait",
+      "obligation": "V::empty_leaf(), Leafable::hash and LeafableHasher::two_to_one are modelled as arbitrary functions. No property of the concrete Bytes32/Poseidon instances (domain separation, non-triviality of the empty leaf, agreement between native and in-circuit hashing) is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "u64-index-arithmetic",
+      "obligation": "Indices and BitPath::value are u64 in Rust and Nat here; the low-bit flip of BitPath::sibling is modelled arithmetically rather than as `value ^= 1`, and u64 wraparound of `1u64 << height` for large heights is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "hashmap-order",
+      "obligation": "HashMap<u64, V> is modelled by an insert-or-replace association list. len, is_empty and lookup are faithful; iteration order (which determines the packed serialization order) is not.",
+      "discharged": false
+    },
+    {
+      "name": "serde-roundtrip",
+      "obligation": "The Serialize/Deserialize impls are not modelled; nothing here rules out a deserialized SparseMerkleProof whose sibling count differs from the tree height, or a packed tree whose stored height disagrees with its entries.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-targets",
+      "obligation": "SparseMerkleProofTarget and the plonky2 CircuitBuilder lowering (new/constant/set_witness/get_root/verify/conditional_verify) are not modelled. No theorem here constrains an arbitrary satisfying in-circuit witness, and native/target agreement is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "panics-and-underflow",
+      "obligation": "MerkleTree::get_node_hash indexes zero_hashes[height - path.len()], which underflows for over-long paths; the model returns a default there instead of panicking. Rust panic and unwinding behaviour is not modelled.",
+      "discharged": false
+    }
+  ]
+}

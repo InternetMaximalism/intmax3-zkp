@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/incremental_merkle_tree.rs",
+  "source_sha256": "14d527625d3f362ae6d8d992d8bdbf4206ae5a0f02ba43aaf3efae8613eef495",
+  "source_lines": 711,
+  "module": "Zkp.Implementation.SparseTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/SparseTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 20,
+      "status": "dependency-boundary",
+      "label": "Imports: plonky2 field/builder/witness types, serde, the private MerkleTree/MerkleProof/BitPath of merkle_tree.rs, and the Leafable/LeafableTarget traits",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.HashSpec",
+        "Zkp.Implementation.SparseTrees.MTree",
+        "Zkp.Implementation.SparseTrees.BitPath"
+      ],
+      "theorems": [],
+      "note": "V::empty_leaf/hash and LeafableHasher::two_to_one become the opaque HashSpec callbacks; the backing MerkleTree and BitPath are re-modelled locally rather than imported. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 21,
+      "end": 21,
+      "status": "non-executable",
+      "label": "#[derive(Debug, Clone)]",
+      "declarations": [],
+      "theorems": [],
+      "note": "Derive attribute; no modelled behaviour."
+    },
+    {
+      "start": 22,
+      "end": 25,
+      "status": "translated",
+      "label": "struct IncrementalMerkleTree { merkle_tree, leaves: Vec<V> }",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.IncTree"
+      ],
+      "theorems": [],
+      "note": "The append-only frontier is the Vec of leaves; its length is the next free index. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 26,
+      "end": 27,
+      "status": "non-executable",
+      "label": "Blank line and inherent impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 28,
+      "end": 36,
+      "status": "translated",
+      "label": "IncrementalMerkleTree::new(height): backing tree with the cached zero-hash ladder plus an empty leaf vector",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incNew",
+        "Zkp.Implementation.SparseTrees.mtNew",
+        "Zkp.Implementation.SparseTrees.ladder",
+        "Zkp.Implementation.SparseTrees.ladderFrom",
+        "Zkp.Implementation.SparseTrees.zeroAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.inc_new_len",
+        "Zkp.Implementation.SparseTrees.inc_new_is_empty",
+        "Zkp.Implementation.SparseTrees.ladder_length_pinned",
+        "Zkp.Implementation.SparseTrees.ladder_get",
+        "Zkp.Implementation.SparseTrees.ladder_from_length",
+        "Zkp.Implementation.SparseTrees.ladder_from_get",
+        "Zkp.Implementation.SparseTrees.zero_at_succ",
+        "Zkp.Implementation.SparseTrees.mt_new_root"
+      ],
+      "note": "The empty-subtree root ladder built inside MerkleTree::new is a pure function of the level (zeroAt) with height+1 entries, independent of any leaf. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 37,
+      "end": 63,
+      "status": "translated",
+      "label": "Accessors: height, get_leaf (past the frontier returns V::empty_leaf), get_root, leaves, len, is_empty",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incHeight",
+        "Zkp.Implementation.SparseTrees.incGetLeaf",
+        "Zkp.Implementation.SparseTrees.incRoot",
+        "Zkp.Implementation.SparseTrees.incLen",
+        "Zkp.Implementation.SparseTrees.incIsEmpty",
+        "Zkp.Implementation.SparseTrees.mtRoot",
+        "Zkp.Implementation.SparseTrees.mtNode",
+        "Zkp.Implementation.SparseTrees.nodeAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.inc_get_leaf_out_of_range",
+        "Zkp.Implementation.SparseTrees.mt_new_node_absent",
+        "Zkp.Implementation.SparseTrees.node_at_congr"
+      ],
+      "note": "get_leaf silently returns the empty leaf for every index at or beyond the frontier, so a caller cannot tell an unfilled slot from one holding the empty leaf. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 64,
+      "end": 68,
+      "status": "translated",
+      "label": "IncrementalMerkleTree::update(index, leaf): rewrites an existing position; `self.leaves[index]` panics past the frontier",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incUpdate",
+        "Zkp.Implementation.SparseTrees.IncError",
+        "Zkp.Implementation.SparseTrees.mtUpdateLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.inc_update_out_of_range",
+        "Zkp.Implementation.SparseTrees.inc_update_len"
+      ],
+      "note": "The Rust out-of-bounds case is a panic and, worse, it happens AFTER merkle_tree.update_leaf has already mutated the backing tree; the Except model returns an error and leaves the tree untouched, so that intermediate state is not modelled. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 69,
+      "end": 76,
+      "status": "translated",
+      "label": "IncrementalMerkleTree::push(leaf): index = len, assert!(index < 1 << height), hash, push, update_leaf",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incPush",
+        "Zkp.Implementation.SparseTrees.updateUp",
+        "Zkp.Implementation.SparseTrees.combineAt",
+        "Zkp.Implementation.SparseTrees.setNode",
+        "Zkp.Implementation.SparseTrees.ancPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.inc_push_len",
+        "Zkp.Implementation.SparseTrees.inc_push_new_leaf",
+        "Zkp.Implementation.SparseTrees.inc_push_preserves_earlier",
+        "Zkp.Implementation.SparseTrees.inc_push_root",
+        "Zkp.Implementation.SparseTrees.inc_push_preserves_ladder",
+        "Zkp.Implementation.SparseTrees.inc_push_preserves_height",
+        "Zkp.Implementation.SparseTrees.inc_push_full",
+        "Zkp.Implementation.SparseTrees.inc_push_ok_bound",
+        "Zkp.Implementation.SparseTrees.inc_push_eq",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_frame",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_root",
+        "Zkp.Implementation.SparseTrees.update_up_frame",
+        "Zkp.Implementation.SparseTrees.update_up_eq_fold",
+        "Zkp.Implementation.SparseTrees.anc_sibling_ne_anc",
+        "Zkp.Implementation.SparseTrees.set_node_eq",
+        "Zkp.Implementation.SparseTrees.set_node_ne",
+        "Zkp.Implementation.SparseTrees.demo_inc_len",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_preserves_zeros",
+        "Zkp.Implementation.SparseTrees.mt_update_leaf_preserves_height",
+        "Zkp.Implementation.SparseTrees.anc_path_zero",
+        "Zkp.Implementation.SparseTrees.anc_path_length"
+      ],
+      "note": "The assert! is modelled as an Except error rather than a panic. The append increments the count by one, leaves every earlier leaf and the cached ladder untouched, and sets the root to the path recomputation from the new leaf and the pre-append frontier siblings. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 77,
+      "end": 80,
+      "status": "translated",
+      "label": "IncrementalMerkleTree::prove(index): wraps MerkleTree::prove",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incProve",
+        "Zkp.Implementation.SparseTrees.mtProve",
+        "Zkp.Implementation.SparseTrees.proveLoop"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.prove_length_pinned",
+        "Zkp.Implementation.SparseTrees.prove_loop_length",
+        "Zkp.Implementation.SparseTrees.mt_new_prove",
+        "Zkp.Implementation.SparseTrees.prove_loop_new"
+      ],
+      "note": "prove is total: it also answers for indices at or beyond the frontier, returning cached empty-subtree hashes. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 81,
+      "end": 84,
+      "status": "non-executable",
+      "label": "Closing brace, blank line, derive and serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 85,
+      "end": 108,
+      "status": "dependency-boundary",
+      "label": "IncrementalMerkleProof newtype over MerkleProof plus the dummy / get_root / verify / from_siblings delegations",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.proofFold",
+        "Zkp.Implementation.SparseTrees.proofRoot",
+        "Zkp.Implementation.SparseTrees.proofVerify",
+        "Zkp.Implementation.SparseTrees.proofDummy",
+        "Zkp.Implementation.SparseTrees.ProofError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.SparseTrees.proof_dummy_length",
+        "Zkp.Implementation.SparseTrees.fold_zero_siblings",
+        "Zkp.Implementation.SparseTrees.constant_hash_forges_membership"
+      ],
+      "note": "Every method is a one-line delegation whose semantics lives in merkle_tree.rs; the local re-model implements the delegated fold and root comparison and its agreement with the real MerkleProof is not proved. Verification is a hash comparison: it implies membership only under collision resistance, which constant_hash_forges_membership shows is genuinely required. Note this proof type is `pub MerkleProof<V>`, so callers can build one from arbitrary siblings."
+    },
+    {
+      "start": 109,
+      "end": 189,
+      "status": "untranslated",
+      "label": "IncrementalMerkleProofTarget: in-circuit proof target, new / constant / set_witness / get_root / verify / conditional_verify",
+      "declarations": [],
+      "theorems": [],
+      "note": "plonky2 CircuitBuilder gate emission is not modelled at all. Nothing here constrains an arbitrary in-circuit witness; the module covers only the native path."
+    },
+    {
+      "start": 190,
+      "end": 193,
+      "status": "non-executable",
+      "label": "Blank line, `// Serialization and Deserialization` comment, derive and serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 194,
+      "end": 214,
+      "status": "translated",
+      "label": "IncrementalMerkleTreePacked plus pack / unpack (unpack replays push for every stored leaf, in order)",
+      "declarations": [
+        "Zkp.Implementation.SparseTrees.incUnpack",
+        "Zkp.Implementation.SparseTrees.incPush",
+        "Zkp.Implementation.SparseTrees.incNew"
+      ],
+      "theorems": [],
+      "note": "unpack is modelled as a monadic fold of incPush over the stored leaves, so a packed leaf list longer than 2^height turns into an error here and into a panic in Rust. No round-trip theorem is claimed. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 215,
+      "end": 233,
+      "status": "untranslated",
+      "label": "Serialize / Deserialize impls for IncrementalMerkleTree",
+      "declarations": [],
+      "theorems": [],
+      "note": "serde plumbing; the wire format and its failure modes are not modelled."
+    },
+    {
+      "start": 234,
+      "end": 234,
+      "status": "non-executable",
+      "label": "Blank line before the test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable content."
+    },
+    {
+      "start": 235,
+      "end": 711,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: with_leaves, circuit, new, height, get_leaf, get_root, len/is_empty, update, push, prove, serialization and target tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code is not part of the modelled production behaviour and is not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "backing-merkle-tree-remodel",
+      "obligation": "MTree/BitPath/updateUp/proveLoop are a handwritten local re-model of the private MerkleTree and BitPath of src/utils/trees/merkle_tree.rs and src/utils/trees/bit_path.rs. That the re-model agrees with those files (and with the separate Zkp.Implementation.MerkleTrees module, which is deliberately not imported) is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "hash-collision-resistance",
+      "obligation": "The hash is an opaque callback. Nothing here says a verifying proof implies the leaf was appended, that the root after an append differs from the root before it, or that two different leaf sequences have different roots. Those need collision resistance of the concrete Poseidon instance; constant_hash_forges_membership exhibits a callback under which they fail.",
+      "discharged": false
+    },
+    {
+      "name": "leafable-trait",
+      "obligation": "V::empty_leaf(), Leafable::hash and LeafableHasher::two_to_one are arbitrary functions here. No property of the concrete instances, and no agreement between native and in-circuit hashing, is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "u64-index-arithmetic",
+      "obligation": "Indices and BitPath::value are u64 in Rust and Nat here; push's bound `1u64 << height` is modelled as 2^height with no shift overflow, and BitPath::sibling's `value ^= 1` is modelled as an arithmetic low-bit flip.",
+      "discharged": false
+    },
+    {
+      "name": "panics",
+      "obligation": "push's assert! and update's Vec index are process panics in Rust, modelled here as Except errors. In particular Rust's update mutates the backing merkle tree before the index panic, leaving a tree whose root no longer matches its leaves; that partially-mutated state is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "serde-roundtrip",
+      "obligation": "The Serialize/Deserialize impls are not modelled; nothing rules out a packed tree whose stored height cannot hold its stored leaves (Rust would panic on unpack).",
+      "discharged": false
+    },
+    {
+      "name": "circuit-targets",
+      "obligation": "IncrementalMerkleProofTarget and the plonky2 CircuitBuilder lowering are not modelled. No theorem here constrains an arbitrary satisfying in-circuit witness, and native/target agreement is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "frontier-consistency-across-history",
+      "obligation": "Only single-step facts are proved (one push, one update). That an arbitrary sequence of pushes and updates keeps every stored node equal to the hash of its children -- so that prove(i) for any i < len always verifies -- is not proved, and its use as an inclusion argument would additionally need collision resistance.",
+      "discharged": false
+    }
+  ]
+}
