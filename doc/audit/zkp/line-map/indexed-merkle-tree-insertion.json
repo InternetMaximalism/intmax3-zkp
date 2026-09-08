@@ -85,7 +85,11 @@
         "Zkp.Implementation.IndexedMerkleTree.new_low_leaf_next_index",
         "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_key",
         "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_next_key",
-        "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_next_index"
+        "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_next_index",
+        "Zkp.Implementation.IndexedMerkleTree.example_insert",
+        "Zkp.Implementation.IndexedMerkleTree.example_after_is_wf",
+        "Zkp.Implementation.IndexedMerkleTree.example_after_key_set",
+        "Zkp.Implementation.IndexedMerkleTree.example_reinsert_fails"
       ],
       "note": "The push capacity assert is a hypothesis, not an error value. Handwritten local semantics; no source/compiler refinement."
     },
@@ -101,7 +105,8 @@
         "Zkp.Implementation.IndexedMerkleTree.prove_and_insert_ok_iff",
         "Zkp.Implementation.IndexedMerkleTree.prove_and_insert_agrees_with_insert",
         "Zkp.Implementation.IndexedMerkleTree.native_insertion_proof_verifies",
-        "Zkp.Implementation.IndexedMerkleTree.native_verify_insertion_ok"
+        "Zkp.Implementation.IndexedMerkleTree.native_verify_insertion_ok",
+        "Zkp.Implementation.IndexedMerkleTree.example_insertion_proof_accepted"
       ],
       "note": "Acceptance of the produced proof is proved only under the CommitmentLaws premises. Handwritten local semantics; no source/compiler refinement."
     },
@@ -157,7 +162,8 @@
         "Zkp.Implementation.IndexedMerkleTree.get_new_root_ok_implies_bounds",
         "Zkp.Implementation.IndexedMerkleTree.get_new_root_ok_implies_key_nonzero",
         "Zkp.Implementation.IndexedMerkleTree.verify_path_ok_iff",
-        "Zkp.Implementation.IndexedMerkleTree.accepted_insertion_implies_key_absent"
+        "Zkp.Implementation.IndexedMerkleTree.accepted_insertion_implies_key_absent",
+        "Zkp.Implementation.IndexedMerkleTree.gates_imply_key_absent"
       ],
       "note": "Hash and path recomputation stay opaque; the absence conclusion is stated only under Binding and Wf. Handwritten local semantics; no source/compiler refinement."
     },

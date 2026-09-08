@@ -1383,9 +1383,9 @@ theorem native_verify_insertion_ok {Hash : Type} [DecidableEq Hash] {C : Commitm
 
 /-! ## A concrete commitment, so nothing above is vacuous
 
-`CommitmentLaws` and `Binding` are assumptions; if they were contradictory every
-theorem that mentions them would be empty. `transparent` satisfies BOTH: the
-"hash" of a leaf is the leaf, and the "root" of a tree is its slot function. It
+`CommitmentLaws` and `Binding` are assumptions; if they were contradictory then
+every statement that mentions them would be empty. `transparent` satisfies BOTH:
+the "hash" of a leaf is the leaf, the "root" of a tree is its slot function. It
 is of course not a hiding or succinct commitment — it exists only to witness
 consistency of the premise set. -/
 

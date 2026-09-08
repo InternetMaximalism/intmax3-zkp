@@ -34,7 +34,12 @@
         "Zkp.Implementation.IndexedMerkleTree.Tree",
         "Zkp.Implementation.IndexedMerkleTree.Commitment"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.transparent_laws",
+        "Zkp.Implementation.IndexedMerkleTree.transparent_binding",
+        "Zkp.Implementation.IndexedMerkleTree.transparent_binding_of_wf",
+        "Zkp.Implementation.IndexedMerkleTree.example_laws_and_binding_are_consistent"
+      ],
       "note": "`Tree` is a handwritten stand-in (height plus occupied leaf prefix); the wrapped IncrementalMerkleTree and MerkleProof semantics stay opaque."
     },
     {
@@ -58,7 +63,8 @@
         "Zkp.Implementation.IndexedMerkleTree.tree_new_size",
         "Zkp.Implementation.IndexedMerkleTree.tree_new_leaf_zero",
         "Zkp.Implementation.IndexedMerkleTree.wf_new",
-        "Zkp.Implementation.IndexedMerkleTree.new_tree_key_set"
+        "Zkp.Implementation.IndexedMerkleTree.new_tree_key_set",
+        "Zkp.Implementation.IndexedMerkleTree.example_low_index"
       ],
       "note": "Handwritten local semantics; no source/compiler refinement."
     },
