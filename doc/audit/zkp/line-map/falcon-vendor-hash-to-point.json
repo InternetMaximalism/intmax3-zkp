@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/hash_to_point.rs",
+  "source_sha256": "d3a0944ec37bb8d2214f2cb9acc92b36638d01751508a7138ff6ba48009915ba",
+  "source_lines": 101,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 11,
+      "status": "non-executable",
+      "label": "Vendor-edit header describing the one intentional functional change",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 12,
+      "end": 27,
+      "status": "dependency-boundary",
+      "label": "Imports of the plonky2 Poseidon permutation, the U32Limb digest decomposition and the domain constant",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.PoseidonPermutation"
+      ],
+      "theorems": [],
+      "note": "The permutation is modelled only as a length-preserving callback."
+    },
+    {
+      "start": 28,
+      "end": 61,
+      "status": "non-executable",
+      "label": "Sponge layout and bias documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 62,
+      "end": 88,
+      "status": "translated",
+      "label": "hash_to_point_poseidon: capacity domain separation, overwrite-mode absorb of salt then digest, 64 squeeze permutations yielding 512 coefficients",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.hashToPoint",
+        "Zkp.Implementation.FalconVendor.h2pInitialState",
+        "Zkp.Implementation.FalconVendor.h2pAbsorbMessage",
+        "Zkp.Implementation.FalconVendor.h2pSqueeze",
+        "Zkp.Implementation.FalconVendor.domainFalconH2P",
+        "Zkp.Implementation.FalconVendor.spongeRate",
+        "Zkp.Implementation.FalconVendor.spongeWidth",
+        "Zkp.Implementation.FalconVendor.squeezeRounds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.hash_to_point_length",
+        "Zkp.Implementation.FalconVendor.hash_to_point_squeeze_budget",
+        "Zkp.Implementation.FalconVendor.hash_to_point_capacity_is_domain_separated",
+        "Zkp.Implementation.FalconVendor.hash_to_point_bias_below_two_pow_fifty",
+        "Zkp.Implementation.FalconVendor.domain_falcon_h2p_is_ascii_imfh",
+        "Zkp.Implementation.FalconVendor.h2p_initial_state_length",
+        "Zkp.Implementation.FalconVendor.h2p_absorb_message_length",
+        "Zkp.Implementation.FalconVendor.h2p_squeeze_length"
+      ],
+      "note": "Sponge structure and budget are modelled; the permutation itself is opaque. There is deliberately NO rejection sampling in this construction."
+    },
+    {
+      "start": 89,
+      "end": 98,
+      "status": "non-executable",
+      "label": "Helper banner and the felt_to_falcon_felt documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 99,
+      "end": 101,
+      "status": "translated",
+      "label": "felt_to_falcon_felt: reduction of a Goldilocks element modulo q",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltToFalconFelt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.hash_to_point_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-permutation",
+      "obligation": "The plonky2 Poseidon permutation is an opaque length-preserving callback; collision resistance, indifferentiability and the sponge security argument are premises, not results.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-field-encoding",
+      "obligation": "The mapping of bytes and limbs into plonky2 Goldilocks elements (from_canonical_u32/u64, to_canonical_u64) is assumed canonical and injective on the stated ranges.",
+      "discharged": false
+    },
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "salt-and-rng-freshness",
+      "obligation": "Freshness and unpredictability of the caller-supplied 40-byte salt and of the trapdoor sampler's RNG are the caller's obligation; nothing here constrains them.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/samplerz.rs",
+  "source_sha256": "8d738ed329af385159161461c865d4c92a2c1438f267d60595ba9eeb707ac19a",
+  "source_lines": 172,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "dependency-boundary",
+      "label": "Vendor note and the rand import",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 3,
+      "end": 6,
+      "status": "non-executable",
+      "label": "Documentation of base_sampler",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 7,
+      "end": 34,
+      "status": "translated",
+      "label": "base_sampler: the 18-entry reverse cumulative distribution table and the count of entries above the drawn 9-byte value",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.rcdt",
+        "Zkp.Implementation.FalconVendor.baseSampler",
+        "Zkp.Implementation.FalconVendor.isStrictlyDecreasing"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.rcdt_length",
+        "Zkp.Implementation.FalconVendor.rcdt_strictly_decreasing",
+        "Zkp.Implementation.FalconVendor.base_sampler_range",
+        "Zkp.Implementation.FalconVendor.base_sampler_top_value",
+        "Zkp.Implementation.FalconVendor.base_sampler_bottom_value",
+        "Zkp.Implementation.FalconVendor.base_sampler_input_bound"
+      ],
+      "note": "Integer table facts only; that the table realises the intended half-Gaussian is a premise."
+    },
+    {
+      "start": 35,
+      "end": 126,
+      "status": "dependency-boundary",
+      "label": "approx_exp, ber_exp and sampler_z",
+      "declarations": [],
+      "theorems": [],
+      "note": "f64 and fixed-point exponential approximation plus rejection sampling; not modelled."
+    },
+    {
+      "start": 127,
+      "end": 127,
+      "status": "non-executable",
+      "label": "Blank line before the test module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 128,
+      "end": 172,
+      "status": "test-only",
+      "label": "Known-answer test for approx_exp",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; not part of the modelled behaviour."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "floating-point-arithmetic",
+      "obligation": "All f64 / Complex64 computation (FFT, LDL tree, Gram-Schmidt norms, the Gaussian sampler's exp approximation) is treated as an opaque dependency; no IEEE-754 semantics are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "gaussian-sampler-distribution",
+      "obligation": "That ffSampling/samplerz produce the discrete Gaussian required for Falcon's zero-knowledge/security argument is assumed; only integer table facts are proved.",
+      "discharged": false
+    },
+    {
+      "name": "constant-time-behaviour",
+      "obligation": "No timing or side-channel property is modelled; the branchy decoders and the subtle::ConstantTimeEq comparison are treated as ordinary functions.",
+      "discharged": false
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/signature.rs",
+  "source_sha256": "eb8ed7567777196558a96dfee98af0443241191582a750f42e4bb81a2b3f3a7f",
+  "source_lines": 352,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 22,
+      "status": "dependency-boundary",
+      "label": "Imports and the vendor note recording that Signature::verify and the 1524-byte wire format were removed",
+      "declarations": [],
+      "theorems": [],
+      "note": "The single canonical verifier lives outside this file; nothing here re-checks a signature."
+    },
+    {
+      "start": 23,
+      "end": 82,
+      "status": "non-executable",
+      "label": "Signature banner, upstream documentation and the Signature struct declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 83,
+      "end": 115,
+      "status": "untranslated",
+      "label": "Signature::new and the nonce/public-key/sig_poly accessors",
+      "declarations": [],
+      "theorems": [],
+      "note": "Plain field wiring; not modelled."
+    },
+    {
+      "start": 116,
+      "end": 126,
+      "status": "non-executable",
+      "label": "Vendor-edit note and the SignatureHeader declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 127,
+      "end": 143,
+      "status": "translated",
+      "label": "SignatureHeader::default: the 0b1011_1001 header byte for Poseidon Falcon-512",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.signatureHeaderByte",
+        "Zkp.Implementation.FalconVendor.falconLogN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.signature_header_layout"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 144,
+      "end": 149,
+      "status": "untranslated",
+      "label": "Serializable for &SignatureHeader",
+      "declarations": [],
+      "theorems": [],
+      "note": "One-byte writer; not modelled."
+    },
+    {
+      "start": 150,
+      "end": 169,
+      "status": "translated",
+      "label": "Deserializable for SignatureHeader: rejects any encoding nibble other than 0b1011 and any degree other than LOG_N",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.decodeSignatureHeader"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.signature_header_accepts_only_default",
+        "Zkp.Implementation.FalconVendor.signature_header_example"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 170,
+      "end": 191,
+      "status": "untranslated",
+      "label": "SignaturePoly newtype, Deref and From wrappers",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 192,
+      "end": 203,
+      "status": "translated",
+      "label": "TryFrom<&[i16; N]> for SignaturePoly: the coefficient window check the signer applies to its own output",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.areCoefficientsValid",
+        "Zkp.Implementation.FalconVendor.NativeSignature",
+        "Zkp.Implementation.FalconVendor.exampleNativeSignature"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.native_signature_coefficients_bounded",
+        "Zkp.Implementation.FalconVendor.example_native_signature_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 204,
+      "end": 258,
+      "status": "untranslated",
+      "label": "Serializable for &SignaturePoly (Falcon Algorithm 17 compressed encoder)",
+      "declarations": [],
+      "theorems": [],
+      "note": "The compressed ENCODER is not modelled; only the decoder is."
+    },
+    {
+      "start": 259,
+      "end": 324,
+      "status": "translated",
+      "label": "Deserializable for SignaturePoly (Falcon Algorithm 18) including the local F-1 end-of-buffer guards, the m >= 2048 rejection, the -0 rejection and the trailing-bit check",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.decodeSignaturePoly",
+        "Zkp.Implementation.FalconVendor.decodeSigCoeffs",
+        "Zkp.Implementation.FalconVendor.decodeSigCoeff",
+        "Zkp.Implementation.FalconVendor.decodeSigCoeffFrom",
+        "Zkp.Implementation.FalconVendor.sigUnaryLoop",
+        "Zkp.Implementation.FalconVendor.sigRefill",
+        "Zkp.Implementation.FalconVendor.SigDecState",
+        "Zkp.Implementation.FalconVendor.sigByte",
+        "Zkp.Implementation.FalconVendor.sigUnaryFuel",
+        "Zkp.Implementation.FalconVendor.sigPolyByteLen",
+        "Zkp.Implementation.FalconVendor.u32Mod",
+        "Zkp.Implementation.FalconVendor.Err"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.decode_signature_poly_balanced_bound",
+        "Zkp.Implementation.FalconVendor.decode_sig_coeffs_range",
+        "Zkp.Implementation.FalconVendor.decode_sig_coeff_range",
+        "Zkp.Implementation.FalconVendor.decode_sig_coeff_from_range",
+        "Zkp.Implementation.FalconVendor.sig_unary_loop_m_bound",
+        "Zkp.Implementation.FalconVendor.sig_unary_fuel_is_unreachable",
+        "Zkp.Implementation.FalconVendor.sig_decode_single_zero_coefficient",
+        "Zkp.Implementation.FalconVendor.sig_decode_minus_zero_rejected",
+        "Zkp.Implementation.FalconVendor.sig_decode_all_zero_rejected",
+        "Zkp.Implementation.FalconVendor.sig_decode_eof_guard",
+        "Zkp.Implementation.FalconVendor.decode_range_does_not_imply_norm_bound"
+      ],
+      "note": "Error order and the F-1 bounds checks are mirrored; acc is modelled as a Nat reduced mod 2^32, which agrees with the source on every bit the decoder reads."
+    },
+    {
+      "start": 325,
+      "end": 331,
+      "status": "non-executable",
+      "label": "Helper banner and the vendor note about the removed verify_helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 332,
+      "end": 345,
+      "status": "translated",
+      "label": "are_coefficients_valid: length N and every coefficient in [-2047, 2047]",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.areCoefficientsValid",
+        "Zkp.Implementation.FalconVendor.maxSigCoefficient",
+        "Zkp.Implementation.FalconVendor.falconN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.are_coefficients_valid_iff"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 346,
+      "end": 352,
+      "status": "non-executable",
+      "label": "Test banner and the note that the upstream round-trip test was dropped with the removed wire format",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "signature-validity",
+      "obligation": "Nothing here proves that an accepted encoding is a valid Falcon signature; the vendored tree contains no verifier and the relation s1 = c - s2*h is never checked in this model.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-traits",
+      "obligation": "ByteReader/ByteWriter/Deserializable semantics come from falcon_sig::compat; buffer bounds and read_array behaviour are assumed to match the modelled fixed-length reads.",
+      "discharged": false
+    },
+    {
+      "name": "machine-integer-wrapping",
+      "obligation": "i16/u16/u32/u128 wrap-around, casts and shift semantics are modelled by Nat/Int operations chosen to match on the ranges reached; out-of-range behaviour is not covered.",
+      "discharged": false
+    },
+    {
+      "name": "constant-time-behaviour",
+      "obligation": "No timing or side-channel property is modelled; the branchy decoders and the subtle::ConstantTimeEq comparison are treated as ordinary functions.",
+      "discharged": false
+    }
+  ]
+}

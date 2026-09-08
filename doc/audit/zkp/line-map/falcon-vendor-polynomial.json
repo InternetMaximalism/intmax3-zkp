@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/polynomial.rs",
+  "source_sha256": "a2616bf7ca36c920b34b471ce37d09dd5336900ab4d3c506888961b3f0c5d82a",
+  "source_lines": 685,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 26,
+      "status": "dependency-boundary",
+      "label": "Module documentation and imports, including the Goldilocks Felt mapping through falcon_sig::compat",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 27,
+      "end": 42,
+      "status": "untranslated",
+      "label": "The generic Polynomial<F> container and its constructor",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 43,
+      "end": 75,
+      "status": "untranslated",
+      "label": "hadamard_mul / hadamard_div / hadamard_inv",
+      "declarations": [],
+      "theorems": [],
+      "note": "Used only in the FFT domain over Complex64; not modelled."
+    },
+    {
+      "start": 76,
+      "end": 100,
+      "status": "translated",
+      "label": "degree and lc (index of the last non-zero coefficient)",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.degreeOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.degree_of_example",
+        "Zkp.Implementation.FalconVendor.degree_of_zero_polynomial"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 101,
+      "end": 178,
+      "status": "untranslated",
+      "label": "reduce_by_cyclotomic, field_norm, lift_next_cyclotomic and galois_adjoint",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 179,
+      "end": 188,
+      "status": "dependency-boundary",
+      "label": "l2_norm_squared over f64",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 189,
+      "end": 207,
+      "status": "untranslated",
+      "label": "PartialEq and Eq by compared degree prefixes",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 208,
+      "end": 445,
+      "status": "untranslated",
+      "label": "The generic Add / Sub / Neg / Mul / One / Zero / shift / map / fold impls",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 446,
+      "end": 483,
+      "status": "translated",
+      "label": "impl Div for Polynomial: long division",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.degreeOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.poly_div_zero_numerator_has_no_degree"
+      ],
+      "note": "The zero-numerator guard is an expression statement with no return, so the zero polynomial reaches degree().unwrap(); the model records only that the degree is absent."
+    },
+    {
+      "start": 484,
+      "end": 529,
+      "status": "untranslated",
+      "label": "vector_karatsuba",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 530,
+      "end": 574,
+      "status": "untranslated",
+      "label": "From conversions between coefficient types",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 575,
+      "end": 583,
+      "status": "translated",
+      "label": "Polynomial<FalconFelt>::norm_squared over balanced values",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.normSquared",
+        "Zkp.Implementation.FalconVendor.balancedValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.norm_squared_bound"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 584,
+      "end": 591,
+      "status": "dependency-boundary",
+      "label": "to_elements: lifting coefficients into Goldilocks field elements",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 592,
+      "end": 596,
+      "status": "translated",
+      "label": "to_balanced_values",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.toBalancedValues"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 597,
+      "end": 616,
+      "status": "translated",
+      "label": "mul_modulo_p: the unreduced 1024-coefficient product and its claim of staying below the host prime",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.falconN",
+        "Zkp.Implementation.FalconVendor.falconQ",
+        "Zkp.Implementation.FalconVendor.goldilocksP"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.mul_modulo_p_no_goldilocks_overflow",
+        "Zkp.Implementation.FalconVendor.goldilocks_p_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 617,
+      "end": 633,
+      "status": "translated",
+      "label": "reduce_negacyclic: reduction of that product modulo x^N + 1",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.reduceNegacyclic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.reduce_negacyclic_length",
+        "Zkp.Implementation.FalconVendor.reduce_negacyclic_canonical",
+        "Zkp.Implementation.FalconVendor.reduce_negacyclic_no_u16_overflow"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 634,
+      "end": 641,
+      "status": "dependency-boundary",
+      "label": "Polynomial<Felt>::to_elements",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 642,
+      "end": 647,
+      "status": "translated",
+      "label": "Polynomial<i16>::to_balanced_values",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.balancedValue",
+        "Zkp.Implementation.FalconVendor.feltNew"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 648,
+      "end": 659,
+      "status": "untranslated",
+      "label": "Zeroize / ZeroizeOnDrop instances",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 660,
+      "end": 662,
+      "status": "non-executable",
+      "label": "Test banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 663,
+      "end": 685,
+      "status": "test-only",
+      "label": "The negacyclic-reduction round-trip test",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; not part of the modelled behaviour."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "floating-point-arithmetic",
+      "obligation": "All f64 / Complex64 computation (FFT, LDL tree, Gram-Schmidt norms, the Gaussian sampler's exp approximation) is treated as an opaque dependency; no IEEE-754 semantics are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-field-encoding",
+      "obligation": "The mapping of bytes and limbs into plonky2 Goldilocks elements (from_canonical_u32/u64, to_canonical_u64) is assumed canonical and injective on the stated ranges.",
+      "discharged": false
+    },
+    {
+      "name": "machine-integer-wrapping",
+      "obligation": "i16/u16/u32/u128 wrap-around, casts and shift semantics are modelled by Nat/Int operations chosen to match on the ranges reached; out-of-range behaviour is not covered.",
+      "discharged": false
+    }
+  ]
+}

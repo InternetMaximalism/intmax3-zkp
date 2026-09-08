@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/keys/public_key.rs",
+  "source_sha256": "427c573daef5fedffeb83d3fc79b8b75f6185abc08fbeb230d229936aa9730a7",
+  "source_lines": 122,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 2,
+      "status": "non-executable",
+      "label": "Module documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 3,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "Imports, and the vendor note that verify / recover_from / to_commitment were removed",
+      "declarations": [],
+      "theorems": [],
+      "note": "The identity digest of h is computed outside this file."
+    },
+    {
+      "start": 22,
+      "end": 27,
+      "status": "non-executable",
+      "label": "Banner, documentation and the PublicKey newtype declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 28,
+      "end": 45,
+      "status": "untranslated",
+      "label": "Vendor-edit note, Deref and From wrappers",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 46,
+      "end": 71,
+      "status": "translated",
+      "label": "Serializable for &PublicKey: LOG_N header byte then 512 coefficients packed at 14 bits each",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.encodePublicKey",
+        "Zkp.Implementation.FalconVendor.encodeBits",
+        "Zkp.Implementation.FalconVendor.bitsToBytes",
+        "Zkp.Implementation.FalconVendor.bitsToBytesAux",
+        "Zkp.Implementation.FalconVendor.natToBits",
+        "Zkp.Implementation.FalconVendor.pkLen",
+        "Zkp.Implementation.FalconVendor.falconEncodingBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.pk_len_layout",
+        "Zkp.Implementation.FalconVendor.encode_bits_length",
+        "Zkp.Implementation.FalconVendor.bits_to_bytes_length",
+        "Zkp.Implementation.FalconVendor.bits_to_bytes_roundtrip"
+      ],
+      "note": "The 512*14 bit stream is a whole number of bytes, so the source encoder's trailing-partial-byte branch is unreachable."
+    },
+    {
+      "start": 72,
+      "end": 79,
+      "status": "untranslated",
+      "label": "Display impl (hex dump)",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 80,
+      "end": 122,
+      "status": "translated",
+      "label": "Deserializable for PublicKey: fixed PK_LEN read, LOG_N header check, per-word canonicality check and the leftover-bit check",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.decodePublicKey",
+        "Zkp.Implementation.FalconVendor.decodeCoeffs",
+        "Zkp.Implementation.FalconVendor.bytesToBits",
+        "Zkp.Implementation.FalconVendor.bitsToNat"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.pubkey_encode_decode_roundtrip",
+        "Zkp.Implementation.FalconVendor.decode_coeffs_of_encode_bits",
+        "Zkp.Implementation.FalconVendor.decode_coeffs_ok_canonical",
+        "Zkp.Implementation.FalconVendor.pubkey_decode_ok_canonical",
+        "Zkp.Implementation.FalconVendor.pubkey_roundtrip_example"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-traits",
+      "obligation": "ByteReader/ByteWriter/Deserializable semantics come from falcon_sig::compat; buffer bounds and read_array behaviour are assumed to match the modelled fixed-length reads.",
+      "discharged": false
+    },
+    {
+      "name": "signature-validity",
+      "obligation": "Nothing here proves that an accepted encoding is a valid Falcon signature; the vendored tree contains no verifier and the relation s1 = c - s2*h is never checked in this model.",
+      "discharged": false
+    },
+    {
+      "name": "machine-integer-wrapping",
+      "obligation": "i16/u16/u32/u128 wrap-around, casts and shift semantics are modelled by Nat/Int operations chosen to match on the ranges reached; out-of-range behaviour is not covered.",
+      "discharged": false
+    }
+  ]
+}

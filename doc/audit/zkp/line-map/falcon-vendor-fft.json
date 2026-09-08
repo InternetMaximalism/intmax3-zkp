@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/fft.rs",
+  "source_sha256": "cbcce5ad2202fff7399fb012453d5e60adbfc89ab04ee6b3ec801d606cc888fd",
+  "source_lines": 1917,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 11,
+      "status": "dependency-boundary",
+      "label": "Imports of num, num_complex and the field/polynomial modules",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 12,
+      "end": 32,
+      "status": "untranslated",
+      "label": "The FastFft trait declaration and its default fft/ifft wrappers",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 33,
+      "end": 59,
+      "status": "untranslated",
+      "label": "CyclotomicFourier trait header, power_of_two_inverse and the primitive_root_of_unity declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 60,
+      "end": 74,
+      "status": "translated",
+      "label": "bitreverse_index: the bit-reversal permutation of an index",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.bitreverseIndex",
+        "Zkp.Implementation.FalconVendor.natToBitsLE",
+        "Zkp.Implementation.FalconVendor.bitsToNat"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.bitreverse_index_lt",
+        "Zkp.Implementation.FalconVendor.bitreverse_index_involutive",
+        "Zkp.Implementation.FalconVendor.bitreverse_index_example"
+      ],
+      "note": "Modelled through an explicit bit-list characterisation rather than the source loop."
+    },
+    {
+      "start": 75,
+      "end": 103,
+      "status": "untranslated",
+      "label": "bitreversed_powers and bitreversed_powers_inverse",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 104,
+      "end": 115,
+      "status": "untranslated",
+      "label": "bitreverse_array (the in-place swap loop)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Only the index permutation is modelled, not the in-place swapping."
+    },
+    {
+      "start": 116,
+      "end": 190,
+      "status": "untranslated",
+      "label": "The forward and inverse number-theoretic/complex transforms (Algorithms 1 and 2)",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 191,
+      "end": 204,
+      "status": "translated",
+      "label": "split_fft: the halving butterfly",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.splitFftFelt",
+        "Zkp.Implementation.FalconVendor.feltTwoInv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.split_fft_lengths",
+        "Zkp.Implementation.FalconVendor.felt_two_inv_correct"
+      ],
+      "note": "Modelled over FalconFelt only; the Complex64 instantiation is a dependency boundary."
+    },
+    {
+      "start": 205,
+      "end": 216,
+      "status": "translated",
+      "label": "merge_fft: the doubling butterfly",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.mergeFftFelt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.merge_fft_length",
+        "Zkp.Implementation.FalconVendor.split_merge_roundtrip_example"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 217,
+      "end": 249,
+      "status": "dependency-boundary",
+      "label": "impl CyclotomicFourier for Complex64 (trigonometric twiddles in f64)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 250,
+      "end": 300,
+      "status": "dependency-boundary",
+      "label": "impl FastFft for Polynomial<Complex64>",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 301,
+      "end": 313,
+      "status": "untranslated",
+      "label": "FalconFelt fft_inplace",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 314,
+      "end": 334,
+      "status": "translated",
+      "label": "FalconFelt ifft_inplace: the per-length inverse-of-n selection",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltNinvTable"
+      ],
+      "theorems": [],
+      "note": "Only the constant table is modelled, not the transform."
+    },
+    {
+      "start": 335,
+      "end": 360,
+      "status": "untranslated",
+      "label": "FalconFelt merge_fft / split_fft wrappers",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 361,
+      "end": 362,
+      "status": "non-executable",
+      "label": "Clippy allow attribute for the table below",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 363,
+      "end": 877,
+      "status": "dependency-boundary",
+      "label": "COMPLEX_BITREVERSED_POWERS: 512 precomputed f64 twiddles",
+      "declarations": [],
+      "theorems": [],
+      "note": "Floating-point constants; not reproduced or checked."
+    },
+    {
+      "start": 878,
+      "end": 880,
+      "status": "translated",
+      "label": "The first entries of FELT_BITREVERSED_POWERS",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltMul",
+        "Zkp.Implementation.FalconVendor.feltNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_bitreversed_powers_inverse_consistent"
+      ],
+      "note": "Only the first non-trivial twiddle is checked against its inverse; the remaining 510 entries are not reproduced."
+    },
+    {
+      "start": 881,
+      "end": 1392,
+      "status": "untranslated",
+      "label": "The remaining 510 entries of FELT_BITREVERSED_POWERS",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 1393,
+      "end": 1395,
+      "status": "translated",
+      "label": "The first entries of FELT_BITREVERSED_POWERS_INVERSE",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltMul",
+        "Zkp.Implementation.FalconVendor.feltNew"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_bitreversed_powers_inverse_consistent"
+      ],
+      "note": "Checked only for consistency with the forward table at the same index; the remaining entries are not reproduced."
+    },
+    {
+      "start": 1396,
+      "end": 1907,
+      "status": "untranslated",
+      "label": "The remaining 510 entries of FELT_BITREVERSED_POWERS_INVERSE",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 1908,
+      "end": 1917,
+      "status": "translated",
+      "label": "FELT_NINV_1 .. FELT_NINV_512, the inverses of the supported transform lengths",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltNinvTable"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_ninv_table_correct"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "floating-point-arithmetic",
+      "obligation": "All f64 / Complex64 computation (FFT, LDL tree, Gram-Schmidt norms, the Gaussian sampler's exp approximation) is treated as an opaque dependency; no IEEE-754 semantics are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "machine-integer-wrapping",
+      "obligation": "i16/u16/u32/u128 wrap-around, casts and shift semantics are modelled by Nat/Int operations chosen to match on the ranges reached; out-of-range behaviour is not covered.",
+      "discharged": false
+    }
+  ]
+}

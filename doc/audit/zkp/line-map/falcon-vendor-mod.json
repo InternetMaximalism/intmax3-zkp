@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/mod.rs",
+  "source_sha256": "51630877113af960074ae9508fb679067f5fa0ca54dbf4a9441f2ff5b6291058",
+  "source_lines": 141,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 35,
+      "status": "non-executable",
+      "label": "Module documentation and the crate-level dead_code allow attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Provenance and vendor-edit notes; no executable content."
+    },
+    {
+      "start": 36,
+      "end": 42,
+      "status": "dependency-boundary",
+      "label": "Imports of Felt/serialization traits through falcon_sig::compat and plonky2",
+      "declarations": [],
+      "theorems": [],
+      "note": "Serialization and field semantics come from the host crate; treated as opaque."
+    },
+    {
+      "start": 43,
+      "end": 57,
+      "status": "non-executable",
+      "label": "Submodule declarations and the trimmed re-export list",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 58,
+      "end": 61,
+      "status": "non-executable",
+      "label": "Constants banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 62,
+      "end": 92,
+      "status": "translated",
+      "label": "Falcon-512 parameter set: q, encoding width, N, LOG_N, salt length, key and signature lengths, beta^2",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.falconQ",
+        "Zkp.Implementation.FalconVendor.falconEncodingBits",
+        "Zkp.Implementation.FalconVendor.falconN",
+        "Zkp.Implementation.FalconVendor.falconLogN",
+        "Zkp.Implementation.FalconVendor.sigNonceLen",
+        "Zkp.Implementation.FalconVendor.nonceElements",
+        "Zkp.Implementation.FalconVendor.pkLen",
+        "Zkp.Implementation.FalconVendor.skLen",
+        "Zkp.Implementation.FalconVendor.sigPolyByteLen",
+        "Zkp.Implementation.FalconVendor.sigL2Bound"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.falcon_q_pinned",
+        "Zkp.Implementation.FalconVendor.falcon_n_pinned",
+        "Zkp.Implementation.FalconVendor.falcon_log_n_pinned",
+        "Zkp.Implementation.FalconVendor.falcon_encoding_bits_pinned",
+        "Zkp.Implementation.FalconVendor.sig_nonce_len_pinned",
+        "Zkp.Implementation.FalconVendor.sig_l2_bound_pinned",
+        "Zkp.Implementation.FalconVendor.pk_len_layout",
+        "Zkp.Implementation.FalconVendor.sk_len_layout"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 93,
+      "end": 95,
+      "status": "dependency-boundary",
+      "label": "SIGMA, the f64 standard deviation of the lattice Gaussian",
+      "declarations": [],
+      "theorems": [],
+      "note": "An f64 constant consumed only by normalize_tree; not modelled."
+    },
+    {
+      "start": 96,
+      "end": 100,
+      "status": "non-executable",
+      "label": "ShortLatticeBasis type alias and banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 101,
+      "end": 111,
+      "status": "non-executable",
+      "label": "Nonce newtype declaration, derives and the vendor security note on the removed deterministic constructor",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 112,
+      "end": 122,
+      "status": "untranslated",
+      "label": "Nonce::as_bytes and Nonce::from_bytes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trivial byte accessors; not modelled."
+    },
+    {
+      "start": 123,
+      "end": 141,
+      "status": "translated",
+      "label": "Nonce::to_elements: the 40-byte salt repacked as eight 5-byte little-endian field elements",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.nonceElement",
+        "Zkp.Implementation.FalconVendor.nonceToElements",
+        "Zkp.Implementation.FalconVendor.nonceElements"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.nonce_to_elements_length",
+        "Zkp.Implementation.FalconVendor.nonce_packing_injective",
+        "Zkp.Implementation.FalconVendor.nonce_element_below_goldilocks"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "goldilocks-field-encoding",
+      "obligation": "The mapping of bytes and limbs into plonky2 Goldilocks elements (from_canonical_u32/u64, to_canonical_u64) is assumed canonical and injective on the stated ranges.",
+      "discharged": false
+    },
+    {
+      "name": "salt-and-rng-freshness",
+      "obligation": "Freshness and unpredictability of the caller-supplied 40-byte salt and of the trapdoor sampler's RNG are the caller's obligation; nothing here constrains them.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-traits",
+      "obligation": "ByteReader/ByteWriter/Deserializable semantics come from falcon_sig::compat; buffer bounds and read_array behaviour are assumed to match the modelled fixed-length reads.",
+      "discharged": false
+    }
+  ]
+}

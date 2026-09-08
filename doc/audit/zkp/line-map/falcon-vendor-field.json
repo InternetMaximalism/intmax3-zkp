@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/field.rs",
+  "source_sha256": "4dfbe1199ce44493d3f539f7d26a40b78fb9327383980c2353b140f3bb8f1e20",
+  "source_lines": 174,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 7,
+      "status": "dependency-boundary",
+      "label": "Imports of num traits, the modulus and the CyclotomicFourier trait",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 8,
+      "end": 10,
+      "status": "non-executable",
+      "label": "Derives and the FalconFelt(u32) newtype declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 11,
+      "end": 34,
+      "status": "translated",
+      "label": "FalconFelt::new (sign-corrected truncating reduction), value, balanced_value and multiply",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltNew",
+        "Zkp.Implementation.FalconVendor.feltValue",
+        "Zkp.Implementation.FalconVendor.balancedValue",
+        "Zkp.Implementation.FalconVendor.feltMul",
+        "Zkp.Implementation.FalconVendor.falconQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_new_nonneg_canonical",
+        "Zkp.Implementation.FalconVendor.felt_new_neg_canonical",
+        "Zkp.Implementation.FalconVendor.felt_new_negative_multiple_of_q_is_not_canonical",
+        "Zkp.Implementation.FalconVendor.balanced_value_range",
+        "Zkp.Implementation.FalconVendor.balanced_value_of_small",
+        "Zkp.Implementation.FalconVendor.felt_mul_canonical",
+        "Zkp.Implementation.FalconVendor.felt_mul_no_u32_overflow"
+      ],
+      "note": "new is NOT canonical on negative multiples of q, which the model records rather than papers over."
+    },
+    {
+      "start": 35,
+      "end": 52,
+      "status": "translated",
+      "label": "impl Add / AddAssign: the overflowing add and conditional subtract",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltAddWrapping",
+        "Zkp.Implementation.FalconVendor.feltAdd"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_add_wrapping_eq_mod",
+        "Zkp.Implementation.FalconVendor.felt_add_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 53,
+      "end": 67,
+      "status": "translated",
+      "label": "impl Sub / SubAssign, defined as self + (-rhs)",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltSub"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 68,
+      "end": 77,
+      "status": "translated",
+      "label": "impl Neg: q - a, forced to 0 at a = 0",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltNeg"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.felt_neg_canonical"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 78,
+      "end": 91,
+      "status": "translated",
+      "label": "impl Mul / MulAssign",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltMul"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 92,
+      "end": 106,
+      "status": "untranslated",
+      "label": "impl Div / DivAssign through inverse_or_zero",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 107,
+      "end": 122,
+      "status": "untranslated",
+      "label": "Zero and One instances",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 123,
+      "end": 149,
+      "status": "translated",
+      "label": "impl Inverse: the fixed addition chain computing a^(q-2)",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.inverseChainExponent"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.inverse_addition_chain_exponent_is_q_minus_two"
+      ],
+      "note": "The chain is modelled at the level of its exponent, showing it is exactly the Fermat inverse."
+    },
+    {
+      "start": 150,
+      "end": 163,
+      "status": "translated",
+      "label": "impl CyclotomicFourier: primitive_root_of_unity by repeated squaring of 1331",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltSquarings"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.root_1331_order_is_two_pow_twelve"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 164,
+      "end": 174,
+      "status": "translated",
+      "label": "TryFrom<u32>: the canonicality check every decoded public-key word passes through",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.feltNew",
+        "Zkp.Implementation.FalconVendor.falconQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.encoding_bits_cover_modulus"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "machine-integer-wrapping",
+      "obligation": "i16/u16/u32/u128 wrap-around, casts and shift semantics are modelled by Nat/Int operations chosen to match on the ranges reached; out-of-range behaviour is not covered.",
+      "discharged": false
+    },
+    {
+      "name": "constant-time-behaviour",
+      "obligation": "No timing or side-channel property is modelled; the branchy decoders and the subtle::ConstantTimeEq comparison are treated as ordinary functions.",
+      "discharged": false
+    }
+  ]
+}

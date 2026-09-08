@@ -11,6 +11,26 @@ math/polynomial.rs, math/fft.rs, math/ffsampling.rs, math/samplerz.rs).
 This is NOT a refinement proof of the Rust source, of rustc, or of plonky2.
 It is a local model of the data layouts and of the checks the vendored code
 actually performs, together with kernel-checked theorems about that model.
+
+Scope, stated honestly. What IS modelled: the parameter set; `FalconFelt`
+modular arithmetic and its balanced representative; the public-key bit codec
+(with a round-trip theorem); the secret-key `encode_i8` / `decode_i8` codec and
+header checks; the compressed signature decoder of Algorithm 18 including its
+local end-of-buffer fix, its `-0` rejection and its high-bits rejection; the
+hash-to-point sponge layout over an opaque permutation; the bit-reversal index
+permutation, the `split_fft` / `merge_fft` butterflies over `FalconFelt`, and
+the `FELT_NINV` twiddle constants; the `base_sampler` cumulative table.
+
+What is NOT modelled, and is named as a boundary in the line maps: all `f64` /
+`Complex64` arithmetic (the complex FFT, the LDL tree, Gram-Schmidt norms, the
+`approx_exp` / `ber_exp` / `sampler_z` Gaussian sampler and the signer's
+rejection loop); the number-theoretic transform itself and its 512-entry
+twiddle tables; `BigInt` NTRU solving; the Poseidon permutation (an opaque
+length-preserving callback); secret erasure; and constant-time behaviour.
+Nothing here asserts that an accepted encoding is a VALID signature: the
+vendored tree contains no verifier at all (`Signature::verify` and
+`PublicKey::verify` were removed by the vendor edits), and the relation
+`s1 = c - s2*h` together with the norm bound is checked outside this file.
 -/
 namespace Zkp.Implementation.FalconVendor
 
@@ -751,6 +771,29 @@ def decodeSignaturePoly (input : List Nat) : Except Err (List Nat) :=
     match decodeSigCoeffs input falconN { idx := 0, acc := 0, accLen := 0 } with
     | .error e => .error e
     | .ok (cs, st) => if st.acc % 2 ^ st.accLen ≠ 0 then .error .trailingBits else .ok cs
+
+/-- Model of `Deserializable for SignatureHeader`: the encoding nibble must be
+    `0b1011` (the Poseidon variant marker) and the degree nibble must be
+    `LOG_N`. -/
+def decodeSignatureHeader (header : Nat) : Except Err Nat :=
+  if header / 16 ≠ 11 then .error .badHeader
+  else if header % 16 ≠ falconLogN then .error .unsupportedDegree
+  else .ok header
+
+theorem signature_header_accepts_only_default (header : Nat) (out : Nat)
+    (h : decodeSignatureHeader header = .ok out) : out = signatureHeaderByte := by
+  simp only [decodeSignatureHeader] at h
+  split at h
+  · exact absurd h (by simp)
+  · split at h
+    · exact absurd h (by simp)
+    · injection h with h
+      subst h
+      simp only [signatureHeaderByte, falconLogN] at *
+      omega
+
+theorem signature_header_example :
+    decodeSignatureHeader signatureHeaderByte = .ok signatureHeaderByte := by rfl
 
 /-- The `m >= 2048` guard fires no later than the 16th unary iteration, so the
     fuel of `sigUnaryFuel = 17` in the model never truncates a run the source

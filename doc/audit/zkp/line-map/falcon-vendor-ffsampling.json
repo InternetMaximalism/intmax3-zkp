@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/ffsampling.rs",
+  "source_sha256": "f18b3489c8dab056a54eeaf7a3bdc93fd59b04e92e710159072bca38712e6347",
+  "source_lines": 329,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 13,
+      "status": "dependency-boundary",
+      "label": "Imports and SIGMIN, the f64 minimum standard deviation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 14,
+      "end": 72,
+      "status": "dependency-boundary",
+      "label": "gram and ldl over Polynomial<Complex64>",
+      "declarations": [],
+      "theorems": [],
+      "note": "Hermitian LDL decomposition in f64; not modelled."
+    },
+    {
+      "start": 73,
+      "end": 78,
+      "status": "non-executable",
+      "label": "Derives and the LdlTree enum declaration",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 79,
+      "end": 126,
+      "status": "untranslated",
+      "label": "Zeroize with write_volatile, the manual Drop and ZeroizeOnDrop for LdlTree",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 127,
+      "end": 196,
+      "status": "dependency-boundary",
+      "label": "ffldl, normalize_tree and ffsampling: the Falcon tree construction and the fast-Fourier trapdoor sampler",
+      "declarations": [],
+      "theorems": [],
+      "note": "Entirely f64 / Complex64 and RNG driven; the sampler distribution is a premise, not a result."
+    },
+    {
+      "start": 197,
+      "end": 200,
+      "status": "non-executable",
+      "label": "Test banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 201,
+      "end": 329,
+      "status": "test-only",
+      "label": "LDL reconstruction tests over random Hermitian matrices",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; not part of the modelled behaviour."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "floating-point-arithmetic",
+      "obligation": "All f64 / Complex64 computation (FFT, LDL tree, Gram-Schmidt norms, the Gaussian sampler's exp approximation) is treated as an opaque dependency; no IEEE-754 semantics are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "gaussian-sampler-distribution",
+      "obligation": "That ffSampling/samplerz produce the discrete Gaussian required for Falcon's zero-knowledge/security argument is assumed; only integer table facts are proved.",
+      "discharged": false
+    },
+    {
+      "name": "secret-erasure",
+      "obligation": "Zeroize/Drop/write_volatile erasure of secret key material and of the LDL tree is not modelled; nothing here asserts secrets are cleared.",
+      "discharged": false
+    },
+    {
+      "name": "salt-and-rng-freshness",
+      "obligation": "Freshness and unpredictability of the caller-supplied 40-byte salt and of the trapdoor sampler's RNG are the caller's obligation; nothing here constrains them.",
+      "discharged": false
+    }
+  ]
+}

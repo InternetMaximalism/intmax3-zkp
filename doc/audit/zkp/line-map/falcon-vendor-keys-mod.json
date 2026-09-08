@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/keys/mod.rs",
+  "source_sha256": "d8d4a83bc1eba3ce0c464ae28d3b4fb58afda14c25050b8d7919d2e0b7dddd38",
+  "source_lines": 15,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 4,
+      "status": "non-executable",
+      "label": "Vendor note recording that the upstream test_falcon_verification test was dropped with PublicKey::verify",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 5,
+      "end": 8,
+      "status": "dependency-boundary",
+      "label": "Serialization trait and math re-imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trait semantics come from falcon_sig::compat."
+    },
+    {
+      "start": 9,
+      "end": 15,
+      "status": "non-executable",
+      "label": "Submodule declarations and re-exports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "serialization-traits",
+      "obligation": "ByteReader/ByteWriter/Deserializable semantics come from falcon_sig::compat; buffer bounds and read_array behaviour are assumed to match the modelled fixed-length reads.",
+      "discharged": false
+    }
+  ]
+}

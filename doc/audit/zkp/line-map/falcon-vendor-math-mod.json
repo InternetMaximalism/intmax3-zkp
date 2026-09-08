@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/vendor/math/mod.rs",
+  "source_sha256": "ff44e7d17138ad4fddc8c3cc1607221a714fd86c1d177fb566a6f97642c59f5c",
+  "source_lines": 326,
+  "module": "Zkp.Implementation.FalconVendor",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconVendor.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 7,
+      "status": "non-executable",
+      "label": "Module documentation and upstream acknowledgements",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 8,
+      "end": 21,
+      "status": "dependency-boundary",
+      "label": "Imports of num/num_complex/rand and the secret-key coefficient widths",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 22,
+      "end": 36,
+      "status": "non-executable",
+      "label": "Submodule declarations and re-exports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments, banners, attributes or declarations with no executable content."
+    },
+    {
+      "start": 37,
+      "end": 39,
+      "status": "translated",
+      "label": "MAX_SMALL_POLY_COEFFICIENT_SIZE and MAX_BIG_POLY_COEFFICIENT_SIZE",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.maxSmallPolyCoefficient",
+        "Zkp.Implementation.FalconVendor.maxBigPolyCoefficient"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.max_small_poly_coefficient_derived",
+        "Zkp.Implementation.FalconVendor.max_big_poly_coefficient_derived"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 40,
+      "end": 85,
+      "status": "dependency-boundary",
+      "label": "The Inverse trait, batch_inverse_or_zero and the Complex64 / f64 instances",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 86,
+      "end": 127,
+      "status": "dependency-boundary",
+      "label": "ntru_gen: the key-generation rejection loop (coefficient bounds, FFT invertibility of f, the Gram-Schmidt bound, and the ntru_solve call)",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.NtruGenAccepted",
+        "Zkp.Implementation.FalconVendor.gramSchmidtBoundScaled"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.ntru_gen_output_is_encodable",
+        "Zkp.Implementation.FalconVendor.gram_schmidt_bound_pinned"
+      ],
+      "note": "Only the integer coefficient-bound conditions are modelled, as the fields of a structure recording what the loop guarantees."
+    },
+    {
+      "start": 128,
+      "end": 166,
+      "status": "untranslated",
+      "label": "ntru_solve: the BigInt field-norm recursion, cyclotomic lifting and Karatsuba products",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 167,
+      "end": 181,
+      "status": "dependency-boundary",
+      "label": "gen_poly: 4096 draws from sampler_z summed into n coefficients",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 182,
+      "end": 209,
+      "status": "dependency-boundary",
+      "label": "gram_schmidt_norm_squared: an f64/Complex64 computation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics supplied by an imported crate or by floating-point arithmetic; treated as an opaque premise."
+    },
+    {
+      "start": 210,
+      "end": 297,
+      "status": "dependency-boundary",
+      "label": "babai_reduce: the BigInt/f64 size-reduction loop and its 1000-iteration give-up",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.babaiIterationCap"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.babai_iteration_cap_pinned"
+      ],
+      "note": "Only the iteration cap is modelled; the reduction arithmetic is opaque."
+    },
+    {
+      "start": 298,
+      "end": 321,
+      "status": "untranslated",
+      "label": "xgcd over BigInt",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding definition in the Lean model."
+    },
+    {
+      "start": 322,
+      "end": 326,
+      "status": "translated",
+      "label": "check_coefficients_bound: balanced coefficients within +/- bound",
+      "declarations": [
+        "Zkp.Implementation.FalconVendor.toBalancedValues",
+        "Zkp.Implementation.FalconVendor.balancedValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconVendor.balanced_value_range"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rust-semantics",
+      "obligation": "The Lean model is handwritten; nothing proves it refines the Rust source, rustc lowering, integer wrapping, or panic behaviour.",
+      "discharged": false
+    },
+    {
+      "name": "floating-point-arithmetic",
+      "obligation": "All f64 / Complex64 computation (FFT, LDL tree, Gram-Schmidt norms, the Gaussian sampler's exp approximation) is treated as an opaque dependency; no IEEE-754 semantics are modelled.",
+      "discharged": false
+    },
+    {
+      "name": "bigint-arithmetic",
+      "obligation": "num::BigInt arithmetic, Karatsuba multiplication and the field-norm recursion of ntru_solve are unmodelled imported semantics.",
+      "discharged": false
+    },
+    {
+      "name": "ntru-equation",
+      "obligation": "That ntru_gen's output satisfies f*G - g*F = q mod (X^N+1), and that FFT(f) is invertible, are assumed properties of the generator, not proved.",
+      "discharged": false
+    },
+    {
+      "name": "gaussian-sampler-distribution",
+      "obligation": "That ffSampling/samplerz produce the discrete Gaussian required for Falcon's zero-knowledge/security argument is assumed; only integer table facts are proved.",
+      "discharged": false
+    }
+  ]
+}
