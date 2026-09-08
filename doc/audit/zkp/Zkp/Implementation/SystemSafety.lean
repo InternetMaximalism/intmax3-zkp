@@ -36,6 +36,13 @@ canonical L1 head (premises f1, f2), that storage survives unmodeled entrypoints
 (premises g1, g2), or that any deployed artifact behaves like these definitions
 (premise h). Liveness, censorship, gas, ordering and ERC20 token honesty are not
 represented at all.
+
+Premise (a0) — the operator's explicit decision to ACCEPT the pinned MLE/WHIR
+submodule as trusted rather than translate it — is likewise borrowed, not proved.
+The last section of this module measures it: `mle_assumption_does_not_imply_fund_safety`
+and `mle_assumption_alone_does_not_yield_close_gate_soundness` exhibit
+environments in which (a0) holds and the conclusion of interest fails anyway, so
+the acceptance cannot be read as closing this audit.
 -/
 
 namespace Zkp.Implementation.SystemSafety
@@ -1204,5 +1211,117 @@ theorem sample_withdrawal_acceptance_pins_the_exact_statement :
       .ok (ClaimSettlementBridge.withdrawalStatement sampleWithdrawalFields).words :=
   ClaimSettlementBridge.accepted_withdrawal_has_exact_adapter_receipt withdrawalAcceptingEvm
     sampleInstalled sampleWithdrawalFields [] sample_withdrawal_claim_is_accepted
+
+/-! ## The accepted MLE/WHIR premise does not close the audit
+
+`TrustBoundary.mleVerifierSoundness` is an accepted trust assumption about the
+pinned `contracts/lib/polygon-plonky2` verifier, not a proof, and accepting it
+leaves the rest of the boundary exactly where it was. The two theorems below make
+that non-implication a kernel-checked fact rather than a comment: each exhibits an
+environment in which the accepted premise holds — vacuously in the strongest
+possible way, because every proof is accepted and every accepted statement is
+declared satisfiable — while the conclusion people might hope it delivers fails.
+
+The environments are built by overriding only the fields the counterexample needs
+(`plonky2Satisfiable`, the adapter view, the installed adapters, the hash, and the
+deposit attribution) on an arbitrary `Models`, so no other premise is disturbed. -/
+
+/-- The `sampleCloseFields` channel, but claiming one raw unit of the single live
+token. Everything else, including `tokenCount = 1` and `minDelegateCount = 0`, is
+unchanged, so the same acceptance computation goes through. -/
+def unbackedCloseFields : SettlementVerifier.CloseFields :=
+  { sampleCloseFields with channelFundAmounts := fun _ => 1 }
+
+/-- An adapter view that accepts every proof and returns the close statement of
+`unbackedCloseFields`. It is a model value, not a proof system. -/
+def unbackedAcceptingEvm : SettlementVerifier.EvmView where
+  chainId := 0
+  codeSize := fun _ => 0
+  allowedChainId := fun _ => .error []
+  core := fun _ => .error []
+  verifyCompactPublicInputs := fun _ _ =>
+    .ok (SettlementCloseBridge.statement sampleKeccak unbackedCloseFields 0).words
+
+/-- The counterexample environment: the pinned adapter accepts everything, every
+accepted word vector is declared to be a satisfiable plonky2 statement of the
+pinned circuit, and the channel deposited nothing. -/
+def unbackedModels {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) :
+    TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore :=
+  { m with
+    evm := unbackedAcceptingEvm
+    installed := sampleInstalled
+    keccak := sampleKeccak
+    deposits := fun _ _ => 0
+    plonky2Satisfiable := fun _ _ => True }
+
+/-- The close endpoint really does accept in that environment, so the theorems
+below are not vacuous: they refute premises on an actual acceptance. -/
+theorem unbacked_close_is_accepted {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) :
+    SettlementVerifier.verifyCloseIntent (unbackedModels m).evm (unbackedModels m).installed
+      (unbackedModels m).keccak unbackedCloseFields [] = .ok true := by
+  show SettlementVerifier.verifyCloseIntent unbackedAcceptingEvm sampleInstalled sampleKeccak
+    unbackedCloseFields [] = .ok true
+  rfl
+
+/-- The accepted MLE/WHIR premise holds in that environment, trivially. -/
+theorem unbacked_environment_satisfies_the_mle_premise
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) :
+    TrustBoundary.MleAcceptedStatementsAreSatisfiable (unbackedModels m) := by
+  intro _ _ _ _ _
+  trivial
+
+/-- **Accepting the submodule does not buy fund safety.** In an environment where
+`mleVerifierSoundness` holds — every proof accepted, every accepted statement
+declared satisfiable — no `TrustBoundary` instance exists at all, because the
+channel is credited a token amount it never deposited and premise (c)
+`closeVectorBacked` is refuted on a genuine acceptance. So the new field cannot
+be read as closing the audit: a satisfiable statement of the pinned circuit is
+not by itself a legitimate fund movement, and premises (c), (d), (e1), (e2),
+(f1), (f2), (g1), (g2) and (h) remain exactly as unproved as before. -/
+theorem mle_assumption_does_not_imply_fund_safety
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (Deployed Modeled Unmodeled : σ → σ → Prop)
+    (managerProjection : σ → ManagerValue.State) (fundingProjection : σ → CloseFunding.State) :
+    TrustBoundary.MleAcceptedStatementsAreSatisfiable (unbackedModels m) ∧
+      ¬ TrustBoundary.TrustBoundary (unbackedModels m) Deployed Modeled Unmodeled
+          managerProjection fundingProjection := by
+  refine ⟨unbacked_environment_satisfies_the_mle_premise m, ?_⟩
+  intro tb
+  have violated := tb.closeVectorBacked unbackedCloseFields [] (unbacked_close_is_accepted m)
+    (0 : Fin 10) (by decide)
+  have credited : (unbackedCloseFields.channelFundAmounts 0).val = 1 := rfl
+  have deposited : (unbackedModels m).deposits unbackedCloseFields.channelId.val
+      (unbackedCloseFields.tokenRegistry 0).val = 0 := rfl
+  rw [credited, deposited] at violated
+  exact absurd violated (by decide)
+
+/-- **Accepting the submodule does not by itself discharge premise (a) either.**
+With no balance proofs available at all, the conclusion of `closeProofSoundness`
+— some witness satisfies `CloseCircuit.CircuitGates` — is false for the accepted
+close, while `mleVerifierSoundness` still holds. This is a logical independence
+witness, deliberately degenerate: it shows only that the statement-to-gates
+lowering of `TrustBoundary.CloseStatementLowering` is a genuinely separate
+obligation, which
+`TrustBoundary.mle_assumption_reduces_close_soundness_to_gate_lowering` must be
+handed before premise (a) follows. -/
+theorem mle_assumption_alone_does_not_yield_close_gate_soundness
+    {AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : TrustBoundary.Models Empty AggregateProof Path Root ClaimPath ClaimCore) :
+    TrustBoundary.MleAcceptedStatementsAreSatisfiable (unbackedModels m) ∧
+      ¬ (∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
+          SettlementVerifier.verifyCloseIntent (unbackedModels m).evm (unbackedModels m).installed
+              (unbackedModels m).keccak f proof = .ok true →
+            ∃ w : CloseCircuit.ProofWitness Empty AggregateProof Path,
+              CloseCircuit.CircuitGates (unbackedModels m).closeEnv
+                (SettlementCloseBridge.statement (unbackedModels m).keccak f
+                  f.minDelegateCount.val) w) := by
+  refine ⟨unbacked_environment_satisfies_the_mle_premise m, ?_⟩
+  intro lowered
+  obtain ⟨w, _⟩ := lowered unbackedCloseFields [] (unbacked_close_is_accepted m)
+  exact w.balanceProof.elim
 
 end Zkp.Implementation.SystemSafety

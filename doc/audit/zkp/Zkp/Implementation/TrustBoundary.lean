@@ -23,6 +23,20 @@ Solidity compilers; none of those objects is modeled anywhere in this project.
 so that every field mentions the SAME verifier view, the SAME hash function and
 the SAME circuit environment as the theorem that consumes it.
 
+One field is different in kind from the others. `mleVerifierSoundness` records an
+audit-scoping decision the operator has taken explicitly: the pinned MLE/WHIR
+proof system of the `contracts/lib/polygon-plonky2` submodule and its Solidity
+counterpart are ACCEPTED as trusted rather than translated, on the same footing
+as the accepted KZG ceremony of `Zkp.Implementation.BlobJournal`. Accepting an
+artifact is not proving it, so the decision is written here the only honest way
+it can be: as one more named, unproved field. What accepting it buys is
+`mle_assumption_reduces_close_soundness_to_gate_lowering` — the close-soundness
+gap shrinks to the statement-to-`CircuitGates` lowering and nothing else. What it
+does not buy is recorded by
+`Zkp.Implementation.SystemSafety.mle_assumption_alone_does_not_yield_close_gate_soundness`
+and `...mle_assumption_does_not_imply_fund_safety`, which exhibit environments
+where the accepted premise holds and the conclusion still fails.
+
 The single inhabitation result below is deliberately degenerate: in an
 environment where every proof adapter returns a failure, every acceptance-guarded
 premise holds vacuously and every storage-frame premise holds because no
@@ -69,6 +83,37 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   deposits : ChannelDeposits
   /-- Intended meaning of a successful aggregate-signature check. -/
   signers : SignerRelation
+  /-- Pinned circuit identity of the adapter deployed at an address: the circuit
+  digest and verification-config digest baked into that adapter's pinned
+  configuration (`MleProverBridge.ConfigBody.circuitDigest` and
+  `MleProverBridge.ConfigFixture.pinnedVerificationConfigDigest` on the Rust
+  side, the fixed `encodedConfiguration` of the deployed verifier on the Solidity
+  side). It is a parameter here; nothing in this project derives it from a
+  circuit, and distinct addresses alone do not prove a deployer pinned the
+  intended circuit. -/
+  pinnedCircuitDigest : SettlementVerifier.Address → List Nat
+  /-- `plonky2Satisfiable digest words` is the intended meaning of: there is a
+  plonky2 statement whose circuit is the one `digest` identifies, whose
+  public-input vector is `words`, and which has a satisfying assignment. It is
+  deliberately opaque — no model in this project defines plonky2 statements,
+  gates or assignments — and only `MleAcceptedStatementsAreSatisfiable` and
+  `CloseStatementLowering` ever mention it. -/
+  plonky2Satisfiable : List Nat → List Nat → Prop
+
+/-- The accepted-artifact assumption in isolation, so that a theorem can take it
+without taking the whole premise bundle: for an adapter the settlement verifier
+actually pins, a word vector returned by `verifyCompactPublicInputs` is the
+public-input vector of a satisfiable plonky2 statement of that adapter's pinned
+circuit. `TrustBoundary.mleVerifierSoundness` is exactly this Prop, and its
+docstring carries the scope of the acceptance. -/
+def MleAcceptedStatementsAreSatisfiable
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ (adapter : SettlementVerifier.Address) (proof : SettlementVerifier.Bytes)
+    (words : SettlementVerifier.Limbs),
+    adapter ∈ m.installed.adapters.list →
+    m.evm.verifyCompactPublicInputs adapter proof = .ok words →
+    m.plonky2Satisfiable (m.pinnedCircuitDigest adapter) words
 
 /-!
 ## The premises
@@ -100,6 +145,53 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
       ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
         CloseCircuit.CircuitGates m.closeEnv
           (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w
+  /-- **(a0) Pinned MLE/WHIR verifier soundness — an ACCEPTED trust assumption,
+  not a proved property.** For an adapter the settlement verifier actually pins,
+  if the modeled EVM view's `verifyCompactPublicInputs` returns a word vector for
+  a proof — that is, if the pinned MLE/WHIR verifier accepted that proof — then
+  that word vector really is the public-input vector of a plonky2 statement of
+  the circuit which the adapter's pinned circuit digest identifies, and that
+  statement has a satisfying assignment.
+
+  (i) ACCEPTED, NOT PROVED. This field is here at the operator's explicit
+  direction, as an audit-scoping decision: the pinned MLE/WHIR submodule is taken
+  on trust instead of being translated, on the same footing as the accepted KZG
+  ceremony that `Zkp.Implementation.BlobJournal` does not challenge. It is a
+  named premise exactly like every other field of this structure — it is not an
+  axiom, it is proved nowhere in this project, and no theorem may treat it as
+  established.
+
+  (ii) WHAT IT COVERS. Exactly one artifact: the pinned MLE/WHIR proof system of
+  the `contracts/lib/polygon-plonky2` submodule — its Rust verifier
+  (`mle/src/verifier_v2.rs` and the sumcheck/WHIR machinery beneath it, roughly
+  34k lines) together with its Solidity counterpart, `PinnedMleVerifierV2.sol`
+  and `CompactMleProofV2.sol` with the `Plonky2GateEvaluator` dispatch they call.
+  The submodule is pinned BY COMMIT in the manifest: `submodules` of
+  `doc/audit/lean-current-source-manifest.json` records
+  `contracts/lib/polygon-plonky2` at `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78`,
+  the same gitlink the parent tree carries, and the Cargo `[patch]` block
+  redirects every transitive `polygon-plonky2` dependency to that one checkout.
+  The acceptance is scoped to that commit and to nothing else: a different
+  submodule revision is a different, unaccepted artifact. Accepting it means
+  accepting, unexamined by this audit, that submodule's WHIR/FRI and sumcheck
+  soundness argument, its claimed security level, its Fiat-Shamir transcript, its
+  compact-proof codec, and the agreement of its Rust and Solidity sides.
+
+  (iii) WHAT IT DOES NOT COVER. It says nothing about the circuit-to-gates
+  lowering: that the plonky2 statement the digest identifies is the circuit these
+  models describe is a separate obligation, stated as `CloseStatementLowering`
+  and still required by `closeProofSoundness`. It says nothing about the KZG
+  attestation or Proof-DA availability path, which stays a distinct boundary of
+  `MleProverBridge` and `BlobJournal`. It says nothing about the correctness of
+  the public inputs a caller passes in: the Solidity binding pins which words
+  were returned, it never validates that they describe a real channel. And a
+  satisfiable statement is not by itself a safe fund movement — that step still
+  needs premises (c), (d), (e1), (e2), (f1), (f2) and (g1). See
+  `mle_assumption_reduces_close_soundness_to_gate_lowering` for what the
+  acceptance buys, and
+  `Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety` for
+  an environment in which this premise holds and fund safety fails anyway. -/
+  mleVerifierSoundness : MleAcceptedStatementsAreSatisfiable m
   /-- **(b1) Withdrawal-claim soundness.** `ClaimSettlementBridge` ties an accepted
   withdrawal claim to the exact 50-word statement only. This premise adds the
   missing direction: acceptance implies a satisfying witness of
@@ -240,7 +332,9 @@ accepted, no aggregate check passes, no finality is observed, and no transition
 outside the model or from the deployed artifact is admitted. This is a
 well-formedness check on the statement, NOT evidence that any field holds of a
 real deployment. In particular the hypotheses below describe an environment in
-which no close, no claim and no materialization can ever succeed. -/
+which no close, no claim and no materialization can ever succeed, and in which
+the accepted MLE/WHIR premise `mleVerifierSoundness` holds only because the
+pinned adapter never returns a word vector at all. -/
 theorem rejecting_environment_satisfies_every_premise
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
@@ -257,6 +351,8 @@ theorem rejecting_environment_satisfies_every_premise
     TrustBoundary m (fun _ _ => False) Modeled (fun _ _ => False) managerOf fundingOf where
   closeProofSoundness f proof accepted :=
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
+  mleVerifierSoundness adapter proof _ _ returned :=
+    Except.noConfusion (returned.symm.trans (rejects adapter proof))
   withdrawalProofSoundness f proof accepted :=
     absurd accepted (rejecting_environment_accepts_no_claim m rejects f ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩ proof).1
   postCloseProofSoundness f proof accepted :=
@@ -294,5 +390,92 @@ theorem close_premise_statement_is_the_adapter_receipt
       .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words :=
   SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt
     m.evm m.installed m.keccak f proof accepted
+
+/-! ## What accepting the pinned MLE/WHIR artifact buys
+
+Premise (a) `closeProofSoundness` is one implication with two independent halves:
+from "the pinned verifier accepted this proof" to "the returned public inputs
+belong to a satisfiable plonky2 statement of the pinned circuit" (the accepted
+premise (a0)), and from there to "some witness satisfies the handwritten
+`CloseCircuit.CircuitGates` for the very same statement" (the lowering below).
+The first half is what the operator has decided to accept; the second half is
+NOT covered by that decision and is stated separately so it cannot be smuggled
+in. `mle_assumption_reduces_close_soundness_to_gate_lowering` is the composition
+of the two, and it is the whole of what accepting the submodule buys on the close
+path. -/
+
+/-- The step the accepted MLE/WHIR premise does NOT cover on the close path: that
+the plonky2 statement identified by the close adapter's pinned circuit digest,
+carrying the very words the Solidity side bound, is the circuit
+`Zkp.Implementation.CloseCircuit` models — so that a satisfying assignment of it
+yields a satisfying witness of `CloseCircuit.CircuitGates`. Discharging it needs
+the emitted gate set of the deployed circuit and `CloseCircuit.FieldAndGadgetLowering`;
+neither the emitted gates nor the plonky2 lowering is modeled in this project. -/
+def CloseStatementLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ f : SettlementVerifier.CloseFields,
+    m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
+        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words →
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w
+
+/-- The close adapter is one of the four adapters the settlement verifier pins,
+so premise (a0) — which is stated only about pinned adapters — does apply to the
+close endpoint. -/
+theorem close_adapter_is_pinned (installed : SettlementVerifier.Installed) :
+    installed.adapters.close ∈ installed.adapters.list := by
+  simp [SettlementVerifier.Adapters.list]
+
+/-- **The composition, stated exactly.** Under the accepted MLE/WHIR premise
+(a0), a successful modeled close verification already yields the first half of
+premise (a): the word vector the pinned adapter returned is the public-input
+vector of a satisfiable plonky2 statement of the pinned close circuit, and it is
+the exact 103-word close statement (that part is proved, not assumed). The
+remaining gap to `closeProofSoundness` is then `CloseStatementLowering` and
+nothing else: supplying it discharges premise (a) for every accepted close.
+
+Note what is quantified where. `lowering` is a hypothesis of this theorem, not a
+consequence of it; accepting the submodule does not make it more likely to hold.
+And `closeProofSoundness` is still only about gates: even with both halves, the
+conclusion is a satisfying witness, never a safe payment. -/
+theorem mle_assumption_reduces_close_soundness_to_gate_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : CloseStatementLowering m)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
+    m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
+        .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
+      m.plonky2Satisfiable (m.pinnedCircuitDigest m.installed.adapters.close)
+        (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words ∧
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w := by
+  have receipt : m.evm.verifyCompactPublicInputs m.installed.adapters.close proof =
+      .ok (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val).words :=
+    SettlementCloseBridge.accepted_verification_has_exact_adapter_receipt
+      m.evm m.installed m.keccak f proof accepted
+  have satisfiable := mleSound m.installed.adapters.close proof _
+    (close_adapter_is_pinned m.installed) receipt
+  exact ⟨receipt, satisfiable, lowering f satisfiable⟩
+
+/-- The same composition read as premise discharge: (a0) plus the lowering give
+premise (a) in the exact form `TrustBoundary.closeProofSoundness` demands, and
+therefore nothing weaker than the lowering can be substituted for it. -/
+theorem mle_assumption_with_lowering_is_close_proof_soundness
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (mleSound : MleAcceptedStatementsAreSatisfiable m)
+    (lowering : CloseStatementLowering m) :
+    ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
+      SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
+      ∃ w : CloseCircuit.ProofWitness BalanceProof AggregateProof Path,
+        CloseCircuit.CircuitGates m.closeEnv
+          (SettlementCloseBridge.statement m.keccak f f.minDelegateCount.val) w :=
+  fun f proof accepted =>
+    (mle_assumption_reduces_close_soundness_to_gate_lowering m mleSound lowering f proof
+      accepted).2.2
 
 end Zkp.Implementation.TrustBoundary

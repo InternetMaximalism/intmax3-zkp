@@ -380,12 +380,12 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "0625cba9a1f2542ee6341cafb8f5df1f60530c1fea247f27b45f6733a3ecd964",
+      "sha256": "f66d09bc6957f782afbb790ddafb9cdcadc2f6935503566c40157f7c9bb04dd1",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "3f38b67ddc8da8f4982a31c58b3a8216ebd48ac8545f305a2a9801771f5abf22",
+      "sha256": "875050ca96ba778b1499243531adc566b2fd86c4dc282bc35f0c39e3cbab4f3d",
       "role": "spec"
     },
     {
@@ -1215,12 +1215,12 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/SystemSafety.lean",
-      "sha256": "a275c9e13988af2a961fb6525e329c3163f802c2d9b0c30c48974d36dc9f11a7",
+      "sha256": "46c922a4e7df6af52273e80c51f2b75f6d6b6e0bcab9dc54af461b637ea65766",
       "role": "model"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "d2085b9b65207cf01101b747bf50ec9ae962c301b764f781c5bf6b3b4f735a73",
+      "sha256": "eff8aea1f66f1a33612543764d33e2f075f96d134f9f6efdfa5f92dcddbeb425",
       "role": "model"
     },
     {
@@ -5350,7 +5350,11 @@
         "Zkp.Implementation.SystemSafety.sample_close_is_accepted",
         "Zkp.Implementation.SystemSafety.sample_withdrawal_claim_is_accepted",
         "Zkp.Implementation.SystemSafety.sample_close_acceptance_pins_the_exact_statement",
-        "Zkp.Implementation.SystemSafety.sample_withdrawal_acceptance_pins_the_exact_statement"
+        "Zkp.Implementation.SystemSafety.sample_withdrawal_acceptance_pins_the_exact_statement",
+        "Zkp.Implementation.SystemSafety.unbacked_close_is_accepted",
+        "Zkp.Implementation.SystemSafety.unbacked_environment_satisfies_the_mle_premise",
+        "Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety",
+        "Zkp.Implementation.SystemSafety.mle_assumption_alone_does_not_yield_close_gate_soundness"
       ],
       "sources": [
         "doc/audit/zkp/line-map/manager-value.json",
@@ -5365,7 +5369,10 @@
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_claim",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_satisfies_every_premise",
         "Zkp.Implementation.TrustBoundary.close_premise_statement_has_103_words",
-        "Zkp.Implementation.TrustBoundary.close_premise_statement_is_the_adapter_receipt"
+        "Zkp.Implementation.TrustBoundary.close_premise_statement_is_the_adapter_receipt",
+        "Zkp.Implementation.TrustBoundary.close_adapter_is_pinned",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_reduces_close_soundness_to_gate_lowering",
+        "Zkp.Implementation.TrustBoundary.mle_assumption_with_lowering_is_close_proof_soundness"
       ],
       "sources": [
         "doc/audit/zkp/line-map/close-circuit.json",

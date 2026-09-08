@@ -147,6 +147,41 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-08（追記）：MLE サブモジュールを信頼仮定として導入
+
+運用者の判断により、pinned MLE/WHIR サブモジュールを **翻訳せず信頼する** ことにしました。
+KZG ceremony と同じ扱いです。この決定は次の 3 か所に記録され、証明としては扱いません。
+
+1. **Lean の名前付き前提。** `TrustBoundary.mleVerifierSoundness`（前提 (a0)）。
+   pinned adapter に対し EVM view の `verifyCompactPublicInputs` が語列を返したなら、
+   その語列は adapter の pinned circuit digest が同定する回路の plonky2 statement の
+   公開入力であり、その statement は充足可能である、という主張です。公理ではなく、
+   他の 12 前提と同格の structure field です。
+2. **inventory の scope note。** MLE の 68 file・33,974 行は引き続き **untranslated** に分類し、
+   検証済みには算入しません。行分類の数値は仮定の導入前後で変わりません。
+3. **manifest の commit pin。** `contracts/lib/polygon-plonky2` を
+   `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78` に固定。仮定はこの commit にのみ及び、
+   別 revision は未受容の別成果物です。
+
+**この仮定が買うもの。** close 経路について、前提 (a) の隙間が 1 段階に縮みます
+（`mle_assumption_reduces_close_soundness_to_gate_lowering`）。残るのは
+`CloseStatementLowering`、すなわち digest が同定する plonky2 statement が本モデルの記述する
+回路であり、その充足割当が `CircuitGates` の witness を与えるという段だけです。
+これは gate 生成と `CloseCircuit.FieldAndGadgetLowering` を要し、証明されていません。
+
+**この仮定が買わないもの（kernel 検証済みの反例つき）。**
+`SystemSafety.mle_assumption_does_not_imply_fund_safety` は、(a0) が成立しながら
+`TrustBoundary` の instance が存在しない環境を与えます。adapter は実際に受理し、
+103 語の close statement を返しますが、そのチャネルは預入していない token を 1 単位主張しており
+前提 (c) が破れます。`mle_assumption_alone_does_not_yield_close_gate_soundness` は
+lowering が破れる環境を与えます。いずれも vacuous な仮定ではなく実際の受理の上に立ちます。
+
+依然として未証明のもの：回路から gate への lowering、KZG / DA 可用性、呼出し側が渡す公開入力が
+実在のチャネルを表すこと、close vector の預入による裏付け (c)、署名妥当性 (d)、
+hash の一致と束縛 (e1, e2)、L1 canonical head / finality (f1, f2)、
+未モデル化 entrypoint に対する storage 永続性 (g1, g2)、source / EVM / compiler refinement (h)、
+および claim 側の前提 (b1, b2)。
+
 ### 2026-09-08：依存層と暗号層の翻訳、実在するテスト失敗 3 件
 
 - **125 Lean モジュール**を build。現行 **72 モジュール**、**470 reviewed-source hashes**、
@@ -455,7 +490,7 @@ source-refinement certificate の形式自体がなく、全行の安全性を�
 ## 続きで必要なこと
 
 0. **core 71 file と依存側の主要部の対応表が完了しました。** 未翻訳は 41,783 行で、
-   その大半は MLE サブモジュール（34,000 行弱）です。残る主作業はそこと、
+   その大半は MLE サブモジュール（34,000 行弱）で、これは信頼仮定として受容済みです（前提 (a0)）。残る主作業はそこと、
    `channel_registration` の到達不能な canonicality 検査の修正、`balance_state` の古いテスト 2 件の
    更新、そして CI に `cargo test --lib` を追加することです。
 1. （履歴）残る依存側の翻訳。Poseidon / keccak / Merkle / Falcon / Regev の実装が現在の opaque callback を
