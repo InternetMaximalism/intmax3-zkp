@@ -76,6 +76,14 @@ CURRENT = {
         "Zkp.Implementation.WithdrawalChain",
         "Zkp.Implementation.WithdrawalChainCircuit",
         "Zkp.Implementation.WitnessGenerators",
+        "Zkp.Implementation.BlockTypes",
+        "Zkp.Implementation.ChannelTypes",
+        "Zkp.Implementation.CommonValues",
+        "Zkp.Implementation.EthereumTypes",
+        "Zkp.Implementation.IndexedMerkleTree",
+        "Zkp.Implementation.MerkleTrees",
+        "Zkp.Implementation.SparseTrees",
+        "Zkp.Implementation.UtilGadgets",
     ),
 }
 ARCH_ROOTS = frozenset({
