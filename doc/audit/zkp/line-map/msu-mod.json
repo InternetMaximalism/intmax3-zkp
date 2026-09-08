@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "source": "src/deprecated/member_set_update/mod.rs",
+  "source_sha256": "1cc1a23c4f4f9e48ba041bf76cf033d258f6aa70c81e601b67d8bc3d21941271",
+  "source_lines": 8,
+  "module": "Zkp.Implementation.MleProverBridge",
+  "model": "doc/audit/zkp/Zkp/Implementation/MleProverBridge.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 7,
+      "status": "non-executable",
+      "label": "Module doc: retired prototype, preserved for audit archaeology",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 8,
+      "end": 8,
+      "status": "translated",
+      "label": "pub mod circuit \u2014 compiled only under the parent's deprecated-msu gate",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedModuleCompiled",
+        "Zkp.Implementation.MleProverBridge.featureEnabled",
+        "Zkp.Implementation.MleProverBridge.deprecatedMsuFeature",
+        "Zkp.Implementation.MleProverBridge.cargoDefaultFeatures"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_is_absent_from_a_default_build",
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_requires_the_explicit_feature",
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_surfaces_share_one_gate"
+      ],
+      "note": "Models the Cargo/cfg gate stated by the manifest, not what any release pipeline enables. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "manifest-fidelity",
+      "obligation": "The feature model reflects Cargo.toml and the cfg attributes as read; it is not a proof that no build enables deprecated-msu.",
+      "discharged": false
+    },
+    {
+      "name": "retired-path-not-endorsed",
+      "obligation": "Nothing asserts the retired prototype is safe or unreachable beyond the manifest gate.",
+      "discharged": false
+    }
+  ]
+}

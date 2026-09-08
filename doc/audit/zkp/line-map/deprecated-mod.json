@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source": "src/deprecated/mod.rs",
+  "source_sha256": "6a2672468fb00f3a903458e5bf60e04c92f9c4691199e0f80858069f645a0240",
+  "source_lines": 6,
+  "module": "Zkp.Implementation.MleProverBridge",
+  "model": "doc/audit/zkp/Zkp/Implementation/MleProverBridge.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 5,
+      "status": "non-executable",
+      "label": "Module doc: explicitly non-production prototypes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 6,
+      "end": 6,
+      "status": "translated",
+      "label": "pub mod member_set_update \u2014 reachable only with the deprecated-msu feature",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedModuleCompiled",
+        "Zkp.Implementation.MleProverBridge.msuFixtureBinaryBuildable",
+        "Zkp.Implementation.MleProverBridge.deprecatedV1ProverCompiled",
+        "Zkp.Implementation.MleProverBridge.cargoDefaultFeatures",
+        "Zkp.Implementation.MleProverBridge.featureEnabled",
+        "Zkp.Implementation.MleProverBridge.deprecatedMsuFeature"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_is_absent_from_a_default_build",
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_surfaces_share_one_gate",
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_requires_the_explicit_feature"
+      ],
+      "note": "Models the Cargo/cfg gate stated by the manifest. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "manifest-fidelity",
+      "obligation": "The feature model reflects Cargo.toml and the cfg attributes as read; it is not a proof that no build enables deprecated-msu.",
+      "discharged": false
+    },
+    {
+      "name": "retired-path-not-endorsed",
+      "obligation": "Nothing asserts the retired prototype is safe or unreachable beyond the manifest gate.",
+      "discharged": false
+    }
+  ]
+}

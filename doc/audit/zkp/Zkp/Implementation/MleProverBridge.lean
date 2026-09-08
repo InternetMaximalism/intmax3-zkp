@@ -807,7 +807,7 @@ theorem cutover_identity_ok_implies_pins (e g : JsonDoc)
         simpa using hfalse
 
 /-- Whatever the cutover accepts, it accepts BECAUSE those twelve pointers agree: any document
-pair that agrees there and carries the two pinned identities is admitted, no matter how it
+pair that agrees there and carries the two pinned identities is accepted, no matter how it
 differs elsewhere. `publicInputWireMap`, the layout pins, the protocol/session values and the
 encoded-config bytes are deliberately outside the pinned set — a cutover may change them. -/
 theorem cutover_accepts_when_only_unpinned_fields_differ (e g : JsonDoc)
@@ -2148,13 +2148,12 @@ theorem deprecated_export_returns_only_guard_accepted_json (fixtureJson : Except
   simp only [deprecatedExportMleJson] at h
   split at h
   · cases h
-  · rename_i j hj
-    split at h
+  · split at h
     · cases h
     · rename_i hguard
       injection h with hjson
       subst hjson
-      exact ⟨hj, hguard⟩
+      exact ⟨rfl, hguard⟩
 
 theorem deprecated_export_gate_guard_blocks_the_json (fixtureJson : Except String String)
     (serializedGates : Option (List SerializedGateRow)) (expected : List ExpectedGateRow)

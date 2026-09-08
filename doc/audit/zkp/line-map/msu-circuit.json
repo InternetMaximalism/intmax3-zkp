@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "source": "src/deprecated/member_set_update/circuit.rs",
+  "source_sha256": "b2b1c786dd58f11784fa540d7409e34039cde96fa3ecf2d319ad8de06e323121",
+  "source_lines": 597,
+  "module": "Zkp.Implementation.MleProverBridge",
+  "model": "doc/audit/zkp/Zkp/Implementation/MleProverBridge.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 39,
+      "status": "non-executable",
+      "label": "Module doc: retired statement, Q-3/Q-4/Q-6 rationale, public-input layout",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 40,
+      "end": 83,
+      "status": "dependency-boundary",
+      "label": "plonky2, keccak, serde and in-crate imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "The Poseidon member-tree fold, the keccak gadget, the Falcon aggregate verifier and validate_member_set_delta are opaque."
+    },
+    {
+      "start": 84,
+      "end": 91,
+      "status": "translated",
+      "label": "IMCM domain constant and MEMBER_SET_UPDATE_PUBLIC_INPUTS_LEN",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.imcmDomain",
+        "Zkp.Implementation.MleProverBridge.closeMemberSetDomain",
+        "Zkp.Implementation.MleProverBridge.bytes32Len",
+        "Zkp.Implementation.MleProverBridge.memberSetUpdatePublicInputsLen",
+        "Zkp.Implementation.MleProverBridge.maxSigCluster",
+        "Zkp.Implementation.MleProverBridge.slotIndices"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.imcm_domain_agrees_with_close_member_set_domain",
+        "Zkp.Implementation.MleProverBridge.member_set_update_public_inputs_len_pinned",
+        "Zkp.Implementation.MleProverBridge.bytes32_len_pinned",
+        "Zkp.Implementation.MleProverBridge.max_sig_cluster_pinned",
+        "Zkp.Implementation.MleProverBridge.member_set_update_domains_are_distinct",
+        "Zkp.Implementation.MleProverBridge.slot_indices_cover_the_cluster",
+        "Zkp.Implementation.MleProverBridge.mem_slot_indices_lt",
+        "Zkp.Implementation.MleProverBridge.lt_mem_slot_indices"
+      ],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 92,
+      "end": 123,
+      "status": "translated",
+      "label": "MemberSetUpdatePublicInputs and to_u64_vec: the 26-limb encoding",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuPublicInputs",
+        "Zkp.Implementation.MleProverBridge.setVersionHi",
+        "Zkp.Implementation.MleProverBridge.setVersionLo",
+        "Zkp.Implementation.MleProverBridge.Words8",
+        "Zkp.Implementation.MleProverBridge.Address5",
+        "Zkp.Implementation.MleProverBridge.immsDomain",
+        "Zkp.Implementation.MleProverBridge.falconAggMsgOffset",
+        "Zkp.Implementation.MleProverBridge.falconAggCountOffset",
+        "Zkp.Implementation.MleProverBridge.falconAggPkListOffset",
+        "Zkp.Implementation.MleProverBridge.falconAggPublicInputsLen",
+        "Zkp.Implementation.MleProverBridge.pkSlotStart"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.msu_public_inputs_length",
+        "Zkp.Implementation.MleProverBridge.msu_public_inputs_layout",
+        "Zkp.Implementation.MleProverBridge.msu_commitment_windows_are_disjoint",
+        "Zkp.Implementation.MleProverBridge.set_version_limbs_recompose",
+        "Zkp.Implementation.MleProverBridge.set_version_limbs_fit_u32",
+        "Zkp.Implementation.MleProverBridge.words8_to_list_length",
+        "Zkp.Implementation.MleProverBridge.address5_to_list_length",
+        "Zkp.Implementation.MleProverBridge.words8_ext",
+        "Zkp.Implementation.MleProverBridge.address5_ext",
+        "Zkp.Implementation.MleProverBridge.falcon_agg_layout_pinned",
+        "Zkp.Implementation.MleProverBridge.pk_slots_are_disjoint_and_inside_the_aggregate_layout"
+      ],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 124,
+      "end": 167,
+      "status": "dependency-boundary",
+      "label": "MemberSetUpdatePublicInputsTarget: virtual targets, 32-bit range checks and to_vec",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuPublicInputs"
+      ],
+      "theorems": [],
+      "note": "plonky2 builder targets and range_check lowering are not modelled; only the limb ORDER is, via MsuPublicInputs.toU64Vec."
+    },
+    {
+      "start": 168,
+      "end": 185,
+      "status": "translated",
+      "label": "MemberSetUpdateCircuitWitness",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuWitness",
+        "Zkp.Implementation.MleProverBridge.MemberLeaf",
+        "Zkp.Implementation.MleProverBridge.emptyLeaf",
+        "Zkp.Implementation.MleProverBridge.leafAt"
+      ],
+      "theorems": [],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 186,
+      "end": 225,
+      "status": "translated",
+      "label": "expected_public_inputs: the native strict mirror",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.expectedPublicInputs",
+        "Zkp.Implementation.MleProverBridge.leadingCount",
+        "Zkp.Implementation.MleProverBridge.changedIndices",
+        "Zkp.Implementation.MleProverBridge.MsuWitnessError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.native_mirror_runs_delta_validation_first",
+        "Zkp.Implementation.MleProverBridge.native_mirror_requires_exactly_one_changed_slot",
+        "Zkp.Implementation.MleProverBridge.native_mirror_new_count_is_old_plus_add",
+        "Zkp.Implementation.MleProverBridge.native_mirror_rotation_carries_zero_recipient"
+      ],
+      "note": "validate_member_set_delta and close_member_set_commitment are opaque callbacks. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 226,
+      "end": 233,
+      "status": "non-executable",
+      "label": "MemberSetUpdateCircuitError enum",
+      "declarations": [],
+      "theorems": [],
+      "note": "Error type declaration."
+    },
+    {
+      "start": 234,
+      "end": 253,
+      "status": "dependency-boundary",
+      "label": "MemberSetUpdateCircuit struct and impl header",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuCircuitWitness"
+      ],
+      "theorems": [],
+      "note": "CircuitData and target handles are plonky2 objects; only the witness view is modelled."
+    },
+    {
+      "start": 254,
+      "end": 529,
+      "status": "translated",
+      "label": "new(): the in-circuit gates \u2014 aggregate verification binding, thermometer, leaf/pk binding, Q-3 delta, M-1 duplicate rule, IMCM commitments, op-digest and IMMS digest",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuCircuitGates",
+        "Zkp.Implementation.MleProverBridge.MsuCircuitWitness",
+        "Zkp.Implementation.MleProverBridge.Thermometer",
+        "Zkp.Implementation.MleProverBridge.countTrue",
+        "Zkp.Implementation.MleProverBridge.activeAt",
+        "Zkp.Implementation.MleProverBridge.changedAt",
+        "Zkp.Implementation.MleProverBridge.changedSlotsOf",
+        "Zkp.Implementation.MleProverBridge.changedSlotIndexSum",
+        "Zkp.Implementation.MleProverBridge.isAddAt",
+        "Zkp.Implementation.MleProverBridge.isAdd",
+        "Zkp.Implementation.MleProverBridge.imcmPreimage",
+        "Zkp.Implementation.MleProverBridge.immsPreimage",
+        "Zkp.Implementation.MleProverBridge.rotateOpPreimage",
+        "Zkp.Implementation.MleProverBridge.addOpPreimage"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.thermometer_active_prefix",
+        "Zkp.Implementation.MleProverBridge.thermometer_head_false_forces_all_false",
+        "Zkp.Implementation.MleProverBridge.count_true_le_length",
+        "Zkp.Implementation.MleProverBridge.msu_active_bits_are_the_first_old_count_slots",
+        "Zkp.Implementation.MleProverBridge.msu_registered_cluster_has_at_least_two_signers",
+        "Zkp.Implementation.MleProverBridge.msu_old_count_within_capacity",
+        "Zkp.Implementation.MleProverBridge.msu_new_count_within_capacity",
+        "Zkp.Implementation.MleProverBridge.msu_full_cluster_cannot_add",
+        "Zkp.Implementation.MleProverBridge.msu_add_lands_at_the_left_packed_boundary",
+        "Zkp.Implementation.MleProverBridge.msu_changed_slot_key_differs_from_every_other_slot",
+        "Zkp.Implementation.MleProverBridge.msu_changed_slot_key_is_non_zero",
+        "Zkp.Implementation.MleProverBridge.msu_signer_list_binds_the_old_key_set",
+        "Zkp.Implementation.MleProverBridge.msu_rotation_exposes_the_zero_recipient",
+        "Zkp.Implementation.MleProverBridge.msu_exposed_commitments_and_signed_message",
+        "Zkp.Implementation.MleProverBridge.changed_slot_index_sum_selects_the_changed_slot"
+      ],
+      "note": "Models the CONSTRAINTS an arbitrary satisfying witness must meet, not the plonky2 lowering; keccak, the Poseidon fold and the recursive Falcon aggregate verification are premises. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 530,
+      "end": 546,
+      "status": "translated",
+      "label": "prove(): the native mirror runs before proving",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.expectedPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.native_mirror_runs_delta_validation_first"
+      ],
+      "note": "Proving itself is opaque. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 547,
+      "end": 597,
+      "status": "dependency-boundary",
+      "label": "prove_with_public_inputs: the M-1 test seam that drives the circuit with caller-supplied public inputs",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuCircuitGates"
+      ],
+      "theorems": [],
+      "note": "PartialWitness assignment (whose set_* Results are discarded with `let _ =`) is not modelled; the gate model in MsuCircuitGates is exactly what defends this path."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "retired-path-not-endorsed",
+      "obligation": "The prototype is documented as never proving an atomic transition of every settlement and validity-layer authority; no theorem here repairs that, and none asserts the path is safe.",
+      "discharged": false
+    },
+    {
+      "name": "falcon-aggregate-verification",
+      "obligation": "The recursive FalconBatchAggCircuit verification, its baked-in verifier key and signature validity are premises.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-and-poseidon-opacity",
+      "obligation": "IMCM/IMMS keccaks and the Poseidon member-tree fold are opaque callbacks; no injectivity is assumed, so equal digests never imply equal sets.",
+      "discharged": false
+    },
+    {
+      "name": "native-delta-validator",
+      "obligation": "validate_member_set_delta lives in another module and is an opaque premise of the native mirror.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "That the builder calls lower to exactly the modelled constraints is not proved; MsuCircuitGates is a handwritten reading of the source.",
+      "discharged": false
+    },
+    {
+      "name": "witness-assignment-errors-discarded",
+      "obligation": "prove_with_public_inputs discards every set_target/set_bool_target Result with `let _ =`; the model does not cover assignment failures.",
+      "discharged": false
+    }
+  ]
+}

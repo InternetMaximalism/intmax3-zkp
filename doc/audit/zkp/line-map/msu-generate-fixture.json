@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "source": "src/deprecated/member_set_update/generate_fixture.rs",
+  "source_sha256": "920399e3969ca2f05b591521e53f27a8ca982348ae5d54b06e4408450f01b65f",
+  "source_lines": 203,
+  "module": "Zkp.Implementation.MleProverBridge",
+  "model": "doc/audit/zkp/Zkp/Implementation/MleProverBridge.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 24,
+      "status": "non-executable",
+      "label": "Generator doc: outputs, security note, usage, compute warning",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 25,
+      "end": 49,
+      "status": "dependency-boundary",
+      "label": "Imports, including the feature-gated deprecated_v1 prover and wallet_core",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedV1ProverCompiled"
+      ],
+      "theorems": [],
+      "note": "wallet_core, WrapperCircuit and the v1 MLE prover are opaque."
+    },
+    {
+      "start": 50,
+      "end": 65,
+      "status": "translated",
+      "label": "MemberSetUpdateDescriptor",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuDescriptor",
+        "Zkp.Implementation.MleProverBridge.descriptorRotatedSlotLiteral"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.descriptor_rotated_slot_literal_pinned"
+      ],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 66,
+      "end": 105,
+      "status": "dependency-boundary",
+      "label": "Steps 1-2: deterministic keys, the real wallet gate, and the previous set's aggregate",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuFixtureRun"
+      ],
+      "theorems": [],
+      "note": "verify_member_set_update, cosign_member_set_update and the Falcon aggregate are opaque outcomes."
+    },
+    {
+      "start": 106,
+      "end": 116,
+      "status": "translated",
+      "label": "Witness assembly and the native mirror",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuWitness",
+        "Zkp.Implementation.MleProverBridge.expectedPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.native_mirror_requires_exactly_one_changed_slot"
+      ],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 117,
+      "end": 135,
+      "status": "translated",
+      "label": "Circuit build, prove, verify and the proved-limbs assertion against the native mirror",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.runMemberSetUpdateFixture",
+        "Zkp.Implementation.MleProverBridge.MsuFixtureRun",
+        "Zkp.Implementation.MleProverBridge.MsuFixtureError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.msu_fixture_runs_the_wallet_gate_first",
+        "Zkp.Implementation.MleProverBridge.msu_fixture_threads_the_public_inputs",
+        "Zkp.Implementation.MleProverBridge.msu_fixture_accepts_a_consistent_run"
+      ],
+      "note": "Proving and verification are opaque outcomes. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 136,
+      "end": 149,
+      "status": "dependency-boundary",
+      "label": "Step 3: wrapper circuit and v1 MLE setup/prove/verify",
+      "declarations": [],
+      "theorems": [],
+      "note": "WrapperCircuit and the v1 MLE prover/verifier are opaque; the witness Result is discarded with `let _ =`."
+    },
+    {
+      "start": 150,
+      "end": 151,
+      "status": "translated",
+      "label": "export_mle_json: the v1 on-chain-evaluability guard runs before the JSON is used",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedExportMleJson"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.deprecated_export_gate_guard_blocks_the_json"
+      ],
+      "note": "Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 152,
+      "end": 171,
+      "status": "translated",
+      "label": "Sanity block: the MLE JSON publicInputs must be the 26 proved limbs",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.runMemberSetUpdateFixture",
+        "Zkp.Implementation.MleProverBridge.memberSetUpdatePublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.msu_fixture_threads_the_public_inputs",
+        "Zkp.Implementation.MleProverBridge.msu_fixture_length_assert_precedes_element_comparison",
+        "Zkp.Implementation.MleProverBridge.msu_fixture_rejects_a_public_input_mismatch"
+      ],
+      "note": "The length assertion precedes the element-wise zip, so no prefix can pass silently. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 172,
+      "end": 180,
+      "status": "dependency-boundary",
+      "label": "Step 4: output directory creation and the MLE artifact write",
+      "declarations": [],
+      "theorems": [],
+      "note": "Filesystem writes are not modelled."
+    },
+    {
+      "start": 181,
+      "end": 203,
+      "status": "translated",
+      "label": "Descriptor construction from the proved public inputs, plus the wallet-side key arrays and the literal rotated slot",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MsuDescriptor",
+        "Zkp.Implementation.MleProverBridge.runMemberSetUpdateFixture",
+        "Zkp.Implementation.MleProverBridge.descriptorRotatedSlotLiteral"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.msu_descriptor_key_arrays_are_not_bound_by_the_public_inputs",
+        "Zkp.Implementation.MleProverBridge.descriptor_rotated_slot_literal_pinned"
+      ],
+      "note": "The pk_g arrays come from wallet objects, not from the proved limbs; the model proves exactly that gap. Models a RETIRED, feature-gated prototype; nothing here asserts it is safe or deployable. Handwritten local semantics; no source/compiler refinement."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "wallet-gate-and-consent",
+      "obligation": "verify_member_set_update (IMKR self-consent plus the previous set's N-of-N) is an opaque accepted/rejected outcome.",
+      "discharged": false
+    },
+    {
+      "name": "proving-and-wrapping",
+      "obligation": "Circuit proving, the WrapperCircuit re-registration of the 26 limbs and the v1 MLE prover/verifier are opaque.",
+      "discharged": false
+    },
+    {
+      "name": "descriptor-key-arrays-unbound",
+      "obligation": "The descriptor's pk_g arrays are not bound by the circuit public inputs; binding rests on the Manager's stored-commitment comparison and on keccak preimage resistance, neither of which is proved.",
+      "discharged": false
+    },
+    {
+      "name": "filesystem-writes",
+      "obligation": "Artifact writes are outside the model.",
+      "discharged": false
+    },
+    {
+      "name": "retired-path-not-endorsed",
+      "obligation": "The generator reproduces a historical fixture for a retired design; no theorem asserts the design is safe.",
+      "discharged": false
+    }
+  ]
+}

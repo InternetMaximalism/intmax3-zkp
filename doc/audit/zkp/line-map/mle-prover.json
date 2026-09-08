@@ -1,0 +1,578 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/mle_prover.rs",
+  "source_sha256": "1c25a055a753e966b3224147606d6788dca19abd7ef14f5a3a0f1107d4ce754a",
+  "source_lines": 1399,
+  "module": "Zkp.Implementation.MleProverBridge",
+  "model": "doc/audit/zkp/Zkp/Implementation/MleProverBridge.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 5,
+      "status": "non-executable",
+      "label": "Module doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 6,
+      "end": 37,
+      "status": "dependency-boundary",
+      "label": "std / anyhow / plonky2 / plonky2_mle imports",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.MleEnv"
+      ],
+      "theorems": [],
+      "note": "Every imported codec and prover call is a parameter of MleEnv, never a definition."
+    },
+    {
+      "start": 38,
+      "end": 87,
+      "status": "dependency-boundary",
+      "label": "MleProveResultV2 and the setup/prove/verify wrappers",
+      "declarations": [],
+      "theorems": [],
+      "note": "mle_setup_v2 / mle_prove_v2 / mle_verify_v2 are opaque; proving and PCS soundness are not modelled."
+    },
+    {
+      "start": 88,
+      "end": 117,
+      "status": "non-executable",
+      "label": "On-chain evaluability guard rationale banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment block only."
+    },
+    {
+      "start": 118,
+      "end": 125,
+      "status": "translated",
+      "label": "SOLIDITY_SUPPORTED_GATE_IDS",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.soliditySupportedGateIds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.solidity_supported_gate_ids_pinned",
+        "Zkp.Implementation.MleProverBridge.exponentiation_gate_id_is_supported",
+        "Zkp.Implementation.MleProverBridge.sentinel_gate_id_is_not_supported"
+      ],
+      "note": "Pinned literal set; agreement with Plonky2GateEvaluator.sol stays a boundary. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 126,
+      "end": 131,
+      "status": "translated",
+      "label": "UNSUPPORTED_GATE_ID sentinel",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.unsupportedGateId"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.unsupported_gate_id_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 132,
+      "end": 158,
+      "status": "non-executable",
+      "label": "check_on_chain_evaluable doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 159,
+      "end": 191,
+      "status": "dependency-boundary",
+      "label": "Per-row re-derivation from CommonCircuitData via classify_gate",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.ExpectedGateRow"
+      ],
+      "theorems": [],
+      "note": "classify_gate and selectors_info are opaque; the model takes the derived rows as given."
+    },
+    {
+      "start": 192,
+      "end": 210,
+      "status": "translated",
+      "label": "ExpectedGateRow: the pre-truncation expectation record",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.ExpectedGateRow"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 211,
+      "end": 213,
+      "status": "non-executable",
+      "label": "check_fixture_json_gates doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 214,
+      "end": 349,
+      "status": "translated",
+      "label": "check_fixture_json_gates: sentinel, u8 range, support, id equality, coset envelope, evaluation parameters, narrow layout fields",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.checkFixtureJsonGates",
+        "Zkp.Implementation.MleProverBridge.checkGateRows",
+        "Zkp.Implementation.MleProverBridge.checkGateRow",
+        "Zkp.Implementation.MleProverBridge.gateRowChecks",
+        "Zkp.Implementation.MleProverBridge.checkCosetEnvelope",
+        "Zkp.Implementation.MleProverBridge.checkParameterField",
+        "Zkp.Implementation.MleProverBridge.checkLayoutField",
+        "Zkp.Implementation.MleProverBridge.firstError",
+        "Zkp.Implementation.MleProverBridge.GateGuardError",
+        "Zkp.Implementation.MleProverBridge.SerializedGateRow",
+        "Zkp.Implementation.MleProverBridge.u8Max",
+        "Zkp.Implementation.MleProverBridge.u16Max",
+        "Zkp.Implementation.MleProverBridge.cosetInterpolationGateId",
+        "Zkp.Implementation.MleProverBridge.cosetMinSubgroupBits",
+        "Zkp.Implementation.MleProverBridge.cosetMaxSubgroupBits",
+        "Zkp.Implementation.MleProverBridge.cosetMinDegree",
+        "Zkp.Implementation.MleProverBridge.sampleExpectedRow",
+        "Zkp.Implementation.MleProverBridge.sampleSerializedRow"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.gate_row_sentinel_precedes_membership",
+        "Zkp.Implementation.MleProverBridge.gate_row_rejects_supported_but_wrong_id",
+        "Zkp.Implementation.MleProverBridge.gate_row_ok_implies_id_supported_and_equal",
+        "Zkp.Implementation.MleProverBridge.gate_row_ok_implies_parameters_match",
+        "Zkp.Implementation.MleProverBridge.gate_row_ok_implies_layout_fits_and_matches",
+        "Zkp.Implementation.MleProverBridge.gate_row_ok_implies_coset_envelope",
+        "Zkp.Implementation.MleProverBridge.layout_bound_precedes_field_read",
+        "Zkp.Implementation.MleProverBridge.layout_field_ok_fits_and_matches",
+        "Zkp.Implementation.MleProverBridge.parameter_field_ok_matches",
+        "Zkp.Implementation.MleProverBridge.coset_envelope_ok_bounds",
+        "Zkp.Implementation.MleProverBridge.coset_envelope_skipped_for_other_gates",
+        "Zkp.Implementation.MleProverBridge.gate_rows_ok_head",
+        "Zkp.Implementation.MleProverBridge.gate_rows_first_error_wins",
+        "Zkp.Implementation.MleProverBridge.fixture_gates_row_count_checked_first",
+        "Zkp.Implementation.MleProverBridge.fixture_gates_missing_array_rejected",
+        "Zkp.Implementation.MleProverBridge.fixture_gates_accepts_matching_row",
+        "Zkp.Implementation.MleProverBridge.fixture_gates_rejects_sentinel_row",
+        "Zkp.Implementation.MleProverBridge.narrow_widths_pinned",
+        "Zkp.Implementation.MleProverBridge.coset_envelope_pinned",
+        "Zkp.Implementation.MleProverBridge.first_error_ok_implies_mem",
+        "Zkp.Implementation.MleProverBridge.first_error_head_error_wins",
+        "Zkp.Implementation.MleProverBridge.first_error_nil_ok"
+      ],
+      "note": "JSON parsing itself is modelled as an already-parsed row list. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 350,
+      "end": 355,
+      "status": "non-executable",
+      "label": "check_v2_gate_rows doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 356,
+      "end": 381,
+      "status": "translated",
+      "label": "check_v2_gate_rows: Ext3 gate-id membership plus the CosetInterpolation envelope",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.checkV2GateRows",
+        "Zkp.Implementation.MleProverBridge.checkV2GateRow",
+        "Zkp.Implementation.MleProverBridge.V2GateRow"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.v2_gate_row_ok_implies_supported",
+        "Zkp.Implementation.MleProverBridge.v2_gate_rows_ok_head",
+        "Zkp.Implementation.MleProverBridge.v2_gate_check_does_not_pin_non_coset_parameters",
+        "Zkp.Implementation.MleProverBridge.v2_gate_check_enforces_coset_envelope"
+      ],
+      "note": "The submodule's own field-width re-derivation is NOT re-done here; the model proves exactly that. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 382,
+      "end": 400,
+      "status": "translated",
+      "label": "export_mle_v2_config_json: derive, gate-guard, canonical JSON",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.exportMleV2ConfigJson",
+        "Zkp.Implementation.MleProverBridge.ConfigFixture",
+        "Zkp.Implementation.MleProverBridge.ConfigBody",
+        "Zkp.Implementation.MleProverBridge.ConfigExportError",
+        "Zkp.Implementation.MleProverBridge.EncodedRecord"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.export_config_gate_guard_precedes_serialisation",
+        "Zkp.Implementation.MleProverBridge.export_config_derivation_refusal_propagates",
+        "Zkp.Implementation.MleProverBridge.export_config_ok_implies_gates_accepted"
+      ],
+      "note": "try_export_mle_v2_config_fixture and to_canonical_json are parameters. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 401,
+      "end": 414,
+      "status": "translated",
+      "label": "MLE_V2_CONFIG_ONLY_FLAG / MLE_V3_CONFIG_CUTOVER_ENV and the argv probe",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.mleV2ConfigOnlyFlag",
+        "Zkp.Implementation.MleProverBridge.mleV3ConfigCutoverEnv",
+        "Zkp.Implementation.MleProverBridge.mleV2ConfigOnlyRequested"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.generator_switches_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 415,
+      "end": 429,
+      "status": "translated",
+      "label": "persist_or_validate_mle_v2_config_json: the cutover env switch",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.allowV3Cutover"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.cutover_env_requires_the_exact_value_one"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 430,
+      "end": 476,
+      "status": "translated",
+      "label": "persist_or_validate_mle_v2_config_json_inner: create-once / compare-later",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.persistOrValidateMleV2ConfigJsonInner",
+        "Zkp.Implementation.MleProverBridge.ConfigReadResult",
+        "Zkp.Implementation.MleProverBridge.PersistAction",
+        "Zkp.Implementation.MleProverBridge.PersistError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.persist_parses_generated_before_touching_disk",
+        "Zkp.Implementation.MleProverBridge.persist_replacement_requires_validated_cutover",
+        "Zkp.Implementation.MleProverBridge.persist_contents_never_replaced_without_the_explicit_switch",
+        "Zkp.Implementation.MleProverBridge.persist_keeps_existing_only_on_exact_bytes",
+        "Zkp.Implementation.MleProverBridge.persist_missing_artifact_is_created",
+        "Zkp.Implementation.MleProverBridge.persist_read_error_is_not_absence"
+      ],
+      "note": "fs::read_to_string outcomes are modelled as a three-way read result. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 477,
+      "end": 551,
+      "status": "dependency-boundary",
+      "label": "Staging-file allocation, write and fsync",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.allocateStagingNonce",
+        "Zkp.Implementation.MleProverBridge.configStagingAttempts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.staging_allocation_fails_when_every_nonce_is_taken"
+      ],
+      "note": "OpenOptions create_new, write_all and sync_all are OS behaviour; only the nonce budget is modelled."
+    },
+    {
+      "start": 552,
+      "end": 584,
+      "status": "translated",
+      "label": "No-clobber publish and the publish/cleanup result combination",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.publishNoClobber",
+        "Zkp.Implementation.MleProverBridge.combinePublishAndCleanup",
+        "Zkp.Implementation.MleProverBridge.PublishError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.publish_never_overwrites_differing_bytes",
+        "Zkp.Implementation.MleProverBridge.create_config_ok_iff_publish_and_cleanup_ok"
+      ],
+      "note": "hard_link no-clobber semantics is a premise; the decision procedure around it is modelled. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 585,
+      "end": 624,
+      "status": "translated",
+      "label": "validate_existing_config_bytes: regular file and exact bytes",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.publishNoClobber"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.publish_accepts_only_identical_concurrent_bytes"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 625,
+      "end": 712,
+      "status": "translated",
+      "label": "validate_protocol_v2_config_cutover: file-name envelope, retired and reviewed identity pins, twelve circuit-identity pointers",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.validateProtocolV2ConfigCutover",
+        "Zkp.Implementation.MleProverBridge.cutoverIdentityCheck",
+        "Zkp.Implementation.MleProverBridge.isCanonicalConfigFileName",
+        "Zkp.Implementation.MleProverBridge.retiredIdentityOk",
+        "Zkp.Implementation.MleProverBridge.currentIdentityOk",
+        "Zkp.Implementation.MleProverBridge.circuitIdentityPointers",
+        "Zkp.Implementation.MleProverBridge.circuitIdentityAgreesAt",
+        "Zkp.Implementation.MleProverBridge.circuitIdentityDriftAt",
+        "Zkp.Implementation.MleProverBridge.CutoverError",
+        "Zkp.Implementation.MleProverBridge.JsonVal",
+        "Zkp.Implementation.MleProverBridge.JsonDoc",
+        "Zkp.Implementation.MleProverBridge.asStr",
+        "Zkp.Implementation.MleProverBridge.asNat",
+        "Zkp.Implementation.MleProverBridge.retiredConfigSchema",
+        "Zkp.Implementation.MleProverBridge.retiredSchemaVersion",
+        "Zkp.Implementation.MleProverBridge.retiredProtocolVersion",
+        "Zkp.Implementation.MleProverBridge.retiredCompactProofEncoding",
+        "Zkp.Implementation.MleProverBridge.retiredWhirPowBits",
+        "Zkp.Implementation.MleProverBridge.currentConfigSchema",
+        "Zkp.Implementation.MleProverBridge.currentSchemaVersion",
+        "Zkp.Implementation.MleProverBridge.currentProtocolVersion",
+        "Zkp.Implementation.MleProverBridge.currentCompactProofEncoding",
+        "Zkp.Implementation.MleProverBridge.currentWhirPowBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.cutover_file_name_checked_first",
+        "Zkp.Implementation.MleProverBridge.cutover_named_artifact_reduces_to_identity_check",
+        "Zkp.Implementation.MleProverBridge.cutover_identity_ok_implies_pins",
+        "Zkp.Implementation.MleProverBridge.cutover_accepts_when_only_unpinned_fields_differ",
+        "Zkp.Implementation.MleProverBridge.public_input_wire_map_is_not_a_pinned_circuit_identity",
+        "Zkp.Implementation.MleProverBridge.retired_identity_pinned",
+        "Zkp.Implementation.MleProverBridge.current_identity_pinned",
+        "Zkp.Implementation.MleProverBridge.cutover_changes_whir_pow_bits",
+        "Zkp.Implementation.MleProverBridge.circuit_identity_pointer_count",
+        "Zkp.Implementation.MleProverBridge.circuit_identity_agrees_iff",
+        "Zkp.Implementation.MleProverBridge.find_none_forall",
+        "Zkp.Implementation.MleProverBridge.find_forall_none"
+      ],
+      "note": "serde_json parsing is a parameter; documents are viewed only through pointer lookups. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 713,
+      "end": 769,
+      "status": "dependency-boundary",
+      "label": "atomic_replace_config and sync_config_directory",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.cutoverStagingAttempts",
+        "Zkp.Implementation.MleProverBridge.allocateStagingNonce"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.staging_attempt_counts_pinned"
+      ],
+      "note": "fs::rename atomicity and directory fsync are OS behaviour."
+    },
+    {
+      "start": 770,
+      "end": 778,
+      "status": "non-executable",
+      "label": "validate_mle_v2_full_against_config_json doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 779,
+      "end": 844,
+      "status": "translated",
+      "label": "Full-vs-config equality, compact grammar and canonicity, structured-proof agreement, both Solidity ABI views, pinned verification-config digest",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.validateMleV2FullAgainstConfigJson",
+        "Zkp.Implementation.MleProverBridge.MleEnv",
+        "Zkp.Implementation.MleProverBridge.MleError",
+        "Zkp.Implementation.MleProverBridge.FullFixture",
+        "Zkp.Implementation.MleProverBridge.ProofView",
+        "Zkp.Implementation.MleProverBridge.decodeAndValidate",
+        "Zkp.Implementation.MleProverBridge.EncodedRecord",
+        "Zkp.Implementation.MleProverBridge.sampleEnv",
+        "Zkp.Implementation.MleProverBridge.sampleFullFixture",
+        "Zkp.Implementation.MleProverBridge.sampleConfigFixture",
+        "Zkp.Implementation.MleProverBridge.sampleTamperedEnv",
+        "Zkp.Implementation.MleProverBridge.sampleTamperedFullFixture",
+        "Zkp.Implementation.MleProverBridge.sampleCompact",
+        "Zkp.Implementation.MleProverBridge.sampleProofView",
+        "Zkp.Implementation.MleProverBridge.sampleCompactRecord",
+        "Zkp.Implementation.MleProverBridge.sampleProofAbiRecord",
+        "Zkp.Implementation.MleProverBridge.sampleConfigAbiRecord",
+        "Zkp.Implementation.MleProverBridge.sampleConfigBody",
+        "Zkp.Implementation.MleProverBridge.sampleGateRow"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.validate_full_ok_extracts",
+        "Zkp.Implementation.MleProverBridge.validate_full_ok_compact_is_the_unique_canonical_encoding",
+        "Zkp.Implementation.MleProverBridge.validate_full_ok_public_inputs_come_from_the_compact_bytes",
+        "Zkp.Implementation.MleProverBridge.validate_full_ok_pins_verification_config_digest",
+        "Zkp.Implementation.MleProverBridge.validate_full_rejects_config_mismatch",
+        "Zkp.Implementation.MleProverBridge.decode_and_validate_ok_binds_label_length_and_digest",
+        "Zkp.Implementation.MleProverBridge.sample_full_artifact_is_accepted",
+        "Zkp.Implementation.MleProverBridge.sample_tampered_structured_proof_is_rejected"
+      ],
+      "note": "decode_compact_v2 / encode_compact_v2 / the ABI encoders / keccak are opaque parameters. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 845,
+      "end": 850,
+      "status": "non-executable",
+      "label": "mle_v2_compact_submission_metadata doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 851,
+      "end": 860,
+      "status": "translated",
+      "label": "Submission / Proof-DA commitment: keccak of the validated compact bytes and their u32 length",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.mleV2CompactSubmissionMetadata",
+        "Zkp.Implementation.MleProverBridge.u32Max"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.submission_metadata_is_keccak_of_validated_compact_bytes",
+        "Zkp.Implementation.MleProverBridge.sample_submission_metadata_is_the_compact_commitment"
+      ],
+      "note": "Keccak is an opaque callback; no digest injectivity is used. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 861,
+      "end": 867,
+      "status": "non-executable",
+      "label": "validated_compact_mle_v2_bytes doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 868,
+      "end": 893,
+      "status": "translated",
+      "label": "validated_compact_mle_v2_bytes: circuit-config equality, gate guard, native verification, then the compact record",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.validatedCompactMleV2Bytes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.validated_compact_ok_implies_circuit_binding_and_guards"
+      ],
+      "note": "validate_against_common is an opaque outcome; no proof soundness is claimed. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 894,
+      "end": 908,
+      "status": "translated",
+      "label": "compact_mle_v2_bytes_from_fixture: magic, recorded length and digest, then the 1..=MAX envelope",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.compactMleV2BytesFromFixture"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.compact_bytes_ok_binds_magic_length_and_digest"
+      ],
+      "note": "COMPACT_MAGIC_V2 and MAX_COMPACT_PROOF_BYTES_V2 are MleEnv parameters. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 909,
+      "end": 916,
+      "status": "non-executable",
+      "label": "export_mle_v2_json doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 917,
+      "end": 949,
+      "status": "translated",
+      "label": "export_mle_v2_json: VK equality, gate guard, canonical JSON round-trip, compact re-check",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.exportMleV2Json"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.export_full_ok_round_trips_and_carries_a_valid_compact_record",
+        "Zkp.Implementation.MleProverBridge.export_full_gate_guard_precedes_serialisation"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 950,
+      "end": 952,
+      "status": "non-executable",
+      "label": "deprecated_v1 module doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 953,
+      "end": 1019,
+      "status": "dependency-boundary",
+      "label": "cfg(feature = deprecated-msu) v1 setup / prove / verify",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedV1ProverCompiled"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.deprecated_msu_surfaces_share_one_gate"
+      ],
+      "note": "mle_setup / mle_prove / mle_verify are opaque; only the feature gate is modelled."
+    },
+    {
+      "start": 1020,
+      "end": 1030,
+      "status": "translated",
+      "label": "deprecated_v1::export_mle_json: serialize then run the v1 gate guard",
+      "declarations": [
+        "Zkp.Implementation.MleProverBridge.deprecatedExportMleJson",
+        "Zkp.Implementation.MleProverBridge.DeprecatedExportError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MleProverBridge.deprecated_export_returns_only_guard_accepted_json",
+        "Zkp.Implementation.MleProverBridge.deprecated_export_gate_guard_blocks_the_json"
+      ],
+      "note": "try_proof_to_json is a parameter. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1031,
+      "end": 1399,
+      "status": "test-only",
+      "label": "cfg(test) mod v2_export_tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "In-tree tests; not modelled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "proving-and-native-verification",
+      "obligation": "mle_prove_v2 / mle_verify_v2 / plonky2 prove / validate_against_common are opaque outcomes; no theorem here implies a proof is sound or that acceptance means the statement holds.",
+      "discharged": false
+    },
+    {
+      "name": "whir-fri-and-sumcheck-soundness",
+      "obligation": "The multilinear PCS, its WHIR/FRI parameters and the proof-of-work bits are not modelled; only their pinned identity values are compared.",
+      "discharged": false
+    },
+    {
+      "name": "kzg-attestation-and-proof-da",
+      "obligation": "Availability and attestation of the compact payload are out of scope; only the keccak byte commitment is modelled.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-opacity",
+      "obligation": "keccak is an opaque callback; no injectivity or collision resistance is assumed or used.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-mle-submodule-codecs",
+      "obligation": "classify_gate, the fixture exporters, the canonical JSON parser/printer, decode/encode_compact_v2, decode_and_validate and the ABI encoders are parameters of MleEnv, not definitions.",
+      "discharged": false
+    },
+    {
+      "name": "solidity-evaluator-agreement",
+      "obligation": "Agreement between this repository's pinned gate-id set and the deployed Plonky2GateEvaluator(Ext3).sol dispatcher is asserted by a Rust test, not proved here; Zkp.Contracts.CurrentVerification models the Solidity side and is deliberately not imported.",
+      "discharged": false
+    },
+    {
+      "name": "filesystem-atomicity",
+      "obligation": "hard_link no-clobber semantics, fs::rename atomicity and fsync durability are premises; only the decision procedure around them is modelled.",
+      "discharged": false
+    }
+  ]
+}
