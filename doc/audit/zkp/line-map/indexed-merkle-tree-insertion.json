@@ -1,0 +1,308 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/indexed_merkle_tree/insertion.rs",
+  "source_sha256": "7a685ddcf6fa8aa00b326976c1f6965627c363593eb1ccbb047128bf16a92d7a",
+  "source_lines": 559,
+  "module": "Zkp.Implementation.IndexedMerkleTree",
+  "model": "doc/audit/zkp/Zkp/Implementation/IndexedMerkleTree.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 31,
+      "status": "dependency-boundary",
+      "label": "imports of plonky2, U256, Poseidon, Leafable and the tree types",
+      "declarations": [],
+      "theorems": [],
+      "note": "Imported semantics is opaque."
+    },
+    {
+      "start": 32,
+      "end": 33,
+      "status": "non-executable",
+      "label": "derive and serde attributes",
+      "declarations": [],
+      "theorems": [],
+      "note": "Derive and serde attributes only."
+    },
+    {
+      "start": 34,
+      "end": 40,
+      "status": "translated",
+      "label": "IndexedInsertionProof fields",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.InsertionProof"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 41,
+      "end": 49,
+      "status": "dependency-boundary",
+      "label": "IndexedInsertionProofTarget mirror",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.InsertionProof"
+      ],
+      "theorems": [],
+      "note": "The circuit-side proof reuses the same modelled record; Target plumbing is not modelled."
+    },
+    {
+      "start": 50,
+      "end": 51,
+      "status": "non-executable",
+      "label": "blank line and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line and impl block header."
+    },
+    {
+      "start": 52,
+      "end": 70,
+      "status": "translated",
+      "label": "IndexedMerkleTree::insert: low leaf lookup, low-leaf rewrite, append",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.insert",
+        "Zkp.Implementation.IndexedMerkleTree.insertResult",
+        "Zkp.Implementation.IndexedMerkleTree.newLowLeaf",
+        "Zkp.Implementation.IndexedMerkleTree.insertedLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.insert_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.insert_result_get",
+        "Zkp.Implementation.IndexedMerkleTree.insert_result_size",
+        "Zkp.Implementation.IndexedMerkleTree.insert_result_old_key",
+        "Zkp.Implementation.IndexedMerkleTree.insert_result_new_key",
+        "Zkp.Implementation.IndexedMerkleTree.insert_key_set",
+        "Zkp.Implementation.IndexedMerkleTree.wf_insert",
+        "Zkp.Implementation.IndexedMerkleTree.insert_present_key_fails",
+        "Zkp.Implementation.IndexedMerkleTree.insert_ok_implies_absent",
+        "Zkp.Implementation.IndexedMerkleTree.zero_key_can_never_be_inserted",
+        "Zkp.Implementation.IndexedMerkleTree.insert_ok_of_absent",
+        "Zkp.Implementation.IndexedMerkleTree.insert_fails_iff_key_present",
+        "Zkp.Implementation.IndexedMerkleTree.new_low_leaf_key",
+        "Zkp.Implementation.IndexedMerkleTree.new_low_leaf_next_key",
+        "Zkp.Implementation.IndexedMerkleTree.new_low_leaf_next_index",
+        "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_key",
+        "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_next_key",
+        "Zkp.Implementation.IndexedMerkleTree.inserted_leaf_next_index"
+      ],
+      "note": "The push capacity assert is a hypothesis, not an error value. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 71,
+      "end": 102,
+      "status": "translated",
+      "label": "prove_and_insert: low-leaf path taken before the update, new-leaf path after both writes",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.proveAndInsert"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.prove_and_insert_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.prove_and_insert_agrees_with_insert",
+        "Zkp.Implementation.IndexedMerkleTree.native_insertion_proof_verifies",
+        "Zkp.Implementation.IndexedMerkleTree.native_verify_insertion_ok"
+      ],
+      "note": "Acceptance of the produced proof is proved only under the CommitmentLaws premises. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 103,
+      "end": 116,
+      "status": "translated",
+      "label": "prove_dummy: an unchecked padding proof off slot 0",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.proveDummy"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.conditional_gates_false_accepts_any_witness"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 117,
+      "end": 118,
+      "status": "non-executable",
+      "label": "blank line and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Blank line and impl block header."
+    },
+    {
+      "start": 119,
+      "end": 127,
+      "status": "translated",
+      "label": "IndexedInsertionProof::dummy uses the default (sentinel-shaped) low leaf",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.dummyProof",
+        "Zkp.Implementation.IndexedMerkleTree.defaultLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.default_leaf_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 128,
+      "end": 174,
+      "status": "translated",
+      "label": "get_new_root: the two bound checks, the low-leaf verify, the empty-slot verify, the new root",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.getNewRoot",
+        "Zkp.Implementation.IndexedMerkleTree.verifyPath",
+        "Zkp.Implementation.IndexedMerkleTree.openRoot",
+        "Zkp.Implementation.IndexedMerkleTree.Binding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.get_new_root_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.get_new_root_ok_implies_bounds",
+        "Zkp.Implementation.IndexedMerkleTree.get_new_root_ok_implies_key_nonzero",
+        "Zkp.Implementation.IndexedMerkleTree.verify_path_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.accepted_insertion_implies_key_absent"
+      ],
+      "note": "Hash and path recomputation stay opaque; the absence conclusion is stated only under Binding and Wf. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 175,
+      "end": 188,
+      "status": "translated",
+      "label": "conditional_get_new_root passes the root through when the condition is false",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.conditionalGetNewRoot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.conditional_get_new_root_false",
+        "Zkp.Implementation.IndexedMerkleTree.conditional_get_new_root_true"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 189,
+      "end": 206,
+      "status": "translated",
+      "label": "verify compares the recomputed root with the claimed new root",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.verifyInsertion"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.verify_insertion_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.accepted_verify_implies_key_absent"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 207,
+      "end": 252,
+      "status": "untranslated",
+      "label": "IndexedInsertionProofTarget::new, constant and set_witness",
+      "declarations": [],
+      "theorems": [],
+      "note": "Builder and witness plumbing; no semantic content modelled."
+    },
+    {
+      "start": 253,
+      "end": 269,
+      "status": "translated",
+      "label": "target verify: recompute and connect to the claimed new root",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Gates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.native_get_new_root_ok_implies_gates"
+      ],
+      "note": "Gate lowering is assumed (plonky2Lowering boundary); the model states the constraint, not its compilation. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 270,
+      "end": 321,
+      "status": "translated",
+      "label": "target get_new_root: the five constraints laid on an arbitrary witness",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Gates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.gates_imply_key_absent",
+        "Zkp.Implementation.IndexedMerkleTree.gates_leave_value_free",
+        "Zkp.Implementation.IndexedMerkleTree.accepted_index_differs_from_low_index"
+      ],
+      "note": "No constraint ties index to the number of occupied leaves and none constrains value; both are recorded as theorems. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 322,
+      "end": 386,
+      "status": "translated",
+      "label": "target conditional_get_new_root: conditional asserts and the root select",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.ConditionalGates"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.conditional_gates_false_accepts_any_witness"
+      ],
+      "note": "An inactive slot constrains nothing about the witness. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 387,
+      "end": 388,
+      "status": "non-executable",
+      "label": "closing brace and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Closing brace and blank line."
+    },
+    {
+      "start": 389,
+      "end": 559,
+      "status": "test-only",
+      "label": "#[cfg(test)] insertion, chained-padding and duplicate-reinsertion tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read but not translated; the in-circuit A5 soundness test corresponds to gates_imply_key_absent."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "leafHash",
+      "obligation": "`<IndexedMerkleLeaf as Leafable>::hash` (Poseidon over the 18 leaf words) is modelled as the opaque callback `Commitment.leafHash`; no property of Poseidon is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "merklePathFold",
+      "obligation": "`MerkleProof::get_root` / `::verify` and `IncrementalMerkleTree::get_root` / `::prove` (merkle_tree.rs, incremental_merkle_tree.rs) are the opaque callbacks `Commitment.rootFrom` / `root` / `path`; their internal correctness is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "commitmentLaws",
+      "obligation": "`CommitmentLaws` (openSet, pathStable, extendEmpty) asserts the incremental Merkle tree behaves honestly; it is assumed, used only for the native completeness theorem, and shown consistent only via the non-cryptographic `transparent` witness.",
+      "discharged": false
+    },
+    {
+      "name": "binding",
+      "obligation": "`Binding` (a sibling list opening leaf L at index i to the tree root forces L to be the tree's leaf at i) is Poseidon collision resistance plus leaf-encoding injectivity; only the encoding half is proved (`leaf_words_injective`).",
+      "discharged": false
+    },
+    {
+      "name": "pushCapacityAssert",
+      "obligation": "`IncrementalMerkleTree::push` aborts the process when the tree is full; the model has no panic, only the `size < capacity` hypothesis and the `Wf.capacity` field.",
+      "discharged": false
+    },
+    {
+      "name": "u256RangeInvariant",
+      "obligation": "Rust's `U256` guarantees every key and next_key is below 2^256; in the model this is an explicit hypothesis (`key < keyBound`) and a `Wf.in_range` field, not a refinement of the limb type.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2Lowering",
+      "obligation": "`is_lt` / `is_zero` / `assert_one` / `conditional_assert_eq` / `select` and the whole CircuitBuilder plumbing are assumed to lower to exactly the `Gates` / `ConditionalGates` predicates; no gate-level refinement is proved.",
+      "discharged": false
+    },
+    {
+      "name": "prevRootChaining",
+      "obligation": "That the `prev_root` fed to an insertion proof is the current nullifier/account tree root, and that the key is the nullifier of the spend being authorised, are consumer obligations of the balance and claim circuits, outside these three files.",
+      "discharged": false
+    },
+    {
+      "name": "serdeRoundTrip",
+      "obligation": "`Serialize`/`Deserialize` derives on the leaf, tree and proof types are not modelled.",
+      "discharged": false
+    }
+  ]
+}

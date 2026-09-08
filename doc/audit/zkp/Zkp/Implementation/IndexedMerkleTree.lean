@@ -947,4 +947,744 @@ theorem wf_insert {t t' : Tree} {key value : Nat} (hw : Wf t) (hkey : key < keyB
     rw [hsize', Tree.capacity, insert_result_height]
     exact hcap
 
+/-! ## The Merkle commitment as an opaque callback record
+
+Poseidon (`PoseidonHashOut::hash_inputs_u64`) and the incremental Merkle tree
+(`MerkleProof::get_root` / `::verify`) are NOT modelled. `Commitment` is the
+interface the insertion proof uses:
+
+* `leafHash` — `<IndexedMerkleLeaf as Leafable>::hash`,
+* `rootFrom siblings i h` — `MerkleProof::get_root` folding `siblings` from a
+  leaf hash `h` sitting at index `i`,
+* `root t` / `path t i` — the tree's own root and the sibling list it hands out
+  (`IncrementalMerkleTree::get_root` / `::prove`).
+
+Nothing about these is assumed unless a theorem names `CommitmentLaws` or
+`Binding` in its hypotheses. -/
+
+structure Commitment (Hash : Type) where
+  leafHash : Leaf → Hash
+  rootFrom : List Hash → Nat → Hash → Hash
+  root : Tree → Hash
+  path : Tree → Nat → List Hash
+
+/-- `MerkleProof::get_root(&leaf, index)`. -/
+def openRoot {Hash : Type} (C : Commitment Hash) (siblings : List Hash) (i : Nat)
+    (L : Leaf) : Hash := C.rootFrom siblings i (C.leafHash L)
+
+/-- `MerkleProof::verify(&leaf, index, root)`; the source's error is
+`MerkleProofError::VerificationFailed` lifted by `#[from]`. -/
+def verifyPath {Hash : Type} [DecidableEq Hash] (C : Commitment Hash) (siblings : List Hash)
+    (L : Leaf) (i : Nat) (root : Hash) : Except Error Unit :=
+  if openRoot C siblings i L = root then .ok () else .error .merkleProofError
+
+theorem verify_path_ok_iff {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {siblings : List Hash} {L : Leaf} {i : Nat} {root : Hash} :
+    verifyPath C siblings L i root = .ok () ↔ openRoot C siblings i L = root := by
+  unfold verifyPath
+  by_cases h : openRoot C siblings i L = root
+  · simp [h]
+  · simp [h]
+
+/-- `IndexedInsertionProof` (insertion.rs 34-40). -/
+structure InsertionProof (Hash : Type) where
+  index : Nat
+  lowLeafProof : List Hash
+  leafProof : List Hash
+  lowLeafIndex : Nat
+  prevLowLeaf : Leaf
+
+/-- `IndexedInsertionProof::get_new_root` (insertion.rs 129-174), flattened into
+nested `if`s so the ERROR PRECEDENCE is explicit: lower bound, then upper bound,
+then the low-leaf opening, then the empty-slot opening. -/
+def getNewRoot {Hash : Type} [DecidableEq Hash] (C : Commitment Hash)
+    (P : InsertionProof Hash) (key value : Nat) (prevRoot : Hash) : Except Error Hash :=
+  if P.prevLowLeaf.key ≥ key then
+    .error (.keyNotLowerBounded key P.prevLowLeaf.key)
+  else if ¬ (key < P.prevLowLeaf.nextKey ∨ P.prevLowLeaf.nextKey = 0) then
+    .error (.keyNotUpperBounded key P.prevLowLeaf.nextKey)
+  else if openRoot C P.lowLeafProof P.lowLeafIndex P.prevLowLeaf ≠ prevRoot then
+    .error .merkleProofError
+  else if openRoot C P.leafProof P.index emptyLeaf ≠
+      openRoot C P.lowLeafProof P.lowLeafIndex (newLowLeaf P.prevLowLeaf P.index key) then
+    .error .merkleProofError
+  else
+    .ok (openRoot C P.leafProof P.index (insertedLeaf P.prevLowLeaf key value))
+
+/-- `IndexedInsertionProof::conditional_get_new_root` (insertion.rs 176-188). -/
+def conditionalGetNewRoot {Hash : Type} [DecidableEq Hash] (C : Commitment Hash)
+    (condition : Bool) (P : InsertionProof Hash) (key value : Nat)
+    (prevRoot : Hash) : Except Error Hash :=
+  if condition then getNewRoot C P key value prevRoot else .ok prevRoot
+
+/-- `IndexedInsertionProof::verify` (insertion.rs 190-205). -/
+def verifyInsertion {Hash : Type} [DecidableEq Hash] (C : Commitment Hash)
+    (P : InsertionProof Hash) (key value : Nat) (prevRoot newRoot : Hash) : Except Error Unit :=
+  match getNewRoot C P key value prevRoot with
+  | .error e => .error e
+  | .ok expected => if newRoot ≠ expected then .error .newRootMismatch else .ok ()
+
+/-- Everything an accepted `get_new_root` establishes, and nothing more. -/
+theorem get_new_root_ok_iff {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot r : Hash} :
+    getNewRoot C P key value prevRoot = .ok r ↔
+      (P.prevLowLeaf.key < key ∧
+       (key < P.prevLowLeaf.nextKey ∨ P.prevLowLeaf.nextKey = 0) ∧
+       openRoot C P.lowLeafProof P.lowLeafIndex P.prevLowLeaf = prevRoot ∧
+       openRoot C P.leafProof P.index emptyLeaf =
+         openRoot C P.lowLeafProof P.lowLeafIndex (newLowLeaf P.prevLowLeaf P.index key) ∧
+       r = openRoot C P.leafProof P.index (insertedLeaf P.prevLowLeaf key value)) := by
+  unfold getNewRoot
+  by_cases h1 : P.prevLowLeaf.key ≥ key
+  · rw [if_pos h1]
+    constructor
+    · intro hc; simp at hc
+    · rintro ⟨hlt, _⟩; omega
+  · rw [if_neg h1]
+    by_cases h2 : ¬ (key < P.prevLowLeaf.nextKey ∨ P.prevLowLeaf.nextKey = 0)
+    · rw [if_pos h2]
+      constructor
+      · intro hc; simp at hc
+      · rintro ⟨_, hu, _⟩; exact absurd hu h2
+    · rw [if_neg h2]
+      by_cases h3 : openRoot C P.lowLeafProof P.lowLeafIndex P.prevLowLeaf ≠ prevRoot
+      · rw [if_pos h3]
+        constructor
+        · intro hc; simp at hc
+        · rintro ⟨_, _, ho, _⟩; exact absurd ho h3
+      · rw [if_neg h3]
+        by_cases h4 : openRoot C P.leafProof P.index emptyLeaf ≠
+            openRoot C P.lowLeafProof P.lowLeafIndex (newLowLeaf P.prevLowLeaf P.index key)
+        · rw [if_pos h4]
+          constructor
+          · intro hc; simp at hc
+          · rintro ⟨_, _, _, he, _⟩; exact absurd he h4
+        · rw [if_neg h4]
+          constructor
+          · intro hc
+            refine ⟨by omega, Decidable.of_not_not h2, Decidable.of_not_not h3,
+              Decidable.of_not_not h4, ?_⟩
+            simp only [Except.ok.injEq] at hc
+            exact hc.symm
+          · rintro ⟨_, _, _, _, hr⟩
+            simp only [Except.ok.injEq]
+            exact hr.symm
+
+theorem get_new_root_ok_implies_bounds {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot r : Hash}
+    (h : getNewRoot C P key value prevRoot = .ok r) :
+    P.prevLowLeaf.key < key ∧ (key < P.prevLowLeaf.nextKey ∨ P.prevLowLeaf.nextKey = 0) :=
+  ⟨(get_new_root_ok_iff.1 h).1, (get_new_root_ok_iff.1 h).2.1⟩
+
+/-- Because the lower bound is strict and keys are non-negative, an accepted
+insertion key is never the `0` sentinel value used for "no successor". -/
+theorem get_new_root_ok_implies_key_nonzero {Hash : Type} [DecidableEq Hash]
+    {C : Commitment Hash} {P : InsertionProof Hash} {key value : Nat} {prevRoot r : Hash}
+    (h : getNewRoot C P key value prevRoot = .ok r) : 0 < key := by
+  have := (get_new_root_ok_iff.1 h).1
+  omega
+
+theorem verify_insertion_ok_iff {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot newRoot : Hash} :
+    verifyInsertion C P key value prevRoot newRoot = .ok () ↔
+      getNewRoot C P key value prevRoot = .ok newRoot := by
+  unfold verifyInsertion
+  cases h : getNewRoot C P key value prevRoot with
+  | error e => simp
+  | ok expected =>
+    by_cases hne : newRoot = expected
+    · subst hne; simp
+    · simp [hne, Ne.symm hne]
+
+/-! ## The BAL-CRIT-001 case split -/
+
+/-- An unoccupied slot cannot serve as a low leaf: its key is `U256::MAX`, so the
+lower-bound check fails for every in-range key. -/
+theorem empty_leaf_blocks_pseudo_sentinel {key : Nat} (h : key < keyBound) :
+    ¬ (emptyLeaf.key < key) := by
+  have hle := in_range_key_le_max_key h
+  show ¬ (maxKey < key)
+  omega
+
+/-- The counterfactual the fix rules out: had `empty_leaf` stayed `default()`,
+BOTH bound checks would pass against any unoccupied slot for every nonzero key,
+so an already-present key could be re-inserted. -/
+theorem default_low_leaf_would_accept_any_nonzero_key {key : Nat} (h : 0 < key) :
+    defaultLeaf.key < key ∧ (key < defaultLeaf.nextKey ∨ defaultLeaf.nextKey = 0) :=
+  ⟨h, Or.inr rfl⟩
+
+/-! ## Binding, and the absence theorem the balance circuits need -/
+
+/-- Merkle binding at a root: a sibling list that opens leaf `L` at index `i` to
+`C.root t` forces `L` to BE the tree's leaf at `i`. This is Poseidon collision
+resistance (plus `leaf_words_injective` for the encoding half). It is an
+assumption; nothing in this file proves it. -/
+def Binding {Hash : Type} (C : Commitment Hash) (t : Tree) : Prop :=
+  ∀ (i : Nat) (siblings : List Hash) (L : Leaf),
+    C.rootFrom siblings i (C.leafHash L) = C.root t → L = t.getLeaf i
+
+/-- THE THEOREM THE BALANCE / CLAIM CIRCUITS NEED.
+
+If an insertion proof is accepted against the root of a well-formed tree `t`,
+and the commitment is binding at that root, then `key` was ABSENT from `t`.
+
+Premises, all explicit: `Binding C t` (Poseidon collision resistance),
+`Wf t` (the ordered-set invariant, established by `wf_new` + `wf_insert`), and
+`key < keyBound` (the Rust `U256` type invariant). The proof splits exactly on
+BAL-CRIT-001: either the witnessed low leaf is a real leaf — and then the bound
+checks contradict `dense` — or it is an unoccupied slot, and then it is
+`empty_leaf`, whose `U256::MAX` key fails the lower bound. -/
+theorem accepted_insertion_implies_key_absent {Hash : Type} [DecidableEq Hash]
+    {C : Commitment Hash} {t : Tree} {P : InsertionProof Hash} {key value : Nat} {r : Hash}
+    (hb : Binding C t) (hw : Wf t) (hkey : key < keyBound)
+    (h : getNewRoot C P key value (C.root t) = .ok r) : ¬ MemKey t key := by
+  obtain ⟨hlb, hub, hopen, _, _⟩ := get_new_root_ok_iff.1 h
+  have hleq : P.prevLowLeaf = t.getLeaf P.lowLeafIndex := hb _ _ _ hopen
+  intro hmem
+  rcases Nat.lt_or_ge P.lowLeafIndex t.size with hlt | hge
+  · refine present_key_has_no_bounding_leaf hw hmem P.lowLeafIndex hlt ?_
+    rw [← hleq]
+    exact ⟨hlb, hub⟩
+  · rw [get_leaf_of_ge hge] at hleq
+    rw [hleq] at hlb
+    exact empty_leaf_blocks_pseudo_sentinel hkey hlb
+
+/-- Same statement for the full `verify` entry point. -/
+theorem accepted_verify_implies_key_absent {Hash : Type} [DecidableEq Hash]
+    {C : Commitment Hash} {t : Tree} {P : InsertionProof Hash} {key value : Nat} {newRoot : Hash}
+    (hb : Binding C t) (hw : Wf t) (hkey : key < keyBound)
+    (h : verifyInsertion C P key value (C.root t) newRoot = .ok ()) : ¬ MemKey t key :=
+  accepted_insertion_implies_key_absent hb hw hkey (verify_insertion_ok_iff.1 h)
+
+/-! ## Arbitrary satisfying witnesses (`IndexedInsertionProofTarget`)
+
+`IndexedInsertionProofTarget::get_new_root` (insertion.rs 271-321) lays exactly
+these five constraints on a witness it did NOT build: two bound assertions, two
+Merkle verifications, and the recomputed root. There is no error ordering, no
+constraint tying `index` to the number of occupied leaves, and no constraint on
+`value` at all. -/
+
+structure Gates {Hash : Type} (C : Commitment Hash) (P : InsertionProof Hash)
+    (key value : Nat) (prevRoot newRoot : Hash) : Prop where
+  /-- `builder.assert_one(prev_low_leaf.key.is_lt(key))`. -/
+  lowerBound : P.prevLowLeaf.key < key
+  /-- `builder.assert_one(or(key.is_lt(next_key), next_key.is_zero()))`. -/
+  upperBound : key < P.prevLowLeaf.nextKey ∨ P.prevLowLeaf.nextKey = 0
+  /-- `low_leaf_proof.verify(prev_low_leaf, low_leaf_index, prev_root)`. -/
+  lowLeafOpens : openRoot C P.lowLeafProof P.lowLeafIndex P.prevLowLeaf = prevRoot
+  /-- `leaf_proof.verify(empty_leaf, index, temp_root)`. -/
+  slotWasEmpty : openRoot C P.leafProof P.index emptyLeaf =
+    openRoot C P.lowLeafProof P.lowLeafIndex (newLowLeaf P.prevLowLeaf P.index key)
+  /-- The returned root. -/
+  newRootIs : openRoot C P.leafProof P.index (insertedLeaf P.prevLowLeaf key value) = newRoot
+
+/-- The ONLY bridge from the native path to arbitrary witnesses, and it points
+one way: a native acceptance satisfies the gates. -/
+theorem native_get_new_root_ok_implies_gates {Hash : Type} [DecidableEq Hash]
+    {C : Commitment Hash} {P : InsertionProof Hash} {key value : Nat} {prevRoot r : Hash}
+    (h : getNewRoot C P key value prevRoot = .ok r) : Gates C P key value prevRoot r := by
+  obtain ⟨h1, h2, h3, h4, h5⟩ := get_new_root_ok_iff.1 h
+  exact ⟨h1, h2, h3, h4, h5.symm⟩
+
+/-- The absence argument survives the move to adversarial witnesses: it uses only
+the two bound gates and the low-leaf opening. -/
+theorem gates_imply_key_absent {Hash : Type} {C : Commitment Hash} {t : Tree}
+    {P : InsertionProof Hash} {key value : Nat} {newRoot : Hash}
+    (hb : Binding C t) (hw : Wf t) (hkey : key < keyBound)
+    (hg : Gates C P key value (C.root t) newRoot) : ¬ MemKey t key := by
+  have hleq : P.prevLowLeaf = t.getLeaf P.lowLeafIndex := hb _ _ _ hg.lowLeafOpens
+  intro hmem
+  rcases Nat.lt_or_ge P.lowLeafIndex t.size with hlt | hge
+  · refine present_key_has_no_bounding_leaf hw hmem P.lowLeafIndex hlt ?_
+    rw [← hleq]
+    exact ⟨hg.lowerBound, hg.upperBound⟩
+  · rw [get_leaf_of_ge hge] at hleq
+    have hlb := hg.lowerBound
+    rw [hleq] at hlb
+    exact empty_leaf_blocks_pseudo_sentinel hkey hlb
+
+/-- NEGATIVE fact: `value` is completely unconstrained by the gates; it only
+moves the recomputed root. Nothing in this file pins a nullifier leaf's value. -/
+theorem gates_leave_value_free {Hash : Type} {C : Commitment Hash} {P : InsertionProof Hash}
+    {key value : Nat} {prevRoot newRoot : Hash} (hg : Gates C P key value prevRoot newRoot)
+    (value' : Nat) :
+    Gates C P key value' prevRoot
+      (openRoot C P.leafProof P.index (insertedLeaf P.prevLowLeaf key value')) :=
+  ⟨hg.lowerBound, hg.upperBound, hg.lowLeafOpens, hg.slotWasEmpty, rfl⟩
+
+/-- The inserted slot cannot be the low-leaf slot: the empty-slot opening and the
+modified low leaf would have to coincide, but their `next_key` differ (`0` vs the
+inserted key). Needs binding AT THAT INDEX only. -/
+theorem accepted_index_differs_from_low_index {Hash : Type} {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot newRoot : Hash}
+    (hg : Gates C P key value prevRoot newRoot) (hkey : 0 < key)
+    (hbind : ∀ (sib sib' : List Hash) (A B : Leaf),
+      C.rootFrom sib P.index (C.leafHash A) = C.rootFrom sib' P.index (C.leafHash B) → A = B) :
+    P.index ≠ P.lowLeafIndex := by
+  intro hc
+  have hs := hg.slotWasEmpty
+  rw [← hc] at hs
+  have := hbind _ _ _ _ hs
+  have hnk : emptyLeaf.nextKey = (newLowLeaf P.prevLowLeaf P.index key).nextKey :=
+    congrArg Leaf.nextKey this
+  rw [new_low_leaf_next_key] at hnk
+  have hzero : (0 : Nat) = key := hnk
+  omega
+
+/-- Conditional gates. `condition = false` is the `prove_dummy` padding path:
+NOTHING about the proof is constrained, the root simply passes through. -/
+def ConditionalGates {Hash : Type} (C : Commitment Hash) (condition : Bool)
+    (P : InsertionProof Hash) (key value : Nat) (prevRoot newRoot : Hash) : Prop :=
+  if condition then Gates C P key value prevRoot newRoot else newRoot = prevRoot
+
+theorem conditional_get_new_root_false {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot : Hash} :
+    conditionalGetNewRoot C false P key value prevRoot = .ok prevRoot := rfl
+
+theorem conditional_get_new_root_true {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {P : InsertionProof Hash} {key value : Nat} {prevRoot : Hash} :
+    conditionalGetNewRoot C true P key value prevRoot = getNewRoot C P key value prevRoot := rfl
+
+/-- NEGATIVE fact matching `prove_dummy`: an inactive slot accepts ANY proof
+witness, including one whose low leaf is nonsense. Padding slots therefore carry
+no security content; only the `condition` wiring does. -/
+theorem conditional_gates_false_accepts_any_witness {Hash : Type} {C : Commitment Hash}
+    (P : InsertionProof Hash) (key value : Nat) (prevRoot : Hash) :
+    ConditionalGates C false P key value prevRoot prevRoot := rfl
+
+/-! ## Native proof construction (`prove_and_insert`, insertion.rs 72-115) -/
+
+/-- The three equations an honest incremental Merkle tree satisfies. They are
+assumptions about `merkle_tree.rs`, which is outside these three files. -/
+structure CommitmentLaws {Hash : Type} (C : Commitment Hash) : Prop where
+  /-- Opening the tree's own path at `i` with leaf `L` yields the root of the
+  tree with `L` written at `i`. -/
+  openSet : ∀ (t : Tree) (i : Nat) (L : Leaf), i ≤ t.size →
+    C.rootFrom (C.path t i) i (C.leafHash L) = C.root (t.setLeaf i L)
+  /-- The sibling list at `i` does not depend on the leaf stored at `i`. -/
+  pathStable : ∀ (t : Tree) (i : Nat) (L : Leaf), i ≤ t.size →
+    C.path (t.setLeaf i L) i = C.path t i
+  /-- Unoccupied slots already hold `empty_leaf`, so appending one is a no-op on
+  the root (`zero_hashes` of `MerkleTree`). -/
+  extendEmpty : ∀ (t : Tree), C.root (t.setLeaf t.size emptyLeaf) = C.root t
+
+/-- `IndexedMerkleTree::prove_and_insert`: note the low-leaf path is taken BEFORE
+the update and the new-leaf path AFTER both writes. -/
+def proveAndInsert {Hash : Type} (C : Commitment Hash) (t : Tree) (key value : Nat) :
+    Except Error (InsertionProof Hash × Tree) := do
+  let low ← lowIndex t key
+  let t2 := insertResult t low key value
+  return ({ index := t.size
+            lowLeafProof := C.path t low
+            leafProof := C.path t2 t.size
+            lowLeafIndex := low
+            prevLowLeaf := t.getLeaf low }, t2)
+
+/-- `IndexedMerkleTree::prove_dummy` (insertion.rs 104-115). -/
+def proveDummy {Hash : Type} (C : Commitment Hash) (t : Tree) : InsertionProof Hash :=
+  { index := 0
+    lowLeafProof := C.path t 0
+    leafProof := C.path t 0
+    lowLeafIndex := 0
+    prevLowLeaf := t.getLeaf 0 }
+
+/-- `IndexedInsertionProof::dummy(height)` (insertion.rs 119-127): the low leaf is
+`IndexedMerkleLeaf::default()`, i.e. the sentinel shape, never `empty_leaf`. -/
+def dummyProof {Hash : Type} (siblings : List Hash) : InsertionProof Hash :=
+  { index := 0
+    lowLeafProof := siblings
+    leafProof := siblings
+    lowLeafIndex := 0
+    prevLowLeaf := defaultLeaf }
+
+theorem prove_and_insert_ok_iff {Hash : Type} {C : Commitment Hash} {t t' : Tree}
+    {key value : Nat} {P : InsertionProof Hash} :
+    proveAndInsert C t key value = .ok (P, t') ↔
+      ∃ low, lowIndex t key = .ok low ∧
+        t' = insertResult t low key value ∧
+        P = { index := t.size
+              lowLeafProof := C.path t low
+              leafProof := C.path (insertResult t low key value) t.size
+              lowLeafIndex := low
+              prevLowLeaf := t.getLeaf low } := by
+  unfold proveAndInsert
+  cases h : lowIndex t key with
+  | error e => simp [h, bind, Except.bind]
+  | ok low =>
+    simp only [bind, Except.bind, pure, Except.pure, Except.ok.injEq, Prod.mk.injEq]
+    constructor
+    · intro hh
+      refine ⟨low, rfl, ?_, ?_⟩
+      · exact hh.2.symm
+      · exact hh.1.symm
+    · rintro ⟨l, hl, h2, h3⟩
+      subst hl
+      exact ⟨h3.symm, h2.symm⟩
+
+/-- The tree `prove_and_insert` leaves behind is the one `insert` produces. -/
+theorem prove_and_insert_agrees_with_insert {Hash : Type} {C : Commitment Hash} {t t' : Tree}
+    {key value : Nat} {P : InsertionProof Hash}
+    (h : proveAndInsert C t key value = .ok (P, t')) : insert t key value = .ok t' := by
+  obtain ⟨low, hlow, ht, _⟩ := prove_and_insert_ok_iff.1 h
+  exact insert_ok_iff.2 ⟨low, hlow, ht⟩
+
+/-- COMPLETENESS of the native path: the proof `prove_and_insert` builds is
+accepted by `get_new_root`, and the root it computes is the new tree root.
+Uses `CommitmentLaws` and nothing else; in particular it does NOT use `Binding`,
+which is why the two premise bundles stay separate. -/
+theorem native_insertion_proof_verifies {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {t t' : Tree} {key value : Nat} {P : InsertionProof Hash} (hl : CommitmentLaws C)
+    (h : proveAndInsert C t key value = .ok (P, t')) :
+    getNewRoot C P key value (C.root t) = .ok (C.root t') := by
+  obtain ⟨low, hlow, ht, hP⟩ := prove_and_insert_ok_iff.1 h
+  have hlt : low < t.size := low_index_lt hlow
+  have hbounds := is_low_leaf_iff.1 (low_index_is_low hlow)
+  subst ht
+  subst hP
+  have hs1 : (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)).size = t.size :=
+    set_leaf_size hlt
+  -- the low-leaf opening reproduces the previous root
+  have hopen0 : openRoot C (C.path t low) low (t.getLeaf low) = C.root t := by
+    unfold openRoot
+    rw [hl.openSet t low (t.getLeaf low) (Nat.le_of_lt hlt), set_leaf_self hlt]
+  -- the intermediate root after rewriting the low leaf
+  have hopen1 : openRoot C (C.path t low) low (newLowLeaf (t.getLeaf low) t.size key) =
+      C.root (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)) := by
+    unfold openRoot
+    exact hl.openSet t low _ (Nat.le_of_lt hlt)
+  -- the new-leaf path is the intermediate tree's path at the appended index
+  have hpath : C.path (insertResult t low key value) t.size =
+      C.path (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)) t.size := by
+    unfold insertResult
+    exact hl.pathStable _ t.size _ (Nat.le_of_eq hs1.symm)
+  have hempty : openRoot C (C.path (insertResult t low key value) t.size) t.size emptyLeaf =
+      C.root (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key)) := by
+    rw [hpath]
+    unfold openRoot
+    rw [hl.openSet _ t.size emptyLeaf (Nat.le_of_eq hs1.symm)]
+    have hext := hl.extendEmpty (t.setLeaf low (newLowLeaf (t.getLeaf low) t.size key))
+    rw [hs1] at hext
+    exact hext
+  have hnew : openRoot C (C.path (insertResult t low key value) t.size) t.size
+      (insertedLeaf (t.getLeaf low) key value) = C.root (insertResult t low key value) := by
+    rw [hpath]
+    unfold openRoot
+    rw [hl.openSet _ t.size _ (Nat.le_of_eq hs1.symm)]
+    rfl
+  refine get_new_root_ok_iff.2 ⟨hbounds.1, hbounds.2, hopen0, ?_, ?_⟩
+  · rw [hempty, hopen1]
+  · rw [hnew]
+
+theorem native_verify_insertion_ok {Hash : Type} [DecidableEq Hash] {C : Commitment Hash}
+    {t t' : Tree} {key value : Nat} {P : InsertionProof Hash} (hl : CommitmentLaws C)
+    (h : proveAndInsert C t key value = .ok (P, t')) :
+    verifyInsertion C P key value (C.root t) (C.root t') = .ok () :=
+  verify_insertion_ok_iff.2 (native_insertion_proof_verifies hl h)
+
+/-! ## A concrete commitment, so nothing above is vacuous
+
+`CommitmentLaws` and `Binding` are assumptions; if they were contradictory every
+theorem that mentions them would be empty. `transparent` satisfies BOTH: the
+"hash" of a leaf is the leaf, and the "root" of a tree is its slot function. It
+is of course not a hiding or succinct commitment — it exists only to witness
+consistency of the premise set. -/
+
+/-- A tree's slots as a total function; unoccupied indices give `empty_leaf`. -/
+abbrev Slots := Nat → Leaf
+
+noncomputable instance slotsDecidableEq : DecidableEq Slots :=
+  fun a b => Classical.propDecidable (a = b)
+
+def transparent : Commitment Slots where
+  leafHash L := fun _ => L
+  rootFrom siblings i h :=
+    match siblings with
+    | f :: _ => fun j => if j = i then h j else f j
+    | [] => fun _ => emptyLeaf
+  root t := fun j => t.getLeaf j
+  path t i := [fun j => if j = i then emptyLeaf else t.getLeaf j]
+
+theorem transparent_laws : CommitmentLaws transparent := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro t i L hi
+    funext j
+    show (if j = i then L else (if j = i then emptyLeaf else t.getLeaf j))
+        = (t.setLeaf i L).getLeaf j
+    rw [get_leaf_set_leaf hi]
+    by_cases hj : j = i
+    · rw [if_pos hj, if_pos hj]
+    · rw [if_neg hj, if_neg hj, if_neg hj]
+  · intro t i L hi
+    show [fun j => if j = i then emptyLeaf else (t.setLeaf i L).getLeaf j]
+        = [fun j => if j = i then emptyLeaf else t.getLeaf j]
+    have hfun : (fun j => if j = i then emptyLeaf else (t.setLeaf i L).getLeaf j)
+        = (fun j => if j = i then emptyLeaf else t.getLeaf j) := by
+      funext j
+      by_cases hj : j = i
+      · rw [if_pos hj, if_pos hj]
+      · rw [if_neg hj, if_neg hj, get_leaf_set_leaf hi, if_neg hj]
+    rw [hfun]
+  · intro t
+    funext j
+    show (t.setLeaf t.size emptyLeaf).getLeaf j = t.getLeaf j
+    rw [get_leaf_set_leaf (Nat.le_refl _)]
+    by_cases hj : j = t.size
+    · rw [if_pos hj, hj, get_leaf_of_ge (Nat.le_refl _)]
+    · rw [if_neg hj]
+
+/-- `transparent` is binding at any tree whose slot 0 is not an empty slot —
+which every well-formed tree satisfies, since its slot 0 is the sentinel. -/
+theorem transparent_binding {t : Tree} (h : t.getLeaf 0 ≠ emptyLeaf) : Binding transparent t := by
+  intro i siblings L heq
+  cases siblings with
+  | nil =>
+    exact absurd (show emptyLeaf = t.getLeaf 0 from congrFun heq 0).symm h
+  | cons f rest =>
+    have hi : (if i = i then L else f i) = t.getLeaf i := congrFun heq i
+    rwa [if_pos rfl] at hi
+
+theorem transparent_binding_of_wf {t : Tree} (hw : Wf t) : Binding transparent t := by
+  refine transparent_binding ?_
+  intro hc
+  have hkey : (t.getLeaf 0).key = emptyLeaf.key := congrArg Leaf.key hc
+  rw [hw.sentinel] at hkey
+  exact max_key_ne_zero hkey.symm
+
+/-! ## Worked example: one honest insertion into a fresh tree -/
+
+def exampleTree : Tree := Tree.new 5
+
+def exampleKey : Nat := 100
+
+def exampleTreeAfter : Tree :=
+  { height := 5
+    leaves := [{ nextIndex := 1, key := 0, nextKey := 100, value := 0 },
+               { nextIndex := 0, key := 100, nextKey := 0, value := 1 }] }
+
+theorem example_low_index : lowIndex exampleTree exampleKey = .ok 0 := rfl
+
+theorem example_insert : insert exampleTree exampleKey 1 = .ok exampleTreeAfter := rfl
+
+theorem example_after_is_wf : Wf exampleTreeAfter :=
+  wf_insert (wf_new 5) (by decide) (by decide) example_insert
+
+/-- The inserted key is now in the modelled set, and the sentinel is still there. -/
+theorem example_after_key_set (k : Nat) :
+    MemKey exampleTreeAfter k ↔ (k = 0 ∨ k = 100) := by
+  constructor
+  · rintro ⟨i, hi, hk⟩
+    have hi2 : i < 2 := hi
+    rcases Nat.lt_or_ge i 1 with h1 | h1
+    · have hi0 : i = 0 := by omega
+      subst hi0
+      exact Or.inl (by rw [← hk]; rfl)
+    · have hi1 : i = 1 := by omega
+      subst hi1
+      exact Or.inr (by rw [← hk]; rfl)
+  · rintro (rfl | rfl)
+    · exact ⟨0, by decide, by rfl⟩
+    · exact ⟨1, by decide, by rfl⟩
+
+/-- The native builder refuses the duplicate; this is the executable form of
+`insert_present_key_fails`. -/
+theorem example_reinsert_fails :
+    insert exampleTreeAfter exampleKey 7 = .error (.keyAlreadyExists 100) := rfl
+
+/-- The two premise bundles are simultaneously satisfiable, so every theorem
+above that assumes them is non-vacuous. -/
+theorem example_laws_and_binding_are_consistent :
+    CommitmentLaws transparent ∧ Binding transparent exampleTree :=
+  ⟨transparent_laws, transparent_binding_of_wf (wf_new 5)⟩
+
+/-- A complete honest trace: `prove_and_insert` builds a proof, `get_new_root`
+accepts it against the real roots, the resulting tree is still well formed, the
+key is now present, and it was absent before. -/
+theorem example_insertion_proof_accepted :
+    ∃ P t', proveAndInsert transparent exampleTree exampleKey 1 = .ok (P, t') ∧
+      getNewRoot transparent P exampleKey 1 (transparent.root exampleTree)
+        = .ok (transparent.root t') ∧
+      Wf t' ∧ MemKey t' exampleKey ∧ ¬ MemKey exampleTree exampleKey := by
+  obtain ⟨P, t', hpi⟩ :
+      ∃ P t', proveAndInsert transparent exampleTree exampleKey 1 = .ok (P, t') :=
+    ⟨_, _, rfl⟩
+  have hins := prove_and_insert_agrees_with_insert hpi
+  refine ⟨P, t', hpi, native_insertion_proof_verifies transparent_laws hpi,
+    wf_insert (wf_new 5) (by decide) (by decide) hins, ?_, ?_⟩
+  · obtain ⟨low, hlow, ht, _⟩ := prove_and_insert_ok_iff.1 hpi
+    subst ht
+    exact (insert_key_set (low_index_lt hlow)).2 (Or.inr rfl)
+  · exact insert_ok_implies_absent (wf_new 5) hins
+
+/-! ## Completeness: `KeyAlreadyExists` really does mean "already exists"
+
+`low_index` reports `KeyAlreadyExists` whenever the candidate set is EMPTY. On a
+well-formed tree that is exactly right: an absent in-range key always has one and
+only one predecessor. Without this the error name would be a guess, and a failed
+insertion could not be read as "the key was there". -/
+
+/-- Index of the largest key strictly below `key` among the first `n` slots. -/
+def bestLowIdx (t : Tree) (key : Nat) : Nat → Option Nat
+  | 0 => none
+  | n + 1 =>
+    match bestLowIdx t key n with
+    | some j =>
+        if (t.getLeaf n).key < key ∧ (t.getLeaf j).key < (t.getLeaf n).key then some n else some j
+    | none => if (t.getLeaf n).key < key then some n else none
+
+theorem best_low_idx_none {t : Tree} {key n : Nat} (h : bestLowIdx t key n = none) :
+    ∀ m, m < n → ¬ ((t.getLeaf m).key < key) := by
+  induction n with
+  | zero => intro m hm; omega
+  | succ p ih =>
+    rw [bestLowIdx] at h
+    cases hp : bestLowIdx t key p with
+    | some j' => simp only [hp] at h; split at h <;> simp at h
+    | none =>
+      simp only [hp] at h
+      by_cases hc : (t.getLeaf p).key < key
+      · rw [if_pos hc] at h; simp at h
+      · rw [if_neg hc] at h
+        intro m hm
+        by_cases hmp : m = p
+        · subst hmp; exact hc
+        · exact ih hp m (by omega)
+
+theorem best_low_idx_spec {t : Tree} {key n j : Nat} (h : bestLowIdx t key n = some j) :
+    j < n ∧ (t.getLeaf j).key < key := by
+  induction n generalizing j with
+  | zero => simp [bestLowIdx] at h
+  | succ p ih =>
+    rw [bestLowIdx] at h
+    cases hp : bestLowIdx t key p with
+    | some j' =>
+      simp only [hp] at h
+      obtain ⟨hj'lt, hj'key⟩ := ih hp
+      by_cases hc : (t.getLeaf p).key < key ∧ (t.getLeaf j').key < (t.getLeaf p).key
+      · rw [if_pos hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        exact ⟨by omega, hc.1⟩
+      · rw [if_neg hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        exact ⟨by omega, hj'key⟩
+    | none =>
+      simp only [hp] at h
+      by_cases hc : (t.getLeaf p).key < key
+      · rw [if_pos hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        exact ⟨by omega, hc⟩
+      · rw [if_neg hc] at h; simp at h
+
+theorem best_low_idx_max {t : Tree} {key n j : Nat} (h : bestLowIdx t key n = some j) :
+    ∀ m, m < n → (t.getLeaf m).key < key → (t.getLeaf m).key ≤ (t.getLeaf j).key := by
+  induction n generalizing j with
+  | zero => intro m hm; omega
+  | succ p ih =>
+    intro m hm hmk
+    rw [bestLowIdx] at h
+    cases hp : bestLowIdx t key p with
+    | some j' =>
+      simp only [hp] at h
+      by_cases hc : (t.getLeaf p).key < key ∧ (t.getLeaf j').key < (t.getLeaf p).key
+      · rw [if_pos hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        by_cases hmp : m = p
+        · rw [hmp]; omega
+        · have hm' : m < p := by omega
+          have := ih hp m hm' hmk
+          omega
+      · rw [if_neg hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        by_cases hmp : m = p
+        · have hpk : (t.getLeaf p).key < key := by rw [← hmp]; exact hmk
+          have hnb : ¬ ((t.getLeaf j').key < (t.getLeaf p).key) := fun hb => hc ⟨hpk, hb⟩
+          rw [hmp]
+          omega
+        · exact ih hp m (by omega) hmk
+    | none =>
+      simp only [hp] at h
+      by_cases hc : (t.getLeaf p).key < key
+      · rw [if_pos hc] at h
+        simp only [Option.some.injEq] at h; subst h
+        by_cases hmp : m = p
+        · rw [hmp]; omega
+        · exact absurd hmk (best_low_idx_none hp m (by omega))
+      · rw [if_neg hc] at h; simp at h
+
+/-- Candidates are unique on a well-formed tree: `TooManyCandidates` is
+unreachable from `low_index`. -/
+theorem low_candidate_unique {t : Tree} {key i i' : Nat} (hw : Wf t)
+    (hi : i < t.size) (hi' : i' < t.size)
+    (h : isLowLeaf key (t.getLeaf i) = true) (h' : isLowLeaf key (t.getLeaf i') = true) :
+    i = i' := by
+  obtain ⟨hlt, hup⟩ := is_low_leaf_iff.1 h
+  obtain ⟨hlt', hup'⟩ := is_low_leaf_iff.1 h'
+  rcases Nat.lt_trichotomy (t.getLeaf i).key (t.getLeaf i').key with hc | hc | hc
+  · exfalso
+    obtain ⟨hne, hle⟩ := hw.dense i i' hi hi' hc
+    rcases hup with hup | hup
+    · omega
+    · exact hne hup
+  · exact hw.distinct i i' hi hi' hc
+  · exfalso
+    obtain ⟨hne, hle⟩ := hw.dense i' i hi' hi hc
+    rcases hup' with hup' | hup'
+    · omega
+    · exact hne hup'
+
+/-- An absent key has a predecessor candidate. -/
+theorem absent_key_has_low_candidate {t : Tree} {key : Nat} (hw : Wf t)
+    (habs : ¬ MemKey t key) (hpos : 0 < key) :
+    ∃ j, j < t.size ∧ isLowLeaf key (t.getLeaf j) = true := by
+  have hsent : (t.getLeaf 0).key < key := by rw [hw.sentinel]; exact hpos
+  obtain ⟨j, hj⟩ := (by
+    cases h : bestLowIdx t key t.size with
+    | some j => exact ⟨j, rfl⟩
+    | none => exact absurd hsent (best_low_idx_none h 0 hw.size_pos) :
+    ∃ j, bestLowIdx t key t.size = some j)
+  obtain ⟨hjlt, hjkey⟩ := best_low_idx_spec hj
+  refine ⟨j, hjlt, is_low_leaf_iff.2 ⟨hjkey, ?_⟩⟩
+  by_cases hz : (t.getLeaf j).nextKey = 0
+  · exact Or.inr hz
+  · left
+    obtain ⟨m, hm, hmk⟩ := hw.succ_mem j hjlt hz
+    have hgt : (t.getLeaf j).key < (t.getLeaf j).nextKey := hw.succ_gt j hjlt hz
+    rcases Nat.lt_trichotomy (t.getLeaf m).key key with hc | hc | hc
+    · have := best_low_idx_max hj m hm hc
+      omega
+    · exact absurd ⟨m, hm, hc⟩ habs
+    · omega
+
+/-- On a well-formed tree, `low_index` succeeds for every absent nonzero key. -/
+theorem low_index_ok_of_absent {t : Tree} {key : Nat} (hw : Wf t)
+    (habs : ¬ MemKey t key) (hpos : 0 < key) :
+    ∃ j, lowIndex t key = .ok j := by
+  obtain ⟨j, hjlt, hjlow⟩ := absent_key_has_low_candidate hw habs hpos
+  refine ⟨j, low_index_ok_iff.2 ?_⟩
+  refine filter_indices_unique hjlt hjlow ?_
+  intro m hm hmp
+  exact low_candidate_unique hw hm hjlt hmp hjlow
+
+/-- A nonzero key absent from a well-formed tree can always be inserted. -/
+theorem insert_ok_of_absent {t : Tree} {key value : Nat} (hw : Wf t)
+    (habs : ¬ MemKey t key) (hpos : 0 < key) :
+    ∃ t', insert t key value = .ok t' := by
+  obtain ⟨j, hj⟩ := low_index_ok_of_absent hw habs hpos
+  exact ⟨insertResult t j key value, insert_ok_iff.2 ⟨j, hj, rfl⟩⟩
+
+/-- The whole ordered-set characterisation in one statement: on a well-formed
+tree, a native insertion of an in-range key fails EXACTLY when the key is already
+in the modelled set. -/
+theorem insert_fails_iff_key_present {t : Tree} {key value : Nat} (hw : Wf t)
+    (hpos : 0 < key) :
+    (∀ t', insert t key value ≠ .ok t') ↔ MemKey t key := by
+  constructor
+  · intro hno
+    rcases Classical.em (MemKey t key) with hmem | habs
+    · exact hmem
+    · obtain ⟨t', ht'⟩ := insert_ok_of_absent hw habs hpos
+      exact absurd ht' (hno t')
+  · intro hmem t' ht'
+    rw [insert_present_key_fails hw hmem] at ht'
+    simp at ht'
+
 end Zkp.Implementation.IndexedMerkleTree

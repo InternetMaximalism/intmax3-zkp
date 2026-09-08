@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/indexed_merkle_tree/mod.rs",
+  "source_sha256": "1e0e77402c0443c55fde9cd86ac7f5cfb430f2bd463e52f856ffc0766ece0a68",
+  "source_lines": 109,
+  "module": "Zkp.Implementation.IndexedMerkleTree",
+  "model": "doc/audit/zkp/Zkp/Implementation/IndexedMerkleTree.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 3,
+      "status": "non-executable",
+      "label": "module declarations",
+      "declarations": [],
+      "theorems": [],
+      "note": "`pub mod` items; nothing executable."
+    },
+    {
+      "start": 4,
+      "end": 19,
+      "status": "dependency-boundary",
+      "label": "imports of U256, Poseidon and the incremental Merkle tree",
+      "declarations": [],
+      "theorems": [],
+      "note": "Semantics of the imported crate items is opaque; see the leafHash / merklePathFold boundaries."
+    },
+    {
+      "start": 20,
+      "end": 24,
+      "status": "dependency-boundary",
+      "label": "IndexedMerkleTree newtype over IncrementalMerkleTree and the proof type aliases",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree",
+        "Zkp.Implementation.IndexedMerkleTree.Commitment"
+      ],
+      "theorems": [],
+      "note": "`Tree` is a handwritten stand-in (height plus occupied leaf prefix); the wrapped IncrementalMerkleTree and MerkleProof semantics stay opaque."
+    },
+    {
+      "start": 25,
+      "end": 25,
+      "status": "non-executable",
+      "label": "impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Impl block header; no executable content."
+    },
+    {
+      "start": 26,
+      "end": 31,
+      "status": "translated",
+      "label": "IndexedMerkleTree::new pushes the all-zero sentinel at index 0",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree.new"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.tree_new_size",
+        "Zkp.Implementation.IndexedMerkleTree.tree_new_leaf_zero",
+        "Zkp.Implementation.IndexedMerkleTree.wf_new",
+        "Zkp.Implementation.IndexedMerkleTree.new_tree_key_set"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 32,
+      "end": 35,
+      "status": "dependency-boundary",
+      "label": "get_root delegates to the Merkle tree",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Commitment.root"
+      ],
+      "theorems": [],
+      "note": "Root computation is an opaque callback."
+    },
+    {
+      "start": 36,
+      "end": 39,
+      "status": "translated",
+      "label": "get_leaf returns empty_leaf for out-of-range indices",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree.getLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.get_leaf_of_lt",
+        "Zkp.Implementation.IndexedMerkleTree.get_leaf_of_ge"
+      ],
+      "note": "Models IncrementalMerkleTree::get_leaf's empty_leaf fallback, the BAL-CRIT-001 surface. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 40,
+      "end": 43,
+      "status": "dependency-boundary",
+      "label": "prove delegates to the Merkle tree",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Commitment.path"
+      ],
+      "theorems": [],
+      "note": "Sibling-list production is an opaque callback."
+    },
+    {
+      "start": 44,
+      "end": 65,
+      "status": "translated",
+      "label": "low_index: predecessor search, KeyAlreadyExists on empty candidate set, TooManyCandidates otherwise",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.lowIndex",
+        "Zkp.Implementation.IndexedMerkleTree.lowCandidates",
+        "Zkp.Implementation.IndexedMerkleTree.isLowLeaf",
+        "Zkp.Implementation.IndexedMerkleTree.indices"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.is_low_leaf_iff",
+        "Zkp.Implementation.IndexedMerkleTree.low_index_ok_iff",
+        "Zkp.Implementation.IndexedMerkleTree.low_index_lt",
+        "Zkp.Implementation.IndexedMerkleTree.low_index_is_low",
+        "Zkp.Implementation.IndexedMerkleTree.low_index_unique",
+        "Zkp.Implementation.IndexedMerkleTree.present_key_has_no_low_candidate",
+        "Zkp.Implementation.IndexedMerkleTree.present_key_has_no_bounding_leaf",
+        "Zkp.Implementation.IndexedMerkleTree.low_candidate_unique",
+        "Zkp.Implementation.IndexedMerkleTree.absent_key_has_low_candidate",
+        "Zkp.Implementation.IndexedMerkleTree.low_index_ok_of_absent"
+      ],
+      "note": "Filter over the ascending index list mirrors `leaves().enumerate().filter(..)`. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 66,
+      "end": 83,
+      "status": "translated",
+      "label": "index: linear key lookup; the source panics on duplicate candidates",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.indexOfKey"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.index_of_key_ok_some"
+      ],
+      "note": "The `panic!` is modelled as an error value, not as an Option; noted in the module header. Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 84,
+      "end": 87,
+      "status": "translated",
+      "label": "key(index) projects the leaf key",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree.getLeaf"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 88,
+      "end": 97,
+      "status": "translated",
+      "label": "update: value-only write on an existing key",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.update"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.update_preserves_key_set",
+        "Zkp.Implementation.IndexedMerkleTree.mem_key_congr"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 98,
+      "end": 101,
+      "status": "translated",
+      "label": "leaves() accessor",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree.leaves",
+        "Zkp.Implementation.IndexedMerkleTree.keysOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.IndexedMerkleTree.mem_key_iff_mem_keys_of"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 102,
+      "end": 105,
+      "status": "translated",
+      "label": "len()",
+      "declarations": [
+        "Zkp.Implementation.IndexedMerkleTree.Tree.size"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 106,
+      "end": 108,
+      "status": "untranslated",
+      "label": "is_empty()",
+      "declarations": [],
+      "theorems": [],
+      "note": "No corresponding declaration; the model uses `0 < Tree.size` via Wf.size_pos instead."
+    },
+    {
+      "start": 109,
+      "end": 109,
+      "status": "non-executable",
+      "label": "closing brace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Closing brace of the impl block."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "leafHash",
+      "obligation": "`<IndexedMerkleLeaf as Leafable>::hash` (Poseidon over the 18 leaf words) is modelled as the opaque callback `Commitment.leafHash`; no property of Poseidon is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "merklePathFold",
+      "obligation": "`MerkleProof::get_root` / `::verify` and `IncrementalMerkleTree::get_root` / `::prove` (merkle_tree.rs, incremental_merkle_tree.rs) are the opaque callbacks `Commitment.rootFrom` / `root` / `path`; their internal correctness is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "commitmentLaws",
+      "obligation": "`CommitmentLaws` (openSet, pathStable, extendEmpty) asserts the incremental Merkle tree behaves honestly; it is assumed, used only for the native completeness theorem, and shown consistent only via the non-cryptographic `transparent` witness.",
+      "discharged": false
+    },
+    {
+      "name": "binding",
+      "obligation": "`Binding` (a sibling list opening leaf L at index i to the tree root forces L to be the tree's leaf at i) is Poseidon collision resistance plus leaf-encoding injectivity; only the encoding half is proved (`leaf_words_injective`).",
+      "discharged": false
+    },
+    {
+      "name": "pushCapacityAssert",
+      "obligation": "`IncrementalMerkleTree::push` aborts the process when the tree is full; the model has no panic, only the `size < capacity` hypothesis and the `Wf.capacity` field.",
+      "discharged": false
+    },
+    {
+      "name": "u256RangeInvariant",
+      "obligation": "Rust's `U256` guarantees every key and next_key is below 2^256; in the model this is an explicit hypothesis (`key < keyBound`) and a `Wf.in_range` field, not a refinement of the limb type.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2Lowering",
+      "obligation": "`is_lt` / `is_zero` / `assert_one` / `conditional_assert_eq` / `select` and the whole CircuitBuilder plumbing are assumed to lower to exactly the `Gates` / `ConditionalGates` predicates; no gate-level refinement is proved.",
+      "discharged": false
+    },
+    {
+      "name": "prevRootChaining",
+      "obligation": "That the `prev_root` fed to an insertion proof is the current nullifier/account tree root, and that the key is the nullifier of the spend being authorised, are consumer obligations of the balance and claim circuits, outside these three files.",
+      "discharged": false
+    },
+    {
+      "name": "serdeRoundTrip",
+      "obligation": "`Serialize`/`Deserialize` derives on the leaf, tree and proof types are not modelled.",
+      "discharged": false
+    }
+  ]
+}
