@@ -397,7 +397,7 @@ theorem pk_validate_ok_shape {pk : RegevPkM} (h : pkValidate pk = .ok ()) : PkSh
   split at h
   · exact absurd h (by simp)
   · next hne =>
-    have h2 := not_or.mp hne
+    have _h2 := not_or.mp hne
     exact ⟨by omega, by omega⟩
 
 theorem pk_validate_ok_canonical {pk : RegevPkM} (h : pkValidate pk = .ok ()) :
@@ -417,7 +417,7 @@ theorem ct_validate_ok_shape {ct : RegevCtM} (h : ctValidate ct = .ok ()) : CtSh
   split at h
   · exact absurd h (by simp)
   · next hne =>
-    have h2 := not_or.mp hne
+    have _h2 := not_or.mp hne
     exact ⟨by omega, by omega⟩
 
 theorem ct_validate_ok_canonical {ct : RegevCtM} (h : ctValidate ct = .ok ()) :
@@ -1942,11 +1942,11 @@ theorem hash_sig_sig_rows_are_native_sponge (P : Poseidon2) (pvPk pvM : List Nat
       (rows 2).inputs = nativeSigInput1 P (rows 0).sk pvM ∧
       (rows 3).inputs = nativeSigInput2 P (rows 0).sk pvM ∧
       (rows 4).inputs = nativeSigInput3 P (rows 0).sk pvM := by
-  obtain ⟨k0, k1, k2, k3, _, _, _, _⟩ := selector_schedule_forced P pvPk pvM rows g
+  obtain ⟨_, k1, k2, k3, _, _, _, _⟩ := selector_schedule_forced P pvPk pvM rows g
   have hsk1 : (rows 1).sk = (rows 0).sk := g.skBroadcast 0 (by decide)
   have hsk2 : (rows 2).sk = (rows 0).sk := by
     rw [g.skBroadcast 1 (by decide), hsk1]
-  have hsk3 : (rows 3).sk = (rows 0).sk := by
+  have _hsk3 : (rows 3).sk = (rows 0).sk := by
     rw [g.skBroadcast 2 (by decide), hsk2]
   have e1 : (rows 1).inputs = (domainSigB :: (rows 0).sk.take 7) ++ List.replicate 8 0 := by
     have := g.sig1Row 1 (by decide) k1
