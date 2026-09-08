@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/params.rs",
+  "source_sha256": "feb9ecfcbaab9068d6801d086a3bec31237990377e62b46f9e5fe2a09ab0e3c8",
+  "source_lines": 84,
+  "module": "Zkp.Implementation.RegevCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 3,
+      "status": "non-executable",
+      "label": "module doc: channel-wide Regev parameter set, D1 deviation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 4,
+      "end": 4,
+      "status": "dependency-boundary",
+      "label": "use regev_plonky3::RegevParams",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.Params"
+      ],
+      "theorems": [],
+      "note": "RegevParams comes from the upstream crate; the model restates the record shape only."
+    },
+    {
+      "start": 5,
+      "end": 28,
+      "status": "non-executable",
+      "label": "REGEV_N doc: security rationale and core-SVP cost table",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment block; the lattice cost estimates are not modelled or checked."
+    },
+    {
+      "start": 29,
+      "end": 29,
+      "status": "translated",
+      "label": "pub const REGEV_N: usize = 2048",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevN"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.regev_constants_pinned",
+        "Zkp.Implementation.RegevCore.ring_degree_is_power_of_two",
+        "Zkp.Implementation.RegevCore.constants_agree_with_decryption_gadget"
+      ],
+      "note": "Ring degree pinned as a literal and checked to be a power of two and to equal the ring degree the decryption-gadget model pins."
+    },
+    {
+      "start": 30,
+      "end": 32,
+      "status": "non-executable",
+      "label": "REGEV_ETA doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 33,
+      "end": 33,
+      "status": "translated",
+      "label": "pub const REGEV_ETA: usize = 2",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevEta"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.regev_constants_pinned"
+      ],
+      "note": "Value pinned; the CBD(2) distribution it names is a boundary, not modelled."
+    },
+    {
+      "start": 34,
+      "end": 37,
+      "status": "non-executable",
+      "label": "REGEV_PLAIN_BITS doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 38,
+      "end": 38,
+      "status": "translated",
+      "label": "pub const REGEV_PLAIN_BITS: usize = 8",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevPlainBits",
+        "Zkp.Implementation.RegevCore.plainModulus"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.regev_constants_pinned",
+        "Zkp.Implementation.RegevCore.constants_agree_with_decryption_gadget"
+      ],
+      "note": "t = 2^8 = 256 pinned and related to the gadget's Delta by t*Delta + 1 = q."
+    },
+    {
+      "start": 39,
+      "end": 42,
+      "status": "non-executable",
+      "label": "REGEV_Q doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 43,
+      "end": 43,
+      "status": "translated",
+      "label": "pub const REGEV_Q: u32 = 2_013_265_921",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.regev_constants_pinned",
+        "Zkp.Implementation.RegevCore.constants_agree_with_decryption_gadget"
+      ],
+      "note": "BabyBear modulus pinned and checked equal to the modulus the decryption-gadget model pins."
+    },
+    {
+      "start": 44,
+      "end": 46,
+      "status": "non-executable",
+      "label": "comment on the compile-time modulus assertion",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 47,
+      "end": 47,
+      "status": "dependency-boundary",
+      "label": "const _: () = assert!(REGEV_Q == RegevParams::q())",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevQ"
+      ],
+      "theorems": [],
+      "note": "The compile-time equality with the upstream field modulus is not reproduced; the model pins the literal instead."
+    },
+    {
+      "start": 48,
+      "end": 59,
+      "status": "non-executable",
+      "label": "MAX_HOMO_ADDS_BEFORE_REFRESH doc: digit and noise margins",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 60,
+      "end": 60,
+      "status": "translated",
+      "label": "pub const MAX_HOMO_ADDS_BEFORE_REFRESH: u32 = 64",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.maxHomoAddsBeforeRefresh",
+        "Zkp.Implementation.RegevCore.cbdWorstCaseNoise"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.noise_and_digit_budget"
+      ],
+      "note": "The budget and the arithmetic of the source's margin comment are restated; enforcement of the counter lives outside this file."
+    },
+    {
+      "start": 61,
+      "end": 62,
+      "status": "non-executable",
+      "label": "channel_regev_params doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 63,
+      "end": 69,
+      "status": "translated",
+      "label": "pub fn channel_regev_params() -> RegevParams",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.channelParams",
+        "Zkp.Implementation.RegevCore.Params"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.regev_constants_pinned"
+      ],
+      "note": "The single channel parameter set as a record of the three pinned constants."
+    },
+    {
+      "start": 70,
+      "end": 70,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 71,
+      "end": 84,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: upstream consistency checks",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test module; not modelled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ring-lwe-hardness",
+      "obligation": "The security of the scheme rests on Ring-LWE/uSVP hardness at n = 2048, q = BabyBear, ternary secret and CBD(2) noise; the model states no secrecy property and the core-SVP cost table in the source is not reproduced or checked.",
+      "discharged": false
+    },
+    {
+      "name": "upstream-regev-plonky3",
+      "obligation": "regev_plonky3::keygen / encrypt / decrypt / encode_value_message, the negacyclic NTT and the field type F are opaque; that they implement the ring arithmetic, that decryption inverts encryption, and that the upstream message encoder produces the modelled 64-bit little-endian layout are undischarged premises (DecryptsTo, HomomorphicDigits and the encodeAmount definition).",
+      "discharged": false
+    },
+    {
+      "name": "rng-and-noise-distribution",
+      "obligation": "The caller-supplied cryptographic RNG, the ternary secret sampler and the CBD(2) noise sampler are boundaries: the model neither samples nor bounds actual noise, and TernarySecret is an asserted shape, not a derived property of channel_keygen.",
+      "discharged": false
+    },
+    {
+      "name": "noise-budget-arithmetic",
+      "obligation": "cbdWorstCaseNoise restates the source's worst-case comment 64*(4n+2) < Delta/2 as arithmetic over the pinned constants; it is not a probabilistic or worst-case bound on the noise actually accumulated by add_ciphertexts.",
+      "discharged": false
+    },
+    {
+      "name": "homomorphic-add-enforcement",
+      "obligation": "MAX_HOMO_ADDS_BEFORE_REFRESH is only a constant here; that the per-member pending_adds counter is actually incremented and checked by the state-update circuits, and that a refresh happens before the budget is exhausted, is proved nowhere in this module.",
+      "discharged": false
+    },
+    {
+      "name": "decryption-gadget-agreement",
+      "obligation": "Constant and word-stream agreement is proved against Zkp.Implementation.DecryptionGadget, itself a handwritten model of the in-circuit gadget; agreement between either model and the compiled Rust/plonky2 code is not established.",
+      "discharged": false
+    },
+    {
+      "name": "rust-machine-and-serde",
+      "obligation": "Refinement of the Nat/Int model to Rust u32/u64/u128/i8 arithmetic, casts, Vec indexing, serde Serialize/Deserialize wire formats and the dropped String error payloads is not established.",
+      "discharged": false
+    }
+  ]
+}

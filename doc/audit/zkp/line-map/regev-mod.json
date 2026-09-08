@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/mod.rs",
+  "source_sha256": "d1ec8aecd6cd4b8e4b23b34a41c90faeda3e2e72d7cac1523e932f5766d83d14",
+  "source_lines": 49,
+  "module": "Zkp.Implementation.RegevCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 13,
+      "status": "non-executable",
+      "label": "module doc: Regev layer overview and boundary contract",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 14,
+      "end": 19,
+      "status": "non-executable",
+      "label": "pub mod declarations",
+      "declarations": [],
+      "theorems": [],
+      "note": "Module declarations; transfer_stark and hash_sig are outside this model."
+    },
+    {
+      "start": 20,
+      "end": 39,
+      "status": "non-executable",
+      "label": "pub use re-exports of encrypt / keys / params / transfer_stark items",
+      "declarations": [],
+      "theorems": [],
+      "note": "Re-export list; the transfer_stark and hash_sig surface is not modelled here."
+    },
+    {
+      "start": 40,
+      "end": 44,
+      "status": "dependency-boundary",
+      "label": "use plonky2_keccak solidity_keccak256 and ethereum_types Bytes32",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.digestWords",
+        "Zkp.Implementation.RegevCore.RegevPk.digestWords"
+      ],
+      "theorems": [],
+      "note": "keccak and the Bytes32 word encoding are opaque; the model only builds the word streams handed to them."
+    },
+    {
+      "start": 45,
+      "end": 46,
+      "status": "non-executable",
+      "label": "comment on the keccak word convention",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 47,
+      "end": 49,
+      "status": "dependency-boundary",
+      "label": "pub(crate) fn hash_words(words: &[u32]) -> Bytes32",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.digestWords",
+        "Zkp.Implementation.RegevCore.RegevPk.poseidonWords",
+        "Zkp.Implementation.RegevCore.RegevCiphertext.digestWords",
+        "Zkp.Implementation.RegevCore.pkRootWords"
+      ],
+      "theorems": [],
+      "note": "Handwritten model treats the hash as an opaque callback: the Lean definitions produce the exact preimage word lists and nothing about the digest value."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-and-poseidon-binding",
+      "obligation": "solidity_keccak256 / hash_words and PoseidonHashOut::hash_inputs_u64 are opaque; the model produces the exact word streams only. Collision resistance, the Bytes32 encoding, and 'equal digest implies equal key/ciphertext' are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "upstream-regev-plonky3",
+      "obligation": "regev_plonky3::keygen / encrypt / decrypt / encode_value_message, the negacyclic NTT and the field type F are opaque; that they implement the ring arithmetic, that decryption inverts encryption, and that the upstream message encoder produces the modelled 64-bit little-endian layout are undischarged premises (DecryptsTo, HomomorphicDigits and the encodeAmount definition).",
+      "discharged": false
+    },
+    {
+      "name": "rust-machine-and-serde",
+      "obligation": "Refinement of the Nat/Int model to Rust u32/u64/u128/i8 arithmetic, casts, Vec indexing, serde Serialize/Deserialize wire formats and the dropped String error payloads is not established.",
+      "discharged": false
+    },
+    {
+      "name": "decryption-gadget-agreement",
+      "obligation": "Constant and word-stream agreement is proved against Zkp.Implementation.DecryptionGadget, itself a handwritten model of the in-circuit gadget; agreement between either model and the compiled Rust/plonky2 code is not established.",
+      "discharged": false
+    }
+  ]
+}

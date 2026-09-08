@@ -1,0 +1,492 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/encrypt.rs",
+  "source_sha256": "1257e98bf94edade055a9b8c3a52904a85fe7f99a9c095e865af1db65e906003",
+  "source_lines": 439,
+  "module": "Zkp.Implementation.RegevCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 3,
+      "status": "non-executable",
+      "label": "module doc: ciphertexts and amount encryption, deviation D1",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 4,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "use p3_field, regev_plonky3, serde, thiserror, super and ethereum_types",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.EncryptionRandomness"
+      ],
+      "theorems": [],
+      "note": "The upstream field F, Ciphertext, PublicKey, SecretKey and EncryptionWitness types are opaque; the model restates only the witness field shape."
+    },
+    {
+      "start": 18,
+      "end": 20,
+      "status": "translated",
+      "label": "REGEV_CT_DOMAIN doc and constant",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevCtDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.domain_separators_distinct",
+        "Zkp.Implementation.RegevCore.ct_digest_words_match_decryption_gadget"
+      ],
+      "note": "Domain separator pinned and checked equal to the one the decryption-gadget model uses for the ciphertext digest preimage."
+    },
+    {
+      "start": 21,
+      "end": 47,
+      "status": "translated",
+      "label": "pub enum RegevError with thiserror messages",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevError"
+      ],
+      "theorems": [],
+      "note": "Variants restated; the #[error(...)] String payloads are dropped, so error-message content is out of scope."
+    },
+    {
+      "start": 48,
+      "end": 53,
+      "status": "non-executable",
+      "label": "RegevCiphertext doc and derives",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 54,
+      "end": 57,
+      "status": "translated",
+      "label": "pub struct RegevCiphertext { c1, c2 }",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext"
+      ],
+      "theorems": [],
+      "note": "Field layout restated; the derived serde wire format is a boundary."
+    },
+    {
+      "start": 58,
+      "end": 68,
+      "status": "non-executable",
+      "label": "impl header and RegevCiphertext::padding doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 69,
+      "end": 74,
+      "status": "translated",
+      "label": "pub fn padding() -> Self",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.padding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.padding_ct_validates",
+        "Zkp.Implementation.RegevCore.normal_padding_trace"
+      ],
+      "note": "All-zero REGEV_N-shaped ciphertext; proved to pass validate and to act as a homomorphic identity."
+    },
+    {
+      "start": 75,
+      "end": 81,
+      "status": "non-executable",
+      "label": "RegevCiphertext::validate doc: canonicality and digest malleability",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 82,
+      "end": 97,
+      "status": "translated",
+      "label": "pub fn validate(&self) -> Result<(), RegevError>",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.validate",
+        "Zkp.Implementation.RegevCore.coeffsCanonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.ct_validate_ok_iff",
+        "Zkp.Implementation.RegevCore.ct_validate_dichotomy",
+        "Zkp.Implementation.RegevCore.ct_component_widths",
+        "Zkp.Implementation.RegevCore.coeffs_canonical_iff"
+      ],
+      "note": "Length check before canonicality check; component widths (REGEV_N coefficients each, all < q) are derived from acceptance."
+    },
+    {
+      "start": 98,
+      "end": 102,
+      "status": "non-executable",
+      "label": "validate_balance_exit_shape doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 103,
+      "end": 113,
+      "status": "translated",
+      "label": "pub fn validate_balance_exit_shape(&self)",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.validateBalanceExitShape"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.exit_shape_accepts_padding",
+        "Zkp.Implementation.RegevCore.exit_shape_refuses_zero_c1_nonzero_c2",
+        "Zkp.Implementation.RegevCore.exit_shape_requires_canonical"
+      ],
+      "note": "Canonical zero stays acceptable as an empty slot, zero c1 with nonzero c2 is refused; no plaintext, range, encryption or conservation property is claimed."
+    },
+    {
+      "start": 114,
+      "end": 122,
+      "status": "non-executable",
+      "label": "RegevCiphertext::digest doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 123,
+      "end": 127,
+      "status": "translated",
+      "label": "digest(): assert!(self.validate().is_ok())",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.digestWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.ct_digest_none_on_invalid"
+      ],
+      "note": "Canonicality gate modelled as 'no digest words exist for an invalid ciphertext'; the Rust panic itself is a boundary."
+    },
+    {
+      "start": 128,
+      "end": 136,
+      "status": "dependency-boundary",
+      "label": "hash_words([IMRC, c1.len(), c1..., c2...])",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.digestWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.digest_preimage_lengths",
+        "Zkp.Implementation.RegevCore.ct_digest_words_match_decryption_gadget"
+      ],
+      "note": "keccak is opaque; the theorems fix only the preimage word stream, its 4098-word length, and its agreement with the decryption-gadget model."
+    },
+    {
+      "start": 137,
+      "end": 146,
+      "status": "non-executable",
+      "label": "end of impl, AmountWitness doc and derives",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 147,
+      "end": 150,
+      "status": "translated",
+      "label": "pub struct AmountWitness { amount, witness }",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.AmountWitness",
+        "Zkp.Implementation.RegevCore.EncryptionRandomness"
+      ],
+      "theorems": [],
+      "note": "Witness shape restated with the upstream EncryptionWitness split into its randomness fields; sender-privacy is a source property, not a modelled one."
+    },
+    {
+      "start": 151,
+      "end": 153,
+      "status": "non-executable",
+      "label": "encode_amount doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 154,
+      "end": 156,
+      "status": "translated",
+      "label": "pub fn encode_amount(amount: u64) -> Vec<u8>",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.encodeAmount",
+        "Zkp.Implementation.RegevCore.bitAt",
+        "Zkp.Implementation.RegevCore.amountBits",
+        "Zkp.Implementation.RegevCore.listWeighted"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.encode_amount_length",
+        "Zkp.Implementation.RegevCore.encode_amount_high_coefficients_zero",
+        "Zkp.Implementation.RegevCore.encode_amount_matches_decryption_gadget",
+        "Zkp.Implementation.RegevCore.encode_amount_zero",
+        "Zkp.Implementation.RegevCore.decode_encode_roundtrip",
+        "Zkp.Implementation.RegevCore.encode_amount_injective_on_u64",
+        "Zkp.Implementation.RegevCore.list_weighted_bits",
+        "Zkp.Implementation.RegevCore.normal_amount_trace"
+      ],
+      "note": "The D1 layout (64 little-endian bits, one per coefficient, zero above, length REGEV_N) is restated and proved injective on the u64 range and identical to the layout the decryption-gadget model uses; that upstream encode_value_message implements this layout is a boundary."
+    },
+    {
+      "start": 157,
+      "end": 179,
+      "status": "non-executable",
+      "label": "zero_amount_witness doc: why the all-zero opening is public and safe",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 180,
+      "end": 194,
+      "status": "translated",
+      "label": "pub fn zero_amount_witness() -> AmountWitness",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.zeroAmountWitness",
+        "Zkp.Implementation.RegevCore.zeroRandomness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.zero_amount_witness_opens_zero"
+      ],
+      "note": "The all-zero witness is built from constants and proved to carry encode_amount(0) with ternary r and CBD halves in range; that it satisfies the E-1 ring identities is checked in transfer_stark, outside this model."
+    },
+    {
+      "start": 195,
+      "end": 197,
+      "status": "non-executable",
+      "label": "encrypt_amount doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 198,
+      "end": 208,
+      "status": "translated",
+      "label": "pub fn encrypt_amount(rng, pk, amount)",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.encryptAmount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.encrypt_amount_witness_message",
+        "Zkp.Implementation.RegevCore.encrypt_amount_refuses_before_oracle"
+      ],
+      "note": "Key validation happens before the upstream encryptor is reached and the returned witness carries the encoded amount; the encryption itself and the RNG are an opaque oracle."
+    },
+    {
+      "start": 209,
+      "end": 212,
+      "status": "non-executable",
+      "label": "decrypt_amount doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 213,
+      "end": 223,
+      "status": "translated",
+      "label": "decrypt_amount: secret-key length check and ciphertext conversion",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.decryptAmount",
+        "Zkp.Implementation.RegevCore.RegevSk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.decrypt_amount_checks_secret_key_first",
+        "Zkp.Implementation.RegevCore.decrypt_amount_refuses_noncanonical_before_oracle"
+      ],
+      "note": "Error precedence is modelled: a wrong-length secret key is refused before the ciphertext, and a non-canonical ciphertext is refused before the upstream decryptor is called."
+    },
+    {
+      "start": 224,
+      "end": 227,
+      "status": "dependency-boundary",
+      "label": "comment and regev_plonky3::decrypt call",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.DecryptsTo"
+      ],
+      "theorems": [],
+      "note": "The upstream decryption is an opaque oracle; that its digits are the encoded plaintext is the undischarged DecryptsTo premise."
+    },
+    {
+      "start": 228,
+      "end": 241,
+      "status": "translated",
+      "label": "digit decode loop and u64::try_from",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.decodeLoop",
+        "Zkp.Implementation.RegevCore.decodeValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.decode_rejects_high_digit",
+        "Zkp.Implementation.RegevCore.decode_padded",
+        "Zkp.Implementation.RegevCore.decode_encode_roundtrip"
+      ],
+      "note": "The skip-zero / reject-high-digit / fit-in-u64 control flow is modelled exactly, including returning DecryptOverflow instead of reaching the panicking upstream decoder."
+    },
+    {
+      "start": 242,
+      "end": 244,
+      "status": "non-executable",
+      "label": "add_ciphertexts doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 245,
+      "end": 264,
+      "status": "translated",
+      "label": "pub fn add_ciphertexts(a, b)",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.addCiphertexts",
+        "Zkp.Implementation.RegevCore.addCoeffs",
+        "Zkp.Implementation.RegevCore.addDigits",
+        "Zkp.Implementation.RegevCore.HomomorphicDigits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.add_ciphertexts_checks_left_operand_first",
+        "Zkp.Implementation.RegevCore.add_ciphertexts_rejects_noncanonical_right",
+        "Zkp.Implementation.RegevCore.add_coeffs_canonical",
+        "Zkp.Implementation.RegevCore.add_coeffs_length",
+        "Zkp.Implementation.RegevCore.add_ciphertexts_result_validates",
+        "Zkp.Implementation.RegevCore.add_ciphertexts_padding_identity",
+        "Zkp.Implementation.RegevCore.encoded_digit_sum_decodes_to_sum",
+        "Zkp.Implementation.RegevCore.homomorphic_pending_balance"
+      ],
+      "note": "Left-then-right validation, coefficient-wise addition with an explicit mod q, and canonicality of the result are modelled; additivity is proved at the digit level and lifted to ciphertexts only under the explicit HomomorphicDigits premise."
+    },
+    {
+      "start": 265,
+      "end": 267,
+      "status": "non-executable",
+      "label": "to_upstream_pk doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 268,
+      "end": 274,
+      "status": "dependency-boundary",
+      "label": "pub(crate) fn to_upstream_pk",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.validate"
+      ],
+      "theorems": [],
+      "note": "Conversion into the upstream field representation is opaque; only the validate-on-the-way-in gate corresponds to a modelled definition."
+    },
+    {
+      "start": 275,
+      "end": 277,
+      "status": "non-executable",
+      "label": "to_upstream_ct doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 278,
+      "end": 284,
+      "status": "dependency-boundary",
+      "label": "pub(crate) fn to_upstream_ct",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevCiphertext.validate"
+      ],
+      "theorems": [],
+      "note": "Conversion into the upstream field representation is opaque; only the validate-on-the-way-in gate corresponds to a modelled definition."
+    },
+    {
+      "start": 285,
+      "end": 287,
+      "status": "non-executable",
+      "label": "from_upstream_ct doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 288,
+      "end": 293,
+      "status": "dependency-boundary",
+      "label": "fn from_upstream_ct: as_canonical_u32 back-conversion",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.coeffsCanonical"
+      ],
+      "theorems": [],
+      "note": "That as_canonical_u32 yields coefficients below REGEV_Q is an upstream guarantee the model states as the canonicality predicate, not a proved fact."
+    },
+    {
+      "start": 294,
+      "end": 294,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 295,
+      "end": 439,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: roundtrip, homomorphic sums, digest golden value, rejection tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test module; not modelled. The golden digest value in particular is not reproduced (keccak is opaque)."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ring-lwe-hardness",
+      "obligation": "The security of the scheme rests on Ring-LWE/uSVP hardness at n = 2048, q = BabyBear, ternary secret and CBD(2) noise; the model states no secrecy property and the core-SVP cost table in the source is not reproduced or checked.",
+      "discharged": false
+    },
+    {
+      "name": "upstream-regev-plonky3",
+      "obligation": "regev_plonky3::keygen / encrypt / decrypt / encode_value_message, the negacyclic NTT and the field type F are opaque; that they implement the ring arithmetic, that decryption inverts encryption, and that the upstream message encoder produces the modelled 64-bit little-endian layout are undischarged premises (DecryptsTo, HomomorphicDigits and the encodeAmount definition).",
+      "discharged": false
+    },
+    {
+      "name": "rng-and-noise-distribution",
+      "obligation": "The caller-supplied cryptographic RNG, the ternary secret sampler and the CBD(2) noise sampler are boundaries: the model neither samples nor bounds actual noise, and TernarySecret is an asserted shape, not a derived property of channel_keygen.",
+      "discharged": false
+    },
+    {
+      "name": "keccak-and-poseidon-binding",
+      "obligation": "solidity_keccak256 / hash_words and PoseidonHashOut::hash_inputs_u64 are opaque; the model produces the exact word streams only. Collision resistance, the Bytes32 encoding, and 'equal digest implies equal key/ciphertext' are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "panic-vs-error",
+      "obligation": "digest() / poseidon_digest() assert canonicality and panic; the model returns none instead. That every ingestion boundary validates before reaching them, so the panic is unreachable, is a caller obligation outside these files.",
+      "discharged": false
+    },
+    {
+      "name": "noise-budget-arithmetic",
+      "obligation": "cbdWorstCaseNoise restates the source's worst-case comment 64*(4n+2) < Delta/2 as arithmetic over the pinned constants; it is not a probabilistic or worst-case bound on the noise actually accumulated by add_ciphertexts.",
+      "discharged": false
+    },
+    {
+      "name": "homomorphic-add-enforcement",
+      "obligation": "MAX_HOMO_ADDS_BEFORE_REFRESH is only a constant here; that the per-member pending_adds counter is actually incremented and checked by the state-update circuits, and that a refresh happens before the budget is exhausted, is proved nowhere in this module.",
+      "discharged": false
+    },
+    {
+      "name": "rust-machine-and-serde",
+      "obligation": "Refinement of the Nat/Int model to Rust u32/u64/u128/i8 arithmetic, casts, Vec indexing, serde Serialize/Deserialize wire formats and the dropped String error payloads is not established.",
+      "discharged": false
+    },
+    {
+      "name": "decryption-gadget-agreement",
+      "obligation": "Constant and word-stream agreement is proved against Zkp.Implementation.DecryptionGadget, itself a handwritten model of the in-circuit gadget; agreement between either model and the compiled Rust/plonky2 code is not established.",
+      "discharged": false
+    }
+  ]
+}

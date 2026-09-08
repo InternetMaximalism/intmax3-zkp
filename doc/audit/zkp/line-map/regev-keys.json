@@ -1,0 +1,330 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/keys.rs",
+  "source_sha256": "ce8e44d82ee9c1b496e2f8776c7aa00cd7fad6ff3ccc92a491a9aed2b2eb41ef",
+  "source_lines": 205,
+  "module": "Zkp.Implementation.RegevCore",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevCore.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 6,
+      "status": "non-executable",
+      "label": "module doc: key material, no serde on the secret key",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 7,
+      "end": 17,
+      "status": "dependency-boundary",
+      "label": "use serde, super::{encrypt, hash_words, params}, ethereum_types, PoseidonHashOut",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevError"
+      ],
+      "theorems": [],
+      "note": "serde, Bytes32 and PoseidonHashOut are imported types the model does not implement; RegevError is restated without its String payloads."
+    },
+    {
+      "start": 18,
+      "end": 20,
+      "status": "translated",
+      "label": "REGEV_PK_DOMAIN doc and constant",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevPkDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.domain_separators_distinct"
+      ],
+      "note": "Domain separator pinned and separated from the other three."
+    },
+    {
+      "start": 21,
+      "end": 22,
+      "status": "translated",
+      "label": "REGEV_PK_ROOT_DOMAIN doc and constant",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevPkRootDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.domain_separators_distinct"
+      ],
+      "note": "Domain separator pinned and separated from the other three."
+    },
+    {
+      "start": 23,
+      "end": 29,
+      "status": "non-executable",
+      "label": "REGEV_PK_POSEIDON_DOMAIN doc: why a separate in-circuit digest exists",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 30,
+      "end": 30,
+      "status": "translated",
+      "label": "pub const REGEV_PK_POSEIDON_DOMAIN: u64",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.regevPkPoseidonDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.domain_separators_distinct",
+        "Zkp.Implementation.RegevCore.pk_poseidon_words_match_decryption_gadget"
+      ],
+      "note": "Pinned and checked equal to the domain word the decryption-gadget model uses for the member-tree preimage."
+    },
+    {
+      "start": 31,
+      "end": 38,
+      "status": "translated",
+      "label": "pub struct RegevPk { a, b }",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk"
+      ],
+      "theorems": [],
+      "note": "Field layout restated; the derived Serialize/Deserialize wire format is a boundary."
+    },
+    {
+      "start": 39,
+      "end": 45,
+      "status": "non-executable",
+      "label": "impl header and RegevPk::padding doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 46,
+      "end": 51,
+      "status": "translated",
+      "label": "pub fn padding() -> Self",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.padding"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.padding_pk_validates"
+      ],
+      "note": "All-zero REGEV_N-shaped key; proved to pass validate, which is what the pad-to-MAX model needs."
+    },
+    {
+      "start": 52,
+      "end": 58,
+      "status": "non-executable",
+      "label": "RegevPk::validate doc: canonicality and the F1-A/B malleability finding",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 59,
+      "end": 74,
+      "status": "translated",
+      "label": "pub fn validate(&self) -> Result<(), RegevError>",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.validate",
+        "Zkp.Implementation.RegevCore.coeffsCanonical"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.pk_validate_ok_iff",
+        "Zkp.Implementation.RegevCore.pk_validate_dichotomy",
+        "Zkp.Implementation.RegevCore.pk_component_widths",
+        "Zkp.Implementation.RegevCore.coeffs_canonical_iff"
+      ],
+      "note": "Length check before canonicality check, both required for acceptance; the error String and the identity of the first offending coefficient are dropped."
+    },
+    {
+      "start": 75,
+      "end": 82,
+      "status": "non-executable",
+      "label": "RegevPk::digest doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 83,
+      "end": 84,
+      "status": "translated",
+      "label": "digest(): assert!(self.validate().is_ok())",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.digestWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.pk_digest_none_on_invalid"
+      ],
+      "note": "The canonicality gate is modelled as 'no digest words exist for an invalid key'; the Rust panic itself is a boundary."
+    },
+    {
+      "start": 85,
+      "end": 93,
+      "status": "dependency-boundary",
+      "label": "hash_words([IMRK, n, a..., b...])",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.digestWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.digest_preimage_lengths"
+      ],
+      "note": "keccak is opaque; only the exact preimage word stream and its 4098-word length are modelled."
+    },
+    {
+      "start": 94,
+      "end": 101,
+      "status": "non-executable",
+      "label": "RegevPk::poseidon_digest doc: must match the in-circuit recompute",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 102,
+      "end": 106,
+      "status": "translated",
+      "label": "poseidon_digest(): assert!(self.validate().is_ok())",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.poseidonWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.pk_poseidon_none_on_invalid"
+      ],
+      "note": "Same canonicality gate as digest(), modelled as absence of a word stream."
+    },
+    {
+      "start": 107,
+      "end": 111,
+      "status": "dependency-boundary",
+      "label": "Poseidon over [IMRP, n, a..., b...] Goldilocks limbs",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk.poseidonWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.pk_poseidon_words_match_decryption_gadget"
+      ],
+      "note": "Poseidon is opaque; the theorem only shows the preimage word stream equals the one the decryption-gadget model commits to (same domain, length prefix and a-then-b order)."
+    },
+    {
+      "start": 112,
+      "end": 118,
+      "status": "non-executable",
+      "label": "end of impl and RegevSk doc",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 119,
+      "end": 122,
+      "status": "translated",
+      "label": "pub struct RegevSk { s: Vec<i8> }",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevSk",
+        "Zkp.Implementation.RegevCore.TernarySecret"
+      ],
+      "theorems": [],
+      "note": "Secret key shape restated; that it is absent from every digest is visible in the model (no digest word stream mentions it), and TernarySecret is an asserted shape, not a derived property."
+    },
+    {
+      "start": 123,
+      "end": 127,
+      "status": "non-executable",
+      "label": "channel_keygen doc: caller must supply a secure RNG",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 128,
+      "end": 138,
+      "status": "dependency-boundary",
+      "label": "pub fn channel_keygen(rng) -> (RegevPk, RegevSk)",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.RegevPk",
+        "Zkp.Implementation.RegevCore.RegevSk",
+        "Zkp.Implementation.RegevCore.TernarySecret"
+      ],
+      "theorems": [],
+      "note": "regev_plonky3::keygen, the RNG and as_canonical_u32 are opaque; that generated keys are canonical and the secret ternary is an upstream premise, not proved."
+    },
+    {
+      "start": 139,
+      "end": 144,
+      "status": "non-executable",
+      "label": "regev_pk_root doc: member order is part of the preimage",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 145,
+      "end": 151,
+      "status": "translated",
+      "label": "pub fn regev_pk_root(pks: &[RegevPk]) -> Bytes32",
+      "declarations": [
+        "Zkp.Implementation.RegevCore.pkRootWords"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevCore.pk_root_preimage_order_sensitive",
+        "Zkp.Implementation.RegevCore.pk_root_preimage_binds_count"
+      ],
+      "note": "The word stream [IMRR, len, digest(pk_0)...] is modelled with the per-key digest as an opaque callback; the theorems are about the preimage, not about the keccak output."
+    },
+    {
+      "start": 152,
+      "end": 152,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Structural syntax, doc comment, attribute or spacing; no executable constraint inferred."
+    },
+    {
+      "start": 153,
+      "end": 205,
+      "status": "test-only",
+      "label": "#[cfg(test)] mod tests: keygen, validate and root order tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test module; not modelled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "keccak-and-poseidon-binding",
+      "obligation": "solidity_keccak256 / hash_words and PoseidonHashOut::hash_inputs_u64 are opaque; the model produces the exact word streams only. Collision resistance, the Bytes32 encoding, and 'equal digest implies equal key/ciphertext' are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "panic-vs-error",
+      "obligation": "digest() / poseidon_digest() assert canonicality and panic; the model returns none instead. That every ingestion boundary validates before reaching them, so the panic is unreachable, is a caller obligation outside these files.",
+      "discharged": false
+    },
+    {
+      "name": "upstream-regev-plonky3",
+      "obligation": "regev_plonky3::keygen / encrypt / decrypt / encode_value_message, the negacyclic NTT and the field type F are opaque; that they implement the ring arithmetic, that decryption inverts encryption, and that the upstream message encoder produces the modelled 64-bit little-endian layout are undischarged premises (DecryptsTo, HomomorphicDigits and the encodeAmount definition).",
+      "discharged": false
+    },
+    {
+      "name": "rng-and-noise-distribution",
+      "obligation": "The caller-supplied cryptographic RNG, the ternary secret sampler and the CBD(2) noise sampler are boundaries: the model neither samples nor bounds actual noise, and TernarySecret is an asserted shape, not a derived property of channel_keygen.",
+      "discharged": false
+    },
+    {
+      "name": "ring-lwe-hardness",
+      "obligation": "The security of the scheme rests on Ring-LWE/uSVP hardness at n = 2048, q = BabyBear, ternary secret and CBD(2) noise; the model states no secrecy property and the core-SVP cost table in the source is not reproduced or checked.",
+      "discharged": false
+    },
+    {
+      "name": "rust-machine-and-serde",
+      "obligation": "Refinement of the Nat/Int model to Rust u32/u64/u128/i8 arithmetic, casts, Vec indexing, serde Serialize/Deserialize wire formats and the dropped String error payloads is not established.",
+      "discharged": false
+    },
+    {
+      "name": "decryption-gadget-agreement",
+      "obligation": "Constant and word-stream agreement is proved against Zkp.Implementation.DecryptionGadget, itself a handwritten model of the in-circuit gadget; agreement between either model and the compiled Rust/plonky2 code is not established.",
+      "discharged": false
+    }
+  ]
+}
