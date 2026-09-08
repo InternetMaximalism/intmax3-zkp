@@ -1,0 +1,1138 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/transfer_stark.rs",
+  "source_sha256": "497240642178a23e06ddab549411772046d5916f7bec4ea2fdbd67369b25ae08",
+  "source_lines": 3206,
+  "module": "Zkp.Implementation.RegevProofs",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevProofs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 101,
+      "status": "non-executable",
+      "label": "Module doc comment: statements, Fiat-Shamir and purpose-domain analyses",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only; the analyses it states are recorded as boundaries in the Lean header."
+    },
+    {
+      "start": 102,
+      "end": 140,
+      "status": "dependency-boundary",
+      "label": "Imports of p3-air/p3-batch-stark/p3-lookup/regev_plonky3",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.Backend",
+        "Zkp.Implementation.RegevProofs.Poseidon2"
+      ],
+      "theorems": [],
+      "note": "Prover/verifier backend and field types come from external crates; modelled only as the opaque Backend and Poseidon2 callback records."
+    },
+    {
+      "start": 141,
+      "end": 144,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 145,
+      "end": 167,
+      "status": "translated",
+      "label": "Purpose domain words and the compile-time `< q` assertions",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.channelTxZkpDomain",
+        "Zkp.Implementation.RegevProofs.channelUpdateZkpDomain",
+        "Zkp.Implementation.RegevProofs.channelUpdateZkpDomainV1Retired",
+        "Zkp.Implementation.RegevProofs.withdrawClaimZkpDomain",
+        "Zkp.Implementation.RegevProofs.balanceRefreshZkpDomain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.purpose_domains_below_q",
+        "Zkp.Implementation.RegevProofs.retired_update_domain_distinct"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 168,
+      "end": 189,
+      "status": "translated",
+      "label": "RegevProofPurpose and its domain() mapping",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.RegevProofPurpose",
+        "Zkp.Implementation.RegevProofs.RegevProofPurpose.domain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.purpose_domains_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 190,
+      "end": 206,
+      "status": "non-executable",
+      "label": "Security doc comment on the hiding config",
+      "declarations": [],
+      "theorems": [],
+      "note": "Doc comment only."
+    },
+    {
+      "start": 207,
+      "end": 211,
+      "status": "translated",
+      "label": "RegevSecurityLevel enum",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.RegevSecurityLevel"
+      ],
+      "theorems": [],
+      "note": "Only the two-level choice is modelled; the FRI query counts are an upstream boundary."
+    },
+    {
+      "start": 212,
+      "end": 220,
+      "status": "dependency-boundary",
+      "label": "config(): zk_config / zk_test_config",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.configIsZk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.expected_degree_bits_pinned"
+      ],
+      "note": "The upstream configs are opaque; only `is_zk() = 1` (used by the trace-height shape check) is pinned."
+    },
+    {
+      "start": 221,
+      "end": 232,
+      "status": "non-executable",
+      "label": "Column-layout comment block",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 233,
+      "end": 276,
+      "status": "translated",
+      "label": "Main and aux column constants, ct_base / aux_base",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.colAS",
+        "Zkp.Implementation.RegevProofs.colBS",
+        "Zkp.Implementation.RegevProofs.colAR",
+        "Zkp.Implementation.RegevProofs.colBR",
+        "Zkp.Implementation.RegevProofs.numKeyCols",
+        "Zkp.Implementation.RegevProofs.ctCols",
+        "Zkp.Implementation.RegevProofs.offC1",
+        "Zkp.Implementation.RegevProofs.offC2",
+        "Zkp.Implementation.RegevProofs.offR",
+        "Zkp.Implementation.RegevProofs.offE1U",
+        "Zkp.Implementation.RegevProofs.offE1V",
+        "Zkp.Implementation.RegevProofs.offE2U",
+        "Zkp.Implementation.RegevProofs.offE2V",
+        "Zkp.Implementation.RegevProofs.offM",
+        "Zkp.Implementation.RegevProofs.offK1",
+        "Zkp.Implementation.RegevProofs.offK2",
+        "Zkp.Implementation.RegevProofs.ctBase",
+        "Zkp.Implementation.RegevProofs.auxAS",
+        "Zkp.Implementation.RegevProofs.auxBS",
+        "Zkp.Implementation.RegevProofs.auxAR",
+        "Zkp.Implementation.RegevProofs.auxBR",
+        "Zkp.Implementation.RegevProofs.numKeyAux",
+        "Zkp.Implementation.RegevProofs.ctAux",
+        "Zkp.Implementation.RegevProofs.aoffC1",
+        "Zkp.Implementation.RegevProofs.aoffC2",
+        "Zkp.Implementation.RegevProofs.aoffR",
+        "Zkp.Implementation.RegevProofs.aoffE1",
+        "Zkp.Implementation.RegevProofs.aoffE2",
+        "Zkp.Implementation.RegevProofs.aoffM",
+        "Zkp.Implementation.RegevProofs.aoffK1",
+        "Zkp.Implementation.RegevProofs.aoffK2",
+        "Zkp.Implementation.RegevProofs.auxBase"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.aux_layout_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 277,
+      "end": 312,
+      "status": "translated",
+      "label": "AirShape and its width / public-value / published-evaluation counts",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.AirShape",
+        "Zkp.Implementation.RegevProofs.AirShape.carryCol",
+        "Zkp.Implementation.RegevProofs.AirShape.numCols",
+        "Zkp.Implementation.RegevProofs.AirShape.numPublicValues",
+        "Zkp.Implementation.RegevProofs.AirShape.numPublishedEvals",
+        "Zkp.Implementation.RegevProofs.AirShape.numAuxCols",
+        "Zkp.Implementation.RegevProofs.assignedColumns"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.e1_columns_partition",
+        "Zkp.Implementation.RegevProofs.e2_columns_partition"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 313,
+      "end": 343,
+      "status": "translated",
+      "label": "E1_SHAPE, E2_SHAPE, amount-limb and extra public-value counts",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.e1Shape",
+        "Zkp.Implementation.RegevProofs.e2Shape",
+        "Zkp.Implementation.RegevProofs.amountLimbPvs",
+        "Zkp.Implementation.RegevProofs.e2NumExtraPvs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.e1_layout_pinned",
+        "Zkp.Implementation.RegevProofs.e2_layout_pinned",
+        "Zkp.Implementation.RegevProofs.e2_exposed_messages_are_the_deltas"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 344,
+      "end": 349,
+      "status": "non-executable",
+      "label": "Section banner and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 350,
+      "end": 394,
+      "status": "translated",
+      "label": "dual_key_lookups: lookup kinds, aux order and published-evaluation order",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.LookupKind",
+        "Zkp.Implementation.RegevProofs.LookupKind.isGlobal",
+        "Zkp.Implementation.RegevProofs.ctLookupKinds",
+        "Zkp.Implementation.RegevProofs.dualKeyLookupKinds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.dual_key_lookup_layout",
+        "Zkp.Implementation.RegevProofs.published_eval_counts_match_lookups",
+        "Zkp.Implementation.RegevProofs.secret_message_columns_not_published"
+      ],
+      "note": "The Kind/aux-index layout is modelled; the p3 SymbolicExpression construction is a boundary."
+    },
+    {
+      "start": 395,
+      "end": 398,
+      "status": "non-executable",
+      "label": "Doc comment of eval_dual_key",
+      "declarations": [],
+      "theorems": [],
+      "note": "Doc comment only."
+    },
+    {
+      "start": 399,
+      "end": 482,
+      "status": "translated",
+      "label": "eval_dual_key: smallness gates, ripple-carry conservation, ring identities",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.FZero",
+        "Zkp.Implementation.RegevProofs.Canonical",
+        "Zkp.Implementation.RegevProofs.FieldProducts",
+        "Zkp.Implementation.RegevProofs.BoolGate",
+        "Zkp.Implementation.RegevProofs.TernaryGate",
+        "Zkp.Implementation.RegevProofs.CbdHalfGate",
+        "Zkp.Implementation.RegevProofs.colValue",
+        "Zkp.Implementation.RegevProofs.ConservationChain",
+        "Zkp.Implementation.RegevProofs.RingEq",
+        "Zkp.Implementation.RegevProofs.dualKeyRingEqs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.bool_gate_forces_bit",
+        "Zkp.Implementation.RegevProofs.ternary_gate_forces",
+        "Zkp.Implementation.RegevProofs.cbd_half_gate_forces",
+        "Zkp.Implementation.RegevProofs.carry_chain_value",
+        "Zkp.Implementation.RegevProofs.conservation_gates_integral",
+        "Zkp.Implementation.RegevProofs.conservation_over_integers",
+        "Zkp.Implementation.RegevProofs.conservation_no_underflow",
+        "Zkp.Implementation.RegevProofs.col_value_add",
+        "Zkp.Implementation.RegevProofs.col_value_nonneg",
+        "Zkp.Implementation.RegevProofs.e1_key_binding_selection",
+        "Zkp.Implementation.RegevProofs.e2_key_binding_selection",
+        "Zkp.Implementation.RegevProofs.ring_eq_count",
+        "Zkp.Implementation.RegevProofs.small_fzero_eq_zero"
+      ],
+      "note": "Gates are modelled as modular equations over Int representatives; the extension-field ring identities at z are recorded structurally only (which aux columns each identity reads)."
+    },
+    {
+      "start": 483,
+      "end": 487,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 488,
+      "end": 535,
+      "status": "translated",
+      "label": "DualKeyTransferAir: width, public-value count, lookups, degree",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.e1Shape",
+        "Zkp.Implementation.RegevProofs.AirShape.numCols",
+        "Zkp.Implementation.RegevProofs.AirShape.numPublicValues",
+        "Zkp.Implementation.RegevProofs.dualKeyLookupKinds",
+        "Zkp.Implementation.RegevProofs.maxConstraintDegree"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.e1_layout_pinned",
+        "Zkp.Implementation.RegevProofs.next_row_columns_pinned"
+      ],
+      "note": "Only the reported width/public-value count/lookup set/degree/next-row columns are modelled; the plonky3 trait lowering is a boundary."
+    },
+    {
+      "start": 536,
+      "end": 540,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 541,
+      "end": 589,
+      "status": "translated",
+      "label": "ChannelUpdateAir: width, public-value count, lookups, degree",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.e2Shape",
+        "Zkp.Implementation.RegevProofs.AirShape.numCols",
+        "Zkp.Implementation.RegevProofs.AirShape.numPublicValues",
+        "Zkp.Implementation.RegevProofs.dualKeyLookupKinds",
+        "Zkp.Implementation.RegevProofs.maxConstraintDegree"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.e2_layout_pinned",
+        "Zkp.Implementation.RegevProofs.next_row_columns_pinned"
+      ],
+      "note": "Same modelling scope as the E-1 AIR impl block."
+    },
+    {
+      "start": 590,
+      "end": 594,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 595,
+      "end": 652,
+      "status": "untranslated",
+      "label": "generate_dual_key_trace: row filling and the native carry loop",
+      "declarations": [],
+      "theorems": [],
+      "note": "The trace matrix construction is not modelled; only the carry-chain semantics it produces are (ConservationChain)."
+    },
+    {
+      "start": 653,
+      "end": 680,
+      "status": "translated",
+      "label": "dual_key_public_values: the E-1/E-2 public-value encoder",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.dualKeyPublicValues",
+        "Zkp.Implementation.RegevProofs.polyBlocks",
+        "Zkp.Implementation.RegevProofs.ctBlocks",
+        "Zkp.Implementation.RegevProofs.channelTxPublicValues"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.dual_key_public_values_length",
+        "Zkp.Implementation.RegevProofs.dual_key_public_values_injective",
+        "Zkp.Implementation.RegevProofs.ct_blocks_length",
+        "Zkp.Implementation.RegevProofs.ct_blocks_inj",
+        "Zkp.Implementation.RegevProofs.poly_blocks_uniform",
+        "Zkp.Implementation.RegevProofs.poly_blocks_length",
+        "Zkp.Implementation.RegevProofs.join_uniform_length",
+        "Zkp.Implementation.RegevProofs.join_uniform_inj",
+        "Zkp.Implementation.RegevProofs.list_append_split",
+        "Zkp.Implementation.RegevProofs.channel_tx_update_public_values_differ"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 681,
+      "end": 690,
+      "status": "translated",
+      "label": "amount_limbs: the four 16-bit limbs",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.amountLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.amount_limbs_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 691,
+      "end": 708,
+      "status": "translated",
+      "label": "e2_extra_pvs: amount limbs plus the base token index",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.e2ExtraPvs",
+        "Zkp.Implementation.RegevProofs.channelUpdatePublicValues"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 709,
+      "end": 718,
+      "status": "non-executable",
+      "label": "Section banner and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 719,
+      "end": 795,
+      "status": "untranslated",
+      "label": "check_amount_witness: prove-side witness shape/range/encoding checks",
+      "declarations": [],
+      "theorems": [],
+      "note": "Not modelled; the model covers only the native conservation and delta-amount refusals."
+    },
+    {
+      "start": 796,
+      "end": 816,
+      "status": "untranslated",
+      "label": "ring_identity_holds: schoolbook degree-<2n polynomial comparison",
+      "declarations": [],
+      "theorems": [],
+      "note": "Polynomial arithmetic over the upstream field is not modelled."
+    },
+    {
+      "start": 817,
+      "end": 821,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 822,
+      "end": 846,
+      "status": "untranslated",
+      "label": "prove_one: batch-STARK proving and postcard serialization",
+      "declarations": [],
+      "theorems": [],
+      "note": "The prover is out of the model; only the verifier side of the backend is a callback."
+    },
+    {
+      "start": 847,
+      "end": 894,
+      "status": "translated",
+      "label": "verify_one: proof decoding and the pre-verification shape checks",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.ProofM",
+        "Zkp.Implementation.RegevProofs.Backend",
+        "Zkp.Implementation.RegevProofs.verifyOne",
+        "Zkp.Implementation.RegevProofs.logRingN",
+        "Zkp.Implementation.RegevProofs.expectedDegreeBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.verify_one_ok",
+        "Zkp.Implementation.RegevProofs.expected_degree_bits_pinned"
+      ],
+      "note": "The decode and verify_batch steps are opaque callbacks; only the ordering and the two shape checks are modelled."
+    },
+    {
+      "start": 895,
+      "end": 921,
+      "status": "untranslated",
+      "label": "Poseidon2 permutation PoC prove/verify",
+      "declarations": [],
+      "theorems": [],
+      "note": "De-risk PoC path; not part of the protocol statements and not modelled."
+    },
+    {
+      "start": 922,
+      "end": 926,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 927,
+      "end": 952,
+      "status": "untranslated",
+      "label": "prove_hash_sig and the test-only arbitrary-trace prover",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side; the hash-signature trace generator is modelled in the hash_sig map, not here."
+    },
+    {
+      "start": 953,
+      "end": 994,
+      "status": "translated",
+      "label": "verify_hash_sig: public-value count and trace-height checks",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.verifyHashSig",
+        "Zkp.Implementation.RegevProofs.hashSigNumPv",
+        "Zkp.Implementation.RegevProofs.hashSigDegreeBits",
+        "Zkp.Implementation.RegevProofs.airHashSig"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.verify_hash_sig_checks_pv_count_first",
+        "Zkp.Implementation.RegevProofs.verify_hash_sig_binds_public_values"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 995,
+      "end": 1001,
+      "status": "translated",
+      "label": "eval_at: Horner evaluation of a public polynomial",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.evalAt",
+        "Zkp.Implementation.RegevProofs.evalAtFold",
+        "Zkp.Implementation.RegevProofs.Chal"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.eval_at_matches_fold"
+      ],
+      "note": "Chal is Int in the model, not the quartic BabyBear extension."
+    },
+    {
+      "start": 1002,
+      "end": 1031,
+      "status": "translated",
+      "label": "expected_published_evals: the recomputed evaluation vector",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.expectedPublishedEvals"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1032,
+      "end": 1050,
+      "status": "translated",
+      "label": "check_published_evals: positional comparison against the statement",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.checkPublishedEvals"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1051,
+      "end": 1055,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1056,
+      "end": 1101,
+      "status": "untranslated",
+      "label": "prove_channel_tx / prove_dual_key_transfer preamble",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side: upstream conversions, witness checks and trace generation are not modelled."
+    },
+    {
+      "start": 1102,
+      "end": 1112,
+      "status": "translated",
+      "label": "E-1 native conservation refusal (before = after + amount, checked_add)",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.proveConservationCheck",
+        "Zkp.Implementation.RegevProofs.u64Limit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.prove_conservation_check_sound",
+        "Zkp.Implementation.RegevProofs.prove_conservation_check_rejects_underflow"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1113,
+      "end": 1126,
+      "status": "untranslated",
+      "label": "E-1 AIR/trace/public-value construction and proving",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side; not modelled."
+    },
+    {
+      "start": 1127,
+      "end": 1159,
+      "status": "translated",
+      "label": "verify_channel_tx: canonicality first, own domain word, published-eval binding",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.verifyChannelTx",
+        "Zkp.Implementation.RegevProofs.ensure",
+        "Zkp.Implementation.RegevProofs.pkValidate",
+        "Zkp.Implementation.RegevProofs.ctValidate",
+        "Zkp.Implementation.RegevProofs.RegevPkM",
+        "Zkp.Implementation.RegevProofs.RegevCtM",
+        "Zkp.Implementation.RegevProofs.PkShaped",
+        "Zkp.Implementation.RegevProofs.CtShaped",
+        "Zkp.Implementation.RegevProofs.canonicalPoly",
+        "Zkp.Implementation.RegevProofs.airChannelTx",
+        "Zkp.Implementation.RegevProofs.zeroPk",
+        "Zkp.Implementation.RegevProofs.zeroCt",
+        "Zkp.Implementation.RegevProofs.stubBackend",
+        "Zkp.Implementation.RegevProofs.exampleProof",
+        "Zkp.Implementation.RegevProofs.exampleExpectedEvals",
+        "Zkp.Implementation.RegevProofs.exampleChallenge"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.verify_channel_tx_rejects_noncanonical_key",
+        "Zkp.Implementation.RegevProofs.verify_channel_tx_rejects_noncanonical_ciphertext",
+        "Zkp.Implementation.RegevProofs.verify_channel_tx_binds_statement",
+        "Zkp.Implementation.RegevProofs.channel_tx_example_accepts",
+        "Zkp.Implementation.RegevProofs.example_expected_evals_length",
+        "Zkp.Implementation.RegevProofs.pk_validate_ok_shape",
+        "Zkp.Implementation.RegevProofs.pk_validate_ok_canonical",
+        "Zkp.Implementation.RegevProofs.ct_validate_ok_shape",
+        "Zkp.Implementation.RegevProofs.ct_validate_ok_canonical",
+        "Zkp.Implementation.RegevProofs.ensure_ok_iff",
+        "Zkp.Implementation.RegevProofs.ensure_error",
+        "Zkp.Implementation.RegevProofs.zero_pk_validates",
+        "Zkp.Implementation.RegevProofs.zero_ct_validates",
+        "Zkp.Implementation.RegevProofs.zero_polys_canonical",
+        "Zkp.Implementation.RegevProofs.all_replicate_below_q",
+        "Zkp.Implementation.RegevProofs.all_append_true"
+      ],
+      "note": "Acceptance of the opaque backend is a hypothesis, never a conclusion."
+    },
+    {
+      "start": 1160,
+      "end": 1164,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1165,
+      "end": 1195,
+      "status": "untranslated",
+      "label": "prove_channel_update preamble (conversions and witness checks)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side; not modelled."
+    },
+    {
+      "start": 1196,
+      "end": 1211,
+      "status": "translated",
+      "label": "E-2 native delta-amount and conservation refusals",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.proveDeltaAmountCheck",
+        "Zkp.Implementation.RegevProofs.proveConservationCheck"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.prove_delta_amount_check_sound",
+        "Zkp.Implementation.RegevProofs.prove_conservation_check_sound"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1212,
+      "end": 1236,
+      "status": "untranslated",
+      "label": "E-2 AIR/trace/public-value construction and proving",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side; not modelled."
+    },
+    {
+      "start": 1237,
+      "end": 1284,
+      "status": "translated",
+      "label": "verify_channel_update: statement rebuild and the public-amount binding (F2-C)",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.verifyChannelUpdate",
+        "Zkp.Implementation.RegevProofs.encodeAmount",
+        "Zkp.Implementation.RegevProofs.bitAt",
+        "Zkp.Implementation.RegevProofs.airChannelUpdate"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.verify_channel_update_pins_delta_messages",
+        "Zkp.Implementation.RegevProofs.encode_amount_injective",
+        "Zkp.Implementation.RegevProofs.encode_amount_value",
+        "Zkp.Implementation.RegevProofs.encode_amount_length",
+        "Zkp.Implementation.RegevProofs.encode_amount_high_zero",
+        "Zkp.Implementation.RegevProofs.list_weighted_bits",
+        "Zkp.Implementation.RegevProofs.list_weighted_append",
+        "Zkp.Implementation.RegevProofs.list_weighted_replicate_zero",
+        "Zkp.Implementation.RegevProofs.mod_two_pow_succ",
+        "Zkp.Implementation.RegevProofs.mod_two_pow_split",
+        "Zkp.Implementation.RegevProofs.range_length_eq",
+        "Zkp.Implementation.RegevProofs.range_succ_append"
+      ],
+      "note": "encodeAmount models the documented D1 encoding; the upstream encode_value_message body is a boundary."
+    },
+    {
+      "start": 1285,
+      "end": 1344,
+      "status": "non-executable",
+      "label": "Decryption-core design comment (rounding, no-wrap and carry-bound analyses)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation; the arithmetic it argues is proved separately as digit_decomposition_unique and the normalization chain theorems."
+    },
+    {
+      "start": 1345,
+      "end": 1369,
+      "status": "translated",
+      "label": "Delta / digit / noise / carry bit constants and their compile-time assertions",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.deltaU32",
+        "Zkp.Implementation.RegevProofs.halfDeltaU32",
+        "Zkp.Implementation.RegevProofs.digitBits",
+        "Zkp.Implementation.RegevProofs.noiseLoBits",
+        "Zkp.Implementation.RegevProofs.noiseHiHalfBits",
+        "Zkp.Implementation.RegevProofs.carryBits",
+        "Zkp.Implementation.RegevProofs.regevQ",
+        "Zkp.Implementation.RegevProofs.regevPlainBits",
+        "Zkp.Implementation.RegevProofs.regevN",
+        "Zkp.Implementation.RegevProofs.regevEta",
+        "Zkp.Implementation.RegevProofs.maxHomoAddsBeforeRefresh",
+        "Zkp.Implementation.RegevProofs.amountBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.parameters_pinned",
+        "Zkp.Implementation.RegevProofs.delta_constants_pinned",
+        "Zkp.Implementation.RegevProofs.digit_decomposition_unique",
+        "Zkp.Implementation.RegevProofs.digit_decomposition_wrap_witness"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1370,
+      "end": 1429,
+      "status": "translated",
+      "label": "Decryption-core and refresh column/aux layout and published-eval counts",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.decA",
+        "Zkp.Implementation.RegevProofs.decB",
+        "Zkp.Implementation.RegevProofs.decC1",
+        "Zkp.Implementation.RegevProofs.decC2",
+        "Zkp.Implementation.RegevProofs.decS",
+        "Zkp.Implementation.RegevProofs.decEpkU",
+        "Zkp.Implementation.RegevProofs.decEpkV",
+        "Zkp.Implementation.RegevProofs.decKPk",
+        "Zkp.Implementation.RegevProofs.decV",
+        "Zkp.Implementation.RegevProofs.decKV",
+        "Zkp.Implementation.RegevProofs.decDBits",
+        "Zkp.Implementation.RegevProofs.decNoiseLo",
+        "Zkp.Implementation.RegevProofs.decNoiseU",
+        "Zkp.Implementation.RegevProofs.decNoiseV",
+        "Zkp.Implementation.RegevProofs.decBit",
+        "Zkp.Implementation.RegevProofs.decCarry",
+        "Zkp.Implementation.RegevProofs.decCoreCols",
+        "Zkp.Implementation.RegevProofs.rfC1New",
+        "Zkp.Implementation.RegevProofs.rfC2New",
+        "Zkp.Implementation.RegevProofs.rfR",
+        "Zkp.Implementation.RegevProofs.rfE1U",
+        "Zkp.Implementation.RegevProofs.rfE1V",
+        "Zkp.Implementation.RegevProofs.rfE2U",
+        "Zkp.Implementation.RegevProofs.rfE2V",
+        "Zkp.Implementation.RegevProofs.rfK1",
+        "Zkp.Implementation.RegevProofs.rfK2",
+        "Zkp.Implementation.RegevProofs.rfCols",
+        "Zkp.Implementation.RegevProofs.dauxA",
+        "Zkp.Implementation.RegevProofs.dauxB",
+        "Zkp.Implementation.RegevProofs.dauxC1",
+        "Zkp.Implementation.RegevProofs.dauxC2",
+        "Zkp.Implementation.RegevProofs.dauxS",
+        "Zkp.Implementation.RegevProofs.dauxEpk",
+        "Zkp.Implementation.RegevProofs.dauxKPk",
+        "Zkp.Implementation.RegevProofs.dauxV",
+        "Zkp.Implementation.RegevProofs.dauxKV",
+        "Zkp.Implementation.RegevProofs.dauxBit",
+        "Zkp.Implementation.RegevProofs.decCoreAux",
+        "Zkp.Implementation.RegevProofs.rfauxC1New",
+        "Zkp.Implementation.RegevProofs.rfauxC2New",
+        "Zkp.Implementation.RegevProofs.rfauxR",
+        "Zkp.Implementation.RegevProofs.rfauxE1",
+        "Zkp.Implementation.RegevProofs.rfauxE2",
+        "Zkp.Implementation.RegevProofs.rfauxK1",
+        "Zkp.Implementation.RegevProofs.rfauxK2",
+        "Zkp.Implementation.RegevProofs.refreshAuxCols",
+        "Zkp.Implementation.RegevProofs.decNumPublished",
+        "Zkp.Implementation.RegevProofs.rfNumPublished",
+        "Zkp.Implementation.RegevProofs.decCoreColumns",
+        "Zkp.Implementation.RegevProofs.refreshColumns"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.decryption_core_layout_pinned",
+        "Zkp.Implementation.RegevProofs.refresh_layout_pinned",
+        "Zkp.Implementation.RegevProofs.dec_core_columns_partition",
+        "Zkp.Implementation.RegevProofs.refresh_columns_partition"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1430,
+      "end": 1455,
+      "status": "dependency-boundary",
+      "label": "Symbolic column expressions and spec-to-lookup conversion",
+      "declarations": [],
+      "theorems": [],
+      "note": "p3 SymbolicVariable/Lookup construction is opaque; only the resulting aux ordering is modelled."
+    },
+    {
+      "start": 1456,
+      "end": 1501,
+      "status": "translated",
+      "label": "Decryption-core and refresh lookup specs (which evaluations are published)",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.decryptionCoreLookupKinds",
+        "Zkp.Implementation.RegevProofs.refreshLookupKinds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.dual_key_lookup_layout",
+        "Zkp.Implementation.RegevProofs.published_eval_counts_match_lookups",
+        "Zkp.Implementation.RegevProofs.secret_message_columns_not_published"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1502,
+      "end": 1512,
+      "status": "dependency-boundary",
+      "label": "zn_plus_one: extension-field powering of the challenge",
+      "declarations": [],
+      "theorems": [],
+      "note": "Extension-field arithmetic is not modelled."
+    },
+    {
+      "start": 1513,
+      "end": 1593,
+      "status": "translated",
+      "label": "eval_decryption_core: smallness, booleanity, digit extraction, normalization adder",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.NormalizationChain",
+        "Zkp.Implementation.RegevProofs.BoolGate",
+        "Zkp.Implementation.RegevProofs.TernaryGate",
+        "Zkp.Implementation.RegevProofs.CbdHalfGate",
+        "Zkp.Implementation.RegevProofs.FZero",
+        "Zkp.Implementation.RegevProofs.colValue"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.normalization_binds_digits_to_bits",
+        "Zkp.Implementation.RegevProofs.normalization_carry_bound",
+        "Zkp.Implementation.RegevProofs.normalization_carry_can_exceed_half",
+        "Zkp.Implementation.RegevProofs.digit_decomposition_unique",
+        "Zkp.Implementation.RegevProofs.carry_chain_value",
+        "Zkp.Implementation.RegevProofs.bool_gate_forces_bit",
+        "Zkp.Implementation.RegevProofs.ternary_gate_forces",
+        "Zkp.Implementation.RegevProofs.cbd_half_gate_forces"
+      ],
+      "note": "The key-binding and decryption identities at z are NOT modelled (extension-field boundary); the row-local digit and adder constraints are."
+    },
+    {
+      "start": 1594,
+      "end": 1629,
+      "status": "untranslated",
+      "label": "eval_refresh_encryption: fresh-encryption ring identities at z",
+      "declarations": [],
+      "theorems": [],
+      "note": "The refresh ring identities are not modelled; only the refresh aux layout and published-evaluation set are."
+    },
+    {
+      "start": 1630,
+      "end": 1634,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1635,
+      "end": 1688,
+      "status": "translated",
+      "label": "DecryptionAir: width, public-value count, next-row columns, degree, lookups",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.decCoreCols",
+        "Zkp.Implementation.RegevProofs.decNumPublicValues",
+        "Zkp.Implementation.RegevProofs.decCarryColumns",
+        "Zkp.Implementation.RegevProofs.maxConstraintDegree",
+        "Zkp.Implementation.RegevProofs.decryptionCoreLookupKinds",
+        "Zkp.Implementation.RegevProofs.airWithdrawClaim"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.dec_public_value_counts_pinned",
+        "Zkp.Implementation.RegevProofs.next_row_columns_pinned",
+        "Zkp.Implementation.RegevProofs.decryption_core_layout_pinned"
+      ],
+      "note": "Only the reported shape values are modelled; the plonky3 trait lowering is a boundary."
+    },
+    {
+      "start": 1689,
+      "end": 1692,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1693,
+      "end": 1747,
+      "status": "translated",
+      "label": "RefreshAir: width, public-value count, next-row columns, degree, lookups",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.rfCols",
+        "Zkp.Implementation.RegevProofs.refreshNumPublicValues",
+        "Zkp.Implementation.RegevProofs.decCarryColumns",
+        "Zkp.Implementation.RegevProofs.maxConstraintDegree",
+        "Zkp.Implementation.RegevProofs.refreshLookupKinds",
+        "Zkp.Implementation.RegevProofs.airBalanceRefresh"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.dec_public_value_counts_pinned",
+        "Zkp.Implementation.RegevProofs.refresh_layout_pinned",
+        "Zkp.Implementation.RegevProofs.next_row_columns_pinned"
+      ],
+      "note": "Same modelling scope as the E-3 AIR impl block."
+    },
+    {
+      "start": 1748,
+      "end": 1752,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1753,
+      "end": 1767,
+      "status": "untranslated",
+      "label": "negacyclic_mul_with_quotient",
+      "declarations": [],
+      "theorems": [],
+      "note": "Polynomial arithmetic over the upstream field is not modelled."
+    },
+    {
+      "start": 1768,
+      "end": 1899,
+      "status": "untranslated",
+      "label": "DecCoreWitness and build_decryption_witness (prove-side decryption)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover-side witness construction is not modelled; the uniqueness of the digit/noise decomposition it relies on is proved separately."
+    },
+    {
+      "start": 1900,
+      "end": 1987,
+      "status": "untranslated",
+      "label": "Decryption/refresh trace row filling",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trace matrix construction is not modelled."
+    },
+    {
+      "start": 1988,
+      "end": 1992,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1993,
+      "end": 2009,
+      "status": "translated",
+      "label": "decryption_public_values: the E-3 public-value encoder",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.decryptionPublicValues",
+        "Zkp.Implementation.RegevProofs.amountLimbs",
+        "Zkp.Implementation.RegevProofs.decNumPublicValues"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.amount_limbs_injective",
+        "Zkp.Implementation.RegevProofs.dec_public_value_counts_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2010,
+      "end": 2061,
+      "status": "untranslated",
+      "label": "prove_withdraw_claim (and its domain-parameterized form)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side; not modelled."
+    },
+    {
+      "start": 2062,
+      "end": 2104,
+      "status": "translated",
+      "label": "verify_withdraw_claim: statement rebuild and amount-bit binding",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.verifyWithdrawClaim",
+        "Zkp.Implementation.RegevProofs.withdrawClaimZkpDomain",
+        "Zkp.Implementation.RegevProofs.encodeAmount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.verify_withdraw_claim_binds_statement",
+        "Zkp.Implementation.RegevProofs.verify_withdraw_claim_rejects_noncanonical_key",
+        "Zkp.Implementation.RegevProofs.encode_amount_injective"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2105,
+      "end": 2109,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 2110,
+      "end": 2126,
+      "status": "translated",
+      "label": "refresh_public_values: the refresh public-value encoder",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.refreshPublicValues",
+        "Zkp.Implementation.RegevProofs.refreshNumPublicValues"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.refresh_statement_carries_no_amount"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2127,
+      "end": 2179,
+      "status": "untranslated",
+      "label": "prove_balance_refresh / prove_balance_refresh_witnessed",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover side (decrypt, fresh re-encrypt, trace) is not modelled."
+    },
+    {
+      "start": 2180,
+      "end": 2208,
+      "status": "translated",
+      "label": "verify_balance_refresh: statement rebuild and published-eval comparison",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.verifyBalanceRefresh",
+        "Zkp.Implementation.RegevProofs.balanceRefreshZkpDomain",
+        "Zkp.Implementation.RegevProofs.rfNumPublished"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.refresh_statement_carries_no_amount"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2209,
+      "end": 2213,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 2214,
+      "end": 2257,
+      "status": "translated",
+      "label": "RegevStatement variants and the RealRegevProofVerifier level field",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.RegevStatement",
+        "Zkp.Implementation.RegevProofs.RegevStatement.variant",
+        "Zkp.Implementation.RegevProofs.RegevSecurityLevel"
+      ],
+      "theorems": [],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2258,
+      "end": 2336,
+      "status": "translated",
+      "label": "RealRegevProofVerifier::verify purpose/statement dispatch",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.realRegevProofVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.purpose_mismatch_rejected"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 2337,
+      "end": 2341,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 2342,
+      "end": 3206,
+      "status": "test-only",
+      "label": "#[cfg(test)] module: fixtures, round trips and adversarial negative tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; the model states its own positive example separately."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "StarkSoundness",
+      "obligation": "stark::prove_batch / verify_batch, the FRI PCS, the hiding (zero-knowledge) config and the Fiat-Shamir challenger are an opaque callback; that an accepted proof implies the claimed statement (or that a diverged transcript rejects) is assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "EvaluationArgumentSoundness",
+      "obligation": "That agreement of the published evaluations at the post-commitment challenge z pins the committed trace columns to the claimed public polynomials (Schwartz-Zippel over the quartic BabyBear extension) is assumed; the model compares evaluations structurally with Chal = Int.",
+      "discharged": false
+    },
+    {
+      "name": "FieldProducts",
+      "obligation": "Primality of q, i.e. that a product vanishing mod q has a vanishing factor; the premise that turns the cubic/quadratic smallness gates into membership facts. Taken as an explicit hypothesis.",
+      "discharged": false
+    },
+    {
+      "name": "UpstreamRegev",
+      "obligation": "regev_plonky3 keygen/encrypt/encode_value_message, RegevParams::delta(), the negacyclic NTT, config.is_zk() and the postcard codec are not translated; encodeAmount models the documented D1 encoding only.",
+      "discharged": false
+    },
+    {
+      "name": "LatticeHardness",
+      "obligation": "Ring-LWE hardness at n = 2048 and the noise/digit budget analysis of params.rs; no secrecy or indistinguishability claim is made here.",
+      "discharged": false
+    },
+    {
+      "name": "Plonky3Lowering",
+      "obligation": "That the Rust AIR impls (BaseAir/Air/LookupAir, symbolic expression construction, trace LDE) really enforce the constraint families the model states is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "NativeTargetRefinement",
+      "obligation": "Rust integer/array/allocation behaviour, error message strings (errors are modelled payload-free) and prover-side witness construction are not translated.",
+      "discharged": false
+    }
+  ]
+}

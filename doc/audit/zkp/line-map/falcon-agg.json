@@ -1,0 +1,449 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/agg.rs",
+  "source_sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
+  "source_lines": 1201,
+  "module": "Zkp.Implementation.FalconAggregate",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconAggregate.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 113,
+      "status": "non-executable",
+      "label": "module documentation (layout, padding-soundness and message-binding argument)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 114,
+      "end": 148,
+      "status": "dependency-boundary",
+      "label": "plonky2 / gadget / crate imports",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.SigEnv",
+        "Zkp.Implementation.FalconAggregate.SlotWitness"
+      ],
+      "theorems": [],
+      "note": "FalconSigVerifyTarget, falcon_pk_digest, DummyProof and the recursive-verification helpers enter as opaque callbacks (SigEnv) and premises."
+    },
+    {
+      "start": 149,
+      "end": 152,
+      "status": "non-executable",
+      "label": "section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 153,
+      "end": 172,
+      "status": "translated",
+      "label": "public-input layout constants and falcon_agg_public_inputs_len",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggLevels",
+        "Zkp.Implementation.FalconAggregate.maxSigCluster",
+        "Zkp.Implementation.FalconAggregate.bytes32Len",
+        "Zkp.Implementation.FalconAggregate.falconAggMsgOffset",
+        "Zkp.Implementation.FalconAggregate.falconAggCountOffset",
+        "Zkp.Implementation.FalconAggregate.falconAggPkListOffset",
+        "Zkp.Implementation.FalconAggregate.falconAggPublicInputsLen",
+        "Zkp.Implementation.FalconAggregate.falconAggPublicInputsLenAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_levels_pinned",
+        "Zkp.Implementation.FalconAggregate.agg_levels_is_log2_max_sig_cluster",
+        "Zkp.Implementation.FalconAggregate.max_sig_cluster_pinned",
+        "Zkp.Implementation.FalconAggregate.bytes32_len_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_msg_offset_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_count_offset_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_pk_list_offset_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_public_inputs_len_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_public_inputs_len_at_table",
+        "Zkp.Implementation.FalconAggregate.top_level_width_is_the_consumer_contract"
+      ],
+      "note": "Constants pinned as literals with their derivations re-checked; the stale doc figures (AGG_LEVELS = 4, 137 elements) are noted in the model docstring."
+    },
+    {
+      "start": 173,
+      "end": 175,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 176,
+      "end": 195,
+      "status": "translated",
+      "label": "falcon_agg_expected_public_inputs: the canonical left-packed encoding",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggExpectedPublicInputs",
+        "Zkp.Implementation.FalconAggregate.zeroSlot",
+        "Zkp.Implementation.FalconAggregate.SlotsWellFormed",
+        "Zkp.Implementation.FalconAggregate.decodeMessage",
+        "Zkp.Implementation.FalconAggregate.decodeCount",
+        "Zkp.Implementation.FalconAggregate.decodeSlot",
+        "Zkp.Implementation.FalconAggregate.slotOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_expected_public_inputs_length",
+        "Zkp.Implementation.FalconAggregate.agg_expected_normal_form",
+        "Zkp.Implementation.FalconAggregate.agg_expected_decode_message",
+        "Zkp.Implementation.FalconAggregate.agg_expected_decode_count",
+        "Zkp.Implementation.FalconAggregate.agg_expected_decode_slot",
+        "Zkp.Implementation.FalconAggregate.agg_expected_slot_active",
+        "Zkp.Implementation.FalconAggregate.agg_expected_slot_padding",
+        "Zkp.Implementation.FalconAggregate.agg_expected_public_inputs_injective"
+      ],
+      "note": "Vec::resize is modelled with take; the source assert signer_pks.len() <= 1<<level is what makes truncation unreachable."
+    },
+    {
+      "start": 196,
+      "end": 203,
+      "status": "non-executable",
+      "label": "section banner and witness documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 204,
+      "end": 208,
+      "status": "translated",
+      "label": "FalconAggWitness: shared message plus per-slot witnesses in slot order",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.SlotWitness",
+        "Zkp.Implementation.FalconAggregate.activeWitnesses"
+      ],
+      "theorems": [],
+      "note": "The record shape only; the gadget witness contents (salt/h/s2) are opaque to this model."
+    },
+    {
+      "start": 209,
+      "end": 227,
+      "status": "dependency-boundary",
+      "label": "FalconAggWitness::for_signatures",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.SlotWitness"
+      ],
+      "theorems": [],
+      "note": "FalconSigGadgetWitness::for_signature lives in gadget.rs; the model carries only the resulting per-slot message binding as a premise."
+    },
+    {
+      "start": 228,
+      "end": 239,
+      "status": "non-executable",
+      "label": "section banner and leaf documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 240,
+      "end": 267,
+      "status": "non-executable",
+      "label": "FalconLeafCircuit struct, Default and impl headers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 268,
+      "end": 303,
+      "status": "translated",
+      "label": "FalconLeafCircuit::new: the level-0 statement [message(8), 1, pk_g(8)]",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.leafStatement",
+        "Zkp.Implementation.FalconAggregate.slotAccepts",
+        "Zkp.Implementation.FalconAggregate.SigEnv",
+        "Zkp.Implementation.FalconAggregate.statementPublicInputs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.leaf_count_is_the_constant_one",
+        "Zkp.Implementation.FalconAggregate.leaf_message_is_the_checked_digest",
+        "Zkp.Implementation.FalconAggregate.leaf_key_is_the_digest_of_its_own_h",
+        "Zkp.Implementation.FalconAggregate.leaf_statement_width",
+        "Zkp.Implementation.FalconAggregate.falcon_predicate_carries_no_cryptographic_content"
+      ],
+      "note": "The unconditional gadget is the opaque accept predicate (boundary ntruShortVectorAssumption); the model covers the exposed statement's shape and wiring only."
+    },
+    {
+      "start": 304,
+      "end": 324,
+      "status": "dependency-boundary",
+      "label": "verifier_data and prove (witness writing, plonky2 proving)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Proving and witness generation are outside the model."
+    },
+    {
+      "start": 325,
+      "end": 331,
+      "status": "non-executable",
+      "label": "section banner and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 332,
+      "end": 339,
+      "status": "translated",
+      "label": "child_pis: the positional parse of a child statement",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.decodeMessage",
+        "Zkp.Implementation.FalconAggregate.decodeCount",
+        "Zkp.Implementation.FalconAggregate.decodeSlot",
+        "Zkp.Implementation.FalconAggregate.slotOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.decode_count_is_the_positional_read",
+        "Zkp.Implementation.FalconAggregate.join_slot_extract"
+      ],
+      "note": "Positional slicing modelled as take/drop over the flat limb vector."
+    },
+    {
+      "start": 340,
+      "end": 369,
+      "status": "non-executable",
+      "label": "FalconAggLevelCircuit struct, field docs and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 370,
+      "end": 391,
+      "status": "translated",
+      "label": "level range, child arity gate and the const-asserted leaf layout",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.falconAggPublicInputsLenAt",
+        "Zkp.Implementation.FalconAggregate.falconAggCountOffset"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.falcon_agg_public_inputs_len_at_table",
+        "Zkp.Implementation.FalconAggregate.leaf_layout_induction_base_pins"
+      ],
+      "note": "The induction base (leaf PI 8 is the verifier-enforced constant 1) is modelled as leafStatement's count field."
+    },
+    {
+      "start": 392,
+      "end": 405,
+      "status": "dependency-boundary",
+      "label": "builder creation, constant-VK child verification, conditional verification, bool target",
+      "declarations": [],
+      "theorems": [],
+      "note": "Recursive verification at a build-time constant verifier key and BoolTarget safety are premises (constantVerifierKeyBinding, proofVerificationOpaque)."
+    },
+    {
+      "start": 406,
+      "end": 448,
+      "status": "translated",
+      "label": "the level's constraints: gated message equality, gated count, left-packing, gated pk slots",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.levelCompose",
+        "Zkp.Implementation.FalconAggregate.messageAgrees",
+        "Zkp.Implementation.FalconAggregate.gateLimbs",
+        "Zkp.Implementation.FalconAggregate.gateSlots",
+        "Zkp.Implementation.FalconAggregate.AggStatement",
+        "Zkp.Implementation.FalconAggregate.AggError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.level_count_is_the_gated_sum",
+        "Zkp.Implementation.FalconAggregate.level_message_is_the_left_message",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_message_agreement",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_full_left_child",
+        "Zkp.Implementation.FalconAggregate.message_agrees_iff_eq",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_present",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_absent_is_zero",
+        "Zkp.Implementation.FalconAggregate.gate_slots_present",
+        "Zkp.Implementation.FalconAggregate.gate_slots_absent"
+      ],
+      "note": "The constraint system is read as a partial function; its error constructors mark unsatisfiable witnesses, not runtime errors."
+    },
+    {
+      "start": 449,
+      "end": 477,
+      "status": "dependency-boundary",
+      "label": "build, release-mode arity assert and the canonical dummy proof",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.dummyStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.absent_right_child_statement_is_ignored"
+      ],
+      "note": "DummyProof::new reconstructs the child circuit from its CommonCircuitData; only the width of its untrusted public inputs is used."
+    },
+    {
+      "start": 478,
+      "end": 485,
+      "status": "dependency-boundary",
+      "label": "verifier_data accessor and prove documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Accessor over plonky2 circuit data."
+    },
+    {
+      "start": 486,
+      "end": 505,
+      "status": "translated",
+      "label": "FalconAggLevelCircuit::prove: left child always, right child optional",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.evalTree",
+        "Zkp.Implementation.FalconAggregate.AggTree",
+        "Zkp.Implementation.FalconAggregate.activeWitnesses"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_tree_ok_characterization"
+      ],
+      "note": "The node shape (left always present, right optional) is modelled; the proving itself is not."
+    },
+    {
+      "start": 506,
+      "end": 535,
+      "status": "non-executable",
+      "label": "facade banner, struct and Default",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 536,
+      "end": 570,
+      "status": "dependency-boundary",
+      "label": "FalconAggCircuit::new and the top/data/verifier_data accessors",
+      "declarations": [],
+      "theorems": [],
+      "note": "Circuit construction and verifier-data plumbing are outside the model."
+    },
+    {
+      "start": 571,
+      "end": 584,
+      "status": "untranslated",
+      "label": "top_level_for: the minimal level for n signers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Prover-side level selection is not modelled."
+    },
+    {
+      "start": 585,
+      "end": 625,
+      "status": "untranslated",
+      "label": "aggregate: same-message precheck and bottom-up chunked folding",
+      "declarations": [],
+      "theorems": [],
+      "note": "The prover-side scheduling is not modelled; the in-circuit message-equality constraint that actually binds is (see the 406-448 span)."
+    },
+    {
+      "start": 626,
+      "end": 655,
+      "status": "translated",
+      "label": "aggregate_to_level: lifting a node with the right subtree absent",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.evalTree",
+        "Zkp.Implementation.FalconAggregate.AggTree",
+        "Zkp.Implementation.FalconAggregate.dummyStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.absent_right_child_statement_is_ignored",
+        "Zkp.Implementation.FalconAggregate.agg_tree_ok_characterization"
+      ],
+      "note": "The lift is the nodeLeftOnly case: message and count copied, new right half provably zero."
+    },
+    {
+      "start": 656,
+      "end": 681,
+      "status": "translated",
+      "label": "FalconAggCircuit::prove: the 1..=MAX_SIG_CLUSTER range and the shared-message precheck",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.evalTree",
+        "Zkp.Implementation.FalconAggregate.AggOk"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_tree_ok_characterization",
+        "Zkp.Implementation.FalconAggregate.agg_ok_public_input_arity",
+        "Zkp.Implementation.FalconAggregate.agg_ok_matches_the_native_reference"
+      ],
+      "note": "The exposed statement of an accepted tree is characterised; the leaf-by-leaf proving order is not."
+    },
+    {
+      "start": 682,
+      "end": 685,
+      "status": "non-executable",
+      "label": "tests banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 686,
+      "end": 1201,
+      "status": "test-only",
+      "label": "adversarial and measurement test suite",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust #[cfg(test)] module: read in full, not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ntruShortVectorAssumption",
+      "obligation": "The Falcon accept predicate is an opaque callback; that an accepting (h, salt, s2) implies the holder of the NTRU trapdoor for h authorised the message is assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashToPointOpaque",
+      "obligation": "The hash-to-point map c = H2P(salt, message) and its in-circuit sponge mirror are opaque; no property of the resulting challenge polynomial is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon is an opaque callback (UtilGadgets.HashEnv). No injectivity or collision resistance is assumed; every fold theorem is about the preimage encoding only.",
+      "discharged": false
+    },
+    {
+      "name": "pkDigestOpaque",
+      "obligation": "pk_g = Poseidon(IMFK || encode(h)) is an opaque callback; distinct keys are not proved to give distinct digests, nor is a zero digest proved unreachable.",
+      "discharged": false
+    },
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Recursive plonky2 verification is recorded as structure, never as soundness: an accepted child/aggregate proof is a premise, not a theorem.",
+      "discharged": false
+    },
+    {
+      "name": "constantVerifierKeyBinding",
+      "obligation": "That a build-time constant verifier key admits only proofs of the intended circuit is assumed (plonky2 constant_verifier_data), not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "dummyProofUntrustedPublicInputs",
+      "obligation": "A canonical dummy proof's public inputs are untrusted; the model only proves the exposed statement ignores them given their width.",
+      "discharged": false
+    },
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "No claim that plonky2 gates (arithmetic, range_check, split_le, select, BaseSumGate) lower to the modelled arithmetic.",
+      "discharged": false
+    },
+    {
+      "name": "fieldRepresentativeAbstraction",
+      "obligation": "Field elements are modelled by non-negative integer representatives; wrap-around is modelled explicitly only where stated (fieldSub).",
+      "discharged": false
+    },
+    {
+      "name": "nativeProverScheduling",
+      "obligation": "The prover-side tree scheduling (top_level_for, aggregate's chunking, leaf proving order) is not modelled; only the statement it yields is.",
+      "discharged": false
+    },
+    {
+      "name": "vendorFalconParameters",
+      "obligation": "beta^2 = FALCON_SIG_L2_BOUND and the Falcon-512 parameters come from src/falcon_sig/vendor, outside the mapped files; they are pinned as literals only.",
+      "discharged": false
+    }
+  ]
+}

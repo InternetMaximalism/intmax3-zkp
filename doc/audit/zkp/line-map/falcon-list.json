@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/list.rs",
+  "source_sha256": "7560fd10bc072ed4751b6d2fdb9ea3c09c5a7ba09e680d2559547b8ce7975a45",
+  "source_lines": 528,
+  "module": "Zkp.Implementation.FalconAggregate",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconAggregate.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 70,
+      "status": "non-executable",
+      "label": "module documentation (chain format, phase-3 change, message binding, cross-context isolation)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 71,
+      "end": 93,
+      "status": "dependency-boundary",
+      "label": "plonky2 / gadget / poseidon_sig imports",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.SigEnv",
+        "Zkp.Implementation.FalconAggregate.SlotWitness"
+      ],
+      "theorems": [],
+      "note": "leaf_target / chain_step_target come from poseidon_sig::list (modelled in UtilGadgets); the Falcon gadget is opaque."
+    },
+    {
+      "start": 94,
+      "end": 129,
+      "status": "non-executable",
+      "label": "section banner, ListStepCircuit struct, Default and impl headers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 130,
+      "end": 177,
+      "status": "translated",
+      "label": "ListStepCircuit::new: verify one signature and fold (m, pk) into the IMLL chain",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.falconListLeaf",
+        "Zkp.Implementation.FalconAggregate.listStepPublicInputsLen",
+        "Zkp.Implementation.FalconAggregate.SlotWitness",
+        "Zkp.Implementation.FalconAggregate.SigEnv"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.list_step_public_inputs_len_pinned",
+        "Zkp.Implementation.FalconAggregate.the_two_list_leaf_preimages_are_different_schemas"
+      ],
+      "note": "The folded pair is the gadget's own message_digest wire and its derived pk_g; the accept predicate itself is opaque."
+    },
+    {
+      "start": 178,
+      "end": 201,
+      "status": "dependency-boundary",
+      "label": "verifier_data and prove (witness writing, proving)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Proving and witness generation are outside the model."
+    },
+    {
+      "start": 202,
+      "end": 239,
+      "status": "non-executable",
+      "label": "banner, ListCircuit struct, docs and Default",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 240,
+      "end": 249,
+      "status": "dependency-boundary",
+      "label": "ListCircuit::new and verifier_data (the cyclic wrapper)",
+      "declarations": [],
+      "theorems": [],
+      "note": "CyclicChainCircuit's C_0 = 0 and prev-chain enforcement are premises (cyclicWrapperOpaque)."
+    },
+    {
+      "start": 250,
+      "end": 264,
+      "status": "translated",
+      "label": "prove_append: one step folded into the running chain",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.falconListRun",
+        "Zkp.Implementation.FalconAggregate.falconListLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.falcon_list_run_matches_list_commitment",
+        "Zkp.Implementation.FalconAggregate.falcon_list_run_is_the_util_list_commitment"
+      ],
+      "note": "The run is proved equal to UtilGadgets.listCommitment over the (m, pk) pairs \u2014 the format-stability claim."
+    },
+    {
+      "start": 265,
+      "end": 265,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 266,
+      "end": 528,
+      "status": "test-only",
+      "label": "list, isolation and format test suite",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust #[cfg(test)] module: read in full, not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ntruShortVectorAssumption",
+      "obligation": "The Falcon accept predicate is an opaque callback; that an accepting (h, salt, s2) implies the holder of the NTRU trapdoor for h authorised the message is assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashToPointOpaque",
+      "obligation": "The hash-to-point map c = H2P(salt, message) and its in-circuit sponge mirror are opaque; no property of the resulting challenge polynomial is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon is an opaque callback (UtilGadgets.HashEnv). No injectivity or collision resistance is assumed; every fold theorem is about the preimage encoding only.",
+      "discharged": false
+    },
+    {
+      "name": "pkDigestOpaque",
+      "obligation": "pk_g = Poseidon(IMFK || encode(h)) is an opaque callback; distinct keys are not proved to give distinct digests, nor is a zero digest proved unreachable.",
+      "discharged": false
+    },
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Recursive plonky2 verification is recorded as structure, never as soundness: an accepted child/aggregate proof is a premise, not a theorem.",
+      "discharged": false
+    },
+    {
+      "name": "constantVerifierKeyBinding",
+      "obligation": "That a build-time constant verifier key admits only proofs of the intended circuit is assumed (plonky2 constant_verifier_data), not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "cyclicWrapperOpaque",
+      "obligation": "CyclicChainCircuit's enforcement of prev_chain_i = C_{i-1} and C_0 = 0, and its CommonCircuitData template assertion, are premises, not results.",
+      "discharged": false
+    },
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "No claim that plonky2 gates (arithmetic, range_check, split_le, select, BaseSumGate) lower to the modelled arithmetic.",
+      "discharged": false
+    }
+  ]
+}

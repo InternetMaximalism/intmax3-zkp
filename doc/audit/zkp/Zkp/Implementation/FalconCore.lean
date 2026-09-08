@@ -949,6 +949,25 @@ theorem crafted_boundary_hits_beta_squared :
 theorem crafted_boundary_plus_one_exceeds :
     sumSquares [5833, 104, 4, 2, 1, 1] = falconSigL2Bound + 1 := by decide
 
+theorem nat_abs_of_nonneg_eq (x : Int) (n : Nat) (h : x = (n : Int)) : x.natAbs = n := by omega
+
+theorem nat_abs_of_neg_eq (x : Int) (n : Nat) (h : x = -(n : Int)) : x.natAbs = n := by omega
+
+/-- The centered magnitude as a plain natural number. -/
+def centeredMagnitude (v : Nat) : Nat := if falconQ / 2 < v then falconQ - v else v
+
+theorem centered_value_nat_abs (v : Nat) (h : v < falconQ) :
+    (centeredValue v).natAbs = centeredMagnitude v := by
+  by_cases hc : falconQ / 2 < v
+  · simp only [centeredValue, centeredMagnitude, if_pos hc]
+    exact nat_abs_of_neg_eq ((v : Int) - (falconQ : Int)) (falconQ - v) (by omega)
+  · simp only [centeredValue, centeredMagnitude, if_neg hc]
+    exact nat_abs_of_nonneg_eq (v : Int) v (by omega)
+
+theorem centered_square_eq (v : Nat) (h : v < falconQ) :
+    centeredSquare v = centeredMagnitude v ^ 2 := by
+  simp only [centeredSquare, centered_value_nat_abs v h]
+
 /-- Every canonical residue centers to magnitude at most `q / 2 = 6144`. -/
 theorem centered_magnitude_bound (v : Nat) (h : v < falconQ) :
     (centeredValue v).natAbs ≤ maxCenteredMagnitude := by
@@ -1336,5 +1355,445 @@ theorem decode_signature_enforces_transport_band (bytes : List Nat) (s : Signatu
     simp only [Except.ok.injEq] at h
     subst h
     exact decode_s2_bytes_facts (rest.drop sigNonceLen) cs hd
+
+/-! ## 11. The in-circuit gadget
+
+`gadget.rs`. Modelled as a GATE SET (a `Prop` over raw witness values) so that arbitrary
+satisfying witnesses — not just the honest ones the Rust witness generator produces — are
+covered. The plonky2 lowering of each gate, and the NTT that computes the product, are
+boundaries. -/
+
+/-- Field subtraction as the circuit computes it (a wrapped value if `b > a`). -/
+def fieldSub (a b : Nat) : Nat := (a + fieldModulus - b % fieldModulus) % fieldModulus
+
+/-- `assert_canonical_coeff`: `v < 2^14` and `(q-1) - v < 2^14`, both as range checks over
+the field. -/
+def canonicalCoeffGates (v : Nat) : Prop := v < 16384 ∧ fieldSub (falconQ - 1) v < 16384
+
+/-- The two 14-bit checks are exactly `v < q`: a `v` in `[q, 2^14)` makes the complement wrap
+to nearly `p` and fail. -/
+theorem canonical_coeff_gates_iff (v : Nat) (hv : v < fieldModulus) :
+    canonicalCoeffGates v ↔ v < falconQ := by
+  simp only [canonicalCoeffGates, fieldSub, falconQ, fieldModulus] at *
+  omega
+
+/-- `constrain_mod_q_decomposition`: `t = k*q + r`, `k < 2^k_bits`, `r < q`. -/
+def modQGates (t k r kBits : Nat) : Prop :=
+  t = falconQ * k + r ∧ k < 2 ^ kBits ∧ r < falconQ
+
+/-- Uniqueness of the decomposition: the only satisfying witness is the honest one. -/
+theorem mod_q_decomposition_unique (t k r kBits : Nat) (h : modQGates t k r kBits) :
+    k = t / falconQ ∧ r = t % falconQ := by
+  obtain ⟨hrec, _, hr⟩ := h
+  simp only [falconQ] at *
+  omega
+
+/-- SECURITY: the classic quotient-cheating witness `(k-1, r+q)` fails the `r < q` gate. -/
+theorem mod_q_quotient_cheating_rejected (t k r kBits : Nat) (h : modQGates t k r kBits)
+    (hk : 1 ≤ k) : ¬ modQGates t (k - 1) (r + falconQ) kBits := by
+  intro hbad
+  obtain ⟨_, _, hr⟩ := hbad
+  omega
+
+/-- SECURITY (no field wrap): the asserted `k_bits <= 49` keeps `k*q + r` below `p`, so the
+field equation IS the integer equation. -/
+theorem mod_q_no_field_wrap : 2 ^ 49 * falconQ < fieldModulus := by decide
+
+/-- Why the naive single-stage Goldilocks -> Z_q reduction was rejected: a 51-bit quotient
+range exceeds the field, so `k*q + r` can wrap and a second representation exists. -/
+theorem naive_single_stage_reduction_would_wrap : fieldModulus < 2 ^ 51 * falconQ := by decide
+
+/-- Stage 2 of the sponge-output reduction: `t = hi * (2^32 mod q) + lo < 2^32 * q`, so a
+32-bit quotient covers it uniquely. -/
+def goldilocksSplitReduce (hi lo : Nat) : Nat := hi * pow32ModQ + lo
+
+theorem goldilocks_split_reduce_bound (hi lo : Nat) (h1 : hi < 4294967296)
+    (h2 : lo < 4294967296) : goldilocksSplitReduce hi lo < 2 ^ 32 * falconQ := by
+  simp only [goldilocksSplitReduce, pow32ModQ, falconQ]
+  omega
+
+/-! ### The free centering bit -/
+
+/-- `(v - b*q)^2` with a prover-chosen boolean `b`. -/
+def circuitCenteredSquare (v b : Nat) : Nat := ((v : Int) - (b : Int) * (falconQ : Int)).natAbs ^ 2
+
+/-- The circuit square in closed Nat form: `v^2` for `b = 0`, `(q - v)^2` for `b = 1`. -/
+theorem circuit_centered_square_eq (v b : Nat) (hv : v < falconQ) (hb : b < 2) :
+    circuitCenteredSquare v b = (if b = 1 then falconQ - v else v) ^ 2 := by
+  by_cases hb1 : b = 1
+  · rw [if_pos hb1]
+    simp only [circuitCenteredSquare, hb1]
+    congr 1
+    exact nat_abs_of_neg_eq _ (falconQ - v) (by omega)
+  · have hb0 : b = 0 := by omega
+    rw [if_neg hb1]
+    simp only [circuitCenteredSquare, hb0]
+    congr 1
+
+/-- SECURITY (free centering bit soundness): a lying bit can only INCREASE the computed
+square, so `computed_norm <= beta^2` still implies `true_norm <= beta^2`. -/
+theorem centering_bit_lie_only_inflates (v b : Nat) (hv : v < falconQ) (hb : b < 2) :
+    centeredSquare v ≤ circuitCenteredSquare v b := by
+  rw [centered_square_eq v hv, circuit_centered_square_eq v b hv hb]
+  refine Nat.pow_le_pow_left ?_ 2
+  simp only [centeredMagnitude, falconQ] at *
+  split <;> split <;> omega
+
+/-- Completeness: the honest generator's bit reproduces the native centered square exactly. -/
+theorem centering_bit_honest (v : Nat) (hv : v < falconQ) :
+    circuitCenteredSquare v (if falconQ / 2 < v then 1 else 0) = centeredSquare v := by
+  have hb : (if falconQ / 2 < v then 1 else 0) < 2 := by split <;> omega
+  rw [circuit_centered_square_eq v _ hv hb, centered_square_eq v hv]
+  by_cases hc : falconQ / 2 < v <;> simp [centeredMagnitude, hc]
+
+theorem circuit_centered_square_bound (v b : Nat) (hv : v < falconQ) (hb : b < 2) :
+    circuitCenteredSquare v b ≤ 12289 ^ 2 := by
+  rw [circuit_centered_square_eq v b hv hb]
+  refine Nat.pow_le_pow_left ?_ 2
+  simp only [falconQ] at *
+  split <;> omega
+
+def circuitSumSquares (vs bs : List Nat) : Nat := natSum (List.zipWith circuitCenteredSquare vs bs)
+
+theorem circuit_sum_squares_cons (a b : Nat) (vs bs : List Nat) :
+    circuitSumSquares (a :: vs) (b :: bs) = circuitCenteredSquare a b + circuitSumSquares vs bs := by
+  simp only [circuitSumSquares, List.zipWith_cons_cons, natSum]
+
+theorem circuit_sum_squares_ge_native :
+    ∀ (vs bs : List Nat), vs.length = bs.length → (∀ v ∈ vs, v < falconQ) →
+      (∀ b ∈ bs, b < 2) → sumSquares vs ≤ circuitSumSquares vs bs := by
+  intro vs
+  induction vs with
+  | nil => intro bs _ _ _; simp [sumSquares, circuitSumSquares, natSum]
+  | cons v vs ih =>
+      intro bs hlen hv hb
+      cases bs with
+      | nil => simp at hlen
+      | cons b bs =>
+          have h1 := centering_bit_lie_only_inflates v b (hv v (by simp)) (hb b (by simp))
+          have h2 := ih bs (by simpa using hlen) (fun x hx => hv x (by simp [hx]))
+            (fun x hx => hb x (by simp [hx]))
+          simp only [sumSquares, circuitSumSquares, List.map_cons, List.zipWith_cons_cons,
+            natSum] at *
+          omega
+
+theorem circuit_sum_squares_bound :
+    ∀ (vs bs : List Nat), (∀ v ∈ vs, v < falconQ) → (∀ b ∈ bs, b < 2) →
+      circuitSumSquares vs bs ≤ vs.length * 12289 ^ 2 := by
+  intro vs
+  induction vs with
+  | nil => intro bs _ _; simp [circuitSumSquares, natSum]
+  | cons v vs ih =>
+      intro bs hv hb
+      cases bs with
+      | nil => simp [circuitSumSquares, natSum]
+      | cons b bs =>
+          have h1 := circuit_centered_square_bound v b (hv v (by simp)) (hb b (by simp))
+          have h2 := ih bs (fun x hx => hv x (by simp [hx])) (fun x hx => hb x (by simp [hx]))
+          have hmul : (vs.length + 1) * 12289 ^ 2 = vs.length * 12289 ^ 2 + 12289 ^ 2 :=
+            Nat.succ_mul _ _
+          simp only [circuitSumSquares, List.zipWith_cons_cons, natSum, List.length_cons] at *
+          omega
+
+/-- SECURITY (the accept/reject decision): `range_check(beta^2 - norm, 26)` accepts exactly the
+norms at or below `beta^2`, for every norm the gate set can produce. -/
+theorem slack_range_check_is_exact (norm : Nat) (h : norm ≤ 154643989504) :
+    fieldSub falconSigL2Bound norm < 67108864 ↔ norm ≤ falconSigL2Bound := by
+  simp only [fieldSub, falconSigL2Bound, fieldModulus]
+  omega
+
+theorem beta_squared_fits_26_bits : falconSigL2Bound < 2 ^ 26 := by decide
+
+/-- AUDIT NOTE: the gadget's own comment bounds the norm by `1024 * 6144^2` (the HONEST-witness
+maximum). An adversarial centering bit can reach `1024 * 12289^2` (bit 1 on a zero coefficient),
+four times larger — still
+far below the field modulus, so the conclusion (no wrap) holds, but the quoted bound is the
+honest one, not the adversarial one. -/
+theorem honest_and_adversarial_norm_ceilings :
+    1024 * maxCenteredMagnitude ^ 2 = 38654705664 ∧ 1024 * 12289 ^ 2 = 154643989504 ∧
+      154643989504 < fieldModulus := by
+  refine ⟨by decide, by decide, by decide⟩
+
+/-! ### The gate set -/
+
+/-- Raw witness values of one gadget instance (`FalconSigVerifyTarget` + its witness). -/
+structure CircuitWitness where
+  /-- INPUT: the member identity digest. -/
+  pkG : Nat
+  /-- INPUT: the signed digest. The CONSUMER must connect it to a digest recomputed
+  in-circuit; the gadget itself leaves it free. -/
+  messageDigest : Nat
+  /-- Witness: the 8 packed salt elements. -/
+  salt : List Nat
+  /-- Witness: the public polynomial, canonical coefficients. -/
+  h : List Nat
+  /-- Witness: the signature polynomial as canonical residues. -/
+  s2 : List Nat
+  /-- Derived: `c - s2*h`, each coefficient the range-checked remainder of a reduction. -/
+  s1 : List Nat
+  /-- Prover-chosen centering bits for `s1`. -/
+  centerBitsS1 : List Nat
+  /-- Prover-chosen centering bits for `s2`. -/
+  centerBitsS2 : List Nat
+  /-- The `new_conditional` gate wire. NOT constrained inside the gadget. -/
+  verifyBit : Nat
+
+def circuitNorm (w : CircuitWitness) : Nat :=
+  circuitSumSquares w.s1 w.centerBitsS1 + circuitSumSquares w.s2 w.centerBitsS2
+
+/-- Every gate the gadget imposes, on an ARBITRARY witness. -/
+structure CircuitSatisfied (e : HashEnvironment) (p : PolynomialProduct)
+    (w : CircuitWitness) : Prop where
+  saltLen : w.salt.length = 8
+  /-- `range_check(s, 40)` per salt element — the packing injectivity condition. -/
+  saltRange : ∀ s ∈ w.salt, s < 1099511627776
+  hLen : w.h.length = falconN
+  s2Len : w.s2.length = falconN
+  hCanonical : ∀ c ∈ w.h, c < falconQ
+  s2Canonical : ∀ c ∈ w.s2, c < falconQ
+  /-- `pk_g == Poseidon(IMFK || encode(h))`, connected INSIDE the gadget. -/
+  pkBinding : w.pkG = falconPkDigest e w.h
+  /-- `s1 = c - s2*h` with `c = H2P(salt, message_digest)`. -/
+  s1Equation : w.s1 = reconstructS1 p (e.hashToPoint w.salt w.messageDigest) w.s2 w.h
+  s1Len : w.s1.length = falconN
+  /-- Each `s1` coefficient is a range-checked remainder of the final reduction. -/
+  s1Canonical : ∀ c ∈ w.s1, c < falconQ
+  bitsS1Len : w.centerBitsS1.length = falconN
+  bitsS2Len : w.centerBitsS2.length = falconN
+  bitsS1Bool : ∀ b ∈ w.centerBitsS1, b < 2
+  bitsS2Bool : ∀ b ∈ w.centerBitsS2, b < 2
+  verifyBool : w.verifyBit < 2
+  /-- `range_check(select(verify, beta^2 - norm, 0), 26)` — the ONLY gated constraint. -/
+  slackGate : (if w.verifyBit = 1 then fieldSub falconSigL2Bound (circuitNorm w) else 0) < 67108864
+
+theorem circuit_norm_ceiling (e : HashEnvironment) (p : PolynomialProduct) (w : CircuitWitness)
+    (hs : CircuitSatisfied e p w) : circuitNorm w ≤ 154643989504 := by
+  have b1 := circuit_sum_squares_bound w.s1 w.centerBitsS1 hs.s1Canonical hs.bitsS1Bool
+  have b2 := circuit_sum_squares_bound w.s2 w.centerBitsS2 hs.s2Canonical hs.bitsS2Bool
+  rw [hs.s1Len] at b1
+  rw [hs.s2Len] at b2
+  simp only [circuitNorm, falconN] at *
+  omega
+
+/-- PARITY (the headline soundness direction): on an ACTIVE slot the circuit's own norm is at
+most `beta^2`, and therefore so is the true centered norm of `(s1, s2)`. -/
+theorem circuit_active_slot_implies_native_norm_bound (e : HashEnvironment)
+    (p : PolynomialProduct) (w : CircuitWitness) (hs : CircuitSatisfied e p w)
+    (hactive : w.verifyBit = 1) : normSquared w.s1 w.s2 ≤ falconSigL2Bound := by
+  have hgate := hs.slackGate
+  rw [if_pos hactive] at hgate
+  have hcirc : circuitNorm w ≤ falconSigL2Bound :=
+    (slack_range_check_is_exact (circuitNorm w) (circuit_norm_ceiling e p w hs)).mp hgate
+  have h1 := circuit_sum_squares_ge_native w.s1 w.centerBitsS1 (by rw [hs.s1Len, hs.bitsS1Len])
+    hs.s1Canonical hs.bitsS1Bool
+  have h2 := circuit_sum_squares_ge_native w.s2 w.centerBitsS2 (by rw [hs.s2Len, hs.bitsS2Len])
+    hs.s2Canonical hs.bitsS2Bool
+  simp only [normSquared, circuitNorm] at *
+  omega
+
+/-- PARITY: an active slot satisfies the FULL native predicate — canonicity of `h`, the
+identity binding, and the norm bound — for the signature whose residues it witnesses. -/
+theorem circuit_active_slot_implies_native_verify (e : HashEnvironment) (p : PolynomialProduct)
+    (w : CircuitWitness) (hs : CircuitSatisfied e p w) (hactive : w.verifyBit = 1)
+    (sig : SignatureParts) (hsalt : saltToElements sig.salt = w.salt)
+    (hs2 : sig.s2.map s2WitnessResidue = w.s2) :
+    verifyWithPkG e p w.pkG w.h w.messageDigest sig = true := by
+  have hnorm := circuit_active_slot_implies_native_norm_bound e p w hs hactive
+  have hcanon : allCanonical w.h = true := (all_canonical_iff w.h).mpr hs.hCanonical
+  have hnorm' : recomputedNormSquared p (e.hashToPoint (saltToElements sig.salt) w.messageDigest)
+      (sig.s2.map s2WitnessResidue) w.h = normSquared w.s1 w.s2 := by
+    rw [hsalt, hs2, recomputedNormSquared, ← hs.s1Equation]
+  simp only [verifyWithPkG, verify, hcanon, Bool.true_eq_false, if_false, hs.pkBinding,
+    ne_eq, not_true_eq_false, hnorm', normWithinBound]
+  simp only [decide_eq_true_eq]
+  exact hnorm
+
+/-- DIVERGENCE (padding slots): with `verify = 0` the norm gate holds for EVERY norm value —
+the accept/reject decision of the scheme is switched off. Everything else (canonicity, the
+`pk_g` binding, H2P and the NTT equation) stays enforced, so an inactive slot recomputes a
+COMMITMENT to `h` and an algebraic `s1`; it verifies no signature. The gate wire itself is
+unconstrained here: binding it is a CONSUMER obligation. -/
+theorem padding_slot_norm_gate_is_trivial (w : CircuitWitness) (h0 : w.verifyBit = 0)
+    (n : Nat) : (if w.verifyBit = 1 then fieldSub falconSigL2Bound n else 0) < 67108864 := by
+  rw [h0]
+  simp
+
+/-- What an inactive slot still forces: the identity commitment and the algebraic equation. -/
+theorem padding_slot_still_binds_pk_and_equation (e : HashEnvironment) (p : PolynomialProduct)
+    (w : CircuitWitness) (hs : CircuitSatisfied e p w) :
+    w.pkG = falconPkDigest e w.h ∧
+    w.s1 = reconstructS1 p (e.hashToPoint w.salt w.messageDigest) w.s2 w.h :=
+  ⟨hs.pkBinding, hs.s1Equation⟩
+
+/-! ### Non-vacuity: satisfiable witnesses
+
+The environments below are DEGENERATE stand-ins (constant hash, constant product), used only
+to show the gate set is satisfiable and to exhibit a divergence. They are not Poseidon. -/
+
+def zeroEnvironment : HashEnvironment where
+  poseidon := fun _ => 0
+  hashToPoint := fun _ _ => List.replicate falconN 0
+
+def zeroProduct : PolynomialProduct where
+  mul := fun _ _ => List.replicate falconN 0
+
+theorem zip_with_replicate (f : Nat → Nat → Nat) (n a b : Nat) :
+    List.zipWith f (List.replicate n a) (List.replicate n b) = List.replicate n (f a b) := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp only [List.replicate_succ, List.zipWith_cons_cons, ih]
+
+theorem nat_sum_replicate_zero (n : Nat) : natSum (List.replicate n 0) = 0 := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp only [List.replicate_succ, natSum, ih]
+
+theorem circuit_sum_squares_replicate_zero (n : Nat) :
+    circuitSumSquares (List.replicate n 0) (List.replicate n 0) = 0 := by
+  simp only [circuitSumSquares, zip_with_replicate]
+  have : circuitCenteredSquare 0 0 = 0 := by decide
+  rw [this, nat_sum_replicate_zero]
+
+theorem reconstruct_s1_zero :
+    reconstructS1 zeroProduct (List.replicate falconN 0) (List.replicate falconN 0)
+      (List.replicate falconN 0) = List.replicate falconN 0 := by
+  simp only [reconstructS1, zeroProduct, zip_with_replicate]
+  have : subModQ 0 0 = 0 := by decide
+  rw [this]
+
+/-- An all-zero slot (the `FalconSigGadgetWitness::padding` shape). -/
+def zeroWitness (verifyBit d : Nat) : CircuitWitness where
+  pkG := falconPkDigest zeroEnvironment (List.replicate falconN 0)
+  messageDigest := d
+  salt := List.replicate 8 0
+  h := List.replicate falconN 0
+  s2 := List.replicate falconN 0
+  s1 := List.replicate falconN 0
+  centerBitsS1 := List.replicate falconN 0
+  centerBitsS2 := List.replicate falconN 0
+  verifyBit := verifyBit
+
+theorem zero_witness_satisfied (d b : Nat) (hb : b < 2) :
+    CircuitSatisfied zeroEnvironment zeroProduct (zeroWitness b d) := by
+  have hrep : ∀ (n : Nat) (c : Nat), c ∈ List.replicate n 0 → c = 0 :=
+    fun _ _ hc => List.eq_of_mem_replicate hc
+  have hnorm : circuitNorm (zeroWitness b d) = 0 := by
+    simp only [circuitNorm, zeroWitness, circuit_sum_squares_replicate_zero]
+  refine ⟨List.length_replicate 8 0, ?_, List.length_replicate _ 0, List.length_replicate _ 0,
+    ?_, ?_, rfl, ?_, List.length_replicate _ 0, ?_, List.length_replicate _ 0,
+    List.length_replicate _ 0, ?_, ?_, hb, ?_⟩
+  · intro s hs; rw [hrep 8 s hs]; decide
+  · intro c hc; rw [hrep _ c hc]; decide
+  · intro c hc; rw [hrep _ c hc]; decide
+  · exact reconstruct_s1_zero.symm
+  · intro c hc; rw [hrep _ c hc]; decide
+  · intro x hx; rw [hrep _ x hx]; decide
+  · intro x hx; rw [hrep _ x hx]; decide
+  · rw [hnorm]
+    split <;> decide
+
+/-- Non-vacuity, ACTIVE slot: the gate set with `verify = 1` is satisfiable. -/
+theorem active_slot_gate_set_is_satisfiable (d : Nat) :
+    CircuitSatisfied zeroEnvironment zeroProduct (zeroWitness 1 d) ∧
+      (zeroWitness 1 d).verifyBit = 1 :=
+  ⟨zero_witness_satisfied d 1 (by decide), rfl⟩
+
+/-- Non-vacuity, PADDING slot. -/
+theorem padding_slot_gate_set_is_satisfiable (d : Nat) :
+    CircuitSatisfied zeroEnvironment zeroProduct (zeroWitness 0 d) ∧
+      (zeroWitness 0 d).verifyBit = 0 :=
+  ⟨zero_witness_satisfied d 0 (by decide), rfl⟩
+
+/-! ### The transport-band divergence -/
+
+/-- Same shape, but one `s2` coefficient centred at 3000 — canonical (`< q`), so every circuit
+gate passes, yet far outside the Golomb-Rice band the native decoder enforces. -/
+def bandDivergenceWitness (d : Nat) : CircuitWitness where
+  pkG := falconPkDigest zeroEnvironment (List.replicate falconN 0)
+  messageDigest := d
+  salt := List.replicate 8 0
+  h := List.replicate falconN 0
+  s2 := 3000 :: List.replicate (falconN - 1) 0
+  s1 := List.replicate falconN 0
+  centerBitsS1 := List.replicate falconN 0
+  centerBitsS2 := 0 :: List.replicate (falconN - 1) 0
+  verifyBit := 1
+
+theorem band_divergence_witness_satisfied (d : Nat) :
+    CircuitSatisfied zeroEnvironment zeroProduct (bandDivergenceWitness d) := by
+  have hrep : ∀ (n : Nat) (c : Nat), c ∈ List.replicate n 0 → c = 0 :=
+    fun _ _ hc => List.eq_of_mem_replicate hc
+  have hlen : (3000 :: List.replicate (falconN - 1) 0).length = falconN := by
+    simp only [List.length_cons, List.length_replicate, falconN]
+  have hlen0 : ((0 : Nat) :: List.replicate (falconN - 1) 0).length = falconN := by
+    simp only [List.length_cons, List.length_replicate, falconN]
+  have h1 : circuitCenteredSquare 3000 0 = 9000000 := by decide
+  have hz : circuitSumSquares (List.replicate (falconN - 1) 0)
+      (List.replicate (falconN - 1) 0) = 0 := circuit_sum_squares_replicate_zero _
+  have hnorm : circuitNorm (bandDivergenceWitness d) = 9000000 := by
+    show circuitSumSquares (List.replicate falconN 0) (List.replicate falconN 0) +
+      circuitSumSquares (3000 :: List.replicate (falconN - 1) 0)
+        ((0 : Nat) :: List.replicate (falconN - 1) 0) = 9000000
+    rw [circuit_sum_squares_replicate_zero, circuit_sum_squares_cons, hz, h1]
+  refine ⟨List.length_replicate 8 0, ?_, List.length_replicate _ 0, hlen, ?_, ?_, rfl, ?_,
+    List.length_replicate _ 0, ?_, List.length_replicate _ 0, hlen0, ?_, ?_, ?_, ?_⟩
+  · intro s hs; rw [hrep 8 s hs]; decide
+  · intro c hc; rw [hrep _ c hc]; decide
+  · intro c hc
+    rcases List.mem_cons.mp hc with h | h
+    · rw [h]; decide
+    · rw [hrep _ c h]; decide
+  · exact reconstruct_s1_zero.symm
+  · intro c hc; rw [hrep _ c hc]; decide
+  · intro x hx; rw [hrep _ x hx]; decide
+  · intro x hx
+    rcases List.mem_cons.mp hx with h | h
+    · rw [h]; decide
+    · rw [hrep _ x h]; decide
+  · show (1 : Nat) < 2
+    decide
+  · rw [hnorm]
+    show (if (1 : Nat) = 1 then fieldSub falconSigL2Bound 9000000 else 0) < 67108864
+    decide
+
+/-- DIVERGENCE (fund-safety relevant, and BENIGN by the GPV argument): the circuit accepts an
+`s2` whose centered magnitude exceeds the 2047 transport band, which no wire blob can carry.
+The band is a TRANSPORT restriction enforced by `FalconSignature::from_bytes`, not part of the
+verification predicate — but it means a circuit-satisfying witness need not correspond to any
+decodable 666-byte signature. -/
+theorem circuit_accepts_s2_outside_transport_band (d : Nat) :
+    ∃ w : CircuitWitness, CircuitSatisfied zeroEnvironment zeroProduct w ∧ w.verifyBit = 1 ∧
+      ∃ v ∈ w.s2, s2CoeffBand < (centeredValue v).natAbs := by
+  refine ⟨bandDivergenceWitness d, band_divergence_witness_satisfied d, rfl, 3000, ?_, ?_⟩
+  · simp [bandDivergenceWitness]
+  · decide
+
+/-! ## 12. Native / in-circuit check parity
+
+Present natively AND as gates: canonicity of every `h` coefficient (`< q`); the identity
+binding `pk_g = Poseidon(IMFK || encode(h))` (native only inside `verify_with_pk_g`, in-circuit
+unconditionally); recomputation of `c` from the salt and the message digest; the equation
+`s1 = c - s2*h`; the inclusive norm bound `<= beta^2` (in-circuit only when the gate wire is 1).
+
+Native ONLY — no in-circuit counterpart:
+* the version byte, the exact 666/1690-byte lengths, and the `Empty` case;
+* the Golomb-Rice decode with its `-0`, `high bits >= 2048`, buffer-exhaustion and
+  unused-bits checks, hence the `[-2047, 2047]` transport band;
+* the re-encoding canonicity check that makes the wire encoding a bijection;
+* the per-coefficient `< q` gate on the transported `h` BYTES (in-circuit `h` is a witness,
+  range-checked but never parsed from bytes).
+
+In-circuit ONLY:
+* the free centering bit (native centers deterministically);
+* the mod-q decomposition witnesses and their range checks (native reduces exactly);
+* the `verify` gate wire, which the gadget does not constrain.
+
+ANSWER to "does the gadget verify a signature or only recompute a commitment": with
+`FalconSigVerifyTarget::new` (or `new_conditional` with the wire bound to 1) it verifies the
+full native `verify_with_pk_g` predicate — see `circuit_active_slot_implies_native_verify`.
+With the wire at 0 it only recomputes the `pk_g` commitment to `h` and the algebraic `s1`; the
+sole accept/reject test of the scheme is switched off — see `padding_slot_norm_gate_is_trivial`
+and `padding_slot_still_binds_pk_and_equation`. Since the gadget does not constrain the wire,
+which of the two a slot gets is decided entirely by the CONSUMER. -/
 
 end Zkp.Implementation.FalconCore

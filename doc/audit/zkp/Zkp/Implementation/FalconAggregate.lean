@@ -39,8 +39,8 @@ source-to-model correspondence is a line-map claim only.
   key is recorded as data, never as "the statement is true". Boundaries `proofVerificationOpaque`,
   `constantVerifierKeyBinding`.
 * **No Schwartz-Zippel.** The batch product check is proved COMPLETE (the honest integer product
-  satisfies the evaluation identity at every point, `poly_eval_mul` / `batch_honest_witness_
-  satisfies_the_product_check`); the converse — evaluation agreement at the transcript challenge
+  satisfies the evaluation identity at every point, `poly_eval_mul` and
+  `batch_honest_witness_satisfies_the_product_check`); the converse — evaluation agreement at the transcript challenge
   implies coefficient equality — is the explicit premise `ProductCheckSound`
   (boundary `schwartzZippelChallenge`), together with `fiatShamirRandomOracle` for the claim that
   `tau` behaves as a random point.
@@ -51,7 +51,8 @@ source-to-model correspondence is a line-map claim only.
 
 ## What an accepted aggregate proof DOES establish, in this model
 
-`agg_tree_ok_characterization` (tree) and `batch_exposed_statement` (flat batch): the exposed
+`agg_tree_ok_characterization` (tree) and `batch_statement_matches_the_tree_contract` (flat
+batch): the exposed
 statement `(message, signer_count, pk_g slots)` satisfies
 
 * `signer_count` equals the number of slots whose Falcon predicate was evaluated and accepted;
@@ -943,6 +944,16 @@ theorem aggregate_accepted_does_not_establish_distinctness :
   rfl
 
 
+/-- NON-RESULT: the exposed statement contains NO member-set constraint. ANY `h` whatsoever — one
+that was never registered, or is not even a valid NTRU public key — yields an accepted leaf whose
+digest lands in the signer list. Tying a slot to a registered member is the CONSUMER's job
+(`update_channel_tree`'s member-tree recomputation, close / cancel-close's member-set commitment
+and A5 distinctness chain). -/
+theorem aggregate_accepted_does_not_establish_membership (h : List Nat) (m : Limbs) :
+    evalTree (permissiveEnv zeroSlot)
+        (.leaf { h := h, s2 := [], salt := [], messageDigest := m }) 0
+      = .ok { message := m, count := 1, pks := [zeroSlot] } := rfl
+
 /-! ## 7. The flat batch aggregate (batch.rs)
 
 ### 7.1 The parameter / bounds ledger (batch.rs 131-200) -/
@@ -1779,5 +1790,309 @@ theorem agg_list_commitment_snoc (env : HashEnv) (a : List AggListEntry) (e : Ag
 /-- The chain STEP is bit-for-bit the one the single-signature list uses (agg_list.rs:210). -/
 theorem agg_list_uses_the_shared_chain_step (env : HashEnv) (prev leaf : Hash) :
     UtilGadgets.listChainStep env prev leaf = env.poseidonU64 (prev ++ leaf) := rfl
+
+
+/-! ### 8.3 The prover-side public-input parser (agg_list.rs 154-206)
+
+PROVER-SIDE CONVENIENCE ONLY, as the source says: it carries NO security weight — the binding is
+the in-circuit fold over the RECURSIVELY VERIFIED proof's public inputs. It is modelled because
+its structural checks (arity, count range, zero-suffix padding) are exactly the shape assumptions
+the rest of the pipeline makes. -/
+
+/-- Fixed-width chunking of a flat limb vector into slots. -/
+def chunks (width : Nat) : Nat → List Nat → List Limbs
+  | 0, _ => []
+  | k + 1, l => l.take width :: chunks width k (l.drop width)
+
+theorem chunks_join : ∀ (S : List Limbs), SlotsWellFormed S →
+    chunks bytes32Len S.length S.join = S := by
+  intro S
+  induction S with
+  | nil => intro _; rfl
+  | cons p ps ih =>
+    intro hw
+    have hp : p.length = bytes32Len := hw p (by simp)
+    have hps : SlotsWellFormed ps := by intro q hq; exact hw q (by simp [hq])
+    simp only [List.length_cons, List.join_cons, chunks, List.take_left' hp, List.drop_left' hp,
+      ih hps]
+
+/-- The 8 pk slots of a 73-element public-input vector. -/
+def sliceSlots (pis : List Nat) : List Limbs :=
+  chunks bytes32Len maxSigCluster (pis.drop falconAggPkListOffset)
+
+theorem slice_slots_of_encoding {message : Limbs} {pks : List Limbs}
+    (hm : message.length = bytes32Len) (hw : SlotsWellFormed pks)
+    (hn : pks.length ≤ maxSigCluster) :
+    sliceSlots (aggExpectedPublicInputs aggLevels message pks)
+      = pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot := by
+  have hpow : (2 : Nat) ^ aggLevels = maxSigCluster := by decide
+  have hhead : (message ++ [pks.length]).length = falconAggPkListOffset := by
+    simp [List.length_append, hm, falconAggPkListOffset]
+  have hSw : SlotsWellFormed (pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot) :=
+    slots_well_formed_append hw (slots_well_formed_replicate _)
+  have hSlen : (pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot).length
+      = maxSigCluster := by
+    simp only [List.length_append, List.length_replicate]
+    omega
+  have hgoal := chunks_join _ hSw
+  rw [hSlen] at hgoal
+  rw [agg_expected_normal_form hm hw (by rw [hpow]; exact hn)]
+  simp only [sliceSlots, hpow, List.drop_left' hhead]
+  exact hgoal
+
+/-- The parser's rejection reasons, in source order. -/
+inductive ParseError where
+  | arity
+  | limbTooLarge
+  | countRange
+  | paddingNonZero
+  deriving DecidableEq, Repr
+
+def limbOk (v : Nat) : Bool := v < 2 ^ 32
+
+/-- `AggListEntry::from_agg_public_inputs` (agg_list.rs:162-206), with the source's check ORDER and
+error precedence: arity, then the message limbs, then the count range, then the slot limbs and the
+zero-padding requirement. -/
+def parseAggPublicInputs (pis : List Nat) : Except ParseError AggListEntry :=
+  if pis.length ≠ falconAggPublicInputsLen then .error ParseError.arity
+  else if !((decodeMessage pis).all limbOk) then .error ParseError.limbTooLarge
+  else if decodeCount pis < 1 ∨ maxSigCluster < decodeCount pis then .error ParseError.countRange
+  else if !((sliceSlots pis).all (fun p => p.all limbOk)) then .error ParseError.limbTooLarge
+  else if !(((sliceSlots pis).drop (decodeCount pis)).all (fun p => p == zeroSlot)) then
+    .error ParseError.paddingNonZero
+  else .ok { message := decodeMessage pis,
+             signerPks := (sliceSlots pis).take (decodeCount pis) }
+
+theorem parse_rejects_wrong_arity {pis : List Nat} (h : pis.length ≠ falconAggPublicInputsLen) :
+    parseAggPublicInputs pis = .error ParseError.arity := by
+  simp [parseAggPublicInputs, h]
+
+theorem parse_rejects_out_of_range_count {pis : List Nat}
+    (harity : pis.length = falconAggPublicInputsLen)
+    (hmsg : (decodeMessage pis).all limbOk = true)
+    (hcount : decodeCount pis < 1 ∨ maxSigCluster < decodeCount pis) :
+    parseAggPublicInputs pis = .error ParseError.countRange := by
+  simp [parseAggPublicInputs, harity, hmsg, hcount]
+
+theorem parse_rejects_nonzero_padding {pis : List Nat}
+    (harity : pis.length = falconAggPublicInputsLen)
+    (hmsg : (decodeMessage pis).all limbOk = true)
+    (hcount : ¬ (decodeCount pis < 1 ∨ maxSigCluster < decodeCount pis))
+    (hlimbs : (sliceSlots pis).all (fun p => p.all limbOk) = true)
+    (hpad : ((sliceSlots pis).drop (decodeCount pis)).all (fun p => p == zeroSlot) = false) :
+    parseAggPublicInputs pis = .error ParseError.paddingNonZero := by
+  simp [parseAggPublicInputs, harity, hmsg, hcount, hlimbs, hpad]
+
+/-- ROUND TRIP: the parser accepts exactly the canonical left-packed encodings and recovers the
+message and the ordered signer list. -/
+theorem parse_of_encoding {message : Limbs} {pks : List Limbs}
+    (hm : message.length = bytes32Len) (hw : SlotsWellFormed pks)
+    (hlo : 1 ≤ pks.length) (hhi : pks.length ≤ maxSigCluster)
+    (hmsgLimbs : message.all limbOk = true)
+    (hpkLimbs : ∀ p ∈ pks, p.all limbOk = true) :
+    parseAggPublicInputs (aggExpectedPublicInputs aggLevels message pks)
+      = .ok { message := message, signerPks := pks } := by
+  have hpow : (2 : Nat) ^ aggLevels = maxSigCluster := by decide
+  have hle : pks.length ≤ 2 ^ aggLevels := by rw [hpow]; exact hhi
+  have harity : (aggExpectedPublicInputs aggLevels message pks).length
+      = falconAggPublicInputsLen := by
+    rw [agg_expected_public_inputs_length hm hw hle]
+    rfl
+  have hmsg : decodeMessage (aggExpectedPublicInputs aggLevels message pks) = message :=
+    agg_expected_decode_message hm hw hle
+  have hcount : decodeCount (aggExpectedPublicInputs aggLevels message pks) = pks.length :=
+    agg_expected_decode_count hm hw hle
+  have hslots := slice_slots_of_encoding hm hw hhi
+  have hzero : zeroSlot.all limbOk = true := by decide
+  have hslotLimbs : (pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot).all
+      (fun p => p.all limbOk) = true := by
+    refine List.all_eq_true.mpr ?_
+    intro p hp
+    rcases List.mem_append.mp hp with h | h
+    · exact hpkLimbs p h
+    · rw [mem_replicate_eq h]; exact hzero
+  have hdrop : (pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot).drop pks.length
+      = List.replicate (maxSigCluster - pks.length) zeroSlot := List.drop_left' rfl
+  have hpadAll : (List.replicate (maxSigCluster - pks.length) zeroSlot).all
+      (fun p => p == zeroSlot) = true := List.all_eq_true.mpr (by
+    intro p hp; rw [mem_replicate_eq hp]; simp)
+  have htake : (pks ++ List.replicate (maxSigCluster - pks.length) zeroSlot).take pks.length
+      = pks := List.take_left' rfl
+  simp only [parseAggPublicInputs, harity, hmsg, hcount, hslots, hslotLimbs, hdrop, hpadAll,
+    htake, hmsgLimbs, ne_eq, not_true_eq_false, if_false, Bool.not_eq_true']
+  have hnot : ¬ (pks.length < 1 ∨ maxSigCluster < pks.length) := by omega
+  simp [hnot]
+
+
+/-! ### 8.4 The step circuit and the chain run (agg_list.rs 256-447) -/
+
+/-- The step's own public-input layout is unchanged from the single-signature list:
+`[prev_chain(8), new_chain(8)]` (agg_list.rs:352-356). -/
+theorem agg_list_step_public_input_arity : listStepPublicInputsLen = 2 * bytes32Len := rfl
+
+/-- The step's DEFENCE-IN-DEPTH range check: `range_check(signer_count - 1, 4)` (agg_list.rs:328). -/
+def aggListStepCountCheck (count : Nat) : Prop := fieldSub count 1 < 2 ^ 4
+
+instance : DecidablePred aggListStepCountCheck := fun _ => inferInstanceAs (Decidable (_ < _))
+
+/-- What that check actually admits: `1 <= signer_count <= 16`. The `count = 0` case is caught
+because the field subtraction wraps to `p - 1`. -/
+theorem agg_list_step_count_check_range (count : Nat) (h : count < goldilocks) :
+    aggListStepCountCheck count ↔ (1 ≤ count ∧ count ≤ 16) := by
+  have hg : goldilocks = 18446744069414584321 := by decide
+  rw [hg] at h
+  simp only [aggListStepCountCheck, fieldSub, hg]
+  split <;> omega
+
+/-- HONEST READING (agg_list.rs:321-327 says as much): this in-circuit check is WEAKER than
+`signer_count <= MAX_SIG_CLUSTER`. A count of 9..16 passes it. The `<= 8` bound comes only from
+the aggregate circuit's own structure (`AggOk.count_le` for the tree, the flag list's length for
+the batch), never from this step. -/
+theorem agg_list_step_count_check_is_weaker_than_the_cluster_bound :
+    aggListStepCountCheck 16 ∧ maxSigCluster < 16 := by decide
+
+/-- The step's fold: the leaf is computed over the message limbs, the count and ALL 8 pk slots of
+the recursively verified proof — padding included (agg_list.rs:332-336). -/
+def aggListStepLeaf (env : HashEnv) (s : AggStatement) : Hash :=
+  aggListLeaf env s.message s.count (aggPkListDigest env s.pks)
+
+/-- THE FOLD EQUALITY the whole pipeline rests on: folding all 8 slots verbatim (in-circuit)
+gives the same leaf as the native fold over just the ACTIVE signer list, because the padding is
+constrained to exactly zero on the circuit side and appended as explicit zeros on the native side
+(agg_list.rs:21-24). Proved from the aggregate's left-packing, not assumed. -/
+theorem agg_list_step_leaf_matches_the_native_entry (env : HashEnv) (sigEnv : SigEnv)
+    {t : AggTree} {s : AggStatement} (hok : AggOk sigEnv aggLevels t s)
+    (shape : SigEnvShape sigEnv) :
+    aggListStepLeaf env s
+      = entryLeaf env { message := s.message,
+                        signerPks := (activeWitnesses t).map (fun w => sigEnv.pkDigest w.h) } := by
+  have hactive : SlotsWellFormed ((activeWitnesses t).map (fun w => sigEnv.pkDigest w.h)) := by
+    intro q hq
+    rcases List.mem_map.mp hq with ⟨w, _, hw⟩
+    rw [← hw]; exact shape w.h
+  have hlen : ((activeWitnesses t).map (fun w => sigEnv.pkDigest w.h)).length = s.count := by
+    simp [hok.count_eq]
+  have hcap : ((activeWitnesses t).map (fun w => sigEnv.pkDigest w.h)).length
+      + (2 ^ aggLevels - s.count) ≤ maxSigCluster := by
+    have := hok.count_le
+    rw [hlen]
+    simp only [aggLevels, maxSigCluster] at *
+    omega
+  simp only [aggListStepLeaf, entryLeaf, hok.pks_eq, hlen,
+    agg_pk_list_digest_zero_suffix_is_free env hactive (2 ^ aggLevels - s.count) hcap]
+
+/-- One chain step: `new_chain = Poseidon(prev_chain ‖ leaf)` — the SHARED gadget. -/
+def aggListStepChain (env : HashEnv) (s : AggStatement) (prev : Hash) : Hash :=
+  UtilGadgets.listChainStep env prev (aggListStepLeaf env s)
+
+/-- The recursive list: fold the statements in order from `C_0 = 0`. The cyclic wrapper's
+enforcement of `prev_chain_i = C_{i-1}` and `C_0 = 0` is an opaque premise here
+(boundary `cyclicWrapperOpaque`); this is the value it commits to when it holds. -/
+def aggListRun (env : HashEnv) (statements : List AggStatement) : Hash :=
+  statements.foldl (fun chain s => aggListStepChain env s chain) UtilGadgets.zeroHash
+
+/-- A8 truncation guard (agg_list.rs:750-763): the run starts from the ZERO chain, so a list
+cannot be seeded mid-chain. -/
+theorem agg_list_run_starts_from_zero (env : HashEnv) :
+    aggListRun env [] = UtilGadgets.zeroHash := rfl
+
+theorem agg_list_run_first_step (env : HashEnv) (s : AggStatement) :
+    aggListRun env [s] = UtilGadgets.listChainStep env UtilGadgets.zeroHash (aggListStepLeaf env s)
+    := rfl
+
+/-- Leafwise agreement propagates through the fold. -/
+theorem run_congr (env : HashEnv) :
+    ∀ (pairs : List (AggStatement × AggListEntry)) (init : Hash),
+      (∀ p ∈ pairs, aggListStepLeaf env p.1 = entryLeaf env p.2) →
+      (pairs.map Prod.fst).foldl (fun chain s => aggListStepChain env s chain) init
+        = (pairs.map Prod.snd).foldl
+            (fun chain e => UtilGadgets.listChainStep env chain (entryLeaf env e)) init := by
+  intro pairs
+  induction pairs with
+  | nil => intro init _; rfl
+  | cons p ps ih =>
+    intro init hall
+    have hp : aggListStepLeaf env p.1 = entryLeaf env p.2 := hall p (by simp)
+    simp only [List.map_cons, List.foldl_cons, aggListStepChain, hp]
+    exact ih _ (fun q hq => hall q (by simp [hq]))
+
+/-- The in-circuit chain equals the native `agg_list_commitment` over the corresponding entries —
+the equality every `prove_append` acceptance test asserts and the consumer's `C == final.sig_chain`
+assertion depends on. -/
+theorem agg_list_run_matches_the_native_commitment (env : HashEnv)
+    (pairs : List (AggStatement × AggListEntry))
+    (hall : ∀ p ∈ pairs, aggListStepLeaf env p.1 = entryLeaf env p.2) :
+    aggListRun env (pairs.map Prod.fst) = aggListCommitment env (pairs.map Prod.snd) :=
+  run_congr env pairs UtilGadgets.zeroHash hall
+
+/-! ## 9. The retired single-signature list (list.rs)
+
+`list.rs` folds `(m, pk)` pairs with the IMLL leaf. Its own module doc says it is NO LONGER the
+validity path's consumer: the block now folds `(IMCH digest, signer_count, pk_list_digest)`, so a
+chain built by that circuit no longer equals the accumulator `update_channel_tree` computes. -/
+
+/-- One `ListStepCircuit` fold: the leaf is `Poseidon([IMLL] ‖ m ‖ pk)` over the gadget's OWN
+`message_digest` wire and its DERIVED `pk_g` wire (list.rs:148). -/
+def falconListLeaf (env : HashEnv) (sigEnv : SigEnv) (w : SlotWitness) : Hash :=
+  UtilGadgets.listLeaf env w.messageDigest (sigEnv.pkDigest w.h)
+
+def falconListRun (env : HashEnv) (sigEnv : SigEnv) (ws : List SlotWitness) : Hash :=
+  ws.foldl (fun chain w => UtilGadgets.listChainStep env chain (falconListLeaf env sigEnv w))
+    UtilGadgets.zeroHash
+
+/-- The recursive list commits to exactly the native `list_commitment` of the imported model —
+the format-stability claim of list.rs:29-31 / 341-376. -/
+theorem falcon_list_run_is_the_util_list_commitment (env : HashEnv) (sigEnv : SigEnv) :
+    ∀ (ws : List SlotWitness) (init : Hash),
+      ws.foldl (fun chain w => UtilGadgets.listChainStep env chain (falconListLeaf env sigEnv w))
+          init
+        = (ws.map (fun w => (w.messageDigest, sigEnv.pkDigest w.h))).foldl
+            (fun chain p => UtilGadgets.listChainStep env chain (UtilGadgets.listLeaf env p.1 p.2))
+            init := by
+  intro ws
+  induction ws with
+  | nil => intro init; rfl
+  | cons w rest ih => intro init; simpa [falconListLeaf] using ih _
+
+theorem falcon_list_run_matches_list_commitment (env : HashEnv) (sigEnv : SigEnv)
+    (ws : List SlotWitness) :
+    falconListRun env sigEnv ws
+      = UtilGadgets.listCommitment env (ws.map (fun w => (w.messageDigest, sigEnv.pkDigest w.h))) :=
+  falcon_list_run_is_the_util_list_commitment env sigEnv ws UtilGadgets.zeroHash
+
+/-- The two chains are NOT interchangeable: their leaf PREIMAGES differ in the leading domain
+constant, so the Phase-4 `list_vd -> agg_list_vd` swap really does change the committed statement
+(agg_list.rs:26-34). Digest distinctness would additionally need the `hashOpaque` premise. -/
+theorem the_two_list_leaf_preimages_are_different_schemas (message pk : Limbs) (c : Nat)
+    (d : Hash) :
+    aggListLeafPreimage message c d ≠ UtilGadgets.listLeafPreimage message pk :=
+  agg_list_leaf_preimage_differs_from_imll message pk c d
+
+/-! ## 10. Worked positive traces (non-vacuity) -/
+
+/-- A concrete level-1 encoding: message, count 1, one signer, one zero padding slot. -/
+theorem agg_expected_public_inputs_example :
+    aggExpectedPublicInputs 1 [1, 2, 3, 4, 5, 6, 7, 8] [[9, 9, 9, 9, 9, 9, 9, 9]]
+      = [1, 2, 3, 4, 5, 6, 7, 8, 1, 9, 9, 9, 9, 9, 9, 9, 9,
+         0, 0, 0, 0, 0, 0, 0, 0] := by decide
+
+/-- A concrete accepted aggregation: two DISTINCT signers, level 1, exposing count 2 and both
+keys in slot order. -/
+theorem agg_tree_positive_trace :
+    evalTree
+        { pkDigest := fun h => h, falconAccepts := fun _ _ _ _ => true }
+        (.nodePair (.leaf { h := [1, 1, 1, 1, 1, 1, 1, 1], s2 := [], salt := [],
+                            messageDigest := [7, 7, 7, 7, 7, 7, 7, 7] })
+                   (.leaf { h := [2, 2, 2, 2, 2, 2, 2, 2], s2 := [], salt := [],
+                            messageDigest := [7, 7, 7, 7, 7, 7, 7, 7] })) 1
+      = .ok { message := [7, 7, 7, 7, 7, 7, 7, 7], count := 2,
+              pks := [[1, 1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2, 2, 2]] } := by rfl
+
+/-- ... and its exposed statement is exactly the canonical left-packed reference vector. -/
+theorem agg_tree_positive_trace_public_inputs :
+    statementPublicInputs { message := [7, 7, 7, 7, 7, 7, 7, 7], count := 2,
+                            pks := [[1, 1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2, 2, 2]] }
+      = aggExpectedPublicInputs 1 [7, 7, 7, 7, 7, 7, 7, 7]
+          [[1, 1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2, 2, 2]] := by decide
 
 end Zkp.Implementation.FalconAggregate

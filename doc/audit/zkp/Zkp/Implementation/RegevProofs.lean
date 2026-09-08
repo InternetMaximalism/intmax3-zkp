@@ -300,6 +300,19 @@ theorem dec_core_columns_partition : decCoreColumns = List.range decCoreCols := 
 theorem refresh_columns_partition : refreshColumns = List.range rfCols := by
   decide
 
+/-- `max_constraint_degree()` reported by all four AIRs (and by the hash-signature
+AIR): degree 3, matching the `log_blowup = 1` config. -/
+def maxConstraintDegree : Nat := 3
+
+/-- `main_next_row_columns()`: the dual-key AIRs open the single carry column, the
+decryption core opens the eight carry-bit columns. -/
+def decCarryColumns : List Nat := (List.range carryBits).map (fun j => decCarry + j)
+
+theorem next_row_columns_pinned :
+    maxConstraintDegree = 3 ∧ [e1Shape.carryCol] = [34] ∧ [e2Shape.carryCol] = [44] ∧
+      decCarryColumns = [44, 45, 46, 47, 48, 49, 50, 51] := by
+  refine ⟨rfl, by decide, by decide, by decide⟩
+
 /-- E-3 and refresh public-value counts (`num_public_values` at lines 1660-1663 and
 1719-1722). -/
 def decNumPublicValues (n : Nat) : Nat := 1 + amountLimbPvs + 4 * n
@@ -1398,6 +1411,62 @@ theorem verify_channel_update_pins_delta_messages (bk : Backend) (level : RegevS
         simp [expectedPublishedEvals, e2Shape, List.range, List.range.loop, List.bind]
     · rw [if_neg hc] at hfin; exact absurd hfin (by simp)
 
+/-- E-3: acceptance pins the published bit-column evaluation to the evaluation of
+`encode_amount(amount)` recomputed by the verifier from the PUBLIC amount, and the
+key/ciphertext evaluations to the claimed statement. -/
+theorem verify_withdraw_claim_binds_statement (bk : Backend) (level : RegevSecurityLevel)
+    (pk : RegevPkM) (ct : RegevCtM) (amount : Nat) (proofBytes : List Nat)
+    (h : verifyWithdrawClaim bk level pk ct amount proofBytes = .ok ()) :
+    ∃ p z, bk.decode proofBytes = .ok p ∧
+      p.degreeBits = [expectedDegreeBits] ∧
+      p.publishedEvals.length = decNumPublished ∧
+      bk.verifyBatch level airWithdrawClaim
+        (decryptionPublicValues withdrawClaimZkpDomain amount pk ct) p = .ok z ∧
+      p.publishedEvals =
+        [evalAt pk.a z, evalAt pk.b z, evalAt ct.c1 z, evalAt ct.c2 z,
+          evalAt (encodeAmount amount) z] := by
+  simp only [verifyWithdrawClaim, ensure_ok_iff] at h
+  obtain ⟨_, _, hfin⟩ := h
+  cases hv : verifyOne bk level airWithdrawClaim proofBytes
+      (decryptionPublicValues withdrawClaimZkpDomain amount pk ct) decNumPublished
+      expectedDegreeBits with
+  | error e => rw [hv] at hfin; exact absurd hfin (by simp)
+  | ok zp =>
+    obtain ⟨z, p⟩ := zp
+    rw [hv] at hfin
+    dsimp only at hfin
+    obtain ⟨hdec, hdb, hlen, hvb⟩ := verify_one_ok hv
+    refine ⟨p, z, hdec, hdb, hlen, hvb, ?_⟩
+    unfold checkPublishedEvals at hfin
+    by_cases hc : p.publishedEvals =
+        [evalAt pk.a z, evalAt pk.b z, evalAt ct.c1 z, evalAt ct.c2 z,
+          evalAt (encodeAmount amount) z]
+    · exact hc
+    · rw [if_neg hc] at hfin; exact absurd hfin (by simp)
+
+/-- The refresh statement contains the key and the two ciphertexts and NOTHING else:
+no amount, no message limbs. What acceptance claims is only that the two ciphertexts
+encrypt the same hidden plaintext under the same key. -/
+theorem refresh_statement_carries_no_amount {pk : RegevPkM} {oldCt newCt : RegevCtM}
+    (hp : PkShaped pk) (ho : CtShaped oldCt) (hn : CtShaped newCt) (domain : Nat) :
+    (refreshPublicValues domain pk oldCt newCt).length = refreshNumPublicValues regevN := by
+  have hjoin : ([pk.a, pk.b, oldCt.c1, oldCt.c2, newCt.c1, newCt.c2].join).length =
+      6 * regevN := by
+    rw [join_uniform_length regevN _ (by
+      intro l hl
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hl
+      rcases hl with h | h | h | h | h | h <;> rw [h]
+      · exact hp.1
+      · exact hp.2
+      · exact ho.1
+      · exact ho.2
+      · exact hn.1
+      · exact hn.2)]
+    rfl
+  show (domain :: ([pk.a, pk.b, oldCt.c1, oldCt.c2, newCt.c1, newCt.c2].join)).length = _
+  rw [List.length_cons, hjoin, refreshNumPublicValues]
+  omega
+
 /-! ## Prove-side conservation checks (transfer_stark.rs lines 1102-1112, 1196-1211)
 
 The native refusals that keep the prover from building an unsatisfiable trace. They
@@ -1497,5 +1566,535 @@ theorem channel_tx_example_accepts :
     stubBackend, exampleProof, checkPublishedEvals]
   simp only [e1_layout_pinned, example_expected_evals_length]
   norm_cast
+
+/-! # Poseidon2-BabyBear hash signature (src/regev/hash_sig.rs)
+
+The SENDER authorization for an intra-channel transfer: the "signature" is a STARK
+proof of knowledge of `sk_b` with `pk_b` and the message limbs as PUBLIC VALUES.
+Field elements are modelled by their canonical representative in `[0, q)`, and the
+permutation is the opaque `Poseidon2` callback (`Poseidon2Permutation` boundary):
+nothing here asserts preimage or collision resistance, so nothing here asserts
+unforgeability. -/
+
+def poseidonWidth : Nat := 16
+def sboxDegree : Nat := 7
+def sboxRegisters : Nat := 1
+def halfFullRounds : Nat := 4
+def partialRounds : Nat := 13
+/-- "BPKB" / "BSGB" domain words, both `< q` and distinct (lines 128-144). -/
+def domainPkB : Nat := 0x42504b42
+def domainSigB : Nat := 0x42534742
+def skLimbs : Nat := 9
+def digestLimbs : Nat := 8
+def msgLimbs : Nat := 16
+def spongeRate : Nat := 8
+def sigAbsorbLen : Nat := 1 + skLimbs + msgLimbs
+def sigBlocksCount : Nat := (sigAbsorbLen + spongeRate - 1) / spongeRate
+def selCols : Nat := 6
+def bindTailCols : Nat := selCols + skLimbs
+def hashSigNumPv : Nat := digestLimbs + msgLimbs
+def hashSigRealRows : Nat := 1 + sigBlocksCount
+def hashSigHeight : Nat := 8
+/-- `HASH_SIG_HEIGHT.trailing_zeros() + config.is_zk()`. -/
+def hashSigDegreeBits : Nat := 3 + configIsZk
+
+/-- Row width: the upstream `Poseidon2Cols` prefix (an `UpstreamRegev` boundary
+value) plus the binding tail. -/
+def hashSigCols (poseidonCols : Nat) : Nat := poseidonCols + bindTailCols
+
+theorem hash_sig_constants_pinned :
+    poseidonWidth = 16 ∧ sboxDegree = 7 ∧ sboxRegisters = 1 ∧ halfFullRounds = 4 ∧
+      partialRounds = 13 ∧ skLimbs = 9 ∧ digestLimbs = 8 ∧ msgLimbs = 16 ∧ spongeRate = 8 ∧
+      sigAbsorbLen = 26 ∧ sigBlocksCount = 4 ∧ selCols = 6 ∧ bindTailCols = 15 ∧
+      hashSigNumPv = 24 ∧ hashSigRealRows = 5 ∧ hashSigHeight = 8 ∧ hashSigDegreeBits = 4 := by
+  refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, by decide, by decide, rfl, by decide,
+    by decide, by decide, rfl, by decide⟩
+
+theorem hash_sig_row_width (poseidonCols : Nat) :
+    hashSigCols poseidonCols = poseidonCols + 15 := by
+  simp [hashSigCols, bindTailCols, selCols, skLimbs]
+
+/-- The height is the smallest power of two above the real rows, so exactly three
+padding rows exist. -/
+theorem hash_sig_padding_rows : hashSigHeight - hashSigRealRows = 3 := by decide
+
+/-- A2 (domain confusion): the two BabyBear domain words are distinct, both `< q`,
+and distinct from every regev purpose word. -/
+theorem hash_sig_domains_separated :
+    domainPkB ≠ domainSigB ∧ domainPkB < regevQ ∧ domainSigB < regevQ ∧
+      (∀ p : RegevProofPurpose, p.domain ≠ domainPkB ∧ p.domain ≠ domainSigB) := by
+  refine ⟨by decide, by decide, by decide, ?_⟩
+  intro p; cases p <;> exact ⟨by decide, by decide⟩
+
+/-- The permutation as an opaque callback: only its width discipline is assumed. -/
+structure Poseidon2 where
+  permute : List Nat → List Nat
+  permuteLength : ∀ st, st.length = poseidonWidth → (permute st).length = poseidonWidth
+
+/-! ## Key material (hash_sig.rs lines 168-305) -/
+
+def canonicalLimbs (xs : List Nat) : Bool := xs.all (fun x => decide (x < regevQ))
+
+/-- `BabyBearSecretKey::from_canonical_limbs`: rejects non-canonical limbs and the
+degenerate all-zero key (A1). -/
+def skFromCanonicalLimbs (limbs : List Nat) : Except RegevError (List Nat) :=
+  if limbs.length ≠ skLimbs then .error .proofVerification
+  else if canonicalLimbs limbs = false then .error .proofVerification
+  else if limbs.all (fun x => decide (x = 0)) then .error .proofVerification
+  else .ok limbs
+
+theorem sk_from_canonical_limbs_ok {limbs out : List Nat}
+    (h : skFromCanonicalLimbs limbs = .ok out) :
+    out = limbs ∧ limbs.length = skLimbs ∧ (∀ x ∈ limbs, x < regevQ) ∧
+      ¬ (∀ x ∈ limbs, x = 0) := by
+  unfold skFromCanonicalLimbs at h
+  split at h
+  · exact absurd h (by simp)
+  · next hlen =>
+    split at h
+    · exact absurd h (by simp)
+    · next hcanon =>
+      split at h
+      · exact absurd h (by simp)
+      · next hzero =>
+        have hout : out = limbs := by simpa using h.symm
+        refine ⟨hout, by omega, ?_, ?_⟩
+        · intro x hx
+          have : canonicalLimbs limbs = true := by
+            cases hc : canonicalLimbs limbs
+            · exact absurd hc hcanon
+            · rfl
+          have := List.all_eq_true.mp this x hx
+          simpa using this
+        · intro hall
+          exact hzero (List.all_eq_true.mpr (fun x hx => by simp [hall x hx]))
+
+theorem sk_all_zero_rejected (limbs : List Nat) (h : ∀ x ∈ limbs, x = 0) :
+    ∃ e, skFromCanonicalLimbs limbs = .error e := by
+  unfold skFromCanonicalLimbs
+  split
+  · exact ⟨_, rfl⟩
+  · split
+    · exact ⟨_, rfl⟩
+    · split
+      · exact ⟨_, rfl⟩
+      · next hz =>
+        exact absurd (List.all_eq_true.mpr (fun x hx => by simp [h x hx])) hz
+
+/-- `pk_b = Poseidon2([DOMAIN_PK_B] ++ sk ++ 0...)[0..8]` (lines 226-235). -/
+def pkInput (sk : List Nat) : List Nat :=
+  domainPkB :: (sk ++ List.replicate (poseidonWidth - 1 - skLimbs) 0)
+
+def publicKeyOf (P : Poseidon2) (sk : List Nat) : List Nat :=
+  (P.permute (pkInput sk)).take digestLimbs
+
+theorem pk_input_length {sk : List Nat} (h : sk.length = skLimbs) :
+    (pkInput sk).length = poseidonWidth := by
+  simp [pkInput, h, poseidonWidth, skLimbs]
+
+theorem public_key_length (P : Poseidon2) {sk : List Nat} (h : sk.length = skLimbs) :
+    (publicKeyOf P sk).length = digestLimbs := by
+  have hp := P.permuteLength (pkInput sk) (pk_input_length h)
+  simp [publicKeyOf, hp, poseidonWidth, digestLimbs]
+  decide
+
+/-- `to_bytes32` / `from_bytes32`: the eight canonical limbs are the eight `Bytes32`
+words, so the anchor round-trips (lines 274-305). The big-endian word packing itself
+is the `NativeTargetRefinement` boundary. -/
+def pkFromBytes32 (words : List Nat) : Except RegevError (List Nat) :=
+  if words.length ≠ digestLimbs ∨ canonicalLimbs words = false then .error .proofVerification
+  else .ok words
+
+theorem pk_bytes32_roundtrip {digest : List Nat} (hlen : digest.length = digestLimbs)
+    (hcanon : canonicalLimbs digest = true) : pkFromBytes32 digest = .ok digest := by
+  unfold pkFromBytes32
+  rw [if_neg]
+  intro hcon
+  rcases hcon with h | h
+  · exact h hlen
+  · rw [hcanon] at h; exact absurd h (by simp)
+
+/-! ## Message-encoding injectivity (hash_sig.rs lines 307-327)
+
+The IMPA digest's eight u32 words are re-split into sixteen 16-bit limbs, each
+`< 2^16 < q`, so distinct digests give distinct field-element tuples. -/
+
+def decomposeDigestToLimbs (words : List Nat) : List Nat :=
+  words.bind (fun w => [w % 65536, w / 65536 % 65536])
+
+theorem decompose_digest_length (words : List Nat) :
+    (decomposeDigestToLimbs words).length = 2 * words.length := by
+  induction words with
+  | nil => rfl
+  | cons w ws ih => simp [decomposeDigestToLimbs, List.bind] at ih ⊢; omega
+
+theorem decompose_digest_limbs_below_q (words : List Nat) :
+    ∀ x ∈ decomposeDigestToLimbs words, x < 65536 := by
+  intro x hx
+  obtain ⟨w, _, hx2⟩ := List.mem_bind.mp hx
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hx2
+  rcases hx2 with h | h <;> subst h <;> omega
+
+/-- Each message limb is `< 2^16 < q`, so absorbing it into BabyBear cannot alias
+(the reason the raw 8x u32 digest is NOT absorbed directly). -/
+theorem decompose_digest_limbs_canonical (words : List Nat) :
+    ∀ x ∈ decomposeDigestToLimbs words, x < regevQ := by
+  intro x hx
+  have h := decompose_digest_limbs_below_q words x hx
+  have hq : regevQ = 2013265921 := rfl
+  omega
+
+/-- MESSAGE-ENCODING INJECTIVITY (the P3 A-item): two different keccak digests never
+produce the same `m_limbs`, so a proof's public message limbs determine the
+channel-tx digest they were built from. -/
+theorem decompose_digest_injective :
+    ∀ (xs ys : List Nat), (∀ x ∈ xs, x < 4294967296) → (∀ y ∈ ys, y < 4294967296) →
+      xs.length = ys.length → decomposeDigestToLimbs xs = decomposeDigestToLimbs ys → xs = ys
+  | [], [], _, _, _, _ => rfl
+  | [], _ :: _, _, _, hl, _ => by simp at hl
+  | _ :: _, [], _, _, hl, _ => by simp at hl
+  | x :: xs, y :: ys, hx, hy, hl, h => by
+      simp only [decomposeDigestToLimbs, List.bind, List.map, List.join, List.cons_append,
+        List.nil_append, List.cons.injEq] at h
+      have hxb : x < 4294967296 := hx x (by simp)
+      have hyb : y < 4294967296 := hy y (by simp)
+      have hxy : x = y := by
+        obtain ⟨h1, h2, _⟩ := h
+        omega
+      have htl : decomposeDigestToLimbs xs = decomposeDigestToLimbs ys := by
+        simpa [decomposeDigestToLimbs] using h.2.2
+      rw [hxy, decompose_digest_injective xs ys (fun a ha => hx a (by simp [ha]))
+        (fun b hb => hy b (by simp [hb])) (by simpa using hl) htl]
+
+/-! ## The sponge (hash_sig.rs lines 237-265 and the AIR's chaining, lines 1125-1198)
+
+`sig_b = Poseidon2_sponge([DOMAIN_SIG_B] ++ sk ++ m)` with rate 8, overwrite on the
+first block and add on the later ones. The absorbed stream is 26 elements padded to
+four blocks of eight. -/
+
+def fadd (x y : Nat) : Nat := (x + y) % regevQ
+
+def sigAbsorbStream (sk m : List Nat) : List Nat :=
+  (domainSigB :: (sk ++ m)) ++ List.replicate (sigBlocksCount * spongeRate - sigAbsorbLen) 0
+
+def sigBlockList (sk m : List Nat) : List (List Nat) :=
+  let a := sigAbsorbStream sk m
+  [a.take 8, (a.drop 8).take 8, (a.drop 16).take 8, (a.drop 24).take 8]
+
+theorem sig_absorb_stream_length {sk m : List Nat} (hs : sk.length = skLimbs)
+    (hm : m.length = msgLimbs) : (sigAbsorbStream sk m).length = 32 := by
+  simp [sigAbsorbStream, hs, hm, sigBlocksCount, spongeRate, sigAbsorbLen, skLimbs, msgLimbs]
+
+/-- The AIR's per-position chaining constants (rows 1->2, 2->3, 3->4). -/
+def airBlock1 (sk m : List Nat) : List Nat :=
+  [sk.getD 7 0, sk.getD 8 0] ++ (List.range 6).map (fun j => m.getD j 0)
+def airBlock2 (m : List Nat) : List Nat := (List.range 8).map (fun j => m.getD (6 + j) 0)
+def airBlock3 (m : List Nat) : List Nat :=
+  [m.getD 14 0, m.getD 15 0, 0, 0, 0, 0, 0, 0]
+
+/-- FIDELITY: the four blocks the native sponge absorbs are exactly the blocks the
+AIR's hand-written per-position equalities inject — `[DOMAIN_SIG_B, sk0..sk6]`,
+`[sk7, sk8, m0..m5]`, `[m6..m13]`, `[m14, m15, 0...]`. -/
+theorem sig_blocks_match_air_constants (s0 s1 s2 s3 s4 s5 s6 s7 s8 : Nat)
+    (m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15 : Nat) :
+    sigBlockList [s0, s1, s2, s3, s4, s5, s6, s7, s8]
+        [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15] =
+      [ [domainSigB, s0, s1, s2, s3, s4, s5, s6],
+        airBlock1 [s0, s1, s2, s3, s4, s5, s6, s7, s8]
+          [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15],
+        airBlock2 [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15],
+        airBlock3 [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15] ] := by
+  rfl
+
+/-- Absorb one block into the rate and carry the capacity: `next.rate[j] =
+post[j] + block[j]`, `next.capacity = post.capacity` (the AIR's chaining shape). -/
+def absorbBlock (state block : List Nat) : List Nat :=
+  List.zipWith fadd (state.take spongeRate) block ++ state.drop spongeRate
+
+theorem absorb_block_length {state block : List Nat} (hs : state.length = poseidonWidth)
+    (hb : block.length = spongeRate) : (absorbBlock state block).length = poseidonWidth := by
+  simp [absorbBlock, hs, hb, poseidonWidth, spongeRate]
+  decide
+
+/-! ## The binding AIR (hash_sig.rs lines 877-1203) -/
+
+inductive RowKind where
+  | pk
+  | sig1
+  | sig2
+  | sig3
+  | sig4
+  | pad
+  deriving DecidableEq, Repr
+
+def advanceKind : RowKind → RowKind
+  | .pk => .sig1
+  | .sig1 => .sig2
+  | .sig2 => .sig3
+  | .sig3 => .sig4
+  | .sig4 => .pad
+  | .pad => .pad
+
+/-- The one-hot selector columns `sel[0..6]`. -/
+def selBits : RowKind → List Nat
+  | .pk => [1, 0, 0, 0, 0, 0]
+  | .sig1 => [0, 1, 0, 0, 0, 0]
+  | .sig2 => [0, 0, 1, 0, 0, 0]
+  | .sig3 => [0, 0, 0, 1, 0, 0]
+  | .sig4 => [0, 0, 0, 0, 1, 0]
+  | .pad => [0, 0, 0, 0, 0, 1]
+
+theorem selector_one_hot (k : RowKind) :
+    (selBits k).length = selCols ∧ (selBits k).foldl (fun a b => a + b) 0 = 1 := by
+  cases k <;> exact ⟨by decide, by decide⟩
+
+/-- FIDELITY: `advanceKind` is exactly the source's five shift-register constraints
+`next_pk = 0`, `next_sigK = local_sig(K-1)`, `next_pad = local_sig4 + local_pad`. -/
+theorem selector_shift_encoding (k : RowKind) :
+    selBits (advanceKind k) =
+      [0, (selBits k).getD 0 0, (selBits k).getD 1 0, (selBits k).getD 2 0,
+        (selBits k).getD 3 0, (selBits k).getD 4 0 + (selBits k).getD 5 0] := by
+  cases k <;> rfl
+
+structure HashSigRow where
+  inputs : List Nat
+  post : List Nat
+  kind : RowKind
+  sk : List Nat
+
+/-- The AIR's constraint set, gated by the one-hot selectors. `sig_b` (row 4's
+output) is deliberately NOT bound to any public value (A6), and padding rows carry
+no gated binding at all. -/
+structure HashSigGates (P : Poseidon2) (pvPk pvM : List Nat) (rows : Nat → HashSigRow) : Prop where
+  /-- (1) every row is a valid permutation (the audited upstream `Poseidon2Air`). -/
+  permutation : ∀ i, i < hashSigHeight → (rows i).post = P.permute (rows i).inputs
+  /-- (2) row 0 is the pk row and the selectors advance as a shift register. -/
+  firstRowIsPk : (rows 0).kind = .pk
+  selectorShift : ∀ i, i + 1 < hashSigHeight → (rows (i + 1)).kind = advanceKind (rows i).kind
+  /-- (3) the secret key is held equal on every row. -/
+  skBroadcast : ∀ i, i + 1 < hashSigHeight → (rows (i + 1)).sk = (rows i).sk
+  /-- (4) pk row: `input = [DOMAIN_PK_B, sk(9), 0(6)]`, `output[0..8] = pk_b`. -/
+  pkRow : ∀ i, i < hashSigHeight → (rows i).kind = .pk →
+    (rows i).inputs = pkInput (rows i).sk ∧ ((rows i).post).take digestLimbs = pvPk
+  /-- (5) first sponge row: `input = [DOMAIN_SIG_B, sk0..sk6, 0(8)]`. -/
+  sig1Row : ∀ i, i < hashSigHeight → (rows i).kind = .sig1 →
+    (rows i).inputs = (domainSigB :: (rows i).sk.take 7) ++ List.replicate 8 0
+  /-- (6)-(8) the three chaining constraints. -/
+  chain1 : ∀ i, i + 1 < hashSigHeight → (rows i).kind = .sig1 →
+    (rows (i + 1)).inputs = absorbBlock (rows i).post (airBlock1 (rows i).sk pvM)
+  chain2 : ∀ i, i + 1 < hashSigHeight → (rows i).kind = .sig2 →
+    (rows (i + 1)).inputs = absorbBlock (rows i).post (airBlock2 pvM)
+  chain3 : ∀ i, i + 1 < hashSigHeight → (rows i).kind = .sig3 →
+    (rows (i + 1)).inputs = absorbBlock (rows i).post (airBlock3 pvM)
+
+/-- The selector schedule is forced: rows 0..4 are the pk row and the four sponge
+rows, and every later row is a padding row. -/
+theorem selector_schedule_forced (P : Poseidon2) (pvPk pvM : List Nat)
+    (rows : Nat → HashSigRow) (g : HashSigGates P pvPk pvM rows) :
+    (rows 0).kind = .pk ∧ (rows 1).kind = .sig1 ∧ (rows 2).kind = .sig2 ∧
+      (rows 3).kind = .sig3 ∧ (rows 4).kind = .sig4 ∧ (rows 5).kind = .pad ∧
+      (rows 6).kind = .pad ∧ (rows 7).kind = .pad := by
+  have h0 := g.firstRowIsPk
+  have h1 := g.selectorShift 0 (by decide)
+  have h2 := g.selectorShift 1 (by decide)
+  have h3 := g.selectorShift 2 (by decide)
+  have h4 := g.selectorShift 3 (by decide)
+  have h5 := g.selectorShift 4 (by decide)
+  have h6 := g.selectorShift 5 (by decide)
+  have h7 := g.selectorShift 6 (by decide)
+  rw [h0] at h1
+  rw [h1] at h2
+  rw [h2] at h3
+  rw [h3] at h4
+  rw [h4] at h5
+  rw [h5] at h6
+  rw [h6] at h7
+  exact ⟨h0, h1, h2, h3, h4, h5, h6, h7⟩
+
+/-- WHAT THE PROOF ESTABLISHES (1/2): the public `pk_b` is the Poseidon2 image of the
+witnessed secret key that every row carries. Combined with `Poseidon2Permutation`
+preimage resistance (NOT proved here) this is the knowledge-of-`sk_b` statement. -/
+theorem hash_sig_pk_row_binds_public_key (P : Poseidon2) (pvPk pvM : List Nat)
+    (rows : Nat → HashSigRow) (g : HashSigGates P pvPk pvM rows) :
+    pvPk = publicKeyOf P (rows 0).sk := by
+  obtain ⟨hin, hout⟩ := g.pkRow 0 (by decide) g.firstRowIsPk
+  have hperm := g.permutation 0 (by decide)
+  rw [← hout, hperm, hin]
+  rfl
+
+/-- The sponge inputs the AIR forces on rows 1..4, as a function of the broadcast
+secret key and the PUBLIC message limbs alone. -/
+def nativeSigInput0 (sk : List Nat) : List Nat :=
+  (domainSigB :: sk.take 7) ++ List.replicate 8 0
+def nativeSigInput1 (P : Poseidon2) (sk m : List Nat) : List Nat :=
+  absorbBlock (P.permute (nativeSigInput0 sk)) (airBlock1 sk m)
+def nativeSigInput2 (P : Poseidon2) (sk m : List Nat) : List Nat :=
+  absorbBlock (P.permute (nativeSigInput1 P sk m)) (airBlock2 m)
+def nativeSigInput3 (P : Poseidon2) (sk m : List Nat) : List Nat :=
+  absorbBlock (P.permute (nativeSigInput2 P sk m)) (airBlock3 m)
+
+/-- WHAT THE PROOF ESTABLISHES (2/2): rows 1..4 are exactly the native sponge run on
+`[DOMAIN_SIG_B] ++ sk ++ m` — the same secret key as the pk row (broadcast register)
+and the message limbs taken from the PUBLIC values. -/
+theorem hash_sig_sig_rows_are_native_sponge (P : Poseidon2) (pvPk pvM : List Nat)
+    (rows : Nat → HashSigRow) (g : HashSigGates P pvPk pvM rows) :
+    (rows 1).inputs = nativeSigInput0 (rows 0).sk ∧
+      (rows 2).inputs = nativeSigInput1 P (rows 0).sk pvM ∧
+      (rows 3).inputs = nativeSigInput2 P (rows 0).sk pvM ∧
+      (rows 4).inputs = nativeSigInput3 P (rows 0).sk pvM := by
+  obtain ⟨k0, k1, k2, k3, _, _, _, _⟩ := selector_schedule_forced P pvPk pvM rows g
+  have hsk1 : (rows 1).sk = (rows 0).sk := g.skBroadcast 0 (by decide)
+  have hsk2 : (rows 2).sk = (rows 0).sk := by
+    rw [g.skBroadcast 1 (by decide), hsk1]
+  have hsk3 : (rows 3).sk = (rows 0).sk := by
+    rw [g.skBroadcast 2 (by decide), hsk2]
+  have e1 : (rows 1).inputs = (domainSigB :: (rows 0).sk.take 7) ++ List.replicate 8 0 := by
+    have := g.sig1Row 1 (by decide) k1
+    rw [hsk1] at this
+    exact this
+  have e2 : (rows 2).inputs = absorbBlock (rows 1).post (airBlock1 (rows 0).sk pvM) := by
+    have := g.chain1 1 (by decide) k1
+    rw [hsk1] at this
+    exact this
+  have e3 : (rows 3).inputs = absorbBlock (rows 2).post (airBlock2 pvM) :=
+    g.chain2 2 (by decide) k2
+  have e4 : (rows 4).inputs = absorbBlock (rows 3).post (airBlock3 pvM) :=
+    g.chain3 3 (by decide) k3
+  have p1 := g.permutation 1 (by decide)
+  have p2 := g.permutation 2 (by decide)
+  have p3 := g.permutation 3 (by decide)
+  refine ⟨e1, ?_, ?_, ?_⟩
+  · rw [e2, p1, e1]; rfl
+  · rw [e3, p2, e2, p1, e1]; rfl
+  · rw [e4, p3, e3, p2, e2, p1, e1]; rfl
+
+/-- Padding rows: every row above index 4 is a `pad` row, and the ONLY gate that
+mentions it is the permutation constraint — the pk-row, sig1-row and chaining gates
+are all conditioned on a non-pad selector. A spliced padding permutation therefore
+cannot affect `pk_b` (only the pk row binds it) or `m` (only the chaining gates read
+it). -/
+theorem hash_sig_padding_rows_only_permutation (P : Poseidon2) (pvPk pvM : List Nat)
+    (rows : Nat → HashSigRow) (g : HashSigGates P pvPk pvM rows) :
+    ∀ i, 5 ≤ i → i < hashSigHeight →
+      (rows i).kind = .pad ∧ (rows i).post = P.permute (rows i).inputs := by
+  obtain ⟨_, _, _, _, _, k5, k6, k7⟩ := selector_schedule_forced P pvPk pvM rows g
+  intro i h5 hi
+  refine ⟨?_, g.permutation i hi⟩
+  have : i = 5 ∨ i = 6 ∨ i = 7 := by
+    have : i < 8 := by simpa [hashSigHeight] using hi
+    omega
+  rcases this with h | h | h
+  · rw [h]; exact k5
+  · rw [h]; exact k6
+  · rw [h]; exact k7
+
+/-! ## Hash-signature public values and verification (hash_sig.rs lines 1305-1310,
+transfer_stark.rs lines 954-994)
+
+The public values are `[pk_b(8) ++ m(16)]` — `sig_b` is witness-only and never
+appears. The verifier is handed the public values by its CALLER, which recomputes
+`pk_b` from the registered `MemberLeaf` and `m` from the channel-tx digest. -/
+
+def hashSigPublicValues (pkB mLimbs : List Nat) : List Nat := pkB ++ mLimbs
+
+theorem hash_sig_public_values_length {pkB mLimbs : List Nat} (hp : pkB.length = digestLimbs)
+    (hm : mLimbs.length = msgLimbs) : (hashSigPublicValues pkB mLimbs).length = hashSigNumPv := by
+  simp [hashSigPublicValues, hp, hm, hashSigNumPv]
+
+/-- The statement a relying party rebuilds (P3-5): the member's registered `pk_b`
+and the 16-bit limbs of the channel-tx digest. -/
+def hashSigStatement (memberPkB txDigest : List Nat) : List Nat :=
+  hashSigPublicValues memberPkB (decomposeDigestToLimbs txDigest)
+
+/-- STATEMENT INJECTIVITY: the public-value vector determines both the member key and
+the channel-tx digest it authorizes, so a proof cannot be re-aimed at another member
+or another transaction without changing the absorbed public values. Whether a changed
+public-value vector really invalidates the proof is the `StarkSoundness` boundary. -/
+theorem hash_sig_statement_injective {pk pk' d d' : List Nat}
+    (hp : pk.length = digestLimbs) (hp' : pk'.length = digestLimbs)
+    (hd : d.length = 8) (hd' : d'.length = 8)
+    (hdb : ∀ x ∈ d, x < 4294967296) (hdb' : ∀ x ∈ d', x < 4294967296)
+    (h : hashSigStatement pk d = hashSigStatement pk' d') : pk = pk' ∧ d = d' := by
+  have hsplit := list_append_split pk pk' (decomposeDigestToLimbs d) (decomposeDigestToLimbs d')
+    h (by rw [hp, hp'])
+  exact ⟨hsplit.1, decompose_digest_injective d d' hdb hdb' (by rw [hd, hd']) hsplit.2⟩
+
+def verifyHashSig (bk : Backend) (level : RegevSecurityLevel) (proofBytes : List Nat)
+    (publicValues : List Nat) : Except RegevError Unit :=
+  if publicValues.length ≠ hashSigNumPv then .error .proofVerification
+  else
+    match bk.decode proofBytes with
+    | .error e => .error e
+    | .ok p =>
+        if p.degreeBits ≠ [hashSigDegreeBits] then .error .proofVerification
+        else
+          match bk.verifyBatch level airHashSig publicValues p with
+          | .error e => .error e
+          | .ok _ => .ok ()
+
+/-- The public-value count is checked BEFORE the proof bytes are touched (line 966). -/
+theorem verify_hash_sig_checks_pv_count_first (bk : Backend) (level : RegevSecurityLevel)
+    (proofBytes publicValues : List Nat) (h : publicValues.length ≠ hashSigNumPv) :
+    verifyHashSig bk level proofBytes publicValues = .error .proofVerification := by
+  unfold verifyHashSig
+  rw [if_pos h]
+
+/-- Acceptance means: the caller-supplied public values were absorbed by the backend
+for the hash-signature AIR at the pinned trace height. It does NOT mean the signer
+was authorized for anything — that binding is the caller's `pk_b` lookup in the
+member tree, and unforgeability is the `Poseidon2Permutation` boundary. -/
+theorem verify_hash_sig_binds_public_values (bk : Backend) (level : RegevSecurityLevel)
+    (proofBytes publicValues : List Nat)
+    (h : verifyHashSig bk level proofBytes publicValues = .ok ()) :
+    publicValues.length = hashSigNumPv ∧
+      ∃ p z, bk.decode proofBytes = .ok p ∧ p.degreeBits = [hashSigDegreeBits] ∧
+        bk.verifyBatch level airHashSig publicValues p = .ok z := by
+  unfold verifyHashSig at h
+  by_cases hlen : publicValues.length ≠ hashSigNumPv
+  · rw [if_pos hlen] at h; exact absurd h (by simp)
+  · rw [if_neg hlen] at h
+    refine ⟨by simpa using hlen, ?_⟩
+    cases hd : bk.decode proofBytes with
+    | error e => rw [hd] at h; exact absurd h (by simp)
+    | ok p =>
+      rw [hd] at h
+      dsimp only at h
+      by_cases hdb : p.degreeBits ≠ [hashSigDegreeBits]
+      · rw [if_pos hdb] at h; exact absurd h (by simp)
+      · rw [if_neg hdb] at h
+        cases hv : bk.verifyBatch level airHashSig publicValues p with
+        | error e => rw [hv] at h; exact absurd h (by simp)
+        | ok z => exact ⟨p, z, by first | exact hd | rfl, by simpa using hdb,
+            by first | exact hv | rfl⟩
+
+/-- The public-value vector is EXACTLY the key and the message: there is no nonce,
+counter, expiry or channel-state component in it. The freshness of the authorization
+is therefore entirely carried by the channel-tx digest the caller puts into `m`; a
+relying party that accepts the same digest twice accepts the same authorization
+twice. This model records that usage discipline, it does not enforce it. -/
+theorem hash_sig_public_values_decompose {pkB mLimbs : List Nat}
+    (hp : pkB.length = digestLimbs) :
+    (hashSigPublicValues pkB mLimbs).take digestLimbs = pkB ∧
+      (hashSigPublicValues pkB mLimbs).drop digestLimbs = mLimbs := by
+  constructor
+  · rw [hashSigPublicValues, ← hp]
+    exact List.take_left _ _
+  · rw [hashSigPublicValues, ← hp]
+    exact List.drop_left _ _
+
+/-- A concrete accepting hash-signature run (non-vacuity), with a stub backend. -/
+def hashSigStubProof : ProofM :=
+  { degreeBits := [hashSigDegreeBits], publishedEvals := [], payload := 0 }
+
+def hashSigStubBackend : Backend :=
+  { decode := fun _ => .ok hashSigStubProof
+    verifyBatch := fun _ _ _ _ => .ok 0 }
+
+theorem hash_sig_example_accepts :
+    verifyHashSig hashSigStubBackend .production []
+      (hashSigPublicValues (List.replicate digestLimbs 0) (List.replicate msgLimbs 0))
+      = .ok () := by
+  unfold verifyHashSig hashSigPublicValues hashSigStubBackend hashSigStubProof
+  simp [hashSigNumPv, digestLimbs, msgLimbs]
 
 end Zkp.Implementation.RegevProofs

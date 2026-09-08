@@ -1489,8 +1489,8 @@ theorem sample_full_artifact_is_accepted :
 
 theorem sample_submission_metadata_is_the_compact_commitment :
     mleV2CompactSubmissionMetadata sampleEnv "full" "config" = .ok (sampleCompact, 3) := by
-  simp [mleV2CompactSubmissionMetadata, sample_full_artifact_is_accepted, sampleEnv,
-    sampleCompact, u32Max]
+  simp only [mleV2CompactSubmissionMetadata, sample_full_artifact_is_accepted]
+  simp [sampleEnv, sampleCompact, u32Max]
 
 theorem sample_tampered_structured_proof_is_rejected :
     validateMleV2FullAgainstConfigJson sampleTamperedEnv "full" "config" =
@@ -1498,5 +1498,942 @@ theorem sample_tampered_structured_proof_is_rejected :
   simp [validateMleV2FullAgainstConfigJson, compactMleV2BytesFromFixture, decodeAndValidate,
     sampleTamperedEnv, sampleEnv, sampleTamperedFullFixture, sampleFullFixture,
     sampleConfigFixture, sampleCompactRecord, sampleCompact, sampleProofView]
+
+/-! ## 6. The RETIRED member-set-update prototype (`src/deprecated/**`)
+
+`src/deprecated/mod.rs` and `src/deprecated/member_set_update/mod.rs` are two documentation-only
+module declarations: nothing is compiled unless the matching `deprecated-*` Cargo feature is
+selected. Section 9 models that manifest gate. Everything in sections 6-8 is a model of a
+RETIRED path, kept for audit archaeology; nothing below asserts that the prototype is safe,
+complete, or fit to deploy. The prototype's own documented limitation (it authenticates the old
+signer set's requested mutation but never proves an atomic transition of every settlement and
+validity-layer authority) is NOT modelled and is not repaired by any theorem here. -/
+
+/-- `constants.rs:135`. The sig-cluster capacity. -/
+def maxSigCluster : Nat := 8
+/-- `Bytes32` limb count. -/
+def bytes32Len : Nat := 8
+
+theorem max_sig_cluster_pinned : maxSigCluster = 8 := rfl
+theorem bytes32_len_pinned : bytes32Len = 8 := rfl
+
+/-- `circuit.rs:91`: `1 + 2 + 8 + 8 + 1 + 1 + 5`. -/
+def memberSetUpdatePublicInputsLen : Nat := 1 + 2 + 8 + 8 + 1 + 1 + 5
+
+theorem member_set_update_public_inputs_len_pinned : memberSetUpdatePublicInputsLen = 26 := rfl
+
+/-- The eight cluster slot indices, written out so slot quantification never depends on a
+`List.range` membership lemma. -/
+def slotIndices : List Nat := [0, 1, 2, 3, 4, 5, 6, 7]
+
+theorem slot_indices_cover_the_cluster : slotIndices.length = maxSigCluster := rfl
+
+theorem mem_slot_indices_lt (i : Nat) (h : i ∈ slotIndices) : i < maxSigCluster := by
+  simp only [slotIndices, List.mem_cons, List.not_mem_nil, or_false] at h
+  simp only [maxSigCluster]
+  omega
+
+theorem lt_mem_slot_indices (i : Nat) (h : i < maxSigCluster) : i ∈ slotIndices := by
+  simp only [maxSigCluster] at h
+  simp only [slotIndices, List.mem_cons, List.not_mem_nil, or_false]
+  omega
+
+/-- `circuit.rs:88` — the in-circuit IMCM constant. -/
+def imcmDomain : Nat := 0x494d434d
+/-- `common/channel.rs:64` — `CLOSE_MEMBER_SET_DOMAIN`, the native/Manager-side constant the
+in-circuit keccak must agree with byte for byte. -/
+def closeMemberSetDomain : Nat := 0x494d434d
+/-- `constants.rs:262` — `MEMBER_SET_UPDATE_DOMAIN` ("IMMS"). -/
+def immsDomain : Nat := 0x494d4d53
+
+/-- The in-circuit commitment domain is the same literal as the native close-path domain, which
+is what makes the exposed commitments comparable with the Manager's stored value. -/
+theorem imcm_domain_agrees_with_close_member_set_domain : imcmDomain = closeMemberSetDomain := rfl
+
+theorem member_set_update_domains_are_distinct : imcmDomain ≠ immsDomain := by decide
+
+/-- `falcon_sig/agg.rs:161-167`, the aggregate-proof public-input layout the circuit reads. -/
+def falconAggMsgOffset : Nat := 0
+def falconAggCountOffset : Nat := bytes32Len
+def falconAggPkListOffset : Nat := bytes32Len + 1
+def falconAggPublicInputsLen : Nat := bytes32Len + 1 + maxSigCluster * bytes32Len
+
+theorem falcon_agg_layout_pinned :
+    falconAggMsgOffset = 0 ∧ falconAggCountOffset = 8 ∧ falconAggPkListOffset = 9 ∧
+      falconAggPublicInputsLen = 73 := by decide
+
+/-- Slot `i`'s pk_g occupies `[pkSlotStart i, pkSlotStart i + 8)` (`circuit.rs:313`). -/
+def pkSlotStart (i : Nat) : Nat := falconAggPkListOffset + i * bytes32Len
+
+theorem pk_slots_are_disjoint_and_inside_the_aggregate_layout (i : Nat) (h : i < maxSigCluster) :
+    pkSlotStart i + bytes32Len ≤ falconAggPublicInputsLen ∧
+      pkSlotStart i + bytes32Len = pkSlotStart (i + 1) := by
+  simp only [pkSlotStart, falconAggPkListOffset, falconAggPublicInputsLen, bytes32Len,
+    maxSigCluster] at *
+  omega
+
+/-! ### 6.1 The 26-limb public-input record (`circuit.rs:93-123`) -/
+
+structure Words8 where
+  w0 : Nat
+  w1 : Nat
+  w2 : Nat
+  w3 : Nat
+  w4 : Nat
+  w5 : Nat
+  w6 : Nat
+  w7 : Nat
+  deriving DecidableEq, Repr
+
+def Words8.toList (w : Words8) : List Nat := [w.w0, w.w1, w.w2, w.w3, w.w4, w.w5, w.w6, w.w7]
+def Words8.zero : Words8 := ⟨0, 0, 0, 0, 0, 0, 0, 0⟩
+
+theorem words8_to_list_length (w : Words8) : w.toList.length = bytes32Len := rfl
+
+structure Address5 where
+  a0 : Nat
+  a1 : Nat
+  a2 : Nat
+  a3 : Nat
+  a4 : Nat
+  deriving DecidableEq, Repr
+
+def Address5.toList (a : Address5) : List Nat := [a.a0, a.a1, a.a2, a.a3, a.a4]
+def Address5.zero : Address5 := ⟨0, 0, 0, 0, 0⟩
+
+theorem address5_to_list_length (a : Address5) : a.toList.length = 5 := rfl
+
+structure MsuPublicInputs where
+  /-- `ChannelId` is a single non-zero u32 limb (`common/channel_id.rs`). -/
+  channelId : Nat
+  /-- The NEW set version; the Manager checks strict monotonicity on-chain (not modelled). -/
+  setVersion : Nat
+  oldCommitment : Words8
+  newCommitment : Words8
+  oldCount : Nat
+  newCount : Nat
+  /-- The joiner's exit address for an add; the zero address for a rotation. -/
+  recipient : Address5
+  deriving DecidableEq, Repr
+
+/-- `set_version >> 32` on a `u64`. -/
+def setVersionHi (v : Nat) : Nat := v / 4294967296
+/-- `set_version & 0xffff_ffff` on a `u64`. -/
+def setVersionLo (v : Nat) : Nat := v % 4294967296
+
+theorem set_version_limbs_recompose (v : Nat) :
+    setVersionHi v * 4294967296 + setVersionLo v = v := by
+  simp only [setVersionHi, setVersionLo]
+  omega
+
+theorem set_version_limbs_fit_u32 (v : Nat) (h : v < 18446744073709551616) :
+    setVersionHi v < 4294967296 ∧ setVersionLo v < 4294967296 := by
+  simp only [setVersionHi, setVersionLo]
+  omega
+
+/-- `MemberSetUpdatePublicInputs::to_u64_vec` (`circuit.rs:110-122`):
+`[channelId(1) | setVersion hi,lo (2) | oldCommitment(8) | newCommitment(8) | oldCount(1) |
+newCount(1) | recipient(5)]`. -/
+def MsuPublicInputs.toU64Vec (p : MsuPublicInputs) : List Nat :=
+  [p.channelId, setVersionHi p.setVersion, setVersionLo p.setVersion] ++
+    p.oldCommitment.toList ++ p.newCommitment.toList ++ [p.oldCount, p.newCount] ++
+    p.recipient.toList
+
+theorem msu_public_inputs_length (p : MsuPublicInputs) :
+    p.toU64Vec.length = memberSetUpdatePublicInputsLen := rfl
+
+/-- The exact limb positions the Solidity bind re-reads. -/
+theorem msu_public_inputs_layout (p : MsuPublicInputs) :
+    p.toU64Vec[0]? = some p.channelId ∧
+    p.toU64Vec[1]? = some (setVersionHi p.setVersion) ∧
+    p.toU64Vec[2]? = some (setVersionLo p.setVersion) ∧
+    p.toU64Vec[3]? = some p.oldCommitment.w0 ∧
+    p.toU64Vec[10]? = some p.oldCommitment.w7 ∧
+    p.toU64Vec[11]? = some p.newCommitment.w0 ∧
+    p.toU64Vec[18]? = some p.newCommitment.w7 ∧
+    p.toU64Vec[19]? = some p.oldCount ∧
+    p.toU64Vec[20]? = some p.newCount ∧
+    p.toU64Vec[21]? = some p.recipient.a0 ∧
+    p.toU64Vec[25]? = some p.recipient.a4 ∧
+    p.toU64Vec[26]? = none := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp [MsuPublicInputs.toU64Vec, Words8.toList, Address5.toList]
+
+theorem words8_ext (a b : Words8) (h0 : a.w0 = b.w0) (h1 : a.w1 = b.w1) (h2 : a.w2 = b.w2)
+    (h3 : a.w3 = b.w3) (h4 : a.w4 = b.w4) (h5 : a.w5 = b.w5) (h6 : a.w6 = b.w6)
+    (h7 : a.w7 = b.w7) : a = b := by
+  cases a; cases b; simp_all
+
+theorem address5_ext (a b : Address5) (h0 : a.a0 = b.a0) (h1 : a.a1 = b.a1) (h2 : a.a2 = b.a2)
+    (h3 : a.a3 = b.a3) (h4 : a.a4 = b.a4) : a = b := by
+  cases a; cases b; simp_all
+
+/-- The commitment limbs occupy disjoint eight-limb windows: an old-set commitment can never be
+read as the new-set commitment. -/
+theorem msu_commitment_windows_are_disjoint (p q : MsuPublicInputs)
+    (h : p.toU64Vec = q.toU64Vec) : p.oldCommitment = q.oldCommitment ∧
+      p.newCommitment = q.newCommitment ∧ p.oldCount = q.oldCount ∧ p.newCount = q.newCount ∧
+      p.recipient = q.recipient ∧ p.channelId = q.channelId := by
+  simp only [MsuPublicInputs.toU64Vec, Words8.toList, Address5.toList, List.append_assoc,
+    List.cons_append, List.nil_append, List.cons.injEq] at h
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18,
+    h19, h20, h21, h22, h23, h24, h25, _⟩ := h
+  exact ⟨words8_ext _ _ h3 h4 h5 h6 h7 h8 h9 h10,
+    words8_ext _ _ h11 h12 h13 h14 h15 h16 h17 h18, h19, h20,
+    address5_ext _ _ h21 h22 h23 h24 h25, h0⟩
+
+/-! ### 6.2 The native mirror `expected_public_inputs` (`circuit.rs:194-224`) -/
+
+/-- `MemberLeaf` viewed through the three digests the circuit compares. -/
+structure MemberLeaf where
+  pkG : Words8
+  pkB : Words8
+  regevPkDigest : Words8
+  deriving DecidableEq, Repr
+
+def emptyLeaf : MemberLeaf := ⟨Words8.zero, Words8.zero, Words8.zero⟩
+
+def leafAt (ls : List MemberLeaf) (i : Nat) : MemberLeaf := (ls[i]?).getD emptyLeaf
+
+/-- `old_leaves.iter().take_while(|l| **l != empty).count()`. -/
+def leadingCount (ls : List MemberLeaf) : Nat :=
+  (ls.takeWhile (fun l => decide (l ≠ emptyLeaf))).length
+
+def changedIndices (old new : List MemberLeaf) : List Nat :=
+  (slotIndices).filter (fun i => decide (leafAt old i ≠ leafAt new i))
+
+structure MsuWitness where
+  channelId : Nat
+  setVersion : Nat
+  oldLeaves : List MemberLeaf
+  newLeaves : List MemberLeaf
+  recipient : Address5
+  deriving DecidableEq
+
+inductive MsuWitnessError where
+  | deltaRejected (message : String)
+  | notExactlyOneChangedSlot
+  | rotationCarriesNonZeroRecipient
+  deriving DecidableEq
+
+/-- The native strict mirror. `validateDelta` is `validate_member_set_delta` (a boundary in
+another module) and `commit` is `close_member_set_commitment` (an opaque keccak callback). The
+check ORDER is the source's: delta validation, then exactly-one-changed-slot, then the
+rotation/recipient rule. -/
+def expectedPublicInputs (validateDelta : List MemberLeaf → List MemberLeaf → Except String Unit)
+    (commit : List Words8 → Nat → Words8) (w : MsuWitness) :
+    Except MsuWitnessError MsuPublicInputs :=
+  match validateDelta w.oldLeaves w.newLeaves with
+  | .error m => .error (.deltaRejected m)
+  | .ok _ =>
+    match changedIndices w.oldLeaves w.newLeaves with
+    | [j] =>
+      let isAdd := leafAt w.oldLeaves j == emptyLeaf
+      let oldCount := leadingCount w.oldLeaves
+      let newCount := oldCount + (if isAdd then 1 else 0)
+      if !isAdd && w.recipient ≠ Address5.zero then .error .rotationCarriesNonZeroRecipient
+      else
+        .ok { channelId := w.channelId
+              setVersion := w.setVersion
+              oldCommitment :=
+                commit ((slotIndices).map (fun i => (leafAt w.oldLeaves i).pkG))
+                  oldCount
+              newCommitment :=
+                commit ((slotIndices).map (fun i => (leafAt w.newLeaves i).pkG))
+                  newCount
+              oldCount := oldCount
+              newCount := newCount
+              recipient := w.recipient }
+    | _ => .error .notExactlyOneChangedSlot
+
+theorem native_mirror_runs_delta_validation_first
+    (validateDelta : List MemberLeaf → List MemberLeaf → Except String Unit)
+    (commit : List Words8 → Nat → Words8) (w : MsuWitness) (m : String)
+    (h : validateDelta w.oldLeaves w.newLeaves = .error m) :
+    expectedPublicInputs validateDelta commit w = .error (.deltaRejected m) := by
+  simp [expectedPublicInputs, h]
+
+theorem native_mirror_requires_exactly_one_changed_slot
+    (validateDelta : List MemberLeaf → List MemberLeaf → Except String Unit)
+    (commit : List Words8 → Nat → Words8) (w : MsuWitness) (p : MsuPublicInputs)
+    (h : expectedPublicInputs validateDelta commit w = .ok p) :
+    validateDelta w.oldLeaves w.newLeaves = .ok () ∧
+      (changedIndices w.oldLeaves w.newLeaves).length = 1 := by
+  simp only [expectedPublicInputs] at h
+  split at h
+  · cases h
+  · rename_i u hu
+    cases u
+    split at h
+    · rename_i j hchanged
+      split at h
+      · cases h
+      · exact ⟨hu, by rw [hchanged]; rfl⟩
+    · cases h
+
+/-- The exposed counts differ by exactly the add bit: a native run never grows the set by more
+than one, and never shrinks it. -/
+theorem native_mirror_new_count_is_old_plus_add
+    (validateDelta : List MemberLeaf → List MemberLeaf → Except String Unit)
+    (commit : List Words8 → Nat → Words8) (w : MsuWitness) (p : MsuPublicInputs)
+    (h : expectedPublicInputs validateDelta commit w = .ok p) :
+    p.oldCount = leadingCount w.oldLeaves ∧
+      (p.newCount = p.oldCount ∨ p.newCount = p.oldCount + 1) := by
+  simp only [expectedPublicInputs] at h
+  split at h
+  · cases h
+  · split at h
+    · rename_i j _
+      split at h
+      · cases h
+      · injection h with hp
+        subst hp
+        by_cases hadd : (leafAt w.oldLeaves j == emptyLeaf) = true
+        · simp [hadd]
+        · simp at hadd
+          simp [hadd]
+    · cases h
+
+/-- A rotation (no add) must expose the zero recipient; the recipient limbs are meaningful only
+for an add. -/
+theorem native_mirror_rotation_carries_zero_recipient
+    (validateDelta : List MemberLeaf → List MemberLeaf → Except String Unit)
+    (commit : List Words8 → Nat → Words8) (w : MsuWitness) (p : MsuPublicInputs)
+    (h : expectedPublicInputs validateDelta commit w = .ok p) (hrot : p.newCount = p.oldCount) :
+    p.recipient = Address5.zero := by
+  simp only [expectedPublicInputs] at h
+  split at h
+  · cases h
+  · split at h
+    · rename_i j _
+      split at h
+      · cases h
+      · rename_i hguard
+        injection h with hp
+        subst hp
+        by_cases hadd : (leafAt w.oldLeaves j == emptyLeaf) = true
+        · have hbad : leadingCount w.oldLeaves + 1 = leadingCount w.oldLeaves := by
+            simpa [hadd] using hrot
+          omega
+        · simp only [Bool.not_eq_true] at hadd
+          simp [hadd] at hguard
+          exact hguard
+    · cases h
+
+/-! ### 6.3 Thermometer encoding of the active-slot bits (`circuit.rs:276-292`) -/
+
+/-- `active[i+1] * (1 - active[i]) = 0` for every adjacent pair. -/
+def Thermometer : List Bool → Prop
+  | [] => True
+  | a :: rest => (rest.head? = some true → a = true) ∧ Thermometer rest
+
+def countTrue : List Bool → Nat
+  | [] => 0
+  | true :: r => countTrue r + 1
+  | false :: r => countTrue r
+
+theorem count_true_le_length : ∀ bs : List Bool, countTrue bs ≤ bs.length := by
+  intro bs
+  induction bs with
+  | nil => exact Nat.le_refl 0
+  | cons a r ih =>
+    cases a with
+    | true => simp only [countTrue, List.length_cons]; omega
+    | false => simp only [countTrue, List.length_cons]; omega
+
+theorem thermometer_head_false_forces_all_false :
+    ∀ bs : List Bool, Thermometer bs → bs.head? ≠ some true → countTrue bs = 0 := by
+  intro bs
+  induction bs with
+  | nil => intro _ _; rfl
+  | cons a r ih =>
+    intro h hhead
+    obtain ⟨h1, h2⟩ := h
+    cases a with
+    | true => exact absurd rfl hhead
+    | false =>
+      have hr : r.head? ≠ some true := by
+        intro hcontra
+        exact absurd (h1 hcontra) (by simp)
+      simp only [countTrue]
+      exact ih h2 hr
+
+/-- The thermometer gates plus `Σ active = old_count` force the active set to be exactly the
+first `old_count` slots: `old_count` really is a left-packed prefix count, not an arbitrary
+population count. -/
+theorem thermometer_active_prefix :
+    ∀ bs : List Bool, Thermometer bs → ∀ i, i < bs.length →
+      (bs[i]?).getD false = decide (i < countTrue bs) := by
+  intro bs
+  induction bs with
+  | nil => intro _ i hi; exact absurd hi (by simp)
+  | cons a r ih =>
+    intro h i hi
+    obtain ⟨h1, h2⟩ := h
+    cases i with
+    | zero =>
+      cases a with
+      | true => simp [countTrue]
+      | false =>
+        have hzero : countTrue r = 0 :=
+          thermometer_head_false_forces_all_false r h2 (by
+            intro hc
+            exact absurd (h1 hc) (by simp))
+        simp [countTrue, hzero]
+    | succ k =>
+      have hk : k < r.length := by simp only [List.length_cons] at hi; omega
+      have hrec := ih h2 k hk
+      cases a with
+      | true =>
+        simp only [countTrue, List.getElem?_cons_succ]
+        rw [hrec]
+        simp only [decide_eq_decide]
+        omega
+      | false =>
+        have hzero : countTrue r = 0 :=
+          thermometer_head_false_forces_all_false r h2 (by
+            intro hc
+            exact absurd (h1 hc) (by simp))
+        simp only [countTrue, List.getElem?_cons_succ]
+        rw [hrec]
+        simp only [hzero, decide_eq_decide]
+        omega
+
+/-! ### 7. The in-circuit gates (`circuit.rs:255-529`)
+
+These are the constraints an ARBITRARY satisfying witness must meet — deliberately separate from
+the native mirror of section 6.2. `MemberSetUpdateCircuit::prove_with_public_inputs` exists
+precisely so a prover can drive the circuit with public inputs the native mirror never produced
+(`circuit.rs:541-546`), so no theorem below may lean on `expectedPublicInputs`. -/
+
+structure MsuCircuitWitness where
+  active : List Bool
+  oldLeaves : List MemberLeaf
+  newLeaves : List MemberLeaf
+  aggCount : Nat
+  aggPkList : List Words8
+  aggMessage : Words8
+  prevRoot : Words8
+  newRoot : Words8
+  opDigest : Words8
+  publicInputs : MsuPublicInputs
+
+def activeAt (w : MsuCircuitWitness) (i : Nat) : Bool := (w.active[i]?).getD false
+
+def changedAt (w : MsuCircuitWitness) (i : Nat) : Prop :=
+  leafAt w.oldLeaves i ≠ leafAt w.newLeaves i
+
+instance (w : MsuCircuitWitness) (i : Nat) : Decidable (changedAt w i) := by
+  unfold changedAt
+  infer_instance
+
+def changedSlotsOf (w : MsuCircuitWitness) : List Nat :=
+  (slotIndices).filter (fun i => decide (changedAt w i))
+
+/-- The circuit forms `Σ changed_i · i`; with a single changed bit that IS the changed index. -/
+def changedSlotIndexSum (w : MsuCircuitWitness) : Nat :=
+  (changedSlotsOf w).foldl (fun acc i => acc + i) 0
+
+theorem changed_slot_index_sum_selects_the_changed_slot (w : MsuCircuitWitness) (j : Nat)
+    (h : changedSlotsOf w = [j]) : changedSlotIndexSum w = j := by
+  simp [changedSlotIndexSum, h]
+
+def isAddAt (w : MsuCircuitWitness) (i : Nat) : Bool := decide (changedAt w i) && !activeAt w i
+
+def isAdd (w : MsuCircuitWitness) : Bool := (slotIndices).any (isAddAt w)
+
+/-- The keccak preimage of the IMCM member-set commitment (`circuit.rs:439-451`). -/
+def imcmPreimage (leaves : List MemberLeaf) (count : Nat) : List Nat :=
+  imcmDomain :: count ::
+    List.join ((slotIndices).map (fun i => (leafAt leaves i).pkG.toList))
+
+/-- The keccak preimage of the IMMS digest (`circuit.rs:503-516`). -/
+def immsPreimage (w : MsuCircuitWitness) : List Nat :=
+  [immsDomain, w.publicInputs.channelId, setVersionHi w.publicInputs.setVersion,
+    setVersionLo w.publicInputs.setVersion] ++ w.prevRoot.toList ++ w.newRoot.toList ++
+    w.opDigest.toList
+
+/-- The op-digest preimages, both shapes (`circuit.rs:479-494`). -/
+def rotateOpPreimage (w : MsuCircuitWitness) (j : Nat) : List Nat :=
+  [2, j] ++ (leafAt w.newLeaves j).pkG.toList ++ (leafAt w.newLeaves j).pkB.toList
+
+def addOpPreimage (w : MsuCircuitWitness) (j : Nat) : List Nat :=
+  [1] ++ (leafAt w.newLeaves j).pkG.toList ++ (leafAt w.newLeaves j).pkB.toList ++
+    (leafAt w.newLeaves j).regevPkDigest.toList ++ w.publicInputs.recipient.toList
+
+/-- Every gate the retired circuit builds, as a Prop over an arbitrary witness. `keccak` and the
+Poseidon member-tree fold are opaque; no injectivity is used. -/
+structure MsuCircuitGates (keccak : List Nat → Words8) (w : MsuCircuitWitness) : Prop where
+  activeLength : w.active.length = maxSigCluster
+  oldLeavesLength : w.oldLeaves.length = maxSigCluster
+  newLeavesLength : w.newLeaves.length = maxSigCluster
+  aggPkListLength : w.aggPkList.length = maxSigCluster
+  /-- `builder.connect(prod, zero)` over adjacent bits. -/
+  thermometer : Thermometer w.active
+  /-- `builder.connect(count_sum, public_inputs.old_count)`. -/
+  activeSumIsOldCount : countTrue w.active = w.publicInputs.oldCount
+  /-- `builder.assert_one(active_bits[1].target)`. -/
+  clusterHasAtLeastTwoSlots : w.active[1]? = some true
+  /-- `connect(agg_proof.public_inputs[FALCON_AGG_COUNT_OFFSET], old_count)`. -/
+  aggCountIsOldCount : w.aggCount = w.publicInputs.oldCount
+  /-- `old_pk.connect(&mut builder, agg_pk)` for every slot. -/
+  oldKeysAreTheVerifiedSignerList : ∀ i, i < maxSigCluster →
+    (leafAt w.oldLeaves i).pkG = (w.aggPkList[i]?).getD Words8.zero
+  oldPaddingIsEmpty : ∀ i, i < maxSigCluster → activeAt w i = false →
+    (leafAt w.oldLeaves i).pkB = Words8.zero ∧
+      (leafAt w.oldLeaves i).regevPkDigest = Words8.zero
+  /-- `builder.connect(sum_changed, one)`. -/
+  exactlyOneChangedSlot : (changedSlotsOf w).length = 1
+  /-- `conditional_assert_eq(add_here, i, old_count)`. -/
+  addIsAtTheLeftPackedBoundary : ∀ i, i < maxSigCluster → changedAt w i → activeAt w i = false →
+    i = w.publicInputs.oldCount
+  /-- Q-6: a rotation preserves the Regev digest, so balances stay decryptable. -/
+  rotationPreservesRegevDigest : ∀ i, i < maxSigCluster → changedAt w i → activeAt w i = true →
+    (leafAt w.oldLeaves i).regevPkDigest = (leafAt w.newLeaves i).regevPkDigest
+  /-- `builder.assert_zero(removed.target)`. -/
+  neverARemoval : ∀ i, i < maxSigCluster → changedAt w i →
+    (leafAt w.newLeaves i).pkG ≠ Words8.zero
+  /-- M-1: the changed slot's new signing key differs from every other slot's. -/
+  noDuplicateSigningIdentity : ∀ i k, i < k → k < maxSigCluster →
+    (changedAt w i ∨ changedAt w k) → (leafAt w.newLeaves i).pkG ≠ (leafAt w.newLeaves k).pkG
+  newCountIsOldPlusAdd :
+    w.publicInputs.newCount = w.publicInputs.oldCount + (if isAdd w = true then 1 else 0)
+  newPaddingIsEmpty : ∀ i, i < maxSigCluster → activeAt w i = false →
+    ¬(isAdd w = true ∧ i = w.publicInputs.oldCount) → leafAt w.newLeaves i = emptyLeaf
+  oldCommitmentIsKeccak :
+    w.publicInputs.oldCommitment = keccak (imcmPreimage w.oldLeaves w.publicInputs.oldCount)
+  newCommitmentIsKeccak :
+    w.publicInputs.newCommitment = keccak (imcmPreimage w.newLeaves w.publicInputs.newCount)
+  rotationExposesZeroRecipient : isAdd w = false → w.publicInputs.recipient = Address5.zero
+  opDigestIsRecomputed : ∀ j, changedSlotsOf w = [j] →
+    w.opDigest = (if isAdd w = true then keccak (addOpPreimage w j)
+      else keccak (rotateOpPreimage w j))
+  /-- `imms_digest.connect(&mut builder, agg_message)`: the OLD set's unanimous signatures are
+  over exactly this transition. -/
+  immsDigestIsTheSignedMessage : keccak (immsPreimage w) = w.aggMessage
+
+theorem msu_active_bits_are_the_first_old_count_slots (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) (i : Nat) (hi : i < maxSigCluster) :
+    activeAt w i = decide (i < w.publicInputs.oldCount) := by
+  have hlen : i < w.active.length := by rw [g.activeLength]; exact hi
+  have := thermometer_active_prefix w.active g.thermometer i hlen
+  rw [activeAt, this, g.activeSumIsOldCount]
+
+theorem msu_registered_cluster_has_at_least_two_signers (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) : 2 ≤ w.publicInputs.oldCount := by
+  have h1 : activeAt w 1 = true := by
+    rw [activeAt, g.clusterHasAtLeastTwoSlots]
+    rfl
+  have h2 := msu_active_bits_are_the_first_old_count_slots keccak w g 1 (by decide)
+  rw [h1] at h2
+  have : 1 < w.publicInputs.oldCount := of_decide_eq_true h2.symm
+  omega
+
+theorem msu_old_count_within_capacity (keccak : List Nat → Words8) (w : MsuCircuitWitness)
+    (g : MsuCircuitGates keccak w) : w.publicInputs.oldCount ≤ maxSigCluster := by
+  have := count_true_le_length w.active
+  rw [g.activeSumIsOldCount, g.activeLength] at this
+  exact this
+
+theorem msu_full_cluster_cannot_add (keccak : List Nat → Words8) (w : MsuCircuitWitness)
+    (g : MsuCircuitGates keccak w) (hfull : w.publicInputs.oldCount = maxSigCluster) :
+    isAdd w = false := by
+  cases hadd : isAdd w with
+  | false => rfl
+  | true =>
+    exfalso
+    simp only [isAdd, List.any_eq_true] at hadd
+    obtain ⟨i, hmem, hi'⟩ := hadd
+    have hi : i < maxSigCluster := mem_slot_indices_lt i hmem
+    simp only [isAddAt, Bool.and_eq_true, Bool.not_eq_true'] at hi'
+    have hact := msu_active_bits_are_the_first_old_count_slots keccak w g i hi
+    rw [hi'.2, hfull] at hact
+    simp [hi] at hact
+
+theorem msu_add_lands_at_the_left_packed_boundary (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) (hadd : isAdd w = true) :
+    w.publicInputs.oldCount < maxSigCluster ∧
+      w.publicInputs.newCount = w.publicInputs.oldCount + 1 := by
+  have hadd' := hadd
+  simp only [isAdd, List.any_eq_true] at hadd'
+  obtain ⟨i, hmem, hi'⟩ := hadd'
+  have hi : i < maxSigCluster := mem_slot_indices_lt i hmem
+  simp only [isAddAt, Bool.and_eq_true, Bool.not_eq_true', decide_eq_true_eq] at hi'
+  have hbound := g.addIsAtTheLeftPackedBoundary i hi hi'.1 hi'.2
+  refine ⟨by omega, ?_⟩
+  rw [g.newCountIsOldPlusAdd, hadd]
+  simp
+
+theorem msu_new_count_within_capacity (keccak : List Nat → Words8) (w : MsuCircuitWitness)
+    (g : MsuCircuitGates keccak w) : w.publicInputs.newCount ≤ maxSigCluster := by
+  cases hadd : isAdd w with
+  | false =>
+    rw [g.newCountIsOldPlusAdd, hadd]
+    simpa using msu_old_count_within_capacity keccak w g
+  | true =>
+    obtain ⟨hlt, hnew⟩ := msu_add_lands_at_the_left_packed_boundary keccak w g hadd
+    omega
+
+/-- M-1 in force: the changed slot's NEW signing key is distinct from every other slot's, so a
+rotate-to-duplicate (an effective removal that passes the "never a removal" gate) is rejected. -/
+theorem msu_changed_slot_key_differs_from_every_other_slot (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) (j k : Nat) (hj : j < maxSigCluster)
+    (hk : k < maxSigCluster) (hjk : j ≠ k) (hchanged : changedAt w j) :
+    (leafAt w.newLeaves j).pkG ≠ (leafAt w.newLeaves k).pkG := by
+  rcases Nat.lt_or_ge j k with hlt | hge
+  · exact g.noDuplicateSigningIdentity j k hlt hk (Or.inl hchanged)
+  · have hkj : k < j := by omega
+    exact fun hcontra =>
+      g.noDuplicateSigningIdentity k j hkj hj (Or.inr hchanged) hcontra.symm
+
+/-- The changed slot's new key is also non-zero, so the delta is never a removal. -/
+theorem msu_changed_slot_key_is_non_zero (keccak : List Nat → Words8) (w : MsuCircuitWitness)
+    (g : MsuCircuitGates keccak w) (j : Nat) (hj : j < maxSigCluster) (hchanged : changedAt w j) :
+    (leafAt w.newLeaves j).pkG ≠ Words8.zero := g.neverARemoval j hj hchanged
+
+/-- The signature world and the Poseidon world name the same key set, and the aggregate's signer
+count is the exposed `old_count`. -/
+theorem msu_signer_list_binds_the_old_key_set (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) :
+    w.aggCount = w.publicInputs.oldCount ∧
+      ∀ i, i < maxSigCluster →
+        (leafAt w.oldLeaves i).pkG = (w.aggPkList[i]?).getD Words8.zero :=
+  ⟨g.aggCountIsOldCount, g.oldKeysAreTheVerifiedSignerList⟩
+
+theorem msu_rotation_exposes_the_zero_recipient (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) (hrot : isAdd w = false) :
+    w.publicInputs.recipient = Address5.zero ∧
+      w.publicInputs.newCount = w.publicInputs.oldCount := by
+  refine ⟨g.rotationExposesZeroRecipient hrot, ?_⟩
+  rw [g.newCountIsOldPlusAdd, hrot]
+  simp
+
+/-- The commitments the L1 apply compares are keccaks over the exposed counts and the witnessed
+key sets, and the message the previous set signed is the IMMS digest over this exact transition.
+Keccak is opaque: nothing here claims the digests determine the sets. -/
+theorem msu_exposed_commitments_and_signed_message (keccak : List Nat → Words8)
+    (w : MsuCircuitWitness) (g : MsuCircuitGates keccak w) :
+    w.publicInputs.oldCommitment = keccak (imcmPreimage w.oldLeaves w.publicInputs.oldCount) ∧
+      w.publicInputs.newCommitment = keccak (imcmPreimage w.newLeaves w.publicInputs.newCount) ∧
+      keccak (immsPreimage w) = w.aggMessage :=
+  ⟨g.oldCommitmentIsKeccak, g.newCommitmentIsKeccak, g.immsDigestIsTheSignedMessage⟩
+
+/-! ## 8. The retired v1 export (`mle_prover.rs:953-1030`) and the fixture generator
+(`src/deprecated/member_set_update/generate_fixture.rs`)
+
+`mle_prover::deprecated_v1` is compiled only under `deprecated-msu`; it is the only remaining
+caller of the v1 `check_on_chain_evaluable` guard of section 2. -/
+
+inductive DeprecatedExportError where
+  | fixtureExportFailed (message : String)
+  | gateGuard (error : GateGuardError)
+  deriving DecidableEq
+
+/-- `deprecated_v1::export_mle_json` (lines 1020-1029): serialize, then run the v1 guard, and
+return the JSON only if the guard accepted. -/
+def deprecatedExportMleJson (fixtureJson : Except String String)
+    (serializedGates : Option (List SerializedGateRow)) (expected : List ExpectedGateRow) :
+    Except DeprecatedExportError String :=
+  match fixtureJson with
+  | .error m => .error (.fixtureExportFailed m)
+  | .ok json =>
+    match checkFixtureJsonGates serializedGates expected with
+    | .error e => .error (.gateGuard e)
+    | .ok _ => .ok json
+
+theorem deprecated_export_returns_only_guard_accepted_json (fixtureJson : Except String String)
+    (serializedGates : Option (List SerializedGateRow)) (expected : List ExpectedGateRow)
+    (json : String) (h : deprecatedExportMleJson fixtureJson serializedGates expected = .ok json) :
+    fixtureJson = .ok json ∧ checkFixtureJsonGates serializedGates expected = .ok () := by
+  simp only [deprecatedExportMleJson] at h
+  split at h
+  · cases h
+  · rename_i j hj
+    split at h
+    · cases h
+    · rename_i hguard
+      injection h with hjson
+      subst hjson
+      exact ⟨hj, hguard⟩
+
+theorem deprecated_export_gate_guard_blocks_the_json (fixtureJson : Except String String)
+    (serializedGates : Option (List SerializedGateRow)) (expected : List ExpectedGateRow)
+    (e : GateGuardError) (h : checkFixtureJsonGates serializedGates expected = .error e) :
+    ∀ json, deprecatedExportMleJson fixtureJson serializedGates expected ≠ .ok json := by
+  intro json hcontra
+  exact absurd (deprecated_export_returns_only_guard_accepted_json fixtureJson serializedGates
+    expected json hcontra).2 (by rw [h]; simp)
+
+/-! ### 8.1 The generator pipeline -/
+
+/-- The descriptor written next to the MLE artifact (`generate_fixture.rs:51-65`). -/
+structure MsuDescriptor where
+  channelId : Nat
+  setVersion : Nat
+  oldCommitment : Words8
+  newCommitment : Words8
+  oldCount : Nat
+  newCount : Nat
+  recipient : Address5
+  oldMemberPkGs : List Words8
+  newMemberPkGs : List Words8
+  rotatedSlot : Nat
+  deriving DecidableEq, Repr
+
+/-- `rotated_slot: 1` is a hard-coded descriptor convenience, not a proved value
+(`generate_fixture.rs:194`). -/
+def descriptorRotatedSlotLiteral : Nat := 1
+
+theorem descriptor_rotated_slot_literal_pinned : descriptorRotatedSlotLiteral = 1 := rfl
+
+inductive MsuFixtureError where
+  | walletGateRejected
+  | aggregateProvingFailed
+  | nativeMirrorRejected (error : MsuWitnessError)
+  | circuitProvingFailed
+  | circuitVerificationFailed
+  | provedLimbsDisagreeWithNativeMirror
+  | wrappingFailed
+  | mleProvingFailed
+  | mleVerificationFailed
+  | exportGuardRejected (error : GateGuardError)
+  | mleJsonHasNoPublicInputs
+  | mlePublicInputsLengthMismatch (length : Nat)
+  | mlePublicInputsDisagreeWithProvedLimbs
+  deriving DecidableEq
+
+/-- The outcomes of every opaque step of one generator run. Proving, aggregation, the wallet gate
+and the MLE prover/verifier are boundaries; the model fixes their outcomes and reasons about the
+CHECKS the generator performs around them. -/
+structure MsuFixtureRun where
+  walletGateAccepted : Bool
+  aggregateProved : Bool
+  expected : Except MsuWitnessError MsuPublicInputs
+  circuitProved : Bool
+  circuitVerified : Bool
+  provedLimbs : List Nat
+  wrapped : Bool
+  mleProved : Bool
+  mleVerified : Bool
+  exportGuard : Except GateGuardError Unit
+  mleJsonPublicInputs : Option (List Nat)
+  oldMemberPkGs : List Words8
+  newMemberPkGs : List Words8
+
+/-- `generate_fixture.rs::main`, in source order: the real wallet gate, the previous set's
+aggregate, the native mirror, circuit proving, native verification, the proved-limbs assertion,
+wrap + MLE prove/verify, the v1 export guard, and finally the MLE-JSON public-input assertions. -/
+def runMemberSetUpdateFixture (r : MsuFixtureRun) : Except MsuFixtureError MsuDescriptor :=
+  if !r.walletGateAccepted then .error .walletGateRejected
+  else if !r.aggregateProved then .error .aggregateProvingFailed
+  else
+    match r.expected with
+    | .error e => .error (.nativeMirrorRejected e)
+    | .ok expected =>
+      if !r.circuitProved then .error .circuitProvingFailed
+      else if !r.circuitVerified then .error .circuitVerificationFailed
+      else if r.provedLimbs ≠ expected.toU64Vec then
+        .error .provedLimbsDisagreeWithNativeMirror
+      else if !r.wrapped then .error .wrappingFailed
+      else if !r.mleProved then .error .mleProvingFailed
+      else if !r.mleVerified then .error .mleVerificationFailed
+      else
+        match r.exportGuard with
+        | .error e => .error (.exportGuardRejected e)
+        | .ok _ =>
+          match r.mleJsonPublicInputs with
+          | none => .error .mleJsonHasNoPublicInputs
+          | some pis =>
+            if pis.length ≠ memberSetUpdatePublicInputsLen then
+              .error (.mlePublicInputsLengthMismatch pis.length)
+            else if pis ≠ r.provedLimbs then .error .mlePublicInputsDisagreeWithProvedLimbs
+            else
+              .ok { channelId := expected.channelId
+                    setVersion := expected.setVersion
+                    oldCommitment := expected.oldCommitment
+                    newCommitment := expected.newCommitment
+                    oldCount := expected.oldCount
+                    newCount := expected.newCount
+                    recipient := expected.recipient
+                    oldMemberPkGs := r.oldMemberPkGs
+                    newMemberPkGs := r.newMemberPkGs
+                    rotatedSlot := descriptorRotatedSlotLiteral }
+
+theorem msu_fixture_runs_the_wallet_gate_first (r : MsuFixtureRun)
+    (h : r.walletGateAccepted = false) :
+    runMemberSetUpdateFixture r = .error .walletGateRejected := by
+  simp [runMemberSetUpdateFixture, h]
+
+/-- PUBLIC-INPUT THREADING. A written fixture has: the proved limbs equal to the native mirror's
+26-limb encoding, and the exported MLE JSON's `publicInputs` equal to those same limbs. The
+length assertion precedes the element-wise comparison, so a shorter or longer array can never be
+silently zipped down to a passing prefix. -/
+theorem msu_fixture_threads_the_public_inputs (r : MsuFixtureRun) (d : MsuDescriptor)
+    (h : runMemberSetUpdateFixture r = .ok d) :
+    ∃ expected, r.expected = .ok expected ∧
+      r.provedLimbs = expected.toU64Vec ∧
+      r.mleJsonPublicInputs = some r.provedLimbs ∧
+      r.provedLimbs.length = memberSetUpdatePublicInputsLen ∧
+      r.exportGuard = .ok () ∧
+      d.oldCommitment = expected.oldCommitment ∧ d.newCommitment = expected.newCommitment ∧
+      d.oldCount = expected.oldCount ∧ d.newCount = expected.newCount ∧
+      d.recipient = expected.recipient ∧ d.rotatedSlot = descriptorRotatedSlotLiteral := by
+  simp only [runMemberSetUpdateFixture] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · rename_i expected hexp
+        split at h
+        · cases h
+        · split at h
+          · cases h
+          · split at h
+            · cases h
+            · rename_i hlimbs
+              split at h
+              · cases h
+              · split at h
+                · cases h
+                · split at h
+                  · cases h
+                  · split at h
+                    · cases h
+                    · rename_i hguard
+                      split at h
+                      · cases h
+                      · rename_i pis hpis
+                        split at h
+                        · cases h
+                        · rename_i hlen
+                          split at h
+                          · cases h
+                          · rename_i heq
+                            injection h with hd
+                            subst hd
+                            have hlimbs' : r.provedLimbs = expected.toU64Vec :=
+                              Decidable.of_not_not hlimbs
+                            have heq' : pis = r.provedLimbs := Decidable.of_not_not heq
+                            refine ⟨expected, hexp, hlimbs', by rw [hpis, heq'], ?_, hguard,
+                              rfl, rfl, rfl, rfl, rfl, rfl⟩
+                            rw [← heq']
+                            exact Decidable.of_not_not hlen
+
+theorem msu_fixture_length_assert_precedes_element_comparison (r : MsuFixtureRun)
+    (expected : MsuPublicInputs) (pis : List Nat) (hexp : r.expected = .ok expected)
+    (hwallet : r.walletGateAccepted = true) (hagg : r.aggregateProved = true)
+    (hproved : r.circuitProved = true) (hverified : r.circuitVerified = true)
+    (hlimbs : r.provedLimbs = expected.toU64Vec) (hwrap : r.wrapped = true)
+    (hmleproved : r.mleProved = true) (hmleverified : r.mleVerified = true)
+    (hguard : r.exportGuard = .ok ()) (hpis : r.mleJsonPublicInputs = some pis)
+    (hlen : pis.length ≠ memberSetUpdatePublicInputsLen) :
+    runMemberSetUpdateFixture r = .error (.mlePublicInputsLengthMismatch pis.length) := by
+  simp [runMemberSetUpdateFixture, hexp, hwallet, hagg, hproved, hverified, hlimbs, hwrap,
+    hmleproved, hmleverified, hguard, hpis, hlen]
+
+/-! ### 8.2 A concrete run, and what the descriptor does NOT bind -/
+
+def sampleWords (a : Nat) : Words8 := ⟨a, 0, 0, 0, 0, 0, 0, 0⟩
+
+def sampleMsuPublicInputs : MsuPublicInputs :=
+  { channelId := 77, setVersion := 1, oldCommitment := sampleWords 11,
+    newCommitment := sampleWords 22, oldCount := 3, newCount := 3, recipient := Address5.zero }
+
+def sampleMsuLimbs : List Nat := sampleMsuPublicInputs.toU64Vec
+
+def sampleMsuRun : MsuFixtureRun :=
+  { walletGateAccepted := true, aggregateProved := true, expected := .ok sampleMsuPublicInputs,
+    circuitProved := true, circuitVerified := true, provedLimbs := sampleMsuLimbs,
+    wrapped := true, mleProved := true, mleVerified := true, exportGuard := .ok (),
+    mleJsonPublicInputs := some sampleMsuLimbs, oldMemberPkGs := [sampleWords 1, sampleWords 2],
+    newMemberPkGs := [sampleWords 1, sampleWords 3] }
+
+def sampleMsuRunOtherKeys : MsuFixtureRun :=
+  { sampleMsuRun with
+    oldMemberPkGs := [sampleWords 5, sampleWords 6]
+    newMemberPkGs := [sampleWords 5, sampleWords 7] }
+
+def sampleMsuDescriptor : MsuDescriptor :=
+  { channelId := 77, setVersion := 1, oldCommitment := sampleWords 11,
+    newCommitment := sampleWords 22, oldCount := 3, newCount := 3, recipient := Address5.zero,
+    oldMemberPkGs := [sampleWords 1, sampleWords 2],
+    newMemberPkGs := [sampleWords 1, sampleWords 3], rotatedSlot := 1 }
+
+def sampleMsuDescriptorOtherKeys : MsuDescriptor :=
+  { sampleMsuDescriptor with
+    oldMemberPkGs := [sampleWords 5, sampleWords 6]
+    newMemberPkGs := [sampleWords 5, sampleWords 7] }
+
+theorem msu_fixture_accepts_a_consistent_run :
+    runMemberSetUpdateFixture sampleMsuRun = .ok sampleMsuDescriptor := rfl
+
+/-- HONEST SCOPE. The descriptor's `oldMemberPkGs` / `newMemberPkGs` (the arrays the Solidity
+test registers and applies) come from the WALLET objects, not from the proved public inputs:
+the circuit exposes only the IMCM commitments. Two runs with identical proved limbs and
+identical MLE public inputs can therefore write different key arrays. Binding them is the
+Manager's `require(old_commitment == stored)` check plus the keccak preimage, neither of which
+is proved here. -/
+theorem msu_descriptor_key_arrays_are_not_bound_by_the_public_inputs :
+    runMemberSetUpdateFixture sampleMsuRun = .ok sampleMsuDescriptor ∧
+      runMemberSetUpdateFixture sampleMsuRunOtherKeys = .ok sampleMsuDescriptorOtherKeys ∧
+      sampleMsuRun.provedLimbs = sampleMsuRunOtherKeys.provedLimbs ∧
+      sampleMsuRun.mleJsonPublicInputs = sampleMsuRunOtherKeys.mleJsonPublicInputs ∧
+      sampleMsuDescriptor.oldMemberPkGs ≠ sampleMsuDescriptorOtherKeys.oldMemberPkGs := by
+  refine ⟨rfl, rfl, rfl, rfl, ?_⟩
+  decide
+
+theorem msu_fixture_rejects_a_public_input_mismatch :
+    runMemberSetUpdateFixture
+        { sampleMsuRun with mleJsonPublicInputs := some (0 :: sampleMsuLimbs.drop 1) } =
+      .error .mlePublicInputsDisagreeWithProvedLimbs := rfl
+
+/-! ## 9. Reachability of the retired path in a build
+
+Models exactly the Cargo/`cfg` facts: `default = []` (Cargo.toml:177), the `deprecated-msu`
+feature (Cargo.toml:223), `#[cfg(feature = "deprecated-msu")] pub mod deprecated` (lib.rs:15-19),
+`required-features = ["deprecated-msu"]` for the fixture binary (Cargo.toml:255-257), and
+`#[cfg(feature = "deprecated-msu")] pub mod deprecated_v1` (mle_prover.rs:953). It is NOT a
+claim about what any operator or release pipeline actually enables. -/
+
+def deprecatedMsuFeature : String := "deprecated-msu"
+
+/-- `[features] default = []`. -/
+def cargoDefaultFeatures : List String := []
+
+def featureEnabled (features : List String) (f : String) : Bool :=
+  features.any (fun x => x == f)
+
+/-- `lib.rs:15-19`. -/
+def deprecatedModuleCompiled (features : List String) : Bool :=
+  featureEnabled features deprecatedMsuFeature
+
+/-- `Cargo.toml:255-257`. -/
+def msuFixtureBinaryBuildable (features : List String) : Bool :=
+  featureEnabled features deprecatedMsuFeature
+
+/-- `mle_prover.rs:953`. -/
+def deprecatedV1ProverCompiled (features : List String) : Bool :=
+  featureEnabled features deprecatedMsuFeature
+
+/-- In a default build none of the three retired surfaces exist. -/
+theorem deprecated_msu_is_absent_from_a_default_build :
+    deprecatedModuleCompiled cargoDefaultFeatures = false ∧
+      msuFixtureBinaryBuildable cargoDefaultFeatures = false ∧
+      deprecatedV1ProverCompiled cargoDefaultFeatures = false := by decide
+
+/-- The retired circuit, its fixture binary and the v1 prover/export are gated by one and the
+same feature: enabling any of them enables all three, and none can appear on its own. -/
+theorem deprecated_msu_surfaces_share_one_gate (features : List String) :
+    deprecatedModuleCompiled features = msuFixtureBinaryBuildable features ∧
+      msuFixtureBinaryBuildable features = deprecatedV1ProverCompiled features := ⟨rfl, rfl⟩
+
+theorem deprecated_msu_requires_the_explicit_feature (features : List String)
+    (h : deprecatedModuleCompiled features = true) : deprecatedMsuFeature ∈ features := by
+  simp only [deprecatedModuleCompiled, featureEnabled, List.any_eq_true, beq_iff_eq] at h
+  obtain ⟨f, hf, he⟩ := h
+  rw [← he]
+  exact hf
 
 end Zkp.Implementation.MleProverBridge

@@ -1,0 +1,497 @@
+{
+  "schema_version": 1,
+  "source": "src/regev/hash_sig.rs",
+  "source_sha256": "1e331db3ad612cdd98512d1c9725f536b9dbdf2115ba54d1cefc2c4988370753",
+  "source_lines": 1313,
+  "module": "Zkp.Implementation.RegevProofs",
+  "model": "doc/audit/zkp/Zkp/Implementation/RegevProofs.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 31,
+      "status": "non-executable",
+      "label": "Module doc comment: the signature scheme and the message-encoding argument",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 32,
+      "end": 43,
+      "status": "dependency-boundary",
+      "label": "Imports of p3-air / p3-baby-bear / p3-poseidon2-air / regev_plonky3",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.Poseidon2"
+      ],
+      "theorems": [],
+      "note": "The Poseidon2 permutation and its AIR come from external crates; modelled as the opaque Poseidon2 callback record."
+    },
+    {
+      "start": 44,
+      "end": 47,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 48,
+      "end": 70,
+      "status": "translated",
+      "label": "Poseidon2-BabyBear AIR parameters (width, S-box degree, registers, rounds)",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.poseidonWidth",
+        "Zkp.Implementation.RegevProofs.sboxDegree",
+        "Zkp.Implementation.RegevProofs.sboxRegisters",
+        "Zkp.Implementation.RegevProofs.halfFullRounds",
+        "Zkp.Implementation.RegevProofs.partialRounds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_constants_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 71,
+      "end": 100,
+      "status": "dependency-boundary",
+      "label": "Audited round constants, AIR construction and the canonical permutation",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.Poseidon2"
+      ],
+      "theorems": [],
+      "note": "The audited constants and default_babybear_poseidon2_16 are opaque; only the width discipline of the permutation callback is assumed."
+    },
+    {
+      "start": 101,
+      "end": 118,
+      "status": "dependency-boundary",
+      "label": "generate_poseidon2_trace: upstream Poseidon2Air trace generator",
+      "declarations": [],
+      "theorems": [],
+      "note": "Upstream trace generation is not modelled."
+    },
+    {
+      "start": 119,
+      "end": 122,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 123,
+      "end": 127,
+      "status": "dependency-boundary",
+      "label": "Field / error / Bytes32 imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "Imported types; Bytes32 word packing and the keccak digest are boundaries."
+    },
+    {
+      "start": 128,
+      "end": 144,
+      "status": "translated",
+      "label": "DOMAIN_PK_B / DOMAIN_SIG_B and their compile-time distinctness assertions",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.domainPkB",
+        "Zkp.Implementation.RegevProofs.domainSigB"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_domains_separated"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 145,
+      "end": 167,
+      "status": "translated",
+      "label": "SK_LIMBS, DIGEST_LIMBS, MSG_LIMBS, SPONGE_RATE, SIG_ABSORB_LEN, SIG_BLOCKS",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.skLimbs",
+        "Zkp.Implementation.RegevProofs.digestLimbs",
+        "Zkp.Implementation.RegevProofs.msgLimbs",
+        "Zkp.Implementation.RegevProofs.spongeRate",
+        "Zkp.Implementation.RegevProofs.sigAbsorbLen",
+        "Zkp.Implementation.RegevProofs.sigBlocksCount"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_constants_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 168,
+      "end": 173,
+      "status": "translated",
+      "label": "BabyBearSecretKey: nine BabyBear limbs",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.skLimbs"
+      ],
+      "theorems": [],
+      "note": "The secret key is modelled as a nine-element canonical limb list; its serde/Debug redaction is not modelled."
+    },
+    {
+      "start": 174,
+      "end": 203,
+      "status": "untranslated",
+      "label": "Redacted Debug impl and BabyBearSecretKey::random (RNG sampling)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Entropy sampling and the debug redaction are not modelled; only the all-zero rejection is (in from_canonical_limbs)."
+    },
+    {
+      "start": 204,
+      "end": 221,
+      "status": "translated",
+      "label": "from_canonical_limbs: canonicality and all-zero (A1) rejection",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.skFromCanonicalLimbs",
+        "Zkp.Implementation.RegevProofs.canonicalLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.sk_from_canonical_limbs_ok",
+        "Zkp.Implementation.RegevProofs.sk_all_zero_rejected"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 222,
+      "end": 225,
+      "status": "untranslated",
+      "label": "limbs() accessor",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trivial accessor; the model represents the key by the limb list itself."
+    },
+    {
+      "start": 226,
+      "end": 236,
+      "status": "translated",
+      "label": "public_key(): pk_b = Poseidon2([DOMAIN_PK_B] ++ sk ++ 0...)[0..8]",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.pkInput",
+        "Zkp.Implementation.RegevProofs.publicKeyOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.pk_input_length",
+        "Zkp.Implementation.RegevProofs.public_key_length"
+      ],
+      "note": "The permutation itself is the opaque Poseidon2 callback: no preimage or collision resistance is asserted."
+    },
+    {
+      "start": 237,
+      "end": 266,
+      "status": "translated",
+      "label": "sign_digest_native: the rate-8 sponge over [DOMAIN_SIG_B] ++ sk ++ m",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.fadd",
+        "Zkp.Implementation.RegevProofs.sigAbsorbStream",
+        "Zkp.Implementation.RegevProofs.sigBlockList",
+        "Zkp.Implementation.RegevProofs.absorbBlock"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.sig_absorb_stream_length",
+        "Zkp.Implementation.RegevProofs.sig_blocks_match_air_constants",
+        "Zkp.Implementation.RegevProofs.absorb_block_length"
+      ],
+      "note": "Field elements are modelled by canonical representatives with fadd = (+) % q."
+    },
+    {
+      "start": 267,
+      "end": 273,
+      "status": "translated",
+      "label": "BabyBearPublicKey: the eight-limb digest",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.digestLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_constants_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 274,
+      "end": 305,
+      "status": "translated",
+      "label": "to_canonical_limbs / to_bytes32 / from_bytes32 and their canonicality check",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.pkFromBytes32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.pk_bytes32_roundtrip"
+      ],
+      "note": "The big-endian Bytes32 word packing is a boundary; the model treats the anchor as the eight canonical limbs."
+    },
+    {
+      "start": 306,
+      "end": 330,
+      "status": "translated",
+      "label": "decompose_digest_to_limbs: the injective 16-bit message encoding",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.decomposeDigestToLimbs",
+        "Zkp.Implementation.RegevProofs.msgLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.decompose_digest_length",
+        "Zkp.Implementation.RegevProofs.decompose_digest_limbs_below_q",
+        "Zkp.Implementation.RegevProofs.decompose_digest_limbs_canonical",
+        "Zkp.Implementation.RegevProofs.decompose_digest_injective"
+      ],
+      "note": "Injectivity is proved for the limb split; the keccak digest itself is never assumed injective."
+    },
+    {
+      "start": 331,
+      "end": 334,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 335,
+      "end": 337,
+      "status": "dependency-boundary",
+      "label": "SymbolicAirBuilder / LookupAir imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "p3 trait machinery, not modelled."
+    },
+    {
+      "start": 338,
+      "end": 410,
+      "status": "untranslated",
+      "label": "NoLookupPoseidon2Air (the bare-permutation PoC wrapper)",
+      "declarations": [],
+      "theorems": [],
+      "note": "De-risk PoC path; not part of the signature statement and not modelled."
+    },
+    {
+      "start": 411,
+      "end": 844,
+      "status": "test-only",
+      "label": "#[cfg(test)] module: permutation, key, sponge and forgery tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; the model states its own positive example separately."
+    },
+    {
+      "start": 845,
+      "end": 853,
+      "status": "non-executable",
+      "label": "Section banner and imports comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment and use lines."
+    },
+    {
+      "start": 854,
+      "end": 875,
+      "status": "untranslated",
+      "label": "output_from_trace_row: Poseidon2Cols borrow helper",
+      "declarations": [],
+      "theorems": [],
+      "note": "Column-layout borrowing of the upstream trace type is not modelled."
+    },
+    {
+      "start": 876,
+      "end": 915,
+      "status": "non-executable",
+      "label": "Design comment: composition path, binding tail and the sk-non-degeneracy note",
+      "declarations": [],
+      "theorems": [],
+      "note": "Documentation only."
+    },
+    {
+      "start": 916,
+      "end": 943,
+      "status": "translated",
+      "label": "Row width, one-hot selector columns, public-value count and trace height",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.selCols",
+        "Zkp.Implementation.RegevProofs.bindTailCols",
+        "Zkp.Implementation.RegevProofs.hashSigCols",
+        "Zkp.Implementation.RegevProofs.hashSigNumPv",
+        "Zkp.Implementation.RegevProofs.hashSigRealRows",
+        "Zkp.Implementation.RegevProofs.hashSigHeight",
+        "Zkp.Implementation.RegevProofs.RowKind",
+        "Zkp.Implementation.RegevProofs.selBits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_constants_pinned",
+        "Zkp.Implementation.RegevProofs.hash_sig_row_width",
+        "Zkp.Implementation.RegevProofs.hash_sig_padding_rows",
+        "Zkp.Implementation.RegevProofs.selector_one_hot"
+      ],
+      "note": "POSEIDON2_COLS is an upstream value and stays a parameter of hashSigCols."
+    },
+    {
+      "start": 944,
+      "end": 949,
+      "status": "dependency-boundary",
+      "label": "poseidon_cols: borrow of the upstream Poseidon2Cols prefix",
+      "declarations": [],
+      "theorems": [],
+      "note": "Upstream column type; not modelled."
+    },
+    {
+      "start": 950,
+      "end": 1012,
+      "status": "translated",
+      "label": "Poseidon2HashSigAir: width, public-value count, next-row columns, degree, empty lookups",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.hashSigCols",
+        "Zkp.Implementation.RegevProofs.hashSigNumPv",
+        "Zkp.Implementation.RegevProofs.maxConstraintDegree",
+        "Zkp.Implementation.RegevProofs.hashSigPublicValues"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_row_width",
+        "Zkp.Implementation.RegevProofs.hash_sig_public_values_length"
+      ],
+      "note": "Only the reported shape values are modelled; the plonky3 trait lowering is a boundary."
+    },
+    {
+      "start": 1013,
+      "end": 1203,
+      "status": "translated",
+      "label": "Air::eval: permutation rows, selector schedule, sk broadcast, pk binding and the three sponge chainings",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.HashSigRow",
+        "Zkp.Implementation.RegevProofs.HashSigGates",
+        "Zkp.Implementation.RegevProofs.advanceKind",
+        "Zkp.Implementation.RegevProofs.selBits",
+        "Zkp.Implementation.RegevProofs.pkInput",
+        "Zkp.Implementation.RegevProofs.publicKeyOf",
+        "Zkp.Implementation.RegevProofs.absorbBlock",
+        "Zkp.Implementation.RegevProofs.airBlock1",
+        "Zkp.Implementation.RegevProofs.airBlock2",
+        "Zkp.Implementation.RegevProofs.airBlock3",
+        "Zkp.Implementation.RegevProofs.nativeSigInput0",
+        "Zkp.Implementation.RegevProofs.nativeSigInput1",
+        "Zkp.Implementation.RegevProofs.nativeSigInput2",
+        "Zkp.Implementation.RegevProofs.nativeSigInput3"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.selector_shift_encoding",
+        "Zkp.Implementation.RegevProofs.selector_one_hot",
+        "Zkp.Implementation.RegevProofs.selector_schedule_forced",
+        "Zkp.Implementation.RegevProofs.hash_sig_pk_row_binds_public_key",
+        "Zkp.Implementation.RegevProofs.hash_sig_sig_rows_are_native_sponge",
+        "Zkp.Implementation.RegevProofs.hash_sig_padding_rows_only_permutation",
+        "Zkp.Implementation.RegevProofs.sig_blocks_match_air_constants"
+      ],
+      "note": "The upstream Poseidon2Air round constraints are the opaque permutation premise; only the binding-tail gates are modelled. sig_b (row 4 output) is bound to nothing, as in the source."
+    },
+    {
+      "start": 1204,
+      "end": 1210,
+      "status": "dependency-boundary",
+      "label": "Compile-time trait-bound assertion against SymbolicAirBuilder",
+      "declarations": [],
+      "theorems": [],
+      "note": "Type-level check against the upstream builder; no protocol semantics."
+    },
+    {
+      "start": 1211,
+      "end": 1214,
+      "status": "non-executable",
+      "label": "Section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comment lines only."
+    },
+    {
+      "start": 1215,
+      "end": 1259,
+      "status": "translated",
+      "label": "generate_hash_sig_trace: the per-row permutation inputs (pk row and the four sponge blocks)",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.nativeSigInput0",
+        "Zkp.Implementation.RegevProofs.nativeSigInput1",
+        "Zkp.Implementation.RegevProofs.nativeSigInput2",
+        "Zkp.Implementation.RegevProofs.nativeSigInput3",
+        "Zkp.Implementation.RegevProofs.sigAbsorbStream",
+        "Zkp.Implementation.RegevProofs.sigBlockList",
+        "Zkp.Implementation.RegevProofs.pkInput"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.sig_blocks_match_air_constants",
+        "Zkp.Implementation.RegevProofs.sig_absorb_stream_length"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement."
+    },
+    {
+      "start": 1260,
+      "end": 1301,
+      "status": "untranslated",
+      "label": "Padding rows, Poseidon2Cols prefix fill and binding-tail writing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Trace matrix construction is not modelled; the padding rows' lack of binding is proved from the gates instead."
+    },
+    {
+      "start": 1302,
+      "end": 1313,
+      "status": "translated",
+      "label": "Public values of the instance: pk_b ++ m",
+      "declarations": [
+        "Zkp.Implementation.RegevProofs.hashSigPublicValues",
+        "Zkp.Implementation.RegevProofs.hashSigStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.RegevProofs.hash_sig_public_values_length",
+        "Zkp.Implementation.RegevProofs.hash_sig_public_values_decompose",
+        "Zkp.Implementation.RegevProofs.hash_sig_statement_injective",
+        "Zkp.Implementation.RegevProofs.hash_sig_example_accepts"
+      ],
+      "note": "sig_b is deliberately absent from the public values, as in the source."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "Poseidon2Permutation",
+      "obligation": "The audited Poseidon2-BabyBear permutation, its round constants and the upstream Poseidon2Air round constraints are an opaque callback; preimage and collision resistance - hence unforgeability of the hash signature - are assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "StarkSoundness",
+      "obligation": "stark::prove_batch / verify_batch, the hiding PCS and the Fiat-Shamir absorption of the public values are opaque; that a proof for other public values is rejected, and that the proof reveals nothing about sk_b, are assumed.",
+      "discharged": false
+    },
+    {
+      "name": "KeccakDigest",
+      "obligation": "The IMPA channel-tx digest that becomes the message is taken as given eight-word input; keccak is never assumed injective or collision resistant here.",
+      "discharged": false
+    },
+    {
+      "name": "MemberTreeBinding",
+      "obligation": "That the pk_b handed to the verifier is the one registered in the sender's MemberLeaf (the off-chain P3-5 lookup) happens outside this file and is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "ReplayDiscipline",
+      "obligation": "The scheme has no nonce, counter or expiry: the same (pk_b, m) proof stays valid forever, so uniqueness and single-use of the channel-tx digest must be enforced by the relying party.",
+      "discharged": false
+    },
+    {
+      "name": "CanonicalRepresentatives",
+      "obligation": "Field elements are modelled by canonical representatives in [0,q) with fadd = (+) % q; that the Rust/plonky3 arithmetic agrees with this convention is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "Plonky3Lowering",
+      "obligation": "That the Rust AIR impl really enforces the gate set the model states (selector one-hotness, sk broadcast, pk-row and chaining equalities) is assumed.",
+      "discharged": false
+    },
+    {
+      "name": "NativeTargetRefinement",
+      "obligation": "RNG sampling, Debug redaction, Bytes32 packing, trace matrix construction and error strings are not translated.",
+      "discharged": false
+    }
+  ]
+}

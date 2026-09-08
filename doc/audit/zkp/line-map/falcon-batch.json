@@ -1,0 +1,475 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/batch.rs",
+  "source_sha256": "a04a278402fea31288431979182bedaf113d268c26734b4316cf9f18fd852a09",
+  "source_lines": 1170,
+  "module": "Zkp.Implementation.FalconAggregate",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconAggregate.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 94,
+      "status": "non-executable",
+      "label": "module documentation (aggregation idea, product-check soundness, gating, contract)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 95,
+      "end": 130,
+      "status": "dependency-boundary",
+      "label": "plonky2 / gadget / crate imports",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.SigEnv",
+        "Zkp.Implementation.FalconAggregate.SlotWitness"
+      ],
+      "theorems": [],
+      "note": "Poseidon permutation, generators, pk_digest_circuit and CenterBitGenerator enter as opaque callbacks and premises."
+    },
+    {
+      "start": 131,
+      "end": 133,
+      "status": "non-executable",
+      "label": "section banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 134,
+      "end": 175,
+      "status": "translated",
+      "label": "the parameter ledger: q, N, PI_COEFFS, PI_BITS, POW32_MOD_Q, S1_FOLD_OFFSET, S1_FOLD_K_BITS, HALF_Q",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.falconN",
+        "Zkp.Implementation.FalconAggregate.falconQ",
+        "Zkp.Implementation.FalconAggregate.piCoeffs",
+        "Zkp.Implementation.FalconAggregate.piBits",
+        "Zkp.Implementation.FalconAggregate.pow32ModQ",
+        "Zkp.Implementation.FalconAggregate.s1FoldOffset",
+        "Zkp.Implementation.FalconAggregate.s1FoldKBits",
+        "Zkp.Implementation.FalconAggregate.halfQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.falcon_n_pinned",
+        "Zkp.Implementation.FalconAggregate.falcon_q_pinned",
+        "Zkp.Implementation.FalconAggregate.pi_coeffs_pinned",
+        "Zkp.Implementation.FalconAggregate.pi_bits_pinned",
+        "Zkp.Implementation.FalconAggregate.half_q_pinned",
+        "Zkp.Implementation.FalconAggregate.s1_fold_offset_pinned"
+      ],
+      "note": "Constants pinned as literals with their derivations re-checked."
+    },
+    {
+      "start": 176,
+      "end": 197,
+      "status": "translated",
+      "label": "the const-asserted bounds ledger",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.s1FoldOffset",
+        "Zkp.Implementation.FalconAggregate.goldilocks"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.pi_bits_covers_the_honest_product",
+        "Zkp.Implementation.FalconAggregate.pow32_mod_q_is_correct",
+        "Zkp.Implementation.FalconAggregate.s1_fold_offset_ledger",
+        "Zkp.Implementation.FalconAggregate.s1_fold_quotient_fits",
+        "Zkp.Implementation.FalconAggregate.s1_fold_decomposition_cannot_wrap",
+        "Zkp.Implementation.FalconAggregate.schwartz_zippel_lift_premise"
+      ],
+      "note": "Every const assert of this block is re-derived in the model."
+    },
+    {
+      "start": 198,
+      "end": 201,
+      "status": "translated",
+      "label": "transcript length per slot",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.transcriptElemsPerSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.transcript_elems_per_slot_pinned"
+      ],
+      "note": "Handwritten local semantics; no source/compiler refinement is proved."
+    },
+    {
+      "start": 202,
+      "end": 217,
+      "status": "non-executable",
+      "label": "section banner and the canonicity-check documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 218,
+      "end": 227,
+      "status": "translated",
+      "label": "assert_canonical_coeff_fast: one-row canonicity",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.canonicalFastAccepts"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.canonical_fast_accepts_iff_lt_q",
+        "Zkp.Implementation.FalconAggregate.canonical_fast_check_boundary"
+      ],
+      "note": "The bit decomposition is modelled arithmetically (div/mod by literals); split_le's booleanity is a gate-lowering premise."
+    },
+    {
+      "start": 228,
+      "end": 278,
+      "status": "dependency-boundary",
+      "label": "AliasQuotientGenerator and its serialization",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.Split32"
+      ],
+      "theorems": [],
+      "note": "Witness generators are completeness-only; serialization is opaque."
+    },
+    {
+      "start": 279,
+      "end": 292,
+      "status": "non-executable",
+      "label": "doc comment for split_32_unique",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 293,
+      "end": 304,
+      "status": "translated",
+      "label": "split_32_unique: the alias-free 32/32 split",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.Split32"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.split_32_is_unique"
+      ],
+      "note": "split_low_high's range checks are premises of the modelled structure."
+    },
+    {
+      "start": 305,
+      "end": 348,
+      "status": "dependency-boundary",
+      "label": "CenteredFoldGenerator and its serialization",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.FoldDecomposition"
+      ],
+      "theorems": [],
+      "note": "The generator writes k and s_shift; soundness is the recomposition plus range checks modelled at the call site."
+    },
+    {
+      "start": 349,
+      "end": 362,
+      "status": "non-executable",
+      "label": "doc comment for h2p_linear_forms",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 363,
+      "end": 403,
+      "status": "dependency-boundary",
+      "label": "h2p_linear_forms: the in-circuit hash-to-point sponge",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.Split32"
+      ],
+      "theorems": [],
+      "note": "The Poseidon sponge and the resulting challenge polynomial are opaque (hashToPointOpaque); only the 32/32 split it uses is modelled."
+    },
+    {
+      "start": 404,
+      "end": 407,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 408,
+      "end": 423,
+      "status": "translated",
+      "label": "pack_coeffs_4x14: the injective 4x14 packing",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.pack4"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.pack4_injective_on_canonical",
+        "Zkp.Implementation.FalconAggregate.canonical_coeff_fits_a_lane"
+      ],
+      "note": "Injectivity holds on the canonicity-checked domain only; that is why the canonicity gate is a soundness requirement."
+    },
+    {
+      "start": 424,
+      "end": 464,
+      "status": "dependency-boundary",
+      "label": "transcript_challenge: the Fiat-Shamir sponge",
+      "declarations": [],
+      "theorems": [],
+      "note": "The sponge and the randomness of tau are assumed (fiatShamirRandomOracle)."
+    },
+    {
+      "start": 465,
+      "end": 469,
+      "status": "non-executable",
+      "label": "doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 470,
+      "end": 481,
+      "status": "translated",
+      "label": "eval_at_tau: Horner evaluation",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.polyEval"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.poly_eval_nil",
+        "Zkp.Implementation.FalconAggregate.poly_eval_cons"
+      ],
+      "note": "Modelled over the naturals; the circuit evaluates in the degree-2 extension (extensionFieldEvaluation)."
+    },
+    {
+      "start": 482,
+      "end": 528,
+      "status": "non-executable",
+      "label": "circuit banner, slot/circuit structs, Default and impl headers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 529,
+      "end": 560,
+      "status": "translated",
+      "label": "SLOTS/D asserts, the shared message input, the asserted and monotone slot flags, signer_count",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.flagsMonotone",
+        "Zkp.Implementation.FalconAggregate.signerCount",
+        "Zkp.Implementation.FalconAggregate.BatchSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.monotone_tail_after_false",
+        "Zkp.Implementation.FalconAggregate.monotone_flags_are_a_prefix",
+        "Zkp.Implementation.FalconAggregate.signer_count_of_prefix",
+        "Zkp.Implementation.FalconAggregate.batch_signer_count_ge_one"
+      ],
+      "note": "Monotone flags with slot 0 asserted active are proved to make the active slots a nonempty prefix."
+    },
+    {
+      "start": 561,
+      "end": 595,
+      "status": "translated",
+      "label": "per-slot witnesses, coefficient canonicity and the gated pk_g exposure",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.batchExposedSlots",
+        "Zkp.Implementation.FalconAggregate.gateLimbs",
+        "Zkp.Implementation.FalconAggregate.canonicalFastAccepts",
+        "Zkp.Implementation.FalconAggregate.SlotWitness"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.batch_exposed_slots_left_packed",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_absent_is_zero",
+        "Zkp.Implementation.FalconAggregate.canonical_fast_accepts_iff_lt_q"
+      ],
+      "note": "pk_digest_circuit is the opaque pkDigest callback; the model covers which h it is applied to and how the result is gated."
+    },
+    {
+      "start": 596,
+      "end": 643,
+      "status": "translated",
+      "label": "the merged centered s1 fold and the norm accumulation",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.foldT",
+        "Zkp.Implementation.FalconAggregate.centeredCoeff",
+        "Zkp.Implementation.FalconAggregate.FoldDecomposition"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.fold_t_nonneg",
+        "Zkp.Implementation.FalconAggregate.fold_centered_is_t_minus_k_q",
+        "Zkp.Implementation.FalconAggregate.fold_centered_is_balanced",
+        "Zkp.Implementation.FalconAggregate.fold_second_decomposition_is_the_q_alias",
+        "Zkp.Implementation.FalconAggregate.fold_alias_only_increases_the_magnitude",
+        "Zkp.Implementation.FalconAggregate.fold_alias_only_increases_the_norm"
+      ],
+      "note": "The free-alias argument is proved: the only second decomposition increases the magnitude, hence the norm."
+    },
+    {
+      "start": 644,
+      "end": 662,
+      "status": "translated",
+      "label": "the gated slack range check and the transcript contribution",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.gatedSlack",
+        "Zkp.Implementation.FalconAggregate.fieldSub",
+        "Zkp.Implementation.FalconAggregate.pack4"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.inactive_slot_norm_is_unconstrained",
+        "Zkp.Implementation.FalconAggregate.active_slot_slack_check_is_the_norm_bound",
+        "Zkp.Implementation.FalconAggregate.centered_norm_is_far_below_the_field",
+        "Zkp.Implementation.FalconAggregate.pack4_injective_on_canonical"
+      ],
+      "note": "The 26-bit check on beta^2 - norm is proved equivalent to the native norm bound for every reachable norm."
+    },
+    {
+      "start": 663,
+      "end": 680,
+      "status": "translated",
+      "label": "the transcript challenge and the per-slot product checks",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.polyMul",
+        "Zkp.Implementation.FalconAggregate.polyEval",
+        "Zkp.Implementation.FalconAggregate.ProductCheckSound"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.batch_honest_witness_satisfies_the_product_check",
+        "Zkp.Implementation.FalconAggregate.poly_eval_mul",
+        "Zkp.Implementation.FalconAggregate.batch_product_check_pins_pi"
+      ],
+      "note": "Completeness is proved; the Schwartz-Zippel direction is the explicit premise ProductCheckSound."
+    },
+    {
+      "start": 681,
+      "end": 700,
+      "status": "translated",
+      "label": "public-input registration and the release-mode arity self-check",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.batchStatement",
+        "Zkp.Implementation.FalconAggregate.statementPublicInputs",
+        "Zkp.Implementation.FalconAggregate.falconAggPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.batch_statement_matches_the_tree_contract",
+        "Zkp.Implementation.FalconAggregate.falcon_agg_public_inputs_len_pinned",
+        "Zkp.Implementation.FalconAggregate.top_level_width_is_the_consumer_contract"
+      ],
+      "note": "The exposed statement is proved byte-identical to the tree's canonical left-packed reference. NOTE: the assert message still says '137-element contract' while asserting 73."
+    },
+    {
+      "start": 701,
+      "end": 718,
+      "status": "dependency-boundary",
+      "label": "struct return, verifier_data and data accessors",
+      "declarations": [],
+      "theorems": [],
+      "note": "plonky2 circuit-data plumbing."
+    },
+    {
+      "start": 719,
+      "end": 753,
+      "status": "translated",
+      "label": "prove: the active-count range, the shared-message precheck and per-slot witness assembly",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.batchStatement",
+        "Zkp.Implementation.FalconAggregate.polyMul"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.batch_signer_count_ge_one",
+        "Zkp.Implementation.FalconAggregate.honest_pi_fits_pi_bits"
+      ],
+      "note": "Prover-side prechecks; the binding checks are the in-circuit constraints modelled above."
+    },
+    {
+      "start": 754,
+      "end": 779,
+      "status": "dependency-boundary",
+      "label": "set_slot_witness: raw witness writing",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness writing is outside the model."
+    },
+    {
+      "start": 780,
+      "end": 796,
+      "status": "translated",
+      "label": "integer_product: the honest schoolbook product witness",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.polyMul"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.poly_mul_length",
+        "Zkp.Implementation.FalconAggregate.poly_mul_mem_bound",
+        "Zkp.Implementation.FalconAggregate.honest_pi_fits_pi_bits"
+      ],
+      "note": "Degree and coefficient bounds are proved, which is what makes the missing range checks on pi sound."
+    },
+    {
+      "start": 797,
+      "end": 800,
+      "status": "non-executable",
+      "label": "tests banner",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 801,
+      "end": 1170,
+      "status": "test-only",
+      "label": "adversarial and measurement test suite",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust #[cfg(test)] module: read in full, not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ntruShortVectorAssumption",
+      "obligation": "The Falcon accept predicate is an opaque callback; that an accepting (h, salt, s2) implies the holder of the NTRU trapdoor for h authorised the message is assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashToPointOpaque",
+      "obligation": "The hash-to-point map c = H2P(salt, message) and its in-circuit sponge mirror are opaque; no property of the resulting challenge polynomial is assumed or proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon is an opaque callback (UtilGadgets.HashEnv). No injectivity or collision resistance is assumed; every fold theorem is about the preimage encoding only.",
+      "discharged": false
+    },
+    {
+      "name": "pkDigestOpaque",
+      "obligation": "pk_g = Poseidon(IMFK || encode(h)) is an opaque callback; distinct keys are not proved to give distinct digests, nor is a zero digest proved unreachable.",
+      "discharged": false
+    },
+    {
+      "name": "schwartzZippelChallenge",
+      "obligation": "That agreement of the witnessed product at tau forces coefficient equality is an explicit premise (ProductCheckSound); only completeness is proved.",
+      "discharged": false
+    },
+    {
+      "name": "fiatShamirRandomOracle",
+      "obligation": "That the in-circuit Poseidon transcript squeezes a tau behaving as a random point is assumed; the sponge is not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "extensionFieldEvaluation",
+      "obligation": "Horner evaluation is modelled over the naturals; the circuit evaluates in F_{p^2}. The lift between the two is not proved.",
+      "discharged": false
+    },
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "No claim that plonky2 gates (arithmetic, range_check, split_le, select, BaseSumGate) lower to the modelled arithmetic.",
+      "discharged": false
+    },
+    {
+      "name": "fieldRepresentativeAbstraction",
+      "obligation": "Field elements are modelled by non-negative integer representatives; wrap-around is modelled explicitly only where stated (fieldSub).",
+      "discharged": false
+    },
+    {
+      "name": "vendorFalconParameters",
+      "obligation": "beta^2 = FALCON_SIG_L2_BOUND and the Falcon-512 parameters come from src/falcon_sig/vendor, outside the mapped files; they are pinned as literals only.",
+      "discharged": false
+    }
+  ]
+}

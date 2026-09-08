@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "source": "src/falcon_sig/agg_list.rs",
+  "source_sha256": "f68281dd2ea7f6bbdde2a92cdb9e9733657486af48852baad851d76b32e0232e",
+  "source_lines": 912,
+  "module": "Zkp.Implementation.FalconAggregate",
+  "model": "doc/audit/zkp/Zkp/Implementation/FalconAggregate.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 47,
+      "status": "non-executable",
+      "label": "module documentation (the fold, domain separation, what a step proof does and does not say)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 48,
+      "end": 81,
+      "status": "dependency-boundary",
+      "label": "plonky2 / crate imports",
+      "declarations": [],
+      "theorems": [],
+      "note": "PoseidonHashOut, the cyclic wrapper and the recursive-verification helper enter as opaque interfaces."
+    },
+    {
+      "start": 82,
+      "end": 87,
+      "status": "non-executable",
+      "label": "section banner and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 88,
+      "end": 96,
+      "status": "translated",
+      "label": "AGG_LIST_LEAF_DOMAIN, AGG_PK_LIST_DOMAIN and AGG_PK_LIST_LIMBS",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggListLeafDomain",
+        "Zkp.Implementation.FalconAggregate.aggPkListDomain",
+        "Zkp.Implementation.FalconAggregate.aggPkListLimbs"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_domain_pinned",
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_domain_pinned",
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_limbs_pinned",
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_domain_is_ascii_imal",
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_domain_is_ascii_impl",
+        "Zkp.Implementation.FalconAggregate.live_list_domains_are_pairwise_distinct"
+      ],
+      "note": "Domain constants pinned and proved pairwise distinct from the IMLL leaf domain; distinct constants separate PREIMAGES only."
+    },
+    {
+      "start": 97,
+      "end": 105,
+      "status": "non-executable",
+      "label": "section banner and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 106,
+      "end": 119,
+      "status": "translated",
+      "label": "agg_pk_list_digest: the 8-slot pk-list preimage",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggPkListPreimage",
+        "Zkp.Implementation.FalconAggregate.aggPkListDigest",
+        "Zkp.Implementation.FalconAggregate.zeroSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_preimage_length",
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_preimage_zero_suffix_is_free",
+        "Zkp.Implementation.FalconAggregate.agg_pk_list_digest_zero_suffix_is_free",
+        "Zkp.Implementation.FalconAggregate.take_pad_id"
+      ],
+      "note": "The resize-to-64 padding is proved to be a free zero suffix at the preimage level, so it holds for any hash."
+    },
+    {
+      "start": 120,
+      "end": 133,
+      "status": "translated",
+      "label": "agg_list_leaf: the widened (message, signer_count, pk_list_digest) leaf",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggListLeafPreimage",
+        "Zkp.Implementation.FalconAggregate.aggListLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_preimage_length",
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_preimage_injective",
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_preimage_separates_signer_counts",
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_preimage_differs_from_imll"
+      ],
+      "note": "Encoder injectivity of the preimage is proved; Poseidon itself stays opaque."
+    },
+    {
+      "start": 134,
+      "end": 152,
+      "status": "translated",
+      "label": "AggListEntry and its leaf",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.AggListEntry",
+        "Zkp.Implementation.FalconAggregate.entryLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_leaf_preimage_injective"
+      ],
+      "note": "signer_count is the active list's length, which is what a left-packed aggregation exposes."
+    },
+    {
+      "start": 153,
+      "end": 161,
+      "status": "non-executable",
+      "label": "parser documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 162,
+      "end": 207,
+      "status": "translated",
+      "label": "from_agg_public_inputs: arity, limb, count-range and zero-padding checks",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.parseAggPublicInputs",
+        "Zkp.Implementation.FalconAggregate.ParseError",
+        "Zkp.Implementation.FalconAggregate.limbOk",
+        "Zkp.Implementation.FalconAggregate.sliceSlots",
+        "Zkp.Implementation.FalconAggregate.chunks",
+        "Zkp.Implementation.FalconAggregate.decodeMessage",
+        "Zkp.Implementation.FalconAggregate.decodeCount",
+        "Zkp.Implementation.FalconAggregate.decodeSlot"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.parse_rejects_wrong_arity",
+        "Zkp.Implementation.FalconAggregate.parse_rejects_out_of_range_count",
+        "Zkp.Implementation.FalconAggregate.parse_rejects_nonzero_padding",
+        "Zkp.Implementation.FalconAggregate.parse_of_encoding",
+        "Zkp.Implementation.FalconAggregate.chunks_join",
+        "Zkp.Implementation.FalconAggregate.slice_slots_of_encoding"
+      ],
+      "note": "Check order and error precedence follow the source. Prover-side only: it carries no security weight."
+    },
+    {
+      "start": 208,
+      "end": 217,
+      "status": "translated",
+      "label": "agg_list_commitment: the chain fold from C_0 = 0",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggListCommitment",
+        "Zkp.Implementation.FalconAggregate.entryLeaf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_commitment_empty_is_zero",
+        "Zkp.Implementation.FalconAggregate.agg_list_commitment_append",
+        "Zkp.Implementation.FalconAggregate.agg_list_commitment_snoc",
+        "Zkp.Implementation.FalconAggregate.agg_list_uses_the_shared_chain_step"
+      ],
+      "note": "The chain step is the shared UtilGadgets.listChainStep; only the leaf format widens."
+    },
+    {
+      "start": 218,
+      "end": 254,
+      "status": "dependency-boundary",
+      "label": "the in-circuit mirrors agg_pk_list_digest_target / agg_list_leaf_target",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggPkListPreimage",
+        "Zkp.Implementation.FalconAggregate.aggListLeafPreimage"
+      ],
+      "theorems": [],
+      "note": "In-circuit Poseidon targets: the model states the same preimage layout, not that the gadget lowers to it."
+    },
+    {
+      "start": 255,
+      "end": 302,
+      "status": "non-executable",
+      "label": "step-circuit banner, struct and documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 303,
+      "end": 308,
+      "status": "translated",
+      "label": "the build-time 73-element arity gate on the aggregation verifier data",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.falconAggPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.falcon_agg_public_inputs_len_pinned",
+        "Zkp.Implementation.FalconAggregate.top_level_width_is_the_consumer_contract"
+      ],
+      "note": "The assert cannot catch an unrelated circuit with the same arity; that stays a caller obligation."
+    },
+    {
+      "start": 309,
+      "end": 312,
+      "status": "dependency-boundary",
+      "label": "builder creation and constant-VK recursive verification",
+      "declarations": [],
+      "theorems": [],
+      "note": "The aggregation proof's acceptance is a premise (proofVerificationOpaque, constantVerifierKeyBinding)."
+    },
+    {
+      "start": 313,
+      "end": 336,
+      "status": "translated",
+      "label": "reading message / signer_count / pk slots from the verified proof and folding them",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.decodeMessage",
+        "Zkp.Implementation.FalconAggregate.decodeCount",
+        "Zkp.Implementation.FalconAggregate.aggListStepCountCheck",
+        "Zkp.Implementation.FalconAggregate.aggListStepLeaf",
+        "Zkp.Implementation.FalconAggregate.aggPkListDigest"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_step_count_check_range",
+        "Zkp.Implementation.FalconAggregate.agg_list_step_count_check_is_weaker_than_the_cluster_bound",
+        "Zkp.Implementation.FalconAggregate.agg_list_step_leaf_matches_the_native_entry"
+      ],
+      "note": "The 4-bit count check is proved to admit 1..=16, i.e. strictly weaker than MAX_SIG_CLUSTER = 8; the tighter bound comes from the aggregate's own structure."
+    },
+    {
+      "start": 337,
+      "end": 357,
+      "status": "translated",
+      "label": "the chain step and the [prev_chain(8), new_chain(8)] layout",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggListStepChain",
+        "Zkp.Implementation.FalconAggregate.listStepPublicInputsLen"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_step_public_input_arity",
+        "Zkp.Implementation.FalconAggregate.list_step_public_inputs_len_pinned"
+      ],
+      "note": "Bytes32Target::to_hash_out's canonicity enforcement is a gate-lowering premise."
+    },
+    {
+      "start": 358,
+      "end": 384,
+      "status": "dependency-boundary",
+      "label": "struct return, verifier_data and prove",
+      "declarations": [],
+      "theorems": [],
+      "note": "Witness writing and proving are outside the model."
+    },
+    {
+      "start": 385,
+      "end": 407,
+      "status": "non-executable",
+      "label": "banner and the CommonCircuitData finding documentation",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 408,
+      "end": 431,
+      "status": "dependency-boundary",
+      "label": "AggListCircuit struct and its cyclic wrapper construction",
+      "declarations": [],
+      "theorems": [],
+      "note": "CyclicChainCircuit's template assertion and its C_0 = 0 / prev-chain enforcement are premises (cyclicWrapperOpaque)."
+    },
+    {
+      "start": 432,
+      "end": 447,
+      "status": "translated",
+      "label": "prove_append: one step then one cyclic step",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.aggListRun",
+        "Zkp.Implementation.FalconAggregate.aggListStepChain"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.agg_list_run_starts_from_zero",
+        "Zkp.Implementation.FalconAggregate.agg_list_run_first_step",
+        "Zkp.Implementation.FalconAggregate.run_congr",
+        "Zkp.Implementation.FalconAggregate.agg_list_run_matches_the_native_commitment"
+      ],
+      "note": "The value the chain commits to when the wrapper's premises hold; the wrapper itself is not modelled."
+    },
+    {
+      "start": 448,
+      "end": 912,
+      "status": "test-only",
+      "label": "acceptance, format-pin and parser test suite",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust #[cfg(test)] module: read in full, not translated."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "ntruShortVectorAssumption",
+      "obligation": "The Falcon accept predicate is an opaque callback; that an accepting (h, salt, s2) implies the holder of the NTRU trapdoor for h authorised the message is assumed, never proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashOpaque",
+      "obligation": "Poseidon is an opaque callback (UtilGadgets.HashEnv). No injectivity or collision resistance is assumed; every fold theorem is about the preimage encoding only.",
+      "discharged": false
+    },
+    {
+      "name": "pkDigestOpaque",
+      "obligation": "pk_g = Poseidon(IMFK || encode(h)) is an opaque callback; distinct keys are not proved to give distinct digests, nor is a zero digest proved unreachable.",
+      "discharged": false
+    },
+    {
+      "name": "proofVerificationOpaque",
+      "obligation": "Recursive plonky2 verification is recorded as structure, never as soundness: an accepted child/aggregate proof is a premise, not a theorem.",
+      "discharged": false
+    },
+    {
+      "name": "constantVerifierKeyBinding",
+      "obligation": "That a build-time constant verifier key admits only proofs of the intended circuit is assumed (plonky2 constant_verifier_data), not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "cyclicWrapperOpaque",
+      "obligation": "CyclicChainCircuit's enforcement of prev_chain_i = C_{i-1} and C_0 = 0, and its CommonCircuitData template assertion, are premises, not results.",
+      "discharged": false
+    },
+    {
+      "name": "gateLoweringOpaque",
+      "obligation": "No claim that plonky2 gates (arithmetic, range_check, split_le, select, BaseSumGate) lower to the modelled arithmetic.",
+      "discharged": false
+    },
+    {
+      "name": "fieldRepresentativeAbstraction",
+      "obligation": "Field elements are modelled by non-negative integer representatives; wrap-around is modelled explicitly only where stated (fieldSub).",
+      "discharged": false
+    }
+  ]
+}
