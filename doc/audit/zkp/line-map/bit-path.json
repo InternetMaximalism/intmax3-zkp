@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/bit_path.rs",
+  "source_sha256": "2ab1f51ceaa5056e05f211c1d2a59cbe63175894dcfa8bd584404ea913ee3e7d",
+  "source_lines": 49,
+  "module": "Zkp.Implementation.MerkleTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/MerkleTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "dependency-boundary",
+      "label": "serde Serialize/Deserialize import",
+      "declarations": [],
+      "theorems": [],
+      "note": "Derived serde encoding of BitPath is an imported interface; the model says nothing about it."
+    },
+    {
+      "start": 2,
+      "end": 10,
+      "status": "non-executable",
+      "label": "doc comments, blank lines and the derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or derives."
+    },
+    {
+      "start": 11,
+      "end": 19,
+      "status": "translated",
+      "label": "BitPath fields (length, value) and BitPath::new",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.BitPath",
+        "Zkp.Implementation.MerkleTrees.BitPath.length",
+        "Zkp.Implementation.MerkleTrees.BitPath.value"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.index_bits_ignore_high_bits"
+      ],
+      "note": "Handwritten local semantics; BitPath::new does not mask value, which index_bits_ignore_high_bits records. No source refinement."
+    },
+    {
+      "start": 20,
+      "end": 31,
+      "status": "translated",
+      "label": "is_empty, len and value accessors",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.BitPath.isEmpty",
+        "Zkp.Implementation.MerkleTrees.BitPath.length",
+        "Zkp.Implementation.MerkleTrees.BitPath.value",
+        "Zkp.Implementation.MerkleTrees.BitPath.rootPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.bit_path_root_path_is_empty",
+        "Zkp.Implementation.MerkleTrees.bit_path_sibling_keeps_length"
+      ],
+      "note": "Handwritten local semantics of the three accessors; no source refinement."
+    },
+    {
+      "start": 32,
+      "end": 42,
+      "status": "translated",
+      "label": "pop: low bit first, then shift right and shorten",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.BitPath.pop",
+        "Zkp.Implementation.MerkleTrees.indexBits",
+        "Zkp.Implementation.MerkleTrees.BitPath.bits"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.bit_path_pop_none_iff_empty",
+        "Zkp.Implementation.MerkleTrees.bit_path_pop_cons_bits",
+        "Zkp.Implementation.MerkleTrees.index_bits_length",
+        "Zkp.Implementation.MerkleTrees.bit_path_bits_length"
+      ],
+      "note": "Pins the LITTLE-ENDIAN, leaf-to-root bit order of the decomposition; no source refinement."
+    },
+    {
+      "start": 43,
+      "end": 49,
+      "status": "translated",
+      "label": "sibling: flip the low bit",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.BitPath.sibling",
+        "Zkp.Implementation.MerkleTrees.flipLowBit"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.flip_low_bit_involutive",
+        "Zkp.Implementation.MerkleTrees.flip_low_bit_keeps_parent",
+        "Zkp.Implementation.MerkleTrees.bit_path_sibling_involutive",
+        "Zkp.Implementation.MerkleTrees.bit_path_sibling_keeps_length"
+      ],
+      "note": "`^= 1` on an unbounded Nat is modelled as flipLowBit; u64 wrap-around is not modelled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "Leafable::hash and LeafableHasher::two_to_one are opaque callbacks (HashEnv). Nothing here establishes collision resistance, preimage resistance, or any algebraic property of Poseidon/Keccak, nor that leaf and node hashing are domain separated (they are not).",
+      "discharged": false
+    },
+    {
+      "name": "collision-freedom-premise",
+      "obligation": "NoCollisionAlong and LeafHashInjectiveOn are explicit, undischarged premises about the specific compared pairs. They are NOT global hash injectivity and are not proved for the real hash.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The Lean definitions are a handwritten local semantics. No refinement of the Rust source, of rustc codegen, or of the plonky2-compiled circuit is proved.",
+      "discharged": false
+    },
+    {
+      "name": "rust-integer-widths",
+      "obligation": "BitPath.length (u32), BitPath.value (u64) and usize heights/lengths are modelled as unbounded Nat. Wrap-around of `>>=`/`^=`, `1 << height` overflow on 32-bit targets, and usize truncation are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "root-provenance",
+      "obligation": "A verified opening says only that the recomputed root equals the supplied root. Nothing here establishes that the root is canonical, current, on-chain, or produced by an honest tree.",
+      "discharged": false
+    },
+    {
+      "name": "serde-roundtrip",
+      "obligation": "The derived Serialize/Deserialize instances for BitPath are not modelled; a decoded BitPath is assumed well formed.",
+      "discharged": false
+    }
+  ]
+}

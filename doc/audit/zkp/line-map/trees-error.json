@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/error.rs",
+  "source_sha256": "f48be47b4b28f14ccc7e7ac10f9feee98e6d4f7e046e2cdd78c03b67acff0c10",
+  "source_lines": 44,
+  "module": "Zkp.Implementation.MerkleTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/MerkleTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 1,
+      "status": "non-executable",
+      "label": "thiserror derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from derives."
+    },
+    {
+      "start": 2,
+      "end": 5,
+      "status": "translated",
+      "label": "MerkleProofError::VerificationFailed",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProofError",
+        "Zkp.Implementation.MerkleTrees.MerkleProof.verify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_proof_verify_ok_iff_root_matches",
+        "Zkp.Implementation.MerkleTrees.merkle_proof_verify_ok_binds_recomputed_root"
+      ],
+      "note": "The single failure mode of MerkleProof::verify; the Display formatting string is not modelled."
+    },
+    {
+      "start": 6,
+      "end": 7,
+      "status": "non-executable",
+      "label": "blank line and thiserror derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from derives."
+    },
+    {
+      "start": 8,
+      "end": 14,
+      "status": "translated",
+      "label": "GetRootFromLeavesError::TooManyLeaves and ::NotPowerOfTwo",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.GetRootFromLeavesError",
+        "Zkp.Implementation.MerkleTrees.getMerkleRootFromLeaves",
+        "Zkp.Implementation.MerkleTrees.getMerkleRootFromFullLeaves"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.get_root_from_leaves_rejects_overflow",
+        "Zkp.Implementation.MerkleTrees.full_leaves_never_reports_not_power_of_two"
+      ],
+      "note": "NotPowerOfTwo is shown unreachable in the model; Display formatting is not modelled."
+    },
+    {
+      "start": 15,
+      "end": 44,
+      "status": "untranslated",
+      "label": "IndexedMerkleTreeError variants",
+      "declarations": [],
+      "theorems": [],
+      "note": "indexed_merkle_tree is outside this module; none of these variants is modelled."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "thiserror-display",
+      "obligation": "The #[error(...)] Display strings and the #[from] MerkleProofError conversion are not modelled; error text is not part of the model.",
+      "discharged": false
+    },
+    {
+      "name": "indexed-merkle-tree-errors",
+      "obligation": "IndexedMerkleTreeError and the indexed-tree invariants it guards are entirely outside this model.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The Lean error enums are a handwritten local semantics; no refinement of the Rust source is proved.",
+      "discharged": false
+    }
+  ]
+}

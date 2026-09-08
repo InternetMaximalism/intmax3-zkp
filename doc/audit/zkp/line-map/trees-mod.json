@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/mod.rs",
+  "source_sha256": "cb5e31654d63945143ef28aa3be2d3bca1b5cff89a6e572e18148127441f79ad",
+  "source_lines": 7,
+  "module": "Zkp.Implementation.MerkleTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/MerkleTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 7,
+      "status": "untranslated",
+      "label": "pub mod declarations for the trees directory",
+      "declarations": [],
+      "theorems": [],
+      "note": "This module models the CONTENTS of bit_path.rs, error.rs, get_root.rs and merkle_tree.rs but has no model of Rust module declaration or path resolution; incremental_merkle_tree, indexed_merkle_tree and sparse_merkle_tree are not modelled at all."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "rustc-module-resolution",
+      "obligation": "rustc path/module resolution, #[path] overrides and cfg evaluation are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "unmodelled-sibling-trees",
+      "obligation": "incremental_merkle_tree.rs, indexed_merkle_tree/ and sparse_merkle_tree.rs wrap MerkleProof and are NOT modelled here; their extra invariants (append-only index, low-leaf ordering, key uniqueness) are undischarged.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The Lean definitions are a handwritten local semantics; no refinement of the Rust source is proved.",
+      "discharged": false
+    }
+  ]
+}

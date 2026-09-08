@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/get_root.rs",
+  "source_sha256": "b29ed63341f1dbe9b6d47054b365d34e9bf6fdb80751ecf63a23e06d08b6ab6e",
+  "source_lines": 256,
+  "module": "Zkp.Implementation.MerkleTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/MerkleTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 20,
+      "status": "dependency-boundary",
+      "label": "plonky2, Leafable/LeafableHasher and error imports",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.HashEnv"
+      ],
+      "theorems": [],
+      "note": "The hasher and builder interfaces are modelled as the opaque HashEnv callback record; their semantics is not established here."
+    },
+    {
+      "start": 21,
+      "end": 32,
+      "status": "translated",
+      "label": "get_merkle_root_from_leaves: overflow check then pad with empty leaves",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.getMerkleRootFromLeaves",
+        "Zkp.Implementation.MerkleTrees.getMerkleRootFromFullLeaves"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.get_root_from_leaves_rejects_overflow",
+        "Zkp.Implementation.MerkleTrees.get_root_from_leaves_pads_to_full_width",
+        "Zkp.Implementation.MerkleTrees.get_root_from_leaves_succeeds_when_it_fits"
+      ],
+      "note": "Handwritten local semantics of the check/pad/delegate order; no source refinement."
+    },
+    {
+      "start": 33,
+      "end": 45,
+      "status": "dependency-boundary",
+      "label": "generic circuit-builder signature of get_merkle_root_from_leaves_circuit",
+      "declarations": [],
+      "theorems": [],
+      "note": "RichField/Extendable/GenericConfig/AlgebraicHasher bounds and the CircuitBuilder handle are imported interfaces."
+    },
+    {
+      "start": 46,
+      "end": 48,
+      "status": "dependency-boundary",
+      "label": "assert! on leaf count, next_power_of_two and trailing_zeros",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.circuitRootFromLeaves"
+      ],
+      "theorems": [],
+      "note": "The usize intrinsics are supplied to the model as the parameter subHeight; the circuit path PANICS where the native path returns TooManyLeaves, and that divergence is not modelled as an error value."
+    },
+    {
+      "start": 49,
+      "end": 74,
+      "status": "translated",
+      "label": "sub-tree root over the next-power-of-two padding, then extension with doubling zero hashes",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.circuitRootFromLeaves",
+        "Zkp.Implementation.MerkleTrees.extendWithZeroSubtrees",
+        "Zkp.Implementation.MerkleTrees.zeroHashAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.circuit_root_matches_native_at_full_width",
+        "Zkp.Implementation.MerkleTrees.circuit_padding_matches_native_on_example"
+      ],
+      "note": "Pins that the extension always places the running root on the LEFT and the zero-subtree hash on the RIGHT. Agreement with the native path is proved only at full width and on a concrete instance."
+    },
+    {
+      "start": 75,
+      "end": 77,
+      "status": "non-executable",
+      "label": "blank line and doc comment",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments."
+    },
+    {
+      "start": 78,
+      "end": 100,
+      "status": "translated",
+      "label": "get_merkle_root_from_full_leaves: exact-width check, leaf hashing, pairwise layer fold",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.getMerkleRootFromFullLeaves",
+        "Zkp.Implementation.MerkleTrees.combineLayer",
+        "Zkp.Implementation.MerkleTrees.reduceLayers"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.combine_layer_halves_length",
+        "Zkp.Implementation.MerkleTrees.reduce_layers_full_length",
+        "Zkp.Implementation.MerkleTrees.list_length_one_is_singleton",
+        "Zkp.Implementation.MerkleTrees.two_pow_pos",
+        "Zkp.Implementation.MerkleTrees.full_leaves_never_reports_not_power_of_two"
+      ],
+      "note": "Pins the left/right order two_to_one(layer[2i], layer[2i+1]) and shows both the empty-layer and NotPowerOfTwo branches unreachable after the width check."
+    },
+    {
+      "start": 101,
+      "end": 101,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from blank lines."
+    },
+    {
+      "start": 102,
+      "end": 148,
+      "status": "dependency-boundary",
+      "label": "get_merkle_root_from_full_leaves_circuit: the same fold over builder targets, with assertions instead of errors",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.combineLayer",
+        "Zkp.Implementation.MerkleTrees.reduceLayers"
+      ],
+      "theorems": [],
+      "note": "The value-level fold is modelled; the target-level lowering (hash gadget, assert! as a build-time panic) is an imported interface and is not proved equivalent."
+    },
+    {
+      "start": 149,
+      "end": 149,
+      "status": "non-executable",
+      "label": "blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from blank lines."
+    },
+    {
+      "start": 150,
+      "end": 256,
+      "status": "test-only",
+      "label": "#[cfg(test)] module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust tests are not part of the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "Leafable::hash and LeafableHasher::two_to_one are opaque callbacks (HashEnv). Nothing here establishes collision resistance, preimage resistance, or any algebraic property of Poseidon/Keccak, nor that leaf and node hashing are domain separated (they are not).",
+      "discharged": false
+    },
+    {
+      "name": "collision-freedom-premise",
+      "obligation": "NoCollisionAlong and LeafHashInjectiveOn are explicit, undischarged premises about the specific compared pairs. They are NOT global hash injectivity and are not proved for the real hash.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The Lean definitions are a handwritten local semantics. No refinement of the Rust source, of rustc codegen, or of the plonky2-compiled circuit is proved.",
+      "discharged": false
+    },
+    {
+      "name": "rust-integer-widths",
+      "obligation": "BitPath.length (u32), BitPath.value (u64) and usize heights/lengths are modelled as unbounded Nat. Wrap-around of `>>=`/`^=`, `1 << height` overflow on 32-bit targets, and usize truncation are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "root-provenance",
+      "obligation": "A verified opening says only that the recomputed root equals the supplied root. Nothing here establishes that the root is canonical, current, on-chain, or produced by an honest tree.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "CircuitBuilder, split_le, two_to_one_swapped, connect_hash and conditional_assert_eq_hash are modelled as Props over an arbitrary witness. Gate lowering, range-check soundness of split_le, and witness-generation correctness are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "usize-intrinsics",
+      "obligation": "next_power_of_two and trailing_zeros are not modelled; subHeight is a parameter, so the model does not prove that the circuit picks the same sub-tree height the Rust code computes.",
+      "discharged": false
+    },
+    {
+      "name": "native-circuit-padding-agreement",
+      "obligation": "get_merkle_root_from_leaves (pad to 2^height) and get_merkle_root_from_leaves_circuit (pad to next power of two, then extend) are proved to agree only at full width and on one concrete instance; the general agreement is undischarged.",
+      "discharged": false
+    },
+    {
+      "name": "circuit-build-panics",
+      "obligation": "The circuit path uses assert! where the native path returns an error; build-time panic behaviour is not modelled.",
+      "discharged": false
+    }
+  ]
+}

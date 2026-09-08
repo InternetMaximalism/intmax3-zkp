@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "source": "src/utils/trees/merkle_tree.rs",
+  "source_sha256": "869188fef8ccbaca49cbf88c3d096d6218ee4bede19f216cd667848b94f9ee32",
+  "source_lines": 619,
+  "module": "Zkp.Implementation.MerkleTrees",
+  "model": "doc/audit/zkp/Zkp/Implementation/MerkleTrees.lean",
+  "refinement": "not-proved",
+  "spans": [
+    {
+      "start": 1,
+      "end": 23,
+      "status": "dependency-boundary",
+      "label": "std, plonky2, serde and crate imports",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.HashEnv"
+      ],
+      "theorems": [],
+      "note": "Hasher, builder and serde interfaces are imported; the model replaces them with the opaque HashEnv record."
+    },
+    {
+      "start": 24,
+      "end": 28,
+      "status": "dependency-boundary",
+      "label": "Hasher/HashOut/HasherFromTarget/HashOutTarget type aliases",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.HashEnv",
+        "Zkp.Implementation.MerkleTrees.HashEnv.leafHash",
+        "Zkp.Implementation.MerkleTrees.HashEnv.twoToOne",
+        "Zkp.Implementation.MerkleTrees.HashEnv.zeroDigest"
+      ],
+      "theorems": [],
+      "note": "The associated-type projections through Leafable/LeafableHasher are collapsed into the opaque callback record; no property of the concrete Poseidon instance is established."
+    },
+    {
+      "start": 29,
+      "end": 31,
+      "status": "non-executable",
+      "label": "doc comment and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments or derives."
+    },
+    {
+      "start": 32,
+      "end": 38,
+      "status": "translated",
+      "label": "MerkleTree fields (height, node_hashes, zero_hashes) and impl header",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree",
+        "Zkp.Implementation.MerkleTrees.MerkleTree.height",
+        "Zkp.Implementation.MerkleTrees.MerkleTree.nodeHashes",
+        "Zkp.Implementation.MerkleTrees.MerkleTree.zeroHashes"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_tree_new_has_no_stored_nodes"
+      ],
+      "note": "The HashMap is modelled as an association list whose insert is a prepend; lookup order is the same, memory behaviour is not modelled."
+    },
+    {
+      "start": 39,
+      "end": 53,
+      "status": "translated",
+      "label": "MerkleTree::new builds zero_hashes = [H(empty_leaf), H(h,h), ...]",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.new",
+        "Zkp.Implementation.MerkleTrees.zeroHashAt",
+        "Zkp.Implementation.MerkleTrees.zeroHashList"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_tree_new_has_height_plus_one_zero_hashes",
+        "Zkp.Implementation.MerkleTrees.merkle_tree_new_has_no_stored_nodes"
+      ],
+      "note": "Pins the height+1 zero-hash convention and the doubling recurrence; no source refinement."
+    },
+    {
+      "start": 54,
+      "end": 57,
+      "status": "translated",
+      "label": "MerkleTree::height accessor",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.height"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_tree_prove_has_height_siblings"
+      ],
+      "note": "Handwritten local semantics; no source refinement."
+    },
+    {
+      "start": 58,
+      "end": 64,
+      "status": "translated",
+      "label": "get_node_hash: stored node else zero_hashes[height - path.len()]",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.getNodeHash",
+        "Zkp.Implementation.MerkleTrees.lookupNode",
+        "Zkp.Implementation.MerkleTrees.zeroHashAt"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.empty_tree_root_is_top_zero_hash"
+      ],
+      "note": "The Rust indexing panics when path.len() > height; Nat subtraction saturates instead, so that panic is NOT modelled."
+    },
+    {
+      "start": 65,
+      "end": 68,
+      "status": "translated",
+      "label": "MerkleTree::get_root = get_node_hash(BitPath::default())",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.getRoot",
+        "Zkp.Implementation.MerkleTrees.BitPath.rootPath"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.empty_tree_root_is_top_zero_hash",
+        "Zkp.Implementation.MerkleTrees.bit_path_root_path_is_empty"
+      ],
+      "note": "Handwritten local semantics; no source refinement."
+    },
+    {
+      "start": 69,
+      "end": 83,
+      "status": "translated",
+      "label": "update_leaf: insert the leaf hash then climb, swapping on the popped bit",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.updateLeaf",
+        "Zkp.Implementation.MerkleTrees.climbUpdate",
+        "Zkp.Implementation.MerkleTrees.nodeOf",
+        "Zkp.Implementation.MerkleTrees.BitPath.sibling",
+        "Zkp.Implementation.MerkleTrees.BitPath.pop"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.toy_update_changes_the_root",
+        "Zkp.Implementation.MerkleTrees.toy_update_prove_get_root_roundtrip"
+      ],
+      "note": "Pins the left/right discipline: a popped bit of 1 puts the running hash on the RIGHT. The index is not masked to height bits."
+    },
+    {
+      "start": 84,
+      "end": 94,
+      "status": "translated",
+      "label": "MerkleTree::prove collects exactly `height` siblings, leaf level first",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleTree.prove",
+        "Zkp.Implementation.MerkleTrees.collectSiblings"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.collect_siblings_length",
+        "Zkp.Implementation.MerkleTrees.merkle_tree_prove_has_height_siblings",
+        "Zkp.Implementation.MerkleTrees.toy_update_prove_get_root_roundtrip",
+        "Zkp.Implementation.MerkleTrees.toy_update_prove_verify_accepts"
+      ],
+      "note": "Pins the height/sibling-count relation and the leaf-to-root ordering; no source refinement."
+    },
+    {
+      "start": 95,
+      "end": 96,
+      "status": "non-executable",
+      "label": "blank line and derive attribute",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from derives."
+    },
+    {
+      "start": 97,
+      "end": 99,
+      "status": "translated",
+      "label": "MerkleProof { siblings }",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof",
+        "Zkp.Implementation.MerkleTrees.MerkleProof.siblings"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_proof_height_is_sibling_count"
+      ],
+      "note": "A proof carries only its sibling vector; its height is that vector's length."
+    },
+    {
+      "start": 100,
+      "end": 125,
+      "status": "dependency-boundary",
+      "label": "hand-written Serialize/Deserialize for MerkleProof",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof"
+      ],
+      "theorems": [],
+      "note": "Serialization is the identity on the sibling vector in the source; the model does not cover encoding, and a decoded proof of ANY length is accepted by Deserialize."
+    },
+    {
+      "start": 126,
+      "end": 131,
+      "status": "translated",
+      "label": "MerkleProof::dummy(height) = height copies of HashOut::default()",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof.dummy",
+        "Zkp.Implementation.MerkleTrees.depositTreeHeight",
+        "Zkp.Implementation.MerkleTrees.sendTreeHeight"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.dummy_proof_siblings_are_the_default_digest",
+        "Zkp.Implementation.MerkleTrees.dummy_proof_height",
+        "Zkp.Implementation.MerkleTrees.dummy_deposit_proof_has_63_siblings",
+        "Zkp.Implementation.MerkleTrees.dummy_send_proof_has_32_siblings",
+        "Zkp.Implementation.MerkleTrees.deposit_tree_height_pinned",
+        "Zkp.Implementation.MerkleTrees.send_tree_height_pinned",
+        "Zkp.Implementation.MerkleTrees.dummy_proof_is_not_an_empty_tree_opening"
+      ],
+      "note": "The dummy siblings are the DEFAULT digest, not the zero-subtree hashes, so a dummy proof is not an opening of the empty tree; the 63- and 32-sibling instances used by the circuits are pinned."
+    },
+    {
+      "start": 132,
+      "end": 135,
+      "status": "translated",
+      "label": "MerkleProof::height() = siblings.len()",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof.height"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_proof_height_is_sibling_count",
+        "Zkp.Implementation.MerkleTrees.dummy_proof_height"
+      ],
+      "note": "Handwritten local semantics; no source refinement."
+    },
+    {
+      "start": 136,
+      "end": 148,
+      "status": "translated",
+      "label": "MerkleProof::get_root: hash the leaf, then fold siblings against the popped index bits",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof.getRoot",
+        "Zkp.Implementation.MerkleTrees.MerkleProof.getRootOption",
+        "Zkp.Implementation.MerkleTrees.climb",
+        "Zkp.Implementation.MerkleTrees.rootFromBits",
+        "Zkp.Implementation.MerkleTrees.nodeOf",
+        "Zkp.Implementation.MerkleTrees.indexBits",
+        "Zkp.Implementation.MerkleTrees.leftOf",
+        "Zkp.Implementation.MerkleTrees.rightOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.climb_eq_root_from_bits",
+        "Zkp.Implementation.MerkleTrees.merkle_proof_get_root_never_unwraps_none",
+        "Zkp.Implementation.MerkleTrees.root_from_bits_is_a_function_of_leaf_hash_bits_and_siblings",
+        "Zkp.Implementation.MerkleTrees.merkle_proof_root_ignores_index_bits_above_height",
+        "Zkp.Implementation.MerkleTrees.node_of_eq_two_to_one",
+        "Zkp.Implementation.MerkleTrees.equal_roots_force_equal_states_under_collision_premise",
+        "Zkp.Implementation.MerkleTrees.opening_at_index_zero_leaves_index_one_unconstrained",
+        "Zkp.Implementation.MerkleTrees.leaf_and_node_domains_are_not_separated",
+        "Zkp.Implementation.MerkleTrees.same_index_hypothesis_is_necessary"
+      ],
+      "note": "The `path.pop().unwrap()` is shown never to fire. Recomputation is a deterministic function of (leaf hash, index bits, siblings); index bits above the sibling count are silently ignored."
+    },
+    {
+      "start": 149,
+      "end": 165,
+      "status": "translated",
+      "label": "MerkleProof::verify compares the recomputed root with the supplied root",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.MerkleProof.verify",
+        "Zkp.Implementation.MerkleTrees.MerkleProofError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.merkle_proof_verify_ok_iff_root_matches",
+        "Zkp.Implementation.MerkleTrees.merkle_proof_verify_ok_binds_recomputed_root",
+        "Zkp.Implementation.MerkleTrees.same_index_equal_roots_force_equal_leaf_hash",
+        "Zkp.Implementation.MerkleTrees.same_index_equal_roots_force_equal_leaves",
+        "Zkp.Implementation.MerkleTrees.native_verify_accepts_index_beyond_height"
+      ],
+      "note": "Acceptance is exactly root equality. Binding two openings to the same leaf needs the EXPLICIT NoCollisionAlong and LeafHashInjectiveOn premises; it is not a consequence of the source."
+    },
+    {
+      "start": 166,
+      "end": 172,
+      "status": "dependency-boundary",
+      "label": "MerkleProofTarget struct over plonky2 HashOutTarget",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.TargetOpening"
+      ],
+      "theorems": [],
+      "note": "Circuit targets are modelled as an arbitrary satisfying witness record; the target representation itself is an imported interface."
+    },
+    {
+      "start": 173,
+      "end": 211,
+      "status": "dependency-boundary",
+      "label": "MerkleProofTarget::new / ::constant / ::set_witness",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.setWitnessOk",
+        "Zkp.Implementation.MerkleTrees.MerkleProof"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.set_witness_requires_matching_height"
+      ],
+      "note": "Only the set_witness length assertion is modelled; virtual-target allocation, constant embedding and witness writing are imported builder behaviour."
+    },
+    {
+      "start": 212,
+      "end": 235,
+      "status": "translated",
+      "label": "MerkleProofTarget::get_root: split_le index bits zipped with siblings, two_to_one_swapped per level",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.TargetOpening.recomputedRoot",
+        "Zkp.Implementation.MerkleTrees.SplitLeRange",
+        "Zkp.Implementation.MerkleTrees.rootFromBits",
+        "Zkp.Implementation.MerkleTrees.indexBits",
+        "Zkp.Implementation.MerkleTrees.nodeOf"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.target_verify_fixes_sibling_count",
+        "Zkp.Implementation.MerkleTrees.circuit_range_check_rejects_shifted_index"
+      ],
+      "note": "split_le is modelled only as the range premise index < 2^height and the same little-endian bit order; the swap gate lowering is an undischarged boundary."
+    },
+    {
+      "start": 236,
+      "end": 252,
+      "status": "translated",
+      "label": "MerkleProofTarget::verify (unconditional connect_hash)",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.TargetVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.target_verify_implies_native_verify",
+        "Zkp.Implementation.MerkleTrees.target_verify_true_condition_is_verify"
+      ],
+      "note": "Modelled as a Prop over an ARBITRARY witness, not as the native builder path; connect_hash lowering is a boundary."
+    },
+    {
+      "start": 253,
+      "end": 275,
+      "status": "translated",
+      "label": "MerkleProofTarget::conditional_verify (root recomputed always, equality gated)",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.TargetConditionalVerify"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.conditional_verify_false_does_not_bind_root",
+        "Zkp.Implementation.MerkleTrees.target_verify_true_condition_is_verify"
+      ],
+      "note": "With the condition false the gadget constrains NOTHING about the claimed root; callers must supply the condition's meaning themselves."
+    },
+    {
+      "start": 276,
+      "end": 279,
+      "status": "translated",
+      "label": "MerkleProofTarget::height() = siblings.len()",
+      "declarations": [
+        "Zkp.Implementation.MerkleTrees.TargetVerify",
+        "Zkp.Implementation.MerkleTrees.TargetOpening.siblings"
+      ],
+      "theorems": [
+        "Zkp.Implementation.MerkleTrees.target_verify_fixes_sibling_count"
+      ],
+      "note": "The in-circuit height is likewise the sibling count, fixed at circuit-build time."
+    },
+    {
+      "start": 280,
+      "end": 281,
+      "status": "non-executable",
+      "label": "closing brace and blank line",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from punctuation."
+    },
+    {
+      "start": 282,
+      "end": 619,
+      "status": "test-only",
+      "label": "#[cfg(test)] module",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust tests are not part of the model."
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "poseidon-hash-callback",
+      "obligation": "Leafable::hash and LeafableHasher::two_to_one are opaque callbacks (HashEnv). Nothing here establishes collision resistance, preimage resistance, or any algebraic property of Poseidon/Keccak, nor that leaf and node hashing are domain separated (they are not).",
+      "discharged": false
+    },
+    {
+      "name": "collision-freedom-premise",
+      "obligation": "NoCollisionAlong and LeafHashInjectiveOn are explicit, undischarged premises about the specific compared pairs. They are NOT global hash injectivity and are not proved for the real hash.",
+      "discharged": false
+    },
+    {
+      "name": "native-target-refinement",
+      "obligation": "The Lean definitions are a handwritten local semantics. No refinement of the Rust source, of rustc codegen, or of the plonky2-compiled circuit is proved.",
+      "discharged": false
+    },
+    {
+      "name": "rust-integer-widths",
+      "obligation": "BitPath.length (u32), BitPath.value (u64) and usize heights/lengths are modelled as unbounded Nat. Wrap-around of `>>=`/`^=`, `1 << height` overflow on 32-bit targets, and usize truncation are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "root-provenance",
+      "obligation": "A verified opening says only that the recomputed root equals the supplied root. Nothing here establishes that the root is canonical, current, on-chain, or produced by an honest tree.",
+      "discharged": false
+    },
+    {
+      "name": "plonky2-gate-lowering",
+      "obligation": "CircuitBuilder, split_le, two_to_one_swapped, connect_hash and conditional_assert_eq_hash are modelled as Props over an arbitrary witness. Gate lowering, range-check soundness of split_le, and witness-generation correctness are not proved.",
+      "discharged": false
+    },
+    {
+      "name": "hashmap-semantics",
+      "obligation": "The node_hashes HashMap is modelled as a prepend-only association list; hashing of BitPath keys, capacity behaviour and iteration order are not modelled.",
+      "discharged": false
+    },
+    {
+      "name": "serde-roundtrip",
+      "obligation": "MerkleProof's hand-written Serialize/Deserialize is not modelled; Deserialize accepts a sibling vector of any length, so a deserialized proof's height is attacker-chosen unless the caller checks it.",
+      "discharged": false
+    },
+    {
+      "name": "index-range-divergence",
+      "obligation": "Native BitPath::new does not mask the index, so native verify accepts index + 2^height; the in-circuit split_le range check does not. Nothing here proves the two paths are used consistently by callers.",
+      "discharged": false
+    },
+    {
+      "name": "native-vs-arbitrary-witness",
+      "obligation": "MerkleProofTarget is modelled as a Prop over an arbitrary satisfying witness. Theorems about the native MerkleTree::prove path do not cover adversarial witnesses, and vice versa.",
+      "discharged": false
+    }
+  ]
+}

@@ -401,11 +401,17 @@ def zeroHashAt (env : HashEnv L D) : Nat → D
   | 0 => env.leafHash env.emptyLeaf
   | n + 1 => env.twoToOne (zeroHashAt env n) (zeroHashAt env n)
 
+/-- The `zero_hashes` vector built by `MerkleTree::new`: push `H(empty_leaf)`, then `height`
+doublings. -/
+def zeroHashList (env : HashEnv L D) : Nat → List D
+  | 0 => [zeroHashAt env 0]
+  | n + 1 => zeroHashList env n ++ [zeroHashAt env (n + 1)]
+
 /-- `MerkleTree::new`. -/
 def MerkleTree.new (env : HashEnv L D) (height : Nat) : MerkleTree D :=
   { height := height
     nodeHashes := []
-    zeroHashes := (List.range (height + 1)).map (zeroHashAt env) }
+    zeroHashes := zeroHashList env height }
 
 /-- Association-list stand-in for the Rust `HashMap`; `insert` is modelled as a prepend, which has
 the same first-match lookup behaviour. -/
@@ -456,7 +462,10 @@ def MerkleTree.prove (env : HashEnv L D) (t : MerkleTree D) (index : Nat) : Merk
 
 theorem merkle_tree_new_has_height_plus_one_zero_hashes (env : HashEnv L D) (height : Nat) :
     (MerkleTree.new env height).zeroHashes.length = height + 1 := by
-  simp [MerkleTree.new, List.length_map, List.length_range]
+  simp only [MerkleTree.new]
+  induction height with
+  | zero => simp [zeroHashList]
+  | succ n ih => simp [zeroHashList, ih]
 
 theorem merkle_tree_new_has_no_stored_nodes (env : HashEnv L D) (height : Nat) :
     (MerkleTree.new env height).nodeHashes = ([] : List (BitPath × D)) := rfl
@@ -594,6 +603,11 @@ theorem list_length_one_is_singleton (l : List D) (h : l.length = 1) : ∃ a, l 
 
 /-- The `NotPowerOfTwo` branch of `get_merkle_root_from_full_leaves` is UNREACHABLE: the length
 check already forces a power-of-two width, and so does the empty-layer branch. -/
+theorem two_pow_pos (n : Nat) : 0 < 2 ^ n := by
+  induction n with
+  | zero => decide
+  | succ n ih => rw [Nat.pow_succ]; omega
+
 theorem full_leaves_never_reports_not_power_of_two (env : HashEnv L D) (height : Nat)
     (leaves : List L) (width : leaves.length = 2 ^ height) :
     ∃ r, getMerkleRootFromFullLeaves env height leaves = .ok r := by
@@ -603,7 +617,10 @@ theorem full_leaves_never_reports_not_power_of_two (env : HashEnv L D) (height :
   have hne : ¬ (leaves.length ≠ 2 ^ height) := by simp [width]
   have hnonempty : ¬ (leaves.map env.leafHash).isEmpty = true := by
     cases hmap : leaves.map env.leafHash with
-    | nil => rw [hmap] at hlayer; simp at hlayer; omega
+    | nil =>
+      rw [hmap] at hlayer
+      simp only [List.length_nil] at hlayer
+      exact absurd hlayer.symm (Nat.ne_of_gt (two_pow_pos height))
     | cons a t => simp
   refine ⟨r, ?_⟩
   simp only [getMerkleRootFromFullLeaves, if_neg hne, if_neg hnonempty]
@@ -617,9 +634,8 @@ theorem get_root_from_leaves_rejects_overflow (env : HashEnv L D) (height : Nat)
 theorem get_root_from_leaves_pads_to_full_width (env : HashEnv L D) (height : Nat) (leaves : List L)
     (fits : leaves.length ≤ 2 ^ height) :
     (leaves ++ List.replicate (2 ^ height - leaves.length) env.emptyLeaf).length = 2 ^ height := by
-  simp only [List.length_append, List.length_replicate]
-  generalize 2 ^ height = width at fits ⊢
-  omega
+  have h : leaves.length + (2 ^ height - leaves.length) = 2 ^ height := Nat.add_sub_cancel' fits
+  simpa using h
 
 theorem get_root_from_leaves_succeeds_when_it_fits (env : HashEnv L D) (height : Nat)
     (leaves : List L) (fits : leaves.length ≤ 2 ^ height) :
@@ -636,7 +652,7 @@ theorem circuit_root_matches_native_at_full_width (env : HashEnv L D) (height : 
     circuitRootFromLeaves env height height leaves = getMerkleRootFromLeaves env height leaves := by
   have hnot : ¬ (leaves.length > 2 ^ height) := by omega
   simp only [circuitRootFromLeaves, getMerkleRootFromLeaves, if_neg hnot, Nat.sub_self]
-  cases h : getMerkleRootFromFullLeaves env height
+  cases _h : getMerkleRootFromFullLeaves env height
       (leaves ++ List.replicate (2 ^ height - leaves.length) env.emptyLeaf) with
   | error e => rfl
   | ok r => simp [extendWithZeroSubtrees]
