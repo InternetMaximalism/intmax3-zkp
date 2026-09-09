@@ -6,7 +6,12 @@
 - sources: from the maps; for map-less composition modules pass
            --compose=Zkp.Implementation.X:path1,path2  (paths must already be hashed implementation/spec files)
 - extra tooling/doc files to hash: --tooling=path1,path2  (role "tooling")
-Idempotent. Never changes an implementation-role hash (asserts unchanged).
+- deliberately accept a CHANGED implementation source: --accept-source-change=path1,path2
+
+Idempotent. An implementation-role hash never moves by accident: the script asserts it is unchanged
+unless you name that exact path in --accept-source-change. Only do that after reviewing the model
+correspondence for the file — the guard's own message says so, and the point of the assert is to make
+the review a deliberate act rather than a side effect of re-running the registrar.
 """
 import hashlib, importlib.util, json, pathlib, sys
 sys.dont_write_bytecode = True
@@ -17,12 +22,14 @@ INVENTORY = ROOT / 'doc/audit/zkp/implementation-inventory.json'
 ZKP = ROOT / 'doc/audit/zkp/Zkp.lean'
 GUARD = ROOT / '.github/ci/lean-safety-guard.py'
 PROJECT = 'doc/audit/zkp'
-compose, tooling = {}, []
+compose, tooling, accepted = {}, [], set()
 for arg in sys.argv[1:]:
     if arg.startswith('--compose='):
         key, val = arg[len('--compose='):].split(':', 1); compose[key] = val.split(',')
     elif arg.startswith('--tooling='):
         tooling += arg[len('--tooling='):].split(',')
+    elif arg.startswith('--accept-source-change='):
+        accepted |= set(arg[len('--accept-source-change='):].split(','))
     else:
         raise SystemExit('unknown arg ' + arg)
 
@@ -68,6 +75,13 @@ for m in modules:
         e = by_path[source]
         assert e['sha256'] == sha(source), f'inventory implementation hash drift: {source}'
         e['line_map'] = map_path
+for path in sorted(accepted):
+    entry = by_path.get(path)
+    assert entry is not None, f'accepted source is not inventoried: {path}'
+    raw = (ROOT / path).read_bytes()
+    entry['sha256'] = hashlib.sha256(raw).hexdigest()
+    entry['lines'] = len(raw.decode('utf8').splitlines())
+    print('inventory: accepted source change', path, '->', entry['lines'], 'lines')
 dump(INVENTORY, inv)
 
 man = load(MANIFEST)
@@ -75,7 +89,7 @@ files = {e['path']: e for e in man['files']}
 def ensure(path, role):
     if path in files:
         assert files[path]['role'] == role, f'role clash {path}: {files[path]["role"]} vs {role}'
-        if role == 'implementation':
+        if role == 'implementation' and path not in accepted:
             assert files[path]['sha256'] == sha(path), f'IMPLEMENTATION HASH CHANGED: {path}'
         else:
             files[path]['sha256'] = sha(path)
@@ -108,7 +122,10 @@ for c in man['theorem_checks']:
     c['theorems'] = [f"{c['module']}.{n}" for n in G.declared_theorems((ROOT / model_path).read_text())]
 for path in list(files):
     if files[path]['role'] == 'implementation':
-        assert files[path]['sha256'] == sha(path), f'IMPLEMENTATION HASH CHANGED: {path}'
+        if path in accepted:
+            files[path]['sha256'] = sha(path)
+        else:
+            assert files[path]['sha256'] == sha(path), f'IMPLEMENTATION HASH CHANGED: {path}'
 dump(MANIFEST, man)
 man = load(MANIFEST)
 for e in man['files']:

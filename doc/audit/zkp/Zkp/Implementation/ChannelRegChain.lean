@@ -207,11 +207,30 @@ def Hash4.toWords (h : Hash4) : Words8 :=
 def Words8.reduceToHash (x : Words8) : Hash4 :=
   ⟨x.w0 * limbBase + x.w1, x.w2 * limbBase + x.w3, x.w4 * limbBase + x.w5, x.w6 * limbBase + x.w7⟩
 
-/-- `PoseidonHashOut::try_from(Bytes32)`: the bytes are the canonical re-encoding. -/
-def Words8.canonical (x : Words8) : Prop := x.reduceToHash.toWords = x
+/-- The BYTE ROUND-TRIP half of `PoseidonHashOut::try_from(Bytes32)` (`value != recovered`):
+    the eight u32 limbs regrouped into four u64s and split apart again are the same eight
+    limbs. Neither direction reduces modulo the field, so on genuine u32 limbs this half is
+    unconditionally true and can never reject (`byte_round_trip_alone_cannot_reject`). -/
+def Words8.byteRoundTrip (x : Words8) : Prop := x.reduceToHash.toWords = x
 
-instance (x : Words8) : Decidable x.canonical := by
-  unfold Words8.canonical; infer_instance
+/-- The GOLDILOCKS ELEMENT half, and the half that actually rejects: the deployed
+    `TryFrom<Bytes32> for PoseidonHashOut` tests each of the four recombined u64s against
+    `GOLDILOCKS_ORDER = 0xFFFF_FFFF_0000_0001` BEFORE the round trip and returns
+    `PoseidonHashOutError::NonCanonicalElement i` on the first element that is too large. -/
+def Words8.goldilocksCanonical (x : Words8) : Prop := x.reduceToHash.canonicalField
+
+/-- `PoseidonHashOut::try_from(Bytes32)` SUCCEEDS: the four recombined 64-bit halves are
+    below the Goldilocks order AND the byte round trip is the identity, in that order. -/
+def Words8.canonical (x : Words8) : Prop := x.goldilocksCanonical ∧ x.byteRoundTrip
+
+instance (x : Words8) : Decidable x.goldilocksCanonical :=
+  inferInstanceAs (Decidable x.reduceToHash.canonicalField)
+
+instance (x : Words8) : Decidable x.byteRoundTrip :=
+  inferInstanceAs (Decidable (x.reduceToHash.toWords = x))
+
+instance (x : Words8) : Decidable x.canonical :=
+  inferInstanceAs (Decidable (x.goldilocksCanonical ∧ x.byteRoundTrip))
 
 theorem to_words_checked (h : Hash4) (hc : h.canonicalField) : CheckedWords h.toWords.words := by
   intro w hw
@@ -242,7 +261,9 @@ theorem reduce_to_words_roundtrip (h : Hash4) (hc : h.canonicalField) :
     therefore has no satisfying witness (source comment in `common/channel_registration.rs`). -/
 theorem circuit_member_words_canonical (h : Hash4) (hc : h.canonicalField) :
     h.toWords.canonical := by
-  simp [Words8.canonical, reduce_to_words_roundtrip h hc]
+  unfold Words8.canonical Words8.goldilocksCanonical Words8.byteRoundTrip
+  rw [reduce_to_words_roundtrip h hc]
+  exact ⟨hc, rfl⟩
 
 /-- Ascending index list `[0, 1, .., n-1]` (the source loops' order). -/
 def upto : Nat → List Nat
@@ -346,8 +367,8 @@ instance (m : RegEntry) : Decidable m.canonical := by unfold RegEntry.canonical;
     this slot is byte-identical to what the contract hashed. -/
 theorem reg_entry_roundtrip (m : RegEntry) (h : m.canonical) : m.toMember.regEntry = m := by
   obtain ⟨h1, h2, h3⟩ := h
-  unfold Words8.canonical at h1 h2 h3
-  simp [RegEntry.toMember, MemberEntry.regEntry, h1, h2, h3]
+  unfold Words8.canonical Words8.byteRoundTrip at h1 h2 h3
+  simp [RegEntry.toMember, MemberEntry.regEntry, h1.2, h2.2, h3.2]
 
 theorem zero_reg_entry_canonical : RegEntry.zero.canonical := by decide
 
@@ -1230,15 +1251,27 @@ theorem gates_leave_recipients_free (e : Environment) (cap : Nat) (x : StepInput
 
 /-! ## What the native canonicality check actually rejects
 
-    `PoseidonHashOut::try_from(Bytes32)` splits each 64-bit half into `(high, low)` u32 limbs and
-    recombines them; that round trip is the identity on ANY `Bytes32`, so the native
-    `NonCanonicalPkG` / `NonCanonicalPkB` / `NonCanonicalRegevPkDigest` errors cannot fire. The
-    GOLDILOCKS canonicality the comments describe is enforced only in-circuit, by the identity
-    being witnessed as a field element: a registration whose 64-bit halves are `>= p` passes
-    native validation and is simply UNPROVABLE. -/
+    `PoseidonHashOut::try_from(Bytes32)` has TWO tests and only one of them can fire.
 
-theorem native_canonicality_check_cannot_fail (x : Words8) (h : CheckedWords x.words) :
-    x.canonical := by
+    The BYTE ROUND TRIP (`value != recovered`) is vacuous: `reduce_to_hash_out` regroups the
+    eight u32 limbs into four u64s and `From<PoseidonHashOut> for Bytes32` splits them back
+    exactly the same way, neither direction reducing modulo the field, so the two are inverses
+    on every genuine `Bytes32`. `byte_round_trip_alone_cannot_reject` is that fact and nothing
+    more: it is a statement about `Words8.byteRoundTrip`, NOT about the deployed conversion.
+
+    The ELEMENT RANGE test is the one that rejects. The deployed conversion tests each of the
+    four recombined u64s against `GOLDILOCKS_ORDER` BEFORE the round trip and returns
+    `PoseidonHashOutError::NonCanonicalElement i`; `Words8.canonical` (which is what
+    `ChannelRegRecord::validate` calls, once per identity, per active slot) therefore carries
+    `Words8.goldilocksCanonical` as its first conjunct, and `validate`'s `NonCanonicalPkG` /
+    `NonCanonicalPkB` / `NonCanonicalRegevPkDigest` arms are LIVE code: a registration whose
+    64-bit halves are `>= p` is now rejected natively, not merely left unprovable in-circuit.
+
+    None of this uses any property of Poseidon or keccak; canonicality is the explicit
+    arithmetic predicate `Words8.goldilocksCanonical`, decided on the limbs. -/
+
+theorem byte_round_trip_alone_cannot_reject (x : Words8) (h : CheckedWords x.words) :
+    x.byteRoundTrip := by
   cases x with
   | mk w0 w1 w2 w3 w4 w5 w6 w7 =>
     have h1 : w1 < limbBase := h _ (by simp [Words8.words])
@@ -1246,25 +1279,100 @@ theorem native_canonicality_check_cannot_fail (x : Words8) (h : CheckedWords x.w
     have h5 : w5 < limbBase := h _ (by simp [Words8.words])
     have h7 : w7 < limbBase := h _ (by simp [Words8.words])
     simp only [limbBase] at h1 h3 h5 h7
-    simp only [Words8.canonical, Words8.reduceToHash, Hash4.toWords, limbBase, Words8.mk.injEq]
+    simp only [Words8.byteRoundTrip, Words8.reduceToHash, Hash4.toWords, limbBase,
+      Words8.mk.injEq]
     refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> omega
 
-/-- The intended (Goldilocks) canonicality of a registered identity half. -/
-def Words8.goldilocksCanonical (x : Words8) : Prop := x.reduceToHash.canonicalField
+/-- Since the round trip is vacuous on u32 limbs, `try_from` succeeding is EXACTLY the
+    Goldilocks element-range test the fix added. -/
+theorem canonical_iff_goldilocks_on_u32_limbs (x : Words8) (h : CheckedWords x.words) :
+    x.canonical ↔ x.goldilocksCanonical :=
+  ⟨fun hc => hc.1, fun hg => ⟨hg, byte_round_trip_alone_cannot_reject x h⟩⟩
 
-/-- A registered identity the native validator accepts but no witness can satisfy: its halves are
-    u32 limbs (so `try_from` succeeds) yet the recombined element is above the Goldilocks modulus,
-    which `Bytes32Target::from_hash_out` can never produce. -/
+/-- A registered identity whose halves are honest u32 limbs (so the round trip holds) yet whose
+    recombined element is at or above the Goldilocks modulus, which `Bytes32Target::from_hash_out`
+    can never produce. Before the fix native `validate()` accepted it; now it does not. -/
 def nonGoldilocksWords : Words8 := ⟨4294967295, 4294967295, 0, 0, 0, 0, 0, 0⟩
 
-theorem non_goldilocks_words_accepted_natively :
-    CheckedWords nonGoldilocksWords.words ∧ nonGoldilocksWords.canonical ∧
-      ¬ nonGoldilocksWords.goldilocksCanonical := by
-  refine ⟨by decide, by decide, ?_⟩
-  intro h
-  have := h nonGoldilocksWords.reduceToHash.h0 (by simp [Hash4.elems])
-  simp only [nonGoldilocksWords, Words8.reduceToHash, limbBase, goldilocks] at this
-  omega
+theorem non_goldilocks_words_rejected_natively :
+    CheckedWords nonGoldilocksWords.words ∧ nonGoldilocksWords.byteRoundTrip ∧
+      ¬ nonGoldilocksWords.goldilocksCanonical ∧ ¬ nonGoldilocksWords.canonical := by
+  have hgold : ¬ nonGoldilocksWords.goldilocksCanonical := by
+    intro h
+    have := h nonGoldilocksWords.reduceToHash.h0 (by simp [Hash4.elems])
+    simp only [nonGoldilocksWords, Words8.reduceToHash, limbBase, goldilocks] at this
+    omega
+  exact ⟨by decide, by decide, hgold, fun hc => hgold hc.1⟩
+
+/-- THE FIX, at the `validate` level. Every identity half of every ACTIVE slot of a natively
+    validated record is below the Goldilocks order. (Before the fix this was unprovable:
+    `validate` accepted records whose halves were `>= p`.) -/
+theorem validate_forces_goldilocks_identities (r : Record) (h : r.validate = .ok ()) (i : Nat)
+    (hi : i < r.memberCount) :
+    (r.slot i).pkG.goldilocksCanonical ∧ (r.slot i).pkB.goldilocksCanonical ∧
+      (r.slot i).regev.goldilocksCanonical := by
+  obtain ⟨hg, hb, hr⟩ := validate_active_canonical r h i hi
+  exact ⟨hg.1, hb.1, hr.1⟩
+
+/-- Contrapositive: an active slot with a 64-bit half at or above the Goldilocks order is
+    REJECTED by `ChannelRegRecord::validate`. -/
+theorem validate_rejects_non_goldilocks_identity (r : Record) (i : Nat) (hi : i < r.memberCount)
+    (h : ¬ (r.slot i).pkG.goldilocksCanonical ∨ ¬ (r.slot i).pkB.goldilocksCanonical ∨
+      ¬ (r.slot i).regev.goldilocksCanonical) : r.validate ≠ .ok () := by
+  intro hok
+  obtain ⟨hg, hb, hr⟩ := validate_forces_goldilocks_identities r hok i hi
+  rcases h with h | h | h
+  · exact h hg
+  · exact h hb
+  · exact h hr
+
+/-- `check c err` reports exactly `err` when `c` fails. -/
+theorem check_error_iff {E : Type} (c : Prop) [Decidable c] (err : E) :
+    check c err = .error err ↔ ¬ c := by
+  by_cases h : c <;> simp [check, h]
+
+/-- The ERROR IDENTITY, not just failure: a non-zero active `pk_g` whose recombined halves are
+    not Goldilocks-canonical makes the slot check return `NonCanonicalPkG i` — the arm that used
+    to be dead code. -/
+theorem check_active_slot_reports_non_canonical_pk_g (r : Record) (i : Nat)
+    (hz : (r.slot i).pkG ≠ Words8.zero) (h : ¬ (r.slot i).pkG.goldilocksCanonical) :
+    checkActiveSlot r i = .error (.nonCanonicalPkG i) := by
+  have hz' : check ((r.slot i).pkG ≠ Words8.zero) (RecordError.zeroActivePkG i) = .ok () :=
+    (check_ok_iff _ _).mpr hz
+  have hc : check (r.slot i).pkG.canonical (RecordError.nonCanonicalPkG i)
+      = .error (.nonCanonicalPkG i) := (check_error_iff _ _).mpr (fun hh => h hh.1)
+  show (check ((r.slot i).pkG ≠ Words8.zero) (RecordError.zeroActivePkG i) >>= fun _ =>
+    check (r.slot i).pkG.canonical (RecordError.nonCanonicalPkG i) >>= fun _ =>
+      check (r.slot i).pkB.canonical (RecordError.nonCanonicalPkB i) >>= fun _ =>
+        check (r.slot i).regev.canonical (RecordError.nonCanonicalRegevPkDigest i) >>= fun _ =>
+          checkDistinctFrom r i ((upto r.memberCount).filter (fun j => decide (i < j))))
+    = .error (.nonCanonicalPkG i)
+  rw [hz', hc]
+  rfl
+
+/-- A CONCRETE non-canonical registration and the exact error `validate` now returns for it.
+    This is the Rust test `test_channel_reg_validate_rejects_noncanonical_identity_encodings`,
+    which the defect made fail. -/
+def nonGoldilocksRecord : Record :=
+  { channelId := 0, bpSlot := 0, memberCount := 2, delegateCount := 0,
+    members :=
+      [⟨nonGoldilocksWords, Words8.zero, Words8.zero, Words5.zero⟩,
+       ⟨⟨0, 0, 0, 0, 0, 0, 0, 1⟩, Words8.zero, Words8.zero, Words5.zero⟩] }
+
+theorem non_goldilocks_record_rejected :
+    nonGoldilocksRecord.validate = .error (.nonCanonicalPkG 0) := by
+  rfl
+
+/-- Contrast: the same record with a Goldilocks-canonical `pk_g` in slot 0 validates, so the
+    rejection above is not an artifact of some other check. -/
+def goldilocksRecord : Record :=
+  { nonGoldilocksRecord with
+    members :=
+      [⟨⟨0, 0, 0, 0, 0, 0, 0, 2⟩, Words8.zero, Words8.zero, Words5.zero⟩,
+       ⟨⟨0, 0, 0, 0, 0, 0, 0, 1⟩, Words8.zero, Words8.zero, Words5.zero⟩] }
+
+theorem goldilocks_record_validates : goldilocksRecord.validate = .ok () := by
+  rfl
 
 /-! ## `set_witness`: the native assignment, and that it satisfies the gates -/
 
@@ -1295,7 +1403,9 @@ def nativeInputs (chainVd : List Nat) (w : StepWitness) (prev out : PublicInputs
 /-- Width / range invariants of the native values (Rust types), plus the two obligations
     `to_public_inputs` does NOT discharge: that the previous proof verifies
     (`NativeProofNotChecked`) and that its declared verifier data is the chain's
-    (`ConsumerVdPin`), and the Goldilocks range of the witnessed identities. -/
+    (`ConsumerVdPin`). `identityFields` (the Goldilocks range of the witnessed identities) is
+    stated here as a width premise like the others, but on a validated record it is now
+    REDUNDANT — `validate` enforces it (`native_widths_identity_fields_follow_from_validate`). -/
 structure NativeWidths (e : Environment) (cap : Nat) (chainVd : List Nat) (w : StepWitness)
     (prev : PublicInputs) : Prop where
   membersLen : w.record.members.length = maxSigCluster
@@ -1313,6 +1423,16 @@ structure NativeWidths (e : Environment) (cap : Nat) (chainVd : List Nat) (w : S
       (w.record.slot i).toMember.regev.canonicalField
   vdMatch : w.initialValue = none → chainVd = prev.vd
   proofVerifies : w.initialValue = none → e.proofAccepted prev.vd prev.toU64Vec = true
+
+/-- `identityFields` is DISCHARGED by native validation now that `PoseidonHashOut::try_from`
+    tests the element range: on a validated record `set_witness`'s `F::from_canonical_u64`
+    cannot silently reduce an identity half. -/
+theorem native_widths_identity_fields_follow_from_validate (r : Record)
+    (h : r.validate = .ok ()) (i : Nat) (hi : i < maxSigCluster) :
+    (r.slot i).toMember.pkG.canonicalField ∧ (r.slot i).toMember.pkB.canonicalField ∧
+      (r.slot i).toMember.regev.canonicalField := by
+  obtain ⟨hg, hb, hr⟩ := validate_all_slots_canonical r h i hi
+  exact ⟨hg.1, hb.1, hr.1⟩
 
 theorem native_slot (w : StepWitness) (chainVd : List Nat) (prev out : PublicInputs)
     (hlen : w.record.members.length = maxSigCluster) (i : Nat) (hi : i < maxSigCluster) :

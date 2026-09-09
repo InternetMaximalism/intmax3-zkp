@@ -20,10 +20,21 @@
         "Zkp.Implementation.TxSettlement.Hash4",
         "Zkp.Implementation.TxSettlement.Tx",
         "Zkp.Implementation.TxSettlement.PublicState",
-        "Zkp.Implementation.TxSettlement.rootToHash4"
+        "Zkp.Implementation.TxSettlement.rootToHash4",
+        "Zkp.Implementation.TxSettlement.ConversionFault",
+        "Zkp.Implementation.TxSettlement.firstNonCanonicalIndex",
+        "Zkp.Implementation.TxSettlement.Bytes32.tryToHashOut"
       ],
-      "theorems": [],
-      "note": "AccountState / SpendPublicInputs / ChannelId / PublicState / Tx / TxV2 / Merkle proofs / PoseidonHashOut / add_proof_target_and_verify are imported. Tx and PublicState reuse the registered Spend and BalancePublicInputs models; Merkle roots and the spend verifier are the opaque callbacks of Environment; plonky2 lowering is FieldAndGadgetLowering. No hash injectivity or proof soundness is assumed."
+      "theorems": [
+        "Zkp.Implementation.TxSettlement.byte_round_trip_is_identity_on_u32_limbs",
+        "Zkp.Implementation.TxSettlement.native_try_from_recovery_failure_is_unreachable",
+        "Zkp.Implementation.TxSettlement.native_try_from_tests_canonicality_before_the_round_trip",
+        "Zkp.Implementation.TxSettlement.native_try_from_accepts_exactly_canonical_u32_limbs",
+        "Zkp.Implementation.TxSettlement.modulus_encoding_is_rejected_by_native_try_from",
+        "Zkp.Implementation.TxSettlement.canonical_hash_has_no_non_canonical_index",
+        "Zkp.Implementation.TxSettlement.non_canonical_hash_has_an_index"
+      ],
+      "note": "AccountState / SpendPublicInputs / ChannelId / PublicState / Tx / TxV2 / Merkle proofs / PoseidonHashOut / add_proof_target_and_verify are imported. Tx and PublicState reuse the registered Spend and BalancePublicInputs models; Merkle roots and the spend verifier are the opaque callbacks of Environment; plonky2 lowering is FieldAndGadgetLowering. No hash injectivity or proof soundness is assumed. The imported PoseidonHashOut interface (line 19) brings in TWO distinct Bytes32 readings, both modeled here: the partial TryFrom<Bytes32> of src/utils/poseidon_hash_out.rs:291-303, which tests each recombined u64 against GOLDILOCKS_ORDER first (firstNonCanonicalIndex) and only then round-trips the bytes (Bytes32.tryToHashOut, ConversionFault), and the total lossy Bytes32::reduce_to_hash_out. The listed theorems are about that imported interface premise only, not about any line of tx_settlement.rs."
     },
     {
       "start": 35,
@@ -200,16 +211,16 @@
         "Zkp.Implementation.TxSettlement.Bytes32.Typed",
         "Zkp.Implementation.TxSettlement.Bytes32.reduceNative",
         "Zkp.Implementation.TxSettlement.hashToBytes32",
-        "Zkp.Implementation.TxSettlement.Bytes32.tryToHashOut",
         "Zkp.Implementation.TxSettlement.hashCanonical"
       ],
       "theorems": [
-        "Zkp.Implementation.TxSettlement.native_try_from_never_rejects_u32_limbs",
-        "Zkp.Implementation.TxSettlement.modulus_encoding_passes_native_try_from",
+        "Zkp.Implementation.TxSettlement.modulus_encoding_still_passes_the_lossy_reduction",
+        "Zkp.Implementation.TxSettlement.native_settlement_accepts_bytes_the_fixed_try_from_rejects",
+        "Zkp.Implementation.TxSettlement.the_aliasing_environment_violates_canonical_roots",
         "Zkp.Implementation.TxSettlement.noncanonical_native_hash_never_equals_a_canonical_root",
         "Zkp.Implementation.TxSettlement.bytes32_typed_iff"
       ],
-      "note": "Native reduction is high<<32 + low per pair with no field reduction, so a non-canonical Bytes32 yields a u64 >= p that can never equal a canonical Poseidon root (CanonicalRoots premise). The native TryFrom round trip never rejects u32 limbs. Handwritten local semantics; no source/compiler refinement."
+      "note": "This line calls the LOSSY Bytes32::reduce_to_hash_out (high<<32 + low per pair, no field reduction, no canonicality test), NOT the partial TryFrom<Bytes32>; the repair of that TryFrom in src/utils/poseidon_hash_out.rs leaves this line's behaviour unchanged, and a settlement whose send-leaf tx_tree_root the fixed TryFrom rejects is still natively accepted here (native_settlement_accepts_bytes_the_fixed_try_from_rejects). Native rejection of a non-canonical tx-tree root comes only from the CanonicalRoots premise: a non-canonical Bytes32 yields a u64 >= p that can never equal a canonical Poseidon root. Handwritten local semantics; no source/compiler refinement."
     },
     {
       "start": 156,
@@ -651,7 +662,7 @@
     },
     {
       "name": "canonical-roots",
-      "obligation": "CanonicalRoots: Poseidon Merkle roots are canonical Goldilocks elements (to_canonical_u64), which is what makes the native bare reduction reject non-canonical tx-tree roots.",
+      "obligation": "CanonicalRoots: Poseidon Merkle roots are canonical Goldilocks elements (to_canonical_u64). This premise, not any conversion check, is the only thing that makes the native path at line 155 reject a non-canonical tx-tree root: line 155 uses the total, many-to-one Bytes32::reduce_to_hash_out, so the canonicality test added to TryFrom<Bytes32> in src/utils/poseidon_hash_out.rs never runs on this path.",
       "discharged": false
     },
     {

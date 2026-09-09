@@ -34,7 +34,10 @@ Named undischarged boundaries (also listed in the line maps):
 * `channel_action_root_callback` — `compute_channel_action_root` / `compute_tx_v2_root`.
 * `bytes32_canonicality_callback` — `PoseidonHashOut::try_from(Bytes32)` is an opaque
   `Bytes32 -> Bool`; the model proves only that `validate`'s three "non-canonical"
-  rejections are exactly as strong as that callback.
+  rejections are exactly as strong as that callback, in BOTH directions (a total
+  callback makes them unreachable; a rejecting callback makes each of them fire). What
+  the deployed conversion actually rejects — a recombined 64-bit half at or above the
+  Goldilocks order — is modeled arithmetically in `Zkp.Implementation.ChannelRegChain`.
 * `native_target_refinement` — target definitions are word-level transcriptions of the
   builder code; plonky2 gate lowering, range checks and witness generation are not modeled.
 * `word_domain_representation` — `Nat` stands for u32/u64/field words.
@@ -962,10 +965,16 @@ theorem channel_reg_rejects_bp_slot_out_of_range (canonical : CanonicalCheck)
   simp [validateChannelReg, Nat.not_lt.mpr lo, Nat.not_lt.mpr hi, noDelegates, active, padding,
     slot]
 
-/-- HONESTY / SECURITY: the three "non-canonical encoding" rejections are only as strong
-    as the `PoseidonHashOut::try_from` callback. With a TOTAL callback they never fire —
-    which is what the deployed `TryFrom<Bytes32>` is, because splitting a u64 into two
-    u32 limbs and recombining them round-trips every `Bytes32` exactly. -/
+/-- HONESTY / SECURITY, direction 1: the three "non-canonical encoding" rejections are only as
+    strong as the `PoseidonHashOut::try_from` callback — with a TOTAL callback they never fire.
+    This is a statement about the MODEL's `canonical` parameter, not about the deployed
+    conversion. The deployed `TryFrom<Bytes32> for PoseidonHashOut` is NOT total: its byte
+    round-trip half is vacuous (splitting a u64 into two u32 limbs and recombining them
+    round-trips every `Bytes32` exactly), but it separately tests each of the four recombined
+    64-bit halves against `GOLDILOCKS_ORDER` and returns `NonCanonicalElement i` when one is at
+    or above it, so these three arms are reachable — see
+    `canonicality_rejections_fire_when_the_callback_rejects` for the other direction and
+    `ChannelRegChain.validate_rejects_non_goldilocks_identity` for the arithmetic predicate. -/
 theorem canonicality_rejections_come_only_from_the_callback (members : List MemberRegEntry)
     (mc i : Nat) :
     checkActiveSlot (fun _ => true) members mc i ≠ .error (.nonCanonicalPkG i) ∧
@@ -977,6 +986,39 @@ theorem canonicality_rejections_come_only_from_the_callback (members : List Memb
       split
       · simp
       · split <;> simp
+
+/-- Direction 2 (the companion): when the callback DOES reject an identity encoding — which the
+    deployed `TryFrom<Bytes32>` does for a 64-bit half at or above `GOLDILOCKS_ORDER` — the
+    corresponding fault IS produced, in the source's order: `pk_g` first, then `pk_b`, then
+    `regev_pk_digest`, each only after the earlier ones were accepted. -/
+theorem canonicality_rejections_fire_when_the_callback_rejects (canonical : CanonicalCheck)
+    (members : List MemberRegEntry) (mc i : Nat)
+    (nonzero : (members.getD i memberZero).pkG ≠ bytes32Zero) :
+    (canonical (members.getD i memberZero).pkG = false →
+        checkActiveSlot canonical members mc i = .error (.nonCanonicalPkG i)) ∧
+      (canonical (members.getD i memberZero).pkG = true →
+        canonical (members.getD i memberZero).pkB = false →
+          checkActiveSlot canonical members mc i = .error (.nonCanonicalPkB i)) ∧
+      (canonical (members.getD i memberZero).pkG = true →
+        canonical (members.getD i memberZero).pkB = true →
+        canonical (members.getD i memberZero).regevPkDigest = false →
+          checkActiveSlot canonical members mc i
+            = .error (.nonCanonicalRegevPkDigest i)) := by
+  refine ⟨?_, ?_, ?_⟩ <;> intros <;> simp_all [checkActiveSlot]
+
+/-- The high 64-bit half is `0xFFFFFFFF_FFFFFFFF`, at or above the Goldilocks order, so the
+    deployed conversion returns `NonCanonicalElement 0` for it. -/
+def nonCanonicalPkGBytes : Bytes32 := ⟨4294967295, 4294967295, 0, 0, 0, 0, 0, 0⟩
+
+/-- A callback that rejects exactly that encoding and accepts everything else. -/
+def rejectsNonCanonicalPkG : CanonicalCheck := fun b => decide (b ≠ nonCanonicalPkGBytes)
+
+/-- Reachability, concretely: the `NonCanonicalPkG` arm is live code, not dead code. -/
+theorem non_canonical_pk_g_rejection_is_reachable :
+    checkActiveSlot rejectsNonCanonicalPkG
+        [⟨nonCanonicalPkGBytes, bytes32Zero, bytes32Zero, addressZero⟩] 2 0
+      = .error (.nonCanonicalPkG 0) := by
+  rfl
 
 /-! ### The R3 word-aligned registration preimage -/
 

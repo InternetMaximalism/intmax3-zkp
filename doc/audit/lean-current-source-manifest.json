@@ -140,7 +140,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "662a5e841151e1bbb61d29aaf896d7c9aaa94789258fc91b11edb57d17a05e08",
+      "sha256": "bc8a2065d7e0e9d0cfe6f0ea234063b9b907558b79f2846f2a53664724240cec",
       "role": "tooling"
     },
     {
@@ -260,7 +260,7 @@
     },
     {
       "path": "src/common/balance_state.rs",
-      "sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
+      "sha256": "c948f630935fc2f3ce3787a6bfd4e1bd04e577572a1d4ff29df601c93fe0689a",
       "role": "implementation"
     },
     {
@@ -380,12 +380,12 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "f66d09bc6957f782afbb790ddafb9cdcadc2f6935503566c40157f7c9bb04dd1",
+      "sha256": "83fee19229237d37bda3df29892e63865a0cca0e79aa55abd07866dc9356038e",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "875050ca96ba778b1499243531adc566b2fd86c4dc282bc35f0c39e3cbab4f3d",
+      "sha256": "b497eb063eea4e7d98c57dc82b8d8933e85eee8f8686cbb52b9f230d1784a886",
       "role": "spec"
     },
     {
@@ -540,12 +540,12 @@
     },
     {
       "path": "doc/audit/zkp/line-map/balance-state-hash-helpers.json",
-      "sha256": "99a516ded9e276e7afac5042918b83bca3427492e5c8a88c5c16218b7c81233c",
+      "sha256": "6faf29e8b4a6bd186bf49be3e5294d457f4d31b450dc452a64aac665b53b0c25",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/H1Gadget.lean",
-      "sha256": "e352675181905ccb199279db2d865338e9829e6f005bfd130e95d2679ca20121",
+      "sha256": "bd6533a74ee6676d0de39de28ec6032f24f9304b914f4cd415b3326e20f199cc",
       "role": "model"
     },
     {
@@ -590,12 +590,12 @@
     },
     {
       "path": "doc/audit/zkp/line-map/poseidon-output-encoding.json",
-      "sha256": "949d3620852bec2345e97d2958bfcb6a71929da2f134617174556fbfb4e954eb",
+      "sha256": "7f01e5ce38ca101b0be6b0682601528b4fed0f3832f7d6ea0ce5861b246d5301",
       "role": "spec"
     },
     {
       "path": "src/utils/poseidon_hash_out.rs",
-      "sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
+      "sha256": "ce711aa5941098b87a772684925a9cfa013bab1eb146f80504d6c3b8dd79b0cf",
       "role": "implementation"
     },
     {
@@ -890,7 +890,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/ChannelRegChain.lean",
-      "sha256": "33728f1e2cb7a26cd9cdc187b025e340267da75e1ae7648ea91814473a993c2b",
+      "sha256": "9e1baf7a42b395de3ba484083086930eeb7ccb7962e030147423f246ffc378ad",
       "role": "model"
     },
     {
@@ -900,7 +900,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/channel-reg-chain-pis.json",
-      "sha256": "f724e3cefaf9413595f9c17191ed98e402080678174cc32e21792a6498c08e80",
+      "sha256": "539d421f6b2fc18cc4325af542a2acd0e9c0b3262fa13fb8782a5c5716a33830",
       "role": "spec"
     },
     {
@@ -910,7 +910,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/channel-reg-hash-chain-circuit.json",
-      "sha256": "1eeeccc8c6ce7d8fcf1bb330109baeac671b0ebd1fe9617ff1d081c9847941b1",
+      "sha256": "a264cf96e151c6b388482e519a53ce5ac1ba9ba9998d7319c680735312d2089a",
       "role": "spec"
     },
     {
@@ -920,7 +920,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/channel-reg-step.json",
-      "sha256": "a6ef38086194ef2dba9546b40538100fd748a8444d45ec77ed63e1af32dc4d1a",
+      "sha256": "4804b2947a4f41ee5b75233fb89707d2747f7051d153951c1830c8e442f3a9de",
       "role": "spec"
     },
     {
@@ -1225,7 +1225,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TxSettlement.lean",
-      "sha256": "a416281162a765e9ca7dcf02163c3b79429a420890ef70208acb116760b1c189",
+      "sha256": "98acbc939bac1fe1359a83a210a7a06c13b59c2f311e6938fec0b20876815df3",
       "role": "model"
     },
     {
@@ -1235,7 +1235,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/tx-settlement.json",
-      "sha256": "2d1c92d2a659cdedf0bf5f16bc7cbaf275f52e99202e71b98689eb6742231a1f",
+      "sha256": "6d30f2a9c93080e937859c600190901e80ed131169de611364e3264ee57de07a",
       "role": "spec"
     },
     {
@@ -1375,7 +1375,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/BlockTypes.lean",
-      "sha256": "6f14d87eab8b398f3366c81f6b8291131ceecf591c816a02dc770df10286903d",
+      "sha256": "43a0948e20210365b22eb70cc570cd06236f62af4eb97fbd3dcd447f6cffd51e",
       "role": "model"
     },
     {
@@ -1405,7 +1405,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/channel-registration.json",
-      "sha256": "d96f9eb0918ec0ec2b1b7720429fd10e4048647968618edadfd79f703086b1bb",
+      "sha256": "d4f005d895194e692816c93e0a9673ab0a6fbd6f495334a2c647099f7ebbcaec",
       "role": "spec"
     },
     {
@@ -1715,7 +1715,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
-      "sha256": "f68c587e0230d910b0ad8c75b1d156ed3848ac0959f3f1bc39428b6c377aa925",
+      "sha256": "888596a354133eebf7bea911d8cab75ace71b77195a7bc01b12cb56b6c28aee3",
       "role": "model"
     },
     {
@@ -1835,12 +1835,12 @@
     },
     {
       "path": "src/utils/error.rs",
-      "sha256": "1fab9e34e948836380b0151c5d78bf3914b8a7514c97ad5b5a1b9a2bbc675146",
+      "sha256": "9a8e44c3469f96037353fc77e12dfbfa69444e6ba3410dad29c9329a18ad0b01",
       "role": "implementation"
     },
     {
       "path": "doc/audit/zkp/line-map/utils-error.json",
-      "sha256": "3949b261224f127fd316238f84555e3f531f212ee40ec7328871f1d8e9d2da96",
+      "sha256": "3883c367b2aa2037312e70d02f0c4ab7b2581835c7cdf3555a0db29270856620",
       "role": "spec"
     },
     {
@@ -3419,6 +3419,8 @@
       "project": "doc/audit/zkp",
       "module": "Zkp.Implementation.H1Gadget",
       "theorems": [
+        "Zkp.Implementation.H1Gadget.goldilocks_order_pinned",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_is_the_field_modulus",
         "Zkp.Implementation.H1Gadget.header_has_exactly_37_field_elements",
         "Zkp.Implementation.H1Gadget.leaf_has_exactly_104_field_elements",
         "Zkp.Implementation.H1Gadget.header_reader_recovers_every_field",
@@ -3445,7 +3447,21 @@
         "Zkp.Implementation.H1Gadget.native_cast_output_words_are_u32",
         "Zkp.Implementation.H1Gadget.native_checked_pair_roundtrip",
         "Zkp.Implementation.H1Gadget.native_reencoding_checked_bytes_is_identity",
-        "Zkp.Implementation.H1Gadget.native_try_from_checks_byte_roundtrip_only",
+        "Zkp.Implementation.H1Gadget.canonical_hash_has_no_non_canonical_index",
+        "Zkp.Implementation.H1Gadget.no_non_canonical_index_implies_canonical",
+        "Zkp.Implementation.H1Gadget.native_try_from_reports_the_first_non_canonical_index",
+        "Zkp.Implementation.H1Gadget.native_try_from_requires_canonical_elements",
+        "Zkp.Implementation.H1Gadget.native_try_from_rejects_every_non_canonical_reading",
+        "Zkp.Implementation.H1Gadget.native_try_from_byte_roundtrip_half_holds_for_every_checked_word",
+        "Zkp.Implementation.H1Gadget.native_try_from_roundtrip_test_alone_is_unreachable",
+        "Zkp.Implementation.H1Gadget.native_try_from_accepts_canonical_checked_words",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_words_are_checked_u32_limbs",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_words_read_back_as_the_order",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_bytes_are_now_rejected",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_bytes_still_pass_the_byte_roundtrip",
+        "Zkp.Implementation.H1Gadget.reduce_to_hash_out_reading_is_still_total",
+        "Zkp.Implementation.H1Gadget.lossy_reduce_reading_still_accepts_what_try_from_rejects",
+        "Zkp.Implementation.H1Gadget.example_canonical_bytes_are_accepted",
         "Zkp.Implementation.H1Gadget.canonical_output_encoding_is_injective",
         "Zkp.Implementation.H1Gadget.target_reduce_is_field_canonical",
         "Zkp.Implementation.H1Gadget.to_hash_out_connect_excludes_noncanonical_pairs",
@@ -4489,8 +4505,16 @@
         "Zkp.Implementation.ChannelRegChain.initial_step_vd_unconstrained",
         "Zkp.Implementation.ChannelRegChain.initial_step_initial_chain_unconstrained",
         "Zkp.Implementation.ChannelRegChain.gates_leave_recipients_free",
-        "Zkp.Implementation.ChannelRegChain.native_canonicality_check_cannot_fail",
-        "Zkp.Implementation.ChannelRegChain.non_goldilocks_words_accepted_natively",
+        "Zkp.Implementation.ChannelRegChain.byte_round_trip_alone_cannot_reject",
+        "Zkp.Implementation.ChannelRegChain.canonical_iff_goldilocks_on_u32_limbs",
+        "Zkp.Implementation.ChannelRegChain.non_goldilocks_words_rejected_natively",
+        "Zkp.Implementation.ChannelRegChain.validate_forces_goldilocks_identities",
+        "Zkp.Implementation.ChannelRegChain.validate_rejects_non_goldilocks_identity",
+        "Zkp.Implementation.ChannelRegChain.check_error_iff",
+        "Zkp.Implementation.ChannelRegChain.check_active_slot_reports_non_canonical_pk_g",
+        "Zkp.Implementation.ChannelRegChain.non_goldilocks_record_rejected",
+        "Zkp.Implementation.ChannelRegChain.goldilocks_record_validates",
+        "Zkp.Implementation.ChannelRegChain.native_widths_identity_fields_follow_from_validate",
         "Zkp.Implementation.ChannelRegChain.native_slot",
         "Zkp.Implementation.ChannelRegChain.native_prev_selection",
         "Zkp.Implementation.ChannelRegChain.map_roundtrip_of_index",
@@ -5391,14 +5415,20 @@
         "Zkp.Implementation.TxSettlement.goldilocks_pinned",
         "Zkp.Implementation.TxSettlement.root_conversion_injective",
         "Zkp.Implementation.TxSettlement.bytes32_typed_iff",
+        "Zkp.Implementation.TxSettlement.canonical_hash_has_no_non_canonical_index",
+        "Zkp.Implementation.TxSettlement.non_canonical_hash_has_an_index",
         "Zkp.Implementation.TxSettlement.pair_gate_forces_canonical_pair",
         "Zkp.Implementation.TxSettlement.typed_canonical_pair_passes_gate",
         "Zkp.Implementation.TxSettlement.canonical_gate_forces_native_agreement",
         "Zkp.Implementation.TxSettlement.typed_canonical_bytes_pass_the_canonical_gate",
         "Zkp.Implementation.TxSettlement.bare_reduction_aliases_noncanonical_bytes",
         "Zkp.Implementation.TxSettlement.canonical_gate_rejects_the_modulus_encoding",
-        "Zkp.Implementation.TxSettlement.native_try_from_never_rejects_u32_limbs",
-        "Zkp.Implementation.TxSettlement.modulus_encoding_passes_native_try_from",
+        "Zkp.Implementation.TxSettlement.byte_round_trip_is_identity_on_u32_limbs",
+        "Zkp.Implementation.TxSettlement.native_try_from_recovery_failure_is_unreachable",
+        "Zkp.Implementation.TxSettlement.native_try_from_tests_canonicality_before_the_round_trip",
+        "Zkp.Implementation.TxSettlement.native_try_from_accepts_exactly_canonical_u32_limbs",
+        "Zkp.Implementation.TxSettlement.modulus_encoding_is_rejected_by_native_try_from",
+        "Zkp.Implementation.TxSettlement.modulus_encoding_still_passes_the_lossy_reduction",
         "Zkp.Implementation.TxSettlement.noncanonical_native_hash_never_equals_a_canonical_root",
         "Zkp.Implementation.TxSettlement.block_number_accessors_read_the_send_leaf",
         "Zkp.Implementation.TxSettlement.check_ok_iff",
@@ -5437,7 +5467,9 @@
         "Zkp.Implementation.TxSettlement.example_spend_nonce_word_is_typed",
         "Zkp.Implementation.TxSettlement.example_legacy_settlement_is_accepted",
         "Zkp.Implementation.TxSettlement.example_settlement_fills_a_satisfying_witness",
-        "Zkp.Implementation.TxSettlement.example_mixed_witness_is_rejected"
+        "Zkp.Implementation.TxSettlement.example_mixed_witness_is_rejected",
+        "Zkp.Implementation.TxSettlement.native_settlement_accepts_bytes_the_fixed_try_from_rejects",
+        "Zkp.Implementation.TxSettlement.the_aliasing_environment_violates_canonical_roots"
       ],
       "sources": [
         "doc/audit/zkp/line-map/tx-settlement.json",
@@ -6001,6 +6033,8 @@
         "Zkp.Implementation.BlockTypes.channel_reg_member_count_checked_before_delegate_count",
         "Zkp.Implementation.BlockTypes.channel_reg_rejects_bp_slot_out_of_range",
         "Zkp.Implementation.BlockTypes.canonicality_rejections_come_only_from_the_callback",
+        "Zkp.Implementation.BlockTypes.canonicality_rejections_fire_when_the_callback_rejects",
+        "Zkp.Implementation.BlockTypes.non_canonical_pk_g_rejection_is_reachable",
         "Zkp.Implementation.BlockTypes.member_words_length",
         "Zkp.Implementation.BlockTypes.member_words_injective",
         "Zkp.Implementation.BlockTypes.member_target_stream_agrees",
@@ -6971,6 +7005,12 @@
         "Zkp.Implementation.UtilGadgets.serialize_round_trip_under_codec_premise",
         "Zkp.Implementation.UtilGadgets.circuit_serialization_error_keeps_context",
         "Zkp.Implementation.UtilGadgets.wrapper_prove_collapses_failures",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_messages_pinned",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_variants_exhaustive",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_variants_are_distinct",
+        "Zkp.Implementation.UtilGadgets.try_hash_out_canonicality_precedes_round_trip",
+        "Zkp.Implementation.UtilGadgets.try_hash_out_rejects_non_canonical_limb",
+        "Zkp.Implementation.UtilGadgets.try_hash_out_accepts_canonical_limbs",
         "Zkp.Implementation.UtilGadgets.utils_error_variants_are_distinct",
         "Zkp.Implementation.UtilGadgets.cyclic_error_messages_pinned",
         "Zkp.Implementation.UtilGadgets.utils_modules_count",

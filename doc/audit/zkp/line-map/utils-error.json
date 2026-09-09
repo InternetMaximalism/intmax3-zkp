@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/utils/error.rs",
-  "source_sha256": "1fab9e34e948836380b0151c5d78bf3914b8a7514c97ad5b5a1b9a2bbc675146",
-  "source_lines": 69,
+  "source_sha256": "9a8e44c3469f96037353fc77e12dfbfa69444e6ba3410dad29c9329a18ad0b01",
+  "source_lines": 72,
   "module": "Zkp.Implementation.UtilGadgets",
   "model": "doc/audit/zkp/Zkp/Implementation/UtilGadgets.lean",
   "refinement": "not-proved",
@@ -65,18 +65,23 @@
     },
     {
       "start": 52,
-      "end": 60,
+      "end": 63,
       "status": "translated",
-      "label": "PoseidonHashOutError",
+      "label": "PoseidonHashOutError: three variants and their messages",
       "declarations": [
-        "Zkp.Implementation.UtilGadgets.PoseidonHashOutError"
+        "Zkp.Implementation.UtilGadgets.PoseidonHashOutError",
+        "Zkp.Implementation.UtilGadgets.poseidonHashOutErrorMessage"
       ],
-      "theorems": [],
-      "note": "Handwritten local semantics; no source/compiler refinement."
+      "theorems": [
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_messages_pinned",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_variants_exhaustive",
+        "Zkp.Implementation.UtilGadgets.poseidon_hash_out_error_variants_are_distinct"
+      ],
+      "note": "Constructors in source order: RecoveryFailed, NonCanonicalElement(usize), InvalidHashValue(String). The usize limb index is modelled and substituted into the pinned message; the InvalidHashValue String payload is not carried, so its {0} stays literal. Handwritten local semantics; no source/compiler refinement."
     },
     {
-      "start": 61,
-      "end": 69,
+      "start": 64,
+      "end": 72,
       "status": "translated",
       "label": "WrapperError",
       "declarations": [

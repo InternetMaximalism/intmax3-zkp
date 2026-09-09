@@ -1516,7 +1516,7 @@ theorem circuit_serialization_error_keeps_context (ctx detail : String) :
       CircuitSerializationError.deserialization ctx detail := by
   intro h; cases h
 
-/-- `WrapperError` (utils/error.rs:62-69). -/
+/-- `WrapperError` (utils/error.rs:65-72). -/
 inductive WrapperError where
   | proofGenerationFailed
   | invalidProof
@@ -1533,11 +1533,88 @@ theorem wrapper_prove_collapses_failures :
 
 /-! ## 9. `src/utils/error.rs` and `src/utils/mod.rs` -/
 
-/-- `PoseidonHashOutError` (utils/error.rs:53-60). -/
+/-- `PoseidonHashOutError` (utils/error.rs:53-63), constructors in source order.
+`NonCanonicalElement` carries the index of the offending 64-bit limb (`usize`). -/
 inductive PoseidonHashOutError where
   | recoveryFailed
+  | nonCanonicalElement (limb : Nat)
   | invalidHashValue
   deriving DecidableEq, Repr
+
+/-- The `PoseidonHashOutError` display strings pinned from utils/error.rs:55-62. The
+`NonCanonicalElement` payload is substituted for thiserror's `{0}`; the `InvalidHashValue`
+payload is a `String` the model does not carry, so its `{0}` stays literal. -/
+def poseidonHashOutErrorMessage : PoseidonHashOutError → String
+  | .recoveryFailed => "Failed to recover HashOut from Bytes32"
+  | .nonCanonicalElement i => s!"Bytes32 limb {i} is not a canonical Goldilocks element"
+  | .invalidHashValue => "Invalid hash value: {0}"
+
+theorem poseidon_hash_out_error_messages_pinned :
+    poseidonHashOutErrorMessage .recoveryFailed = "Failed to recover HashOut from Bytes32" ∧
+    poseidonHashOutErrorMessage (.nonCanonicalElement 2) =
+      "Bytes32 limb 2 is not a canonical Goldilocks element" ∧
+    poseidonHashOutErrorMessage .invalidHashValue = "Invalid hash value: {0}" :=
+  ⟨rfl, rfl, rfl⟩
+
+/-- These three are EXACTLY the variants of `PoseidonHashOutError`: every value is one of them. -/
+theorem poseidon_hash_out_error_variants_exhaustive (e : PoseidonHashOutError) :
+    e = .recoveryFailed ∨ (∃ i, e = .nonCanonicalElement i) ∨ e = .invalidHashValue := by
+  cases e with
+  | recoveryFailed => exact Or.inl rfl
+  | nonCanonicalElement i => exact Or.inr (Or.inl ⟨i, rfl⟩)
+  | invalidHashValue => exact Or.inr (Or.inr rfl)
+
+/-- The three variants are pairwise distinct constructors, so the canonicality rejection is never
+conflated with the round-trip rejection or with an unparsable hash string. -/
+theorem poseidon_hash_out_error_variants_are_distinct (i : Nat) :
+    PoseidonHashOutError.nonCanonicalElement i ≠ PoseidonHashOutError.recoveryFailed ∧
+    PoseidonHashOutError.nonCanonicalElement i ≠ PoseidonHashOutError.invalidHashValue ∧
+    PoseidonHashOutError.recoveryFailed ≠ PoseidonHashOutError.invalidHashValue :=
+  ⟨(by intro h; cases h), (by intro h; cases h), (by intro h; cases h)⟩
+
+/-- The index of the FIRST limb at or above the Goldilocks order, counting from `i`
+(the `for (i, &element) in ... .enumerate()` loop of poseidon_hash_out.rs:293-297). -/
+def firstNonCanonicalLimbFrom (i : Nat) : List Nat → Option Nat
+  | [] => none
+  | e :: rest => if e ≥ goldilocksModulus then some i else firstNonCanonicalLimbFrom (i + 1) rest
+
+/-- `first_non_canonical_limb` of the four `u64` elements produced by `reduce_to_hash_out`. -/
+def firstNonCanonicalLimb (limbs : List Nat) : Option Nat := firstNonCanonicalLimbFrom 0 limbs
+
+/-- `TryFrom<Bytes32> for PoseidonHashOut` (poseidon_hash_out.rs:291-303) as repaired: the
+per-limb canonicality test runs FIRST and short-circuits on the first offending index; only then
+is the byte round trip compared. `roundTripHolds` is left as an explicit parameter because
+`reduce_to_hash_out` and `From<PoseidonHashOut> for Bytes32` regroup the same limbs without
+reducing, so the source comment claims this branch is unreachable — a claim this model records
+rather than proves. -/
+def tryHashOutFromBytes32 (limbs : List Nat) (roundTripHolds : Bool) :
+    Except PoseidonHashOutError (List Nat) :=
+  match firstNonCanonicalLimb limbs with
+  | some i => .error (.nonCanonicalElement i)
+  | none => if roundTripHolds then .ok limbs else .error .recoveryFailed
+
+/-- Error PRECEDENCE: a non-canonical limb is reported as `NonCanonicalElement` whatever the byte
+round trip does, so the canonicality rejection can never be masked by `RecoveryFailed`. -/
+theorem try_hash_out_canonicality_precedes_round_trip (limbs : List Nat) (i : Nat)
+    (h : firstNonCanonicalLimb limbs = some i) (b : Bool) :
+    tryHashOutFromBytes32 limbs b = .error (.nonCanonicalElement i) := by
+  simp [tryHashOutFromBytes32, h]
+
+/-- Concrete rejection, the case the pre-repair conversion could not produce: a `Bytes32` whose
+second 64-bit limb is exactly the Goldilocks order is refused with the index of that limb. -/
+theorem try_hash_out_rejects_non_canonical_limb :
+    tryHashOutFromBytes32 [0, goldilocksModulus, 0, 0] true =
+      .error (.nonCanonicalElement 1) := by
+  simp [tryHashOutFromBytes32, firstNonCanonicalLimb, firstNonCanonicalLimbFrom,
+    goldilocksModulus]
+
+/-- Non-vacuous positive trace: four canonical limbs with a holding round trip are accepted
+unchanged. -/
+theorem try_hash_out_accepts_canonical_limbs :
+    tryHashOutFromBytes32 [0, 1, 2, goldilocksModulus - 1] true =
+      .ok [0, 1, 2, goldilocksModulus - 1] := by
+  simp [tryHashOutFromBytes32, firstNonCanonicalLimb, firstNonCanonicalLimbFrom,
+    goldilocksModulus]
 
 /-- `UtilsError` (utils/error.rs:8-30): seven `#[error(transparent)]` variants, i.e. the display
 of a `UtilsError` is the display of the wrapped error, with no extra context added. -/

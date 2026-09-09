@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "source": "src/utils/poseidon_hash_out.rs",
-  "source_sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
-  "source_lines": 600,
+  "source_sha256": "ce711aa5941098b87a772684925a9cfa013bab1eb146f80504d6c3b8dd79b0cf",
+  "source_lines": 620,
   "module": "Zkp.Implementation.H1Gadget",
   "model": "doc/audit/zkp/Zkp/Implementation/H1Gadget.lean",
   "refinement": "not-proved",
   "spans": [
     {
       "start": 1,
-      "end": 238,
+      "end": 37,
       "status": "untranslated",
       "label": "remaining source outside selected hash helpers",
       "declarations": [],
@@ -17,8 +17,40 @@
       "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
     },
     {
-      "start": 239,
-      "end": 240,
+      "start": 38,
+      "end": 40,
+      "status": "non-executable",
+      "label": "GOLDILOCKS_ORDER docstring",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments."
+    },
+    {
+      "start": 41,
+      "end": 42,
+      "status": "translated",
+      "label": "GOLDILOCKS_ORDER constant tied to GoldilocksField::ORDER",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.goldilocksOrder"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.goldilocks_order_pinned",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_is_the_field_modulus"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 43,
+      "end": 244,
+      "status": "untranslated",
+      "label": "remaining source outside selected hash helpers",
+      "declarations": [],
+      "theorems": [],
+      "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
+    },
+    {
+      "start": 245,
+      "end": 246,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -26,8 +58,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 241,
-      "end": 250,
+      "start": 247,
+      "end": 256,
       "status": "translated",
       "label": "native From<HashOut> ordered u32 cast pairs",
       "declarations": [
@@ -40,8 +72,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 251,
-      "end": 251,
+      "start": 257,
+      "end": 257,
       "status": "dependency-boundary",
       "label": "native Bytes32 construction from eight known-u32 words",
       "declarations": [
@@ -51,8 +83,8 @@
       "note": "Poseidon/imported primitive/type or compiler operation is not established by the local proof."
     },
     {
-      "start": 252,
-      "end": 255,
+      "start": 258,
+      "end": 261,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -60,43 +92,97 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 256,
-      "end": 269,
+      "start": 262,
+      "end": 275,
       "status": "translated",
-      "label": "native raw u64 pair recovery (not field reduction)",
+      "label": "reduce_to_hash_out: raw u64 pair recovery, unchanged and total",
       "declarations": [
         "Zkp.Implementation.H1Gadget.nativeRecover"
       ],
       "theorems": [
-        "Zkp.Implementation.H1Gadget.native_reencoding_checked_bytes_is_identity"
+        "Zkp.Implementation.H1Gadget.native_reencoding_checked_bytes_is_identity",
+        "Zkp.Implementation.H1Gadget.reduce_to_hash_out_reading_is_still_total"
       ],
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
-    },
-    {
-      "start": 270,
-      "end": 275,
-      "status": "non-executable",
-      "label": "comments / structural spacing",
-      "declarations": [],
-      "theorems": [],
-      "note": "No executable constraint is inferred from comments."
     },
     {
       "start": 276,
-      "end": 283,
+      "end": 281,
+      "status": "non-executable",
+      "label": "comments / structural spacing / TryFrom impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments."
+    },
+    {
+      "start": 282,
+      "end": 290,
+      "status": "non-executable",
+      "label": "SECURITY docstring explaining why the byte round-trip is not the check",
+      "declarations": [],
+      "theorems": [],
+      "note": "No executable constraint is inferred from comments."
+    },
+    {
+      "start": 291,
+      "end": 292,
       "status": "translated",
-      "label": "native TryFrom byte equality check only",
+      "label": "try_from entry: the lossy reduce_to_hash_out reading",
       "declarations": [
-        "Zkp.Implementation.H1Gadget.nativeTryFrom"
+        "Zkp.Implementation.H1Gadget.nativeTryFrom",
+        "Zkp.Implementation.H1Gadget.nativeRecover"
       ],
       "theorems": [
-        "Zkp.Implementation.H1Gadget.native_try_from_checks_byte_roundtrip_only"
+        "Zkp.Implementation.H1Gadget.reduce_to_hash_out_reading_is_still_total",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_words_read_back_as_the_order"
       ],
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 284,
-      "end": 287,
+      "start": 293,
+      "end": 297,
+      "status": "translated",
+      "label": "canonicality loop: element >= GOLDILOCKS_ORDER -> NonCanonicalElement(i)",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeTryFrom",
+        "Zkp.Implementation.H1Gadget.firstNonCanonicalIndex",
+        "Zkp.Implementation.H1Gadget.goldilocksOrder",
+        "Zkp.Implementation.H1Gadget.TryFromError",
+        "Zkp.Implementation.H1Gadget.CanonicalHash"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.native_try_from_requires_canonical_elements",
+        "Zkp.Implementation.H1Gadget.native_try_from_reports_the_first_non_canonical_index",
+        "Zkp.Implementation.H1Gadget.native_try_from_rejects_every_non_canonical_reading",
+        "Zkp.Implementation.H1Gadget.canonical_hash_has_no_non_canonical_index",
+        "Zkp.Implementation.H1Gadget.no_non_canonical_index_implies_canonical",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_bytes_are_now_rejected",
+        "Zkp.Implementation.H1Gadget.lossy_reduce_reading_still_accepts_what_try_from_rejects"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 298,
+      "end": 303,
+      "status": "translated",
+      "label": "byte round-trip test (RecoveryFailed) then Ok(hash_out)",
+      "declarations": [
+        "Zkp.Implementation.H1Gadget.nativeTryFrom",
+        "Zkp.Implementation.H1Gadget.nativeEncode"
+      ],
+      "theorems": [
+        "Zkp.Implementation.H1Gadget.native_try_from_byte_roundtrip_half_holds_for_every_checked_word",
+        "Zkp.Implementation.H1Gadget.native_try_from_roundtrip_test_alone_is_unreachable",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_bytes_still_pass_the_byte_roundtrip",
+        "Zkp.Implementation.H1Gadget.native_try_from_accepts_canonical_checked_words",
+        "Zkp.Implementation.H1Gadget.example_canonical_bytes_are_accepted",
+        "Zkp.Implementation.H1Gadget.goldilocks_order_words_are_checked_u32_limbs"
+      ],
+      "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
+    },
+    {
+      "start": 304,
+      "end": 307,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -104,8 +190,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 288,
-      "end": 299,
+      "start": 308,
+      "end": 319,
       "status": "translated",
       "label": "target from_hash_out four canonical split pairs",
       "declarations": [
@@ -119,8 +205,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 300,
-      "end": 300,
+      "start": 320,
+      "end": 320,
       "status": "dependency-boundary",
       "label": "target type assembly",
       "declarations": [
@@ -130,8 +216,8 @@
       "note": "Poseidon/imported primitive/type or compiler operation is not established by the local proof."
     },
     {
-      "start": 301,
-      "end": 313,
+      "start": 321,
+      "end": 333,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -139,8 +225,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 314,
-      "end": 327,
+      "start": 334,
+      "end": 347,
       "status": "translated",
       "label": "target modular high*2^32+low recovery",
       "declarations": [
@@ -152,8 +238,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 328,
-      "end": 328,
+      "start": 348,
+      "end": 348,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -161,8 +247,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 329,
-      "end": 337,
+      "start": 349,
+      "end": 357,
       "status": "translated",
       "label": "target encode-back connect",
       "declarations": [
@@ -174,8 +260,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 338,
-      "end": 340,
+      "start": 358,
+      "end": 360,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -183,8 +269,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 341,
-      "end": 344,
+      "start": 361,
+      "end": 364,
       "status": "translated",
       "label": "safe_split_lo_and_hi interface",
       "declarations": [
@@ -194,8 +280,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 345,
-      "end": 345,
+      "start": 365,
+      "end": 365,
       "status": "dependency-boundary",
       "label": "imported split_low_high lowering",
       "declarations": [
@@ -205,8 +291,8 @@
       "note": "Poseidon/imported primitive/type or compiler operation is not established by the local proof."
     },
     {
-      "start": 346,
-      "end": 352,
+      "start": 366,
+      "end": 372,
       "status": "non-executable",
       "label": "comments / structural spacing",
       "declarations": [],
@@ -214,8 +300,8 @@
       "note": "No executable constraint is inferred from comments."
     },
     {
-      "start": 353,
-      "end": 358,
+      "start": 373,
+      "end": 378,
       "status": "translated",
       "label": "high-max indicator, zero low, ordered outputs",
       "declarations": [
@@ -233,8 +319,8 @@
       "note": "Handwritten local semantics only; source compiler/gate refinement remains unproved."
     },
     {
-      "start": 359,
-      "end": 379,
+      "start": 379,
+      "end": 399,
       "status": "untranslated",
       "label": "remaining source outside selected hash helpers",
       "declarations": [],
@@ -242,8 +328,8 @@
       "note": "Retained explicitly as untranslated; existence of an older abstract model does not discharge these lines."
     },
     {
-      "start": 380,
-      "end": 600,
+      "start": 400,
+      "end": 620,
       "status": "test-only",
       "label": "cfg(test) test module",
       "declarations": [],
@@ -270,6 +356,11 @@
     {
       "name": "caller-authentication-and-fund-ownership",
       "obligation": "The helper accepts a header root and full rows, does not authenticate a channel, verify a signature/opening, validate counts/registry/suffixes, decrypt balances or prove resource custody.",
+      "discharged": false
+    },
+    {
+      "name": "native-canonicality-vs-circuit-admission",
+      "obligation": "The fixed native TryFrom rejects non-canonical u64 elements, but no refinement ties that native rejection to any circuit's admission of the same bytes; callers that use reduce_to_hash_out keep the lossy many-to-one reading and are not covered.",
       "discharged": false
     }
   ]

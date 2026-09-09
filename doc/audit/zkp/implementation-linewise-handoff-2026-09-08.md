@@ -128,18 +128,25 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
 
 いずれも定理として固定済み。脆弱性の実証ではありません。番号は進捗文書と対応します。
 
-**実在する不具合（1 件）**
-- `ChannelRegRecord::validate` の非 canonical identity 拒否は **到達不能**。
-  `PoseidonHashOut::try_from(Bytes32)` が同じ 32/32 分割を組み直す全域関数のため。
-  リポジトリ自身のテスト `common::channel_registration::tests::test_channel_reg_validate_rejects_noncanonical_identity_encodings`
-  が実際に失敗します（`cargo test --release --locked --lib` で再現確認済み）。
-  Lean 側でも `ChannelRegChain.native_canonicality_check_cannot_fail` と
-  `BlockTypes.canonicality_rejections_come_only_from_the_callback` が独立に同結論。
+**実在した不具合（1 件・2026-09-09 修正済み）**
+- `ChannelRegRecord::validate` の非 canonical identity 拒否が **到達不能** でした。
+  `PoseidonHashOut::try_from(Bytes32)` の round-trip 検査が、`reduce_to_hash_out` と逆変換が
+  厳密な逆であるため決して発火しなかったためです。リポジトリ自身のテスト
+  `common::channel_registration::tests::test_channel_reg_validate_rejects_noncanonical_identity_encodings`
+  が実際に失敗していました。
+  **修正**: `try_from` に Goldilocks 位数に対する明示的な canonical 性検査を前置し、
+  エラー variant `PoseidonHashOutError::NonCanonicalElement(usize)` を追加。`reduce_to_hash_out` と
+  `From<PoseidonHashOut> for Bytes32` は未変更なので、多対一の読み取りを使う呼び出し元には影響しません。
+  Lean 側も追随済み（`H1Gadget.native_try_from_requires_canonical_elements`、
+  `ChannelRegChain.non_goldilocks_record_rejected`、`BlockTypes.non_canonical_pk_g_rejection_is_reachable`）。
+  round-trip 半分が今も到達不能であることは
+  `ChannelRegChain.byte_round_trip_alone_cannot_reject` として残しています。
 
-**古いテスト（2 件）**
+**古いテスト（2 件・2026-09-09 更新済み）**
 - `common::balance_state::tests::balance_state_validate_multi_n` と
-  `balance_state_delegate_count_regions_and_h1` が member_count 16 の通過を主張。
-  `fd467ea`（sig-cluster を 8 に制限）以降 2..=8 が正。テスト側の更新漏れ。
+  `balance_state_delegate_count_regions_and_h1` が member_count 16 の通過を主張していました。
+  `fd467ea`（sig-cluster を 8 に制限）以降 2..=8 が正。`MAX_SIG_CLUSTER` を使うよう更新し、
+  無効な基底 16 から作っていた否定テスト 3 件も有効な基底に直して、意図した検査を実際に通すようにしました。
 
 **設計上の観察**
 - **チャネル木はブロックを通じた資金保存を強制しない。** `ChannelLeaf` に fund vector がなく、

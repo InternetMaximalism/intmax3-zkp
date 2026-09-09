@@ -55,6 +55,9 @@ pub enum PoseidonHashOutError {
     #[error("Failed to recover HashOut from Bytes32")]
     RecoveryFailed,
 
+    #[error("Bytes32 limb {0} is not a canonical Goldilocks element")]
+    NonCanonicalElement(usize),
+
     #[error("Invalid hash value: {0}")]
     InvalidHashValue(String),
 }

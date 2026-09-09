@@ -15,9 +15,15 @@ The header receives a root; computing/authenticating the tree is not performed
 here. The native header's slot_tree_root() is an explicit supplied computation.
 The canonical output split proof is derived from local modular gate equations,
 u32 bounds and the high-max conditional zero. It proves neither imported gate
-lowering nor Poseidon soundness. Native Bytes32->HashOut recovery is raw u64 pair
-joining: its roundtrip is NOT a Goldilocks canonicity check. The target direction
-adds a modular reduction and canonical encode-back equality; they differ.
+lowering nor Poseidon soundness.
+
+Native Bytes32->HashOut conversion has TWO layers and they must not be confused.
+`reduce_to_hash_out` is raw u64 pair joining: total, many-to-one modulo p, and
+unchanged. `TryFrom<Bytes32>` now runs an EXPLICIT per-element canonicality test
+(element < GOLDILOCKS_ORDER, reporting the first offending index) BEFORE the byte
+round-trip test; the round-trip test alone still rejects nothing, which is proved
+here rather than assumed. The target direction reduces modulo p and connects the
+canonical encode-back; it still differs from the native path.
 
 No compiler/EVM refinement or whole-funds safety certificate is claimed.
 -/
@@ -25,6 +31,16 @@ namespace Zkp.Implementation.H1Gadget
 
 def fieldModulus : Nat := 18446744069414584321
 def wordBase : Nat := 4294967296
+
+/-- Source `pub const GOLDILOCKS_ORDER: u64 = 0xFFFF_FFFF_0000_0001` of
+    src/utils/poseidon_hash_out.rs, which the source ties to
+    `GoldilocksField::ORDER` by a compile-time assertion. -/
+def goldilocksOrder : Nat := 0xFFFFFFFF00000001
+
+theorem goldilocks_order_pinned : goldilocksOrder = 18446744069414584321 := rfl
+
+theorem goldilocks_order_is_the_field_modulus : goldilocksOrder = fieldModulus := rfl
+
 def headerDomain : Nat := 0x494d4232
 def leafDomain : Nat := 0x494d5332
 
@@ -298,15 +314,155 @@ theorem native_reencoding_checked_bytes_is_identity (w : Words8) (checked : Clos
   cases w
   simp_all [nativeEncode,nativeRecover]
 
-def nativeTryFrom (w : Words8) : Option Hash4 :=
-  let recovered := nativeRecover w
-  if w = nativeEncode recovered then some recovered else none
+/-- The two rejections of `TryFrom<Bytes32> for PoseidonHashOut`, in the source's
+    own order: `PoseidonHashOutError::NonCanonicalElement(i)` from the per-element
+    canonicality loop, `PoseidonHashOutError::RecoveryFailed` from the byte
+    round-trip test that runs after it. -/
+inductive TryFromError where
+  | nonCanonicalElement (index : Nat)
+  | recoveryFailed
+  deriving DecidableEq, Repr
 
-/-- Exact native TryFrom success, with NO claim that the resulting raw u64
-    values are <p. In contrast target to_hash_out below enforces <p. -/
-theorem native_try_from_checks_byte_roundtrip_only (w : Words8) (checked : CloseCircuit.CheckedWords w.words) :
-    nativeTryFrom w = some (nativeRecover w) := by
-  simp [nativeTryFrom,native_reencoding_checked_bytes_is_identity w checked]
+/-- Source loop `for (i, &element) in hash_out.elements.iter().enumerate()` with the
+    early `return Err(NonCanonicalElement(i))`: the FIRST element index whose raw u64
+    reading is at or above GOLDILOCKS_ORDER, if there is one. -/
+def firstNonCanonicalIndex (h : Hash4) : Option Nat :=
+  if goldilocksOrder ≤ h.h0 then some 0
+  else if goldilocksOrder ≤ h.h1 then some 1
+  else if goldilocksOrder ≤ h.h2 then some 2
+  else if goldilocksOrder ≤ h.h3 then some 3
+  else none
+
+/-- Native `TryFrom<Bytes32> for PoseidonHashOut`: the lossy pair-joining read
+    (`reduce_to_hash_out`), THEN the explicit canonicality test on the four u64
+    elements, and only then the byte round-trip test. The order and the error
+    distinction are the source's. -/
+def nativeTryFrom (w : Words8) : Except TryFromError Hash4 :=
+  match firstNonCanonicalIndex (nativeRecover w) with
+  | some i => .error (TryFromError.nonCanonicalElement i)
+  | none =>
+      if w = nativeEncode (nativeRecover w) then .ok (nativeRecover w)
+      else .error TryFromError.recoveryFailed
+
+theorem canonical_hash_has_no_non_canonical_index {h : Hash4} (bounds : CanonicalHash h) :
+    firstNonCanonicalIndex h = none := by
+  obtain ⟨b0,b1,b2,b3⟩ := bounds
+  have order : goldilocksOrder = fieldModulus := rfl
+  unfold firstNonCanonicalIndex
+  rw [order, if_neg (by omega), if_neg (by omega), if_neg (by omega), if_neg (by omega)]
+
+theorem no_non_canonical_index_implies_canonical {h : Hash4}
+    (found : firstNonCanonicalIndex h = none) : CanonicalHash h := by
+  have order : goldilocksOrder = fieldModulus := rfl
+  unfold firstNonCanonicalIndex at found
+  split at found
+  · exact found.elim
+  · rename_i c0
+    split at found
+    · exact found.elim
+    · rename_i c1
+      split at found
+      · exact found.elim
+      · rename_i c2
+        split at found
+        · exact found.elim
+        · rename_i c3
+          rw [order, Nat.not_le] at c0 c1 c2 c3
+          exact ⟨c0,c1,c2,c3⟩
+
+/-- The canonicality loop runs BEFORE the round-trip test, so a non-canonical
+    reading is reported as NonCanonicalElement of the FIRST offending index and
+    never as RecoveryFailed. -/
+theorem native_try_from_reports_the_first_non_canonical_index (w : Words8) (i : Nat)
+    (found : firstNonCanonicalIndex (nativeRecover w) = some i) :
+    nativeTryFrom w = .error (TryFromError.nonCanonicalElement i) := by
+  unfold nativeTryFrom
+  rw [found]
+
+/-- Exact native TryFrom success condition: acceptance now FORCES every one of the
+    four raw u64 elements below the Goldilocks order. This is the fixed behaviour;
+    the byte round-trip alone never gave it. -/
+theorem native_try_from_requires_canonical_elements (w : Words8) (h : Hash4)
+    (accepted : nativeTryFrom w = .ok h) : h = nativeRecover w ∧ CanonicalHash h := by
+  unfold nativeTryFrom at accepted
+  split at accepted
+  · exact Except.noConfusion accepted
+  · rename_i canonical
+    split at accepted
+    · have eq : nativeRecover w = h := Except.ok.inj accepted
+      exact ⟨eq.symm, eq ▸ no_non_canonical_index_implies_canonical canonical⟩
+    · exact accepted.elim
+
+theorem native_try_from_rejects_every_non_canonical_reading (w : Words8)
+    (noncanonical : ¬ CanonicalHash (nativeRecover w)) :
+    ∃ i, nativeTryFrom w = .error (TryFromError.nonCanonicalElement i) := by
+  cases found : firstNonCanonicalIndex (nativeRecover w) with
+  | none => exact absurd (no_non_canonical_index_implies_canonical found) noncanonical
+  | some i => exact ⟨i, native_try_from_reports_the_first_non_canonical_index w i found⟩
+
+/-- The ROUND-TRIP HALF of the test, on its own: re-encoding the raw pair-joined
+    read of any eight u32 limbs reproduces exactly the same bytes. This says
+    nothing about canonicality. -/
+theorem native_try_from_byte_roundtrip_half_holds_for_every_checked_word (w : Words8)
+    (checked : CloseCircuit.CheckedWords w.words) : w = nativeEncode (nativeRecover w) :=
+  (native_reencoding_checked_bytes_is_identity w checked).symm
+
+/-- Why the old check was ineffective: RecoveryFailed is unreachable for every
+    well-formed Bytes32, so the byte round-trip test alone rejects nothing. -/
+theorem native_try_from_roundtrip_test_alone_is_unreachable (w : Words8)
+    (checked : CloseCircuit.CheckedWords w.words) :
+    nativeTryFrom w ≠ .error TryFromError.recoveryFailed := by
+  unfold nativeTryFrom
+  split
+  · simp
+  · rw [if_pos (native_try_from_byte_roundtrip_half_holds_for_every_checked_word w checked)]
+    simp
+
+theorem native_try_from_accepts_canonical_checked_words (w : Words8)
+    (checked : CloseCircuit.CheckedWords w.words)
+    (bounds : CanonicalHash (nativeRecover w)) : nativeTryFrom w = .ok (nativeRecover w) := by
+  unfold nativeTryFrom
+  rw [canonical_hash_has_no_non_canonical_index bounds]
+  exact if_pos (native_try_from_byte_roundtrip_half_holds_for_every_checked_word w checked)
+
+/-- The repo's own witness: the u32 limb pair (0xFFFFFFFF, 1) joins to exactly the
+    Goldilocks order, which is the encoding of no field element. -/
+def goldilocksOrderWords : Words8 := ⟨0xFFFFFFFF,1,0,0,0,0,0,0⟩
+
+theorem goldilocks_order_words_are_checked_u32_limbs :
+    CloseCircuit.CheckedWords goldilocksOrderWords.words := by
+  unfold CloseCircuit.CheckedWords
+  decide
+
+theorem goldilocks_order_words_read_back_as_the_order :
+    nativeRecover goldilocksOrderWords = ⟨goldilocksOrder,0,0,0⟩ := rfl
+
+theorem goldilocks_order_bytes_are_now_rejected :
+    nativeTryFrom goldilocksOrderWords = .error (TryFromError.nonCanonicalElement 0) := rfl
+
+/-- The same witness passes the byte round-trip test: concrete evidence that the
+    round-trip was never the check. -/
+theorem goldilocks_order_bytes_still_pass_the_byte_roundtrip :
+    goldilocksOrderWords = nativeEncode (nativeRecover goldilocksOrderWords) := rfl
+
+/-- `reduce_to_hash_out` is UNCHANGED by the fix: still total, still the raw
+    many-to-one pair joining, and it still reads back exactly the bytes the fixed
+    TryFrom now rejects. Callers that want that reading must ask for it. -/
+theorem reduce_to_hash_out_reading_is_still_total (w : Words8) :
+    nativeRecover w = ⟨w.w0 * wordBase + w.w1,w.w2 * wordBase + w.w3,
+      w.w4 * wordBase + w.w5,w.w6 * wordBase + w.w7⟩ := rfl
+
+theorem lossy_reduce_reading_still_accepts_what_try_from_rejects :
+    nativeRecover goldilocksOrderWords = ⟨goldilocksOrder,0,0,0⟩ ∧
+      nativeTryFrom goldilocksOrderWords = .error (TryFromError.nonCanonicalElement 0) :=
+  ⟨goldilocks_order_words_read_back_as_the_order, goldilocks_order_bytes_are_now_rejected⟩
+
+def exampleCanonicalWords : Words8 := ⟨1,2,3,4,5,6,7,8⟩
+
+theorem example_canonical_bytes_are_accepted :
+    nativeTryFrom exampleCanonicalWords = .ok (nativeRecover exampleCanonicalWords) :=
+  native_try_from_accepts_canonical_checked_words exampleCanonicalWords
+    (by unfold CloseCircuit.CheckedWords; decide) (by unfold CanonicalHash; decide)
 
 theorem canonical_output_encoding_is_injective (a b : Hash4) (eq : canonicalEncode a = canonicalEncode b) : a = b := by
   have r := congrArg nativeRecover eq

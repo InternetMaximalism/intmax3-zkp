@@ -47,11 +47,33 @@ Explicit premises / boundaries (never proved here, named in the line map):
 * No signature validity, no finality, no hash injectivity, no statement of
   the form "acceptance ⇒ funds are safe".
 
-Real source behaviour the model records honestly: the native `TryFrom<Bytes32>`
-round trip through u64 arithmetic never fails for u32 limbs
-(`native_try_from_never_rejects_u32_limbs`); non-canonical tx-tree roots are
-rejected natively only because a non-canonical u64 never equals a canonical
-Merkle root (`CanonicalRoots`), and in-circuit by `ToHashOutGates`.
+Real source behaviour the model records honestly, about the two DIFFERENT
+`Bytes32 → PoseidonHashOut` readings in src/utils/poseidon_hash_out.rs:
+* `TryFrom<Bytes32> for PoseidonHashOut` (poseidon_hash_out.rs:278-304) tests
+  each recombined u64 element against `GOLDILOCKS_ORDER` FIRST and only then
+  performs the byte round trip
+  (`native_try_from_tests_canonicality_before_the_round_trip`). The round-trip
+  half alone is still unreachable for u32 limbs
+  (`byte_round_trip_is_identity_on_u32_limbs`,
+  `native_try_from_recovery_failure_is_unreachable`), so the canonicality test
+  carries the whole rejection
+  (`native_try_from_accepts_exactly_canonical_u32_limbs`); the Bytes32 encoding
+  of the modulus is now REJECTED
+  (`modulus_encoding_is_rejected_by_native_try_from`).
+* `Bytes32::reduce_to_hash_out` (poseidon_hash_out.rs:261-276) is UNCHANGED:
+  still total, still many-to-one, and it still accepts that same modulus
+  encoding (`modulus_encoding_still_passes_the_lossy_reduction`).
+
+THIS CIRCUIT'S OWN NATIVE PATH IS UNAFFECTED BY THAT FIX: tx_settlement.rs:155
+reads `send_leaf.tx_tree_root` with the lossy `reduce_to_hash_out`, never with
+`TryFrom` (see the file's own SECURITY comment at lines 285-293), so a settlement
+whose send leaf carries bytes the fixed `TryFrom` rejects is still natively
+accepted (`native_settlement_accepts_bytes_the_fixed_try_from_rejects`). Native
+rejection of a non-canonical tx-tree root therefore still comes only from
+`CanonicalRoots` — a non-canonical u64 never equals a canonical Merkle root
+(`noncanonical_native_hash_never_equals_a_canonical_root`,
+`the_aliasing_environment_violates_canonical_roots`) — and in-circuit only from
+`ToHashOutGates`.
 -/
 
 namespace Zkp.Implementation.TxSettlement
@@ -135,9 +157,57 @@ def hashToBytes32 (h : Hash4) : Bytes32 :=
   ⟨h.h0 / wordBase, h.h0 % wordBase, h.h1 / wordBase, h.h1 % wordBase,
    h.h2 / wordBase, h.h2 % wordBase, h.h3 / wordBase, h.h3 % wordBase⟩
 
-/-- Native `TryFrom<Bytes32> for PoseidonHashOut`: reduce, split back, compare. -/
-def Bytes32.tryToHashOut (x : Bytes32) : Option Hash4 :=
-  if hashToBytes32 x.reduceNative = x then some x.reduceNative else none
+/-- `PoseidonHashOutError` variants reachable from `TryFrom<Bytes32>`
+    (poseidon_hash_out.rs:291-303). -/
+inductive ConversionFault where
+  | nonCanonicalElement (index : Nat)
+  | recoveryFailed
+  deriving DecidableEq, Repr
+
+/-- The index of the first recombined u64 element at or above the Goldilocks
+    order, i.e. the loop of poseidon_hash_out.rs:293-297 in source order. -/
+def firstNonCanonicalIndex (h : Hash4) : Option Nat :=
+  if h.h0 ≥ goldilocks then some 0
+  else if h.h1 ≥ goldilocks then some 1
+  else if h.h2 ≥ goldilocks then some 2
+  else if h.h3 ≥ goldilocks then some 3
+  else none
+
+/-- Native `TryFrom<Bytes32> for PoseidonHashOut` (poseidon_hash_out.rs:291-303):
+    reduce with the lossy `reduce_to_hash_out`, then test EACH recombined u64
+    element against `GOLDILOCKS_ORDER` first, and only afterwards split back and
+    compare bytes. The order matters: the canonicality test is the only check
+    that can fire, and it fires before the (unreachable) round-trip test. -/
+def Bytes32.tryToHashOut (x : Bytes32) : Except ConversionFault Hash4 :=
+  match firstNonCanonicalIndex x.reduceNative with
+  | some i => .error (.nonCanonicalElement i)
+  | none =>
+    if hashToBytes32 x.reduceNative = x then .ok x.reduceNative
+    else .error .recoveryFailed
+
+theorem canonical_hash_has_no_non_canonical_index (h : Hash4) (canon : hashCanonical h) :
+    firstNonCanonicalIndex h = none := by
+  obtain ⟨c0, c1, c2, c3⟩ := canon
+  simp only [firstNonCanonicalIndex, ge_iff_le, if_neg (Nat.not_le.mpr c0),
+    if_neg (Nat.not_le.mpr c1), if_neg (Nat.not_le.mpr c2), if_neg (Nat.not_le.mpr c3)]
+
+theorem non_canonical_hash_has_an_index (h : Hash4) (bad : ¬ hashCanonical h) :
+    ∃ i, firstNonCanonicalIndex h = some i := by
+  unfold firstNonCanonicalIndex
+  split
+  · exact ⟨0, rfl⟩
+  · next h0 =>
+    split
+    · exact ⟨1, rfl⟩
+    · next h1 =>
+      split
+      · exact ⟨2, rfl⟩
+      · next h2 =>
+        split
+        · exact ⟨3, rfl⟩
+        · next h3 =>
+          exact absurd ⟨Nat.lt_of_not_le h0, Nat.lt_of_not_le h1, Nat.lt_of_not_le h2,
+            Nat.lt_of_not_le h3⟩ bad
 
 /-- Semantic content of `Bytes32Target::to_hash_out`: the bare field reduction,
     split back through the unique 32/32 decomposition of a canonical element,
@@ -217,11 +287,15 @@ theorem canonical_gate_rejects_the_modulus_encoding : ¬ ToHashOutGates modulusB
   simp only [hashCanonical, Bytes32.reduceNative, modulusBytes, wordBase, goldilocks] at canon
   omega
 
-/-- The native `TryFrom<Bytes32>` is a u64 round trip; with u32 limbs it never fails,
-    so it does NOT by itself reject the non-canonical encoding (contrary to the
-    comment's wording). Native rejection of such roots comes from `CanonicalRoots`. -/
-theorem native_try_from_never_rejects_u32_limbs (x : Bytes32) (typed : x.Typed) :
-    x.tryToHashOut = some x.reduceNative := by
+/-- The byte round trip of `TryFrom<Bytes32>` is the IDENTITY on u32 limbs:
+    `reduce_to_hash_out` regroups the eight limbs into four u64s and
+    `From<PoseidonHashOut> for Bytes32` splits them back the same way, neither
+    reducing modulo the field. So the `value != recovered` test is unreachable
+    and is not what rejects anything. (This is the restatement of the former
+    `native_try_from_never_rejects_u32_limbs`, which claimed the whole
+    conversion was total; it is no longer, see below.) -/
+theorem byte_round_trip_is_identity_on_u32_limbs (x : Bytes32) (typed : x.Typed) :
+    hashToBytes32 x.reduceNative = x := by
   cases x with
   | mk a b c d e f g h =>
     have limbs : a < wordBase ∧ b < wordBase ∧ c < wordBase ∧ d < wordBase ∧
@@ -229,15 +303,67 @@ theorem native_try_from_never_rejects_u32_limbs (x : Bytes32) (typed : x.Typed) 
       simp only [Bytes32.Typed, Bytes32.limbs, List.mem_cons, List.mem_nil_iff, or_false,
         forall_eq_or_imp, forall_eq] at typed
       exact typed
-    have key : hashToBytes32 (Bytes32.reduceNative ⟨a, b, c, d, e, f, g, h⟩) = ⟨a, b, c, d, e, f, g, h⟩ := by
-      simp only [hashToBytes32, Bytes32.reduceNative, Bytes32.mk.injEq, wordBase] at *
-      omega
-    simp [Bytes32.tryToHashOut, key]
+    simp only [hashToBytes32, Bytes32.reduceNative, Bytes32.mk.injEq, wordBase] at limbs ⊢
+    omega
 
-theorem modulus_encoding_passes_native_try_from :
-    modulusBytes.tryToHashOut = some ⟨goldilocks, 0, 0, 0⟩ := by
-  rw [native_try_from_never_rejects_u32_limbs modulusBytes (by decide)]
-  simp only [Bytes32.reduceNative, modulusBytes, wordBase, goldilocks]
+/-- The `RecoveryFailed` branch is unreachable for u32 limbs: the round-trip half
+    alone never rejects. -/
+theorem native_try_from_recovery_failure_is_unreachable (x : Bytes32) (typed : x.Typed) :
+    x.tryToHashOut ≠ .error .recoveryFailed := by
+  intro bad
+  unfold Bytes32.tryToHashOut at bad
+  split at bad
+  · simp at bad
+  · rw [if_pos (byte_round_trip_is_identity_on_u32_limbs x typed)] at bad
+    exact Except.noConfusion bad
+
+/-- The canonicality test runs BEFORE the round trip: whenever some recombined
+    element is at or above the Goldilocks order the conversion reports that
+    element's index, whatever the byte round trip would have done. -/
+theorem native_try_from_tests_canonicality_before_the_round_trip (x : Bytes32) (i : Nat)
+    (bad : firstNonCanonicalIndex x.reduceNative = some i) :
+    x.tryToHashOut = .error (.nonCanonicalElement i) := by
+  simp only [Bytes32.tryToHashOut, bad]
+
+/-- Consequently the fixed `TryFrom<Bytes32>` is NOT total: on u32 limbs it
+    succeeds exactly on the canonical encodings. -/
+theorem native_try_from_accepts_exactly_canonical_u32_limbs (x : Bytes32) (typed : x.Typed) :
+    x.tryToHashOut = .ok x.reduceNative ↔ hashCanonical x.reduceNative := by
+  constructor
+  · intro ok
+    rcases Classical.em (hashCanonical x.reduceNative) with canon | bad
+    · exact canon
+    · obtain ⟨i, hi⟩ := non_canonical_hash_has_an_index _ bad
+      simp [Bytes32.tryToHashOut, hi] at ok
+  · intro canon
+    simp only [Bytes32.tryToHashOut, canonical_hash_has_no_non_canonical_index _ canon,
+      if_pos (byte_round_trip_is_identity_on_u32_limbs x typed)]
+
+/-- The concrete witness: the Bytes32 encoding of the Goldilocks modulus is
+    REJECTED by the fixed native `TryFrom<Bytes32>`, at element 0. -/
+theorem modulus_encoding_is_rejected_by_native_try_from :
+    modulusBytes.reduceNative = ⟨goldilocks, 0, 0, 0⟩ ∧
+      firstNonCanonicalIndex modulusBytes.reduceNative = some 0 ∧
+      modulusBytes.tryToHashOut = .error (.nonCanonicalElement 0) := by
+  have hred : modulusBytes.reduceNative = ⟨goldilocks, 0, 0, 0⟩ := by
+    simp only [Bytes32.reduceNative, modulusBytes, wordBase, goldilocks]
+  have hidx : firstNonCanonicalIndex modulusBytes.reduceNative = some 0 := by
+    rw [hred]; decide
+  exact ⟨hred, hidx, native_try_from_tests_canonicality_before_the_round_trip _ 0 hidx⟩
+
+/-- The SAME witness on the lossy reading, which the fix did NOT touch:
+    `reduce_to_hash_out` is total and still maps the modulus encoding to the
+    non-canonical element `p`, and the byte round trip still recovers the bytes
+    exactly — so nothing in the lossy path rejects it. -/
+theorem modulus_encoding_still_passes_the_lossy_reduction :
+    modulusBytes.Typed ∧ modulusBytes.reduceNative = ⟨goldilocks, 0, 0, 0⟩ ∧
+      hashToBytes32 modulusBytes.reduceNative = modulusBytes ∧
+      ¬ hashCanonical modulusBytes.reduceNative := by
+  refine ⟨by decide, modulus_encoding_is_rejected_by_native_try_from.1,
+    byte_round_trip_is_identity_on_u32_limbs modulusBytes (by decide), ?_⟩
+  intro canon
+  simp only [hashCanonical, Bytes32.reduceNative, modulusBytes, wordBase, goldilocks] at canon
+  omega
 
 theorem noncanonical_native_hash_never_equals_a_canonical_root (r : Hash4)
     (canon : hashCanonical r) : modulusBytes.reduceNative ≠ r := by
@@ -785,14 +911,16 @@ theorem settled_chain_binds_spend_tx_to_the_public_account_root {Path Proof : Ty
       rw [← agree, ← tx_v2_wire_is_pinned_by_tx_when_used g used]
       exact g.v2Inclusion used
 
-/-- The circuit never uses the many-to-one bare reduction on the prover-supplied root. -/
+/-- The circuit never uses the many-to-one bare reduction on the prover-supplied
+    root: its gate forces exactly the bytes the fixed native `TryFrom<Bytes32>`
+    would also have accepted. -/
 theorem circuit_tx_tree_root_is_the_canonical_native_value {Path Proof : Type}
     {env : Environment Path Proof} {checked : Bool} {w : Witness Path Proof}
     (g : CircuitGates env checked w) :
     w.accountState.sendLeaf.txTreeRoot.fieldReduce = w.accountState.sendLeaf.txTreeRoot.reduceNative ∧
-    w.accountState.sendLeaf.txTreeRoot.tryToHashOut = some w.accountState.sendLeaf.txTreeRoot.reduceNative := by
-  obtain ⟨typed, _, agree⟩ := canonical_gate_forces_native_agreement _ g.txTreeRootCanonical
-  exact ⟨agree, native_try_from_never_rejects_u32_limbs _ typed⟩
+    w.accountState.sendLeaf.txTreeRoot.tryToHashOut = .ok w.accountState.sendLeaf.txTreeRoot.reduceNative := by
+  obtain ⟨typed, canon, agree⟩ := canonical_gate_forces_native_agreement _ g.txTreeRootCanonical
+  exact ⟨agree, (native_try_from_accepts_exactly_canonical_u32_limbs _ typed).mpr canon⟩
 
 /-- Merkle index decomposition bounds the channel id even when `is_checked = false`. -/
 theorem channel_id_is_bounded_without_is_checked {Path Proof : Type} {env : Environment Path Proof}
@@ -959,5 +1087,44 @@ theorem example_mixed_witness_is_rejected (s : Settlement Unit Unit) :
       none () ≠ .ok s :=
   mixed_tx_v2_witness_is_never_accepted exampleEnv 1 Spend.emptyTx examplePublicState
     exampleAccountState () (some ()) none () (by decide) s
+
+/-! ## What the `TryFrom<Bytes32>` fix does (and does not) change here
+
+tx_settlement.rs:155 converts the prover-supplied `send_leaf.tx_tree_root` with
+the LOSSY `reduce_to_hash_out`, not with `TryFrom<Bytes32>` (that is exactly the
+gap its own SECURITY comment at lines 285-293 describes for the circuit side).
+The example below is `exampleEnv` with a tx-tree root that the fixed native
+`TryFrom` rejects: native admission still accepts it. -/
+
+/-- `exampleEnv` whose tx-tree root is the aliasing, non-canonical value. -/
+def aliasEnv : Environment Unit Unit :=
+  { exampleEnv with txRoot := fun _ _ _ => modulusBytes.reduceNative }
+
+/-- The same account state as `exampleAccountState` but whose send leaf carries
+    the modulus encoding byte-for-byte. -/
+def aliasAccountState : AccountState Unit :=
+  { channelId := 1, accountTreeRoot := exampleAccountRoot,
+    sendLeaf := ⟨0, 5, modulusBytes⟩, sendLeafIndex := 0, sendMerkleProof := (),
+    channelLeaf := ⟨1, 0, exampleSendTreeRoot, Spend.zeroHash⟩, userMerkleProof := () }
+
+def aliasSettlement : Settlement Unit Unit :=
+  ⟨1, Spend.emptyTx, examplePublicState, aliasAccountState, (), none, none, ()⟩
+
+/-- The honest conclusion for THIS file: the `TryFrom<Bytes32>` fix changes
+    nothing on `tx_settlement.rs`'s own native path. The send-leaf tx-tree root
+    here is rejected by the fixed conversion, yet `TxSettlement::new` still
+    returns `Ok`, because line 155 calls `reduce_to_hash_out` instead. -/
+theorem native_settlement_accepts_bytes_the_fixed_try_from_rejects :
+    aliasAccountState.sendLeaf.txTreeRoot.tryToHashOut = .error (.nonCanonicalElement 0) ∧
+    acceptLegacy aliasEnv 1 Spend.emptyTx examplePublicState aliasAccountState () () =
+      .ok aliasSettlement :=
+  ⟨modulus_encoding_is_rejected_by_native_try_from.2.2, rfl⟩
+
+/-- Such an environment is outside `CanonicalRoots`: the model's native rejection
+    of non-canonical tx-tree roots comes from that premise, not from the
+    conversion. -/
+theorem the_aliasing_environment_violates_canonical_roots : ¬ CanonicalRoots aliasEnv := by
+  intro canon
+  exact modulus_encoding_still_passes_the_lossy_reduction.2.2.2 (canon.1 Spend.emptyTx 0 ())
 
 end Zkp.Implementation.TxSettlement

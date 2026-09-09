@@ -217,7 +217,7 @@
     },
     {
       "name": "GoldilocksWitnessRange",
-      "obligation": "`PoseidonHashOut::try_from(Bytes32)` cannot fail (`native_canonicality_check_cannot_fail`), so a registration whose 64-bit identity halves exceed the Goldilocks modulus passes native validation and is only rejected by having no satisfying witness; the field range is a premise (`NativeWidths.identityFields`).",
+      "obligation": "`ChannelRegRecord::validate` now REJECTS a registration whose 64-bit identity halves are at or above the Goldilocks order: `PoseidonHashOut::try_from(Bytes32)` tests each recombined element against `GOLDILOCKS_ORDER` before its (vacuous) byte round trip (`byte_round_trip_alone_cannot_reject`, `canonical_iff_goldilocks_on_u32_limbs`, `validate_rejects_non_goldilocks_identity`). What remains undischarged is only the native/target correspondence: that `set_witness`'s `F::from_canonical_u64` sees exactly those validated halves. `NativeWidths.identityFields` still states the range as a premise, but on a validated record it is derivable (`native_widths_identity_fields_follow_from_validate`).",
       "discharged": false
     },
     {

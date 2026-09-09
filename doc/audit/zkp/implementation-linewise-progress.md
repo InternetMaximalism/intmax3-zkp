@@ -1,4 +1,4 @@
-# 実装の行対応 Lean 化 — 2026-09-08 作業記録
+# 実装の行対応 Lean 化 — 2026-09-09 作業記録
 
 ## 結論と対象
 
@@ -147,6 +147,54 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-09：確認済み不具合の修正、古いテストの更新、CI の穴を塞ぐ
+
+監査開始以来はじめて **runtime に差分**が出た checkpoint です。基準 `05ec7ae` に対する変更は
+`src/utils/poseidon_hash_out.rs`、`src/utils/error.rs`、`src/common/balance_state.rs`（テスト部のみ）と
+`.github/workflows/ci.yml` の 4 ファイルです。回路、proof parameter、proof format は変更していません。
+
+**1. 到達不能だった canonical 性検査の修正（根本原因）。**
+`TryFrom<Bytes32> for PoseidonHashOut` の round-trip 検査は、`reduce_to_hash_out` が 8 個の u32 limb を
+4 個の u64 に組み替えるだけで、`From<PoseidonHashOut> for Bytes32` がそれを厳密に逆変換するため、
+**あらゆる入力で成立し決して発火しません**でした。その結果 `ChannelRegRecord::validate` の
+非 canonical identity 拒否 3 種が dead code となり、リポジトリ自身のテストが失敗していました。
+修正は Goldilocks 位数に対する明示的な要素検査を round-trip の**前**に置き、エラー variant
+`PoseidonHashOutError::NonCanonicalElement(usize)` を追加するものです。`reduce_to_hash_out` と
+`From` impl は未変更なので、多対一の読み取りを意図して使う多数の呼び出し元は影響を受けません。
+
+**2. 古いテストの更新。** `balance_state` の 2 件が member_count 16 の通過を主張していました
+（`fd467ea` で sig-cluster が 8 に制限されて以降は誤り）。`MAX_SIG_CLUSTER` を使うよう更新し、
+併せて無効な基底 16 から作られていた否定テスト 3 件も有効な基底に直しました。これらは
+「上限超過は拒否される」ことを主張しながら、実際には基底自体が無効なために通っていたものです。
+
+**3. CI の穴を塞ぐ。** workflow は名前付きの `--test` 統合テストのみを実行し、`cargo test --lib` を
+一度も走らせていませんでした。上記 3 件の失敗はすべてこの穴に落ちていました。
+`lib unit tests (pure-logic modules)` 手順を追加し、`common:: utils:: ethereum_types::` の
+**189 テスト・ignored 0** をリポジトリ自身の `rust-test-guard.sh` の下で実行します（約 20 秒）。
+`circuits::` / `regev::` / `falcon_sig::` は実回路を構築するため除外しました。実測で `circuits::` だけで
+**37 分・25 GB RSS でも完了せず**、無フィルタの `--lib` は `--test-threads=1` でも OOM で SIGKILL されます
+（この SIGKILL はテスト失敗に見えます）。これらは既存の専用 `--test` 手順が担当します。
+
+**4. モデルの追随。** guard がただちに source の hash 変化を検出して停止し、意図どおり
+「モデル対応を見直してから manifest を更新せよ」と要求しました。見直しの結果、変換を独立にモデル化
+していた 5 module を更新しています。
+
+| module | 対応 |
+|---|---|
+| `H1Gadget` | `nativeTryFrom` を `Except` 化し canonical 性検査を前置。`native_try_from_requires_canonical_elements`、`goldilocks_order_bytes_are_now_rejected` ほか。round-trip 半分が今も到達不能であることは `native_try_from_roundtrip_test_alone_is_unreachable` として保持 |
+| `UtilGadgets` | エラー enum に variant を追加し、variant 集合・Display 文言・エラー優先順位（canonical 性が round-trip に先行）を固定 |
+| `ChannelRegChain` | `Words8.canonical` を「Goldilocks 要素検査 ∧ round-trip」に分割。`native_canonicality_check_cannot_fail` を **`byte_round_trip_alone_cannot_reject`** に改名（命題は保持、名前と説明が現状と食い違っていたため）。`non_goldilocks_record_rejected` で拒否が live であることを証明 |
+| `BlockTypes` | 命題は保持し docstring を訂正。`non_canonical_pk_g_rejection_is_reachable` を追加して両方向を記録 |
+| `TxSettlement` | `native_try_from_never_rejects_u32_limbs` と `modulus_encoding_passes_native_try_from` を改名・逆転。**この回路自身の経路は変わりません**：`tx_settlement.rs` は `send_leaf.tx_tree_root` を無変更の多対一 `reduce_to_hash_out` で読むため、修正後の変換が拒否する byte 列を依然として受理します（`native_settlement_accepts_bytes_the_fixed_try_from_rejects`）。非 canonical な tx-tree root の native 拒否は今も `CanonicalRoots` 前提、回路側は `ToHashOutGates` に依存します |
+
+**5. 登録器の安全装置。** `register2.py` は実装 hash の変更を既定で拒否します。今回のように正当な
+見直しを経た場合のみ `--accept-source-change=<path>` で明示的に受理する経路を追加しました。
+再実行の副作用で hash が動くことはありません。
+
+検証：main guard PASS（125 modules / 現行 72 modules / 470 hashes）、line guard PASS（169 maps）、
+回帰 51 件と fixture parity 40 件および 18 fixture・177 項目が green、`--require-complete` は exit 1。
+行分類は translated 31,095 / untranslated 41,784。
+
 ### 2026-09-08（追記）：MLE サブモジュールを信頼仮定として導入
 
 運用者の判断により、pinned MLE/WHIR サブモジュールを **翻訳せず信頼する** ことにしました。
@@ -206,8 +254,9 @@ hash の一致と束縛 (e1, e2)、L1 canonical head / finality (f1, f2)、
 **リポジトリ自身のテスト失敗 3 件（CI は `cargo test --lib` を実行しないため未検出）。**
 
 1. **実在の不具合。** `common::channel_registration::tests::test_channel_reg_validate_rejects_noncanonical_identity_encodings` が失敗します。`ChannelRegRecord::validate` の非 canonical identity 拒否は到達不能で、`PoseidonHashOut::try_from(Bytes32)` が同じ 32/32 分割を組み直す全域関数であることが原因です。テストは正しい意図を主張しており、コード側の欠陥です。Lean 側でも
-   `ChannelRegChain.native_canonicality_check_cannot_fail` と
-   `BlockTypes.canonicality_rejections_come_only_from_the_callback` が独立に同じ結論に達しています。
+   `ChannelRegChain.byte_round_trip_alone_cannot_reject`（旧 `native_canonicality_check_cannot_fail`）と
+   `BlockTypes.canonicality_rejections_come_only_from_the_callback` が独立に同じ結論に達していました。
+   **2026-09-09 に修正済み。** 下の追記を参照してください。
 2. **古いテスト。** `common::balance_state::tests::balance_state_validate_multi_n` と
    `balance_state_delegate_count_regions_and_h1` は member_count 16 が通ることを主張しますが、
    `fd467ea`（sig-cluster を 8 に制限）以降 2..=8 が正です。テスト側の更新漏れです。
@@ -325,7 +374,7 @@ Python による keccak 再計算の 4 経路で一致します。**これは re
 4. **block step の最初の step では初期公開状態と cyclic verifier 鍵が自由な witness** であり、
    timestamp も無制約です（`BlockStep.gates_first_step_verifier_key_is_free` ほか）。
 5. **`ChannelRegRecord::validate` の canonicality 検査は到達不能**です。`try_from` が同じ 32/32 分割を
-   組み直すため決して失敗しません（`ChannelRegChain.native_canonicality_check_cannot_fail`）。
+   組み直すため決して失敗しませんでした（`ChannelRegChain.byte_round_trip_alone_cannot_reject`)。2026-09-09 に修正済み。
    非 canonical な identity は witness 構築時ではなく proving 時に失敗します。
 6. **回路側で member recipient が制約されません。** `member_pubkeys_root` を変えずに任意の recipient を
    割り当てる充足 witness が存在し、束縛は L1 の chain 一致のみです。

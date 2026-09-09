@@ -10,7 +10,7 @@ use plonky2::{
     field::{
         extension::Extendable,
         goldilocks_field::GoldilocksField,
-        types::{Field, PrimeField64},
+        types::{Field, Field64, PrimeField64},
     },
     hash::{
         hash_types::{HashOut, NUM_HASH_OUT_ELTS, RichField},
@@ -34,6 +34,12 @@ use crate::ethereum_types::bytes32::Bytes32;
 use super::conversion::{ToField, ToU64};
 
 pub const POSEIDON_HASH_OUT_LEN: usize = 4;
+
+/// The Goldilocks order `p = 2^64 - 2^32 + 1`. A `u64` limb is the canonical encoding of a field
+/// element exactly when it is below this value; `GoldilocksField::ORDER` is the same constant and
+/// the assertion below keeps the two tied together.
+pub const GOLDILOCKS_ORDER: u64 = 0xFFFF_FFFF_0000_0001;
+const _: () = assert!(GOLDILOCKS_ORDER == GoldilocksField::ORDER);
 
 /// A struct equivalent to plonky2's `HashOut`, but implemented with u64 fixed instead of
 /// generics. This is convenient for implementing serialize and leafable.
@@ -273,8 +279,22 @@ impl TryFrom<Bytes32> for PoseidonHashOut {
     type Error = PoseidonHashOutError;
     // Convert Bytes32 to HashOut.
     /// Bytes32 has a larger representation space than HashOut, so this might fail.
+    ///
+    /// SECURITY: the byte round-trip alone can never reject anything, so it is not the check.
+    /// `reduce_to_hash_out` only regroups the eight u32 limbs into four u64s, and
+    /// `From<PoseidonHashOut> for Bytes32` splits them back exactly the same way; neither
+    /// direction reduces modulo the field, so the two are inverses for EVERY `Bytes32` and
+    /// `value != recovered` is unreachable. Canonicality is therefore tested directly: a 64-bit
+    /// limb at or above the Goldilocks order is the encoding of no field element, so no circuit
+    /// witness can reproduce those exact registration bytes. Callers that want the lossy,
+    /// many-to-one reading must say so by calling `reduce_to_hash_out` instead.
     fn try_from(value: Bytes32) -> Result<Self, Self::Error> {
         let hash_out = value.reduce_to_hash_out();
+        for (i, &element) in hash_out.elements.iter().enumerate() {
+            if element >= GOLDILOCKS_ORDER {
+                return Err(PoseidonHashOutError::NonCanonicalElement(i));
+            }
+        }
         let recovered: Bytes32 = hash_out.into();
         if value != recovered {
             return Err(PoseidonHashOutError::RecoveryFailed);

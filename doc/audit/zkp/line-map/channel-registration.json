@@ -137,7 +137,9 @@
         "Zkp.Implementation.BlockTypes.checkPaddingSlots",
         "Zkp.Implementation.BlockTypes.CanonicalCheck",
         "Zkp.Implementation.BlockTypes.exampleMember",
-        "Zkp.Implementation.BlockTypes.exampleRecord"
+        "Zkp.Implementation.BlockTypes.exampleRecord",
+        "Zkp.Implementation.BlockTypes.nonCanonicalPkGBytes",
+        "Zkp.Implementation.BlockTypes.rejectsNonCanonicalPkG"
       ],
       "theorems": [
         "Zkp.Implementation.BlockTypes.channel_reg_rejects_small_member_count",
@@ -147,9 +149,11 @@
         "Zkp.Implementation.BlockTypes.channel_reg_rejects_bp_slot_out_of_range",
         "Zkp.Implementation.BlockTypes.canonicality_rejections_come_only_from_the_callback",
         "Zkp.Implementation.BlockTypes.channel_reg_example_validates",
-        "Zkp.Implementation.BlockTypes.channel_reg_example_has_full_slot_width"
+        "Zkp.Implementation.BlockTypes.channel_reg_example_has_full_slot_width",
+        "Zkp.Implementation.BlockTypes.canonicality_rejections_fire_when_the_callback_rejects",
+        "Zkp.Implementation.BlockTypes.non_canonical_pk_g_rejection_is_reachable"
       ],
-      "note": "Control flow and error precedence are modeled; PoseidonHashOut::try_from is an opaque canonicality callback."
+      "note": "Control flow and error precedence are modeled; PoseidonHashOut::try_from is an opaque canonicality callback, and the three non-canonical arms are pinned in BOTH directions (unreachable under a total callback, reached whenever the callback rejects). The deployed conversion is not total: it tests each recombined 64-bit half against GOLDILOCKS_ORDER, modeled arithmetically in Zkp.Implementation.ChannelRegChain."
     },
     {
       "start": 181,
@@ -295,7 +299,7 @@
     },
     {
       "name": "bytes32_canonicality_callback",
-      "obligation": "PoseidonHashOut::try_from(Bytes32) is modeled as an opaque predicate; the model proves only that validate's non-canonical rejections are exactly as strong as that callback.",
+      "obligation": "PoseidonHashOut::try_from(Bytes32) is modeled as an opaque predicate; the model proves only that validate's non-canonical rejections are exactly as strong as that callback, in both directions. That the deployed conversion rejects exactly the encodings whose recombined 64-bit halves are at or above the Goldilocks order is modeled in Zkp.Implementation.ChannelRegChain, not here.",
       "discharged": false
     },
     {

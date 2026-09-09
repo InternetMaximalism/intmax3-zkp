@@ -1067,12 +1067,12 @@ mod tests {
         }
     }
 
-    /// Multi-N (D6 pad-to-MAX): `BalanceState::validate()` ACCEPTS member_count = 2 / 8 / 16 with
+    /// Multi-N (D6 pad-to-MAX): `BalanceState::validate()` ACCEPTS member_count = 2 / 8 with
     /// canonical active ciphertexts + `RegevCiphertext::padding()` padding, and REJECTS the D6
     /// boundary violations (out-of-range count, nonzero padding slot, nonzero padding add-counter).
     #[test]
     fn balance_state_validate_multi_n() {
-        for count in [2u8, 8, 16] {
+        for count in [2u8, MAX_SIG_CLUSTER as u8] {
             state_with_members(count)
                 .validate()
                 .unwrap_or_else(|e| panic!("member_count {count} must validate: {e}"));
@@ -1089,7 +1089,7 @@ mod tests {
         // member_count > MAX_SIG_CLUSTER rejected (cosigner cap, NOT the 1024 balance-slot
         // capacity — the old `(MAX_CHANNEL_MEMBERS + 1) as u8` truncated to 1 at MAX=1024 and
         // passed for the wrong reason).
-        let mut too_many = state_with_members(16);
+        let mut too_many = state_with_members(MAX_SIG_CLUSTER as u8);
         too_many.member_count = (MAX_SIG_CLUSTER + 1) as u8;
         assert!(matches!(
             too_many.validate(),
@@ -1156,7 +1156,7 @@ mod tests {
             .expect("members + delegates + padding must validate");
 
         // The cosigner cap binds: member_count > MAX_SIG_CLUSTER is rejected even with delegates.
-        let mut overflow = state_with_members(16);
+        let mut overflow = state_with_members(MAX_SIG_CLUSTER as u8);
         overflow.member_count = (MAX_SIG_CLUSTER + 1) as u8;
         overflow.delegate_count = 1;
         assert!(
@@ -1169,7 +1169,7 @@ mod tests {
         // Slot-capacity check: with u16 delegate_count (2026-07-18 slot widening) the
         // `member_count + delegate_count > MAX_CHANNEL_MEMBERS` boundary is now REACHABLE
         // (it was dead code with u8 counts: 16 + 255 = 271 < 1024). Exercise it.
-        let mut over_capacity = state_with_members(16);
+        let mut over_capacity = state_with_members(MAX_SIG_CLUSTER as u8);
         over_capacity.delegate_count = (MAX_CHANNEL_MEMBERS - MAX_SIG_CLUSTER + 1) as u16;
         assert!(
             matches!(
@@ -1178,15 +1178,15 @@ mod tests {
             ),
             "member_count + delegate_count > MAX_CHANNEL_MEMBERS must be rejected"
         );
-        // 16 cosigners + 1 active delegate is well within the 1024 balance slots and must
-        // validate (the delegate slot 16 carries an active ciphertext).
-        let mut full_members = state_with_members(16);
+        // A FULL cosigner set (MAX_SIG_CLUSTER) plus 1 active delegate is well within the 1024
+        // balance slots and must validate (the delegate slot carries an active ciphertext).
+        let mut full_members = state_with_members(MAX_SIG_CLUSTER as u8);
         full_members.delegate_count = 1;
-        full_members.enc_balances[16][0] = ciphertext(60);
-        full_members.recipients[16] = recipient(60);
+        full_members.enc_balances[MAX_SIG_CLUSTER][0] = ciphertext(60);
+        full_members.recipients[MAX_SIG_CLUSTER] = recipient(60);
         full_members
             .validate()
-            .expect("16 cosigners + 1 active delegate must validate at MAX=1024 slots");
+            .expect("a full sig-cluster + 1 active delegate must validate at MAX=1024 slots");
 
         // A slot inside the delegate region must be ACTIVE (non-padding): if a declared delegate
         // slot is left as padding it is fine (padding ct is canonical), but a slot BEYOND

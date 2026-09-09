@@ -979,7 +979,7 @@
     },
     {
       "path": "src/common/balance_state.rs",
-      "sha256": "105a17ccb73e4cf8d8236b208a5d7ce57e1226c3517c2967f9e40bf77a38318a",
+      "sha256": "c948f630935fc2f3ce3787a6bfd4e1bd04e577572a1d4ff29df601c93fe0689a",
       "lines": 1797,
       "category": "dependency",
       "line_map": "doc/audit/zkp/line-map/balance-state-hash-helpers.json"
@@ -1469,8 +1469,8 @@
     },
     {
       "path": "src/utils/error.rs",
-      "sha256": "1fab9e34e948836380b0151c5d78bf3914b8a7514c97ad5b5a1b9a2bbc675146",
-      "lines": 69,
+      "sha256": "9a8e44c3469f96037353fc77e12dfbfa69444e6ba3410dad29c9329a18ad0b01",
+      "lines": 72,
       "category": "dependency",
       "line_map": "doc/audit/zkp/line-map/utils-error.json"
     },
@@ -1553,8 +1553,8 @@
     },
     {
       "path": "src/utils/poseidon_hash_out.rs",
-      "sha256": "e97b3e6555157684b83074f21c8b1deb87d89a8ccee396c349ce5d8a4d4919f0",
-      "lines": 600,
+      "sha256": "ce711aa5941098b87a772684925a9cfa013bab1eb146f80504d6c3b8dd79b0cf",
+      "lines": 620,
       "category": "dependency",
       "line_map": "doc/audit/zkp/line-map/poseidon-output-encoding.json"
     },
