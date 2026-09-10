@@ -11055,8 +11055,9 @@ mod partial_withdrawal_tests {
 /// REGRESSION (2026-07-18 1000-connection storm): with u8 slot typing, joins hard-stopped at 256
 /// active slots ("no member at slot 256") even though Option B promises MAX_CHANNEL_MEMBERS =
 /// 1024. These tests walk the native join/assemble path PAST slot 256 with u16 slots — no
-/// proving, fabricated identities only (build_record never validates key material, just slot
-/// structure), so they run at ordinary unit-test cost.
+/// proving, fabricated identities only (build_record validates Regev key shape/nonzero-ness and
+/// distinctness — see `fake_member` — but no signature or keypair consistency), so they run at
+/// ordinary unit-test cost.
 #[cfg(test)]
 mod slot_capacity_tests {
     use super::*;
@@ -11066,16 +11067,22 @@ mod slot_capacity_tests {
         regev::{REGEV_N, RegevCiphertext, RegevPk},
     };
 
-    /// Fabricated distinct nonzero identity for `slot`. `build_record` /
-    /// `member_pubkeys_root` only hash these values — no key validity is checked — so
-    /// synthetic pk_g/pk_b keep the test cheap enough to cover 300 slots natively.
+    /// Fabricated distinct identity for `slot`. `pk_g` / `pk_b` are only hashed, but the Regev
+    /// key IS validated: `build_record` -> `validate_new_participant_exit_keys` requires every
+    /// active slot's key to be shape/canonicality-valid (`RegevPk::validate`), to have a NONZERO
+    /// `a` polynomial, and to be DISTINCT from every other active slot's key. So `a` is the
+    /// padding vector with a per-slot tag in `a[0]` — nonzero, distinct, canonical
+    /// (`tag < REGEV_Q`) — which satisfies the check without generating 300 real keypairs, and
+    /// keeps this test cheap enough to cover 300 slots natively.
     fn fake_member(slot: u16) -> MemberInfo {
         let tag = slot as u32 + 1;
+        let mut regev_pk = RegevPk::padding();
+        regev_pk.a[0] = tag;
         MemberInfo {
             slot,
             pk_g: Bytes32::from_u32_slice(&[0xA0, 0, 0, 0, 0, 0, 0, tag]).unwrap(),
             pk_b: Bytes32::from_u32_slice(&[0xB0, 0, 0, 0, 0, 0, 0, tag]).unwrap(),
-            regev_pk: RegevPk::padding(),
+            regev_pk,
         }
     }
 
