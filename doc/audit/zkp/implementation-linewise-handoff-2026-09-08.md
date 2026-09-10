@@ -113,11 +113,12 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
 
 ## 5. 次にやるべきこと（優先順）
 
-1. **`ChannelRegRecord::validate` の到達不能な canonicality 検査を直す。** 下記 6 の実在不具合。
-2. **`balance_state` の古いテスト 2 件を更新する。** member_count 16 → 2..=8。
-3. **CI に `cargo test --lib` を足す。** これがない限り同種の失敗は今後も検出されません。
-   ただし lib 全体は重い回路テストで OOM します。`--release --locked --lib <module>::` の分割実行か、
-   `--skip measure --skip bench` が必要です（`.github/ci/rust-test-guard.sh` の作法に合わせること）。
+1. ~~`ChannelRegRecord::validate` の到達不能な canonicality 検査を直す~~ **完了（`150bb19`）。**
+2. ~~`balance_state` の古いテスト 2 件を更新する~~ **完了（`150bb19`）。** `wallet_core` の古いテスト
+   1 件も `31aaf6c` で更新。
+3. ~~CI に `cargo test --lib` を足す~~ **完了（`150bb19`、`regev::` を加えて 240 件）。**
+   lib 711 件の全数実行も 2026-09-10 に完了し全通過（進捗文書の同日節）。`wallet_core::` /
+   `circuits::` / `falcon_sig::` は 16 GB runner に載らないため routine step 外に留めています。
 4. **残る前提の削減。** `CloseStatementLowering`（gate 生成）と claim 側 (b1, b2) の lowering、
    hash binding (e1, e2)、署名妥当性 (d) が主対象。(f) finality と (h) refinement は
    形式化しても仮定のままです。

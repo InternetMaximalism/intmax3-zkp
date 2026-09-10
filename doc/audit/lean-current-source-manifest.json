@@ -140,7 +140,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "bc8a2065d7e0e9d0cfe6f0ea234063b9b907558b79f2846f2a53664724240cec",
+      "sha256": "59e38b741b4e7aa1ea8d1cec069e743c6156c9f3e8aade7fe17ca6b5fc693ee6",
       "role": "tooling"
     },
     {
@@ -250,7 +250,7 @@
     },
     {
       "path": "src/wallet_core.rs",
-      "sha256": "f02a1c608da688ce8e6b95ce44b09aed093ac30aa8c3e54e9923d7160d935889",
+      "sha256": "1c1165af1294229092e4b912baed9cb4357a4195f51a839180f565afa273d665",
       "role": "implementation"
     },
     {
@@ -385,7 +385,7 @@
     },
     {
       "path": "doc/audit/zkp/implementation-linewise-progress.md",
-      "sha256": "b497eb063eea4e7d98c57dc82b8d8933e85eee8f8686cbb52b9f230d1784a886",
+      "sha256": "7ba19e363d57b7523597ccefeef14121674817d974670e124369b967eba39b95",
       "role": "spec"
     },
     {

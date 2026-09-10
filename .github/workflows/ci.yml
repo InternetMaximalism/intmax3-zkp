@@ -389,14 +389,22 @@ jobs:
       # `TryFrom<Bytes32>` round-trip could not reject anything) and two `balance_state` tests left
       # behind by fd467ea when the sig-cluster cap went 16 -> 8.
       #
-      # Only the pure-logic modules run here. `circuits::`, `regev::` and `falcon_sig::` build real
-      # circuits: measured on an M-series laptop the `circuits::` filter alone ran past 37 minutes at
-      # 25 GB RSS without finishing, and an unfiltered `--lib` run is OOM-killed even at
-      # --test-threads=1 (the SIGKILL is reported as a test failure). Those paths are covered by the
-      # dedicated `--test` targets below. If you add a unit test under common/, utils/ or
-      # ethereum_types/, bump the expected-passed count.
-      - name: lib unit tests (pure-logic modules)
-        run: .github/ci/rust-test-guard.sh 189 0 -- cargo test --release --locked --lib -- --test-threads=1 common:: utils:: ethereum_types::
+      # Only modules that fit a 16 GB ubuntu-latest runner run here. The whole lib suite (711 tests)
+      # was executed once, serially and in chunks, on 2026-09-10 (see
+      # doc/audit/zkp/implementation-linewise-progress.md): every test passes, but the heavy
+      # modules cannot be a routine step — `wallet_core::` needs ~18 min and ~18 GB RSS,
+      # `circuits::` ~75 min in total with one 40-iteration property test alone taking 45 min at
+      # 30 GB, `falcon_sig::` ~6.5 min with multi-GB recursive-proof tests — and an unfiltered
+      # `--lib` run is OOM-killed even at --test-threads=1 (the SIGKILL reads as a test failure).
+      # Those paths are exercised by the dedicated `--test` targets below. `regev::` is pure
+      # arithmetic (6 s) and is included. If you add a unit test under common/, utils/,
+      # ethereum_types/ or regev/, bump the expected-passed count.
+      #
+      # Filter gotcha: libtest filters are substrings, so `foo::` does NOT match `foo_circuit::`.
+      # The module names below are top-level and safe; do not add trailing-`::` submodule filters
+      # without checking `-- --list`.
+      - name: lib unit tests (modules that fit the runner)
+        run: .github/ci/rust-test-guard.sh 240 0 -- cargo test --release --locked --lib -- --test-threads=1 common:: utils:: ethereum_types:: regev::
 
       - name: nullifier and exclusivity soundness suites
         run: |

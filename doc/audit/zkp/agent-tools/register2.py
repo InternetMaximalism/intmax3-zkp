@@ -76,8 +76,14 @@ for m in modules:
         assert e['sha256'] == sha(source), f'inventory implementation hash drift: {source}'
         e['line_map'] = map_path
 for path in sorted(accepted):
+    assert (ROOT / path).is_file(), f'accepted source does not exist: {path}'
     entry = by_path.get(path)
-    assert entry is not None, f'accepted source is not inventoried: {path}'
+    if entry is None:
+        # Manifest-only implementation source (e.g. a file the architecture models cite but the
+        # line-coverage inventory does not scope). Only its manifest hash moves; there is no
+        # inventory row or line map to re-review.
+        print('inventory: accepted source is outside the line-coverage scope (manifest hash only):', path)
+        continue
     raw = (ROOT / path).read_bytes()
     entry['sha256'] = hashlib.sha256(raw).hexdigest()
     entry['lines'] = len(raw.decode('utf8').splitlines())

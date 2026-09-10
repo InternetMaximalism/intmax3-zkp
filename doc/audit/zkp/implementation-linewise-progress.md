@@ -1,4 +1,4 @@
-# 実装の行対応 Lean 化 — 2026-09-09 作業記録
+# 実装の行対応 Lean 化 — 2026-09-10 作業記録
 
 ## 結論と対象
 
@@ -146,6 +146,45 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 実装に新たな盗難脆弱性を発見したという報告ではありません。
 
 ## 再検証
+
+### 2026-09-10：lib 単体テスト 711 件の全数実行
+
+前回「未確認」として残した回路系・暗号系の lib テストを、submodule 単位の chunk に分けて直列・背景で
+全数実行しました。結果は **711 件中 711 件を実行し、修正済みの 1 件を除いて全通過** です。
+実行済み集合と `cargo test -- --list` の 711 件を照合し、未実行ゼロ・未通過ゼロを確認しています。
+
+| chunk | 件数 | 秒 | 備考 |
+|---|---:|---:|---|
+| 中間層（wallet_core, publisher 系ほか 14 module） | 195 | 1,093 | wallet_core は ~18 GB RSS |
+| regev | 51 | 6 | 純算術 |
+| falcon_sig（measure/bench 除く） | 77 | 390 | 再帰証明を含む |
+| circuits::balance / close / cancel_close / close_asset_backing | 49 | 249 | |
+| circuits::channel 請求系 + decryption_gadget | 35 | 3,337 | うち `property_vs_native_oracle` 1 件が 40 反復で **45 分・30 GB** |
+| circuits::channel::state_update_verifier | 50 | 27 | 最重量 file だがテストは軽い |
+| circuits::channel::e2e_flow / validity / withdraw / witness | 63 | 667 | |
+| measure / bench 系 | 6 | 158 | 単独実行なら通る。以前の OOM は無フィルタ実行のメモリ蓄積が原因 |
+| 個別に取りこぼした 6 件（close_pis, h1_gadget, review_hardening） | 6 | 2 | |
+
+**新たに見つかった失敗 1 件（古いテスト・修正済み `31aaf6c`）。**
+`wallet_core::slot_capacity_tests::join_path_reaches_slot_256_and_beyond` は fabricated member に
+`RegevPk::padding()`（零多項式）を与え、「build_record は鍵を検査しない」と自ら注記していました。
+`b5bafb7`（2026-09-06）で `build_record` が active slot の Regev 鍵に形状・canonical 性・非零・相異を
+要求するようになり、テストが取り残されたものです。テストは 2026-07-19 の `f08ba2e` 由来で検査より
+7 週間古く、検査側は正当（零の `a` は padding slot 専用）です。修正はテスト側のみで、slot ごとに
+異なる非零・canonical な `a[0]` を与え、注記を訂正しました。runtime は変更していません。
+検証は Fable 5.1 が分類と計画、Opus 5 が実装を担当し、分類根拠（両 commit の日付、`git show`）を
+実装側にも独立に確認させました。
+
+**運用上の教訓 2 点。**
+- **libtest の filter は部分文字列一致**で、`withdrawal_claim::` は `withdrawal_claim_circuit::` に
+  一致しません。初回 pass で 47 件が実行されずに `ok` と報告され、`--list` との照合で発覚しました。
+  末尾 `::` の submodule filter は使わず、必ず全件リストと突き合わせること。
+- **OOM の SIGKILL はテスト失敗に見えます。** 無フィルタの `--lib` は `--test-threads=1` でも落ちますが、
+  同じテストは chunk 単独なら通ります。chunk 化と `signal: 9` の判別を runner に組み込んでいます。
+
+**CI への反映。** 16 GB の `ubuntu-latest` に載る `regev::` を lib 手順に追加（189 → 240 件）。
+`wallet_core::`（18 GB）、`circuits::`（最大 30 GB）、`falcon_sig::`（数 GB の再帰証明）は routine step に
+できないため、実測値を手順のコメントに残し、既存の専用 `--test` 手順に委ねます。
 
 ### 2026-09-09：確認済み不具合の修正、古いテストの更新、CI の穴を塞ぐ
 
