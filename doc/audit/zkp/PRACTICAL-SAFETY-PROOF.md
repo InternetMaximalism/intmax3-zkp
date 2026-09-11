@@ -257,9 +257,10 @@ digest has a satisfiable plonky2 statement at the 103 bound close words, then th
 whose `readPublic` is exactly that statement. Definition: `ClosePrimitiveLowering`
 (`TrustBoundary.lean:418`).
 
-**Evidence today.** `CloseCircuit` transcribes `ChannelCloseCircuit::new` as a 47-instruction
-`constructorProgram`; 4 of the 47 emit no constraint (config, build, raw allocation, insertion
-path) and say so. `CloseCircuit.program_satisfied_implies_gates` (`CloseCircuit.lean:1740`) proves
+**Evidence today.** `CloseCircuit` transcribes `ChannelCloseCircuit::new` as an ordered
+`constructorProgram` of 191 entries over a `BuildOp` type with **47 constructors** (one per kind of
+builder call); 4 of the 47 kinds emit no constraint (config, build, raw allocation, insertion path)
+and say so. `CloseCircuit.program_satisfied_implies_gates` (`CloseCircuit.lean:1740`) proves
 the handwritten gate predicate from `ProgramSatisfied` alone, with zero residual
 `EnvironmentGates`. Each `holds` case quotes its source line in its docstring. The line map
 `line-map/close-circuit.json` links each span to a declaration of the module and is validated by
@@ -271,17 +272,19 @@ attributed to it — for instance a `range_check` that is elided by a later opti
 `connect` that is not emitted, or a source line the transcript omits. A deployed adapter whose
 pinned digest is not the digest of this program refutes (ii) without touching (i).
 
-**How to check.** Read `CloseCircuit.constructorProgram` and its `BuildOp.holds` cases side by
-side with `src/circuits/channel/close_circuit.rs` at the lines quoted in each docstring; there are
-47 of them. For (ii), compare the deployed verifier's `encodedConfiguration` circuit digest with a
-digest computed from the same builder sequence.
+**How to check.** Read the 47 `BuildOp.holds` cases side by side with
+`src/circuits/channel/close_circuit.rs` at the lines quoted in each docstring, then read the
+191-entry `constructorProgram` against the constructor's call order. For (ii), compare the deployed
+verifier's `encodedConfiguration` circuit digest with a digest computed from the same builder
+sequence.
 
 #### 3.1.2 (b1) `withdrawalPrimitiveLowering` — `TrustBoundary.lean:748`
 
 **Statement.** The same reduction on the 50-word withdrawal-claim endpoint
 (`WithdrawalPrimitiveLowering`, `TrustBoundary.lean:433`).
 
-**Evidence today.** 32-instruction transcript, 10 of which emit no constraint;
+**Evidence today.** 32 `BuildOp` kinds, 10 of which emit no constraint, over a 41-entry
+`constructorProgram`;
 `WithdrawalClaimCircuit.program_satisfied_implies_gates` (`WithdrawalClaimCircuit.lean:985`);
 53 named theorems in the module; `line-map/withdrawal-claim-circuit.json`; fixture case
 `withdrawal_claim` with 12 compared fields.
@@ -295,7 +298,8 @@ the ten equality flags, the select chains, the Regev decryption core and the inc
 `(readWitness a).p` because that circuit's model reads its registered public inputs out of the raw
 witness (`PostClosePrimitiveLowering`, `TrustBoundary.lean:447`).
 
-**Evidence today.** `PostCloseClaimCircuit.program_satisfied_implies_gates`
+**Evidence today.** 8 `BuildOp` kinds over a 45-entry `constructorProgram`;
+`PostCloseClaimCircuit.program_satisfied_implies_gates`
 (`PostCloseClaimCircuit.lean:707`); 54 named theorems; `line-map/post-close-claim-circuit.json`;
 fixture case `post_close_claim`, 10 compared fields, 2 explicitly not comparable. Transcribing
 this circuit surfaced one **missing builder call** in the earlier model (`add_virtual_target` at
@@ -1091,9 +1095,13 @@ All of these are checked by the Lean kernel against the allowlist of §5.1.
    is asserted by a human reader. This is premise (h).
 2. **`BuildOp.holds` → plonky2 gate set.** That each transcribed builder call's local proposition
    is exactly what plonky2 emits for that call. Human reading against the quoted source line, one
-   call at a time — 47 for the close circuit, 32 for withdrawal claim, 23 for the Falcon gadget, 8
-   for the aggregation leaf, 23 + 8·2^(k−1) at level `k`. This is obligation (i) of §3.1, and the
-   mechanical checks that would reduce it are **not yet implemented** (§5.7).
+   call at a time. The obligation is per `BuildOp` *kind*: 47 kinds for the close circuit, 32 for
+   withdrawal claim, 8 for post-close claim, 23 for the Falcon gadget, plus the leaf and level ops
+   of the aggregation stack. The ordered programs those kinds are instantiated in are longer —
+   `CloseCircuit.constructorProgram` has 191 entries, withdrawal claim 41, post-close claim 45, the
+   Falcon gadget 23, the aggregation leaf 8, and `levelProgram k` 23 + 8·2^(k−1) (31, 39, 55). This
+   is obligation (i) of §3.1, and the mechanical checks that would reduce it are **not yet
+   implemented** (§5.7).
 3. **Digest pinning.** That the pinned adapter digests and the per-level aggregate digests are the
    digests of the transcribed programs. Nothing in this project computes a digest from a circuit.
    This is obligation (ii).

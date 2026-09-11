@@ -41,6 +41,35 @@ chains are only committed, not proved final inside this circuit.
 
 Tests in Rust lines 577-914 were read but are not translated as production
 constraints, and no Rust proving/adversarial tests are executed by this model.
+
+GATE LOWERING (final section). `CircuitConstraints` is no longer joined to the
+builder transcript by a bare named gap. `Assignment` values every wire
+`CloseAssetBackingCircuit::new` allocates, `BuildOp.holds` gives each builder
+call the local proposition that primitive enforces on those wires, and
+`program_satisfied_implies_constraints` derives EVERY field of
+`CircuitConstraints` from `ProgramSatisfied constructorProgram` alone - no extra
+admission premise, no `EnvironmentGates` side hypothesis and no residual;
+`program_satisfied_computes_public_inputs` derives the 26 registered public
+wires the same way. `PrimitiveLowering` replaces `FieldGateLowering` as the
+obligation to discharge and `primitive_lowering_implies_field_gate_lowering`
+shows it is stronger, while `example_program_satisfiable` and
+`example_program_reads_back` keep the 468-op list non-vacuous.
+
+So the REMAINING unproved obligation is PER-PRIMITIVE, not whole-circuit:
+(1) each `BuildOp.holds` case must equal the gate set plonky2 really emits for
+that one builder call (`range_check`, `connect`, `add_virtual_bool_target_safe`,
+`add`/`sub`/`mul`, `not`, `assert_one`, `is_equal`/`and`,
+`PoseidonHashOutTarget::select`, `hash_inputs`, `keccak256`,
+`add_proof_target_and_verify_cyclic`, `SparseMerkleProofTarget::conditional_verify`
+and `::get_root`), and (2) digest/verifier-data pinning: the `Environment`'s
+`MerkleContract`, `HashFunctions` and `RecursiveVerifierContract` must be the
+real gadgets and the real pinned Balance circuit. Twenty-five of the 468 ops are
+`True` because that source call emits no constraint at all: the config choice,
+the `from_pis` re-slicing of the verified proof, the deliberately unchecked
+`PrivateStateTarget::new`, the raw `token_count` and registry allocations, the
+ten asset-path allocations and `build`. Neither obligation is proved here, and
+the `Nat` model of field arithmetic is justified only by the 32-bit range checks
+and the at-most-ten-term Boolean sums staying far below the Goldilocks modulus.
 -/
 
 namespace Zkp.Implementation.CloseAssetBacking
@@ -2022,5 +2051,398 @@ theorem program_satisfied_computes_public_inputs {Proof Path : Type}
   show a.publicWire = _
   rw [hAssemble, hDigest, hCommitment]
   rfl
+
+/-! #### A concrete satisfying assignment (non-vacuity)
+
+The three-token vector of `normalRows` above, a Balance proof accepted at the
+pinned key, and the constant opaque callbacks, so that every digest and every
+path gate is satisfiable at once. That is exactly what makes this a witness that
+the 468-op list is not self-contradictory, and nothing more: the constant
+callbacks are NOT claimed to be Poseidon, keccak or a real recursive verifier. -/
+
+def exampleZeroHash : Hash4 := ⟨0, 0, 0, 0⟩
+
+def exampleMerkle : MerkleContract Hash4 Unit where
+  encode := fun _ => exampleZeroHash
+  emptyRoot := exampleZeroHash
+  pathRoot := fun _ _ _ => exampleZeroHash
+
+def exampleHashFunctions : HashFunctions where
+  privateCommitment := fun _ => exampleZeroHash
+  extendedCommitment := fun _ => Words8.zero
+  tokenFundsHash := fun _ => Words8.zero
+
+def exampleVerifierKey : VerifierKey := ⟨exampleZeroHash, []⟩
+
+def exampleRecursive : RecursiveVerifierContract Unit where
+  pinnedKey := exampleVerifierKey
+  expectedBalancePiCount := balancePublicInputsLength
+  circuitAccepts := fun p =>
+    p.embeddedVerifierKey = exampleVerifierKey ∧ p.publicInputCount = balancePublicInputsLength
+  balanceRelation := fun _ _ _ => True
+  sound := fun _ h => ⟨h.1, h.2, trivial⟩
+
+def exampleEnvironment : Environment Unit Unit where
+  merkle := exampleMerkle
+  hash := exampleHashFunctions
+  recursive := exampleRecursive
+
+def exampleInnerState : InnerPublicState where
+  blockNumber := 12
+  timestampHi := 0
+  timestampLo := 7
+  accountTreeRoot := exampleZeroHash
+  depositTreeRoot := exampleZeroHash
+  previousPublicStateRoot := exampleZeroHash
+
+def exampleExtendedState : ExtendedPublicState where
+  inner := exampleInnerState
+  blockHashChain := Words8.zero
+  depositHashChain := Words8.zero
+  depositCount := 0
+  channelRegistrationHashChain := Words8.zero
+  blockProducerSignatureChain := Words8.zero
+
+def examplePrivateState : PrivateState where
+  assetTreeRoot := exampleZeroHash
+  nullifierTreeRoot := exampleZeroHash
+  sentTxTreeRoot := exampleZeroHash
+  previousPrivateCommitment := exampleZeroHash
+  nonce := 5
+  salt := exampleZeroHash
+
+def exampleSettledChain : Words8 := normalAmount 5
+
+def exampleBalanceStatement : BalanceStatement where
+  channelId := 91
+  publicState := exampleInnerState
+  blockR := 0
+  privateCommitment := exampleZeroHash
+  settledTxChain := exampleSettledChain
+
+def exampleBalanceProof : BalanceProofView Unit where
+  artifact := ()
+  statement := exampleBalanceStatement
+  embeddedVerifierKey := exampleVerifierKey
+  publicInputCount := balancePublicInputsLength
+  cyclicKeyCheck := true
+  nativeVerification := true
+  nativeDecode := true
+
+def exampleRegistryWire (i : Nat) : Nat :=
+  if i = 1 then 17 else if i = 2 then 4294967295 else 0
+
+def exampleAmountWire (i : Nat) : Words8 :=
+  if i = 0 then normalAmount 11
+  else if i = 1 then normalAmount 22
+  else if i = 2 then normalAmount 33
+  else Words8.zero
+
+def exampleActivityWire (i : Nat) : Nat := if i < 3 then 1 else 0
+
+def exampleActivitySumWire (i : Nat) : Nat := if i < 3 then i else 3
+
+def exampleRow (i : Nat) : Row Unit :=
+  { registry := exampleRegistryWire i
+    amount := exampleAmountWire i
+    active := exampleActivityWire i == 1
+    path := () }
+
+def exampleRows : List (Row Unit) := indexedWires exampleRow 0 maxTokens
+
+def examplePublicInputs : PublicInputs where
+  channelId := 91
+  settledTxChain := exampleSettledChain
+  tokenFundsDigest := Words8.zero
+  extendedStateCommitment := Words8.zero
+  anchorBlockNumber := 12
+
+def exampleAssignment : Assignment exampleEnvironment where
+  balanceProofWire := exampleBalanceProof
+  privateStateWire := examplePrivateState
+  openedPrivateCommitmentWire := exampleZeroHash
+  extendedStateWire := exampleExtendedState
+  tokenCountWire := 3
+  registryWire := exampleRegistryWire
+  amountWire := exampleAmountWire
+  activityWire := exampleActivityWire
+  pathWire := fun _ => ()
+  zeroWire := 0
+  oneWire := 1
+  oneMinusActivityWire := fun i => 1 - exampleActivityWire i
+  riseProductWire := fun i => exampleActivityWire (i + 1) * (1 - exampleActivityWire i)
+  activitySumWire := exampleActivitySumWire
+  inactiveWire := fun i => 1 - exampleActivityWire i
+  dirtyRegistryWire := fun i => (1 - exampleActivityWire i) * exampleRegistryWire i
+  dirtyAmountWire := fun i j =>
+    (1 - exampleActivityWire i) * (exampleAmountWire i).words.getD j 0
+  registryEqualWire := fun i j => if exampleRegistryWire i = exampleRegistryWire j then 1 else 0
+  duplicateActiveWire := fun i j =>
+    (if exampleRegistryWire i = exampleRegistryWire j then 1 else 0) * exampleActivityWire j
+  zeroLeafWire := Words8.zero
+  rootWire := fun _ => exampleZeroHash
+  insertedRootWire := fun _ => exampleZeroHash
+  tokenFundsDomainWire := tokenFundsDomain
+  amountLimbsWire := amountWords exampleRows
+  digestPreimageWire :=
+    [tokenFundsDomain] ++ registryWords exampleRows ++ [3] ++ amountWords exampleRows
+  tokenFundsDigestWire := Words8.zero
+  extendedCommitmentWire := Words8.zero
+  publicWire := examplePublicInputs
+
+theorem example_extended_state_is_range_checked : exampleExtendedState.Checked :=
+  ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide⟩
+
+theorem example_registry_is_range_checked (i : Nat) : exampleRegistryWire i < wordBase := by
+  unfold exampleRegistryWire
+  split
+  · decide
+  · split
+    · decide
+    · decide
+
+theorem example_amount_is_range_checked (i : Nat) : (exampleAmountWire i).Checked := by
+  unfold exampleAmountWire
+  split
+  · decide
+  · split
+    · decide
+    · split
+      · decide
+      · decide
+
+theorem example_activity_is_boolean (i : Nat) :
+    exampleActivityWire i = 0 ∨ exampleActivityWire i = 1 := by
+  unfold exampleActivityWire
+  split
+  · exact Or.inr rfl
+  · exact Or.inl rfl
+
+theorem example_activity_never_rises (i : Nat) :
+    exampleActivityWire (i + 1) * (1 - exampleActivityWire i) = 0 := by
+  unfold exampleActivityWire
+  rcases Nat.lt_or_ge (i + 1) 3 with h | h
+  · rw [if_pos (show i < 3 by omega)]
+    exact Nat.mul_zero _
+  · rw [if_neg (by omega : ¬ (i + 1 < 3))]
+    exact Nat.zero_mul _
+
+theorem example_activity_sum_step (i : Nat) :
+    exampleActivitySumWire (i + 1) = exampleActivitySumWire i + exampleActivityWire i := by
+  unfold exampleActivitySumWire exampleActivityWire
+  rcases Nat.lt_or_ge (i + 1) 3 with h | h
+  · rw [if_pos h, if_pos (show i < 3 by omega), if_pos (show i < 3 by omega)]
+  · rw [if_neg (by omega : ¬ (i + 1 < 3))]
+    rcases Nat.lt_or_ge i 3 with h2 | h2
+    · rw [if_pos h2, if_pos h2]
+      omega
+    · rw [if_neg (by omega : ¬ i < 3), if_neg (by omega : ¬ i < 3)]
+
+theorem example_inactive_registry_is_zero (i : Nat) :
+    (1 - exampleActivityWire i) * exampleRegistryWire i = 0 := by
+  rcases Nat.lt_or_ge i 3 with hi | hi
+  · have h1 : exampleActivityWire i = 1 := by
+      unfold exampleActivityWire
+      rw [if_pos hi]
+    rw [h1]
+    exact Nat.zero_mul _
+  · have h0 : exampleRegistryWire i = 0 := by
+      unfold exampleRegistryWire
+      rw [if_neg (by omega : ¬ i = 1), if_neg (by omega : ¬ i = 2)]
+    rw [h0]
+    exact Nat.mul_zero _
+
+theorem example_inactive_amount_is_zero (i j : Nat) (hj : j < 8) :
+    (1 - exampleActivityWire i) * (exampleAmountWire i).words.getD j 0 = 0 := by
+  rcases Nat.lt_or_ge i 3 with hi | hi
+  · have h1 : exampleActivityWire i = 1 := by
+      unfold exampleActivityWire
+      rw [if_pos hi]
+    rw [h1]
+    exact Nat.zero_mul _
+  · have h0 : exampleAmountWire i = Words8.zero := by
+      unfold exampleAmountWire
+      rw [if_neg (by omega : ¬ i = 0), if_neg (by omega : ¬ i = 1), if_neg (by omega : ¬ i = 2)]
+    rw [h0, words8_zero_limb j hj]
+    exact Nat.mul_zero _
+
+theorem example_has_no_duplicate_active_registry (i j : Nat) (hij : i < j) (hj : j < maxTokens) :
+    (if exampleRegistryWire i = exampleRegistryWire j then 1 else 0) *
+      exampleActivityWire j = 0 := by
+  rcases Nat.lt_or_ge j 3 with hj3 | hj3
+  · have hcases : (i = 0 ∧ j = 1) ∨ (i = 0 ∧ j = 2) ∨ (i = 1 ∧ j = 2) := by omega
+    have hne : ¬ (exampleRegistryWire i = exampleRegistryWire j) := by
+      rcases hcases with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> decide
+    rw [if_neg hne]
+    exact Nat.zero_mul _
+  · have h0 : exampleActivityWire j = 0 := by
+      unfold exampleActivityWire
+      rw [if_neg (by omega : ¬ j < 3)]
+    rw [h0]
+    exact Nat.mul_zero _
+
+theorem example_assignment_satisfies_program :
+    ProgramSatisfied constructorProgram exampleAssignment := by
+  unfold constructorProgram
+  refine satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of ?c1 ?c2) ?c3) ?c4) ?c5) ?c6) ?c7) ?c8) ?c9) ?c10) ?c11) ?c12) ?c13) ?c14
+  case c1 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl
+    · rfl
+    · exact True.intro
+    · exact ⟨rfl, rfl⟩
+    · exact True.intro
+    · exact True.intro
+    · rfl
+    · rfl
+    · exact example_extended_state_is_range_checked
+    · rfl
+    · exact True.intro
+    · exact (show (3 : Nat) < wordBase by decide)
+  case c2 =>
+    refine satisfied_bind_range_of (fun i _ => ?_)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl
+    · exact True.intro
+    · exact example_registry_is_range_checked i
+  case c3 => exact satisfied_map_range_of (fun i _ => example_amount_is_range_checked i)
+  case c4 => exact satisfied_map_range_of (fun i _ => example_activity_is_boolean i)
+  case c5 => exact satisfied_map_range_of (fun _ _ => True.intro)
+  case c6 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl
+    · exact ⟨rfl, rfl⟩
+    · rfl
+  case c7 =>
+    refine satisfied_bind_range_of (fun i _ => ?_)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl
+    · rfl
+    · rfl
+    · exact example_activity_never_rises i
+  case c8 => exact satisfied_map_range_of (fun i _ => example_activity_sum_step i)
+  case c9 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl
+    · rfl
+    · rfl
+  case c10 =>
+    refine satisfied_bind_range_of (fun i _ => ?_)
+    refine satisfied_append_of ?_ ?_
+    · intro op hop
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+      rcases hop with rfl|rfl|rfl
+      · rfl
+      · rfl
+      · exact example_inactive_registry_is_zero i
+    · refine satisfied_bind_range_of (fun j hj => ?_)
+      intro op hop
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+      rcases hop with rfl|rfl
+      · rfl
+      · exact example_inactive_amount_is_zero i j hj
+  case c11 =>
+    refine satisfied_ordered_pairs_of (fun i j hij hj => ?_)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl
+    · rfl
+    · rfl
+    · exact example_has_no_duplicate_active_registry i j hij hj
+  case c12 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl
+    · rfl
+    · rfl
+  case c13 =>
+    refine satisfied_bind_range_of (fun i _ => ?_)
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl
+    · exact fun _ => rfl
+    · rfl
+    · show exampleZeroHash =
+        (if exampleActivityWire i = 1 then exampleZeroHash else exampleZeroHash)
+      split <;> rfl
+  case c14 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · exact True.intro
+
+/-- Non-vacuity: the whole ordered builder program is satisfiable. Without this
+    `program_satisfied_implies_constraints` could hold for the empty reason. -/
+theorem example_program_satisfiable :
+    ∃ a : Assignment exampleEnvironment, ProgramSatisfied constructorProgram a :=
+  ⟨exampleAssignment, example_assignment_satisfies_program⟩
+
+/-- The wire-to-field readback of the satisfying assignment: the activity WIRES
+    decode to the expected active prefix, the ten rows are exactly `normalRows`,
+    and the registered public half is the expected 26-word statement. -/
+theorem example_program_reads_back :
+    readPublic exampleAssignment = examplePublicInputs ∧
+    (readWitness exampleAssignment).rows = normalRows ∧
+    (readWitness exampleAssignment).tokenCount = 3 ∧
+    (readWitness exampleAssignment).privateState = examplePrivateState ∧
+    activity (readWitness exampleAssignment).rows =
+      [true, true, true, false, false, false, false, false, false, false] ∧
+    computedPublicInputs exampleEnvironment.hash (readWitness exampleAssignment) =
+      examplePublicInputs :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem example_satisfying_assignment_gives_circuit_constraints :
+    CircuitConstraints exampleEnvironment.merkle exampleEnvironment.hash
+      exampleEnvironment.recursive (readWitness exampleAssignment) :=
+  program_satisfied_implies_constraints exampleEnvironment exampleAssignment
+    example_assignment_satisfies_program
+
+/-- The REDUCED lowering obligation. `FieldGateLowering` demanded the whole
+    hand-written `CircuitConstraints` predicate; this demands only that an
+    accepted 26-word statement together with its witness exhibit a wire
+    assignment satisfying the ordered builder program, one primitive at a time. -/
+def PrimitiveLowering {Proof Path : Type} (e : Environment Proof Path)
+    (accepts : PublicInputs → Witness Proof Path → Prop) : Prop :=
+  ∀ p w, accepts p w →
+    ∃ a : Assignment e, ProgramSatisfied constructorProgram a ∧
+      readPublic a = p ∧ readWitness a = w
+
+theorem primitive_lowering_implies_field_gate_lowering {Proof Path : Type}
+    (e : Environment Proof Path) (accepts : PublicInputs → Witness Proof Path → Prop)
+    (lowering : PrimitiveLowering e accepts) :
+    FieldGateLowering e.merkle e.hash e.recursive (fun w => ∃ p, accepts p w) := by
+  intro w hraw
+  obtain ⟨p, hp⟩ := hraw
+  obtain ⟨a, hsat, _, hw⟩ := lowering p w hp
+  have gates := program_satisfied_implies_constraints e a hsat
+  rw [hw] at gates
+  exact gates
+
+theorem primitive_lowering_gives_a_constrained_witness {Proof Path : Type}
+    (e : Environment Proof Path) (accepts : PublicInputs → Witness Proof Path → Prop)
+    (lowering : PrimitiveLowering e accepts) (p : PublicInputs) (w : Witness Proof Path)
+    (h : accepts p w) :
+    ∃ v : Witness Proof Path, CircuitConstraints e.merkle e.hash e.recursive v ∧
+      computedPublicInputs e.hash v = p := by
+  obtain ⟨a, hsat, hp, _⟩ := lowering p w h
+  refine ⟨readWitness a, program_satisfied_implies_constraints e a hsat, ?_⟩
+  rw [← program_satisfied_computes_public_inputs e a hsat]
+  exact hp
 
 end Zkp.Implementation.CloseAssetBacking

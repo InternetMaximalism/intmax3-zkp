@@ -550,6 +550,15 @@ theorem sample_validation_succeeds :
     CloseFunding.validateBackingPublicInputs sampleEnvironment sampleState sampleManager
       samplePublicInputs = .ok ⟨1, 2, 3, 5⟩ := rfl
 
+/-- The accepted sample is not a degenerate zero vector: token 5 is credited
+    amount 3 out of escrow 10 and the channel is latched with digest 8. -/
+theorem sample_materialization_credits_a_nonzero_vector :
+    CloseFunding.materializeSignedHead sampleEnvironment sampleWorld sampleManager sampleProof
+      = .ok (⟨CloseFunding.latchState sampleState ⟨sampleChannel, sampleManager, 8, 1,
+          [⟨sampleToken, 3⟩]⟩,
+        CloseFunding.creditState sampleWorld.ledger sampleManager ⟨sampleToken, 3⟩⟩,
+        [.materialized sampleChannel sampleManager 8 1]) := rfl
+
 theorem sample_materialization_succeeds :
     ∃ after events, CloseFunding.materializeSignedHead sampleEnvironment sampleWorld
       sampleManager sampleProof = .ok (after, events) := ⟨_, _, rfl⟩

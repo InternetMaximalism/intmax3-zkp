@@ -319,11 +319,15 @@
       "declarations": [
         "Zkp.Implementation.CloseAssetBacking.newCircuitProgram",
         "Zkp.Implementation.CloseAssetBacking.constructorProgram",
-        "Zkp.Implementation.CloseAssetBacking.balancePublicInputsLength"
+        "Zkp.Implementation.CloseAssetBacking.balancePublicInputsLength",
+        "Zkp.Implementation.CloseAssetBacking.Assignment",
+        "Zkp.Implementation.CloseAssetBacking.BuildOp.holds",
+        "Zkp.Implementation.CloseAssetBacking.ProgramSatisfied"
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.constructor_admits_only_exact_cyclic_balance_shape",
-        "Zkp.Implementation.CloseAssetBacking.constructor_starts_with_pinned_recursive_verification"
+        "Zkp.Implementation.CloseAssetBacking.constructor_starts_with_pinned_recursive_verification",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Exact Balance PI count=29+vd_vec_len before builder creation. vd_vec_len calculation and standard_recursion_zk_config internals remain dependencies."
     },
@@ -339,7 +343,8 @@
         "Zkp.Implementation.CloseAssetBacking.constructorProgram"
       ],
       "theorems": [
-        "Zkp.Implementation.CloseAssetBacking.circuit_binds_recursive_statement"
+        "Zkp.Implementation.CloseAssetBacking.circuit_binds_recursive_statement",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Records constant-VK/cyclic verification before use of parsed Balance PIs. Gadget soundness and PI extraction not proved here; certified relation does not assume asset conservation."
     },
@@ -358,7 +363,8 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.private_state_commitment_preimage_has_all_21_fields",
-        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets"
+        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "All 21 commitment words represented and connection checked. No nonce/salt range checks invented; Poseidon and field representation are unresolved."
     },
@@ -375,7 +381,8 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
-        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state"
+        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Checked block/timestamp/bytes/count domains and inner equality modeled. Extra chains are committed but not proven finalized in this circuit."
     },
@@ -391,7 +398,8 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
-        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix"
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Arbitrary count/registry witnesses, u32 checks in original loop order. Boolean/sum constraints later derive the stronger 1..10 count."
     },
@@ -408,7 +416,9 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.constructor_allocates_exactly_ten_safe_activity_witnesses",
-        "Zkp.Implementation.CloseAssetBacking.checked_eight_big_endian_limbs_fit_u256"
+        "Zkp.Implementation.CloseAssetBacking.checked_eight_big_endian_limbs_fit_u256",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints",
+        "Zkp.Implementation.CloseAssetBacking.example_program_satisfiable"
       ],
       "note": "Macro allocation order and eight checked amount limbs represented. Safe Boolean, u32 gadget and height-32 path allocation internals require lowering."
     },
@@ -428,7 +438,8 @@
         "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
         "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
         "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
-        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector"
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
     },
@@ -443,7 +454,8 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.inactive_registry_and_amount_zero",
-        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix"
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Each inactive product is zero; exact all-limb zero derived by Boolean case analysis under field lowering."
     },
@@ -458,7 +470,8 @@
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.constructor_checks_all_45_ordered_registry_pairs",
-        "Zkp.Implementation.CloseAssetBacking.unique_rows_preserve_every_exact_amount"
+        "Zkp.Implementation.CloseAssetBacking.unique_rows_preserve_every_exact_amount",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "All 45 earlier/later comparisons. Preserves source guard on later active bit only; does not substitute a stronger guard."
     },
@@ -483,7 +496,8 @@
         "Zkp.Implementation.CloseAssetBacking.constructorProgram"
       ],
       "theorems": [
-        "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty"
+        "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Exact empty-leaf shape and semantic empty map modeled; actual canonical root hashing requires the explicit CanonicalEmptyRoot premise. MerkleContract itself is data-only."
     },
@@ -506,7 +520,8 @@
         "Zkp.Implementation.CloseAssetBacking.canonical_root_from_empty",
         "Zkp.Implementation.CloseAssetBacking.circuit_private_root_is_exact_full_vector",
         "Zkp.Implementation.CloseAssetBacking.canonical_assets_no_unlisted_balance",
-        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets"
+        "Zkp.Implementation.CloseAssetBacking.authenticated_private_tree_has_exact_listed_and_no_unlisted_assets",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
       ],
       "note": "Full sequential call-level loop and final root connection translated. Roots are computed for inactive paths too, but equality is active-only. Arbitrary-length induction uses exact-index range plus RowPathContracts for only the finite concrete visited path/tree/key/amount tuples. These dependency premises are separate theorem arguments, not CircuitConstraints or a premise of complete vector safety. No global all-AssetMap opening/update law is assumed."
     },
@@ -524,7 +539,8 @@
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.amount_words_length",
         "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_full_width",
-        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_injective_fields"
+        "Zkp.Implementation.CloseAssetBacking.token_funds_preimage_injective_fields",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs"
       ],
       "note": "Preserves IMTF domain, ten registry words, count, all 80 big-endian fund limbs; fixed 92-word encoding without per-token aggregation."
     },
@@ -542,7 +558,8 @@
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.token_funds_digest_binds_complete_vector",
         "Zkp.Implementation.CloseAssetBacking.extended_state_commitment_preimage_has_all_48_fields",
-        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state"
+        "Zkp.Implementation.CloseAssetBacking.extended_commitment_and_anchor_bind_one_public_state",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs"
       ],
       "note": "Preimage structure proved; Keccak/Poseidon gadget correctness, canonical field-to-Bytes32 conversion and scoped collision resistance remain undischarged."
     },
@@ -554,12 +571,15 @@
       "declarations": [
         "Zkp.Implementation.CloseAssetBacking.computedPublicInputs",
         "Zkp.Implementation.CloseAssetBacking.PublicInputs.words",
-        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.readPublic"
       ],
       "theorems": [
         "Zkp.Implementation.CloseAssetBacking.circuit_does_not_mix_channel_or_settled_wires",
         "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
-        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds"
+        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs",
+        "Zkp.Implementation.CloseAssetBacking.example_program_reads_back"
       ],
       "note": "Channel/settled wires come from the same Balance statement; TFD/extended commitment are computed, anchor is the same extended-inner block wire; 26 public inputs in exact order."
     },
@@ -571,9 +591,14 @@
       "declarations": [
         "Zkp.Implementation.CloseAssetBacking.constructorProgram",
         "Zkp.Implementation.CloseAssetBacking.ComputedWires",
-        "Zkp.Implementation.CloseAssetBacking.prove"
+        "Zkp.Implementation.CloseAssetBacking.prove",
+        "Zkp.Implementation.CloseAssetBacking.readWitness",
+        "Zkp.Implementation.CloseAssetBacking.PrimitiveLowering"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
+      ],
       "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
     },
     {

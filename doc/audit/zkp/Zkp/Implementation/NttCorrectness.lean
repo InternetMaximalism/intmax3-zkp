@@ -565,4 +565,487 @@ theorem stage_k_spec (t : Nat) (blk : Nat → (Nat → Nat) → (Nat → Nat))
         rw [stage_k_succ, hfix _ _ _ (Or.inr (by omega))]
         exact ih2 x (by omega)
 
+/-! ## 6. The two concrete stages -/
+
+theorem ct_butterfly_fixed (s t j : Nat) (b : Nat → Nat) (i : Nat) (h1 : i ≠ j) (h2 : i ≠ j + t) :
+    ctButterfly s t j b i = b i := by
+  simp only [ctButterfly, upd, if_neg h1, if_neg h2]
+
+theorem ct_butterfly_dep (s t j : Nat) (b c : Nat → Nat) (e1 : b j = c j)
+    (e2 : b (j + t) = c (j + t)) :
+    ctButterfly s t j b j = ctButterfly s t j c j ∧
+      ctButterfly s t j b (j + t) = ctButterfly s t j c (j + t) :=
+  ⟨by simp only [ctButterfly, upd, e1, e2], by simp only [ctButterfly, upd, e1, e2]⟩
+
+theorem ct_butterfly_low (s t j : Nat) (b : Nat → Nat) (ht : 0 < t) :
+    ctButterfly s t j b j = (b j + s * b (j + t)) % falconQ := by
+  simp only [ctButterfly, upd, if_neg (show ¬ j = j + t by omega), if_pos rfl, if_true]
+
+theorem ct_butterfly_high (s t j : Nat) (b : Nat → Nat) :
+    ctButterfly s t j b (j + t) = (b j + falconQ * falconQ - s * b (j + t)) % falconQ := by
+  simp only [ctButterfly, upd, if_pos rfl, if_true]
+
+theorem gs_butterfly_fixed (s t j : Nat) (b : Nat → Nat) (i : Nat) (h1 : i ≠ j) (h2 : i ≠ j + t) :
+    gsButterfly s t j b i = b i := by
+  simp only [gsButterfly, upd, if_neg h1, if_neg h2]
+
+theorem gs_butterfly_dep (s t j : Nat) (b c : Nat → Nat) (e1 : b j = c j)
+    (e2 : b (j + t) = c (j + t)) :
+    gsButterfly s t j b j = gsButterfly s t j c j ∧
+      gsButterfly s t j b (j + t) = gsButterfly s t j c (j + t) :=
+  ⟨by simp only [gsButterfly, upd, e1, e2], by simp only [gsButterfly, upd, e1, e2]⟩
+
+theorem gs_butterfly_low (s t j : Nat) (b : Nat → Nat) (ht : 0 < t) :
+    gsButterfly s t j b j = (b j + b (j + t)) % falconQ := by
+  simp only [gsButterfly, upd, if_neg (show ¬ j = j + t by omega), if_pos rfl, if_true]
+
+theorem gs_butterfly_high (s t j : Nat) (b : Nat → Nat) :
+    gsButterfly s t j b (j + t) = (b j + falconQ - b (j + t)) * s % falconQ := by
+  simp only [gsButterfly, upd, if_pos rfl, if_true]
+
+theorem ct_inner_spec (s t j1 : Nat) (ht : 0 < t) (a : Nat → Nat) :
+    (∀ j, j < t → ctInner s t j1 a (j1 + j) = (a (j1 + j) + s * a (j1 + j + t)) % falconQ) ∧
+      (∀ j, j < t → ctInner s t j1 a (j1 + j + t)
+          = (a (j1 + j) + falconQ * falconQ - s * a (j1 + j + t)) % falconQ) ∧
+      (∀ x, (x < j1 ∨ j1 + 2 * t ≤ x) → ctInner s t j1 a x = a x) := by
+  have key := inner_k_spec t j1 (fun j b => ctButterfly s t j b)
+    (fun j b i h1 h2 => ct_butterfly_fixed s t j b i h1 h2)
+    (fun j b c e1 e2 => ct_butterfly_dep s t j b c e1 e2) a t (Nat.le_refl t)
+  obtain ⟨k1, k2, k3⟩ := key
+  refine ⟨fun j hj => ?_, fun j hj => ?_, fun x hx => ?_⟩
+  · rw [show ctInner s t j1 a = innerK t (fun j b => ctButterfly s t j b) j1 t a from rfl, k1 j hj]
+    exact ct_butterfly_low s t (j1 + j) a ht
+  · rw [show ctInner s t j1 a = innerK t (fun j b => ctButterfly s t j b) j1 t a from rfl, k2 j hj]
+    exact ct_butterfly_high s t (j1 + j) a
+  · exact k3 x (fun j hj => ⟨by omega, by omega⟩)
+
+theorem gs_inner_spec (s t j1 : Nat) (ht : 0 < t) (a : Nat → Nat) :
+    (∀ j, j < t → gsInner s t j1 a (j1 + j) = (a (j1 + j) + a (j1 + j + t)) % falconQ) ∧
+      (∀ j, j < t → gsInner s t j1 a (j1 + j + t)
+          = (a (j1 + j) + falconQ - a (j1 + j + t)) * s % falconQ) ∧
+      (∀ x, (x < j1 ∨ j1 + 2 * t ≤ x) → gsInner s t j1 a x = a x) := by
+  have key := inner_k_spec t j1 (fun j b => gsButterfly s t j b)
+    (fun j b i h1 h2 => gs_butterfly_fixed s t j b i h1 h2)
+    (fun j b c e1 e2 => gs_butterfly_dep s t j b c e1 e2) a t (Nat.le_refl t)
+  obtain ⟨k1, k2, k3⟩ := key
+  refine ⟨fun j hj => ?_, fun j hj => ?_, fun x hx => ?_⟩
+  · rw [show gsInner s t j1 a = innerK t (fun j b => gsButterfly s t j b) j1 t a from rfl, k1 j hj]
+    exact gs_butterfly_low s t (j1 + j) a ht
+  · rw [show gsInner s t j1 a = innerK t (fun j b => gsButterfly s t j b) j1 t a from rfl, k2 j hj]
+    exact gs_butterfly_high s t (j1 + j) a
+  · exact k3 x (fun j hj => ⟨by omega, by omega⟩)
+
+theorem ct_inner_dep (s t : Nat) (ht : 0 < t) (j1 : Nat) (b c : Nat → Nat)
+    (hbc : ∀ y, j1 ≤ y → y < j1 + 2 * t → b y = c y) (x : Nat)
+    (hx1 : j1 ≤ x) (hx2 : x < j1 + 2 * t) :
+    ctInner s t j1 b x = ctInner s t j1 c x := by
+  obtain ⟨d, rfl⟩ := Nat.exists_eq_add_of_le hx1
+  obtain ⟨bs1, bs2, _⟩ := ct_inner_spec s t j1 ht b
+  obtain ⟨cs1, cs2, _⟩ := ct_inner_spec s t j1 ht c
+  rcases Nat.lt_or_ge d t with hd | hd
+  · rw [bs1 d hd, cs1 d hd, hbc (j1 + d) (by omega) (by omega),
+      hbc (j1 + d + t) (by omega) (by omega)]
+  · have hsplit : j1 + d = j1 + (d - t) + t := by omega
+    rw [hsplit, bs2 (d - t) (by omega), cs2 (d - t) (by omega),
+      hbc (j1 + (d - t)) (by omega) (by omega),
+      hbc (j1 + (d - t) + t) (by omega) (by omega)]
+
+/-- The Cooley-Tukey stage, resolved blockwise. -/
+theorem ct_stage_block (m t : Nat) (ht : 0 < t) (a : Nat → Nat) :
+    (∀ i x, i < m → 2 * i * t ≤ x → x < 2 * i * t + 2 * t →
+        ctStage m t a x = ctInner (psiRev (m + i)) t (2 * i * t) a x) ∧
+      (∀ x, 2 * m * t ≤ x → ctStage m t a x = a x) :=
+  stage_k_spec t (fun i b => ctInner (psiRev (m + i)) t (2 * i * t) b)
+    (fun i b x hx => (ct_inner_spec (psiRev (m + i)) t (2 * i * t) ht b).2.2 x hx)
+    (fun i b c hbc x hx1 hx2 =>
+      ct_inner_dep (psiRev (m + i)) t ht (2 * i * t) b c hbc x hx1 hx2) a m
+
+theorem gs_stage_alt (hh t : Nat) (a : Nat → Nat) :
+    gsStage hh t a = stageK (fun i b => gsInner (psiInvRev (hh + i)) t (2 * i * t) b) hh a := by
+  have hcomm : ∀ i : Nat, 2 * t * i = 2 * i * t := by
+    intro i
+    rw [Nat.mul_assoc, Nat.mul_comm t i, ← Nat.mul_assoc]
+  simp only [gsStage, stageK, hcomm]
+
+theorem gs_inner_dep (s t : Nat) (ht : 0 < t) (j1 : Nat) (b c : Nat → Nat)
+    (hbc : ∀ y, j1 ≤ y → y < j1 + 2 * t → b y = c y) (x : Nat)
+    (hx1 : j1 ≤ x) (hx2 : x < j1 + 2 * t) :
+    gsInner s t j1 b x = gsInner s t j1 c x := by
+  obtain ⟨d, rfl⟩ := Nat.exists_eq_add_of_le hx1
+  obtain ⟨bs1, bs2, _⟩ := gs_inner_spec s t j1 ht b
+  obtain ⟨cs1, cs2, _⟩ := gs_inner_spec s t j1 ht c
+  rcases Nat.lt_or_ge d t with hd | hd
+  · rw [bs1 d hd, cs1 d hd, hbc (j1 + d) (by omega) (by omega),
+      hbc (j1 + d + t) (by omega) (by omega)]
+  · have hsplit : j1 + d = j1 + (d - t) + t := by omega
+    rw [hsplit, bs2 (d - t) (by omega), cs2 (d - t) (by omega),
+      hbc (j1 + (d - t)) (by omega) (by omega),
+      hbc (j1 + (d - t) + t) (by omega) (by omega)]
+
+/-- The Gentleman-Sande stage, resolved blockwise. -/
+theorem gs_stage_block (hh t : Nat) (ht : 0 < t) (a : Nat → Nat) :
+    (∀ i x, i < hh → 2 * i * t ≤ x → x < 2 * i * t + 2 * t →
+        gsStage hh t a x = gsInner (psiInvRev (hh + i)) t (2 * i * t) a x) ∧
+      (∀ x, 2 * hh * t ≤ x → gsStage hh t a x = a x) := by
+  rw [gs_stage_alt]
+  exact stage_k_spec t (fun i b => gsInner (psiInvRev (hh + i)) t (2 * i * t) b)
+    (fun i b x hx => (gs_inner_spec (psiInvRev (hh + i)) t (2 * i * t) ht b).2.2 x hx)
+    (fun i b c hbc x hx1 hx2 =>
+      gs_inner_dep (psiInvRev (hh + i)) t ht (2 * i * t) b c hbc x hx1 hx2) a hh
+
+theorem ct_stage_low (m t : Nat) (ht : 0 < t) (a : Nat → Nat) (i r : Nat) (hi : i < m)
+    (hr : r < t) : ctStage m t a (2 * i * t + r)
+      = (a (2 * i * t + r) + psiRev (m + i) * a (2 * i * t + r + t)) % falconQ := by
+  rw [(ct_stage_block m t ht a).1 i (2 * i * t + r) hi (by omega) (by omega)]
+  exact (ct_inner_spec (psiRev (m + i)) t (2 * i * t) ht a).1 r hr
+
+theorem ct_stage_high (m t : Nat) (ht : 0 < t) (a : Nat → Nat) (i r : Nat) (hi : i < m)
+    (hr : r < t) : ctStage m t a (2 * i * t + r + t)
+      = (a (2 * i * t + r) + falconQ * falconQ - psiRev (m + i) * a (2 * i * t + r + t))
+        % falconQ := by
+  rw [(ct_stage_block m t ht a).1 i (2 * i * t + r + t) hi (by omega) (by omega)]
+  exact (ct_inner_spec (psiRev (m + i)) t (2 * i * t) ht a).2.1 r hr
+
+theorem ct_stage_fixed (m t : Nat) (ht : 0 < t) (a : Nat → Nat) (x : Nat) (hx : 2 * m * t ≤ x) :
+    ctStage m t a x = a x :=
+  (ct_stage_block m t ht a).2 x hx
+
+theorem gs_stage_low (hh t : Nat) (ht : 0 < t) (a : Nat → Nat) (i r : Nat) (hi : i < hh)
+    (hr : r < t) : gsStage hh t a (2 * i * t + r)
+      = (a (2 * i * t + r) + a (2 * i * t + r + t)) % falconQ := by
+  rw [(gs_stage_block hh t ht a).1 i (2 * i * t + r) hi (by omega) (by omega)]
+  exact (gs_inner_spec (psiInvRev (hh + i)) t (2 * i * t) ht a).1 r hr
+
+theorem gs_stage_high (hh t : Nat) (ht : 0 < t) (a : Nat → Nat) (i r : Nat) (hi : i < hh)
+    (hr : r < t) : gsStage hh t a (2 * i * t + r + t)
+      = (a (2 * i * t + r) + falconQ - a (2 * i * t + r + t)) * psiInvRev (hh + i) % falconQ := by
+  rw [(gs_stage_block hh t ht a).1 i (2 * i * t + r + t) hi (by omega) (by omega)]
+  exact (gs_inner_spec (psiInvRev (hh + i)) t (2 * i * t) ht a).2.1 r hr
+
+theorem gs_stage_fixed (hh t : Nat) (ht : 0 < t) (a : Nat → Nat) (x : Nat) (hx : 2 * hh * t ≤ x) :
+    gsStage hh t a x = a x :=
+  (gs_stage_block hh t ht a).2 x hx
+
+/-! ## 7. Twiddle factors and spectral sums -/
+
+theorem one_mod_q : (1 : Nat) % falconQ = 1 := by decide
+
+theorem q_sub_one_mod_q : (falconQ - 1) % falconQ = falconQ - 1 := by decide
+
+theorem two_mul_assoc (m L : Nat) : 2 * m * L = m * (2 * L) := by
+  rw [Nat.mul_assoc, Nat.mul_left_comm]
+
+theorem psi_rev_eq (j : Nat) : psiRev j = powQ ntoPsi (revOf 9 j) := by
+  have hb : revOf 9 j < 2 ^ 64 := by
+    have h1 := rev_of_lt 9 j
+    have h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
+    omega
+  show powModQ ntoPsi (bitReverse9 j) = _
+  rw [bit_reverse_9_eq]
+  exact pow_mod_q_eq _ _ hb
+
+theorem psi_inv_rev_eq (j : Nat) : psiInvRev j = powQ psiInv (revOf 9 j) := by
+  have hb : revOf 9 j < 2 ^ 64 := by
+    have h1 := rev_of_lt 9 j
+    have h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
+    omega
+  show powModQ psiInv (bitReverse9 j) = _
+  rw [bit_reverse_9_eq]
+  exact pow_mod_q_eq _ _ hb
+
+theorem psi_rev_lt (j : Nat) : psiRev j < falconQ := by rw [psi_rev_eq]; exact pow_q_lt _ _
+
+theorem psi_inv_rev_lt (j : Nat) : psiInvRev j < falconQ := by
+  rw [psi_inv_rev_eq]; exact pow_q_lt _ _
+
+/-- The two tables are inverse at every index: `psi_rev[j] * psi_inv_rev[j] = 1 mod q`.
+Only the build-time assertion `psi * psi^-1 = 1` (:176) is used; q is never assumed prime. -/
+theorem psi_rev_mul_inv (j : Nat) : psiRev j * psiInvRev j % falconQ = 1 := by
+  have hone : EqQ (ntoPsi * psiInv) 1 := by
+    show (ntoPsi * psiInv) % falconQ = 1 % falconQ
+    rw [psi_inverse_pinned, one_mod_q]
+  have hp : EqQ ((ntoPsi * psiInv) ^ revOf 9 j) (1 ^ revOf 9 j) := eq_q_pow hone _
+  rw [Nat.one_pow, Nat.mul_pow] at hp
+  have hmul : EqQ (psiRev j * psiInvRev j) (ntoPsi ^ revOf 9 j * psiInv ^ revOf 9 j) := by
+    rw [psi_rev_eq, psi_inv_rev_eq]
+    exact eq_q_mul (pow_q_eq_q _ _) (pow_q_eq_q _ _)
+  have hfin : EqQ (psiRev j * psiInvRev j) 1 := eq_q_trans hmul hp
+  show psiRev j * psiInvRev j % falconQ = 1
+  rw [hfin, one_mod_q]
+
+/-- `psi^512 = -1 mod q` (the build-time assertion of :172) as a congruence. -/
+theorem psi_pow_half : EqQ (ntoPsi ^ 512) (falconQ - 1) := by
+  have h : powQ ntoPsi 512 = falconQ - 1 := by
+    rw [← pow_mod_q_eq ntoPsi 512 (by decide)]
+    exact psi_half_order_is_minus_one
+  show ntoPsi ^ 512 % falconQ = (falconQ - 1) % falconQ
+  rw [show ntoPsi ^ 512 % falconQ = powQ ntoPsi 512 from rfl, h, q_sub_one_mod_q]
+
+/-- `psi^1024 = 1 mod q` (the build-time assertion of :173) as a congruence. -/
+theorem psi_pow_order : EqQ (ntoPsi ^ 1024) 1 := by
+  have h : powQ ntoPsi 1024 = 1 := by
+    rw [← pow_mod_q_eq ntoPsi 1024 (by decide)]
+    exact psi_order
+  show ntoPsi ^ 1024 % falconQ = 1 % falconQ
+  rw [show ntoPsi ^ 1024 % falconQ = powQ ntoPsi 1024 from rfl, h, one_mod_q]
+
+/-- `sum_{d < m} A(r + d*L) * c^d`: the `r`-th coefficient of the residue of `A` modulo
+`X^L - c`, when `A` has `m*L` coefficients. -/
+def specSum (A : Nat → Nat) (L c m r : Nat) : Nat := sumTo (fun d => A (r + d * L) * c ^ d) m
+
+theorem spec_sum_zero (A : Nat → Nat) (L c r : Nat) : specSum A L c 0 r = 0 := rfl
+
+theorem spec_sum_eq_q_c (A : Nat → Nat) (L : Nat) {c c' : Nat} (h : EqQ c c') (m r : Nat) :
+    EqQ (specSum A L c m r) (specSum A L c' m r) :=
+  sum_to_eq_q_congr (fun d _ => eq_q_mul_left _ (eq_q_pow h d))
+
+/-- Splitting a residue modulo `X^L - c` into its even and odd parts: exactly the
+Cooley-Tukey butterfly, before any reduction. -/
+theorem spec_sum_even_odd (A : Nat → Nat) (L c : Nat) : ∀ m r : Nat,
+    specSum A L c (2 * m) r
+      = specSum A (2 * L) (c * c) m r + c * specSum A (2 * L) (c * c) m (r + L) := by
+  intro m
+  induction m with
+  | zero => intro r; rfl
+  | succ m ih =>
+      intro r
+      have hsq : c ^ (2 * m) = (c * c) ^ m := by
+        rw [Nat.pow_mul, show c ^ 2 = c * c by rw [Nat.pow_succ, Nat.pow_one]]
+      have hf0 : A (r + 2 * m * L) * c ^ (2 * m) = A (r + m * (2 * L)) * (c * c) ^ m := by
+        rw [two_mul_assoc, hsq]
+      have hidx1 : r + (2 * m + 1) * L = r + L + m * (2 * L) := by
+        have e : (2 * m + 1) * L = m * (2 * L) + L := by
+          rw [Nat.right_distrib, Nat.one_mul, two_mul_assoc]
+        omega
+      have hf1 : A (r + (2 * m + 1) * L) * c ^ (2 * m + 1)
+          = c * (A (r + L + m * (2 * L)) * (c * c) ^ m) := by
+        rw [hidx1, Nat.pow_succ, hsq]
+        simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      simp only [specSum] at *
+      rw [show 2 * (m + 1) = 2 * m + 1 + 1 from by omega]
+      simp only [sum_to_succ]
+      rw [ih r, hf0, hf1, Nat.left_distrib]
+      omega
+
+/-- The exponent of `psi` attached to block `i` of the `2^s` blocks of width `2^h`. -/
+def blockExp (h s i : Nat) : Nat := 2 ^ h * (1 + 2 * revOf s i)
+
+/-- The block's modulus constant: block `i` holds `A mod (X^(2^h) - blockC h s i)`. -/
+def blockC (h s i : Nat) : Nat := powQ ntoPsi (blockExp h s i)
+
+theorem block_c_lt (h s i : Nat) : blockC h s i < falconQ := pow_q_lt _ _
+
+theorem block_exp_expand (h s i : Nat) : blockExp h s i = 2 ^ h + 2 ^ (h + 1) * revOf s i := by
+  rw [blockExp, Nat.left_distrib, Nat.mul_one, ← Nat.mul_assoc, ← Nat.pow_succ]
+
+theorem block_exp_even (h s i : Nat) : blockExp h (s + 1) (2 * i) = blockExp h s i := by
+  simp only [blockExp, rev_of_double]
+
+theorem block_exp_double (h s i : Nat) : blockExp (h + 1) s i = 2 * blockExp h s i := by
+  simp only [blockExp, Nat.pow_succ, Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+
+theorem block_exp_odd (h s i : Nat) (hsh : s + h + 1 = 9) :
+    blockExp h (s + 1) (2 * i + 1) = blockExp h s i + 512 := by
+  have hp : (2 : Nat) ^ h * (2 * 2 ^ s) = 512 := by
+    have e2 : h + 1 + s = 9 := by omega
+    calc (2 : Nat) ^ h * (2 * 2 ^ s) = 2 ^ (h + 1 + s) := by
+          rw [← Nat.mul_assoc, ← Nat.pow_succ, ← Nat.pow_add]
+      _ = 2 ^ 9 := by rw [e2]
+      _ = 512 := by decide
+  have he : 1 + 2 * (2 ^ s + revOf s i) = (1 + 2 * revOf s i) + 2 * 2 ^ s := by omega
+  simp only [blockExp, rev_of_double_succ]
+  rw [he, Nat.left_distrib, hp]
+
+/-- The stage twiddle `psi_rev[2^s + i]` is exactly the constant of the even child block. -/
+theorem psi_rev_is_block_c (s h i : Nat) (hsh : s + h + 1 = 9) (hi : i < 2 ^ s) :
+    psiRev (2 ^ s + i) = blockC h (s + 1) (2 * i) := by
+  rw [psi_rev_eq, ← hsh, rev_of_pow_add s h i hi, blockC, block_exp_even, block_exp_expand]
+
+theorem block_c_pow (h s i : Nat) : EqQ (blockC h s i) (ntoPsi ^ blockExp h s i) :=
+  pow_q_eq_q _ _
+
+theorem block_c_even_sq (s h i : Nat) : EqQ (blockC h (s + 1) (2 * i) * blockC h (s + 1) (2 * i))
+    (blockC (h + 1) s i) := by
+  have h1 : EqQ (blockC h (s + 1) (2 * i) * blockC h (s + 1) (2 * i))
+      (ntoPsi ^ blockExp h (s + 1) (2 * i) * ntoPsi ^ blockExp h (s + 1) (2 * i)) :=
+    eq_q_mul (block_c_pow _ _ _) (block_c_pow _ _ _)
+  have h2 : ntoPsi ^ blockExp h (s + 1) (2 * i) * ntoPsi ^ blockExp h (s + 1) (2 * i)
+      = ntoPsi ^ blockExp (h + 1) s i := by
+    rw [← Nat.pow_add, block_exp_even, block_exp_double]
+    congr 1
+    omega
+  rw [h2] at h1
+  exact eq_q_trans h1 (eq_q_symm (block_c_pow _ _ _))
+
+theorem block_c_odd (s h i : Nat) (hsh : s + h + 1 = 9) :
+    EqQ (blockC h (s + 1) (2 * i + 1)) (blockC h (s + 1) (2 * i) * (falconQ - 1)) := by
+  refine eq_q_trans (block_c_pow _ _ _) ?_
+  rw [block_exp_odd h s i hsh, Nat.pow_add, ← block_exp_even h s i]
+  exact eq_q_mul (eq_q_symm (block_c_pow _ _ _)) psi_pow_half
+
+theorem block_c_odd_sq (s h i : Nat) (hsh : s + h + 1 = 9) :
+    EqQ (blockC h (s + 1) (2 * i + 1) * blockC h (s + 1) (2 * i + 1)) (blockC (h + 1) s i) := by
+  have h1 : EqQ (blockC h (s + 1) (2 * i + 1) * blockC h (s + 1) (2 * i + 1))
+      (ntoPsi ^ blockExp h (s + 1) (2 * i + 1) * ntoPsi ^ blockExp h (s + 1) (2 * i + 1)) :=
+    eq_q_mul (block_c_pow _ _ _) (block_c_pow _ _ _)
+  have h2 : ntoPsi ^ blockExp h (s + 1) (2 * i + 1) * ntoPsi ^ blockExp h (s + 1) (2 * i + 1)
+      = ntoPsi ^ blockExp (h + 1) s i * ntoPsi ^ 1024 := by
+    rw [← Nat.pow_add, ← Nat.pow_add, block_exp_odd h s i hsh, block_exp_double]
+    congr 1
+    omega
+  rw [h2] at h1
+  refine eq_q_trans h1 (eq_q_trans (eq_q_mul (eq_q_symm (block_c_pow _ _ _)) psi_pow_order) ?_)
+  rw [Nat.mul_one]
+  exact eq_q_refl _
+
+/-! ## 8. The forward stage invariant -/
+
+theorem two_pow_pos (n : Nat) : 0 < 2 ^ n := by
+  induction n with
+  | zero => decide
+  | succ n ih => rw [Nat.pow_succ]; omega
+
+theorem two_pow_succ (n : Nat) : (2 : Nat) ^ (n + 1) = 2 * 2 ^ n := by
+  rw [Nat.pow_succ]; omega
+
+theorem nat_sub_mul (m n k : Nat) : (m - n) * k = m * k - n * k := by
+  rw [Nat.mul_comm, nat_mul_sub, Nat.mul_comm k m, Nat.mul_comm k n]
+
+theorem block_start_double (i h : Nat) : 2 * i * 2 ^ h = i * 2 ^ (h + 1) := by
+  rw [two_pow_succ]
+  simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+
+/-- The residue computed by the additive half of a Cooley-Tukey butterfly. -/
+theorem ct_low_residue (X Y g : Nat) : EqQ (X % falconQ + g * (Y % falconQ)) (X + g * Y) :=
+  eq_q_add (eq_q_mod X) (eq_q_mul_left g (eq_q_mod Y))
+
+/-- The residue computed by the subtractive half: the `q^2` offset of :459-461 is a
+representative of `-1` times the twiddled operand. -/
+theorem ct_high_residue (X Y g : Nat) (hg : g < falconQ) :
+    EqQ (X % falconQ + falconQ * falconQ - g * (Y % falconQ)) (X + (falconQ - 1) * (g * Y)) := by
+  have hy : Y % falconQ < falconQ := mod_q_lt Y
+  have hP1 : g * (Y % falconQ) ≤ falconQ * falconQ :=
+    Nat.mul_le_mul (by omega) (by omega)
+  have hP2 : g * (Y % falconQ) ≤ falconQ * (g * (Y % falconQ)) :=
+    Nat.le_mul_of_pos_left _ falcon_q_pos
+  have step1 : EqQ (X % falconQ + falconQ * falconQ - g * (Y % falconQ))
+      (X % falconQ + falconQ * (g * (Y % falconQ)) - g * (Y % falconQ)) :=
+    sub_offset_mod (X % falconQ) (g * (Y % falconQ)) falconQ (g * (Y % falconQ)) hP1 hP2
+  have e0 : (falconQ - 1) * (g * (Y % falconQ))
+      = falconQ * (g * (Y % falconQ)) - g * (Y % falconQ) := by
+    rw [nat_sub_mul, Nat.one_mul]
+  have step2 : X % falconQ + falconQ * (g * (Y % falconQ)) - g * (Y % falconQ)
+      = X % falconQ + (falconQ - 1) * (g * (Y % falconQ)) := by omega
+  rw [step2] at step1
+  exact eq_q_trans step1
+    (eq_q_add (eq_q_mod X) (eq_q_mul_left _ (eq_q_mul_left g (eq_q_mod Y))))
+
+/-- The stage invariant: after the stage that leaves `2^s` blocks of width `2^h`, block `i`
+of the working vector holds the coefficients of `A mod (X^(2^h) - blockC h s i)`. -/
+def Inv (A : Nat → Nat) (s h : Nat) (a : Nat → Nat) : Prop :=
+  ∀ i r, i < 2 ^ s → r < 2 ^ h →
+    a (i * 2 ^ h + r) = specSum A (2 ^ h) (blockC h s i) (2 ^ s) r % falconQ
+
+theorem inv_step (A : Nat → Nat) (s h : Nat) (hsh : s + h + 1 = 9) (a : Nat → Nat)
+    (hinv : Inv A s (h + 1) a) : Inv A (s + 1) h (ctStage (2 ^ s) (2 ^ h) a) := by
+  intro i' r' hi' hr'
+  have ht : 0 < 2 ^ h := two_pow_pos h
+  have hps : (2 : Nat) ^ (s + 1) = 2 * 2 ^ s := two_pow_succ s
+  have hph : (2 : Nat) ^ (h + 1) = 2 * 2 ^ h := two_pow_succ h
+  obtain ⟨i, hcase⟩ : ∃ i, i' = 2 * i ∨ i' = 2 * i + 1 := ⟨i' / 2, by omega⟩
+  have hi : i < 2 ^ s := by rcases hcase with h1 | h1 <;> omega
+  have hb : 2 * i * 2 ^ h = i * 2 ^ (h + 1) := block_start_double i h
+  have hgam : psiRev (2 ^ s + i) = blockC h (s + 1) (2 * i) := psi_rev_is_block_c s h i hsh hi
+  have hA1 : a (2 * i * 2 ^ h + r')
+      = specSum A (2 ^ (h + 1)) (blockC (h + 1) s i) (2 ^ s) r' % falconQ := by
+    rw [show 2 * i * 2 ^ h + r' = i * 2 ^ (h + 1) + r' from by omega]
+    exact hinv i r' hi (by omega)
+  have hA2 : a (2 * i * 2 ^ h + r' + 2 ^ h)
+      = specSum A (2 ^ (h + 1)) (blockC (h + 1) s i) (2 ^ s) (r' + 2 ^ h) % falconQ := by
+    rw [show 2 * i * 2 ^ h + r' + 2 ^ h = i * 2 ^ (h + 1) + (r' + 2 ^ h) from by omega]
+    exact hinv i (r' + 2 ^ h) hi (by omega)
+  -- the two child spectra, before reduction
+  have hsplit : ∀ c : Nat, specSum A (2 ^ h) c (2 ^ (s + 1)) r'
+      = specSum A (2 ^ (h + 1)) (c * c) (2 ^ s) r'
+        + c * specSum A (2 ^ (h + 1)) (c * c) (2 ^ s) (r' + 2 ^ h) := by
+    intro c
+    rw [hps, spec_sum_even_odd, ← hph]
+  rcases hcase with hcase | hcase
+  · subst hcase
+    rw [ct_stage_low (2 ^ s) (2 ^ h) ht a i r' hi hr', hgam, hA1, hA2]
+    refine eq_q_trans (ct_low_residue _ _ _) (eq_q_symm ?_)
+    rw [hsplit (blockC h (s + 1) (2 * i))]
+    exact eq_q_add (spec_sum_eq_q_c _ _ (block_c_even_sq s h i) _ _)
+      (eq_q_mul_left _ (spec_sum_eq_q_c _ _ (block_c_even_sq s h i) _ _))
+  · subst hcase
+    have hidx : (2 * i + 1) * 2 ^ h + r' = 2 * i * 2 ^ h + r' + 2 ^ h := by
+      rw [Nat.right_distrib, Nat.one_mul]; omega
+    rw [hidx, ct_stage_high (2 ^ s) (2 ^ h) ht a i r' hi hr', hgam, hA1, hA2]
+    refine eq_q_trans (ct_high_residue _ _ _ (block_c_lt _ _ _)) (eq_q_symm ?_)
+    rw [hsplit (blockC h (s + 1) (2 * i + 1))]
+    refine eq_q_trans (eq_q_add (spec_sum_eq_q_c _ _ (block_c_odd_sq s h i hsh) _ _)
+      (eq_q_mul (block_c_odd s h i hsh)
+        (spec_sum_eq_q_c _ _ (block_c_odd_sq s h i hsh) _ _))) ?_
+    refine eq_q_add (eq_q_refl _) ?_
+    simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    exact eq_q_refl _
+
+/-! ## 9. The forward transform is evaluation at the negacyclic points -/
+
+theorem ntt_forward_loop_unfold (a : Nat → Nat) :
+    nttForwardLoop 10 1 falconN a
+      = ctStage (2 ^ 8) (2 ^ 0) (ctStage (2 ^ 7) (2 ^ 1) (ctStage (2 ^ 6) (2 ^ 2)
+          (ctStage (2 ^ 5) (2 ^ 3) (ctStage (2 ^ 4) (2 ^ 4) (ctStage (2 ^ 3) (2 ^ 5)
+            (ctStage (2 ^ 2) (2 ^ 6) (ctStage (2 ^ 1) (2 ^ 7)
+              (ctStage (2 ^ 0) (2 ^ 8) a)))))))) := by
+  simp only [nttForwardLoop, falconN, Nat.reduceMul, Nat.reduceDiv, Nat.reduceLT,
+    Nat.reducePow, reduceIte]
+
+/-- Evaluation of the polynomial `A` (512 coefficients) at `c`, modulo nothing yet. -/
+def evalAt (A : Nat → Nat) (c : Nat) : Nat := sumTo (fun d => A d * c ^ d) falconN
+
+theorem inv_initial (A : Nat → Nat) (hc : ∀ i, A i < falconQ) : Inv A 0 9 A := by
+  intro i r hi _
+  have hi0 : i = 0 := by simp only [Nat.pow_zero] at hi; omega
+  subst hi0
+  have hs : specSum A (2 ^ 9) (blockC 9 0 0) (2 ^ 0) r = A r := by
+    show sumTo (fun d => A (r + d * 2 ^ 9) * blockC 9 0 0 ^ d) 1 = _
+    rw [sum_to_succ, sum_to_zero]
+    simp only [Nat.zero_mul, Nat.add_zero, Nat.pow_zero, Nat.mul_one, Nat.zero_add]
+  rw [hs, Nat.mod_eq_of_lt (hc r), Nat.zero_mul, Nat.zero_add]
+
+theorem inv_chain_forward (A : Nat → Nat) (a : Nat → Nat) (h0 : Inv A 0 9 a) :
+    Inv A 9 0 (nttForwardLoop 10 1 falconN a) := by
+  rw [ntt_forward_loop_unfold]
+  exact inv_step A 8 0 (by decide) _ (inv_step A 7 1 (by decide) _
+    (inv_step A 6 2 (by decide) _ (inv_step A 5 3 (by decide) _
+      (inv_step A 4 4 (by decide) _ (inv_step A 3 5 (by decide) _
+        (inv_step A 2 6 (by decide) _ (inv_step A 1 7 (by decide) _
+          (inv_step A 0 8 (by decide) _ h0))))))))
+
+/-- The transcribed forward NTT evaluates its input at the odd powers of `psi`, in the
+bit-reversed index order the Longa-Naehrig twiddle table imposes. -/
+theorem ntt_forward_loop_eval (A : Nat → Nat) (hc : ∀ i, A i < falconQ) (j : Nat)
+    (hj : j < falconN) :
+    nttForwardLoop 10 1 falconN A j = evalAt A (powQ ntoPsi (1 + 2 * revOf 9 j)) % falconQ := by
+  have hinv := inv_chain_forward A A (inv_initial A hc) j 0 (by simpa [falconN] using hj)
+    (by decide)
+  simp only [Nat.pow_zero, Nat.mul_one, Nat.add_zero] at hinv
+  rw [hinv]
+  have hc9 : blockC 0 9 j = powQ ntoPsi (1 + 2 * revOf 9 j) := by
+    simp only [blockC, blockExp, Nat.pow_zero, Nat.one_mul]
+  have hspec : specSum A 1 (blockC 0 9 j) (2 ^ 9) 0
+      = evalAt A (powQ ntoPsi (1 + 2 * revOf 9 j)) := by
+    rw [hc9]
+    show sumTo (fun d => A (0 + d * 1) * powQ ntoPsi (1 + 2 * revOf 9 j) ^ d) (2 ^ 9) = _
+    exact sum_to_congr (fun d _ => by rw [Nat.mul_one, Nat.zero_add])
+  rw [hspec]
+
+theorem ntt_forward_eval (l : List Nat) (hc : ∀ c ∈ l, c < falconQ) (j : Nat)
+    (hj : j < falconN) :
+    wireOf (nttForward l) j = evalAt (wireOf l) (powQ ntoPsi (1 + 2 * revOf 9 j)) % falconQ := by
+  rw [show nttForward l = (rangeList falconN).map (nttForwardLoop 10 1 falconN (wireOf l)) from rfl,
+    wire_of_map_range _ falconN j hj]
+  exact ntt_forward_loop_eval (wireOf l) (wire_of_lt_q l hc) j hj
+
 end Zkp.Implementation.NttCorrectness
