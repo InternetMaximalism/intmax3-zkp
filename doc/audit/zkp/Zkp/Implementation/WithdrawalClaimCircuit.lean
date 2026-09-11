@@ -8,6 +8,23 @@ explicit direct-dependency interfaces. NOT Rust/Plonky2 compiler refinement.
 All Nat wires are integer representatives; FieldLowering is the unresolved
 primitive gate/arithmetic interpretation, not an assumption of asset safety.
 
+GATE LOWERING (`BuildOp.holds` … `program_satisfied_implies_gates`): the builder
+program transcribed from `WithdrawalClaimCircuit::new` is given one LOCAL
+proposition per builder call, and every field of the hand-written `CircuitGates`
+predicate is DERIVED from those local propositions alone — no extra premise
+(`EnvironmentGates` is empty: no `CircuitGates` field needs one) and no weakening
+of `CircuitGates`. `FieldLowering` therefore reduces to `PrimitiveLowering`
+(`primitive_lowering_implies_field_lowering`), whose remaining, unproved content is
+exactly (a) PER-PRIMITIVE: each plonky2 primitive really enforces the modeled local
+relation on its wires — `range_check(t, 32)` bounds a limb, `connect` is equality,
+`is_equal` yields a safe Boolean equality flag, `select` picks a limb,
+`less_than_u32`'s `split_le` gives the 33-bit borrow equation, and the
+`recompute_h1` / `regev_pk_poseidon_digest_gadget` / `regev_ct_digest_gadget` /
+`balance_slot_leaf_hash_circuit` / `IncrementalMerkleProofTarget::verify` /
+`decryption_core` / `keccak256` gadgets compute the callbacks of `Environment`;
+and (b) DIGEST PINNING: the circuit whose proofs are accepted on-chain is the one
+built by this constructor program. Neither is discharged here.
+
 The callee checks H1 recomputation, active participant bound, canonical token
 selection, a full slot leaf opening, Regev digest/decryption calls, and IMW2.
 It does NOT verify a channel signature, finalize a close, link the close id to H1,
@@ -287,7 +304,8 @@ structure CircuitGates {Path Core : Type} (e : Environment Path Core)
   amountConnect : e.decryption w.polynomials w.core p.amount.lo p.amount.hi
   nullifierConnect : e.keccak (nullifierPreimage p.closeId (computedPk e w) p.tokenSlot) = p.nullifier
 
-/-- Only primitive constructor-gate lowering, explicitly unresolved. -/
+/-- Only primitive constructor-gate lowering, explicitly unresolved. Reduced below
+    to `PrimitiveLowering` by `primitive_lowering_implies_field_lowering`. -/
 def FieldLowering {Path Core Raw : Type} (e : Environment Path Core)
     (accepts : Raw → PublicInputs → Witness Path Core → Prop) : Prop :=
   ∀ raw p w, accepts raw p w → CircuitGates e p w
@@ -869,12 +887,35 @@ theorem checked_of_all_words {xs : List Nat}
     (h : xs.all (fun x => decide (x < wordBase)) = true) : Checked xs :=
   fun x mem => of_decide_eq_true (List.all_eq_true.mp h x mem)
 
-/-- What ONE builder call enforces on the wires it touches. Profiling reads
-    (`builder.num_gates()`), the config choice and `builder.build()` enforce nothing;
-    `allocateRawRootAndMemberIndex` enforces nothing either, because the source
-    allocates `slot_tree_root` as four RAW field elements (src 325-327) and
-    `member_index` with a bare `add_virtual_target` (src 333) — the index bound
-    comes only from the inclusion verify's `split_le` (src 493). -/
+/-- What ONE builder call enforces on the wires it touches, per source line of
+    src/circuits/channel/withdrawal_claim_circuit.rs:
+
+    * `zeroKnowledgeConfig` 307-308, `observe*` 341/436/462/494/510/539/548,
+      `buildCircuit` 557 — no wire constraint (config choice, `builder.num_gates()`
+      profiling reads, `builder.build()`).
+    * `allocateRawRootAndMemberIndex` 325-333 — ALSO no constraint: `slot_tree_root`
+      is four RAW field elements (`PoseidonHashOutTarget::new`, 327) and
+      `member_index` a bare `add_virtual_target` (333). The index bound comes only
+      from the inclusion verify's `split_le` (493, via
+      src/utils/trees/merkle_tree.rs:227).
+    * `allocateCheckedPublic` 113-131 (groups in `to_vec` order, 134-151),
+      `allocateCheckedHeader` 316-330, `allocateTenCheckedCiphertextsAndCounters`
+      337-340 — `builder.range_check(t, 32)` on each limb (`Bytes32Target::new(_,
+      true)`, `AddressTarget::new(_, true)`, `U64Target::new(_, true)`, `u32_limb`).
+    * `recomputeH1` 344-355 / `connectH1` 356; `activeSumAnd11Bits` 377-379;
+      `compareActive1025` 380-382; `compareMemberActive` 384-385;
+      `tenEqualityFlagsAndSumOne` 396-404; `compareTokenCount` 410-411;
+      `selectEightCiphertextLimbs` 417-425; `selectBaseToken` 430-435;
+      `allocateFourPolynomials` 451-454 (length only: canonicality `< q` is pinned
+      inside `decryption_core`, not here); `hashPkAndCiphertext` 457/460;
+      `connectCiphertext` 461; `hashFullSlotLeaf` 482-488; `verifyInclusion`
+      489-493; `decryptExposeAmount` 503-505; `connectAmountHighThenLow` 507-509
+      (PI `to_vec` is `[hi, lo]`); `deriveIMW2` 528-537; `connectNullifier` 538;
+      `registerPublic` 547.
+
+    The eight per-limb ct select chains (419-425) are modeled at `Words8`
+    granularity; `member_pk_g` is only allocated and registered (123, 140), so no
+    op constrains it — matching the source, where it is informational. -/
 def BuildOp.holds {Path Core : Type} {e : Environment Path Core} :
     BuildOp → Assignment e → Prop
   | .zeroKnowledgeConfig, _ => True
@@ -1118,6 +1159,9 @@ def examplePolynomial : List Nat := List.replicate regevN 0
 def examplePolynomials : Polynomials :=
   ⟨examplePolynomial,examplePolynomial,examplePolynomial,examplePolynomial⟩
 
+theorem example_polynomial_length : examplePolynomial.length = regevN := by
+  simp [examplePolynomial]
+
 def examplePublicInputs : PublicInputs :=
   { closeId := CloseCircuit.Words8.zero, channelId := 1, h1 := CloseCircuit.Words8.zero,
     memberPk := CloseCircuit.Words8.zero, recipient := ⟨1,2,3,4,5⟩,
@@ -1152,6 +1196,7 @@ theorem example_program_reads_back :
     readPublic exampleAssignment = examplePublicInputs ∧
     readWitness exampleAssignment = exampleWitness := ⟨rfl,rfl⟩
 
+set_option maxRecDepth 8192 in
 theorem example_program_satisfied : ProgramSatisfied constructorProgram exampleAssignment := by
   simp only [ProgramSatisfied,constructorProgram,publicAllocationProgram,List.cons_append,
     List.nil_append,List.singleton_append,List.forall_mem_cons,List.not_mem_nil,
@@ -1159,12 +1204,15 @@ theorem example_program_satisfied : ProgramSatisfied constructorProgram exampleA
   repeat' apply And.intro
   all_goals
     first
-      | trivial
+      | (simp only [exampleAssignment,examplePolynomials,examplePolynomial,List.length_replicate]
+         done)
+      | (intro _ impossible
+         exact impossible.elim)
       | exact checked_of_all_words (by rfl)
       | (intro k _
          exact ⟨fun flag => (of_decide_eq_true flag).symm,fun slot => decide_eq_true slot.symm⟩)
+      | trivial
       | decide
-      | simp [examplePolynomials,examplePolynomial]
 
 theorem example_program_satisfiable :
     ∃ a : Assignment exampleEnvironment, ProgramSatisfied constructorProgram a :=

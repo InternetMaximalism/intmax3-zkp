@@ -24,6 +24,26 @@ visited insertion trace. Falcon aggregation is an explicit pinned-proof
 dependency; member distinctness is a separate consumer obligation.
 The source's feature-gated fixture/proof generators and test bodies are read
 but not claimed as production constraints or executed by these Lean examples.
+
+GATE LOWERING (final section). `CircuitGates` is no longer connected to the
+builder transcript by a bare named gap. `Assignment` values every wire
+`ChannelCloseCircuit::new` allocates, `BuildOp.holds` gives each builder call the
+local proposition that primitive enforces on those wires, and
+`program_satisfied_implies_gates` derives EVERY field of `CircuitGates` from
+`ProgramSatisfied constructorProgram` alone — no extra admission premise and no
+`EnvironmentGates` side hypothesis. `PrimitiveLowering` replaces
+`FieldAndGadgetLowering` as the obligation to discharge, and
+`primitive_lowering_implies_field_and_gadget_lowering` shows it is stronger.
+So the REMAINING unproved obligation is now PER-PRIMITIVE, not whole-circuit:
+(1) each `BuildOp.holds` case must equal the gate set plonky2 really emits for
+that one builder call (`range_check`, `connect`, `add_virtual_bool_target_safe`,
+`mul`/`sub`/`add`, `assert_one`, `is_equal`/`and`, `select`, `keccak256`,
+`add_proof_target_and_verify(_cyclic)`, `conditional_get_new_root`), and
+(2) the digest/verifier-data pinning: `Environment.h1Hash`, `keccak`,
+`balanceVerifier`, `aggregateVerifier`, `insertGates`/`insertStep` must be the
+real gadgets and the real pinned circuits. Neither is proved here, and the
+`Nat` model of field arithmetic is justified only by the 32-bit range checks and
+the at-most-10-term Boolean sums staying far below the Goldilocks modulus.
 -/
 
 namespace Zkp.Implementation.CloseCircuit
@@ -1761,7 +1781,9 @@ theorem program_satisfied_implies_gates {BP AP Path Root : Type}
           (a.distinctRoot i) ∧
         a.distinctRoot (i+1) = e.insertStep (a.memberFlagWire i == 1) (a.aggregateKey i)
           (a.insertionPath i) (a.distinctRoot i) := satisfied_map_range hInsert
-  have pairOps := satisfied_token_pairs hPairs
+  have pairOps : ∀ i j, i < j → j < maxTokens →
+      (if a.registryWire i = a.registryWire j then 1 else 0) * a.tokenFlagWire j = 0 :=
+    satisfied_token_pairs hPairs
   -- literal-chunk ops
   have rChannel : CheckedWords [a.publicWires.channelId] :=
     hPublic (.checkedPublicField "channelId" 1) (by simp [publicAllocationProgram])
@@ -1918,60 +1940,86 @@ theorem program_satisfied_implies_gates {BP AP Path Root : Type}
     exact checked_words_append d6 rAmounts
   · exact ⟨indexed_wires_length _ _ _, indexed_wires_length _ _ _, indexed_wires_length _ _ _,
       indexed_wires_length _ _ _⟩
-  · exact
-      { length := indexed_wires_length _ _ _
-        monotone := indexed_flags_no_rise a.memberFlagWire maxMembers 0 true mBool0
-          (fun i hi => by
-            rw [Nat.zero_add]
-            exact mMono i (by simp only [maxMembers] at hi ⊢; omega))
-          (fun _ _ => rfl)
-        sum := by
-          rw [indexed_flags_active_count a.memberFlagWire maxMembers 0 mBool0]; exact memberSum }
-  · constructor
-    · rw [indexed_get_zero_start _ false maxMembers 0 (by simp [maxMembers])]; simp [mFlag0]
-    · rw [indexed_get_zero_start _ false maxMembers 1 (by simp [maxMembers])]; simp [mFlag1]
-  · exact
-      { length := indexed_wires_length _ _ _
-        monotone := indexed_flags_no_rise a.tokenFlagWire maxTokens 0 true tBool0
-          (fun i hi => by
-            rw [Nat.zero_add]
-            exact tMono i (by simp only [maxTokens] at hi ⊢; omega))
-          (fun _ _ => rfl)
-        sum := by
-          rw [indexed_flags_active_count a.tokenFlagWire maxTokens 0 tBool0]; exact tokenSum }
+  · show PrefixGates maxMembers a.publicWires.memberCount
+      (indexedWires (fun i => a.memberFlagWire i == 1) 0 maxMembers)
+    refine { length := indexed_wires_length _ _ _, monotone := ?_, sum := ?_ }
+    · exact indexed_flags_no_rise a.memberFlagWire maxMembers 0 true mBool0
+        (fun i hi => by
+          rw [Nat.zero_add]
+          exact mMono i (by simp only [maxMembers] at hi ⊢; omega))
+        (fun _ _ => rfl)
+    · rw [indexed_flags_active_count a.memberFlagWire maxMembers 0 mBool0]
+      exact memberSum
+  · show MemberFloor (indexedWires (fun i => a.memberFlagWire i == 1) 0 maxMembers)
+    refine ⟨?_, ?_⟩
+    · rw [indexed_get_zero_start (fun i => a.memberFlagWire i == 1) false maxMembers 0
+        (by simp [maxMembers])]
+      simp [mFlag0]
+    · rw [indexed_get_zero_start (fun i => a.memberFlagWire i == 1) false maxMembers 1
+        (by simp [maxMembers])]
+      simp [mFlag1]
+  · show PrefixGates maxTokens a.tokenCountWire
+      (indexedWires (fun i => a.tokenFlagWire i == 1) 0 maxTokens)
+    refine { length := indexed_wires_length _ _ _, monotone := ?_, sum := ?_ }
+    · exact indexed_flags_no_rise a.tokenFlagWire maxTokens 0 true tBool0
+        (fun i hi => by
+          rw [Nat.zero_add]
+          exact tMono i (by simp only [maxTokens] at hi ⊢; omega))
+        (fun _ _ => rfl)
+    · rw [indexed_flags_active_count a.tokenFlagWire maxTokens 0 tBool0]
+      exact tokenSum
   · show (indexedWires (fun i => a.tokenFlagWire i == 1) 0 maxTokens).getD 0 false = true
-    rw [indexed_get_zero_start _ false maxTokens 0 (by simp [maxTokens])]; simp [tFlag0]
-  · intro i j hij hj hflag
+    rw [indexed_get_zero_start (fun i => a.tokenFlagWire i == 1) false maxTokens 0
+      (by simp [maxTokens])]
+    simp [tFlag0]
+  · show RegistryPairGates (indexedWires a.registryWire 0 maxTokens)
+      (indexedWires (fun i => a.tokenFlagWire i == 1) 0 maxTokens)
+    intro i j hij hj hflag
     have hjlt : j < maxTokens := by
-      show j < maxTokens
       rw [indexed_wires_length a.registryWire maxTokens 0] at hj
       exact hj
     have hilt : i < maxTokens := Nat.lt_trans hij hjlt
-    rw [indexed_get_zero_start _ false maxTokens j hjlt] at hflag
+    rw [indexed_get_zero_start (fun i => a.tokenFlagWire i == 1) false maxTokens j hjlt] at hflag
     have hf : a.tokenFlagWire j = 1 := by simpa using hflag
     have hop := pairOps i j hij hjlt
-    rw [indexed_get_zero_start _ 0 maxTokens i hilt, indexed_get_zero_start _ 0 maxTokens j hjlt]
+    rw [indexed_get_zero_start a.registryWire 0 maxTokens i hilt,
+      indexed_get_zero_start a.registryWire 0 maxTokens j hjlt]
     intro heq
-    show False
     rw [hf, if_pos heq] at hop
     simp at hop
   · show (indexedWires a.amountWire 0 maxTokens).head? = some a.publicWires.genesisFund
     rw [indexed_wires_head_of_pos a.amountWire maxTokens 0 (by simp [maxTokens]), hGenesis]
-  · refine ⟨a.freezeCarry, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · show FreezeSuccessorGates a.stateFreezeNonce a.publicWires.freezeNonce
+    refine ⟨a.freezeCarry, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [← hFreezeConn]; exact hFreezeAdd.2.2.1
     · rw [← hFreezeConn]; exact hFreezeAdd.2.2.2
     · exact rPrivFreeze _ (by simp [Words2.words])
     · exact rPrivFreeze _ (by simp [Words2.words])
     · exact rFreeze _ (by simp [Words2.words])
     · exact rFreeze _ (by simp [Words2.words])
-  · rw [hH1.1]; exact hImch.1.trans hImch.2
-  · rw [← hImch.2]; exact hImcs.1.trans hImcs.2
-  · rw [← hBalKey]; exact hBalVerified
-  · rw [← hBalKey]; exact hCyclic
-  · rw [← hAggKey]; exact hAggVerified
+  · show e.keccak (imchPreimage a.publicWires (readPrivate a)
+      (e.h1Hash (h1Preimage a.publicWires (readPrivate a)))) = a.publicWires.stateDigest
+    rw [hH1.1]
+    exact hImch.1.trans hImch.2
+  · show e.keccak (imcsPreimage a.publicWires a.publicWires.stateDigest) = a.publicWires.closeId
+    rw [← hImch.2]
+    exact hImcs.1.trans hImcs.2
+  · show e.verifyBalance e.balanceVerifier a.balanceProof a.balance
+    rw [← hBalKey]
+    exact hBalVerified
+  · show a.balance.embeddedVerifier = e.balanceVerifier
+    rw [← hBalKey]
+    exact hCyclic
+  · show e.verifyAggregate e.aggregateVerifier a.aggregateProof (aggregateStatementOf a)
+    rw [← hAggKey]
+    exact hAggVerified
   · show a.aggregateMessageWire = a.publicWires.stateDigest
-    rw [hAggMsg]; exact hImch.2
-  · rw [← hEmptyRoot]
+    rw [hAggMsg]
+    exact hImch.2
+  · show InsertionGates e (indexedWires (fun i => a.memberFlagWire i == 1) 0 maxMembers)
+      (indexedWires a.aggregateKey 0 maxMembers) (indexedWires a.insertionPath 0 maxMembers)
+      e.emptyDistinctRoot
+    rw [← hEmptyRoot]
     exact indexed_insertion_gates e (fun i => a.memberFlagWire i == 1) a.aggregateKey
       a.insertionPath a.distinctRoot maxMembers 0
       (fun i hi => by rw [Nat.zero_add]; exact insertOps i hi)
@@ -1982,5 +2030,278 @@ theorem program_satisfied_implies_gates {BP AP Path Root : Type}
     rw [← indexed_selected_keys (fun i => a.memberFlagWire i == 1) a.aggregateKey a.imcmKeyWire
       maxMembers 0 (fun i hi => by rw [Nat.zero_add]; exact selectOps i hi)]
     exact hMemberSetOp.1.trans hMemberSetOp.2
+
+theorem checked_of_all (xs : List Nat) (hx : xs.all (fun x => decide (x < wordBase)) = true) :
+    CheckedWords xs := by
+  intro x hmem
+  have h := List.all_eq_true.mp hx x hmem
+  simpa using h
+
+/-! #### A concrete satisfying assignment (non-vacuity)
+
+Two cosigners, one active token, a non-zero genesis fund, a freeze nonce that
+really increments. The opaque callbacks are the constant ones, so every digest
+gate is satisfiable at once; that is exactly what makes this a witness that the
+op list is not self-contradictory, and nothing more. -/
+def exampleEnvironment : Environment Unit Unit Unit Unit where
+  h1Hash := fun _ => Words8.zero
+  keccak := fun _ => Words8.zero
+  balanceVerifier := [7]
+  aggregateVerifier := [9]
+  verifyBalance := fun _ _ _ => True
+  verifyAggregate := fun _ _ _ => True
+  emptyDistinctRoot := ()
+  insertStep := fun _ _ _ root => root
+  insertGates := fun _ _ _ _ => True
+
+def exampleGenesisFund : Words8 := ⟨0,0,0,0,0,0,0,fixtureNativeAmount⟩
+
+def exampleAmount (i : Nat) : Words8 := if i = 0 then exampleGenesisFund else Words8.zero
+def exampleMemberFlag (i : Nat) : Nat := if i < 2 then 1 else 0
+def exampleTokenFlag (i : Nat) : Nat := if i = 0 then 1 else 0
+
+def exampleBalance : BalanceStatement where
+  channelId := 1
+  publicStateWords := []
+  blockR := 0
+  privateCommitment := ⟨0,0,0,0⟩
+  settledChain := ⟨0,0,0,0,0,0,0,5⟩
+  embeddedVerifier := [7]
+
+def exampleStatement : PublicInputs where
+  channelId := 1
+  closeNonce := ⟨0,1⟩
+  finalEpoch := ⟨0,5⟩
+  finalSmallBlock := ⟨0,9⟩
+  freezeNonce := ⟨0,1⟩
+  stateDigest := Words8.zero
+  h1 := Words8.zero
+  genesisFund := exampleGenesisFund
+  fundRoot := ⟨0,0,0,0,0,0,0,3⟩
+  burnHash := Words8.zero
+  withdrawalDigest := Words8.zero
+  closeId := Words8.zero
+  snapshot := Words2.zero
+  stateVersion := ⟨0,2⟩
+  settledChain := ⟨0,0,0,0,0,0,0,5⟩
+  accumulatorRoot := ⟨0,0,0,0,0,0,0,4⟩
+  memberSet := Words8.zero
+  memberCount := 2
+  delegateCount := 1
+  tokenFundsDigest := Words8.zero
+
+def exampleAssignment : Assignment exampleEnvironment where
+  publicWires := exampleStatement
+  stateFreezeNonce := ⟨0,0⟩
+  sharedNullifierRoot := Words8.zero
+  unallocatedIncoming := Words8.zero
+  previousDigest := Words8.zero
+  h2Tag := Words8.zero
+  slotTreeRoot := ⟨0,0,0,0⟩
+  tokenCountWire := 1
+  registryWire := fun i => i
+  amountWire := exampleAmount
+  memberFlagWire := exampleMemberFlag
+  tokenFlagWire := exampleTokenFlag
+  freezeCarry := 0
+  freezeSum := ⟨0,1⟩
+  recomputedH1 := Words8.zero
+  recomputedStateDigest := Words8.zero
+  recomputedWithdrawalDigest := Words8.zero
+  recomputedCloseId := Words8.zero
+  recomputedTokenFundsDigest := Words8.zero
+  recomputedMemberSet := Words8.zero
+  balanceKeyWire := [7]
+  balanceProof := ()
+  balance := exampleBalance
+  aggregateKeyWire := [9]
+  aggregateProof := ()
+  aggregateMessageWire := Words8.zero
+  aggregateCountWire := 2
+  aggregateKey := fun _ => Words8.zero
+  imcmKeyWire := fun _ => Words8.zero
+  insertionPath := fun _ => ()
+  insertionValue := 1
+  distinctRoot := fun _ => ()
+
+theorem example_amount_is_range_checked (i : Nat) : CheckedWords (exampleAmount i).words := by
+  unfold exampleAmount
+  split
+  · exact checked_of_all _ (by decide)
+  · exact checked_of_all _ (by decide)
+
+theorem example_member_flag_is_boolean (i : Nat) :
+    exampleMemberFlag i = 0 ∨ exampleMemberFlag i = 1 := by
+  unfold exampleMemberFlag
+  split
+  · exact Or.inr rfl
+  · exact Or.inl rfl
+
+theorem example_token_flag_is_boolean (i : Nat) :
+    exampleTokenFlag i = 0 ∨ exampleTokenFlag i = 1 := by
+  unfold exampleTokenFlag
+  split
+  · exact Or.inr rfl
+  · exact Or.inl rfl
+
+theorem example_member_flags_are_monotone (i : Nat) :
+    exampleMemberFlag (i+1) * (1 - exampleMemberFlag i) = 0 := by
+  unfold exampleMemberFlag
+  by_cases hi : i + 1 < 2
+  · have hprev : i < 2 := by omega
+    simp [hi, hprev]
+  · simp [hi]
+
+theorem example_token_flags_are_monotone (i : Nat) :
+    exampleTokenFlag (i+1) * (1 - exampleTokenFlag i) = 0 := by
+  unfold exampleTokenFlag
+  simp
+
+theorem satisfied_nil {BP AP Path Root : Type} {e : Environment BP AP Path Root}
+    {a : Assignment e} : ProgramSatisfied [] a := by
+  intro op hop
+  exact absurd hop (List.not_mem_nil op)
+
+theorem satisfied_cons_of {BP AP Path Root : Type} {e : Environment BP AP Path Root}
+    {op : BuildOp} {rest : List BuildOp} {a : Assignment e}
+    (hhead : op.holds a) (htail : ProgramSatisfied rest a) : ProgramSatisfied (op :: rest) a := by
+  intro o ho
+  rcases List.mem_cons.mp ho with rfl | ho
+  · exact hhead
+  · exact htail o ho
+
+theorem example_assignment_satisfies_program :
+    ProgramSatisfied constructorProgram exampleAssignment := by
+  unfold constructorProgram
+  refine satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of (satisfied_append_of (satisfied_append_of
+    (satisfied_append_of (satisfied_append_of ?c1 ?c2) ?c3) ?c4) ?c5) ?c6) ?c7) ?c8) ?c9)
+    ?c10) ?c11) ?c12) ?c13) ?c14) ?c15) ?c16) ?c17) ?c18) ?c19
+  case c1 =>
+    refine satisfied_cons_of ?_ (satisfied_cons_of trivial satisfied_nil)
+    exact aggregate_current_layout_is_73_words _ (indexed_wires_length _ _ _)
+  case c2 =>
+    intro op hop
+    simp only [publicAllocationProgram, List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;>
+      exact checked_of_all _ (by decide)
+  case c3 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl|rfl|rfl|rfl|rfl <;>
+      first
+        | exact checked_of_all _ (by decide)
+        | trivial
+        | exact (show (1:Nat) < wordBase by decide)
+  case c4 =>
+    refine satisfied_map_range_of (fun i hi => ?_)
+    show exampleAssignment.registryWire i < wordBase
+    exact Nat.lt_trans hi (by decide)
+  case c5 => exact satisfied_map_range_of (fun i _ => example_amount_is_range_checked i)
+  case c6 => exact satisfied_map_range_of (fun i _ => example_member_flag_is_boolean i)
+  case c7 => exact satisfied_map_range_of (fun i _ => example_member_flags_are_monotone i)
+  case c8 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl <;> rfl
+  case c9 => exact satisfied_map_range_of (fun i _ => example_token_flag_is_boolean i)
+  case c10 => exact satisfied_map_range_of (fun i _ => example_token_flags_are_monotone i)
+  case c11 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl <;> rfl
+  case c12 =>
+    refine satisfied_token_pairs_of (fun i j hij _ => ?_)
+    have hz : exampleAssignment.tokenFlagWire j = 0 := by
+      show exampleTokenFlag j = 0
+      unfold exampleTokenFlag
+      rw [if_neg (by omega : ¬ j = 0)]
+    show (if exampleAssignment.registryWire i = exampleAssignment.registryWire j then 1 else 0) *
+      exampleAssignment.tokenFlagWire j = 0
+    rw [hz, Nat.mul_zero]
+  case c13 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;>
+      first
+        | exact ⟨by decide, by decide, rfl, rfl⟩
+        | exact ⟨rfl, rfl⟩
+        | rfl
+        | trivial
+  case c14 =>
+    refine satisfied_map_range_of (fun i hi => ?_)
+    show (indexedWires exampleAssignment.aggregateKey 0 maxMembers).getD i Words8.zero =
+      exampleAssignment.aggregateKey i
+    exact indexed_get_zero_start _ _ maxMembers i hi
+  case c15 =>
+    refine satisfied_map_range_of (fun i _ => ?_)
+    show exampleAssignment.imcmKeyWire i =
+      (if exampleAssignment.memberFlagWire i == 1 then exampleAssignment.aggregateKey i
+        else Words8.zero)
+    split <;> rfl
+  case c16 => exact satisfied_map_range_of (fun _ _ => trivial)
+  case c17 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl <;> rfl
+  case c18 => exact satisfied_map_range_of (fun _ _ => ⟨trivial, rfl⟩)
+  case c19 =>
+    intro op hop
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl|rfl|rfl <;>
+      first
+        | exact ⟨rfl, rfl⟩
+        | exact public_input_word_count _
+        | trivial
+
+/-- The wire-to-field readback of the satisfying assignment: the flag WIRES
+    decode to the expected active prefixes and the public half is the expected
+    close statement. -/
+theorem example_program_reads_back :
+    readPublic exampleAssignment = exampleStatement ∧
+    (readWitness exampleAssignment).privateData.memberActive =
+      [true,true,false,false,false,false,false,false] ∧
+    (readWitness exampleAssignment).privateData.tokenActive =
+      [true,false,false,false,false,false,false,false,false,false] ∧
+    (readWitness exampleAssignment).privateData.registry = [0,1,2,3,4,5,6,7,8,9] ∧
+    (readWitness exampleAssignment).privateData.amounts.head? = some exampleGenesisFund ∧
+    (readWitness exampleAssignment).aggregate.signerCount = exampleStatement.memberCount :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Non-vacuity: the whole ordered builder program is satisfiable. Without this
+    `program_satisfied_implies_gates` could be true for the empty reason. -/
+theorem example_program_satisfiable :
+    ∃ a : Assignment exampleEnvironment, ProgramSatisfied constructorProgram a :=
+  ⟨exampleAssignment, example_assignment_satisfies_program⟩
+
+theorem example_satisfying_assignment_gives_circuit_gates :
+    CircuitGates exampleEnvironment (readPublic exampleAssignment)
+      (readWitness exampleAssignment) :=
+  program_satisfied_implies_gates exampleEnvironment exampleAssignment
+    example_assignment_satisfies_program
+
+/-- The REDUCED lowering obligation. `FieldAndGadgetLowering` demanded the whole
+    hand-written `CircuitGates` predicate; this demands only that an accepted raw
+    proof exhibit a wire assignment satisfying the ordered builder program, one
+    primitive at a time. -/
+def PrimitiveLowering {BalanceProof AggregateProof Path Root : Type}
+    (e : Environment BalanceProof AggregateProof Path Root)
+    (accepts : PublicInputs → ProofWitness BalanceProof AggregateProof Path → Prop) : Prop :=
+  ∀ p w, accepts p w →
+    ∃ a : Assignment e, ProgramSatisfied constructorProgram a ∧
+      readPublic a = p ∧ readWitness a = w
+
+theorem primitive_lowering_implies_field_and_gadget_lowering
+    {BalanceProof AggregateProof Path Root : Type}
+    (e : Environment BalanceProof AggregateProof Path Root)
+    (accepts : PublicInputs → ProofWitness BalanceProof AggregateProof Path → Prop)
+    (lowering : PrimitiveLowering e accepts) : FieldAndGadgetLowering e accepts := by
+  intro p w hraw
+  obtain ⟨a, hsat, hp, hw⟩ := lowering p w hraw
+  have gates := program_satisfied_implies_gates e a hsat
+  rw [hp, hw] at gates
+  exact gates
 
 end Zkp.Implementation.CloseCircuit
