@@ -147,7 +147,9 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.AllocationChecks",
         "Zkp.Implementation.WithdrawalClaimCircuit.Checked",
-        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram"
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicGroup",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
@@ -171,7 +173,9 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.AllocationChecks",
         "Zkp.Implementation.WithdrawalClaimCircuit.Checked",
-        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram"
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicAllocationProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicGroup",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.amount_public_value_is_u64"
@@ -202,11 +206,14 @@
       "status": "translated",
       "label": "Public target to_vec",
       "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words",
+        "Zkp.Implementation.WithdrawalClaimCircuit.publicGroup",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readPublic"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50",
-        "Zkp.Implementation.WithdrawalClaimCircuit.public_encoding_injective"
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_encoding_injective",
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_words_are_groups"
       ],
       "note": "Exact50-element ordered concatenation. readPublicFields is proof-only utility, not an invented source from_slice method."
     },
@@ -927,10 +934,27 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Assignment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readPublic",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readHeader",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readWitness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ProgramSatisfied",
+        "Zkp.Implementation.WithdrawalClaimCircuit.EnvironmentGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PrimitiveLowering"
       ],
-      "theorems": [],
-      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.environment_gates_are_empty",
+        "Zkp.Implementation.WithdrawalClaimCircuit.primitive_lowering_implies_field_lowering",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_reads_back",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_satisfied",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_program_satisfiable",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_assignment_meets_circuit_gates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.example_polynomial_length"
+      ],
+      "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts. Per-primitive semantics: constructorProgram transcribes these builder calls op by op, BuildOp.holds gives each op its local proposition on one Assignment read back by readPublic/readHeader/readWitness, and program_satisfied_implies_gates derives the whole CircuitGates predicate from those alone (EnvironmentGates is empty); PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
       "start": 315,
@@ -950,9 +974,13 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.headerAllocationWords",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.private_words_are_allocations"
+      ],
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
@@ -973,9 +1001,13 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.headerAllocationWords",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.private_words_are_allocations"
+      ],
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
@@ -996,9 +1028,13 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.headerAllocationWords",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.private_words_are_allocations"
+      ],
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
@@ -1019,7 +1055,8 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
@@ -1042,9 +1079,13 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
         "Zkp.Implementation.WithdrawalClaimCircuit.Header",
-        "Zkp.Implementation.WithdrawalClaimCircuit.Witness"
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.slotRowWords",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.private_words_are_allocations"
+      ],
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
@@ -1072,7 +1113,9 @@
       "label": "H1 header recompute/connect",
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.headerPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readHeader",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.header_preimage_width",
@@ -1107,11 +1150,15 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
@@ -1132,11 +1179,15 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
@@ -1157,11 +1208,15 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
@@ -1190,11 +1245,15 @@
       "label": "Canonical one-hot token slot",
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.oneHotSum",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.flagSum",
+        "Zkp.Implementation.WithdrawalClaimCircuit.FlagsPinned",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.equality_flag_sum",
-        "Zkp.Implementation.WithdrawalClaimCircuit.one_hot_connection_forces_exact_slot_range"
+        "Zkp.Implementation.WithdrawalClaimCircuit.one_hot_connection_forces_exact_slot_range",
+        "Zkp.Implementation.WithdrawalClaimCircuit.flag_sum_is_one_hot_sum"
       ],
       "note": "Flags are equality computations on exact PI slot; arithmetic loop sum=1 derives slot<10, not assumed."
     },
@@ -1214,10 +1273,14 @@
       "label": "Active token comparison",
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.token_slot_is_active_and_local"
+        "Zkp.Implementation.WithdrawalClaimCircuit.token_slot_is_active_and_local",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "Actual slot<token_count comparison; no unstated token_count<=10/registry-uniqueness/zero-suffix gate."
     },
@@ -1247,11 +1310,14 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
         "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken"
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext"
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
       ],
       "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
     },
@@ -1272,11 +1338,14 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
         "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken"
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext"
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
       ],
       "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
     },
@@ -1299,7 +1368,8 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
@@ -1323,7 +1393,8 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
@@ -1347,7 +1418,8 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
@@ -1370,7 +1442,8 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.slotPreimage",
         "Zkp.Implementation.WithdrawalClaimCircuit.Slot",
         "Zkp.Implementation.WithdrawalClaimCircuit.OpeningAt",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.full_slot_preimage_width",
@@ -1407,7 +1480,8 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
         "Zkp.Implementation.WithdrawalClaimCircuit.CoreOutputAt",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.amount_equals_the_core_output",
@@ -1432,7 +1506,8 @@
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
         "Zkp.Implementation.WithdrawalClaimCircuit.CoreOutputAt",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.amount_equals_the_core_output",
@@ -1465,7 +1540,8 @@
       "label": "IMW2 nullifier derivation",
       "declarations": [
         "Zkp.Implementation.WithdrawalClaimCircuit.nullifierPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates"
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.nullifier_preimage_width",
@@ -1504,7 +1580,10 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
         "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp",
         "Zkp.Implementation.WithdrawalClaimCircuit.Profile",
-        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words"
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readPublic",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ProgramSatisfied"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
@@ -1707,12 +1786,17 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
         "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
     },
@@ -1734,12 +1818,17 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
         "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
     },
@@ -1761,12 +1850,17 @@
         "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
         "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
         "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount"
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
       ],
       "theorems": [
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
         "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less"
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
       ],
       "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
     },
@@ -2135,6 +2229,11 @@
     {
       "name": "rust_plonky2_refinement",
       "obligation": "Handwritten fields, control flow and operation program must be linked to actual Rust/Plonky2 compilation and proof verification; FieldLowering is not discharged.",
+      "discharged": false
+    },
+    {
+      "name": "primitive-semantics-faithfulness",
+      "obligation": "each `BuildOp.holds` case equals what the corresponding plonky2 primitive enforces; the pinned circuit digest is the digest of `constructorProgram`",
       "discharged": false
     },
     {

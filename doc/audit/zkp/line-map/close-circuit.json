@@ -298,7 +298,9 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PublicInputs.AllocationChecks",
         "Zkp.Implementation.CloseCircuit.publicAllocationProgram",
-        "Zkp.Implementation.CloseCircuit.BuildOp"
+        "Zkp.Implementation.CloseCircuit.BuildOp",
+        "Zkp.Implementation.CloseCircuit.publicFieldWires",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Every103 public limb is range32 by new(true)/explicit range_check. Raw targets are distinct from typed native values and from constructor-computed commitments."
@@ -320,7 +322,9 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PublicInputs.AllocationChecks",
         "Zkp.Implementation.CloseCircuit.publicAllocationProgram",
-        "Zkp.Implementation.CloseCircuit.BuildOp"
+        "Zkp.Implementation.CloseCircuit.BuildOp",
+        "Zkp.Implementation.CloseCircuit.publicFieldWires",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Every103 public limb is range32 by new(true)/explicit range_check. Raw targets are distinct from typed native values and from constructor-computed commitments."
@@ -846,12 +850,26 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.constructorArityAdmitted",
         "Zkp.Implementation.CloseCircuit.aggregatePublicInputsLength",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.Assignment",
+        "Zkp.Implementation.CloseCircuit.readPublic",
+        "Zkp.Implementation.CloseCircuit.readPrivate",
+        "Zkp.Implementation.CloseCircuit.readWitness",
+        "Zkp.Implementation.CloseCircuit.aggregateStatementOf",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds",
+        "Zkp.Implementation.CloseCircuit.ProgramSatisfied",
+        "Zkp.Implementation.CloseCircuit.PrimitiveLowering"
       ],
       "theorems": [
-        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width"
+        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width",
+        "Zkp.Implementation.CloseCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.CloseCircuit.primitive_lowering_implies_field_and_gadget_lowering",
+        "Zkp.Implementation.CloseCircuit.example_assignment_satisfies_program",
+        "Zkp.Implementation.CloseCircuit.example_program_reads_back",
+        "Zkp.Implementation.CloseCircuit.example_program_satisfiable",
+        "Zkp.Implementation.CloseCircuit.example_satisfying_assignment_gives_circuit_gates"
       ],
-      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape."
+      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape. Per-primitive semantics: constructorProgram is the ordered transcript of these builder calls, BuildOp.holds gives each op its local wire proposition on an Assignment read back by readPublic/readPrivate/readWitness, and program_satisfied_implies_gates derives every CircuitGates field from those alone with no extra environment hypothesis; PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
       "start": 473,
@@ -870,12 +888,26 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.constructorArityAdmitted",
         "Zkp.Implementation.CloseCircuit.aggregatePublicInputsLength",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.Assignment",
+        "Zkp.Implementation.CloseCircuit.readPublic",
+        "Zkp.Implementation.CloseCircuit.readPrivate",
+        "Zkp.Implementation.CloseCircuit.readWitness",
+        "Zkp.Implementation.CloseCircuit.aggregateStatementOf",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds",
+        "Zkp.Implementation.CloseCircuit.ProgramSatisfied",
+        "Zkp.Implementation.CloseCircuit.PrimitiveLowering"
       ],
       "theorems": [
-        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width"
+        "Zkp.Implementation.CloseCircuit.constructor_checks_actual_aggregate_width",
+        "Zkp.Implementation.CloseCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.CloseCircuit.primitive_lowering_implies_field_and_gadget_lowering",
+        "Zkp.Implementation.CloseCircuit.example_assignment_satisfies_program",
+        "Zkp.Implementation.CloseCircuit.example_program_reads_back",
+        "Zkp.Implementation.CloseCircuit.example_program_satisfiable",
+        "Zkp.Implementation.CloseCircuit.example_satisfying_assignment_gives_circuit_gates"
       ],
-      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape."
+      "note": "Checks aggregate arity73 then standard_recursion_zk_config. Width alone is not canonical VK identity. Balance layout slicing needs the supplied key's expected shape. Per-primitive semantics: constructorProgram is the ordered transcript of these builder calls, BuildOp.holds gives each op its local wire proposition on an Assignment read back by readPublic/readPrivate/readWitness, and program_satisfied_implies_gates derives every CircuitGates field from those alone with no extra environment hypothesis; PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
       "start": 483,
@@ -885,7 +917,9 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.privateFieldWires",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
@@ -907,7 +941,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
@@ -929,9 +964,12 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Shape",
         "Zkp.Implementation.CloseCircuit.PrivateWitness.Checked",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
-      "theorems": [],
+      "theorems": [
+        "Zkp.Implementation.CloseCircuit.example_amount_is_range_checked"
+      ],
       "note": "Checked state nonce/shared/nullifier/unallocated/prev/H2 and10xU256 funds/10 u32 registry/count; slot root remains4 raw field elements. No private member ciphertext witnesses are allocated."
     },
     {
@@ -954,7 +992,8 @@
         "Zkp.Implementation.CloseCircuit.NoRise",
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.MemberFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
@@ -963,7 +1002,8 @@
         "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
         "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
         "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
-        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors",
+        "Zkp.Implementation.CloseCircuit.example_member_flag_is_boolean"
       ],
       "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
     },
@@ -987,7 +1027,8 @@
         "Zkp.Implementation.CloseCircuit.NoRise",
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.MemberFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
@@ -996,7 +1037,8 @@
         "Zkp.Implementation.CloseCircuit.monotone_flags_are_the_exact_active_prefix",
         "Zkp.Implementation.CloseCircuit.prefix_gates_fix_every_flag",
         "Zkp.Implementation.CloseCircuit.member_floor_requires_two_active_flags",
-        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors",
+        "Zkp.Implementation.CloseCircuit.example_member_flags_are_monotone"
       ],
       "note": "Eight safe bits, adjacent no-rise equations, integer-lifted count sum, explicit bits0 and1 asserted. Derives2<=memberCount<=8 without relying on native fill or inherited aggregate floor."
     },
@@ -1020,7 +1062,8 @@
         "Zkp.Implementation.CloseCircuit.NoRise",
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.MemberFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
@@ -1053,7 +1096,8 @@
         "Zkp.Implementation.CloseCircuit.NoRise",
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.MemberFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
@@ -1086,7 +1130,8 @@
         "Zkp.Implementation.CloseCircuit.NoRise",
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.MemberFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.active_count_bounded_by_width",
@@ -1116,11 +1161,14 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.PrefixGates",
         "Zkp.Implementation.CloseCircuit.TokenFloor",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.token_floor_requires_one_active_flag",
-        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors"
+        "Zkp.Implementation.CloseCircuit.close_proves_current_member_and_token_floors",
+        "Zkp.Implementation.CloseCircuit.example_token_flag_is_boolean",
+        "Zkp.Implementation.CloseCircuit.example_token_flags_are_monotone"
       ],
       "note": "Ten safe bits, adjacent monotonicity, count sum and bit0 required. Derives1<=tokenCount<=10. Does not force inactive registry/fund suffix zero."
     },
@@ -1140,7 +1188,8 @@
       "label": "Active registry pair comparisons",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.RegistryPairGates",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.constructor_checks_all_45_ordered_token_pairs"
@@ -1162,7 +1211,8 @@
       "status": "translated",
       "label": "Genesis token amount connection",
       "declarations": [
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [],
       "note": "amounts[0] equals genesisFund PI, linking full IMCH/TFD vector to IMCL's legacy amount slot. This is not proof that a live burn took place."
@@ -1184,7 +1234,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.FreezeSuccessorGates",
         "Zkp.Implementation.CloseCircuit.Words2.value",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.freeze_limb_equations_prove_exact_successor"
@@ -1230,7 +1281,8 @@
       "label": "Canonical close metadata and zero incoming",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.CircuitGates",
-        "Zkp.Implementation.CloseCircuit.constructorProgram"
+        "Zkp.Implementation.CloseCircuit.constructorProgram",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.close_metadata_is_canonical_without_new_signatures"
@@ -1254,7 +1306,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.h1Preimage",
         "Zkp.Implementation.CloseCircuit.h1Prefix",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.h1_header_has_current_37_elements",
@@ -1279,7 +1332,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.h1Preimage",
         "Zkp.Implementation.CloseCircuit.h1Prefix",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.h1_header_has_current_37_elements",
@@ -1306,7 +1360,8 @@
         "Zkp.Implementation.CloseCircuit.imchPrefix",
         "Zkp.Implementation.CloseCircuit.imchSuffix",
         "Zkp.Implementation.CloseCircuit.CircuitGates",
-        "Zkp.Implementation.CloseCircuit.HashBindingAt"
+        "Zkp.Implementation.CloseCircuit.HashBindingAt",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.imch_has_complete_139_word_preimage",
@@ -1332,7 +1387,8 @@
       "label": "IMCL recomputation",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.imclPreimage",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.imcl_preimage_has_42_words"
@@ -1355,7 +1411,8 @@
       "label": "Canonical IMCS recomputation",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.imcsPreimage",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.imcs_preimage_has_12_words",
@@ -1371,7 +1428,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.tokenFundsPreimage",
         "Zkp.Implementation.CloseCircuit.flattenAmounts",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.token_funds_preimage_has_exact_92_words",
@@ -1398,7 +1456,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.tokenFundsPreimage",
         "Zkp.Implementation.CloseCircuit.flattenAmounts",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.token_funds_preimage_has_exact_92_words",
@@ -1425,7 +1484,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.BalanceStatement",
         "Zkp.Implementation.CloseCircuit.Environment",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.recursive_balance_identity_and_history_are_exact"
@@ -1449,7 +1509,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.BalanceStatement",
         "Zkp.Implementation.CloseCircuit.Environment",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.recursive_balance_identity_and_history_are_exact"
@@ -1474,7 +1535,9 @@
         "Zkp.Implementation.CloseCircuit.AggregateStatement",
         "Zkp.Implementation.CloseCircuit.Environment",
         "Zkp.Implementation.CloseCircuit.AggregateContractAt",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.aggregateStatementOf",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.aggregate_current_layout_is_73_words"
@@ -1497,7 +1560,8 @@
       "label": "Aggregate message and count connections",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.CircuitGates",
-        "Zkp.Implementation.CloseCircuit.AggregateContractAt"
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members",
@@ -1521,7 +1585,8 @@
       "label": "Aggregate message and count connections",
       "declarations": [
         "Zkp.Implementation.CloseCircuit.CircuitGates",
-        "Zkp.Implementation.CloseCircuit.AggregateContractAt"
+        "Zkp.Implementation.CloseCircuit.AggregateContractAt",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members",
@@ -1546,7 +1611,9 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.AggregateStatement",
         "Zkp.Implementation.CloseCircuit.ProofWitness",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.aggregateStatementOf",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.aggregate_statement_is_bound_to_all_active_members"
@@ -1571,7 +1638,8 @@
         "Zkp.Implementation.CloseCircuit.selectedKeys",
         "Zkp.Implementation.CloseCircuit.memberSetPreimage",
         "Zkp.Implementation.CloseCircuit.activeKeys",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.selected_key_vector_preserves_width",
@@ -1600,7 +1668,8 @@
         "Zkp.Implementation.CloseCircuit.selectedKeys",
         "Zkp.Implementation.CloseCircuit.memberSetPreimage",
         "Zkp.Implementation.CloseCircuit.activeKeys",
-        "Zkp.Implementation.CloseCircuit.CircuitGates"
+        "Zkp.Implementation.CloseCircuit.CircuitGates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.selected_key_vector_preserves_width",
@@ -1630,7 +1699,8 @@
         "Zkp.Implementation.CloseCircuit.InsertionContractAt",
         "Zkp.Implementation.CloseCircuit.ScopedInsertionContracts",
         "Zkp.Implementation.CloseCircuit.FreshInsertions",
-        "Zkp.Implementation.CloseCircuit.NoDuplicates"
+        "Zkp.Implementation.CloseCircuit.NoDuplicates",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.scoped_indexed_paths_prove_each_active_insertion_is_fresh",
@@ -1657,7 +1727,8 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.CircuitGates",
         "Zkp.Implementation.CloseCircuit.constructorProgram",
-        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering"
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.constructor_registers_only_after_member_set_binding"
@@ -1681,7 +1752,9 @@
       "declarations": [
         "Zkp.Implementation.CloseCircuit.CircuitGates",
         "Zkp.Implementation.CloseCircuit.constructorProgram",
-        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering"
+        "Zkp.Implementation.CloseCircuit.FieldAndGadgetLowering",
+        "Zkp.Implementation.CloseCircuit.readPublic",
+        "Zkp.Implementation.CloseCircuit.BuildOp.holds"
       ],
       "theorems": [
         "Zkp.Implementation.CloseCircuit.constructor_registers_only_after_member_set_binding"
@@ -2555,6 +2628,11 @@
     {
       "name": "compiler_and_field_lowering",
       "obligation": "Handwritten order/data/gates do not prove equivalence to Rust/Plonky2 compiled constraints or bytecode. FieldAndGadgetLowering must justify actual safe Booleans, checked word ranges, integer-lifted counts, equality/select/connection and local U64 carry equations without circular asset-safety premises.",
+      "discharged": false
+    },
+    {
+      "name": "primitive-semantics-faithfulness",
+      "obligation": "each `BuildOp.holds` case equals what the corresponding plonky2 primitive enforces; the pinned circuit digest is the digest of `constructorProgram`",
       "discharged": false
     },
     {

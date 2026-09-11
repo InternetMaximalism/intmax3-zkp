@@ -61,7 +61,9 @@
       "label": "PI target new and u32 allocator",
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.publicAllocationProgram",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.rangeWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.OpHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.circuit_amount_and_token_are_u32_limbed"
@@ -142,10 +144,31 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.newCircuit",
         "Zkp.Implementation.PostCloseClaimCircuit.constructorProgram",
-        "Zkp.Implementation.PostCloseClaimCircuit.publicAllocationProgram"
+        "Zkp.Implementation.PostCloseClaimCircuit.publicAllocationProgram",
+        "Zkp.Implementation.PostCloseClaimCircuit.BuildOp",
+        "Zkp.Implementation.PostCloseClaimCircuit.BuildOp.holds",
+        "Zkp.Implementation.PostCloseClaimCircuit.Assignment",
+        "Zkp.Implementation.PostCloseClaimCircuit.readWitness",
+        "Zkp.Implementation.PostCloseClaimCircuit.readPublicInputs",
+        "Zkp.Implementation.PostCloseClaimCircuit.assignmentOf",
+        "Zkp.Implementation.PostCloseClaimCircuit.OpHolds",
+        "Zkp.Implementation.PostCloseClaimCircuit.ProgramSatisfied",
+        "Zkp.Implementation.PostCloseClaimCircuit.PrimitiveLowering"
       ],
-      "theorems": [],
-      "note": "Pinned standard_recursion_zk_config and range32 allocator; compiler behavior remains unproved."
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimCircuit.program_satisfied_implies_gates",
+        "Zkp.Implementation.PostCloseClaimCircuit.constructor_program_ops_imply_gates",
+        "Zkp.Implementation.PostCloseClaimCircuit.gate_lowering_needs_no_extra_environment_hypothesis",
+        "Zkp.Implementation.PostCloseClaimCircuit.primitive_lowering_implies_field_and_gadget_lowering",
+        "Zkp.Implementation.PostCloseClaimCircuit.primitive_lowering_iff_every_primitive_holds",
+        "Zkp.Implementation.PostCloseClaimCircuit.read_witness_recovers_every_witness",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_witness_satisfies_every_primitive",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_program_reproduces_the_gate_predicate",
+        "Zkp.Implementation.PostCloseClaimCircuit.normal_active_delegate_claim_is_locally_satisfiable",
+        "Zkp.Implementation.PostCloseClaimCircuit.example_program_reads_back",
+        "Zkp.Implementation.PostCloseClaimCircuit.example_program_satisfiable"
+      ],
+      "note": "Pinned standard_recursion_zk_config and range32 allocator; compiler behavior remains unproved. Per-primitive semantics: constructorProgram is the op-by-op transcription of these builder calls, BuildOp.holds/OpHolds give each op its local proposition on an Assignment read back by readWitness, and program_satisfied_implies_gates derives every ConstructorGates field from those alone; PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
       "start": 321,
@@ -155,7 +178,8 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.txWingPreimage",
         "Zkp.Implementation.PostCloseClaimCircuit.txLeaf",
-        "Zkp.Implementation.PostCloseClaimCircuit.Environment"
+        "Zkp.Implementation.PostCloseClaimCircuit.Environment",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.tx_wing_has_exact_17_words"
@@ -172,7 +196,9 @@
         "Zkp.Implementation.PostCloseClaimCircuit.push",
         "Zkp.Implementation.PostCloseClaimCircuit.txIds",
         "Zkp.Implementation.PostCloseClaimCircuit.recomputedTxHash",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.chain_push_has_exact_17_words",
@@ -190,7 +216,9 @@
         "Zkp.Implementation.PostCloseClaimCircuit.decodeHash",
         "Zkp.Implementation.PostCloseClaimCircuit.encodeHash",
         "Zkp.Implementation.PostCloseClaimCircuit.CanonicalRoot",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.virtualWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.MerkleHolds"
       ],
       "theorems": [],
       "note": "Exact modeled field-reduced pairs and encode-back equality; actual safe-split gadget refinement remains unproved. Not equated to native TryFrom."
@@ -203,7 +231,8 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.merkleFold",
         "Zkp.Implementation.PostCloseClaimCircuit.accumulatorRoot",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.MerkleHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.incoming_tx_is_anchored_at_a_20_bit_position"
@@ -219,7 +248,9 @@
         "Zkp.Implementation.PostCloseClaimCircuit.RawWitness",
         "Zkp.Implementation.PostCloseClaimCircuit.privateWords",
         "Zkp.Implementation.PostCloseClaimCircuit.constructorProgram",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.rangeWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.virtualWires"
       ],
       "theorems": [],
       "note": "Member/delegate/token counts u32; registry ten u32; stateVersion two u32; leaf ten digests and counters. No zero suffix/floor implied by allocation."
@@ -234,7 +265,9 @@
         "Zkp.Implementation.PostCloseClaimCircuit.Header.words",
         "Zkp.Implementation.PostCloseClaimCircuit.header",
         "Zkp.Implementation.PostCloseClaimCircuit.recomputedH1",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.header_has_exact_37_elements",
@@ -250,7 +283,9 @@
       "label": "active sum and strict active-slot guards",
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.lessThanU32",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.rangeWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.active_gate_bounds_full_member_delegate_region",
@@ -267,7 +302,8 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.RawWitness",
         "Zkp.Implementation.PostCloseClaimCircuit.constructorProgram",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.virtualWires"
       ],
       "theorems": [],
       "note": "Four vectors of REGEV_N=2048 virtual targets; internal canonical coefficient checks belong to decryption callee."
@@ -281,7 +317,8 @@
         "Zkp.Implementation.PostCloseClaimCircuit.keyPreimage",
         "Zkp.Implementation.PostCloseClaimCircuit.openedSlot",
         "Zkp.Implementation.PostCloseClaimCircuit.Slot.words",
-        "Zkp.Implementation.PostCloseClaimCircuit.Environment"
+        "Zkp.Implementation.PostCloseClaimCircuit.Environment",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.slot_has_exact_104_elements",
@@ -298,7 +335,8 @@
         "Zkp.Implementation.PostCloseClaimCircuit.merkleFold",
         "Zkp.Implementation.PostCloseClaimCircuit.slotRoot",
         "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
-        "Zkp.Implementation.PostCloseClaimCircuit.SlotOpeningBindingAt"
+        "Zkp.Implementation.PostCloseClaimCircuit.SlotOpeningBindingAt",
+        "Zkp.Implementation.PostCloseClaimCircuit.MerkleHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.reference_slot_fixes_recipient_and_regev_key"
@@ -313,7 +351,9 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.ctPreimage",
         "Zkp.Implementation.PostCloseClaimCircuit.Environment",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.anchored_ciphertext_is_the_decryption_ciphertext"
@@ -328,7 +368,8 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.Environment",
         "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
-        "Zkp.Implementation.PostCloseClaimCircuit.DecryptionContractAt"
+        "Zkp.Implementation.PostCloseClaimCircuit.DecryptionContractAt",
+        "Zkp.Implementation.PostCloseClaimCircuit.DecryptionHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.amount_matches_plaintext_under_decryption_contract"
@@ -341,7 +382,8 @@
       "status": "translated",
       "label": "amount high and low wire connects",
       "declarations": [
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.amount_is_exact_core_output",
@@ -357,7 +399,9 @@
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.nullifierPreimage",
         "Zkp.Implementation.PostCloseClaimCircuit.recomputedNullifier",
-        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates"
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.hashPreimage",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
       ],
       "theorems": [
         "Zkp.Implementation.PostCloseClaimCircuit.nullifier_preimage_has_exact_25_words",
@@ -372,10 +416,13 @@
       "label": "public registration and circuit build",
       "declarations": [
         "Zkp.Implementation.PostCloseClaimCircuit.constructorProgram",
-        "Zkp.Implementation.PostCloseClaimCircuit.FieldAndGadgetLowering"
+        "Zkp.Implementation.PostCloseClaimCircuit.FieldAndGadgetLowering",
+        "Zkp.Implementation.PostCloseClaimCircuit.registeredPublicInputs",
+        "Zkp.Implementation.PostCloseClaimCircuit.OpHolds"
       ],
       "theorems": [
-        "Zkp.Implementation.PostCloseClaimCircuit.constructor_finishes_with_exact_registration"
+        "Zkp.Implementation.PostCloseClaimCircuit.constructor_finishes_with_exact_registration",
+        "Zkp.Implementation.PostCloseClaimCircuit.registered_public_inputs_are_the_statement"
       ],
       "note": "57 public words registered only after final nullifier connect; actual compiler/proof backend is unproved."
     },
@@ -549,6 +596,11 @@
     {
       "name": "rust_compiler_and_plonky2_lowering",
       "obligation": "Handwritten data/controlflow/relations and operation traces are not a machine-checked refinement of Rust allocation, field arithmetic, gates, optimization, witness generators, compiler, or proof serialization.",
+      "discharged": false
+    },
+    {
+      "name": "primitive-semantics-faithfulness",
+      "obligation": "each `BuildOp.holds` case equals what the corresponding plonky2 primitive enforces; the pinned circuit digest is the digest of `constructorProgram`",
       "discharged": false
     },
     {
