@@ -112,3 +112,6 @@ import Zkp.Implementation.RegevProofs
 import Zkp.Implementation.TreeInstances
 import Zkp.Implementation.CloseSignatureBridge
 import Zkp.Implementation.Keccak256
+import Zkp.Implementation.FalconAggProgram
+import Zkp.Implementation.FalconGadgetProgram
+import Zkp.Implementation.LedgerWriters
