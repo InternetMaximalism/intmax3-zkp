@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/circuits/channel/withdrawal_claim_circuit.rs",
-  "source_sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
-  "source_lines": 1427,
+  "source_sha256": "c65ee9d3547f3a57597fb732d21e4e28dfa35c4f72eedc2d210ac3e8c2c50751",
+  "source_lines": 1753,
   "module": "Zkp.Implementation.WithdrawalClaimCircuit",
   "model": "doc/audit/zkp/Zkp/Implementation/WithdrawalClaimCircuit.lean",
   "refinement": "not-proved",
@@ -874,7 +874,7 @@
     },
     {
       "start": 283,
-      "end": 288,
+      "end": 287,
       "status": "translated",
       "label": "Circuit target handles",
       "declarations": [
@@ -888,8 +888,32 @@
       "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
     },
     {
-      "start": 289,
-      "end": 289,
+      "start": 288,
+      "end": 328,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 329,
+      "end": 329,
+      "status": "translated",
+      "label": "Circuit target handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Witness",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Header",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Environment",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "Handles represented by witnessed/computed values and ordered macro operations, not target IDs, generic compiler layouts or actual profiling counts."
+    },
+    {
+      "start": 330,
+      "end": 330,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -897,8 +921,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 290,
-      "end": 290,
+      "start": 331,
+      "end": 331,
       "status": "dependency-boundary",
       "label": "Rust derive attribute",
       "declarations": [],
@@ -906,8 +930,8 @@
       "note": "Generated Clone/Debug trait implementations are not translated; the following observation fields are modeled separately."
     },
     {
-      "start": 291,
-      "end": 298,
+      "start": 332,
+      "end": 339,
       "status": "translated",
       "label": "Circuit profile",
       "declarations": [
@@ -917,8 +941,8 @@
       "note": "Observation positions retained; no benchmark values fabricated. beforePadding additionally represents circuit's separate counter field."
     },
     {
-      "start": 299,
-      "end": 299,
+      "start": 340,
+      "end": 340,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -926,8 +950,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 300,
-      "end": 314,
+      "start": 341,
+      "end": 355,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -957,8 +981,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts. Per-primitive semantics: constructorProgram transcribes these builder calls op by op, BuildOp.holds gives each op its local proposition on one Assignment read back by readPublic/readHeader/readWitness, and program_satisfied_implies_gates derives the whole CircuitGates predicate from those alone (EnvironmentGates is empty); PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
-      "start": 315,
-      "end": 315,
+      "start": 356,
+      "end": 356,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -966,8 +990,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 316,
-      "end": 317,
+      "start": 357,
+      "end": 358,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -984,8 +1008,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
-      "start": 318,
-      "end": 320,
+      "start": 359,
+      "end": 361,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -993,8 +1017,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 321,
-      "end": 323,
+      "start": 362,
+      "end": 364,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -1011,8 +1035,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
-      "start": 324,
-      "end": 326,
+      "start": 365,
+      "end": 367,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1020,8 +1044,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 327,
-      "end": 330,
+      "start": 368,
+      "end": 371,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -1038,8 +1062,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
-      "start": 331,
-      "end": 332,
+      "start": 372,
+      "end": 373,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1047,8 +1071,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 333,
-      "end": 333,
+      "start": 374,
+      "end": 374,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -1062,8 +1086,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
-      "start": 334,
-      "end": 336,
+      "start": 375,
+      "end": 377,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1071,8 +1095,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 337,
-      "end": 341,
+      "start": 378,
+      "end": 382,
       "status": "translated",
       "label": "Constructor config and private allocations",
       "declarations": [
@@ -1089,8 +1113,8 @@
       "note": "ZK config, checked headers and rows, raw4-word root/member-index allocation; member index bounded later by source Merkle split. Nativeu8/u16 domain is not imposed on raw target counts."
     },
     {
-      "start": 342,
-      "end": 342,
+      "start": 383,
+      "end": 383,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1098,8 +1122,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 343,
-      "end": 343,
+      "start": 384,
+      "end": 384,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1107,8 +1131,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 344,
-      "end": 356,
+      "start": 385,
+      "end": 397,
       "status": "translated",
       "label": "H1 header recompute/connect",
       "declarations": [
@@ -1125,8 +1149,8 @@
       "note": "Exact37-word IMB2 preimage and PI equality; Poseidon+canonical representation binding scoped to compared inputs. Finalized H1 provenance remains caller obligation."
     },
     {
-      "start": 357,
-      "end": 360,
+      "start": 398,
+      "end": 401,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1134,8 +1158,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 361,
-      "end": 362,
+      "start": 402,
+      "end": 403,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1143,8 +1167,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 363,
-      "end": 364,
+      "start": 404,
+      "end": 405,
       "status": "translated",
       "label": "Participant activity and capacity gates",
       "declarations": [
@@ -1163,8 +1187,17 @@
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
     {
-      "start": 365,
-      "end": 371,
+      "start": 406,
+      "end": 407,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 408,
+      "end": 414,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1172,8 +1205,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 372,
-      "end": 373,
+      "start": 415,
+      "end": 416,
       "status": "translated",
       "label": "Participant activity and capacity gates",
       "declarations": [
@@ -1192,8 +1225,8 @@
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
     {
-      "start": 374,
-      "end": 378,
+      "start": 417,
+      "end": 421,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1201,8 +1234,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 379,
-      "end": 385,
+      "start": 422,
+      "end": 425,
       "status": "translated",
       "label": "Participant activity and capacity gates",
       "declarations": [
@@ -1221,8 +1254,37 @@
       "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
     },
     {
-      "start": 386,
-      "end": 386,
+      "start": 426,
+      "end": 429,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 430,
+      "end": 432,
+      "status": "translated",
+      "label": "Participant activity and capacity gates",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.active_region_is_bounded",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
+      ],
+      "note": "Source11-bit sum range and33-bit strict comparisons derive memberIndex<active<=1024. No member-signature floor added."
+    },
+    {
+      "start": 433,
+      "end": 433,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1230,8 +1292,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 387,
-      "end": 394,
+      "start": 434,
+      "end": 441,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1239,8 +1301,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 395,
-      "end": 404,
+      "start": 442,
+      "end": 451,
       "status": "translated",
       "label": "Canonical one-hot token slot",
       "declarations": [
@@ -1258,8 +1320,8 @@
       "note": "Flags are equality computations on exact PI slot; arithmetic loop sum=1 derives slot<10, not assumed."
     },
     {
-      "start": 405,
-      "end": 409,
+      "start": 452,
+      "end": 456,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1267,8 +1329,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 410,
-      "end": 411,
+      "start": 457,
+      "end": 458,
       "status": "translated",
       "label": "Active token comparison",
       "declarations": [
@@ -1285,122 +1347,7 @@
       "note": "Actual slot<token_count comparison; no unstated token_count<=10/registry-uniqueness/zero-suffix gate."
     },
     {
-      "start": 412,
-      "end": 412,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 413,
-      "end": 417,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 418,
-      "end": 426,
-      "status": "translated",
-      "label": "Ciphertext and base-token selectors",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
-        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
-      ],
-      "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
-        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
-      ],
-      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
-    },
-    {
-      "start": 427,
-      "end": 430,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 431,
-      "end": 436,
-      "status": "translated",
-      "label": "Ciphertext and base-token selectors",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
-        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
-      ],
-      "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
-        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
-        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
-      ],
-      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
-    },
-    {
-      "start": 437,
-      "end": 450,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 451,
-      "end": 454,
-      "status": "translated",
-      "label": "Regev allocations and digest calls",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
-        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
-        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
-      ],
-      "theorems": [],
-      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
-    },
-    {
-      "start": 455,
-      "end": 456,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 457,
-      "end": 457,
-      "status": "translated",
-      "label": "Regev allocations and digest calls",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
-        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
-        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
-        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
-      ],
-      "theorems": [],
-      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
-    },
-    {
-      "start": 458,
+      "start": 459,
       "end": 459,
       "status": "non-executable",
       "label": "Comment or whitespace",
@@ -1410,7 +1357,128 @@
     },
     {
       "start": 460,
-      "end": 462,
+      "end": 464,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 465,
+      "end": 465,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 466,
+      "end": 467,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 468,
+      "end": 473,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 474,
+      "end": 475,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 476,
+      "end": 477,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 478,
+      "end": 481,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 482,
+      "end": 487,
+      "status": "translated",
+      "label": "Ciphertext and base-token selectors",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectLoop",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedDigest",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectedToken",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selectChain",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_loop_selects_exact_exposed_slot",
+        "Zkp.Implementation.WithdrawalClaimCircuit.selected_payment_asset_and_ciphertext",
+        "Zkp.Implementation.WithdrawalClaimCircuit.select_chain_is_select_loop"
+      ],
+      "note": "Ordered last-selected-value loops over same PI equality flags;8 limb selection represented by record selection with same flags. Registry/ciphertext outputs are connected to PIs."
+    },
+    {
+      "start": 488,
+      "end": 501,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 502,
+      "end": 505,
       "status": "translated",
       "label": "Regev allocations and digest calls",
       "declarations": [
@@ -1425,8 +1493,8 @@
       "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
     },
     {
-      "start": 463,
-      "end": 481,
+      "start": 506,
+      "end": 507,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1434,8 +1502,58 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 482,
-      "end": 494,
+      "start": 508,
+      "end": 508,
+      "status": "translated",
+      "label": "Regev allocations and digest calls",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [],
+      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
+    },
+    {
+      "start": 509,
+      "end": 510,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 511,
+      "end": 513,
+      "status": "translated",
+      "label": "Regev allocations and digest calls",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Polynomials",
+        "Zkp.Implementation.WithdrawalClaimCircuit.pkPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ctPreimage",
+        "Zkp.Implementation.WithdrawalClaimCircuit.computedPk",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CircuitGates",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds"
+      ],
+      "theorems": [],
+      "note": "Four2048-target polynomials and exact IMRP/IMRC input domains; digest algorithms/canonical split and later core input canonicality are dependencies, not proved here."
+    },
+    {
+      "start": 514,
+      "end": 532,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 533,
+      "end": 545,
       "status": "translated",
       "label": "Full slot leaf and Merkle inclusion",
       "declarations": [
@@ -1455,8 +1573,8 @@
       "note": "Exact104-word IMS2 leaf includes PIrecipient and all10rows/counters; source height10 path. Concrete opening and compared leaf-hash binding explicit, no global finite-hash injectivity or assumed payment equality."
     },
     {
-      "start": 495,
-      "end": 495,
+      "start": 546,
+      "end": 546,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1464,8 +1582,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 496,
-      "end": 496,
+      "start": 547,
+      "end": 547,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1473,8 +1591,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 497,
-      "end": 505,
+      "start": 548,
+      "end": 556,
       "status": "translated",
       "label": "Decryption call and amount connections",
       "declarations": [
@@ -1490,8 +1608,8 @@
       "note": "Calls imported core with expose_amount=true, binds returnedlo/hi to PIhi/lo correctly. Full ring/digit/decrypt semantics are NOT discharged; only caller connection to specified core output."
     },
     {
-      "start": 506,
-      "end": 506,
+      "start": 557,
+      "end": 557,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1499,8 +1617,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 507,
-      "end": 510,
+      "start": 558,
+      "end": 561,
       "status": "translated",
       "label": "Decryption call and amount connections",
       "declarations": [
@@ -1516,8 +1634,8 @@
       "note": "Calls imported core with expose_amount=true, binds returnedlo/hi to PIhi/lo correctly. Full ring/digit/decrypt semantics are NOT discharged; only caller connection to specified core output."
     },
     {
-      "start": 511,
-      "end": 511,
+      "start": 562,
+      "end": 562,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1525,8 +1643,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 512,
-      "end": 527,
+      "start": 563,
+      "end": 578,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1534,8 +1652,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 528,
-      "end": 539,
+      "start": 579,
+      "end": 590,
       "status": "translated",
       "label": "IMW2 nullifier derivation",
       "declarations": [
@@ -1554,8 +1672,8 @@
       "note": "Exact18-word closeId/keyDigest/tokenSlot domain. Same inputs give same output unconditionally; inverse requires concrete collision-binding premise. No slot-index or member_pk_g key fabricated."
     },
     {
-      "start": 540,
-      "end": 540,
+      "start": 591,
+      "end": 591,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1563,8 +1681,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 541,
-      "end": 546,
+      "start": 592,
+      "end": 597,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1572,8 +1690,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 547,
-      "end": 581,
+      "start": 598,
+      "end": 607,
       "status": "translated",
       "label": "Public registration build and returned handles",
       "declarations": [
@@ -1591,8 +1709,64 @@
       "note": "Registers50 original PI words and records observation boundaries; proof/compiler implementation remains external."
     },
     {
-      "start": 582,
-      "end": 582,
+      "start": 608,
+      "end": 626,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 627,
+      "end": 649,
+      "status": "translated",
+      "label": "Public registration build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Profile",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readPublic",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ProgramSatisfied"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Registers50 original PI words and records observation boundaries; proof/compiler implementation remains external."
+    },
+    {
+      "start": 650,
+      "end": 651,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 652,
+      "end": 653,
+      "status": "translated",
+      "label": "Public registration build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.constructorProgram",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp",
+        "Zkp.Implementation.WithdrawalClaimCircuit.Profile",
+        "Zkp.Implementation.WithdrawalClaimCircuit.PublicInputs.words",
+        "Zkp.Implementation.WithdrawalClaimCircuit.readPublic",
+        "Zkp.Implementation.WithdrawalClaimCircuit.BuildOp.holds",
+        "Zkp.Implementation.WithdrawalClaimCircuit.ProgramSatisfied"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.public_input_width_is_50"
+      ],
+      "note": "Registers50 original PI words and records observation boundaries; proof/compiler implementation remains external."
+    },
+    {
+      "start": 654,
+      "end": 654,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1600,8 +1774,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 583,
-      "end": 606,
+      "start": 655,
+      "end": 678,
       "status": "translated",
       "label": "Native fill initial guard and assignments",
       "declarations": [
@@ -1616,8 +1790,8 @@
       "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
     },
     {
-      "start": 607,
-      "end": 608,
+      "start": 679,
+      "end": 680,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1625,8 +1799,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 609,
-      "end": 618,
+      "start": 681,
+      "end": 690,
       "status": "translated",
       "label": "Native fill initial guard and assignments",
       "declarations": [
@@ -1641,8 +1815,8 @@
       "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
     },
     {
-      "start": 619,
-      "end": 620,
+      "start": 691,
+      "end": 692,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1650,8 +1824,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 621,
-      "end": 645,
+      "start": 693,
+      "end": 717,
       "status": "translated",
       "label": "Native fill initial guard and assignments",
       "declarations": [
@@ -1666,8 +1840,8 @@
       "note": "Only native explicit admission check is memberIndex<1024 here. Ordered PI/header/path/row writes model assignment effects/panics by callbacks; stronger PIS helper is NOT silently invoked."
     },
     {
-      "start": 646,
-      "end": 647,
+      "start": 718,
+      "end": 719,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1675,8 +1849,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 648,
-      "end": 670,
+      "start": 720,
+      "end": 742,
       "status": "translated",
       "label": "Native polynomial zip and decryption witness",
       "declarations": [
@@ -1691,8 +1865,8 @@
       "note": "Zip preserves min length; same four polynomials+secret go to buildCore, error mapped verbatim, then fillCore. Imported builder's detailed ring/noise/length checks remain dependency."
     },
     {
-      "start": 671,
-      "end": 671,
+      "start": 743,
+      "end": 743,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1700,8 +1874,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 672,
-      "end": 673,
+      "start": 744,
+      "end": 745,
       "status": "translated",
       "label": "Native polynomial zip and decryption witness",
       "declarations": [
@@ -1716,8 +1890,8 @@
       "note": "Zip preserves min length; same four polynomials+secret go to buildCore, error mapped verbatim, then fillCore. Imported builder's detailed ring/noise/length checks remain dependency."
     },
     {
-      "start": 674,
-      "end": 674,
+      "start": 746,
+      "end": 746,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1725,8 +1899,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 675,
-      "end": 684,
+      "start": 747,
+      "end": 756,
       "status": "translated",
       "label": "Native prove",
       "declarations": [
@@ -1738,8 +1912,8 @@
       "note": "Actual fill-then-data.prove sequencing/error propagation. Does not prove backend proof soundness or finalization."
     },
     {
-      "start": 685,
-      "end": 685,
+      "start": 757,
+      "end": 757,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1747,8 +1921,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 686,
-      "end": 695,
+      "start": 758,
+      "end": 767,
       "status": "translated",
       "label": "Default constructor",
       "declarations": [
@@ -1760,221 +1934,17 @@
       "note": "Default delegates exactly to constructor, not a separate configuration."
     },
     {
-      "start": 696,
-      "end": 696,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 697,
-      "end": 700,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 701,
-      "end": 705,
-      "status": "translated",
-      "label": "less_than_u32 implementation",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
-      ],
-      "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
-      ],
-      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
-    },
-    {
-      "start": 706,
-      "end": 708,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 709,
-      "end": 713,
-      "status": "translated",
-      "label": "less_than_u32 implementation",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
-      ],
-      "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
-      ],
-      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
-    },
-    {
-      "start": 714,
-      "end": 714,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 715,
-      "end": 721,
-      "status": "translated",
-      "label": "less_than_u32 implementation",
-      "declarations": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
-        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
-        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
-      ],
-      "theorems": [
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
-        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
-        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
-        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
-      ],
-      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
-    },
-    {
-      "start": 722,
-      "end": 725,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 726,
-      "end": 728,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
-    },
-    {
-      "start": 729,
-      "end": 729,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 730,
-      "end": 733,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
-    },
-    {
-      "start": 734,
-      "end": 734,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 735,
-      "end": 751,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
-    },
-    {
-      "start": 752,
-      "end": 752,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 753,
-      "end": 755,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
-    },
-    {
-      "start": 756,
-      "end": 756,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 757,
-      "end": 760,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
-    },
-    {
-      "start": 761,
-      "end": 765,
-      "status": "non-executable",
-      "label": "Comment or whitespace",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
-    },
-    {
-      "start": 766,
+      "start": 768,
       "end": 768,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
+      "status": "non-executable",
+      "label": "Comment or whitespace",
       "declarations": [],
       "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
       "start": 769,
-      "end": 771,
+      "end": 772,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -1982,17 +1952,31 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 772,
+      "start": 773,
       "end": 777,
-      "status": "untranslated",
-      "label": "Feature-enabled witness/proof fixtures",
-      "declarations": [],
-      "theorems": [],
-      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
     },
     {
       "start": 778,
-      "end": 778,
+      "end": 780,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2000,8 +1984,72 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 779,
-      "end": 787,
+      "start": 781,
+      "end": 785,
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
+    },
+    {
+      "start": 786,
+      "end": 786,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 787,
+      "end": 793,
+      "status": "translated",
+      "label": "less_than_u32 implementation",
+      "declarations": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.Comparison33",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparisonResult",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitsValue",
+        "Zkp.Implementation.WithdrawalClaimCircuit.bitCount",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.result",
+        "Zkp.Implementation.WithdrawalClaimCircuit.CompareWires.Enforces"
+      ],
+      "theorems": [
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_bound",
+        "Zkp.Implementation.WithdrawalClaimCircuit.packed_bits_zero_iff_bit_sum_zero",
+        "Zkp.Implementation.WithdrawalClaimCircuit.comparison_result_iff_strict_less",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_expose_comparison",
+        "Zkp.Implementation.WithdrawalClaimCircuit.compare_wires_force_strict_less"
+      ],
+      "note": "33-bit shifted subtraction represented by its local natural-number equation plus actual boolean decomposition and low-bit sum. Modular-to-integer lowering is explicit dependency, strict order is derived."
+    },
+    {
+      "start": 794,
+      "end": 797,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 798,
+      "end": 800,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2009,8 +2057,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 788,
-      "end": 789,
+      "start": 801,
+      "end": 801,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2018,8 +2066,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 790,
-      "end": 794,
+      "start": 802,
+      "end": 805,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2027,8 +2075,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 795,
-      "end": 796,
+      "start": 806,
+      "end": 806,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2036,8 +2084,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 797,
-      "end": 873,
+      "start": 807,
+      "end": 823,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2045,8 +2093,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 874,
-      "end": 875,
+      "start": 824,
+      "end": 824,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2054,8 +2102,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 876,
-      "end": 877,
+      "start": 825,
+      "end": 827,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2063,8 +2111,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 878,
-      "end": 878,
+      "start": 828,
+      "end": 828,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2072,8 +2120,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 879,
-      "end": 882,
+      "start": 829,
+      "end": 832,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2081,8 +2129,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 883,
-      "end": 884,
+      "start": 833,
+      "end": 837,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2090,8 +2138,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 885,
-      "end": 896,
+      "start": 838,
+      "end": 840,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2099,8 +2147,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 897,
-      "end": 897,
+      "start": 841,
+      "end": 843,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2108,8 +2156,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 898,
-      "end": 905,
+      "start": 844,
+      "end": 849,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2117,8 +2165,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 906,
-      "end": 908,
+      "start": 850,
+      "end": 850,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2126,8 +2174,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 909,
-      "end": 909,
+      "start": 851,
+      "end": 859,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2135,8 +2183,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 910,
-      "end": 910,
+      "start": 860,
+      "end": 861,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2144,8 +2192,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 911,
-      "end": 911,
+      "start": 862,
+      "end": 866,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2153,8 +2201,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 912,
-      "end": 919,
+      "start": 867,
+      "end": 868,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2162,8 +2210,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 920,
-      "end": 929,
+      "start": 869,
+      "end": 945,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2171,8 +2219,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 930,
-      "end": 930,
+      "start": 946,
+      "end": 947,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2180,8 +2228,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 931,
-      "end": 1035,
+      "start": 948,
+      "end": 949,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2189,8 +2237,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 1036,
-      "end": 1036,
+      "start": 950,
+      "end": 950,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2198,8 +2246,8 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 1037,
-      "end": 1063,
+      "start": 951,
+      "end": 954,
       "status": "untranslated",
       "label": "Feature-enabled witness/proof fixtures",
       "declarations": [],
@@ -2207,8 +2255,8 @@
       "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
     },
     {
-      "start": 1064,
-      "end": 1064,
+      "start": 955,
+      "end": 956,
       "status": "non-executable",
       "label": "Comment or whitespace",
       "declarations": [],
@@ -2216,8 +2264,152 @@
       "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
     },
     {
-      "start": 1065,
-      "end": 1427,
+      "start": 957,
+      "end": 968,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 969,
+      "end": 969,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 970,
+      "end": 977,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 978,
+      "end": 980,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 981,
+      "end": 981,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 982,
+      "end": 982,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 983,
+      "end": 983,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 984,
+      "end": 991,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 992,
+      "end": 1001,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 1002,
+      "end": 1002,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 1003,
+      "end": 1107,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 1108,
+      "end": 1108,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 1109,
+      "end": 1135,
+      "status": "untranslated",
+      "label": "Feature-enabled witness/proof fixtures",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read in full, not translated or executed. Also enabled under withdrawal-claim-fixture-bin, so not mislabeled test-only; no production constraint/proof claims."
+    },
+    {
+      "start": 1136,
+      "end": 1136,
+      "status": "non-executable",
+      "label": "Comment or whitespace",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read commentary/blank line; stale or caller-dependent prose is not a callee guarantee."
+    },
+    {
+      "start": 1137,
+      "end": 1498,
+      "status": "test-only",
+      "label": "Unit tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read only. No proof tests executed and no test assertions are treated as production gates or linked property proofs."
+    },
+    {
+      "start": 1499,
+      "end": 1752,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 1753,
+      "end": 1753,
       "status": "test-only",
       "label": "Unit tests",
       "declarations": [],

@@ -96,6 +96,8 @@ CURRENT = {
         "Zkp.Implementation.FalconAggProgram",
         "Zkp.Implementation.FalconGadgetProgram",
         "Zkp.Implementation.LedgerWriters",
+        "Zkp.Implementation.BackingBridge",
+        "Zkp.Implementation.NttCorrectness",
     ),
 }
 ARCH_ROOTS = frozenset({

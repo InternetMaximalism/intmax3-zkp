@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/falcon_sig/agg.rs",
-  "source_sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
-  "source_lines": 1201,
+  "source_sha256": "dbcd34e136c8e8127e7732099f4fd8ed83d3c673524869926a0e02eb0a071f15",
+  "source_lines": 1562,
   "module": "Zkp.Implementation.FalconAggregate",
   "model": "doc/audit/zkp/Zkp/Implementation/FalconAggregate.lean",
   "refinement": "not-proved",
@@ -208,7 +208,7 @@
     },
     {
       "start": 340,
-      "end": 369,
+      "end": 359,
       "status": "non-executable",
       "label": "FalconAggLevelCircuit struct, field docs and impl header",
       "declarations": [],
@@ -216,8 +216,26 @@
       "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
     },
     {
-      "start": 370,
-      "end": 391,
+      "start": 360,
+      "end": 393,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 394,
+      "end": 403,
+      "status": "non-executable",
+      "label": "FalconAggLevelCircuit struct, field docs and impl header",
+      "declarations": [],
+      "theorems": [],
+      "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
+    },
+    {
+      "start": 404,
+      "end": 425,
       "status": "translated",
       "label": "level range, child arity gate and the const-asserted leaf layout",
       "declarations": [
@@ -231,8 +249,8 @@
       "note": "The induction base (leaf PI 8 is the verifier-enforced constant 1) is modelled as leafStatement's count field."
     },
     {
-      "start": 392,
-      "end": 405,
+      "start": 426,
+      "end": 439,
       "status": "dependency-boundary",
       "label": "builder creation, constant-VK child verification, conditional verification, bool target",
       "declarations": [],
@@ -240,8 +258,8 @@
       "note": "Recursive verification at a build-time constant verifier key and BoolTarget safety are premises (constantVerifierKeyBinding, proofVerificationOpaque)."
     },
     {
-      "start": 406,
-      "end": 448,
+      "start": 440,
+      "end": 478,
       "status": "translated",
       "label": "the level's constraints: gated message equality, gated count, left-packing, gated pk slots",
       "declarations": [
@@ -266,8 +284,78 @@
       "note": "The constraint system is read as a partial function; its error constructors mark unsatisfiable witnesses, not runtime errors."
     },
     {
-      "start": 449,
-      "end": 477,
+      "start": 479,
+      "end": 480,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 481,
+      "end": 482,
+      "status": "translated",
+      "label": "the level's constraints: gated message equality, gated count, left-packing, gated pk slots",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.levelCompose",
+        "Zkp.Implementation.FalconAggregate.messageAgrees",
+        "Zkp.Implementation.FalconAggregate.gateLimbs",
+        "Zkp.Implementation.FalconAggregate.gateSlots",
+        "Zkp.Implementation.FalconAggregate.AggStatement",
+        "Zkp.Implementation.FalconAggregate.AggError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.level_count_is_the_gated_sum",
+        "Zkp.Implementation.FalconAggregate.level_message_is_the_left_message",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_message_agreement",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_full_left_child",
+        "Zkp.Implementation.FalconAggregate.message_agrees_iff_eq",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_present",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_absent_is_zero",
+        "Zkp.Implementation.FalconAggregate.gate_slots_present",
+        "Zkp.Implementation.FalconAggregate.gate_slots_absent"
+      ],
+      "note": "The constraint system is read as a partial function; its error constructors mark unsatisfiable witnesses, not runtime errors."
+    },
+    {
+      "start": 483,
+      "end": 484,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 485,
+      "end": 486,
+      "status": "translated",
+      "label": "the level's constraints: gated message equality, gated count, left-packing, gated pk slots",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.levelCompose",
+        "Zkp.Implementation.FalconAggregate.messageAgrees",
+        "Zkp.Implementation.FalconAggregate.gateLimbs",
+        "Zkp.Implementation.FalconAggregate.gateSlots",
+        "Zkp.Implementation.FalconAggregate.AggStatement",
+        "Zkp.Implementation.FalconAggregate.AggError"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.level_count_is_the_gated_sum",
+        "Zkp.Implementation.FalconAggregate.level_message_is_the_left_message",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_message_agreement",
+        "Zkp.Implementation.FalconAggregate.level_present_forces_full_left_child",
+        "Zkp.Implementation.FalconAggregate.message_agrees_iff_eq",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_present",
+        "Zkp.Implementation.FalconAggregate.gate_limbs_absent_is_zero",
+        "Zkp.Implementation.FalconAggregate.gate_slots_present",
+        "Zkp.Implementation.FalconAggregate.gate_slots_absent"
+      ],
+      "note": "The constraint system is read as a partial function; its error constructors mark unsatisfiable witnesses, not runtime errors."
+    },
+    {
+      "start": 487,
+      "end": 505,
       "status": "dependency-boundary",
       "label": "build, release-mode arity assert and the canonical dummy proof",
       "declarations": [
@@ -279,8 +367,52 @@
       "note": "DummyProof::new reconstructs the child circuit from its CommonCircuitData; only the width of its untrusted public inputs is used."
     },
     {
-      "start": 478,
-      "end": 485,
+      "start": 506,
+      "end": 522,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 523,
+      "end": 530,
+      "status": "dependency-boundary",
+      "label": "build, release-mode arity assert and the canonical dummy proof",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.dummyStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.absent_right_child_statement_is_ignored"
+      ],
+      "note": "DummyProof::new reconstructs the child circuit from its CommonCircuitData; only the width of its untrusted public inputs is used."
+    },
+    {
+      "start": 531,
+      "end": 532,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 533,
+      "end": 534,
+      "status": "dependency-boundary",
+      "label": "build, release-mode arity assert and the canonical dummy proof",
+      "declarations": [
+        "Zkp.Implementation.FalconAggregate.dummyStatement"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconAggregate.absent_right_child_statement_is_ignored"
+      ],
+      "note": "DummyProof::new reconstructs the child circuit from its CommonCircuitData; only the width of its untrusted public inputs is used."
+    },
+    {
+      "start": 535,
+      "end": 542,
       "status": "dependency-boundary",
       "label": "verifier_data accessor and prove documentation",
       "declarations": [],
@@ -288,8 +420,8 @@
       "note": "Accessor over plonky2 circuit data."
     },
     {
-      "start": 486,
-      "end": 505,
+      "start": 543,
+      "end": 562,
       "status": "translated",
       "label": "FalconAggLevelCircuit::prove: left child always, right child optional",
       "declarations": [
@@ -303,8 +435,8 @@
       "note": "The node shape (left always present, right optional) is modelled; the proving itself is not."
     },
     {
-      "start": 506,
-      "end": 535,
+      "start": 563,
+      "end": 592,
       "status": "non-executable",
       "label": "facade banner, struct and Default",
       "declarations": [],
@@ -312,8 +444,8 @@
       "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
     },
     {
-      "start": 536,
-      "end": 570,
+      "start": 593,
+      "end": 627,
       "status": "dependency-boundary",
       "label": "FalconAggCircuit::new and the top/data/verifier_data accessors",
       "declarations": [],
@@ -321,8 +453,8 @@
       "note": "Circuit construction and verifier-data plumbing are outside the model."
     },
     {
-      "start": 571,
-      "end": 584,
+      "start": 628,
+      "end": 641,
       "status": "untranslated",
       "label": "top_level_for: the minimal level for n signers",
       "declarations": [],
@@ -330,8 +462,8 @@
       "note": "Prover-side level selection is not modelled."
     },
     {
-      "start": 585,
-      "end": 625,
+      "start": 642,
+      "end": 682,
       "status": "untranslated",
       "label": "aggregate: same-message precheck and bottom-up chunked folding",
       "declarations": [],
@@ -339,8 +471,8 @@
       "note": "The prover-side scheduling is not modelled; the in-circuit message-equality constraint that actually binds is (see the 406-448 span)."
     },
     {
-      "start": 626,
-      "end": 655,
+      "start": 683,
+      "end": 712,
       "status": "translated",
       "label": "aggregate_to_level: lifting a node with the right subtree absent",
       "declarations": [
@@ -355,8 +487,8 @@
       "note": "The lift is the nodeLeftOnly case: message and count copied, new right half provably zero."
     },
     {
-      "start": 656,
-      "end": 681,
+      "start": 713,
+      "end": 738,
       "status": "translated",
       "label": "FalconAggCircuit::prove: the 1..=MAX_SIG_CLUSTER range and the shared-message precheck",
       "declarations": [
@@ -371,8 +503,8 @@
       "note": "The exposed statement of an accepted tree is characterised; the leaf-by-leaf proving order is not."
     },
     {
-      "start": 682,
-      "end": 685,
+      "start": 739,
+      "end": 742,
       "status": "non-executable",
       "label": "tests banner",
       "declarations": [],
@@ -380,8 +512,26 @@
       "note": "Comments / banners / blank lines: no executable constraint is inferred from them."
     },
     {
-      "start": 686,
-      "end": 1201,
+      "start": 743,
+      "end": 1257,
+      "status": "test-only",
+      "label": "adversarial and measurement test suite",
+      "declarations": [],
+      "theorems": [],
+      "note": "Rust #[cfg(test)] module: read in full, not translated."
+    },
+    {
+      "start": 1258,
+      "end": 1561,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 1562,
+      "end": 1562,
       "status": "test-only",
       "label": "adversarial and measurement test suite",
       "declarations": [],

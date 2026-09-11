@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/falcon_sig/gadget.rs",
-  "source_sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
-  "source_lines": 1766,
+  "source_sha256": "e380bf8c579ecd9caa65bd8ab375be6ba829dd312addcd3c5d13a11ff1011620",
+  "source_lines": 2053,
   "module": "Zkp.Implementation.FalconCore",
   "model": "doc/audit/zkp/Zkp/Implementation/FalconCore.lean",
   "refinement": "not-proved",
@@ -313,7 +313,7 @@
     },
     {
       "start": 589,
-      "end": 606,
+      "end": 605,
       "status": "translated",
       "label": "FalconSigVerifyTarget: inputs and witnesses",
       "declarations": [
@@ -323,8 +323,28 @@
       "note": "Field roles (input vs witness) are modelled as fields of the witness record; target allocation is not."
     },
     {
-      "start": 607,
-      "end": 619,
+      "start": 606,
+      "end": 641,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 642,
+      "end": 642,
+      "status": "translated",
+      "label": "FalconSigVerifyTarget: inputs and witnesses",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitWitness"
+      ],
+      "theorems": [],
+      "note": "Field roles (input vs witness) are modelled as fields of the witness record; target allocation is not."
+    },
+    {
+      "start": 643,
+      "end": 655,
       "status": "translated",
       "label": "FalconSigVerifyTarget::new (unconditional variant)",
       "declarations": [
@@ -337,8 +357,8 @@
       "note": "new corresponds to the gate set with the verify wire fixed to 1."
     },
     {
-      "start": 620,
-      "end": 649,
+      "start": 656,
+      "end": 685,
       "status": "translated",
       "label": "new_conditional: only the norm comparison is gated",
       "declarations": [
@@ -354,8 +374,8 @@
       "note": "The gate wire is not constrained by the gadget; binding it is a consumer obligation named as a boundary."
     },
     {
-      "start": 650,
-      "end": 736,
+      "start": 686,
+      "end": 764,
       "status": "translated",
       "label": "build: range checks, pk binding, H2P, NTT equation, centered norm, 26-bit slack",
       "declarations": [
@@ -386,8 +406,90 @@
       "note": "Gate set modelled over arbitrary witnesses, not only the ones the Rust generator produces."
     },
     {
-      "start": 737,
-      "end": 795,
+      "start": 765,
+      "end": 780,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 781,
+      "end": 786,
+      "status": "translated",
+      "label": "build: range checks, pk binding, H2P, NTT equation, centered norm, 26-bit slack",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitSatisfied",
+        "Zkp.Implementation.FalconCore.circuitNorm",
+        "Zkp.Implementation.FalconCore.circuitSumSquares",
+        "Zkp.Implementation.FalconCore.fieldSub",
+        "Zkp.Implementation.FalconCore.reconstructS1",
+        "Zkp.Implementation.FalconCore.subModQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.circuit_norm_ceiling",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_norm_bound",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_verify",
+        "Zkp.Implementation.FalconCore.slack_range_check_is_exact",
+        "Zkp.Implementation.FalconCore.beta_squared_fits_26_bits",
+        "Zkp.Implementation.FalconCore.honest_and_adversarial_norm_ceilings",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_ge_native",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_bound",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_cons",
+        "Zkp.Implementation.FalconCore.circuit_accepts_s2_outside_transport_band",
+        "Zkp.Implementation.FalconCore.band_divergence_witness_satisfied",
+        "Zkp.Implementation.FalconCore.max_norm_no_field_wrap",
+        "Zkp.Implementation.FalconCore.norm_squared_no_field_wrap",
+        "Zkp.Implementation.FalconCore.sub_mod_q_lt",
+        "Zkp.Implementation.FalconCore.sum_squares_bound"
+      ],
+      "note": "Gate set modelled over arbitrary witnesses, not only the ones the Rust generator produces."
+    },
+    {
+      "start": 787,
+      "end": 788,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 789,
+      "end": 790,
+      "status": "translated",
+      "label": "build: range checks, pk binding, H2P, NTT equation, centered norm, 26-bit slack",
+      "declarations": [
+        "Zkp.Implementation.FalconCore.CircuitSatisfied",
+        "Zkp.Implementation.FalconCore.circuitNorm",
+        "Zkp.Implementation.FalconCore.circuitSumSquares",
+        "Zkp.Implementation.FalconCore.fieldSub",
+        "Zkp.Implementation.FalconCore.reconstructS1",
+        "Zkp.Implementation.FalconCore.subModQ"
+      ],
+      "theorems": [
+        "Zkp.Implementation.FalconCore.circuit_norm_ceiling",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_norm_bound",
+        "Zkp.Implementation.FalconCore.circuit_active_slot_implies_native_verify",
+        "Zkp.Implementation.FalconCore.slack_range_check_is_exact",
+        "Zkp.Implementation.FalconCore.beta_squared_fits_26_bits",
+        "Zkp.Implementation.FalconCore.honest_and_adversarial_norm_ceilings",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_ge_native",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_bound",
+        "Zkp.Implementation.FalconCore.circuit_sum_squares_cons",
+        "Zkp.Implementation.FalconCore.circuit_accepts_s2_outside_transport_band",
+        "Zkp.Implementation.FalconCore.band_divergence_witness_satisfied",
+        "Zkp.Implementation.FalconCore.max_norm_no_field_wrap",
+        "Zkp.Implementation.FalconCore.norm_squared_no_field_wrap",
+        "Zkp.Implementation.FalconCore.sub_mod_q_lt",
+        "Zkp.Implementation.FalconCore.sum_squares_bound"
+      ],
+      "note": "Gate set modelled over arbitrary witnesses, not only the ones the Rust generator produces."
+    },
+    {
+      "start": 791,
+      "end": 849,
       "status": "untranslated",
       "label": "set_witness and set_signature_witness",
       "declarations": [],
@@ -395,8 +497,8 @@
       "note": "PartialWitness plumbing; the model reasons about witness values directly."
     },
     {
-      "start": 796,
-      "end": 856,
+      "start": 850,
+      "end": 910,
       "status": "translated",
       "label": "FalconSigGadgetWitness::for_signature and ::padding",
       "declarations": [
@@ -418,8 +520,8 @@
       "note": "The balanced-to-residue map and the all-zero padding witness are modelled and shown to satisfy the gate set."
     },
     {
-      "start": 857,
-      "end": 868,
+      "start": 911,
+      "end": 922,
       "status": "translated",
       "label": "salt_to_elements: 5 little-endian bytes per element",
       "declarations": [
@@ -435,8 +537,8 @@
       "note": "Handwritten local semantics; no source/compiler refinement."
     },
     {
-      "start": 869,
-      "end": 928,
+      "start": 923,
+      "end": 982,
       "status": "untranslated",
       "label": "FalconSigCircuit standalone harness (build, public inputs, prove)",
       "declarations": [],
@@ -444,8 +546,8 @@
       "note": "Circuit building, public-input registration and proving are outside the model."
     },
     {
-      "start": 929,
-      "end": 932,
+      "start": 983,
+      "end": 986,
       "status": "non-executable",
       "label": "Tests section comment",
       "declarations": [],
@@ -453,8 +555,26 @@
       "note": "Documentation only."
     },
     {
-      "start": 933,
-      "end": 1766,
+      "start": 987,
+      "end": 1819,
+      "status": "test-only",
+      "label": "#[cfg(test)] suite: bound ledger, NTT oracle, KAT mirrors, adversarial cases, measurement",
+      "declarations": [],
+      "theorems": [],
+      "note": "Test code; the model states the corresponding properties as theorems."
+    },
+    {
+      "start": 1820,
+      "end": 2052,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 2053,
+      "end": 2053,
       "status": "test-only",
       "label": "#[cfg(test)] suite: bound ledger, NTT oracle, KAT mirrors, adversarial cases, measurement",
       "declarations": [],

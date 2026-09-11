@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/circuits/channel/post_close_claim_circuit.rs",
-  "source_sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
-  "source_lines": 1221,
+  "source_sha256": "12c48948536a9ca6b81052d0aef5a3a3cb4a22d2aeae70f6103b6f7056353faa",
+  "source_lines": 1557,
   "module": "Zkp.Implementation.PostCloseClaimCircuit",
   "model": "doc/audit/zkp/Zkp/Implementation/PostCloseClaimCircuit.lean",
   "refinement": "not-proved",
@@ -125,7 +125,7 @@
     },
     {
       "start": 257,
-      "end": 306,
+      "end": 298,
       "status": "dependency-boundary",
       "label": "circuit data and private target handles",
       "declarations": [
@@ -137,8 +137,30 @@
       "note": "Handles represented by corresponding assignment fields; actual CircuitData/compiler/proof object not translated."
     },
     {
-      "start": 307,
-      "end": 320,
+      "start": 299,
+      "end": 336,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 337,
+      "end": 344,
+      "status": "dependency-boundary",
+      "label": "circuit data and private target handles",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimCircuit.RawWitness",
+        "Zkp.Implementation.PostCloseClaimCircuit.Environment",
+        "Zkp.Implementation.PostCloseClaimCircuit.FieldAndGadgetLowering"
+      ],
+      "theorems": [],
+      "note": "Handles represented by corresponding assignment fields; actual CircuitData/compiler/proof object not translated."
+    },
+    {
+      "start": 345,
+      "end": 358,
       "status": "translated",
       "label": "constructor config and initial allocation",
       "declarations": [
@@ -171,8 +193,8 @@
       "note": "Pinned standard_recursion_zk_config and range32 allocator; compiler behavior remains unproved. Per-primitive semantics: constructorProgram is the op-by-op transcription of these builder calls, BuildOp.holds/OpHolds give each op its local proposition on an Assignment read back by readWitness, and program_satisfied_implies_gates derives every ConstructorGates field from those alone; PrimitiveLowering is the residual per-primitive plonky2 obligation."
     },
     {
-      "start": 321,
-      "end": 345,
+      "start": 359,
+      "end": 383,
       "status": "translated",
       "label": "transaction sender and receiver wings",
       "declarations": [
@@ -187,8 +209,8 @@
       "note": "Two 17-word IMTL Keccak wings then 16-word concatenation; concrete Keccak primitive remains boundary."
     },
     {
-      "start": 346,
-      "end": 366,
+      "start": 384,
+      "end": 404,
       "status": "translated",
       "label": "token-bearing transaction folds and connect",
       "declarations": [
@@ -208,8 +230,8 @@
       "note": "Exact ids positions [0,0,0,0,0,token,destination,source]; local compared-hash binding only, no universal injectivity."
     },
     {
-      "start": 367,
-      "end": 378,
+      "start": 405,
+      "end": 416,
       "status": "dependency-boundary",
       "label": "accumulator allocation and canonical root decode",
       "declarations": [
@@ -224,8 +246,8 @@
       "note": "Exact modeled field-reduced pairs and encode-back equality; actual safe-split gadget refinement remains unproved. Not equated to native TryFrom."
     },
     {
-      "start": 379,
-      "end": 387,
+      "start": 417,
+      "end": 425,
       "status": "dependency-boundary",
       "label": "accumulator Merkle verification",
       "declarations": [
@@ -240,8 +262,8 @@
       "note": "20 siblings, split20 index, Poseidon hash of Bytes32 leaf and least-significant-first path modeled; hashing/gate/tree authentication are boundaries."
     },
     {
-      "start": 388,
-      "end": 409,
+      "start": 426,
+      "end": 447,
       "status": "translated",
       "label": "H1 scalar and slot field allocation",
       "declarations": [
@@ -256,8 +278,8 @@
       "note": "Member/delegate/token counts u32; registry ten u32; stateVersion two u32; leaf ten digests and counters. No zero suffix/floor implied by allocation."
     },
     {
-      "start": 410,
-      "end": 427,
+      "start": 448,
+      "end": 465,
       "status": "dependency-boundary",
       "label": "shared H1 recompute and final H1 connect",
       "declarations": [
@@ -277,8 +299,8 @@
       "note": "Exact 37-element call preimage, public channel and SAME accumulator root; shared Poseidon/canonical encoding remains dependency; consumer head binding is additional."
     },
     {
-      "start": 428,
-      "end": 444,
+      "start": 466,
+      "end": 470,
       "status": "translated",
       "label": "active sum and strict active-slot guards",
       "declarations": [
@@ -295,8 +317,62 @@
       "note": "Actual 11-bit active range, active<1025, index<active; 10-bit index supplied by Merkle dependency. No cosigner-only restriction."
     },
     {
-      "start": 445,
-      "end": 450,
+      "start": 471,
+      "end": 472,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 473,
+      "end": 480,
+      "status": "translated",
+      "label": "active sum and strict active-slot guards",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimCircuit.lessThanU32",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.rangeWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimCircuit.active_gate_bounds_full_member_delegate_region",
+        "Zkp.Implementation.PostCloseClaimCircuit.opened_slot_is_active_member_or_delegate",
+        "Zkp.Implementation.PostCloseClaimCircuit.member_or_delegate_classification"
+      ],
+      "note": "Actual 11-bit active range, active<1025, index<active; 10-bit index supplied by Merkle dependency. No cosigner-only restriction."
+    },
+    {
+      "start": 481,
+      "end": 484,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 485,
+      "end": 488,
+      "status": "translated",
+      "label": "active sum and strict active-slot guards",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimCircuit.lessThanU32",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConstructorGates",
+        "Zkp.Implementation.PostCloseClaimCircuit.rangeWires",
+        "Zkp.Implementation.PostCloseClaimCircuit.ConnectHolds"
+      ],
+      "theorems": [
+        "Zkp.Implementation.PostCloseClaimCircuit.active_gate_bounds_full_member_delegate_region",
+        "Zkp.Implementation.PostCloseClaimCircuit.opened_slot_is_active_member_or_delegate",
+        "Zkp.Implementation.PostCloseClaimCircuit.member_or_delegate_classification"
+      ],
+      "note": "Actual 11-bit active range, active<1025, index<active; 10-bit index supplied by Merkle dependency. No cosigner-only restriction."
+    },
+    {
+      "start": 489,
+      "end": 494,
       "status": "translated",
       "label": "Regev and delta vector allocation",
       "declarations": [
@@ -309,8 +385,8 @@
       "note": "Four vectors of REGEV_N=2048 virtual targets; internal canonical coefficient checks belong to decryption callee."
     },
     {
-      "start": 451,
-      "end": 467,
+      "start": 495,
+      "end": 511,
       "status": "dependency-boundary",
       "label": "Regev key digest and IMS2 slot leaf",
       "declarations": [
@@ -327,8 +403,8 @@
       "note": "Exact IMRP 4098 elements, canonical output encoding, and IMS2 104-element full row preimage with recipient PI; actual hash gadgets are dependencies."
     },
     {
-      "start": 468,
-      "end": 478,
+      "start": 512,
+      "end": 522,
       "status": "dependency-boundary",
       "label": "receiver slot Merkle verification",
       "declarations": [
@@ -344,8 +420,8 @@
       "note": "Height10 identity Hash4 leaf path; narrow two-opening authentication premise explicit and unproved, not an assumed global safety result."
     },
     {
-      "start": 479,
-      "end": 484,
+      "start": 523,
+      "end": 528,
       "status": "dependency-boundary",
       "label": "delta ciphertext digest connection",
       "declarations": [
@@ -361,8 +437,8 @@
       "note": "Exact same c1,c2 passed to 4098-word IMRC and decryption; canonical coefficients and Keccak implementation remain dependency."
     },
     {
-      "start": 485,
-      "end": 494,
+      "start": 529,
+      "end": 538,
       "status": "dependency-boundary",
       "label": "decryption-core call and exposed amount",
       "declarations": [
@@ -377,8 +453,8 @@
       "note": "Exact (a,b,c1,c2), expose_amount=true and dependency-private core. Internal polynomial/range/noise equations not translated in this module, no unconditional plaintext theorem."
     },
     {
-      "start": 495,
-      "end": 498,
+      "start": 539,
+      "end": 542,
       "status": "translated",
       "label": "amount high and low wire connects",
       "declarations": [
@@ -392,8 +468,8 @@
       "note": "Connect PI[0]=amount_hi and PI[1]=amount_lo, not reversed; PI width establishes uint64 integer bound."
     },
     {
-      "start": 499,
-      "end": 511,
+      "start": 543,
+      "end": 555,
       "status": "translated",
       "label": "shared nullifier preimage and connect",
       "declarations": [
@@ -410,8 +486,17 @@
       "note": "IMCK + close digest + incoming hash + pkG, exact 25 words. Hash primitive unproved and no replay-state claim."
     },
     {
-      "start": 512,
-      "end": 513,
+      "start": 556,
+      "end": 577,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 578,
+      "end": 579,
       "status": "dependency-boundary",
       "label": "public registration and circuit build",
       "declarations": [
@@ -427,8 +512,8 @@
       "note": "57 public words registered only after final nullifier connect; actual compiler/proof backend is unproved."
     },
     {
-      "start": 514,
-      "end": 542,
+      "start": 580,
+      "end": 605,
       "status": "translated",
       "label": "return all target handles",
       "declarations": [
@@ -440,8 +525,30 @@
       "note": "All source handles represented, no proof acceptance assumed from constructor return."
     },
     {
-      "start": 543,
-      "end": 555,
+      "start": 606,
+      "end": 607,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 608,
+      "end": 610,
+      "status": "translated",
+      "label": "return all target handles",
+      "declarations": [
+        "Zkp.Implementation.PostCloseClaimCircuit.RawWitness",
+        "Zkp.Implementation.PostCloseClaimCircuit.newCircuit",
+        "Zkp.Implementation.PostCloseClaimCircuit.constructorProgram"
+      ],
+      "theorems": [],
+      "note": "All source handles represented, no proof acceptance assumed from constructor return."
+    },
+    {
+      "start": 611,
+      "end": 623,
       "status": "translated",
       "label": "fill_witness first guard and public writes",
       "declarations": [
@@ -455,8 +562,8 @@
       "note": "Index>=1024 rejected BEFORE any witness assignment; partial witness allocation/writer implementation boundary."
     },
     {
-      "start": 556,
-      "end": 580,
+      "start": 624,
+      "end": 648,
       "status": "translated",
       "label": "fill transaction and accumulator assignment",
       "declarations": [
@@ -468,8 +575,8 @@
       "note": "Ordered hash/scalar/path writes and exact incoming index; canonical field conversion and path-shape assert may panic via writer boundary."
     },
     {
-      "start": 581,
-      "end": 606,
+      "start": 649,
+      "end": 674,
       "status": "translated",
       "label": "fill native header count and registry assignment",
       "declarations": [
@@ -480,8 +587,8 @@
       "note": "Native u8/u16/u8 counts remain narrower host representation only; full registry written in increasing array order."
     },
     {
-      "start": 607,
-      "end": 631,
+      "start": 675,
+      "end": 699,
       "status": "translated",
       "label": "fill slot root path fields and state scalars",
       "declarations": [
@@ -492,8 +599,8 @@
       "note": "Slot root/path/index then ten ciphertext digests, ten counters, settled chain and stateVersion, preserving source ordering."
     },
     {
-      "start": 632,
-      "end": 642,
+      "start": 700,
+      "end": 710,
       "status": "translated",
       "label": "set_poly zipper and four vector assignments",
       "declarations": [
@@ -507,8 +614,8 @@
       "note": "Writes zip(targets,values), no padding or implicit equality-length check; subsequent core builder handles length errors."
     },
     {
-      "start": 643,
-      "end": 655,
+      "start": 711,
+      "end": 723,
       "status": "dependency-boundary",
       "label": "build and fill decryption core",
       "declarations": [
@@ -520,8 +627,8 @@
       "note": "Exact key/cipher/secret call arguments; ordinary build error maps FailedToProve, panic remains distinct; generated core/amount projection opaque."
     },
     {
-      "start": 656,
-      "end": 659,
+      "start": 724,
+      "end": 727,
       "status": "translated",
       "label": "fill witness successful result",
       "declarations": [
@@ -533,8 +640,8 @@
       "note": "Returns assigned raw statement with generated core; no implication that adversarial circuit gates hold."
     },
     {
-      "start": 660,
-      "end": 670,
+      "start": 728,
+      "end": 738,
       "status": "dependency-boundary",
       "label": "prove wrapper",
       "declarations": [
@@ -547,8 +654,8 @@
       "note": "Actual fill error propagation then backend prove result/error; proof completeness/soundness/runtime not proved."
     },
     {
-      "start": 671,
-      "end": 681,
+      "start": 739,
+      "end": 749,
       "status": "translated",
       "label": "Default implementation",
       "declarations": [
@@ -561,8 +668,8 @@
       "note": "Direct call to same constructor."
     },
     {
-      "start": 682,
-      "end": 702,
+      "start": 750,
+      "end": 770,
       "status": "translated",
       "label": "strict small-u32 comparator",
       "declarations": [
@@ -574,8 +681,8 @@
       "note": "Integer lowered shifted33/highbit/nonzero-low equivalent on checked-u32 domain; low-bit sum zero equivalence and field/gate lowering retained in boundary."
     },
     {
-      "start": 703,
-      "end": 966,
+      "start": 771,
+      "end": 1034,
       "status": "untranslated",
       "label": "feature-gated shared fixture (also built by tests)",
       "declarations": [],
@@ -583,8 +690,26 @@
       "note": "Read completely; cfg(any(test, feature=\"post-close-claim-fixture-bin\")) also enables executable fixture functions in a feature build. These functions remain untranslated, not test-only and not proof coverage; no linked theorems."
     },
     {
-      "start": 967,
-      "end": 1221,
+      "start": 1035,
+      "end": 1288,
+      "status": "test-only",
+      "label": "unit tests",
+      "declarations": [],
+      "theorems": [],
+      "note": "Read completely; neither negative proof experiments nor production proving executed; no linked theorems."
+    },
+    {
+      "start": 1289,
+      "end": 1556,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 1557,
+      "end": 1557,
       "status": "test-only",
       "label": "unit tests",
       "declarations": [],
