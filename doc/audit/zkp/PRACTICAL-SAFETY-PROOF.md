@@ -1083,9 +1083,9 @@ KERNEL_AXIOMS = frozenset({"propext", "Classical.choice", "Quot.sound"})   # lea
 
 These are Lean's own kernel axioms. **No project-specific axiom is permitted**, and no manifest
 field can relax the allowlist. At this revision, 5,311 theorems are probed, and nothing outside the
-allowlist is observed. The per-axiom distribution across those theorems is
-<!-- TODO: number --> (the previous revision's figures no longer apply and the run that would
-refresh them did not reach its summary line).
+allowlist is observed. The per-axiom distribution across those theorems at this revision is: 1,859 depend on no
+axiom at all, 3,449 on `propext`, 1,797 on `Quot.sound` and 367 on `Classical.choice` (a theorem
+may count in several columns).
 
 ### 5.2 Counts at this revision
 
@@ -1099,7 +1099,7 @@ refresh them did not reach its summary line).
 | …of which in `Zkp.Implementation.*` | 5,092, across 74 modules |
 | line maps | 169 |
 | inventoried source files / physical lines | 237 / 119,449 |
-| mechanical faithfulness tables / rows | 7 / 275 |
+| mechanical faithfulness tables / rows | 7 / 280 |
 
 Two modules were added this loop — `Zkp.Implementation.BackingBridge` (52 theorems) and
 `Zkp.Implementation.NttCorrectness` (157) — and six runtime sources grew by the `#[cfg(test)]`-only
@@ -1268,29 +1268,28 @@ Computed from the seven checked-in `.tsv` tables:
 | `CloseCircuit` | 79 | 59 | 0 | 0 | 19 | 1 |
 | `WithdrawalClaimCircuit` | 48 | 30 | 0 | 0 | 10 | 8 |
 | `PostCloseClaimCircuit` | 48 | 35 | 0 | 0 | 12 | 1 |
-| `CloseAssetBacking` | 41 | 20 | 0 | 0 | 20 | 1 |
+| `CloseAssetBacking` | 46 | 27 | 0 | 0 | 16 | 3 |
 | `FalconGadgetProgram` | 29 | 17 | 5 | 0 | 5 | 2 |
 | `FalconAggProgram-leaf` | 9 | 6 | 0 | 0 | 1 | 2 |
 | `FalconAggProgram-level1` | 21 | 10 | 3 | 2 | 4 | 2 |
-| **total** | **275** | **177** | **8** | **2** | **71** | **17** |
+| **total** | **280** | **184** | **8** | **2** | **67** | **19** |
 
-By `kind`, the 275 rows are 76 `range`, 42 `gadget`, 39 `arith`, 34 `connect`, 21 `constant`,
-18 `public-inputs`, 17 `no-gate`, 16 `width`, 6 `aliasing`, 4 `config` and 2 `preimage`.
+By `kind`, the 280 rows are 76 `range`, 41 `gadget`, 38 `connect`, 36 `arith`, 23 `constant`, 19 `no-gate`, 18 `public-inputs`, 16 `width`, 7 `aliasing`, 4 `config` and 2 `preimage`.
 
 **No disagreement was found.** A row whose Lean `holds` claim does not hold in the built circuit is
 recorded as `MISMATCH`, the generating test fails on any such row, and **there is no `MISMATCH` row
-in any of the seven tables**. That is the whole of the positive result: 177 structural claims about
+in any of the seven tables**. That is the whole of the positive result: 184 structural claims about
 five circuits and two aggregation levels were checked against the circuit plonky2 built, and all 177
 held.
 
-**What is honestly not covered.** The 71 `not-static` rows are arithmetic and gadget semantics —
+**What is honestly not covered.** The 67 `not-static` rows are arithmetic and gadget semantics —
 invisible to the copy-constraint partition, because the partition records *which wires are equal*,
 not *what a gate computes*. **They stay in the per-primitive premise**, in (a), (b1), (b2), (c2) and
 (d1'), exactly as before. The 2 `not-injectable` rows are claims whose violation cannot be expressed
 through the circuit's public witness API at all (a `set_bool_target` that only accepts a genuine
-bool; a level-1 count gap the leaf's verifier already forces to a constant). The 17 `trivial` rows
+bool; a level-1 count gap the leaf's verifier already forces to a constant). The 19 `trivial` rows
 are ops whose Lean `holds` is `True` — config choices, struct literals, profiling reads — so there
-is nothing to check. **Checking 177 of 275 rows is not discharging obligation (i); it is bounding
+is nothing to check. **Checking 184 of 280 rows is not discharging obligation (i); it is bounding
 where a transcription error could still hide.**
 
 #### The line-number caveat
@@ -1529,7 +1528,7 @@ All of these are checked by the Lean kernel against the allowlist of §5.1.
    close-asset-backing 468, the Falcon gadget 23, the aggregation leaf 8, and `levelProgram k`
    23 + 8·2^(k−1) (31, 39, 55). This is obligation (i) of §3.1.
 
-   **The structural half is now machine-checked** against the circuit plonky2 built, and 177 of 275
+   **The structural half is now machine-checked** against the circuit plonky2 built, and 184 of 280
    table rows came back `ok` with no `MISMATCH` (§5.7). **The arithmetic and gadget half is not**:
    71 rows are `not-static`, 8 are covered only by sampled mutation proving on the two cheap
    circuits, and human reading against the quoted source line remains the only support for the rest.
@@ -1671,7 +1670,7 @@ Three rules, applied consistently above:
 3. **Evidence and proof are kept apart.** Fixture agreement, test vectors, CI scans, write-site
    inventories and the faithfulness tables of §5.7 are evidence. They narrow where a model could be
    wrong. They are not refinement, and this document never converts one into the other. In
-   particular, "177 of 275 rows came back `ok`" is a statement about a check that ran, not about a
+   particular, "184 of 280 rows came back `ok`" is a statement about a check that ran, not about a
    premise that was discharged.
 
 The composition is real, the four unconditional results are real, and the arithmetic theorem of

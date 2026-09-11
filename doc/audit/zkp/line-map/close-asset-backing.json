@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "src/circuits/channel/close_asset_backing_circuit.rs",
-  "source_sha256": "1f59ca8d5ef2073326909c2c9dc447e80f30968546ea4afd987da74eb7ee7317",
-  "source_lines": 1196,
+  "source_sha256": "370f8ba34ba687a19b850472bf6720f8317791ecc6a2d1d2e82b41cbdd8c496e",
+  "source_lines": 1398,
   "module": "Zkp.Implementation.CloseAssetBacking",
   "model": "doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean",
   "refinement": "not-proved",
@@ -313,7 +313,7 @@
     },
     {
       "start": 391,
-      "end": 417,
+      "end": 409,
       "status": "test-only",
       "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
       "declarations": [],
@@ -321,8 +321,26 @@
       "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
     },
     {
-      "start": 418,
-      "end": 425,
+      "start": 410,
+      "end": 423,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 424,
+      "end": 431,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 432,
+      "end": 439,
       "status": "dependency-boundary",
       "label": "circuit data and target handles",
       "declarations": [
@@ -334,8 +352,8 @@
       "note": "Semantic witness/computed values and constructor actions modeled. CircuitData, target-ID allocation, generic circuit type and generated proving key not translated."
     },
     {
-      "start": 426,
-      "end": 434,
+      "start": 440,
+      "end": 448,
       "status": "translated",
       "label": "constructor shape assertion and ZK builder start",
       "declarations": [
@@ -354,8 +372,8 @@
       "note": "Exact Balance PI count=29+vd_vec_len before builder creation. vd_vec_len calculation and standard_recursion_zk_config internals remain dependencies."
     },
     {
-      "start": 435,
-      "end": 441,
+      "start": 449,
+      "end": 455,
       "status": "dependency-boundary",
       "label": "recursive proof target and PI parse",
       "declarations": [
@@ -371,8 +389,8 @@
       "note": "Records constant-VK/cyclic verification before use of parsed Balance PIs. Gadget soundness and PI extraction not proved here; certified relation does not assume asset conservation."
     },
     {
-      "start": 442,
-      "end": 444,
+      "start": 456,
+      "end": 458,
       "status": "dependency-boundary",
       "label": "private-state allocation, hash and connection",
       "declarations": [
@@ -391,8 +409,8 @@
       "note": "All 21 commitment words represented and connection checked. No nonce/salt range checks invented; Poseidon and field representation are unresolved."
     },
     {
-      "start": 445,
-      "end": 446,
+      "start": 459,
+      "end": 460,
       "status": "test-only",
       "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
       "declarations": [],
@@ -400,8 +418,8 @@
       "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
     },
     {
-      "start": 447,
-      "end": 448,
+      "start": 461,
+      "end": 462,
       "status": "dependency-boundary",
       "label": "private-state allocation, hash and connection",
       "declarations": [
@@ -420,8 +438,8 @@
       "note": "All 21 commitment words represented and connection checked. No nonce/salt range checks invented; Poseidon and field representation are unresolved."
     },
     {
-      "start": 449,
-      "end": 453,
+      "start": 463,
+      "end": 467,
       "status": "dependency-boundary",
       "label": "checked extended-state allocation and inner connection",
       "declarations": [
@@ -438,8 +456,8 @@
       "note": "Checked block/timestamp/bytes/count domains and inner equality modeled. Extra chains are committed but not proven finalized in this circuit."
     },
     {
-      "start": 454,
-      "end": 460,
+      "start": 468,
+      "end": 474,
       "status": "translated",
       "label": "count and registry allocation/range gates",
       "declarations": [
@@ -455,8 +473,8 @@
       "note": "Arbitrary count/registry witnesses, u32 checks in original loop order. Boolean/sum constraints later derive the stronger 1..10 count."
     },
     {
-      "start": 461,
-      "end": 464,
+      "start": 475,
+      "end": 478,
       "status": "dependency-boundary",
       "label": "U256, safe Boolean and path allocations",
       "declarations": [
@@ -474,8 +492,8 @@
       "note": "Macro allocation order and eight checked amount limbs represented. Safe Boolean, u32 gadget and height-32 path allocation internals require lowering."
     },
     {
-      "start": 465,
-      "end": 479,
+      "start": 479,
+      "end": 481,
       "status": "translated",
       "label": "prefix, sum and first-active gates",
       "declarations": [
@@ -495,8 +513,107 @@
       "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
     },
     {
-      "start": 480,
+      "start": 482,
+      "end": 483,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 484,
+      "end": 486,
+      "status": "translated",
+      "label": "prefix, sum and first-active gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.bit",
+        "Zkp.Implementation.CloseAssetBacking.activeCount",
+        "Zkp.Implementation.CloseAssetBacking.NoRise",
+        "Zkp.Implementation.CloseAssetBacking.VectorGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
+        "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
+    },
+    {
+      "start": 487,
       "end": 488,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 489,
+      "end": 491,
+      "status": "translated",
+      "label": "prefix, sum and first-active gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.bit",
+        "Zkp.Implementation.CloseAssetBacking.activeCount",
+        "Zkp.Implementation.CloseAssetBacking.NoRise",
+        "Zkp.Implementation.CloseAssetBacking.VectorGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
+        "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
+    },
+    {
+      "start": 492,
+      "end": 493,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 494,
+      "end": 499,
+      "status": "translated",
+      "label": "prefix, sum and first-active gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.bit",
+        "Zkp.Implementation.CloseAssetBacking.activeCount",
+        "Zkp.Implementation.CloseAssetBacking.NoRise",
+        "Zkp.Implementation.CloseAssetBacking.VectorGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.no_rise_after_false",
+        "Zkp.Implementation.CloseAssetBacking.prefix_gates_determine_all_activity",
+        "Zkp.Implementation.CloseAssetBacking.vector_token_count_bounds",
+        "Zkp.Implementation.CloseAssetBacking.canonical_activity_vector",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "Actual adjacent a[t+1]*(1-a[t])=0, sum=count and a[0]=1 denotation. Initial predecessor=true is one tautological semantic clause. Does not assume fill_witness generated activity."
+    },
+    {
+      "start": 500,
+      "end": 503,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 504,
+      "end": 506,
       "status": "translated",
       "label": "inactive registry and limb gates",
       "declarations": [
@@ -511,8 +628,67 @@
       "note": "Each inactive product is zero; exact all-limb zero derived by Boolean case analysis under field lowering."
     },
     {
-      "start": 489,
-      "end": 496,
+      "start": 507,
+      "end": 508,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 509,
+      "end": 511,
+      "status": "translated",
+      "label": "inactive registry and limb gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PaddingGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.inactive_registry_and_amount_zero",
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "Each inactive product is zero; exact all-limb zero derived by Boolean case analysis under field lowering."
+    },
+    {
+      "start": 512,
+      "end": 513,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 514,
+      "end": 516,
+      "status": "translated",
+      "label": "inactive registry and limb gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.PaddingGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.inactive_registry_and_amount_zero",
+        "Zkp.Implementation.CloseAssetBacking.circuit_range_and_zero_suffix",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "Each inactive product is zero; exact all-limb zero derived by Boolean case analysis under field lowering."
+    },
+    {
+      "start": 517,
+      "end": 518,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 519,
+      "end": 522,
       "status": "translated",
       "label": "registry equality gates",
       "declarations": [
@@ -527,8 +703,33 @@
       "note": "All 45 earlier/later comparisons. Preserves source guard on later active bit only; does not substitute a stronger guard."
     },
     {
-      "start": 497,
-      "end": 499,
+      "start": 523,
+      "end": 524,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 525,
+      "end": 528,
+      "status": "translated",
+      "label": "registry equality gates",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.UniqueGates",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.constructor_checks_all_45_ordered_registry_pairs",
+        "Zkp.Implementation.CloseAssetBacking.unique_rows_preserve_every_exact_amount",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints"
+      ],
+      "note": "All 45 earlier/later comparisons. Preserves source guard on later active bit only; does not substitute a stronger guard."
+    },
+    {
+      "start": 529,
+      "end": 531,
       "status": "non-executable",
       "label": "reconstruction rationale comment",
       "declarations": [],
@@ -536,8 +737,8 @@
       "note": "Claim is not assumed as a premise: selected reconstruction/no-unlisted theorems are independently derived below."
     },
     {
-      "start": 500,
-      "end": 502,
+      "start": 532,
+      "end": 534,
       "status": "dependency-boundary",
       "label": "zero leaf and canonical empty root",
       "declarations": [
@@ -553,8 +754,8 @@
       "note": "Exact empty-leaf shape and semantic empty map modeled; actual canonical root hashing requires the explicit CanonicalEmptyRoot premise. MerkleContract itself is data-only."
     },
     {
-      "start": 503,
-      "end": 504,
+      "start": 535,
+      "end": 536,
       "status": "test-only",
       "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
       "declarations": [],
@@ -562,8 +763,8 @@
       "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
     },
     {
-      "start": 505,
-      "end": 525,
+      "start": 537,
+      "end": 557,
       "status": "translated",
       "label": "conditional zero opening, root insertion and select loop",
       "declarations": [
@@ -586,8 +787,8 @@
       "note": "Full sequential call-level loop and final root connection translated. Roots are computed for inactive paths too, but equality is active-only. Arbitrary-length induction uses exact-index range plus RowPathContracts for only the finite concrete visited path/tree/key/amount tuples. These dependency premises are separate theorem arguments, not CircuitConstraints or a premise of complete vector safety. No global all-AssetMap opening/update law is assumed."
     },
     {
-      "start": 526,
-      "end": 538,
+      "start": 558,
+      "end": 570,
       "status": "translated",
       "label": "token-fund preimage construction",
       "declarations": [
@@ -605,8 +806,8 @@
       "note": "Preserves IMTF domain, ten registry words, count, all 80 big-endian fund limbs; fixed 92-word encoding without per-token aggregation."
     },
     {
-      "start": 539,
-      "end": 541,
+      "start": 571,
+      "end": 573,
       "status": "dependency-boundary",
       "label": "Keccak and extended-state hash",
       "declarations": [
@@ -624,8 +825,8 @@
       "note": "Preimage structure proved; Keccak/Poseidon gadget correctness, canonical field-to-Bytes32 conversion and scoped collision resistance remain undischarged."
     },
     {
-      "start": 542,
-      "end": 548,
+      "start": 574,
+      "end": 580,
       "status": "translated",
       "label": "computed public outputs and registration",
       "declarations": [
@@ -644,8 +845,8 @@
       "note": "Channel/settled wires come from the same Balance statement; TFD/extended commitment are computed, anchor is the same extended-inner block wire; 26 public inputs in exact order."
     },
     {
-      "start": 549,
-      "end": 560,
+      "start": 581,
+      "end": 586,
       "status": "test-only",
       "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
       "declarations": [],
@@ -653,73 +854,91 @@
       "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
     },
     {
-      "start": 561,
-      "end": 561,
-      "status": "translated",
-      "label": "computed public outputs and registration",
-      "declarations": [
-        "Zkp.Implementation.CloseAssetBacking.computedPublicInputs",
-        "Zkp.Implementation.CloseAssetBacking.PublicInputs.words",
-        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
-        "Zkp.Implementation.CloseAssetBacking.readPublic"
-      ],
-      "theorems": [
-        "Zkp.Implementation.CloseAssetBacking.circuit_does_not_mix_channel_or_settled_wires",
-        "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
-        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds",
-        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs",
-        "Zkp.Implementation.CloseAssetBacking.example_program_reads_back"
-      ],
-      "note": "Channel/settled wires come from the same Balance statement; TFD/extended commitment are computed, anchor is the same extended-inner block wire; 26 public inputs in exact order."
-    },
-    {
-      "start": 562,
-      "end": 574,
-      "status": "dependency-boundary",
-      "label": "builder.build and returned handles",
-      "declarations": [
-        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
-        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
-        "Zkp.Implementation.CloseAssetBacking.prove",
-        "Zkp.Implementation.CloseAssetBacking.readWitness",
-        "Zkp.Implementation.CloseAssetBacking.PrimitiveLowering"
-      ],
-      "theorems": [
-        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
-        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
-      ],
-      "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
-    },
-    {
-      "start": 575,
-      "end": 576,
-      "status": "test-only",
-      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
-      "declarations": [],
-      "theorems": [],
-      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
-    },
-    {
-      "start": 577,
-      "end": 578,
-      "status": "dependency-boundary",
-      "label": "builder.build and returned handles",
-      "declarations": [
-        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
-        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
-        "Zkp.Implementation.CloseAssetBacking.prove",
-        "Zkp.Implementation.CloseAssetBacking.readWitness",
-        "Zkp.Implementation.CloseAssetBacking.PrimitiveLowering"
-      ],
-      "theorems": [
-        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
-        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
-      ],
-      "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
-    },
-    {
-      "start": 579,
+      "start": 587,
       "end": 591,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 592,
+      "end": 597,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 598,
+      "end": 598,
+      "status": "translated",
+      "label": "computed public outputs and registration",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.computedPublicInputs",
+        "Zkp.Implementation.CloseAssetBacking.PublicInputs.words",
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.readPublic"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.circuit_does_not_mix_channel_or_settled_wires",
+        "Zkp.Implementation.CloseAssetBacking.circuit_public_anchor_is_balance_public_height",
+        "Zkp.Implementation.CloseAssetBacking.constructor_registers_exact_26_inputs_then_builds",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs",
+        "Zkp.Implementation.CloseAssetBacking.example_program_reads_back"
+      ],
+      "note": "Channel/settled wires come from the same Balance statement; TFD/extended commitment are computed, anchor is the same extended-inner block wire; 26 public inputs in exact order."
+    },
+    {
+      "start": 599,
+      "end": 611,
+      "status": "dependency-boundary",
+      "label": "builder.build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
+        "Zkp.Implementation.CloseAssetBacking.prove",
+        "Zkp.Implementation.CloseAssetBacking.readWitness",
+        "Zkp.Implementation.CloseAssetBacking.PrimitiveLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
+      ],
+      "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
+    },
+    {
+      "start": 612,
+      "end": 613,
+      "status": "test-only",
+      "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
+      "declarations": [],
+      "theorems": [],
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
+    },
+    {
+      "start": 614,
+      "end": 615,
+      "status": "dependency-boundary",
+      "label": "builder.build and returned handles",
+      "declarations": [
+        "Zkp.Implementation.CloseAssetBacking.constructorProgram",
+        "Zkp.Implementation.CloseAssetBacking.ComputedWires",
+        "Zkp.Implementation.CloseAssetBacking.prove",
+        "Zkp.Implementation.CloseAssetBacking.readWitness",
+        "Zkp.Implementation.CloseAssetBacking.PrimitiveLowering"
+      ],
+      "theorems": [
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
+      ],
+      "note": "Build-last sequencing modeled; actual compiled circuit, proving/verifying keys, returned target identifiers and constraint-system extraction not translated."
+    },
+    {
+      "start": 616,
+      "end": 628,
       "status": "translated",
       "label": "fill_witness proof/state/count assignments",
       "declarations": [
@@ -730,8 +949,8 @@
       "note": "Copies proof, extended/private state and count before per-row assignments. Actual PartialWitness writes, canonical-u8 conversion, unwrap panics and proof shape validation are dependency/static-domain obligations."
     },
     {
-      "start": 592,
-      "end": 610,
+      "start": 629,
+      "end": 647,
       "status": "translated",
       "label": "fill_witness per-row assignments",
       "declarations": [
@@ -746,8 +965,8 @@
       "note": "Copies registry/amount/path in loop order and computes activity=position<count. Witness-writer object behavior and canonical casts are not extracted."
     },
     {
-      "start": 611,
-      "end": 620,
+      "start": 648,
+      "end": 657,
       "status": "translated",
       "label": "prove wrapper",
       "declarations": [
@@ -759,8 +978,8 @@
       "note": "Delegates only to backend(fillWitness), maps backend error to FailedToProve. No native constructor or ChannelState admission is invented; backend proof generation/soundness unresolved."
     },
     {
-      "start": 621,
-      "end": 621,
+      "start": 658,
+      "end": 658,
       "status": "non-executable",
       "label": "separator",
       "declarations": [],
@@ -768,8 +987,8 @@
       "note": "Blank line."
     },
     {
-      "start": 622,
-      "end": 958,
+      "start": 659,
+      "end": 995,
       "status": "test-only",
       "label": "Rust unit tests and mock Balance circuit",
       "declarations": [],
@@ -777,22 +996,13 @@
       "note": "All test lines read. Fixtures, mock cyclic Balance circuit, positive and refusal tests are not translated as production constraints or run by this task. Lean normal examples are separate kernel-checked examples."
     },
     {
-      "start": 959,
-      "end": 1195,
+      "start": 996,
+      "end": 1398,
       "status": "test-only",
       "label": "faithfulness probe: #[cfg(test)]-only wire captures for the Lean per-primitive model (2026-09-11)",
       "declarations": [],
       "theorems": [],
-      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering."
-    },
-    {
-      "start": 1196,
-      "end": 1196,
-      "status": "test-only",
-      "label": "Rust unit tests and mock Balance circuit",
-      "declarations": [],
-      "theorems": [],
-      "note": "All test lines read. Fixtures, mock cyclic Balance circuit, positive and refusal tests are not translated as production constraints or run by this task. Lean normal examples are separate kernel-checked examples."
+      "note": "Inserted after the model was written; compiled only under #[cfg(test)]. Line citations in the Lean module docstrings refer to the pre-insertion numbering. Rewritten in place on 2026-09-11 to diff the faithfulness table against the per-op holds."
     }
   ],
   "boundaries": [
