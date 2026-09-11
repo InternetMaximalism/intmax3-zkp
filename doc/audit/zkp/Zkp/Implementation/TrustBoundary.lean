@@ -7,6 +7,7 @@ import Zkp.Implementation.FalconGadgetProgram
 import Zkp.Implementation.LedgerWriters
 import Zkp.Implementation.Keccak256
 import Zkp.Implementation.BackingBridge
+import Zkp.Implementation.NttCorrectness
 
 /-!
 # The named premise classes of the implementation-model audit
@@ -61,11 +62,17 @@ handwritten gate predicate is PROVED, per circuit, by
 `CloseCircuit.program_satisfied_implies_gates`,
 `WithdrawalClaimCircuit.program_satisfied_implies_gates` and
 `PostCloseClaimCircuit.program_satisfied_implies_gates` — no whole-circuit black
-box is assumed anywhere. Splitting the premises this way makes the borrowed
-halves disjoint: no field bundles the accepted artifact with an unaccepted
-lowering, and no field hides the gate derivation.
+box is assumed anywhere. The FOURTH settlement circuit, the close-asset-backing
+circuit the Materializer verifies, is carried the same way since this loop: (c1)
+`backingVerifierSoundness` is the artifact step at the Materializer's own pinned
+adapter and (c2) `backingPrimitiveLowering` is the per-builder-call lowering, with
+`CloseAssetBacking.program_satisfied_implies_constraints` proving the gate
+predicate. Splitting the premises this way makes the borrowed halves disjoint: no
+field bundles the accepted artifact with an unaccepted lowering, and no field
+hides the gate derivation.
 
-Two sub-obligations remain genuinely opaque inside each of (a), (b1), (b2), and
+Two sub-obligations remain genuinely opaque inside each of (a), (b1), (b2), (c2),
+and
 nothing in this project discharges either: (i) PRIMITIVE-SEMANTICS FAITHFULNESS —
 each `BuildOp.holds` case must be exactly the constraint plonky2 emits for that
 one builder call (`range_check`, `connect`, `add_virtual_bool_target_safe`,
@@ -73,10 +80,11 @@ one builder call (`range_check`, `connect`, `add_virtual_bool_target_safe`,
 Merkle/insertion gadgets); and (ii) DIGEST PINNING — `pinnedCircuitDigest
 adapter` must be the digest of the very program `constructorProgram`
 transcribes. Sub-obligation (ii) is also stated on its own, as
-`ClosePinnedDigestIsProgramDigest`, `WithdrawalPinnedDigestIsProgramDigest` and
-`PostClosePinnedDigestIsProgramDigest`, and the three
-`*_digest_pinning_and_program_lowering_give_primitive_lowering` theorems show
-that (ii) plus a program-level lowering is what each field amounts to.
+`ClosePinnedDigestIsProgramDigest`, `WithdrawalPinnedDigestIsProgramDigest`,
+`PostClosePinnedDigestIsProgramDigest` and `BackingPinnedDigestIsProgramDigest`,
+and the four `*_digest_pinning_and_program_lowering_give_primitive_lowering`
+theorems show that (ii) plus a program-level lowering is what each field amounts
+to.
 
 The older, statement-level lowering obligations (`CloseStatementLowering`,
 `WithdrawalStatementLowering`, `PostCloseStatementLowering`) and the still older,
@@ -130,12 +138,22 @@ shared message. What is left is carried as: (d0)
 `aggregateRecursiveVerifierSoundness` at the top constant key, (d0')
 `levelRecursionSoundness` at each level's constant child key, (d1')
 `aggregatePrimitiveLowering` — per-builder-call at every level, down to and
-including the gadget — (d2') `nttComputesNegacyclicProduct`, and (d3)
-`falconUnforgeability`. `signature_validity_of_boundary` composes (d0), (d0'),
-(d1') and (d3) into `CloseSignatureBridge.SignerEvidence` (it does not need
-(d2')), and `signature_gap_is_now_per_primitive` names those four residues as one
-conjunction, replacing the former `signature_gap_is_now_per_signature` — two of
-whose conjuncts no longer exist as Props. The digest-pinning half is stated on its
+including the gadget — and (d3) `falconUnforgeability`.
+`signature_validity_of_boundary` composes (d0), (d0'), (d1') and (d3) into
+`CloseSignatureBridge.SignerEvidence`, and `signature_gap_is_now_per_primitive`
+names those four residues as one conjunction, replacing the former
+`signature_gap_is_now_per_signature` — two of whose conjuncts no longer exist as
+Props.
+
+**(d2') IS DISCHARGED and is no longer a field.** It said the transcribed
+in-circuit NTT computes the negacyclic product of `Z_q[X]/(X^512+1)`, and it was
+the one field of this structure a determined prover could settle inside Lean.
+`Zkp.Implementation.NttCorrectness` settles it: the nine-stage Cooley-Tukey loop
+with bit-reversed twiddles is proved equal to evaluation at the odd powers of ψ,
+the pointwise product is proved to be the negacyclic product's evaluation, and
+the Gentleman-Sande inverse is proved to invert it — without Mathlib and without
+assuming primality of q. `ntt_computes_negacyclic_product_of_boundary` below is
+that theorem, imported, and it takes NO boundary instance because it needs none. The digest-pinning half is stated on its
 own, outside the structure, as `AggregateLevelPinnedDigestIsProgramDigest`,
 exactly as the three settlement endpoints have done since the first loop.
 
@@ -165,11 +183,40 @@ is what `durable_nullifier_ledger_of_boundary` concludes and what
 exception. Nothing downstream is weakened, because `SystemSafety` never consumed
 (g1) or (g2).
 
-The eighteen fields, in order: (a0) `mleVerifierSoundness`, (a)
+The close-vector premise is split too, and it is the biggest change of this loop.
+The old (c) `closeVectorBacked` said the close statement's amounts were bounded by
+`m.deposits channel token` for an opaque per-channel deposit map, and it said it
+about CLOSE-INTENT ACCEPTANCE. Both halves were wrong about the deployed system:
+accepting a close intent credits nothing, no modeled contract maintains such a
+map, and with L2 transfers "what this channel deposited" is not the invariant. The
+event that moves money is `CloseFundingMaterializer.materializeSignedHead`, and it
+demands a BACKING PROOF — `CloseAssetBacking` recursively verifies a Balance
+proof, opens its private commitment, rebuilds the asset tree from the very token
+vector whose keccak digest the Manager's finalized close statement carries, and
+exposes an extended-state commitment the Materializer checks against
+`isFinalizedRoot`. Seven fields follow that path, each naming one artifact or one
+step: (c0) `materializerViewIsManagerState`, (c0b)
+`managerFundsDigestIsReference`, (c1) `backingVerifierSoundness`, (c2)
+`backingPrimitiveLowering`, (c3a) `backingKeccakIsReference`, (c3b)
+`backingTokenFundsHashBinding` and (c4) `finalizedBalanceIsBacked`. Everything
+between them is PROVED —
+`materialized_credits_are_finalized_l2_balances_of_boundary` composes them into
+"every credit of an accepted materialization is an active row of a
+constraint-satisfying backing witness, hence within that channel's L2 entitlement
+at a finalized root" — and `close_vector_backing_gap_is_now_l2_ledger` names what
+is left. (c4) is the residue proper: the L2 ledger invariant, whose discharge is
+the validity-chain composition (BalanceCircuit → SwitchBoard → ValidityChain →
+DepositChain / WithdrawalChain), the named next project. The `deposits` parameter
+and the `ChannelDeposits` abbreviation are gone with the field.
+
+The twenty-three fields, in order: (a0) `mleVerifierSoundness`, (a)
 `closePrimitiveLowering`, (b1) `withdrawalPrimitiveLowering`, (b2)
-`postClosePrimitiveLowering`, (c) `closeVectorBacked`, (d0)
+`postClosePrimitiveLowering`, (c0) `materializerViewIsManagerState`, (c0b)
+`managerFundsDigestIsReference`, (c1) `backingVerifierSoundness`, (c2)
+`backingPrimitiveLowering`, (c3a) `backingKeccakIsReference`, (c3b)
+`backingTokenFundsHashBinding`, (c4) `finalizedBalanceIsBacked`, (d0)
 `aggregateRecursiveVerifierSoundness`, (d0') `levelRecursionSoundness`, (d1')
-`aggregatePrimitiveLowering`, (d2') `nttComputesNegacyclicProduct`, (d3)
+`aggregatePrimitiveLowering`, (d3)
 `falconUnforgeability`, (e1a) `solidityKeccakIsReference`, (e1b)
 `circuitKeccakIsReference`, (e2) `tokenFundsHashBinding`, (f1)
 `finalizedRootObservation`, (f2) `finalizedHeightObservation`, (g1')
@@ -182,11 +229,12 @@ satisfiable at all and no recursive child verification ever succeeds, every
 acceptance-guarded premise holds vacuously, every lowering premise holds
 vacuously, the unforgeability premise holds because the authorization relation is
 taken to be trivial, and every storage premise holds because no transition outside
-the model is admitted. Two fields are the exception and are supplied as
-hypotheses rather than made vacuous — the two hash equations and (d2'), which is
-a universal claim about two concrete Lean functions and mentions no environment at
-all. That witnesses only well-formedness of the statement, and
-`rejecting_environment_accepts_no_close` records why: such an environment
+the model is admitted. Five fields are the exception and are supplied as
+hypotheses rather than made vacuous — the two hash equations, the backing hash
+equation (c3a), and the two Manager-observation equations (c0) and (c0b), none of
+which has an antecedent an environment could deny. That witnesses only well-formedness of the statement, and
+`rejecting_environment_accepts_no_close` and
+`rejecting_environment_materializes_nothing` record why: such an environment
 authorizes no fund movement at all.
 -/
 
@@ -895,8 +943,12 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   correctness of the public inputs a caller passes in: the Solidity binding pins
   which words were returned, it never validates that they describe a real
   channel. And a satisfiable statement is not by itself a safe fund movement —
-  that step still needs premises (c), (d0), (d0'), (d1'), (d2'), (d3), (e1a),
-  (e1b), (e2), (f1), (f2) and (g1'). See
+  that step still needs premises (c0), (c0b), (c1), (c2), (c3a), (c3b), (c4),
+  (d0), (d0'), (d1'), (d3), (e1a), (e1b), (e2), (f1), (f2) and (g1'). Note
+  that (c1) is THIS field again, at the Materializer's own pinned backing
+  verifier: the acceptance is scoped to an artifact, not to an address, but the
+  address list of `SettlementVerifier.Installed` does not cover the Materializer,
+  so the same acceptance has to be written down twice to stay honest. See
   `mle_assumption_reduces_close_soundness_to_gate_lowering` for what the
   acceptance buys, and
   `Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety` for
@@ -1195,46 +1247,14 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   transcript, stated separately and NOT as a field, as
   `AggregateLevelPinnedDigestIsProgramDigest`. Neither is modeled or proved here.
 
-  The still-opaque arithmetic content of the signature primitive — that the
-  transcribed NTT is the negacyclic product — is (d2'), and this field does not
-  need it: `FalconGadgetProgram.circuitProduct` is a concrete function either way. -/
+  The arithmetic content of the signature primitive — that the transcribed NTT is
+  the negacyclic product — used to be the separate field (d2'); it is now PROVED,
+  in `Zkp.Implementation.NttCorrectness`, and this field never needed it anyway:
+  `FalconGadgetProgram.circuitProduct` is a concrete function either way. -/
   aggregatePrimitiveLowering :
     FalconAggProgram.GadgetLevelLowering
       (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
       m.falconHash
-  /-- **(d2') The transcribed in-circuit NTT computes the negacyclic product.**
-  `FalconGadgetProgram.circuitProduct` is not a callback: it is the CONCRETE
-  composition "forward-transform both operands, multiply pointwise,
-  inverse-transform" that gadget.rs:684-687 performs, with the twiddle tables,
-  the butterflies and the mod-`q` reductions transcribed. This premise says that
-  concrete function is the negacyclic product of `Z_q[X]/(X^512+1)` —
-  `FalconGadgetProgram.negacyclicProduct`, the schoolbook definition transcribed
-  from the Rust test at gadget.rs:999-1022 — on canonical length-512 inputs.
-
-  IT REPLACES A PARAMETER, NOT A PROOF. The models used to carry an opaque
-  `falconMul : FalconCore.PolynomialProduct`; (d2) then said the aggregation
-  model's `Bool` accept callback was the gadget gate set for THAT product. Both
-  are gone. The product is now fixed to the transcribed NTT and the gate set is
-  reached through `FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied`,
-  which needs no premise at all. What is left is this one arithmetic sentence
-  about a concrete algorithm.
-
-  NOT NEEDED BY THE SIGNER-EVIDENCE THEOREM. `signature_validity_of_boundary`
-  does not use this field, and neither does anything it calls: the evidence chain
-  runs entirely through `FalconCore.CircuitSatisfied` for `circuitProduct`, and
-  (d3) is stated for the same concrete product, so the two meet without knowing
-  what the NTT computes. This premise is needed only to read
-  `FalconCore.CircuitSatisfied` as Falcon's own `verify` — i.e. to say the gate
-  set checks the REAL signature equation `s1 = c - s2 * h mod (q, X^512+1)` rather
-  than an equation about some other bilinear map. Without it the audit's
-  signature conclusion is "the transcribed gate set is satisfied and its solutions
-  are unforgeable"; with it, that gate set is Falcon.
-
-  It is an ordinary mathematical claim about a concrete algorithm — the Rust test
-  suite checks it on random inputs — and it is the only field of this structure a
-  determined prover could discharge inside Lean, by proving the NTT correct. It is
-  not discharged here. -/
-  nttComputesNegacyclicProduct : FalconGadgetProgram.NttComputesNegacyclicProduct
   /-- **(d3) Falcon unforgeability.** The lattice assumption in the form a consumer
   can use: a satisfied active gadget instance for public polynomial `h` and message
   digest `d` means the holder of `h` authorized `d`. This is
@@ -2250,11 +2270,12 @@ theorem materialized_credits_are_finalized_l2_balances_of_boundary
         rw [List.getElem?_map, atJ]; rfl
       rw [amountEq, BackingBridge.ten_list_get_lt _ jBound] at step
       rw [← Option.some.inj step, BackingBridge.digest_value, tokenIs]
+    have jWitness : j < w.tokenCount := by rw [countEq]; exact jCount
     have activeAt : row.active = true := by
       have step : (w.rows.map CloseAssetBacking.Row.active)[j]? = some row.active := by
         rw [List.getElem?_map, atJ]; rfl
       rw [show w.rows.map CloseAssetBacking.Row.active = CloseAssetBacking.activity w.rows from rfl,
-        activityShape, BackingBridge.replicate_true_prefix_index _ j _ (by omega)] at step
+        activityShape, BackingBridge.replicate_true_prefix_index _ j _ jWitness] at step
       exact (Option.some.inj step).symm
     exact ⟨row, BackingBridge.mem_of_index atJ, activeAt, by rw [registryAt, tokenIs],
       by rw [amountAt, amountIs]⟩
@@ -2366,8 +2387,9 @@ soundness at each level's constant child key, (d1') per-builder-call lowering al
 the way down to the gadget, and (d3) unforgeability at the concrete
 `FalconGadgetProgram.circuitProduct` — composed by
 `FalconAggProgram.top_level_satisfiable_gives_signer_evidence_per_primitive`.
-(d2') is NOT used: the chain never needs to know what the transcribed NTT
-computes. Poseidon stays opaque throughout, so the conclusion speaks of key
+The chain never needs to know what the transcribed NTT computes — the former
+(d2'), now the theorem `ntt_computes_negacyclic_product_of_boundary`, is not on
+its path. Poseidon stays opaque throughout, so the conclusion speaks of key
 DIGESTS, never of public polynomials. -/
 theorem signature_validity_of_boundary
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
@@ -2436,9 +2458,10 @@ statement from its transcript, gated presence flag and left-packing gate include
 the four circuits that turns a satisfiable top statement into a witness list
 (`FalconAggProgram.satisfiable_top_level_gives_witness_list`); and the 73-word
 public-input LAYOUT shared by the aggregation circuit and the close circuit
-(`CloseSignatureBridge.to_agg_statement_public_inputs`). (d2') is not in the list
-either, for a different reason: it is a residue of the PRODUCT, not of the
-evidence chain, and no theorem above consumes it. -/
+(`CloseSignatureBridge.to_agg_statement_public_inputs`). The former (d2') is not
+in the list either, for two reasons: it was a residue of the PRODUCT rather than
+of the evidence chain, and it is no longer a residue at all —
+`ntt_computes_negacyclic_product_of_boundary` proves it. -/
 theorem signature_gap_is_now_per_primitive
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
@@ -2457,6 +2480,33 @@ theorem signature_gap_is_now_per_primitive
         m.authorized :=
   ⟨tb.aggregateRecursiveVerifierSoundness, tb.levelRecursionSoundness,
     tb.aggregatePrimitiveLowering, tb.falconUnforgeability⟩
+
+/-- **The old field (d2'), now a theorem — and it takes no boundary at all.**
+`FalconGadgetProgram.circuitProduct` is the CONCRETE composition
+"forward-transform both operands, multiply pointwise, inverse-transform" that
+`gadget.rs:684-687` performs, with the twiddle tables, the butterflies and the
+mod-`q` reductions transcribed. That it is the negacyclic product of
+`Z_q[X]/(X^512+1)` — `FalconGadgetProgram.negacyclicProduct`, the schoolbook
+definition transcribed from the Rust test at `gadget.rs:999-1022` — used to be the
+premise (d2') `nttComputesNegacyclicProduct`, the one field of this structure a
+determined prover could discharge inside Lean.
+
+`Zkp.Implementation.NttCorrectness` discharges it, so the field is gone and this
+theorem replaces it verbatim. Note the signature: no `Models`, no `TrustBoundary`,
+no hypothesis — the statement never mentioned an environment, which is exactly why
+it could be proved rather than borrowed.
+
+WHAT IT BUYS. It is what lets `FalconCore.CircuitSatisfied` be read as Falcon's
+own `verify` — the gate set checks the REAL signature equation
+`s1 = c - s2 * h mod (q, X^512+1)` rather than an equation about some other
+bilinear map. The signer-evidence chain never needed it
+(`signature_validity_of_boundary` does not use it, and (d3) is stated for the same
+concrete product), but the audit's signature conclusion now reads "that gate set
+is Falcon" instead of "the transcribed gate set is satisfied and its solutions are
+unforgeable". -/
+theorem ntt_computes_negacyclic_product_of_boundary :
+    FalconGadgetProgram.NttComputesNegacyclicProduct :=
+  NttCorrectness.ntt_computes_negacyclic_product
 
 /-! ## The two durability conclusions, recovered from the write-site inventory
 
@@ -2611,21 +2661,32 @@ a leaf nor a level assignment is ever exhibited. (d3) holds because
 `authorizedTrivially` makes its conclusion hold of everything, which is the
 opposite of the lattice assumption having been discharged.
 
-(d2') is the exception, and it is worth being explicit about why. It cannot be
-made vacuous by any choice of environment: `FalconGadgetProgram.NttComputesNegacyclicProduct`
-is a UNIVERSAL claim about two concrete Lean functions — the transcribed in-circuit
-NTT and the schoolbook negacyclic product — with no reference to `m` at all. There
-is no antecedent to deny and no callback to choose, so exhibiting an environment
-cannot discharge it; it has to be supplied, and it is supplied here as the
-hypothesis `nttProduct`. That mirrors the two hash premises, which are likewise
-supplied as equations rather than vacuously: `solidityReference` and
+The former (d2') needed no environment and is not a field any longer: it was a
+UNIVERSAL claim about two concrete Lean functions — the transcribed in-circuit NTT
+and the schoolbook negacyclic product — with no reference to `m` at all, and
+`Zkp.Implementation.NttCorrectness` proves it outright. The two hash premises are
+still supplied as equations rather than vacuously: `solidityReference` and
 `circuitReference` say the two boundary functions ARE the reference Keccak-256,
 which is what `reference_keccak_models_satisfy_hash_premises` shows is achievable,
 not something this environment proves.
 
 The two inventory premises (g1') and (g2') are vacuous for the plainest possible
 reason: `Unmodeled` is instantiated to the empty relation, so there is no
-transition outside the model to inventory. -/
+transition outside the model to inventory.
+
+The seven backing premises split three ways. (c1) is vacuous because
+`noBackingProof` denies it its antecedent — the Materializer's pinned verifier
+never returns a word vector — and that same hypothesis makes (c3b) vacuous
+through `rejecting_environment_materializes_nothing`, since `prepareSignedHead`
+calls `verifyCompact` before anything else. (c2) is vacuous through
+`noSatisfiableStatements`, exactly like (a), (b1) and (b2), so no assignment of
+the backing constructor program is ever exhibited either. (c4) is vacuous because
+`noFinalizedHead` says the canonical head finalizes no root at all: there is no
+finalized extended state for a backing witness to be bound to. The remaining
+three, (c0), (c0b) and (c3a), are EQUATIONS — about the staticcall view, about
+the digest in Manager storage and about the circuit's keccak callback — with no
+antecedent to deny, so they are supplied as hypotheses, exactly like the two hash
+premises. Supplying them is not discharging them. -/
 theorem rejecting_environment_satisfies_every_premise
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
@@ -2645,7 +2706,6 @@ theorem rejecting_environment_satisfies_every_premise
       m.backingEnv.hash.tokenFundsHash words =
         BackingBridge.digest (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words)))
     (noFinalizedHead : ∀ root, m.head.finalizedRoot root ≠ true)
-    (nttProduct : FalconGadgetProgram.NttComputesNegacyclicProduct)
     (authorizedTrivially : ∀ h d, m.authorized h d)
     (solidityReference : ∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
       m.keccak b = Keccak256.digestU256 b)
@@ -2683,7 +2743,6 @@ theorem rejecting_environment_satisfies_every_premise
   aggregatePrimitiveLowering :=
     ⟨fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _),
       fun _ _ _ _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)⟩
-  nttComputesNegacyclicProduct := nttProduct
   falconUnforgeability cw digest _ _ _ := authorizedTrivially cw.h digest
   solidityKeccakIsReference := solidityReference
   circuitKeccakIsReference := circuitReference

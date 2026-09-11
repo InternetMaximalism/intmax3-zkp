@@ -36,21 +36,40 @@ named premises below, one obtains `SignerEvidence`:
 The aggregate bookkeeping (count, left packing, one shared message, per-slot predicate) is
 therefore no longer assumed; it is derived from `FalconAggregate.agg_tree_ok_characterization`.
 
-## What stays OPAQUE, and where the planner must carry it (layer T `TrustBoundary` fields)
+## What stays OPAQUE (layer T `TrustBoundary` fields), and what no longer does
+
+**(d1) and (d2) are NO LONGER BOUNDARIES.** They were, when this module was
+written, and the paragraph below used to say the planner had to carry them. Since the
+third loop it does not: `Zkp.Implementation.FalconGadgetProgram` transcribes
+`FalconSigVerifyTarget::build` as a 23-call builder program and
+`Zkp.Implementation.FalconAggProgram` transcribes the leaf and level constructors of
+`src/falcon_sig/agg.rs` the same way, so the aggregation TREE and the gadget gate set are
+DERIVED — `FalconAggProgram.satisfiable_top_level_gives_witness_list` and
+`FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied`, neither taking a
+side hypothesis. `TrustBoundary` carries the per-builder-call (d1')
+`aggregatePrimitiveLowering` and the per-level (d0') `levelRecursionSoundness` in their
+place, and neither `AggregateStatementLowering` nor `FalconPredicateIsGadget` is a field of
+that structure any more. The defs below are kept because the older, coarser composition
+route (`accepted_aggregate_tree_gives_signer_evidence`) is stated in their terms and is
+still used as a cross-check; they are no longer anything the planner must borrow.
 
 * **(d0) recursive-verifier soundness** — that `verifyAggregate aggregateVerifier proof st`
   implies the pinned `FalconAggCircuit` constraint system is satisfiable at `st.words`.
   Nothing here; plonky2's own recursive verifier is not modelled anywhere in this audit.
-* **(d1) coarse aggregate statement lowering** — that a satisfiable `FalconAggCircuit`
-  instance at `st.words` yields SOME aggregation tree `t` with
-  `evalTree sigEnv t aggLevels = .ok (toAggStatement st)`. This is a WHOLE-CIRCUIT premise:
-  `FalconAggregate` has no `BuildOp` program, so no per-primitive refinement exists yet.
-  `to_agg_statement_public_inputs` is the part of it that IS proved here: the two public-input
-  layouts (`CloseCircuit.AggregateStatement.words` and
+  This one IS still a `TrustBoundary` field, together with (d0') at each level's constant
+  child key.
+* **(d1) coarse aggregate statement lowering, RETIRED as a boundary** — that a satisfiable
+  `FalconAggCircuit` instance at `st.words` yields SOME aggregation tree `t` with
+  `evalTree sigEnv t aggLevels = .ok (toAggStatement st)`. It was a WHOLE-CIRCUIT premise;
+  `FalconAggProgram` now supplies the per-primitive program it lacked, and (d1')
+  replaces it. `to_agg_statement_public_inputs` is the part of it that IS proved here: the
+  two public-input layouts (`CloseCircuit.AggregateStatement.words` and
   `FalconAggregate.statementPublicInputs`) are the same 73-element vector.
-* **(d2) gadget faithfulness** — `FalconPredicateIsGadget`, below: that the aggregate model's
-  opaque `SigEnv.falconAccepts` callback really is the `gadget.rs` gate set of
-  `FalconCore.CircuitSatisfied` on an ACTIVE slot.
+* **(d2) gadget faithfulness, RETIRED as a boundary** — `FalconPredicateIsGadget`, below:
+  that the aggregate model's opaque `SigEnv.falconAccepts` callback really is the
+  `gadget.rs` gate set of `FalconCore.CircuitSatisfied` on an ACTIVE slot. The callback is
+  gone from the evidence chain; `FalconAggProgram.sigEnvOf` takes it to be the constant
+  `true` and the per-slot evidence comes from the gadget transcript instead.
 * **(d3) unforgeability** — `FalconUnforgeable`, below: the usable form of
   `FalconCore.LatticeHardness` / `ntruShortVectorAssumption`. It is the ONE step from
   "the gate set is satisfied" to "the holder of `h` authorised this digest".

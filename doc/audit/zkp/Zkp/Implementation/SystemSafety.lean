@@ -34,12 +34,18 @@ step and the lowering step are separate named premises, and
 `TrustBoundary.close_proof_soundness_of_boundary`,
 `.withdrawal_proof_soundness_of_boundary` and
 `.post_close_proof_soundness_of_boundary` are exactly their composition, still borrowed and
-still not proved), that a finalized close vector is backed by the channel's own deposits
-(premise c), that a passing aggregate check means signatures exist (premise d),
-that hashes bind (premises e1, e2), that the finality getters observe the
-canonical L1 head (premises f1, f2), that storage survives unmodeled entrypoints
-(premises g1, g2), or that any deployed artifact behaves like these definitions
-(premise h). Liveness, censorship, gas, ordering and ERC20 token honesty are not
+still not proved), that the Materializer's staticcall view is the Manager's
+storage and that the digest it holds is the EVM keccak of the finalized vector
+(premises c0, c0b), that the backing proof means anything (premises c1, c2), that
+the backing circuit's keccak gadget is Keccak-256 and has no collision on the one
+compared pair (premises c3a, c3b), that a Balance-certified amount at a finalized
+L2 root is within the channel's L2 entitlement (premise c4 — the residue the
+validity-chain composition would have to close), that a passing aggregate check
+means signatures exist (premises d0, d0', d1', d3 — the former d2' is now the
+theorem `TrustBoundary.ntt_computes_negacyclic_product_of_boundary`), that hashes bind
+(premises e1a, e1b, e2), that the finality getters observe the canonical L1 head
+(premises f1, f2), that storage survives unmodeled entrypoints (premises g1',
+g2'), or that any deployed artifact behaves like these definitions (premise h). Liveness, censorship, gas, ordering and ERC20 token honesty are not
 represented at all.
 
 Premise (a0) — the operator's explicit decision to ACCEPT the pinned MLE/WHIR
@@ -736,10 +742,12 @@ later modeled step, so the channel's close vector is credited at most once.
 `materialization_credits_are_the_managers_own_vector` below adds that the credited
 amounts are precisely the Manager's own getter values.
 
-What is NOT proved, and remains exactly premise (c): that the cap itself — the
-finalized close vector — is bounded by what this channel deposited. Nothing in
-`RollupValue`, `ManagerValue` or `CloseFunding` relates the vector to deposits;
-escrow is pooled, and `RollupValue`'s header says so. -/
+What is NOT proved here, and is the content of the (c) family: that the cap itself
+— the finalized close vector — is what the channel is entitled to on L2. Nothing
+in `RollupValue`, `ManagerValue` or `CloseFunding` relates the vector to any
+ledger; escrow is pooled, and `RollupValue`'s header says so.
+`materialized_credits_are_backed_by_l2_entitlement` below carries that vector back
+to a backing-circuit witness at a finalized state root, leaving premise (c4). -/
 theorem trace_channel_attribution (cfg : ManagerValue.Config) {before after : State}
     {inflow outflow : Flow} (trace : Trace cfg before after inflow outflow)
     (bounded : ∀ t, (before.managers cfg.manager).received t ≤
@@ -775,21 +783,47 @@ theorem materialization_credits_are_the_managers_own_vector {fe : CloseFunding.E
           before.ledger.pending token manager + CloseFunding.transferred p.credits token) :=
   CloseFunding.materialization_call_complete_vector call
 
-/-- The remaining gap of premise (c), stated in full: the accepted close
-statement's own token amounts are within what that channel deposited. This is the
-obligation the Balance/validity circuit family must discharge. -/
-theorem close_vector_backing_is_exactly_premise_c
+/-- **The close-vector backing, at the step that actually moves money.** This
+theorem REPLACES `close_vector_backing_is_exactly_premise_c`, which asserted the
+old premise (c) — the close statement's amounts bounded by an opaque per-channel
+deposit map — about close-intent ACCEPTANCE, an event that credits nothing. The
+event that credits is `Step.materialize`, and its call shape is exactly the one
+below: the Materializer runs against the combined state's own materializer
+storage and the Rollup ledger projected out of it.
+
+For such a call against the bound Manager, `TrustBoundary`'s
+`materialized_credits_are_finalized_l2_balances_of_boundary` gives a backing
+witness satisfying `CloseAssetBacking.CircuitConstraints` whose extended-state
+commitment the canonical Rollup head finalizes, whose channel wire is the bound
+channel, and each of whose ACTIVE rows carries one credited (token, amount) pair —
+so every credited amount is within that channel's L2 entitlement at that finalized
+root. What is still borrowed is premise (c4) and the six fields around it, not a
+deposit map. -/
+theorem materialized_credits_are_backed_by_l2_entitlement
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
     {Deployed Modeled Unmodeled : σ → σ → Prop}
     {managerProjection : σ → ManagerValue.State} {fundingProjection : σ → CloseFunding.State}
     (tb : TrustBoundary.TrustBoundary m Deployed Modeled Unmodeled managerProjection
       fundingProjection)
-    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
-    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true)
-    (i : Fin 10) (live : i.val < f.tokenCount.val) :
-    (f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val :=
-  tb.closeVectorBacked f proof accepted i live
+    (s : State) (fundingAfter : CloseFunding.State) (out : RollupValue.State)
+    (proof : CloseFunding.Bytes) (events : List CloseFunding.Event)
+    (call : CloseFunding.materializeSignedHead m.funding ⟨s.funding, FundFlow.projectLedger s.rollup⟩
+      m.managerAddress proof = .ok (⟨fundingAfter, FundFlow.projectLedger out⟩, events)) :
+    ∃ (w : CloseAssetBacking.Witness BalanceProof Path)
+      (plan : CloseFunding.MaterializationPlan),
+      CloseAssetBacking.CircuitConstraints m.backingEnv.merkle m.backingEnv.hash
+          m.backingEnv.recursive w ∧
+      m.head.finalizedRoot
+          (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment.value
+        = true ∧
+      (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).channelId = m.managerChannel ∧
+      (∀ c ∈ plan.credits, ∃ row ∈ w.rows, row.active = true ∧ row.registry = c.token ∧
+        row.amount.value = c.amount) ∧
+      (∀ c ∈ plan.credits, c.amount ≤ m.l2Entitlement
+        (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment
+        m.managerChannel c.token) :=
+  TrustBoundary.materialized_credits_are_finalized_l2_balances_of_boundary tb _ _ proof events call
 
 /-! ## Replay protection and payout bound -/
 
@@ -1231,8 +1265,10 @@ possible way, because every proof is accepted and every accepted statement is
 declared satisfiable — while the conclusion people might hope it delivers fails.
 
 The environments are built by overriding only the fields the counterexample needs
-(`plonky2Satisfiable`, the adapter view, the installed adapters, the hash, and the
-deposit attribution) on an arbitrary `Models`, so no other premise is disturbed. -/
+(`plonky2Satisfiable`, the adapter view, the installed adapters, the hash, and —
+for the backing counterexample — the backing circuit environment, the canonical
+head's finality map and the L2 entitlement) on an arbitrary `Models`, so no other
+premise is disturbed. -/
 
 /-- The `sampleCloseFields` channel, but claiming one raw unit of the single live
 token. Everything else, including `tokenCount = 1` and `minDelegateCount = 0`, is
@@ -1250,9 +1286,9 @@ def unbackedAcceptingEvm : SettlementVerifier.EvmView where
   verifyCompactPublicInputs := fun _ _ =>
     .ok (SettlementCloseBridge.statement sampleKeccak unbackedCloseFields 0).words
 
-/-- The counterexample environment: the pinned adapter accepts everything, every
-accepted word vector is declared to be a satisfiable plonky2 statement of the
-pinned circuit, and the channel deposited nothing. -/
+/-- The counterexample environment: the pinned adapter accepts everything and
+every accepted word vector is declared to be a satisfiable plonky2 statement of
+the pinned circuit. -/
 def unbackedModels {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
     (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) :
     TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore :=
@@ -1260,8 +1296,21 @@ def unbackedModels {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : 
     evm := unbackedAcceptingEvm
     installed := sampleInstalled
     keccak := sampleKeccak
-    deposits := fun _ _ => 0
     plonky2Satisfiable := fun _ _ => True }
+
+/-- The same environment, specialised so that the BACKING path can be refuted
+concretely: the backing circuit's opaque dependencies are
+`CloseAssetBacking.exampleEnvironment` (for which the module exhibits a satisfying
+assignment of the whole 468-op builder program), the canonical head finalizes
+every root, and the L2 ledger entitles the channel to NOTHING. Premise (c4) is
+then refuted by a witness that carries a nonzero active amount. -/
+def unbackedBackingModels {AggregateProof Root ClaimPath ClaimCore : Type}
+    (m : TrustBoundary.Models Unit AggregateProof Unit Root ClaimPath ClaimCore) :
+    TrustBoundary.Models Unit AggregateProof Unit Root ClaimPath ClaimCore :=
+  { unbackedModels m with
+    backingEnv := CloseAssetBacking.exampleEnvironment
+    head := { m.head with finalizedRoot := fun _ => true }
+    l2Entitlement := fun _ _ _ => 0 }
 
 /-- The close endpoint really does accept in that environment, so the theorems
 below are not vacuous: they refute premises on an actual acceptance. -/
@@ -1284,27 +1333,42 @@ theorem unbacked_environment_satisfies_the_mle_premise
 /-- **Accepting the submodule does not buy fund safety.** In an environment where
 `mleVerifierSoundness` holds — every proof accepted, every accepted statement
 declared satisfiable — no `TrustBoundary` instance exists at all, because the
-channel is credited a token amount it never deposited and premise (c)
-`closeVectorBacked` is refuted on a genuine acceptance. So the new field cannot
-be read as closing the audit: a satisfiable statement of the pinned circuit is
-not by itself a legitimate fund movement, and premises (c), (d), (e1), (e2),
-(f1), (f2), (g1), (g2) and (h) remain exactly as unproved as before. -/
+BACKING residue is refuted by a concrete satisfying witness: the module
+`CloseAssetBacking` exhibits an assignment of its whole builder program, the
+witness it reads back carries an active row of amount 22 at a root the canonical
+head finalizes, and the L2 ledger entitles that channel to zero. So the accepted
+field cannot be read as closing the audit: a satisfiable statement of a pinned
+circuit is not by itself a legitimate fund movement, and premises (c0), (c0b),
+(c1), (c2), (c3a), (c3b), (c4), (d0), (d0'), (d1'), (d3), (e1a), (e1b),
+(e2), (f1), (f2), (g1'), (g2') and (h) remain exactly as unproved as before.
+
+The refuted field has changed — it used to be (c) `closeVectorBacked`, refuted by
+a credit of a token the channel never deposited — but the message has not: the
+counterexample still exhibits an environment satisfying the accepted premise in
+which fund safety fails. -/
 theorem mle_assumption_does_not_imply_fund_safety
-    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
-    (m : TrustBoundary.Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    {AggregateProof Root ClaimPath ClaimCore σ : Type}
+    (m : TrustBoundary.Models Unit AggregateProof Unit Root ClaimPath ClaimCore)
     (Deployed Modeled Unmodeled : σ → σ → Prop)
     (managerProjection : σ → ManagerValue.State) (fundingProjection : σ → CloseFunding.State) :
-    TrustBoundary.MleAcceptedStatementsAreSatisfiable (unbackedModels m) ∧
-      ¬ TrustBoundary.TrustBoundary (unbackedModels m) Deployed Modeled Unmodeled
+    TrustBoundary.MleAcceptedStatementsAreSatisfiable (unbackedBackingModels m) ∧
+      ¬ TrustBoundary.TrustBoundary (unbackedBackingModels m) Deployed Modeled Unmodeled
           managerProjection fundingProjection := by
-  refine ⟨unbacked_environment_satisfies_the_mle_premise m, ?_⟩
+  refine ⟨fun _ _ _ _ _ => trivial, ?_⟩
   intro tb
-  have violated := tb.closeVectorBacked unbackedCloseFields [] (unbacked_close_is_accepted m)
-    (0 : Fin 10) (by decide)
-  have credited : (unbackedCloseFields.channelFundAmounts 0).val = 1 := rfl
-  have deposited : (unbackedModels m).deposits unbackedCloseFields.channelId.val
-      (unbackedCloseFields.tokenRegistry 0).val = 0 := rfl
-  rw [credited, deposited] at violated
+  have live : (⟨17, CloseAssetBacking.normalAmount 22, true, ()⟩ : CloseAssetBacking.Row Unit) ∈
+      (CloseAssetBacking.readWitness CloseAssetBacking.exampleAssignment).rows := by
+    rw [show (CloseAssetBacking.readWitness CloseAssetBacking.exampleAssignment).rows =
+      CloseAssetBacking.normalRows from rfl]
+    simp [CloseAssetBacking.normalRows]
+  have violated := tb.finalizedBalanceIsBacked
+    (CloseAssetBacking.readWitness CloseAssetBacking.exampleAssignment)
+    CloseAssetBacking.example_satisfying_assignment_gives_circuit_constraints rfl
+    ⟨17, CloseAssetBacking.normalAmount 22, true, ()⟩ live rfl
+  have credited : (CloseAssetBacking.normalAmount 22).value = 22 := rfl
+  have entitlement : ∀ (root : CloseAssetBacking.Words8) (channel token : Nat),
+      (unbackedBackingModels m).l2Entitlement root channel token = 0 := fun _ _ _ => rfl
+  rw [credited, entitlement] at violated
   exact absurd violated (by decide)
 
 /-- **Accepting the submodule does not by itself discharge the close soundness
