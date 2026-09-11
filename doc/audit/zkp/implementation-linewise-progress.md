@@ -1,4 +1,4 @@
-# 実装の行対応 Lean 化 — 2026-09-10 作業記録
+# 実装の行対応 Lean 化 — 2026-09-11 作業記録
 
 ## 結論と対象
 
@@ -146,6 +146,57 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 実装に新たな盗難脆弱性を発見したという報告ではありません。
 
 ## 再検証
+
+### 2026-09-11：gate lowering の前提を回路全体から命令単位へ縮小
+
+対象は `CloseStatementLowering` と claim 側の前提 (b1)(b2) です。「受理された plonky2 statement から
+手書きの `CircuitGates` へ」という回路丸ごとの黒箱を、3 層に分解しました。役割分担は
+Fable 5.1 が計画と結果確認、Opus 5 が実装です。
+
+**L1（形の統一）。** (b1)(b2) も close と同型の `StatementLowering` に分割し、
+`MLE 前提 (a0) + 各回路の lowering` に揃えました。旧 field の結論は
+`close_proof_soundness_of_boundary` 等の互換定理として残り、`SystemSafety` の呼び出しは無変更で通ります。
+検証で 1 件の問題を捕捉しました。互換定理が入れ子 `namespace` 内の camelCase で宣言されており、
+登録器の組み立てる定数名と実体が食い違って guard の公理 probe が失敗する状態でした。
+トップレベルの snake_case に改名して解消しています。
+
+**L2（回路ごとの導出）。** 各回路が既にデータとして持っていた builder 呼び出し列
+`constructorProgram : List BuildOp` に、命令ごとの局所的な充足意味論 `BuildOp.holds` を与え、
+`program_satisfied_implies_gates : ProgramSatisfied constructorProgram a → CircuitGates e (readPublic a) (readWitness a)`
+を 3 回路すべてで証明しました。**前提は `ProgramSatisfied` のみで、残余の `EnvironmentGates` は 3 回路ともゼロ**です。
+
+| 回路 | 定理数 | `BuildOp` 追加 | 制約を出さない命令（`True`） | `CircuitGates` の変更 |
+|---|---:|---|---|---|
+| CloseCircuit | 58 → 92 | 0 | 47 命令中 4（config、build、生 allocation、insertion path） | なし（commit 基準と byte 一致を確認） |
+| WithdrawalClaimCircuit | 37 → 53 | 0 | 32 命令中 10（config、profiling observe、build、生 allocation） | なし |
+| PostCloseClaimCircuit | 32 → 54 | 1（`add_virtual_target` :372、転記漏れ） | 少数 | なし |
+
+いずれも非空性の例（2 cosigner・非零 genesis fund・実 freeze-nonce 増分など）を持ち、
+`readPublic` が期待する statement を読み戻すことまで定理化しています。
+`holds` の各ケースは source 行を docstring に引用しており、source が出さない制約は加えていません。
+PostClose の `DecryptionHolds` は gate 記録より強く（8192 係数の canonical 性と `a ≠ 0` / `c1 ≠ 0`）、
+これは手書き `ConstructorGates` が実回路の下近似であったことを意味します。
+
+**L3（前提の昇格）。** `TrustBoundary` の 3 field を `ClosePrimitiveLowering` /
+`WithdrawalPrimitiveLowering` / `PostClosePrimitiveLowering` に置き換えました。内容は
+「pinned digest の plonky2 statement が充足可能なら、**同じ** `constructorProgram` を我々の命令意味論で
+充足する割当が存在し、それが当該 statement を読み戻す」です。旧 `*StatementLowering` は instance 上の
+定理として再導出され、`*_gap_is_now_per_primitive` は受理から「プログラムの充足割当」と「gate」の両方が
+出ることを示します。digest pinning は `*PinnedDigestIsProgramDigest m digestOf` として分離し、
+`*_digest_pinning_and_program_lowering_give_primitive_lowering` で field に結び付けています。
+`TrustBoundary` は 8 → 35 定理、field は 13 個のまま。
+
+**残る前提は次の 2 つに限定されました。**
+(i) `BuildOp.holds` の各ケースが plonky2 の対応 primitive の強制内容と一致すること（命令の種類ごとの有限の照合）、
+(ii) `pinnedCircuitDigest adapter` が `constructorProgram` の digest であること。
+回路全体を黒箱として仮定する箇所は前提から消えました。(a0)、(c)〜(h) は従来どおりです。
+
+line-map には新定理を紐付け（close 46→57、withdrawal 32→46、post-close 30→42 定理）、
+境界 `primitive-semantics-faithfulness` を 3 map に追加しました。source hash・行数・span 分割は不変です。
+
+検証：main guard PASS（125 modules / 現行 72 / 470 hashes）、line guard PASS（169 maps）、
+回帰 3 suite と fixture parity green、`--require-complete` は exit 1。現行 named theorems 4,775
+（implementation 67 module・4,556）。runtime 差分なし。
 
 ### 2026-09-10：lib 単体テスト 711 件の全数実行
 

@@ -94,11 +94,17 @@ submitClaim、claimCredit payout、close の request / cancel / finalize、rollb
 
 ### 4.4 名前付き前提 13 個（`Zkp.Implementation.TrustBoundary`）
 
-`closeProofSoundness` / `withdrawalProofSoundness` / `postCloseProofSoundness` /
+`mleVerifierSoundness` (a0) / `closePrimitiveLowering` (a) / `withdrawalPrimitiveLowering` (b1) /
+`postClosePrimitiveLowering` (b2) /
 `closeVectorBacked` / `signatureValidity` / `circuitKeccakIsSolidityKeccak` /
 `tokenFundsHashBinding` / `finalizedRootObservation` / `finalizedHeightObservation` /
-`durableNullifierLedger` / `durableMaterializationLatch` / `sourceRefinement` /
-`mleVerifierSoundness`。
+`durableNullifierLedger` / `durableMaterializationLatch` / `sourceRefinement`。
+
+**2026-09-11 以降、(a)(b1)(b2) は「回路全体の lowering」ではなく「命令単位の lowering」です。**
+各回路の `program_satisfied_implies_gates` が `ProgramSatisfied constructorProgram a ⇒ CircuitGates` を
+前提なしで証明済みなので、残るのは (i) `BuildOp.holds` の各ケースと plonky2 primitive の一致、
+(ii) pinned digest が `constructorProgram` の digest であること、の 2 点だけです
+（`TrustBoundary.*_gap_is_now_per_primitive`、`*PinnedDigestIsProgramDigest`）。
 
 **`mleVerifierSoundness`（前提 a0）は運用者判断で受容した信頼仮定です。** KZG ceremony と同格。
 pinned MLE/WHIR サブモジュール（commit `6cefc6ac` に限定）を翻訳せず信頼します。
@@ -119,9 +125,9 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
 3. ~~CI に `cargo test --lib` を足す~~ **完了（`150bb19`、`regev::` を加えて 240 件）。**
    lib 711 件の全数実行も 2026-09-10 に完了し全通過（進捗文書の同日節）。`wallet_core::` /
    `circuits::` / `falcon_sig::` は 16 GB runner に載らないため routine step 外に留めています。
-4. **残る前提の削減。** `CloseStatementLowering`（gate 生成）と claim 側 (b1, b2) の lowering、
-   hash binding (e1, e2)、署名妥当性 (d) が主対象。(f) finality と (h) refinement は
-   形式化しても仮定のままです。
+4. **残る前提の削減。** ~~`CloseStatementLowering` と claim 側 (b1, b2) の lowering~~ は 2026-09-11 に
+   命令単位まで縮小済み（進捗文書の同日節）。次は hash binding (e1, e2) と署名妥当性 (d)。
+   (f) finality と (h) refinement は形式化しても仮定のままです。
 5. **未翻訳 41,783 行**は MLE 33,974 行（受容済み）＋残り約 7,800 行（falcon vendor の f64 FFT、
    各 module が untranslated と明記した部分）。無理に translated へ付け替えないこと。
 
