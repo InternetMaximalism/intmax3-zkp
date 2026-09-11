@@ -332,4 +332,160 @@ theorem bound_close_preserves_entire_settlement_vector
   exact CloseCircuit.token_funds_preimage_binds_count_registry_and_every_amount
     w.privateData expected sameLength wordsEq
 
+/-! ## ABI faithfulness of the token-funds preimage
+
+The hash-binding premise (e2) of `TrustBoundary` says: if the Solidity-side and the
+circuit-side token-funds digests agree, then the two hashed byte strings agree.
+What follows pins down exactly what kind of assumption that is.
+
+* `token_funds_preimage_length` and `witness_token_preimage_length` show both compared
+  strings are 368 bytes long (4 domain + 10*4 registry + 4 count + 10*32 amounts), and
+  `token_funds_compared_strings_same_length` states that as one equation. So (e2) is a
+  SAME-LENGTH collision claim: no length-extension or padding ambiguity is involved.
+* `be_bytes_injective` and `token_funds_preimage_injective` show the layout itself is
+  injective: distinct (registry, count, amounts) triples always produce distinct byte
+  strings, so a collision can never arise from the encoding losing information.
+
+Together these prove the "ABI-encoding faithfulness" half of (e2)'s obligation. What
+remains is solely collision resistance of Keccak-256 on the one concrete pair of
+368-byte strings compared inside an accepted close; nothing about the encoding, its
+width, its domain separation or its field ordering is still assumed. -/
+
+theorem token_funds_preimage_length (registry : Fin 10 → SettlementVerifier.U32)
+    (count : SettlementVerifier.U8) (amounts : Fin 10 → SettlementVerifier.U256) :
+    (SettlementVerifier.tokenFundsPreimage registry count amounts).length = 368 :=
+  SettlementVerifier.tokenFundsPreimage_length registry count amounts
+
+theorem word_bytes_length (ws : List Nat) : (wordBytes ws).length = ws.length * 4 := by
+  induction ws with
+  | nil => rfl
+  | cons w ws ih =>
+    simp only [wordBytes, List.length_append, SettlementVerifier.beBytes_length, ih,
+      List.length_cons]
+    omega
+
+theorem witness_token_preimage_length (w : CloseCircuit.PrivateWitness)
+    (shape : w.Shape) : (wordBytes (CloseCircuit.tokenFundsPreimage w)).length = 368 := by
+  rw [word_bytes_length, CloseCircuit.token_funds_preimage_has_exact_92_words w shape]
+
+theorem be_bytes_mod_eq_of_eq (n a b : Nat) :
+    SettlementVerifier.beBytes n a = SettlementVerifier.beBytes n b →
+      a % 256 ^ n = b % 256 ^ n := by
+  induction n generalizing a b with
+  | zero => intro _; simp [Nat.mod_one]
+  | succ n ih =>
+    intro h
+    simp only [SettlementVerifier.beBytes, List.cons.injEq] at h
+    have tail := ih a b h.2
+    have expand : ∀ x : Nat,
+        x % 256 ^ (n + 1) = 256 ^ n * (x / 256 ^ n % 256) + x % 256 ^ n := by
+      intro x
+      have dvd : (256 : Nat) ^ n ∣ 256 ^ (n + 1) := ⟨256, Nat.pow_succ 256 n⟩
+      have hm : x % 256 ^ (n + 1) % 256 ^ n = x % 256 ^ n := Nat.mod_mod_of_dvd x dvd
+      have hd : x % 256 ^ (n + 1) / 256 ^ n = x / 256 ^ n % 256 := by
+        rw [Nat.pow_succ]
+        exact Nat.mod_mul_right_div_self x (256 ^ n) 256
+      calc x % 256 ^ (n + 1)
+          = 256 ^ n * (x % 256 ^ (n + 1) / 256 ^ n) + x % 256 ^ (n + 1) % 256 ^ n :=
+            (Nat.div_add_mod _ _).symm
+        _ = 256 ^ n * (x / 256 ^ n % 256) + x % 256 ^ n := by rw [hm, hd]
+    rw [expand a, expand b, h.1, tail]
+
+theorem be_bytes_injective (n a b : Nat) (ha : a < 256 ^ n) (hb : b < 256 ^ n)
+    (h : SettlementVerifier.beBytes n a = SettlementVerifier.beBytes n b) : a = b := by
+  have hmod := be_bytes_mod_eq_of_eq n a b h
+  rwa [Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb] at hmod
+
+theorem be_bytes_prefix_injective (n a b : Nat) (xs ys : List Nat)
+    (ha : a < 256 ^ n) (hb : b < 256 ^ n)
+    (h : SettlementVerifier.beBytes n a ++ xs = SettlementVerifier.beBytes n b ++ ys) :
+    a = b ∧ xs = ys := by
+  have split := List.append_inj h (by simp [SettlementVerifier.beBytes_length])
+  exact ⟨be_bytes_injective n a b ha hb split.1, split.2⟩
+
+theorem ten_be_bytes_join_injective (n : Nat) (f g : Fin 10 → Nat)
+    (hf : ∀ i, f i < 256 ^ n) (hg : ∀ i, g i < 256 ^ n)
+    (h : (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes n (f i)).join =
+      (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes n (g i)).join) :
+    ∀ i, f i = g i := by
+  simp only [SettlementVerifier.tenList, List.join_cons, List.join_nil] at h
+  obtain ⟨e0, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 0) (hg 0) h
+  obtain ⟨e1, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 1) (hg 1) h
+  obtain ⟨e2, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 2) (hg 2) h
+  obtain ⟨e3, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 3) (hg 3) h
+  obtain ⟨e4, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 4) (hg 4) h
+  obtain ⟨e5, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 5) (hg 5) h
+  obtain ⟨e6, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 6) (hg 6) h
+  obtain ⟨e7, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 7) (hg 7) h
+  obtain ⟨e8, h⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 8) (hg 8) h
+  obtain ⟨e9, -⟩ := be_bytes_prefix_injective n _ _ _ _ (hf 9) (hg 9) h
+  intro i
+  obtain ⟨v, hv⟩ := i
+  match v, hv with
+  | 0, _ => exact e0
+  | 1, _ => exact e1
+  | 2, _ => exact e2
+  | 3, _ => exact e3
+  | 4, _ => exact e4
+  | 5, _ => exact e5
+  | 6, _ => exact e6
+  | 7, _ => exact e7
+  | 8, _ => exact e8
+  | 9, _ => exact e9
+  | k + 10, hk => exact absurd hk (by omega)
+
+theorem token_funds_preimage_injective
+    (r r' : Fin 10 → SettlementVerifier.U32) (c c' : SettlementVerifier.U8)
+    (a a' : Fin 10 → SettlementVerifier.U256)
+    (h : SettlementVerifier.tokenFundsPreimage r c a =
+      SettlementVerifier.tokenFundsPreimage r' c' a') :
+    r = r' ∧ c = c' ∧ a = a' := by
+  have regBound : ∀ (f : Fin 10 → SettlementVerifier.U32) (i : Fin 10), (f i).val < 256 ^ 4 :=
+    fun f i => Nat.lt_of_lt_of_le (f i).isLt (by decide)
+  have amtBound : ∀ (f : Fin 10 → SettlementVerifier.U256) (i : Fin 10), (f i).val < 256 ^ 32 :=
+    fun f i => Nat.lt_of_lt_of_le (f i).isLt (by decide)
+  have countBound : ∀ x : SettlementVerifier.U8, x.val < 256 ^ 4 :=
+    fun x => Nat.lt_of_lt_of_le x.isLt (by decide)
+  simp only [SettlementVerifier.tokenFundsPreimage] at h
+  have amountsSplit :
+      SettlementVerifier.beBytes 4 SettlementVerifier.tokenFundsDomain ++
+            (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r i).val).join ++
+            SettlementVerifier.beBytes 4 c.val =
+          SettlementVerifier.beBytes 4 SettlementVerifier.tokenFundsDomain ++
+            (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r' i).val).join ++
+            SettlementVerifier.beBytes 4 c'.val ∧
+        (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 32 (a i).val).join =
+          (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 32 (a' i).val).join :=
+    List.append_inj h (by simp [SettlementVerifier.tenList, SettlementVerifier.beBytes_length])
+  have countSplit :
+      SettlementVerifier.beBytes 4 SettlementVerifier.tokenFundsDomain ++
+            (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r i).val).join =
+          SettlementVerifier.beBytes 4 SettlementVerifier.tokenFundsDomain ++
+            (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r' i).val).join ∧
+        SettlementVerifier.beBytes 4 c.val = SettlementVerifier.beBytes 4 c'.val :=
+    List.append_inj amountsSplit.1
+      (by simp [SettlementVerifier.tenList, SettlementVerifier.beBytes_length])
+  have registryJoin :
+      (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r i).val).join =
+        (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes 4 (r' i).val).join :=
+    List.append_inj_right countSplit.1 rfl
+  have countEq : c.val = c'.val :=
+    be_bytes_injective 4 _ _ (countBound c) (countBound c') countSplit.2
+  refine ⟨?_, Fin.eq_of_val_eq countEq, ?_⟩
+  · funext i
+    exact Fin.eq_of_val_eq
+      (ten_be_bytes_join_injective 4 (fun j => (r j).val) (fun j => (r' j).val)
+        (regBound r) (regBound r') registryJoin i)
+  · funext i
+    exact Fin.eq_of_val_eq
+      (ten_be_bytes_join_injective 32 (fun j => (a j).val) (fun j => (a' j).val)
+        (amtBound a) (amtBound a') amountsSplit.2 i)
+
+theorem token_funds_compared_strings_same_length (f : SettlementVerifier.CloseFields)
+    (w : CloseCircuit.PrivateWitness) (shape : w.Shape) :
+    (wordBytes (CloseCircuit.tokenFundsPreimage w)).length =
+      (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+        f.channelFundAmounts).length := by
+  rw [witness_token_preimage_length w shape, token_funds_preimage_length]
+
 end Zkp.Implementation.SettlementCloseBridge
