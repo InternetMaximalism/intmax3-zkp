@@ -2,6 +2,9 @@ import Zkp.Implementation.FundFlow
 import Zkp.Implementation.SettlementCloseBridge
 import Zkp.Implementation.ClaimSettlementBridge
 import Zkp.Implementation.CloseSignatureBridge
+import Zkp.Implementation.FalconAggProgram
+import Zkp.Implementation.FalconGadgetProgram
+import Zkp.Implementation.LedgerWriters
 import Zkp.Implementation.Keccak256
 
 /-!
@@ -103,38 +106,85 @@ callback form from it and (e1a), and
 collision of Keccak-256 on ONE pair of 368-byte strings, the ABI-faithfulness
 half having been proved in `SettlementCloseBridge`.
 
-The signature boundary is split four ways. The old single field
-`signatureValidity` said that a passing aggregate check means the close message
-was authorized by that many of those keys — one implication bundling a
-recursive-verifier claim, a circuit-lowering claim, the aggregation tree's
-bookkeeping and the whole of Falcon's cryptography. The bookkeeping half is now
-PROVED, in `Zkp.Implementation.CloseSignatureBridge`
-(`accepted_aggregate_tree_gives_signer_evidence`), and the remaining four
-residues are carried separately: (d0) `aggregateRecursiveVerifierSoundness`,
-(d1) `aggregateStatementLowering`, (d2) `falconPredicateIsGadget` and (d3)
-`falconUnforgeability`. `signature_validity_of_boundary` composes them into
-`CloseSignatureBridge.SignerEvidence` — a strictly stronger conclusion than the
-old field's opaque `signers` relation, which no longer exists — and
-`signature_gap_is_now_per_signature` names the four residues as one conjunction.
+The signature boundary is split five ways, and every one of the five is now
+per-primitive or per-artifact. The old single field `signatureValidity` said that
+a passing aggregate check means the close message was authorized by that many of
+those keys — one implication bundling a recursive-verifier claim, a
+circuit-lowering claim, the aggregation tree's bookkeeping and the whole of
+Falcon's cryptography. Its first replacement, the quadruple (d0), (d1), (d2),
+(d3), still named two whole gate structures: (d1) `aggregateStatementLowering`
+asked for a `FalconAggregate.AggTree` evaluating to the exposed statement, and
+(d2) `falconPredicateIsGadget` identified an opaque `Bool` accept callback with
+the whole of `FalconCore.CircuitSatisfied`. Both are gone, together with the
+`Models` parameters they needed (`sigEnv`, `falconMul`, `aggregateCircuitDigest`).
 
-The seventeen fields, in order: (a0) `mleVerifierSoundness`, (a)
+`Zkp.Implementation.FalconGadgetProgram` transcribes `FalconSigVerifyTarget::build`
+(gadget.rs:651-736) as a 23-call builder program and PROVES
+`FalconCore.CircuitSatisfied` for the concrete product the circuit computes;
+`Zkp.Implementation.FalconAggProgram` transcribes the leaf and level constructors
+of `src/falcon_sig/agg.rs` the same way, splices the gadget transcript into the
+leaf's signature call, and PROVES the induction over the four circuits — the tree,
+the count bounds, the left packing with its exactly-zero suffix and the single
+shared message. What is left is carried as: (d0)
+`aggregateRecursiveVerifierSoundness` at the top constant key, (d0')
+`levelRecursionSoundness` at each level's constant child key, (d1')
+`aggregatePrimitiveLowering` — per-builder-call at every level, down to and
+including the gadget — (d2') `nttComputesNegacyclicProduct`, and (d3)
+`falconUnforgeability`. `signature_validity_of_boundary` composes (d0), (d0'),
+(d1') and (d3) into `CloseSignatureBridge.SignerEvidence` (it does not need
+(d2')), and `signature_gap_is_now_per_primitive` names those four residues as one
+conjunction, replacing the former `signature_gap_is_now_per_signature` — two of
+whose conjuncts no longer exist as Props. The digest-pinning half is stated on its
+own, outside the structure, as `AggregateLevelPinnedDigestIsProgramDigest`,
+exactly as the three settlement endpoints have done since the first loop.
+
+The two durability premises are reduced the same way, and one of them carried a
+FALSE clause. `Zkp.Implementation.LedgerWriters` pins the write-site inventory of
+the five flagged storage variables — one Solidity assignment each, re-derived from
+the sources on every CI run by `.github/ci/check-ledger-writers.py` — and proves
+the model-level frame theorems over an enumeration of every modeled entrypoint of
+`ManagerValue` and `CloseFunding`. The premises become (g1')
+`ledgerWritersAreInventoried` and (g2') `latchWritersAreInventoried`: every
+transition outside the model that touches that storage is a run of an inventoried
+entrypoint. The old conclusions come back as the theorems
+`durable_nullifier_ledger_of_boundary` and
+`durable_materialization_latch_of_boundary`.
+
+**THE FINDING (2026-09-11), recorded here and in (g1')'s docstring.** The former
+(g1) `durableNullifierLedger` asserted `cap t = cap s` for transitions outside the
+model. That clause is REFUTED by the deployed contract:
+`ChannelSettlementManager.sol:1681`, inside `_finalizeClose` and reached from the
+external `finalizeCloseGuarded`, does `finalizedChannelFundAmount[baseToken] +=
+...`; the entrypoint is modeled — by `ManagerValue.finalizeCloseCore` — but it is
+NOT a `SystemSafety.Step` constructor, so it lives in the UNMODELED relation and
+raises the cap. The corrected clause is MONOTONE, `cap s tok ≤ cap t tok`, which
+is what `durable_nullifier_ledger_of_boundary` concludes and what
+`LedgerWriters.manager_entrypoints_are_ledger_monotone` proves;
+`LedgerWriters.only_cap_writer_is_outside_step` pins that this is the single
+exception. Nothing downstream is weakened, because `SystemSafety` never consumed
+(g1) or (g2).
+
+The eighteen fields, in order: (a0) `mleVerifierSoundness`, (a)
 `closePrimitiveLowering`, (b1) `withdrawalPrimitiveLowering`, (b2)
 `postClosePrimitiveLowering`, (c) `closeVectorBacked`, (d0)
-`aggregateRecursiveVerifierSoundness`, (d1) `aggregateStatementLowering`, (d2)
-`falconPredicateIsGadget`, (d3) `falconUnforgeability`, (e1a)
-`solidityKeccakIsReference`, (e1b) `circuitKeccakIsReference`, (e2)
-`tokenFundsHashBinding`, (f1) `finalizedRootObservation`, (f2)
-`finalizedHeightObservation`, (g1) `durableNullifierLedger`, (g2)
-`durableMaterializationLatch`, (h) `sourceRefinement`.
+`aggregateRecursiveVerifierSoundness`, (d0') `levelRecursionSoundness`, (d1')
+`aggregatePrimitiveLowering`, (d2') `nttComputesNegacyclicProduct`, (d3)
+`falconUnforgeability`, (e1a) `solidityKeccakIsReference`, (e1b)
+`circuitKeccakIsReference`, (e2) `tokenFundsHashBinding`, (f1)
+`finalizedRootObservation`, (f2) `finalizedHeightObservation`, (g1')
+`ledgerWritersAreInventoried`, (g2') `latchWritersAreInventoried`, (h)
+`sourceRefinement`.
 
 The single inhabitation result below is deliberately degenerate: in an
 environment where every proof adapter returns a failure, no plonky2 statement is
-satisfiable at all and no Falcon signature is ever accepted, every
+satisfiable at all and no recursive child verification ever succeeds, every
 acceptance-guarded premise holds vacuously, every lowering premise holds
-vacuously, the gadget-faithfulness premise holds because its antecedent is never
-met, the unforgeability premise holds because the authorization relation is
-taken to be trivial, and every storage-frame premise holds because no transition
-is admitted. That witnesses only well-formedness of the statement, and
+vacuously, the unforgeability premise holds because the authorization relation is
+taken to be trivial, and every storage premise holds because no transition outside
+the model is admitted. Two fields are the exception and are supplied as
+hypotheses rather than made vacuous — the two hash equations and (d2'), which is
+a universal claim about two concrete Lean functions and mentions no environment at
+all. That witnesses only well-formedness of the statement, and
 `rejecting_environment_accepts_no_close` records why: such an environment
 authorizes no fund movement at all.
 -/
@@ -169,29 +219,49 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   head : RollupValue.State
   /-- Intended per-channel deposit attribution (see `ChannelDeposits`). -/
   deposits : ChannelDeposits
-  /-- Aggregation-tree environment of `src/falcon_sig/agg.rs`: the opaque Poseidon
-  key-digest callback and the opaque per-slot Falcon accept callback the
-  aggregation model evaluates. Premises (d1), (d2) and the derived signer evidence
-  all speak of THIS environment, so the tree an accepted proof is claimed to have,
-  the gadget the accept callback is claimed to be, and the key digests the close
-  circuit exposes cannot drift apart. -/
-  sigEnv : FalconAggregate.SigEnv
   /-- Hash environment of the single-signature model `FalconCore`: the
   `hash_to_point` and Poseidon callbacks the `gadget.rs` gate set is stated over.
-  A parameter, exactly like `sigEnv`; nothing here defines Poseidon. -/
+  A parameter, exactly like `closeEnv`; nothing here defines Poseidon. The
+  polynomial product is NOT a parameter any more: `FalconGadgetProgram`
+  transcribes the in-circuit NTT, so every field that used to be read against an
+  abstract `falconMul` is now read against the concrete
+  `FalconGadgetProgram.circuitProduct`. -/
   falconHash : FalconCore.HashEnvironment
-  /-- The negacyclic polynomial product of `Z_q[X]/(X^512+1)` that `FalconCore`'s
-  gate set multiplies with. Also a parameter: the model does not fix an
-  implementation, so (d2) and (d3) must be read against the same one. -/
-  falconMul : FalconCore.PolynomialProduct
-  /-- Pinned circuit identity of the `FalconAggCircuit` whose verifier data is
-  `closeEnv.aggregateVerifier`: the circuit digest baked into the constant
-  verifier key the close circuit verifies its aggregate proof against. It is a
-  parameter here, exactly like `pinnedCircuitDigest`; nothing in this project
-  derives it from a circuit, and nothing proves that the key the close circuit
-  pins is the key of the aggregation circuit `FalconAggregate` models. Only (d0)
-  and (d1) mention it, and the pinning claim is part of what (d1) borrows. -/
-  aggregateCircuitDigest : List Nat
+  /-- Pinned circuit identity of EACH level of the Falcon aggregation stack:
+  `aggregateLevelDigest k` is the circuit digest of the level-`k` circuit of
+  `src/falcon_sig/agg.rs`, with level 0 the LEAF circuit
+  (`FalconLeafCircuit::new`, agg.rs:268-305) and level 3
+  (`FalconAggregate.aggLevels`) the TOP circuit whose constant verifier key
+  `closeEnv.aggregateVerifier` is, i.e. the one the close circuit verifies its
+  aggregate proof against. Levels 1 and 2 are the intermediate
+  `FalconAggLevelCircuit`s, each of which recursively verifies the level below at
+  its own constant child verifier data.
+
+  It is a parameter here, exactly like `pinnedCircuitDigest`; nothing in this
+  project derives a digest from a circuit, and nothing proves that the key a
+  level circuit pins is the key of the circuit `FalconAggProgram` transcribes at
+  that level. That last claim is stated on its own as
+  `AggregateLevelPinnedDigestIsProgramDigest` and is not a field. Only (d0),
+  (d0') and (d1') mention this map. -/
+  aggregateLevelDigest : Nat → List Nat
+  /-- Aggregation-stack recursion environment of `src/falcon_sig/agg.rs`: the
+  OPAQUE child-verification relation `verifyChild` standing for plonky2's
+  in-circuit recursive verifier (`add_proof_target_and_verify` /
+  `add_proof_target_and_conditionally_verify`, agg.rs:399 and :403-404), together
+  with the CONSTANT child verifier data each level circuit bakes in
+  (agg.rs:99-105, :394-404). Premises (d0') and (d1') and the derived signer
+  evidence all speak of THIS environment, so the proofs a level circuit is
+  claimed to have verified and the assignments its transcript is claimed to admit
+  cannot drift apart.
+
+  Its type parameter is the SAME `AggregateProof` that `closeEnv` uses. That is
+  deliberate and is part of what the field says: the recursive proof object the
+  close circuit verifies at the top of the stack is the same kind of artifact the
+  level circuits verify one level down — one plonky2 proof type for the whole
+  aggregation stack, not two unrelated ones. Reading (d0) and (d0') against a
+  single proof type is what lets the top-level statement (d0) produces feed the
+  per-level induction (d0') and (d1') run. -/
+  aggEnv : FalconAggProgram.LevelEnvironment AggregateProof
   /-- `authorized h digest` is the intended meaning of a Falcon signature: the
   holder of the public polynomial `h` authorized the message digest `digest`
   (as its 8 `Bytes32` limbs). It replaces the former `signers` relation one level
@@ -214,13 +284,14 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   public-input vector is `words`, and which has a satisfying assignment. It is
   deliberately opaque — no model in this project defines plonky2 statements,
   gates or assignments — and only `MleAcceptedStatementsAreSatisfiable`, the
-  three `*StatementLowering` obligations and the two aggregate-signature fields
-  (d0) `aggregateRecursiveVerifierSoundness` and (d1) `aggregateStatementLowering`
-  ever mention it. The aggregate pair uses it at a DIFFERENT digest,
-  `aggregateCircuitDigest`, and behind a different verifier (the close circuit's
-  in-circuit recursive verify, not the settlement contract's MLE/WHIR call), which
-  is precisely why accepting the MLE/WHIR artifact in (a0) says nothing about
-  (d0). -/
+  three `*StatementLowering` obligations and the three aggregate-signature fields
+  (d0) `aggregateRecursiveVerifierSoundness`, (d0') `levelRecursionSoundness` and
+  (d1') `aggregatePrimitiveLowering` ever mention it. The aggregate triple uses it
+  at DIFFERENT digests, the four `aggregateLevelDigest k`, and behind a different
+  verifier (the close circuit's in-circuit recursive verify and the level
+  circuits' own recursive verifies, not the settlement contract's MLE/WHIR call),
+  which is precisely why accepting the MLE/WHIR artifact in (a0) says nothing
+  about (d0) or (d0'). -/
   plonky2Satisfiable : List Nat → List Nat → Prop
 
 /-- The accepted-artifact assumption in isolation, so that a theorem can take it
@@ -418,6 +489,27 @@ def PostClosePinnedDigestIsProgramDigest
   m.pinnedCircuitDigest m.installed.adapters.postClose =
     digestOf PostCloseClaimCircuit.constructorProgram
 
+/-- (ii) for the FOUR circuits of the Falcon aggregation stack, stated once for
+all levels. `digestOf k` is the (unmodeled) circuit digest plonky2 computes for
+the level-`k` builder transcript of `FalconAggProgram` — `leafProgram` at `k = 0`
+and `levelProgram k` at `k ∈ {1, 2, 3}` — so the map, not a single list, is what
+has to be pinned. The Prop says the digest map (d0), (d0') and (d1') are all read
+against IS that one, at every level of the stack.
+
+This is deliberately NOT a field. Keeping it outside the structure is what makes
+(d1') an obligation about the TRANSCRIPT alone: the level lowering says "a
+satisfiable statement at `aggregateLevelDigest k` admits an assignment of the
+level-`k` transcript", and this Prop is the separate claim that those two
+circuits are the same circuit. The old (d1) `aggregateStatementLowering` asserted
+both at once; the close, withdrawal and post-close endpoints have kept them apart
+since the first loop, and the aggregation stack now does too. Nothing here proves
+either half. -/
+def AggregateLevelPinnedDigestIsProgramDigest
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (digestOf : Nat → List Nat) : Prop :=
+  ∀ k : Nat, k ≤ FalconAggregate.aggLevels → m.aggregateLevelDigest k = digestOf k
+
 /-- **The per-primitive premise really does yield the coarse one.** Given an
 assignment satisfying `CloseCircuit.constructorProgram` whose public wires are
 the bound statement, `CloseCircuit.program_satisfied_implies_gates` produces the
@@ -598,13 +690,14 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   attestation or Proof-DA availability path, which stays a distinct boundary of
   `MleProverBridge` and `BlobJournal`. It says nothing about plonky2's own
   recursive verifier, which the close circuit invokes on the Falcon aggregate
-  proof: that is (d0), a separate un-accepted premise, even though the recursive
-  verifier ships in the same pinned submodule. It says nothing about the
+  proof and which the three aggregation level circuits invoke on their children:
+  those are (d0) and (d0'), separate un-accepted premises, even though the
+  recursive verifier ships in the same pinned submodule. It says nothing about the
   correctness of the public inputs a caller passes in: the Solidity binding pins
   which words were returned, it never validates that they describe a real
   channel. And a satisfiable statement is not by itself a safe fund movement —
-  that step still needs premises (c), (d0), (d1), (d2), (d3), (e1a), (e1b), (e2),
-  (f1), (f2) and (g1). See
+  that step still needs premises (c), (d0), (d0'), (d1'), (d2'), (d3), (e1a),
+  (e1b), (e2), (f1), (f2) and (g1'). See
   `mle_assumption_reduces_close_soundness_to_gate_lowering` for what the
   acceptance buys, and
   `Zkp.Implementation.SystemSafety.mle_assumption_does_not_imply_fund_safety` for
@@ -682,13 +775,21 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
       SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
       ∀ i : Fin 10, i.val < f.tokenCount.val →
         (f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val
-  /-- **(d0) Aggregate recursive-verifier soundness — NOT covered by (a0).**
-  `CloseCircuit.CircuitGates.aggregateVerified` is an opaque predicate call
-  standing for plonky2's in-circuit recursive verification of the Falcon
+  /-- **(d0) Aggregate recursive-verifier soundness at the TOP key — NOT covered
+  by (a0).** `CloseCircuit.CircuitGates.aggregateVerified` is an opaque predicate
+  call standing for plonky2's in-circuit recursive verification of the Falcon
   aggregation proof against the constant verifier key `aggregateVerifier`. This
-  premise says a passing such check means the aggregation circuit identified by
-  `aggregateCircuitDigest` really has a satisfiable statement at the 73 aggregate
-  public-input words.
+  premise says a passing such check means the circuit identified by
+  `aggregateLevelDigest FalconAggregate.aggLevels` — the TOP circuit of the
+  aggregation stack, the one that key belongs to — really has a satisfiable
+  statement at the 73 aggregate public-input words.
+
+  ONE KEY ONLY. This field is about the verify the CLOSE circuit performs, and
+  therefore about the top of the stack alone. The three verifies the level
+  circuits perform on their children are a different claim at three different
+  constant keys, carried separately as (d0') `levelRecursionSoundness`. Splitting
+  them is what lets the induction over the four circuits run without any field
+  quantifying over proofs the close circuit never sees.
 
   EXPLICITLY NOT COVERED BY THE ACCEPTED PREMISE (a0). The acceptance recorded in
   (a0) is scoped to ONE artifact: the pinned MLE/WHIR verifier the settlement
@@ -703,55 +804,128 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   aggregateRecursiveVerifierSoundness :
     ∀ (proof : AggregateProof) (st : CloseCircuit.AggregateStatement),
       m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st →
-      m.plonky2Satisfiable m.aggregateCircuitDigest st.words
-  /-- **(d1) Aggregate statement lowering — COARSE, whole-circuit.** From a
-  satisfiable plonky2 statement of the aggregation circuit at those 73 words to an
-  actual aggregation tree of `Zkp.Implementation.FalconAggregate` that evaluates,
-  under `sigEnv`, to exactly the statement the close circuit exposed (lowered by
-  `CloseSignatureBridge.toAggStatement`; the two public-input layouts are the same
-  vector, and THAT part is proved, by
-  `CloseSignatureBridge.to_agg_statement_public_inputs`). The width conjunct is the
-  8-limb `Bytes32` message-digest shape the tree characterization needs.
+      m.plonky2Satisfiable (m.aggregateLevelDigest FalconAggregate.aggLevels) st.words
+  /-- **(d0') Recursive-verifier soundness at each LEVEL's constant child key —
+  NOT covered by (a0) and NOT covered by (d0).** Each of the three
+  `FalconAggLevelCircuit`s verifies its two children in-circuit, at the CONSTANT
+  child verifier data it bakes in (`add_proof_target_and_verify` on the left,
+  agg.rs:399; `add_proof_target_and_conditionally_verify` on the right,
+  agg.rs:403-404; the constant is agg.rs:394-398 with the A7 binding of
+  agg.rs:99-105). `m.aggEnv.verifyChild` is that verification as an opaque
+  relation; this premise says a child proof it accepts at level `k` means the
+  level-`(k-1)` circuit really is satisfiable at the public inputs the parent
+  read out of it.
 
-  THIS FIELD IS COARSE — it names a whole circuit, the granularity fields (a),
-  (b1) and (b2) had before the per-primitive loop, and it is the only field that
-  still does. The reason is structural, not an oversight: `FalconAggregate` has no
-  `BuildOp` program, so there is nothing finer to state yet. Refining it the way
-  `constructorProgram` refined (a) is the named next step.
+  SAME ARTIFACT SCOPE AS (d0), DIFFERENT INSTANCES. It is the same plonky2
+  recursive verifier, at three more constant keys, inside three more circuits, and
+  it is no more accepted than (d0) is: (a0) covers the MLE/WHIR verifier the
+  settlement contract calls, and nothing else. Nothing here models a plonky2
+  proof, so this cannot be discharged in this project at all; it would need a
+  soundness proof of the recursive verifier at those keys.
 
-  DIGEST PINNING IS IMPLICIT IN IT. Nothing separates "the statement at
-  `aggregateCircuitDigest` is satisfiable" from "that digest is the digest of the
-  circuit `FalconAggregate` transcribes": this field asserts both at once, where
-  the close/withdrawal/post-close endpoints keep them apart as
-  `ClosePinnedDigestIsProgramDigest` and its siblings. That is another thing the
-  per-primitive refinement would buy. -/
-  aggregateStatementLowering :
-    ∀ st : CloseCircuit.AggregateStatement,
-      m.plonky2Satisfiable m.aggregateCircuitDigest st.words →
-      ∃ t : FalconAggregate.AggTree,
-        (∀ w ∈ FalconAggregate.activeWitnesses t, w.messageDigest.length = 8) ∧
-          FalconAggregate.evalTree m.sigEnv t FalconAggregate.aggLevels =
-            .ok (CloseSignatureBridge.toAggStatement st)
-  /-- **(d2) The aggregation model's accept callback IS the Falcon gadget.**
-  `FalconAggregate.SigEnv.falconAccepts` is an opaque `Bool` callback at every leaf
-  of the aggregation tree. This premise says that whenever it accepts, the
-  `src/falcon_sig/gadget.rs` gate set that `FalconCore` models is satisfied on an
-  ACTIVE slot by a witness whose `h`, `s2` and `salt` are the slot's own and whose
-  message digest is the slot's 8 limbs packed big-endian. It would be discharged by
-  a per-gate reading of `gadget.rs` against `FalconCore.CircuitSatisfied` — the
-  same kind of obligation as the per-`holds` faithfulness inside (a), for a circuit
-  that has no `BuildOp` program yet. -/
-  falconPredicateIsGadget :
-    CloseSignatureBridge.FalconPredicateIsGadget m.sigEnv m.falconHash m.falconMul
+  WHAT IT BUYS. Together with (d1') it is what replaces the whole-circuit (d1)
+  `aggregateStatementLowering`: the aggregation TREE is no longer assumed to exist
+  behind a satisfiable top statement — it is DERIVED, level by level, by
+  `FalconAggProgram.satisfiable_top_level_gives_witness_list`, from these two
+  fields and nothing else. -/
+  levelRecursionSoundness :
+    FalconAggProgram.RecursionSound
+      (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
+  /-- **(d1') Aggregation-stack PER-PRIMITIVE lowering — replaces the last
+  whole-circuit premise of this structure.** For every level of the stack, a
+  satisfiable plonky2 statement at that level's pinned digest yields an ASSIGNMENT
+  of the wires the corresponding Rust constructor allocates which satisfies this
+  project's own per-builder-call semantics of the SAME ordered program, and whose
+  registered public inputs read back to exactly those words:
+
+  * at the LEAF (level 0) the assignment is a `FalconGadgetProgram.GadgetAssignment`
+    satisfying every one of the 23 `holds` cases of
+    `FalconGadgetProgram.gadgetProgram` (the transcript of
+    `FalconSigVerifyTarget::build`, gadget.rs:651-736), TOGETHER WITH a
+    `FalconAggProgram.LeafAssignment` whose signature wires are that gadget
+    assignment's, the call-site wiring `FalconAggProgram.LeafWiring`
+    (agg.rs:234-239, :271, :274, :279 and the two `Bytes32Target::new(_, true)`
+    range checks of gadget.rs:659-661), and the leaf's seven OTHER builder calls
+    of agg.rs:268-305;
+  * at levels 1, 2 and 3 the assignment satisfies every `holds` case of
+    `FalconAggProgram.levelProgram k`, the transcript of
+    `FalconAggLevelCircuit::new` (agg.rs:370-479).
+
+  NO GATE STRUCTURE APPEARS AS A WHOLE ANYWHERE IN IT. That is the whole point of
+  this field: the old (d1) `aggregateStatementLowering` asked for a
+  `FalconAggregate.AggTree` evaluating to the exposed statement — a claim about
+  an entire circuit family — and the old (d2) `falconPredicateIsGadget` related an
+  opaque `Bool` callback to `FalconCore.CircuitSatisfied`, another whole gate set.
+  Both are gone. The tree, the left packing, the shared message, the signer count
+  and `CircuitSatisfied` itself are now DERIVED —
+  `FalconAggProgram.leaf_program_satisfied_of_gadget_program`,
+  `FalconAggProgram.level_program_satisfied_implies_compose`,
+  `FalconAggProgram.satisfiable_top_level_gives_witness_list` and
+  `FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied`, none of
+  which takes a side hypothesis.
+
+  WHAT REMAINS OPAQUE inside this field, exactly as for (a), (b1), (b2): (i)
+  PRIMITIVE-SEMANTICS FAITHFULNESS — each `holds` case must be precisely the
+  constraint plonky2 emits for that one builder call
+  (`add_proof_target_and_verify`, `add_proof_target_and_conditionally_verify`,
+  `add_virtual_bool_target_safe`, `sub`, `mul`, `add`, `assert_zero`, `constant`,
+  `range_check`, `register_public_input(s)`, the Poseidon sponge calls); and (ii)
+  DIGEST PINNING — that `aggregateLevelDigest k` is the digest of the level-`k`
+  transcript, stated separately and NOT as a field, as
+  `AggregateLevelPinnedDigestIsProgramDigest`. Neither is modeled or proved here.
+
+  The still-opaque arithmetic content of the signature primitive — that the
+  transcribed NTT is the negacyclic product — is (d2'), and this field does not
+  need it: `FalconGadgetProgram.circuitProduct` is a concrete function either way. -/
+  aggregatePrimitiveLowering :
+    FalconAggProgram.GadgetLevelLowering
+      (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
+      m.falconHash
+  /-- **(d2') The transcribed in-circuit NTT computes the negacyclic product.**
+  `FalconGadgetProgram.circuitProduct` is not a callback: it is the CONCRETE
+  composition "forward-transform both operands, multiply pointwise,
+  inverse-transform" that gadget.rs:684-687 performs, with the twiddle tables,
+  the butterflies and the mod-`q` reductions transcribed. This premise says that
+  concrete function is the negacyclic product of `Z_q[X]/(X^512+1)` —
+  `FalconGadgetProgram.negacyclicProduct`, the schoolbook definition transcribed
+  from the Rust test at gadget.rs:999-1022 — on canonical length-512 inputs.
+
+  IT REPLACES A PARAMETER, NOT A PROOF. The models used to carry an opaque
+  `falconMul : FalconCore.PolynomialProduct`; (d2) then said the aggregation
+  model's `Bool` accept callback was the gadget gate set for THAT product. Both
+  are gone. The product is now fixed to the transcribed NTT and the gate set is
+  reached through `FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied`,
+  which needs no premise at all. What is left is this one arithmetic sentence
+  about a concrete algorithm.
+
+  NOT NEEDED BY THE SIGNER-EVIDENCE THEOREM. `signature_validity_of_boundary`
+  does not use this field, and neither does anything it calls: the evidence chain
+  runs entirely through `FalconCore.CircuitSatisfied` for `circuitProduct`, and
+  (d3) is stated for the same concrete product, so the two meet without knowing
+  what the NTT computes. This premise is needed only to read
+  `FalconCore.CircuitSatisfied` as Falcon's own `verify` — i.e. to say the gate
+  set checks the REAL signature equation `s1 = c - s2 * h mod (q, X^512+1)` rather
+  than an equation about some other bilinear map. Without it the audit's
+  signature conclusion is "the transcribed gate set is satisfied and its solutions
+  are unforgeable"; with it, that gate set is Falcon.
+
+  It is an ordinary mathematical claim about a concrete algorithm — the Rust test
+  suite checks it on random inputs — and it is the only field of this structure a
+  determined prover could discharge inside Lean, by proving the NTT correct. It is
+  not discharged here. -/
+  nttComputesNegacyclicProduct : FalconGadgetProgram.NttComputesNegacyclicProduct
   /-- **(d3) Falcon unforgeability.** The lattice assumption in the form a consumer
   can use: a satisfied active gadget instance for public polynomial `h` and message
   digest `d` means the holder of `h` authorized `d`. This is
   `FalconCore.LatticeHardness` / `ntruShortVectorAssumption` made into an
-  implication. It is a COMPUTATIONAL assumption about NTRU/GPV lattices and cannot
-  be discharged in this project at all; no proof about the Rust, the circuit or the
-  contracts would establish it. -/
+  implication, now stated for the CONCRETE `FalconGadgetProgram.circuitProduct`
+  rather than for a parameter, so it cannot be read against a different product
+  from the one (d1') lowers into. It is a COMPUTATIONAL assumption about NTRU/GPV
+  lattices and cannot be discharged in this project at all; no proof about the
+  Rust, the circuit or the contracts would establish it. -/
   falconUnforgeability :
-    CloseSignatureBridge.FalconUnforgeable m.falconHash m.falconMul m.authorized
+    CloseSignatureBridge.FalconUnforgeable m.falconHash FalconGadgetProgram.circuitProduct
+      m.authorized
   /-- **(e1a) The Solidity boundary hash IS Keccak-256.** The `Keccak` callback the
   settlement-verifier model calls stands for the EVM `KECCAK256` opcode
   (`keccak256(abi.encodePacked(...))` in the deployed contract). This premise says
@@ -827,25 +1001,92 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   the observation itself is of the canonical chain. -/
   finalizedHeightObservation :
     ∀ n : Nat, m.funding.latestFinalized = .ok n → m.head.chain.finalizedBlock = n
-  /-- **(g1) Durable replay ledger.** The composition's trace only steps through
-  modeled entrypoints. This premise says the storage those steps rely on for
-  replay protection is durable: transitions outside the model never clear a used
-  nullifier and never rewrite the Manager's received/paid/cap counters. It would
-  be discharged by an exhaustive entrypoint inventory plus EVM storage-layout
-  isolation; neither is modeled. -/
-  durableNullifierLedger :
+  /-- **(g1') The Manager's ledger writers are inventoried.** A SOURCE-REFINEMENT
+  premise, kin to (h) rather than to any circuit premise: every transition outside
+  the model that touches the flagged Manager storage — the used-nullifier set, the
+  received and paid counters, the per-token funding cap — is a run of one of the
+  entrypoints `LedgerWriters.ManagerEntrypoint` enumerates, on states projecting
+  to the two the transition relates, and one that `SystemSafety.Step` does not
+  already cover.
+
+  WHAT IT REPLACES. The old (g1) `durableNullifierLedger` asserted the CONSEQUENCE
+  directly — no unmodeled transition clears a nullifier or moves the counters —
+  and it asserted one clause that is FALSE of the deployed contract (see the
+  finding below). This field asserts only the inventory; the durability
+  consequence is now the THEOREM `durable_nullifier_ledger_of_boundary`, proved
+  from this field plus `LedgerWriters.manager_entrypoints_are_ledger_monotone` and
+  `LedgerWriters.non_step_manager_entrypoints_are_ledger_neutral_except_cap`. The
+  borrowed part shrinks from "the ledger is durable" to "these are the only
+  writers".
+
+  **THE FINDING (2026-09-11): the old (g1) clause `cap t = cap s` is REFUTED by the
+  deployed contract.** `ChannelSettlementManager.sol:1681`, inside `_finalizeClose`
+  and reached from the external `finalizeCloseGuarded`, does
+  `finalizedChannelFundAmount[baseToken] += ...`. That entrypoint IS modeled — by
+  `ManagerValue.finalizeCloseCore` — but it is NOT a `SystemSafety.Step`
+  constructor, so a real `finalizeCloseGuarded` call sits in the UNMODELED
+  relation of this structure and raises the cap. Any instance of the old
+  structure over a `Deployed`/`Modeled` pair that admits it was therefore
+  unsatisfiable, not merely unproved. The corrected clause is MONOTONE,
+  `cap s tok ≤ cap t tok`, which is what `durable_nullifier_ledger_of_boundary`
+  concludes; `LedgerWriters.only_cap_writer_is_outside_step` pins that this is the
+  single exception, and `LedgerWriters.finalize_close_only_raises_cap` gives the
+  exact increment. Nothing downstream weakens: `SystemSafety` never consumed (g1).
+
+  WHY IT IS PLAUSIBLE AT SOURCE LEVEL. `LedgerWriters.flaggedWriteSites` is the
+  pinned write-site inventory of the reviewed Solidity text, and it has exactly
+  ONE assignment per flagged variable — `usedWithdrawalNullifiers` :2231
+  (set-only), `receivedChannelFunds` :2364, `totalCreditedOut` :2398 (`+=` only,
+  cap-guarded), `finalizedChannelFundAmount` :1681 (`+=` only) — each inside an
+  entrypoint this enumeration carries. No proxy, `delegatecall`, `selfdestruct`,
+  initializer or assembly `sstore` touches the contract, and the Rollup cannot
+  write Manager storage. `.github/ci/check-ledger-writers.py` re-derives the list
+  from the sources on every CI run and fails if any other `.sol` file under
+  `contracts/src` writes one of them, so the inventory cannot rot silently.
+
+  WHAT REMAINS BORROWED. Two things this project does not model: that the deployed
+  BYTECODE implements the reviewed source (the CI check is a text scan, blind to
+  an inline `sstore` through an inherited library, a proxy upgrade or a compiler
+  bug), and that EVM storage isolation keeps every other contract and every other
+  transaction off these slots. Exactly the (h)-flavoured residue, now attached to
+  a finite, re-derivable list instead of to a durability claim. -/
+  ledgerWritersAreInventoried :
     ∀ s t : σ, Unmodeled s t →
-      (∀ n, (managerOf s).used n = true → (managerOf t).used n = true) ∧
-      (managerOf t).received = (managerOf s).received ∧
-      (managerOf t).paid = (managerOf s).paid ∧
-      (managerOf t).cap = (managerOf s).cap
-  /-- **(g2) Durable materialization latch.** `CloseFunding.materialization_call_one_shot`
-  is a statement about two calls on the SAME modeled storage. This premise says
-  the latch is not cleared between them by anything outside the model. -/
-  durableMaterializationLatch :
-    ∀ s t : σ, Unmodeled s t →
-      ∀ c : CloseFunding.Channel, (fundingOf s).materializedChannelExit c ≠ 0 →
-        (fundingOf t).materializedChannelExit c = (fundingOf s).materializedChannelExit c
+      ((managerOf t).used ≠ (managerOf s).used ∨
+        (managerOf t).received ≠ (managerOf s).received ∨
+        (managerOf t).paid ≠ (managerOf s).paid ∨
+        (managerOf t).cap ≠ (managerOf s).cap) →
+      ∃ (call : LedgerWriters.ManagerEntrypoint) (fs ft : ManagerValue.FullState),
+        fs.value = managerOf s ∧ ft.value = managerOf t ∧ call.run fs = some ft ∧
+          call.stepCovered = false
+  /-- **(g2') The materializer's latch writers are inventoried.** The same
+  source-refinement premise for `CloseFundingMaterializer`: every transition
+  outside the model that changes the materializer's storage at all is a run of one
+  of the seven entrypoints `LedgerWriters.MaterializerEntrypoint` enumerates, on
+  worlds whose storage components are the two states the transition relates.
+
+  WHAT IT REPLACES. The old (g2) `durableMaterializationLatch` asserted the
+  consequence — a latched channel exit is never rewritten by anything outside the
+  model — which is now the THEOREM
+  `durable_materialization_latch_of_boundary`, proved from this field and
+  `LedgerWriters.materializer_entrypoints_keep_the_latch`. As with (g1'), what is
+  borrowed shrinks from a durability claim to an inventory claim.
+
+  WHY IT IS PLAUSIBLE AT SOURCE LEVEL. `materializedChannelExit` has exactly one
+  write site in the reviewed text, `CloseFundingMaterializer.sol:461` inside
+  `_materialize`, reached only from the external `materializeSignedHead` and
+  guarded by the `== 0` read at :434 — the row
+  `LedgerWriters.flaggedWriteSites` pins and `.github/ci/check-ledger-writers.py`
+  re-derives. The other six modeled entrypoints do not name the variable at all,
+  and no proxy, `delegatecall`, `selfdestruct` or assembly `sstore` appears in the
+  contract.
+
+  WHAT REMAINS BORROWED. The same two things as (g1'): bytecode-equals-source, and
+  EVM storage isolation against every other contract and transaction. -/
+  latchWritersAreInventoried :
+    ∀ s t : σ, Unmodeled s t → fundingOf t ≠ fundingOf s →
+      ∃ (call : LedgerWriters.MaterializerEntrypoint) (w v : CloseFunding.World),
+        w.storage = fundingOf s ∧ v.storage = fundingOf t ∧ call.run w = some v
   /-- **(h) Source/EVM/compiler refinement.** Every model in this project is a
   handwritten reading of Rust and Solidity text. This premise says the deployed
   artifacts' transitions on the represented storage are among the transitions the
@@ -1522,27 +1763,48 @@ theorem reference_keccak_models_satisfy_hash_premises
   · intro words
     simp [circuit]
 
-/-! ## The signature boundary: from four residues to per-signature evidence
+/-! ## The signature boundary: from four residues to per-primitive evidence
 
 The old field (d) `signatureValidity` concluded an opaque `signers message keys
 count` relation — a relation this module had to introduce precisely because
-nothing was proved about what an accepted aggregate MEANS. It is gone. The four
-fields (d0), (d1), (d2), (d3) are each a separate artifact's obligation, and
-`CloseSignatureBridge` PROVES the aggregation bookkeeping that used to sit
-unnamed between them: the signer count, the left-packed key digests with an
-exactly-zero suffix, and the single shared message. The composition below is
-therefore strictly stronger than the old field, with strictly smaller borrowed
-parts. -/
+nothing was proved about what an accepted aggregate MEANS. It is gone, and so are
+its first two replacements. (d1) `aggregateStatementLowering` asked for a whole
+`FalconAggregate.AggTree`, and (d2) `falconPredicateIsGadget` related an opaque
+`Bool` accept callback to the whole of `FalconCore.CircuitSatisfied`; both named
+a gate structure as a unit. The four fields the structure now carries — (d0),
+(d0'), (d1') and (d3) — name only per-builder-call transcripts, two instances of
+plonky2's recursive verifier, and the lattice assumption. Everything between them
+is PROVED, in `FalconGadgetProgram`, `FalconAggProgram` and
+`CloseSignatureBridge`: the 23 gadget gates from the gadget transcript, the leaf
+and level statements from their transcripts, the induction over the four
+circuits, the count bounds, the left packing with its exactly-zero suffix and the
+single shared message. -/
 
-/-- **The old field (d), replaced and strengthened.** An accepted aggregate check
-yields `CloseSignatureBridge.SignerEvidence`: between one and eight witnesses,
-whose count is the exposed `signerCount`, whose key digests are the exposed key
-list left-packed with an exactly-zero suffix, each of which ran against the ONE
-exposed message and each of whose key holders authorized that message. The old
-field asserted a weaker, opaque conclusion outright; this derives a concrete one
-from (d0) recursion soundness, (d1) coarse lowering, (d2) gadget faithfulness and
-(d3) unforgeability. Poseidon stays opaque throughout, so the conclusion speaks of
-key DIGESTS, never of public polynomials. -/
+/-- **The old field (d), replaced and strengthened — now from per-primitive
+premises only.** An accepted aggregate check yields
+`CloseSignatureBridge.SignerEvidence`: between one and eight witnesses, whose
+count is the exposed `signerCount`, whose key digests are the exposed key list
+left-packed with an exactly-zero suffix, each of which ran against the ONE exposed
+message and each of whose key holders authorized that message.
+
+The name, the argument list and the shape of the conclusion are those the theorem
+had before; what changed is the environment the evidence is reported in and the
+premises it comes from. The environment is `FalconAggProgram.sigEnvOf
+m.falconHash` — key digests are `FalconCore.falconPkDigest` in limb form and the
+accept callback is the constant `true`, which `SignerEvidence` never reads,
+because the per-slot evidence now comes from the gadget transcript rather than
+from an opaque `Bool`. The `Models.sigEnv` parameter that used to carry it no
+longer exists, so no environment can drift between the premise and the
+conclusion.
+
+The premises are (d0) recursion soundness at the top key, (d0') recursion
+soundness at each level's constant child key, (d1') per-builder-call lowering all
+the way down to the gadget, and (d3) unforgeability at the concrete
+`FalconGadgetProgram.circuitProduct` — composed by
+`FalconAggProgram.top_level_satisfiable_gives_signer_evidence_per_primitive`.
+(d2') is NOT used: the chain never needs to know what the transcribed NTT
+computes. Poseidon stays opaque throughout, so the conclusion speaks of key
+DIGESTS, never of public polynomials. -/
 theorem signature_validity_of_boundary
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
@@ -1551,36 +1813,69 @@ theorem signature_validity_of_boundary
     (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
     (proof : AggregateProof) (st : CloseCircuit.AggregateStatement)
     (verified : m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st) :
-    CloseSignatureBridge.SignerEvidence m.sigEnv m.authorized st.message st.keys
-      st.signerCount := by
-  have satisfiable := tb.aggregateRecursiveVerifierSoundness proof st verified
-  obtain ⟨t, width, evaluates⟩ := tb.aggregateStatementLowering st satisfiable
-  exact CloseSignatureBridge.accepted_aggregate_tree_gives_signer_evidence m.sigEnv
-    m.falconHash m.falconMul m.authorized tb.falconPredicateIsGadget tb.falconUnforgeability
-    st t width evaluates
+    CloseSignatureBridge.SignerEvidence (FalconAggProgram.sigEnvOf m.falconHash) m.authorized
+      st.message st.keys st.signerCount :=
+  FalconAggProgram.top_level_satisfiable_gives_signer_evidence_per_primitive m.aggEnv
+    (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.falconHash
+    m.authorized tb.levelRecursionSoundness tb.aggregatePrimitiveLowering
+    tb.falconUnforgeability st
+    (tb.aggregateRecursiveVerifierSoundness proof st verified)
 
-/-- **What is left of the signature gap, named.** Exactly these four Props, and
-nothing else, stand between "the close circuit's aggregate check passed" and
+/-- **The level-by-level lowering the induction actually consumes.** (d1') is
+stated with the leaf's signature primitive spliced out into
+`FalconGadgetProgram.gadgetProgram`; `FalconAggProgram.LevelLowering` is the same
+obligation with the leaf clause stated through `FalconAggProgram.leafProgram` as
+a whole, at the concrete `FalconGadgetProgram.circuitProduct`. The first implies
+the second — `FalconAggProgram.gadget_level_lowering_implies_level_lowering` —
+so a consumer that wants the coarser form has it, and nothing is assumed twice. -/
+theorem level_lowering_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf) :
+    FalconAggProgram.LevelLowering
+      (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
+      m.falconHash FalconGadgetProgram.circuitProduct :=
+  FalconAggProgram.gadget_level_lowering_implies_level_lowering
+    (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
+    m.falconHash tb.aggregatePrimitiveLowering
+
+/-- **What is left of the signature gap, named.** This theorem REPLACES
+`signature_gap_is_now_per_signature`, which named the previous four residues:
+two of them, the coarse (d1) and the gadget-identification (d2), no longer exist
+as Props at all, so the old conjunction could not be restated. Exactly these four,
+and nothing else, stand between "the close circuit's aggregate check passed" and
 "each listed key digest belongs to a holder who authorized this message":
 
-* (d0) plonky2's RECURSIVE VERIFIER is sound at the constant aggregate key — an
-  artifact obligation, and explicitly not part of the accepted premise (a0) even
-  though that verifier ships in the same pinned submodule;
-* (d1) the aggregation circuit's satisfiable statement really is an aggregation
-  TREE of `FalconAggregate` evaluating to the exposed statement — the one
-  remaining whole-circuit premise in this structure, coarse because
-  `FalconAggregate` has no `BuildOp` program yet, and carrying the digest pinning
-  for `aggregateCircuitDigest` implicitly;
-* (d2) the aggregation model's opaque accept callback IS the `gadget.rs` gate set
-  — a per-gate reading obligation;
-* (d3) FALCON UNFORGEABILITY — a computational lattice assumption, the only one of
-  the four that no amount of translation work could ever discharge.
+* (d0) plonky2's RECURSIVE VERIFIER is sound at the constant aggregate key the
+  close circuit pins — an artifact obligation, and explicitly not part of the
+  accepted premise (a0) even though that verifier ships in the same pinned
+  submodule;
+* (d0') the same verifier is sound at each LEVEL's constant child key — three more
+  instances of the same artifact obligation, inside the aggregation circuits;
+* (d1') PER-BUILDER-CALL LOWERING at every level, down to and including the 23
+  calls of the signature gadget. No gate structure is named as a whole; what is
+  borrowed is per-`holds` primitive faithfulness, plus the digest pinning stated
+  apart as `AggregateLevelPinnedDigestIsProgramDigest`;
+* (d3) FALCON UNFORGEABILITY at the concrete `FalconGadgetProgram.circuitProduct`
+  — a computational lattice assumption, the only one of the four that no amount of
+  translation work could ever discharge.
 
-Everything else the old premise (d) bundled — the count bounds, the left packing,
-the zero suffix, the single shared message, the per-slot evaluation — is now
-PROVED in `CloseSignatureBridge`. The residue is per-SIGNATURE (and per-artifact),
-not per-aggregate. -/
-theorem signature_gap_is_now_per_signature
+WHAT IS NOW PROVED, and therefore absent from this list: the 23 gadget gates from
+the gadget transcript (`FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied`);
+the leaf statement from the gadget transcript plus the leaf's own calls
+(`FalconAggProgram.leaf_program_satisfied_of_gadget_program`,
+`FalconAggProgram.leaf_program_satisfied_implies_statement`); each level's exposed
+statement from its transcript, gated presence flag and left-packing gate included
+(`FalconAggProgram.level_program_satisfied_implies_compose`); the INDUCTION over
+the four circuits that turns a satisfiable top statement into a witness list
+(`FalconAggProgram.satisfiable_top_level_gives_witness_list`); and the 73-word
+public-input LAYOUT shared by the aggregation circuit and the close circuit
+(`CloseSignatureBridge.to_agg_statement_public_inputs`). (d2') is not in the list
+either, for a different reason: it is a residue of the PRODUCT, not of the
+evidence chain, and no theorem above consumes it. -/
+theorem signature_gap_is_now_per_primitive
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
     {Deployed Modeled Unmodeled : σ → σ → Prop}
@@ -1588,17 +1883,102 @@ theorem signature_gap_is_now_per_signature
     (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf) :
     (∀ (proof : AggregateProof) (st : CloseCircuit.AggregateStatement),
         m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st →
-        m.plonky2Satisfiable m.aggregateCircuitDigest st.words) ∧
-      (∀ st : CloseCircuit.AggregateStatement,
-        m.plonky2Satisfiable m.aggregateCircuitDigest st.words →
-        ∃ t : FalconAggregate.AggTree,
-          (∀ w ∈ FalconAggregate.activeWitnesses t, w.messageDigest.length = 8) ∧
-            FalconAggregate.evalTree m.sigEnv t FalconAggregate.aggLevels =
-              .ok (CloseSignatureBridge.toAggStatement st)) ∧
-      CloseSignatureBridge.FalconPredicateIsGadget m.sigEnv m.falconHash m.falconMul ∧
-      CloseSignatureBridge.FalconUnforgeable m.falconHash m.falconMul m.authorized :=
-  ⟨tb.aggregateRecursiveVerifierSoundness, tb.aggregateStatementLowering,
-    tb.falconPredicateIsGadget, tb.falconUnforgeability⟩
+        m.plonky2Satisfiable (m.aggregateLevelDigest FalconAggregate.aggLevels) st.words) ∧
+      FalconAggProgram.RecursionSound
+        (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv ∧
+      FalconAggProgram.GadgetLevelLowering
+        (fun k words => m.plonky2Satisfiable (m.aggregateLevelDigest k) words) m.aggEnv
+        m.falconHash ∧
+      CloseSignatureBridge.FalconUnforgeable m.falconHash FalconGadgetProgram.circuitProduct
+        m.authorized :=
+  ⟨tb.aggregateRecursiveVerifierSoundness, tb.levelRecursionSoundness,
+    tb.aggregatePrimitiveLowering, tb.falconUnforgeability⟩
+
+/-! ## The two durability conclusions, recovered from the write-site inventory
+
+Fields (g1) `durableNullifierLedger` and (g2) `durableMaterializationLatch` used
+to assert their consequences outright. They are now theorems about the inventory
+premises (g1') and (g2') and the model-level frame theorems of
+`Zkp.Implementation.LedgerWriters`, with one correction: (g1)'s clause
+`cap t = cap s` was REFUTED by the deployed contract and is replaced by
+monotonicity. See the finding recorded in the module header and in (g1')'s
+docstring. -/
+
+/-- **The old field (g1), corrected and now proved.** Outside the modeled step
+relation, no used withdrawal nullifier is ever cleared, the Manager's received and
+paid counters never move, and the per-token funding cap never DECREASES.
+
+The fourth clause is the correction. The old field said `cap t = cap s`; that is
+false of the deployed contract, because `finalizeCloseGuarded` reaches
+`finalizedChannelFundAmount[baseToken] += ...` at
+`ChannelSettlementManager.sol:1681` and is not a `SystemSafety.Step` constructor,
+so it is an UNMODELED transition that raises the cap. `cap s tok ≤ cap t tok` is
+what the inventoried entrypoints really guarantee
+(`LedgerWriters.manager_entrypoints_are_ledger_monotone`), and it is strong enough
+for every consumer: `SystemSafety` never used (g1) at all.
+
+The proof splits on whether the transition moved the flagged storage. If it did
+not, all four clauses are immediate. If it did, (g1') produces an inventoried,
+non-`Step`-covered entrypoint whose run relates the two projections, and the two
+`LedgerWriters` frame theorems supply monotonicity and the counter frame. -/
+theorem durable_nullifier_ledger_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (s t : σ) (unmodeled : Unmodeled s t) :
+    (∀ n, (managerOf s).used n = true → (managerOf t).used n = true) ∧
+      (managerOf t).received = (managerOf s).received ∧
+      (managerOf t).paid = (managerOf s).paid ∧
+      (∀ tok, (managerOf s).cap tok ≤ (managerOf t).cap tok) := by
+  by_cases changed :
+      (managerOf t).used ≠ (managerOf s).used ∨
+        (managerOf t).received ≠ (managerOf s).received ∨
+        (managerOf t).paid ≠ (managerOf s).paid ∨
+        (managerOf t).cap ≠ (managerOf s).cap
+  · obtain ⟨call, fs, ft, sourceValue, targetValue, ran, outside⟩ :=
+      tb.ledgerWritersAreInventoried s t unmodeled changed
+    have monotone := LedgerWriters.manager_entrypoints_are_ledger_monotone call fs ft ran
+    have framed := LedgerWriters.non_step_manager_entrypoints_are_ledger_neutral_except_cap
+      call fs ft outside ran
+    rw [sourceValue, targetValue] at monotone framed
+    exact ⟨monotone.1, framed.2.1, framed.2.2, monotone.2⟩
+  · have used : (managerOf t).used = (managerOf s).used :=
+      Classical.byContradiction fun differs => changed (Or.inl differs)
+    have received : (managerOf t).received = (managerOf s).received :=
+      Classical.byContradiction fun differs => changed (Or.inr (Or.inl differs))
+    have paid : (managerOf t).paid = (managerOf s).paid :=
+      Classical.byContradiction fun differs => changed (Or.inr (Or.inr (Or.inl differs)))
+    have cap : (managerOf t).cap = (managerOf s).cap :=
+      Classical.byContradiction fun differs => changed (Or.inr (Or.inr (Or.inr differs)))
+    exact ⟨fun n live => by rw [used]; exact live, received, paid,
+      fun tok => Nat.le_of_eq (congrFun cap tok).symm⟩
+
+/-- **The old field (g2), now proved, with its statement unchanged.** A channel
+exit that has already been latched is never rewritten by a transition outside the
+model. If the materializer's storage did not change at all the claim is immediate;
+otherwise (g2') produces an inventoried entrypoint whose run relates the two
+storages, and `LedgerWriters.materializer_entrypoints_keep_the_latch` — which
+covers all seven modeled entrypoints, the single `_materialize` writer of
+`CloseFundingMaterializer.sol:461` included — gives the conclusion. -/
+theorem durable_materialization_latch_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (s t : σ) (unmodeled : Unmodeled s t) (c : CloseFunding.Channel)
+    (live : (fundingOf s).materializedChannelExit c ≠ 0) :
+    (fundingOf t).materializedChannelExit c = (fundingOf s).materializedChannelExit c := by
+  by_cases untouched : fundingOf t = fundingOf s
+  · rw [untouched]
+  · obtain ⟨call, w, v, sourceStorage, targetStorage, ran⟩ :=
+      tb.latchWritersAreInventoried s t unmodeled untouched
+    have kept := LedgerWriters.materializer_entrypoints_keep_the_latch call w v ran c
+      (by rw [sourceStorage]; exact live)
+    rw [sourceStorage, targetStorage] at kept
+    exact kept
 
 /-! ## Well-formedness witness -/
 
@@ -1629,30 +2009,43 @@ theorem rejecting_environment_accepts_no_claim
 
 /-- The premise structure is inhabited, but only degenerately: nothing is
 accepted, no plonky2 statement of any circuit is satisfiable, no aggregate check
-passes, no Falcon signature is accepted at any slot, the authorization relation
-is trivially true, no finality is observed, and no transition outside the model
-or from the deployed artifact is admitted. This is a well-formedness check on the
-statement, NOT evidence that any field holds of a real deployment. In particular
-the hypotheses below describe an environment in which no close, no claim and no
-materialization can ever succeed, in which the accepted MLE/WHIR premise
-`mleVerifierSoundness` holds only because the pinned adapter never returns a word
-vector at all, and in which the three PER-PRIMITIVE lowering premises (a), (b1),
-(b2) hold only because `noSatisfiableStatements` denies them their antecedent —
-no assignment of any constructor program is ever exhibited, so neither half of
-what those fields borrow (per-`holds` primitive faithfulness, digest pinning) is
-discharged here in any useful sense; they are merely vacuous.
+passes, no recursive child verification succeeds at any level, the authorization
+relation is trivially true, no finality is observed, and no transition outside the
+model or from the deployed artifact is admitted. This is a well-formedness check
+on the statement, NOT evidence that any field holds of a real deployment. In
+particular the hypotheses below describe an environment in which no close, no
+claim and no materialization can ever succeed, in which the accepted MLE/WHIR
+premise `mleVerifierSoundness` holds only because the pinned adapter never returns
+a word vector at all, and in which the three PER-PRIMITIVE lowering premises (a),
+(b1), (b2) hold only because `noSatisfiableStatements` denies them their
+antecedent — no assignment of any constructor program is ever exhibited, so
+neither half of what those fields borrow (per-`holds` primitive faithfulness,
+digest pinning) is discharged here in any useful sense; they are merely vacuous.
 
-The four signature fields are vacuous or trivial in exactly the same way. (d0)
-holds because `noAggregate` denies it its antecedent, (d1) because
-`noSatisfiableStatements` does — no aggregation tree is ever exhibited, so the
-coarse lowering is not tested — (d2) because `noFalconAccept` makes its antecedent
-`false = true`, so no gadget instance is ever produced, and (d3) because
+The five signature fields are vacuous, trivial, or supplied outright, in three
+different ways. (d0) holds because `noAggregate` denies it its antecedent, (d0')
+because `noChildVerified` does — the opaque `aggEnv.verifyChild` relation is empty,
+so the per-level recursion premise is never tested — and (d1') because
+`noSatisfiableStatements` does, at every level, so neither a gadget assignment nor
+a leaf nor a level assignment is ever exhibited. (d3) holds because
 `authorizedTrivially` makes its conclusion hold of everything, which is the
-opposite of the lattice assumption having been discharged. The two hash premises
-are the only ones supplied as equations rather than vacuously: `solidityReference`
-and `circuitReference` say the two boundary functions ARE the reference Keccak-256,
+opposite of the lattice assumption having been discharged.
+
+(d2') is the exception, and it is worth being explicit about why. It cannot be
+made vacuous by any choice of environment: `FalconGadgetProgram.NttComputesNegacyclicProduct`
+is a UNIVERSAL claim about two concrete Lean functions — the transcribed in-circuit
+NTT and the schoolbook negacyclic product — with no reference to `m` at all. There
+is no antecedent to deny and no callback to choose, so exhibiting an environment
+cannot discharge it; it has to be supplied, and it is supplied here as the
+hypothesis `nttProduct`. That mirrors the two hash premises, which are likewise
+supplied as equations rather than vacuously: `solidityReference` and
+`circuitReference` say the two boundary functions ARE the reference Keccak-256,
 which is what `reference_keccak_models_satisfy_hash_premises` shows is achievable,
-not something this environment proves. -/
+not something this environment proves.
+
+The two inventory premises (g1') and (g2') are vacuous for the plainest possible
+reason: `Unmodeled` is instantiated to the empty relation, so there is no
+transition outside the model to inventory. -/
 theorem rejecting_environment_satisfies_every_premise
     {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
     (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
@@ -1663,7 +2056,8 @@ theorem rejecting_environment_satisfies_every_premise
     (noSatisfiableStatements : ∀ digest words, ¬ m.plonky2Satisfiable digest words)
     (noAggregate : ∀ proof st,
       ¬ m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st)
-    (noFalconAccept : ∀ h msg salt s2, m.sigEnv.falconAccepts h msg salt s2 = false)
+    (noChildVerified : ∀ k proof pis, ¬ m.aggEnv.verifyChild k proof pis)
+    (nttProduct : FalconGadgetProgram.NttComputesNegacyclicProduct)
     (authorizedTrivially : ∀ h d, m.authorized h d)
     (solidityReference : ∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
       m.keccak b = Keccak256.digestU256 b)
@@ -1686,10 +2080,12 @@ theorem rejecting_environment_satisfies_every_premise
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
   aggregateRecursiveVerifierSoundness proof st verified :=
     absurd verified (noAggregate proof st)
-  aggregateStatementLowering :=
-    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
-  falconPredicateIsGadget w accepts :=
-    absurd (accepts.symm.trans (noFalconAccept w.h w.messageDigest w.salt w.s2)) (by decide)
+  levelRecursionSoundness := fun k _ _ proof pis verified =>
+    absurd verified (noChildVerified k proof pis)
+  aggregatePrimitiveLowering :=
+    ⟨fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _),
+      fun _ _ _ _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)⟩
+  nttComputesNegacyclicProduct := nttProduct
   falconUnforgeability cw digest _ _ _ := authorizedTrivially cw.h digest
   solidityKeccakIsReference := solidityReference
   circuitKeccakIsReference := circuitReference
@@ -1697,8 +2093,8 @@ theorem rejecting_environment_satisfies_every_premise
     absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
   finalizedRootObservation root observed := absurd observed (noFinality root)
   finalizedHeightObservation n observed := absurd observed (noHeight n)
-  durableNullifierLedger _ _ impossible := impossible.elim
-  durableMaterializationLatch _ _ impossible := impossible.elim
+  ledgerWritersAreInventoried _ _ impossible := impossible.elim
+  latchWritersAreInventoried _ _ impossible := impossible.elim
   sourceRefinement _ _ impossible := impossible.elim
 
 /-! ## What the premises are attached to -/

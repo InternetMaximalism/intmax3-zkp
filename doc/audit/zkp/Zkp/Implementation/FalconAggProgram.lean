@@ -1,6 +1,7 @@
 import Zkp.Implementation.FalconAggregate
 import Zkp.Implementation.FalconCore
 import Zkp.Implementation.CloseSignatureBridge
+import Zkp.Implementation.FalconGadgetProgram
 
 /-!
 # FalconAggProgram: per-primitive lowering of the Falcon aggregation tree
@@ -1724,5 +1725,134 @@ theorem example_level_public_inputs :
       = FalconAggregate.aggExpectedPublicInputs 1 exampleMessageLimbs
         [FalconAggregate.zeroSlot, FalconAggregate.zeroSlot] := by
   decide
+
+
+/-! ## 8. Splicing in the gadget's own builder transcript
+
+`Zkp.Implementation.FalconGadgetProgram` transcribes `FalconSigVerifyTarget::build`
+(gadget.rs:651-736) as a 23-call builder program of its own and derives
+`FalconCore.CircuitSatisfied e circuitProduct (readWitness g)` from those local propositions
+alone. Composing the two transcripts removes the one conjunct of `LeafOp.holds
+.falconSigVerify` that still named the gate set AS A WHOLE: in
+`GadgetLevelLowering` every conjunct is a per-builder-call statement, and the product is the
+concrete `FalconGadgetProgram.circuitProduct` rather than an arbitrary callback.
+-/
+
+/-- The gadget-boundary wiring `FalconSigVerifyTarget::new` fixes at the leaf's call site
+(agg.rs:271): exactly the conjuncts of `LeafOp.holds .falconSigVerify` OTHER than the
+whole-gate-set `FalconCore.CircuitSatisfied`. The slot is unconditionally ACTIVE
+(agg.rs:234-239: no `verify` wire is passed, so the gate wire is the constant 1); the
+gadget's `message_digest` and `pk_g` INPUT wires are the D1 bridge's `digestOfLimbs` of the
+limbs the leaf registers (agg.rs:236-239, :274, :279); and each of the 16 limbs of the two
+`Bytes32Target::new(_, true)` inputs carries a `range_check(_, 32)` (gadget.rs:659-661, and
+the note at gadget.rs:351-353). -/
+def LeafWiring (a : LeafAssignment) : Prop :=
+  a.sig.verifyBit = 1 ∧
+    a.sig.messageDigest = CloseSignatureBridge.digestOfLimbs a.messageLimbs ∧
+    a.sig.pkG = CloseSignatureBridge.digestOfLimbs a.pkGLimbs ∧
+    (∀ x ∈ a.messageLimbs, x < limbBase) ∧
+    (∀ x ∈ a.pkGLimbs, x < limbBase)
+
+/-- THE SPLICE. A satisfied GADGET transcript whose witness is the leaf's signature wires,
+plus the gadget-boundary wiring and the leaf's other seven builder calls, gives the whole
+leaf transcript. No hypothesis of this theorem mentions the gate set as a whole. -/
+theorem leaf_program_satisfied_of_gadget_program (e : FalconCore.HashEnvironment)
+    (g : FalconGadgetProgram.GadgetAssignment e) (a : LeafAssignment)
+    (hg : FalconGadgetProgram.ProgramSatisfied FalconGadgetProgram.gadgetProgram g)
+    (hsig : a.sig = FalconGadgetProgram.readWitness g)
+    (hw : LeafWiring a)
+    (hrest : ∀ op ∈ leafProgram, op ≠ LeafOp.falconSigVerify →
+      LeafOp.holds e FalconGadgetProgram.circuitProduct op a) :
+    LeafProgramSatisfied e FalconGadgetProgram.circuitProduct a := by
+  intro op hop
+  by_cases hne : op = LeafOp.falconSigVerify
+  · subst hne
+    obtain ⟨hbit, hmd, hpk, hmcan, hpkcan⟩ := hw
+    simp only [LeafOp.holds]
+    refine ⟨?_, hbit, hmd, hpk, hmcan, hpkcan⟩
+    rw [hsig]
+    exact FalconGadgetProgram.gadget_program_satisfied_implies_circuit_satisfied e g hg
+  · exact hrest op hop hne
+
+/-- (d1'') PER-PRIMITIVE LOWERING, all the way down. Same shape as `LevelLowering`, with the
+leaf clause's assignment replaced by a GADGET assignment plus the leaf's own wiring: every
+conjunct is now a builder-call transcript — `FalconGadgetProgram.gadgetProgram` for the
+signature primitive, `leafProgram` minus its gadget call for the leaf, `levelProgram k` for
+the levels — and no gate structure appears as a whole anywhere in the premise. The level
+clause is `LevelLowering`'s, unchanged. -/
+def GadgetLevelLowering {ProofTy : Type} (Sat : Nat → List Nat → Prop)
+    (env : LevelEnvironment ProofTy) (e : FalconCore.HashEnvironment) : Prop :=
+  (∀ words : List Nat, Sat 0 words →
+      ∃ (g : FalconGadgetProgram.GadgetAssignment e) (a : LeafAssignment),
+        FalconGadgetProgram.ProgramSatisfied FalconGadgetProgram.gadgetProgram g ∧
+          a.sig = FalconGadgetProgram.readWitness g ∧
+          LeafWiring a ∧
+          (∀ op ∈ leafProgram, op ≠ LeafOp.falconSigVerify →
+            LeafOp.holds e FalconGadgetProgram.circuitProduct op a) ∧
+          readLeafPublic a = words) ∧
+  (∀ k : Nat, 1 ≤ k → k ≤ FalconAggregate.aggLevels → ∀ words : List Nat, Sat k words →
+      ∃ a : LevelAssignment ProofTy,
+        LevelProgramSatisfied env k a ∧ readLevelPublic k a = words)
+
+/-- The per-primitive lowering premise is strictly stronger than the one section 5's
+induction consumes, at the concrete product. -/
+theorem gadget_level_lowering_implies_level_lowering {ProofTy : Type}
+    (Sat : Nat → List Nat → Prop) (env : LevelEnvironment ProofTy)
+    (e : FalconCore.HashEnvironment) (h : GadgetLevelLowering Sat env e) :
+    LevelLowering Sat env e FalconGadgetProgram.circuitProduct := by
+  refine ⟨?_, h.2⟩
+  intro words hw
+  obtain ⟨g, a, hg, hsig, hwire, hrest, hpub⟩ := h.1 words hw
+  exact ⟨a, leaf_program_satisfied_of_gadget_program e g a hg hsig hwire hrest, hpub⟩
+
+/-- THE END-TO-END STATEMENT, per primitive. `top_level_satisfiable_gives_signer_evidence`
+with the whole-circuit lowering premise replaced by `GadgetLevelLowering` and the opaque
+product replaced by `FalconGadgetProgram.circuitProduct`: a satisfiable top-level aggregate
+instance gives close-circuit signer evidence, from recursion soundness, per-builder-call
+lowering and Falcon unforgeability only. -/
+theorem top_level_satisfiable_gives_signer_evidence_per_primitive {ProofTy : Type}
+    (env : LevelEnvironment ProofTy) (Sat : Nat → List Nat → Prop)
+    (e : FalconCore.HashEnvironment)
+    (authorized : List Nat → List Nat → Prop)
+    (hrec : RecursionSound Sat env) (hlow : GadgetLevelLowering Sat env e)
+    (unforgeable : CloseSignatureBridge.FalconUnforgeable e
+      FalconGadgetProgram.circuitProduct authorized)
+    (st : CloseCircuit.AggregateStatement)
+    (hsat : Sat FalconAggregate.aggLevels st.words) :
+    CloseSignatureBridge.SignerEvidence (sigEnvOf e) authorized st.message st.keys
+      st.signerCount :=
+  top_level_satisfiable_gives_signer_evidence env Sat e FalconGadgetProgram.circuitProduct
+    authorized hrec (gadget_level_lowering_implies_level_lowering Sat env e hlow) unforgeable
+    st hsat
+
+/-- NON-VACUITY of the spliced leaf clause: for the example leaf's own 17 public inputs the
+existential of `GadgetLevelLowering`'s leaf clause is witnessed, with the gadget side being
+`FalconGadgetProgram.zeroAssignment 1` (the padding slot, gate wire active) and the leaf side
+the module's `exampleLeafAssignment`. -/
+theorem example_leaf_lowering_via_gadget :
+    ∃ (g : FalconGadgetProgram.GadgetAssignment FalconCore.zeroEnvironment)
+      (a : LeafAssignment),
+      FalconGadgetProgram.ProgramSatisfied FalconGadgetProgram.gadgetProgram g ∧
+        a.sig = FalconGadgetProgram.readWitness g ∧
+        LeafWiring a ∧
+        (∀ op ∈ leafProgram, op ≠ LeafOp.falconSigVerify →
+          LeafOp.holds FalconCore.zeroEnvironment FalconGadgetProgram.circuitProduct op a) ∧
+        readLeafPublic a = exampleLeafPis := by
+  refine ⟨FalconGadgetProgram.zeroAssignment 1, exampleLeafAssignment,
+    FalconGadgetProgram.example_zero_program_satisfied 1 (by decide), ?_, ?_, ?_, rfl⟩
+  · exact (FalconGadgetProgram.zero_assignment_reads_back 1).symm
+  · exact ⟨rfl, example_message_digest.symm, example_message_digest.symm,
+      example_message_canonical, example_message_canonical⟩
+  · intro op hop hne
+    simp only [leafProgram, List.mem_cons, List.not_mem_nil, or_false] at hop
+    rcases hop with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · exact absurd rfl hne
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · trivial
+    · trivial
 
 end Zkp.Implementation.FalconAggProgram
