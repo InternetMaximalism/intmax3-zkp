@@ -590,4 +590,419 @@ theorem sample_materialization_has_receipt :
   exact ⟨pi, st, p, channel, plan, after, events, call, hverify, hvalid, hparse, hchannel,
     vs, vf, vr, hanchor, hamounts, hdigest⟩
 
+/-! ## The Solidity token-vector layout, read as backing-circuit words
+
+The backing circuit hashes `CloseAssetBacking.tokenFundsPreimage count rows` — 92
+u32 WORDS — while `ChannelSettlementManager.sol:1685-1686` hashes
+`SettlementVerifier.tokenFundsPreimage registry count amounts` — 368 BYTES. The
+two are the same byte string exactly when the circuit's rows carry the Solidity
+vector, and that equivalence is proved here, not assumed: `wordBytes` is the
+fixed-width big-endian packing already used on the close path
+(`SettlementCloseBridge.wordBytes`), and the only cryptographic input is the
+equality of the two 368-byte strings, which the caller must obtain from a hash
+premise.
+
+Nothing in this section mentions a hash function. -/
+
+/-- The eight big-endian u32 limbs of a `uint256`, in the circuit's `Words8`
+    shape. Identical to `SettlementCloseBridge.digest` up to the target
+    structure, so the packing lemmas of that module apply verbatim. -/
+def digest (v : SettlementVerifier.U256) : CloseAssetBacking.Words8 :=
+  ⟨SettlementVerifier.word v.val 7, SettlementVerifier.word v.val 6,
+   SettlementVerifier.word v.val 5, SettlementVerifier.word v.val 4,
+   SettlementVerifier.word v.val 3, SettlementVerifier.word v.val 2,
+   SettlementVerifier.word v.val 1, SettlementVerifier.word v.val 0⟩
+
+theorem digest_words_exact (v : SettlementVerifier.U256) :
+    (digest v).words = SettlementVerifier.putUint256 v := rfl
+
+theorem digest_is_checked (v : SettlementVerifier.U256) : (digest v).Checked := by
+  intro x hx
+  have h := SettlementVerifier.putUint256_canonical v x (by rw [← digest_words_exact]; exact hx)
+  simpa [CloseAssetBacking.wordBase, SettlementVerifier.limbBound] using h
+
+theorem digest_packs_as_solidity_bytes (v : SettlementVerifier.U256) :
+    SettlementCloseBridge.wordBytes (digest v).words = SettlementVerifier.beBytes 32 v.val := by
+  rw [digest_words_exact]
+  exact SettlementCloseBridge.digest_words_pack_as_thirty_two_bytes v
+
+/-- The eight-limb reading recovers the integer: no information is lost between
+    the Solidity `uint256` and the circuit's `Words8`. -/
+theorem digest_value (v : SettlementVerifier.U256) : (digest v).value = v.val := by
+  have h := v.isLt
+  simp only [digest, CloseAssetBacking.Words8.value, CloseAssetBacking.Words8.words,
+    CloseAssetBacking.wordBase, SettlementVerifier.word, SettlementVerifier.limbBound,
+    List.foldl_cons, List.foldl_nil]
+  omega
+
+/-! ### The Solidity vector as a row list -/
+
+/-- One token position of the Solidity-side vector, as the circuit's `Row`. The
+    path component is irrelevant to every statement below — only `registry` and
+    `amount` are ever read — so any path value of the surrounding witness does. -/
+def solidityRow {Path : Type} (p0 : Path) (registry : Fin 10 → SettlementVerifier.U32)
+    (amounts : Fin 10 → SettlementVerifier.U256) (i : Fin 10) : CloseAssetBacking.Row Path :=
+  { registry := (registry i).val, amount := digest (amounts i), active := true, path := p0 }
+
+def solidityRows {Path : Type} (p0 : Path) (registry : Fin 10 → SettlementVerifier.U32)
+    (amounts : Fin 10 → SettlementVerifier.U256) : List (CloseAssetBacking.Row Path) :=
+  SettlementVerifier.tenList (solidityRow p0 registry amounts)
+
+theorem solidity_rows_length {Path : Type} (p0 : Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (amounts : Fin 10 → SettlementVerifier.U256) :
+    (solidityRows p0 registry amounts).length = CloseAssetBacking.maxTokens := rfl
+
+theorem solidity_rows_registry {Path : Type} (p0 : Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (amounts : Fin 10 → SettlementVerifier.U256) :
+    (solidityRows p0 registry amounts).map CloseAssetBacking.Row.registry =
+      SettlementVerifier.tenList (fun i => (registry i).val) := rfl
+
+theorem solidity_rows_amount {Path : Type} (p0 : Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (amounts : Fin 10 → SettlementVerifier.U256) :
+    (solidityRows p0 registry amounts).map CloseAssetBacking.Row.amount =
+      SettlementVerifier.tenList (fun i => digest (amounts i)) := rfl
+
+theorem solidity_rows_ranges {Path : Type} (p0 : Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (amounts : Fin 10 → SettlementVerifier.U256) :
+    CloseAssetBacking.RangeGates (solidityRows p0 registry amounts) := by
+  intro r hr
+  simp only [solidityRows, SettlementVerifier.tenList, List.mem_cons, List.not_mem_nil,
+    or_false] at hr
+  rcases hr with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
+    exact ⟨by simp [solidityRow, CloseAssetBacking.wordBase], digest_is_checked _⟩
+
+/-- The 92 circuit words of the Solidity row list pack into exactly the 368 bytes
+    the Manager hashes. The circuit's domain tag and the verifier's are the same
+    literal (`0x494d5446`), which `rfl` below checks. -/
+theorem solidity_rows_pack_as_solidity_bytes {Path : Type} (p0 : Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (count : SettlementVerifier.U8)
+    (amounts : Fin 10 → SettlementVerifier.U256) :
+    SettlementCloseBridge.wordBytes
+        (CloseAssetBacking.tokenFundsPreimage count.val (solidityRows p0 registry amounts)) =
+      SettlementVerifier.tokenFundsPreimage registry count amounts := by
+  simp only [CloseAssetBacking.tokenFundsPreimage, CloseAssetBacking.registryWords,
+    CloseAssetBacking.amountWords, solidityRows, solidityRow, SettlementVerifier.tenList,
+    List.map_cons, List.map_nil, SettlementCloseBridge.word_bytes_append,
+    digest_packs_as_solidity_bytes]
+  simp [SettlementCloseBridge.wordBytes, SettlementVerifier.tokenFundsPreimage,
+    SettlementVerifier.tenList, CloseAssetBacking.tokenFundsDomain,
+    SettlementVerifier.tokenFundsDomain, List.join, List.append_assoc]
+
+/-- Every word of a range-checked token-vector preimage is a canonical u32, so
+    the byte packing is injective on it (`word_byte_encoding_injective_on_checked_words`). -/
+theorem token_funds_preimage_words_are_checked {Path : Type} {count : Nat}
+    {rows : List (CloseAssetBacking.Row Path)} (countRange : count < CloseAssetBacking.wordBase)
+    (ranges : CloseAssetBacking.RangeGates rows) :
+    CloseCircuit.CheckedWords (CloseAssetBacking.tokenFundsPreimage count rows) := by
+  have limbs : ∀ x ∈ CloseAssetBacking.amountWords rows, x < CloseCircuit.wordBase := by
+    intro x hx
+    induction rows with
+    | nil => exact absurd hx (by simp [CloseAssetBacking.amountWords])
+    | cons r rs ih =>
+      simp only [CloseAssetBacking.amountWords, List.mem_append] at hx
+      rcases hx with hx | hx
+      · have := (ranges r (by simp)).2 x hx
+        simpa [CloseCircuit.wordBase, CloseAssetBacking.wordBase] using this
+      · exact ih (fun s hs => ranges s (by simp [hs])) hx
+  intro x hx
+  simp only [CloseAssetBacking.tokenFundsPreimage, List.mem_append, List.mem_cons,
+    List.not_mem_nil, or_false] at hx
+  rcases hx with ((rfl | hreg) | rfl) | hamt
+  · decide
+  · simp only [CloseAssetBacking.registryWords, List.mem_map] at hreg
+    obtain ⟨r, hr, rfl⟩ := hreg
+    simpa [CloseCircuit.wordBase, CloseAssetBacking.wordBase] using (ranges r hr).1
+  · simpa [CloseCircuit.wordBase, CloseAssetBacking.wordBase] using countRange
+  · exact limbs x hamt
+
+/-- Equal flattened amount streams over row lists of equal length mean equal
+    amounts, row by row: each row contributes exactly eight limbs, and
+    `words8_words_injective` recovers the `Words8`. -/
+theorem amount_words_injective {Path : Type} :
+    ∀ {a b : List (CloseAssetBacking.Row Path)}, a.length = b.length →
+      CloseAssetBacking.amountWords a = CloseAssetBacking.amountWords b →
+      a.map CloseAssetBacking.Row.amount = b.map CloseAssetBacking.Row.amount := by
+  intro a
+  induction a with
+  | nil => intro b hl _; cases b with
+    | nil => rfl
+    | cons y ys => simp at hl
+  | cons x xs ih =>
+    intro b hl h
+    cases b with
+    | nil => simp at hl
+    | cons y ys =>
+      simp only [CloseAssetBacking.amountWords] at h
+      have split := List.append_inj h (by rw [CloseAssetBacking.words8_length,
+        CloseAssetBacking.words8_length])
+      have heads : x.amount = y.amount := CloseAssetBacking.words8_words_injective split.1
+      have tails := ih (by simpa using hl) split.2
+      simp [heads, tails]
+
+/-- **The token-vector binding, hash-free.** If the circuit's own token-funds
+    preimage packs into exactly the bytes the Manager hashed, then the circuit's
+    rows ARE the Solidity vector: same count, same ten registry entries, same ten
+    amounts. Only the byte-string equality is borrowed; this step is proved. -/
+theorem word_bytes_token_vector_binding {Path : Type} {count : Nat}
+    {rows : List (CloseAssetBacking.Row Path)} {registry : Fin 10 → SettlementVerifier.U32}
+    {solidityCount : SettlementVerifier.U8} {amounts : Fin 10 → SettlementVerifier.U256}
+    (width : rows.length = CloseAssetBacking.maxTokens)
+    (countRange : count < CloseAssetBacking.wordBase)
+    (ranges : CloseAssetBacking.RangeGates rows)
+    (bytes : SettlementCloseBridge.wordBytes (CloseAssetBacking.tokenFundsPreimage count rows) =
+      SettlementVerifier.tokenFundsPreimage registry solidityCount amounts) :
+    count = solidityCount.val ∧
+      rows.map CloseAssetBacking.Row.registry =
+        SettlementVerifier.tenList (fun i => (registry i).val) ∧
+      rows.map CloseAssetBacking.Row.amount =
+        SettlementVerifier.tenList (fun i => digest (amounts i)) := by
+  cases rows with
+  | nil => simp [CloseAssetBacking.maxTokens] at width
+  | cons head rest =>
+    have countBound : solidityCount.val < CloseAssetBacking.wordBase := by
+      have := solidityCount.isLt
+      simp only [CloseAssetBacking.wordBase]
+      omega
+    rw [← solidity_rows_pack_as_solidity_bytes head.path registry solidityCount amounts] at bytes
+    have words := SettlementCloseBridge.word_byte_encoding_injective_on_checked_words _ _
+      (token_funds_preimage_words_are_checked countRange ranges)
+      (token_funds_preimage_words_are_checked countBound
+        (solidity_rows_ranges head.path registry amounts)) bytes
+    have lengths : (head :: rest).length =
+        (solidityRows head.path registry amounts).length := by
+      rw [width, solidity_rows_length]
+    obtain ⟨hreg, hcount, hamt⟩ :=
+      CloseAssetBacking.token_funds_preimage_injective_fields lengths words
+    refine ⟨hcount, ?_, ?_⟩
+    · rw [show (head :: rest).map CloseAssetBacking.Row.registry =
+        CloseAssetBacking.registryWords (head :: rest) from rfl, hreg]
+      exact solidity_rows_registry head.path registry amounts
+    · rw [amount_words_injective lengths hamt, solidity_rows_amount]
+
+/-! ## Positional list helpers
+
+Small, self-contained facts about the fixed ten-element layouts used above. They
+carry no source semantics. -/
+
+theorem ten_list_get {α : Type} (f : Fin 10 → α) (i : Fin 10) :
+    (SettlementVerifier.tenList f)[i.val]? = some (f i) := by
+  obtain ⟨v, hv⟩ := i
+  match v, hv with
+  | 0, _ => simp [SettlementVerifier.tenList]
+  | 1, _ => simp [SettlementVerifier.tenList]
+  | 2, _ => simp [SettlementVerifier.tenList]
+  | 3, _ => simp [SettlementVerifier.tenList]
+  | 4, _ => simp [SettlementVerifier.tenList]
+  | 5, _ => simp [SettlementVerifier.tenList]
+  | 6, _ => simp [SettlementVerifier.tenList]
+  | 7, _ => simp [SettlementVerifier.tenList]
+  | 8, _ => simp [SettlementVerifier.tenList]
+  | 9, _ => simp [SettlementVerifier.tenList]
+  | k + 10, hk => exact absurd hk (by omega)
+
+theorem ten_list_get_lt {α : Type} (f : Fin 10 → α) {j : Nat} (h : j < 10) :
+    (SettlementVerifier.tenList f)[j]? = some (f ⟨j, h⟩) := ten_list_get f ⟨j, h⟩
+
+theorem mem_of_index {α : Type} : ∀ {l : List α} {j : Nat} {x : α}, l[j]? = some x → x ∈ l := by
+  intro l
+  induction l with
+  | nil => intro j x h; simp at h
+  | cons y ys ih =>
+    intro j x h
+    cases j with
+    | zero => simp only [List.getElem?_cons_zero, Option.some.injEq] at h; simp [h]
+    | succ k =>
+      rw [List.getElem?_cons_succ] at h
+      exact List.mem_cons_of_mem y (ih h)
+
+theorem index_exists {α : Type} : ∀ {l : List α} {j : Nat}, j < l.length → ∃ x, l[j]? = some x := by
+  intro l
+  induction l with
+  | nil => intro j hj; exact absurd hj (by simp)
+  | cons y ys ih =>
+    intro j hj
+    cases j with
+    | zero => exact ⟨y, by simp⟩
+    | succ k =>
+      rw [List.getElem?_cons_succ]
+      exact ih (Nat.lt_of_succ_lt_succ (by simpa using hj))
+
+theorem replicate_true_prefix_index : ∀ (k j : Nat) (rest : List Bool), j < k →
+    (List.replicate k true ++ rest)[j]? = some true := by
+  intro k
+  induction k with
+  | zero => intro j rest hj; exact absurd hj (Nat.not_lt_zero j)
+  | succ k ih =>
+    intro j rest hj
+    rw [List.replicate_succ]
+    cases j with
+    | zero => simp
+    | succ i =>
+      rw [List.cons_append, List.getElem?_cons_succ]
+      exact ih i rest (Nat.lt_of_succ_lt_succ hj)
+
+/-! ## The credited vector really is the Manager's registry prefix
+
+`CloseFunding.prepared_materialization_guards` exposes the plan's uniqueness and
+its per-credit amount getter, but not WHICH tokens the plan names. That is what
+`readVector` decides, position by position, and the two theorems below expose it:
+every credit's token is `tokenAt j` for a position `j` below the token count.
+Without this, a credit could name a token outside the Manager's finalized
+registry and no circuit row would correspond to it. -/
+
+theorem read_vector_tokens_are_indexed {m : CloseFunding.ManagerView} :
+    ∀ {n i : Nat} {seen : List CloseFunding.Token} {cs : List CloseFunding.Credit},
+      CloseFunding.readVector m n i seen = .ok cs →
+      ∀ c ∈ cs, ∃ j, j < n ∧ m.tokenAt (i + j) = .ok c.token := by
+  intro n
+  induction n with
+  | zero =>
+    intro i seen cs h c hc
+    simp [CloseFunding.readVector] at h
+    subst cs
+    exact absurd hc (by simp)
+  | succ n ih =>
+    intro i seen cs h c hc
+    simp only [CloseFunding.readVector] at h
+    cases ht : m.tokenAt i with
+    | error error => simp [ht] at h
+    | ok token =>
+      simp only [ht, CloseFunding.result_bind_ok, CloseFunding.result_bind_error,
+        CloseFunding.result_pure, CloseFunding.require] at h
+      split at h
+      · simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error,
+          CloseFunding.result_pure] at h
+        cases ha : m.amountAt token with
+        | error error => simp [ha] at h
+        | ok amount =>
+          simp only [ha, CloseFunding.result_bind_ok, CloseFunding.result_bind_error,
+            CloseFunding.result_pure] at h
+          cases hr : CloseFunding.readVector m n (i + 1) (seen ++ [token]) with
+          | error error => simp [hr] at h
+          | ok tail =>
+            simp [hr] at h
+            subst cs
+            simp only [List.mem_cons] at hc
+            rcases hc with rfl | hc
+            · exact ⟨0, Nat.succ_pos n, by simpa using ht⟩
+            · obtain ⟨j, hj, hread⟩ := ih hr c hc
+              exact ⟨j + 1, by omega, by rw [show i + (j + 1) = i + 1 + j by omega]; exact hread⟩
+      · simp at h
+
+/-- The token-count getter, its range guard and the exact `readVector` run behind
+    a successful `prepareMaterialization`. Same case analysis as
+    `CloseFunding.prepared_materialization_guards`, exposing the two components
+    that theorem discards. -/
+theorem prepared_materialization_reads_the_registry_vector {e : CloseFunding.Environment}
+    {s : CloseFunding.State} {manager anchor : Nat} {p : CloseFunding.MaterializationPlan}
+    (h : CloseFunding.prepareMaterialization e s manager anchor = .ok p) :
+    (e.manager manager).tokenCount = .ok p.tokenCount ∧ p.tokenCount ≠ 0 ∧
+      p.tokenCount ≤ CloseFunding.maxChannelTokens ∧
+      CloseFunding.readVector (e.manager manager) p.tokenCount 0 [] = .ok p.credits := by
+  unfold CloseFunding.prepareMaterialization at h
+  cases hc : (e.manager manager).channelId with
+  | error error => simp [hc] at h
+  | ok channel =>
+    simp only [hc, CloseFunding.result_bind_ok, CloseFunding.require] at h
+    split at h <;>
+      simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+    split at h <;>
+      simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+    split at h <;>
+      simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+    cases hs : (e.manager manager).status with
+    | error error => simp [hs] at h
+    | ok status =>
+      simp only [hs, CloseFunding.result_bind_ok] at h
+      split at h <;>
+        simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+      cases hg : (e.manager manager).generation with
+      | error error => simp [hg] at h
+      | ok generation =>
+        simp only [hg, CloseFunding.result_bind_ok] at h
+        split at h <;>
+          simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+        cases hd : (e.manager manager).closeDigest with
+        | error error => simp [hd] at h
+        | ok digest =>
+          simp only [hd, CloseFunding.result_bind_ok] at h
+          cases hr : (e.manager manager).stateRoot with
+          | error error => simp [hr] at h
+          | ok root =>
+            simp only [hr, CloseFunding.result_bind_ok] at h
+            split at h <;>
+              simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+            cases hf : e.isFinalizedRoot root with
+            | error error => simp [hf] at h
+            | ok finalized =>
+              simp only [hf, CloseFunding.result_bind_ok] at h
+              split at h <;>
+                simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+              cases hl : e.latestFinalized with
+              | error error => simp [hl] at h
+              | ok last =>
+                simp only [hl, CloseFunding.result_bind_ok] at h
+                split at h <;>
+                  simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+                cases hn : (e.manager manager).tokenCount with
+                | error error => simp [hn] at h
+                | ok count =>
+                  simp only [hn, CloseFunding.result_bind_ok] at h
+                  split at h <;>
+                    simp only [CloseFunding.result_bind_ok, CloseFunding.result_bind_error] at h
+                  rename_i inRange
+                  cases hv : CloseFunding.readVector (e.manager manager) count 0 [] with
+                  | error error => simp [hv] at h
+                  | ok vector =>
+                    simp [hv] at h
+                    subst p
+                    have bounds : count ≠ 0 ∧ count ≤ CloseFunding.maxChannelTokens := by
+                      simpa using inRange
+                    exact ⟨rfl, bounds.1, bounds.2, hv⟩
+
+/-- **The credited vector, positioned.** Everything the derived boundary theorem
+    needs about an accepted `materializeSignedHead` beyond
+    `signed_head_materialization_receipt`: the plan's token count is the
+    Manager's own `tokenCount` getter, it lies in `1 … 10`, and every credit's
+    token is the getter value at a position below that count, with its amount the
+    Manager's own `amountAt`. -/
+theorem signed_head_credits_are_the_registry_vector {fe : CloseFunding.Environment}
+    {w after : CloseFunding.World} {manager : CloseFunding.Address}
+    {proof : CloseFunding.Bytes} {events : List CloseFunding.Event}
+    (call : CloseFunding.materializeSignedHead fe w manager proof = .ok (after, events)) :
+    ∃ (pi : List Nat) (st : CloseFunding.BackingStatement)
+      (p : CloseAssetBacking.PublicInputs) (channel : CloseFunding.Channel)
+      (plan : CloseFunding.MaterializationPlan),
+      fe.verifyCompact proof = .ok pi ∧
+      fe.isFinalizedRoot st.backingRoot = .ok true ∧
+      (fe.manager manager).channelId = .ok channel ∧
+      (fe.manager manager).tokenFundsDigest = .ok st.tokenFundsDigest ∧
+      (fe.manager manager).tokenCount = .ok plan.tokenCount ∧
+      CloseAssetBacking.parseTargets pi = some p ∧
+      p.words = pi ∧
+      p.channelId = channel ∧
+      p.tokenFundsDigest.value = st.tokenFundsDigest ∧
+      p.extendedStateCommitment.value = st.backingRoot ∧
+      plan.tokenCount ≠ 0 ∧ plan.tokenCount ≤ CloseFunding.maxChannelTokens ∧
+      plan.credits.length = plan.tokenCount ∧
+      (∀ c ∈ plan.credits, (∃ j, j < plan.tokenCount ∧ (fe.manager manager).tokenAt j = .ok c.token)
+        ∧ (fe.manager manager).amountAt c.token = .ok c.amount) := by
+  obtain ⟨plan, hprepared, _, _⟩ := CloseFunding.materialization_call_exact_accounting call
+  obtain ⟨pi, st, hverify, hvalid, _, _, hfunds, _⟩ :=
+    prepared_signed_head_provenance hprepared
+  obtain ⟨_, _, _, _, ⟨channel, hchannel, _, _⟩, _, _, _, hfinalized, _⟩ :=
+    validated_backing_facts hvalid
+  obtain ⟨p, hparse, hwords, hchannelValue, _, _, _, _, _, _, vf, vr⟩ :=
+    validated_words_decode hvalid hchannel
+  obtain ⟨_, localChecks⟩ := (CloseFunding.prepared_signed_head_requires_receipt_and_local_checks
+    hprepared).2
+  obtain ⟨hcount, hnonzero, hbound, hread⟩ :=
+    prepared_materialization_reads_the_registry_vector localChecks
+  obtain ⟨_, _, _, _, _, _, _, hlength, _, hamounts⟩ :=
+    CloseFunding.prepared_materialization_guards localChecks
+  refine ⟨pi, st, p, channel, plan, hverify, hfinalized, hchannel, hfunds, hcount, hparse,
+    hwords, hchannelValue, vf, vr, hnonzero, hbound, hlength, fun c hc => ⟨?_, hamounts c hc⟩⟩
+  obtain ⟨j, hj, hread⟩ := read_vector_tokens_are_indexed hread c hc
+  exact ⟨j, hj, by simpa using hread⟩
+
 end Zkp.Implementation.BackingBridge

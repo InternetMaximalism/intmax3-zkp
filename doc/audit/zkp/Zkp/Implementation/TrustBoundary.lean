@@ -6,6 +6,7 @@ import Zkp.Implementation.FalconAggProgram
 import Zkp.Implementation.FalconGadgetProgram
 import Zkp.Implementation.LedgerWriters
 import Zkp.Implementation.Keccak256
+import Zkp.Implementation.BackingBridge
 
 /-!
 # The named premise classes of the implementation-model audit
@@ -191,12 +192,6 @@ authorizes no fund movement at all.
 
 namespace Zkp.Implementation.TrustBoundary
 
-/-- Per-channel deposit attribution: `d channel token` is the number of raw units
-of `token` that entered the Rollup escrow on behalf of `channel`. No modeled
-contract maintains this map; it is the accounting the Balance/validity circuit
-family is supposed to enforce off-chain. -/
-abbrev ChannelDeposits := Nat → Nat → Nat
-
 /-- The environment values every premise below is indexed by. Bundling them makes
 it impossible for two premises (or a premise and the theorem that uses it) to
 silently refer to different verifier views or different hash functions. -/
@@ -217,8 +212,45 @@ structure Models (BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Ty
   funding : CloseFunding.Environment
   /-- The Rollup state the materializer's finality getters are supposed to read. -/
   head : RollupValue.State
-  /-- Intended per-channel deposit attribution (see `ChannelDeposits`). -/
-  deposits : ChannelDeposits
+  /-- Pinned circuit identity of the Materializer's `backingMleVerifier`: the
+  circuit digest and verification-config digest baked into the backing adapter's
+  pinned configuration. It is a parameter here, exactly like
+  `pinnedCircuitDigest`; nothing in this project derives a digest from a circuit,
+  and nothing proves that the adapter `CloseFundingMaterializer` pins carries the
+  digest of the program `CloseAssetBacking.constructorProgram` transcribes — that
+  claim is stated on its own as `BackingPinnedDigestIsProgramDigest` and is not a
+  field. Only (c1) and (c2) mention this list. -/
+  backingCircuitDigest : List Nat
+  /-- The backing circuit's opaque dependencies, bundled exactly as
+  `CloseAssetBacking.Environment` bundles them: the sparse-Merkle contract of the
+  asset tree, the three hash callbacks (Poseidon private commitment, Poseidon
+  extended commitment, the `plonky2_keccak` token-funds hash) and the constant-key
+  recursive verifier of the Balance proof. Nothing here defines any of them; (c3a)
+  is the only field that says WHICH function one of them is. -/
+  backingEnv : CloseAssetBacking.Environment BalanceProof Path
+  /-- The Manager address the Materializer is bound to — the `manager` argument of
+  `materializeSignedHead` and the address whose getters
+  `CloseFunding.Environment.manager` observes. -/
+  managerAddress : CloseFunding.Address
+  /-- The Manager storage the Materializer's staticcalls observe at materialization
+  time. It is a SNAPSHOT, exactly like `head`: nothing in this structure makes it
+  evolve, and (c0) is precisely the claim that the cross-contract getter view
+  agrees with it at the moment of the call. -/
+  managerSnapshot : ManagerValue.FullState
+  /-- The channel id of the bound Manager. `ManagerValue.FullState` does not carry
+  it — it lives in `ManagerValue.Config.channel`, which is configuration rather
+  than storage — so it is a separate parameter here, tied to the Materializer's
+  `channelId` getter by (c0). -/
+  managerChannel : Nat
+  /-- `l2Entitlement root channel token` is the number of raw units of `token` the
+  L2 ledger accounts to `channel` at the finalized extended-state root `root`, as
+  the validity chain computes it.
+
+  It is a PARAMETER: it NAMES the L2 ledger, and nothing in this project derives
+  it, constrains it or relates it to escrow. Only (c4) mentions it, and (c4) is
+  the residue the validity-chain composition (BalanceCircuit → SwitchBoard →
+  ValidityChain → DepositChain/WithdrawalChain) would have to discharge. -/
+  l2Entitlement : CloseAssetBacking.Words8 → Nat → Nat → Nat
   /-- Hash environment of the single-signature model `FalconCore`: the
   `hash_to_point` and Poseidon callbacks the `gadget.rs` gate set is stated over.
   A parameter, exactly like `closeEnv`; nothing here defines Poseidon. The
@@ -631,6 +663,173 @@ theorem post_close_adapter_is_pinned (installed : SettlementVerifier.Installed) 
     installed.adapters.postClose ∈ installed.adapters.list := by
   simp [SettlementVerifier.Adapters.list]
 
+/-! ## The close-vector backing obligations, split
+
+The old field (c) `closeVectorBacked` is gone, and not because it was discharged.
+It said the close statement's token amounts were bounded by `m.deposits channel
+token` for an opaque per-channel deposit map, and it said it about CLOSE-INTENT
+ACCEPTANCE. Both halves were wrong about the deployed system: accepting a close
+intent credits nothing, no modeled contract maintains such a map, and with L2
+transfers "what this channel deposited" is not the right bound in the first
+place.
+
+What the contracts really require before any credit leaves escrow is
+`CloseFundingMaterializer.materializeSignedHead`, and it requires a BACKING
+PROOF. `CloseAssetBacking` recursively verifies a Balance proof at a constant
+key, opens its private commitment, rebuilds the asset tree from the very token
+vector whose keccak digest the Manager's finalized close statement carries, and
+exposes an extended-state commitment the Materializer checks against
+`isFinalizedRoot`. So the credited vector is, by construction, a channel balance
+certified by the Balance circuit family at a finalized L2 state.
+
+Seven fields carry that path, each naming ONE artifact or ONE step:
+
+* (c0) `materializerViewIsManagerState` — the cross-contract staticcall view is
+  the Manager's storage (an EVM/refinement premise, kin to (f1));
+* (c0b) `managerFundsDigestIsReference` — the digest that storage holds is the
+  EVM keccak of the Solidity token-vector preimage (kin to (e1a));
+* (c1) `backingVerifierSoundness` — the SAME accepted MLE/WHIR artifact as (a0),
+  at the backing adapter;
+* (c2) `backingPrimitiveLowering` — the per-builder-call lowering of
+  `CloseAssetBacking.constructorProgram` (kin to (a), (b1), (b2));
+* (c3a) `backingKeccakIsReference` — the circuit's keccak gadget is Keccak-256
+  (the (e1b) sentence for the backing circuit);
+* (c3b) `backingTokenFundsHashBinding` — no collision on the one compared pair
+  (the (e2) sentence for the backing circuit);
+* (c4) `finalizedBalanceIsBacked` — THE RESIDUE: Balance-certified amounts at a
+  finalized root are within the channel's L2 entitlement.
+
+Everything BETWEEN those fields is proved:
+`materialized_credits_are_finalized_l2_balances_of_boundary` composes them into
+"every credit of an accepted materialization is an active row of a
+constraint-satisfying backing witness, and is therefore within that channel's L2
+entitlement at a finalized root". -/
+
+/-- Lifecycle correspondence between the two Manager models: the
+`ChannelLifecycleStatus` enum as `ManagerValue` names its three values and as the
+Materializer's `status` getter reads them. A notation, not a claim. -/
+def managerStatus : ManagerValue.Lifecycle → CloseFunding.Status
+  | .active => .active
+  | .pending => .closePending
+  | .closed => .closed
+
+/-- **(c0), stated.** Every component of the Materializer's `ManagerView` — twelve
+separate staticcalls into `ChannelSettlementManager` — returns the corresponding
+component of the Manager storage snapshot, with the channel id nonzero. The last
+three conjuncts are the WIDTH facts the ABI already guarantees at that boundary
+(`uint32` registry entries, a `uint8` token count, `uint256` caps); they are
+listed here because the Solidity-side preimage of (c0b) is typed by those widths
+and nothing else in this project supplies them. -/
+def MaterializerViewIsManagerState {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  (m.funding.manager m.managerAddress).channelId = .ok m.managerChannel ∧
+  0 < m.managerChannel ∧
+  (m.funding.manager m.managerAddress).status =
+    .ok (managerStatus m.managerSnapshot.value.lifecycle) ∧
+  (m.funding.manager m.managerAddress).generation = .ok m.managerSnapshot.value.generation ∧
+  (m.funding.manager m.managerAddress).closeDigest = .ok m.managerSnapshot.value.finalDigest ∧
+  (m.funding.manager m.managerAddress).stateRoot = .ok m.managerSnapshot.final.fundRoot ∧
+  (m.funding.manager m.managerAddress).settledChain = .ok m.managerSnapshot.final.settledChain ∧
+  (m.funding.manager m.managerAddress).tokenFundsDigest = .ok m.managerSnapshot.tokenFundsDigest ∧
+  (m.funding.manager m.managerAddress).tokenCount = .ok m.managerSnapshot.value.tokenCount ∧
+  (∀ i : Fin 10, i.val < m.managerSnapshot.value.tokenCount →
+    (m.funding.manager m.managerAddress).tokenAt i.val = .ok (m.managerSnapshot.value.registry i)) ∧
+  (∀ t : CloseFunding.Token,
+    (m.funding.manager m.managerAddress).amountAt t = .ok (m.managerSnapshot.value.cap t)) ∧
+  (∀ i : Fin 10, m.managerSnapshot.value.registry i < 2 ^ 32) ∧
+  m.managerSnapshot.value.tokenCount < 2 ^ 8 ∧
+  (∀ t : ManagerValue.Token, m.managerSnapshot.value.cap t < 2 ^ 256)
+
+/-- The Manager's finalized token vector, at the Solidity ABI widths: ten `uint32`
+registry entries, a `uint8` count and the ten `uint256` per-token caps read at
+those registry entries. This is the triple
+`ChannelSettlementManager.sol:1685-1686` passes to
+`verifier.tokenFundsDigest(...)` after `_finalizeClose` has written
+`finalizedTokenRegistry`, `finalizedTokenCount` and
+`finalizedChannelFundAmount`. -/
+def SnapshotVector {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (registry : Fin 10 → SettlementVerifier.U32) (count : SettlementVerifier.U8)
+    (amounts : Fin 10 → SettlementVerifier.U256) : Prop :=
+  (∀ i : Fin 10, (registry i).val = m.managerSnapshot.value.registry i) ∧
+  count.val = m.managerSnapshot.value.tokenCount ∧
+  (∀ i : Fin 10, (amounts i).val =
+    m.managerSnapshot.value.cap (m.managerSnapshot.value.registry i))
+
+/-- **(c0b), stated.** The digest the Manager stores is the reference Keccak-256
+of the Solidity token-vector preimage of its own finalized vector. -/
+def ManagerFundsDigestIsReference
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ (registry : Fin 10 → SettlementVerifier.U32) (count : SettlementVerifier.U8)
+    (amounts : Fin 10 → SettlementVerifier.U256),
+    SnapshotVector m registry count amounts →
+    m.managerSnapshot.tokenFundsDigest =
+      (Keccak256.digestU256 (SettlementVerifier.tokenFundsPreimage registry count amounts)).val
+
+/-- **(c2), stated.** The per-builder-call lowering of the backing circuit, in the
+same form as (a), (b1) and (b2): a satisfiable plonky2 statement of the backing
+adapter's pinned digest yields an ASSIGNMENT of every wire
+`CloseAssetBackingCircuit::new` allocates which satisfies every
+`CloseAssetBacking.BuildOp.holds` case of `constructorProgram`, whose 26
+registered public wires are exactly those words. -/
+def BackingPrimitiveLowering {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ words : List Nat, m.plonky2Satisfiable m.backingCircuitDigest words →
+    ∃ a : CloseAssetBacking.Assignment m.backingEnv,
+      CloseAssetBacking.ProgramSatisfied CloseAssetBacking.constructorProgram a ∧
+        (CloseAssetBacking.readPublic a).words = words
+
+/-- Sub-obligation (ii) for the backing endpoint, stated on its own exactly as it
+is for the close, withdrawal, post-close and aggregation circuits: the digest the
+Materializer's `backingMleVerifier` pins is the digest of the program
+`CloseAssetBacking.constructorProgram` transcribes. Deliberately NOT a field. -/
+def BackingPinnedDigestIsProgramDigest
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (digestOf : List CloseAssetBacking.BuildOp → List Nat) : Prop :=
+  m.backingCircuitDigest = digestOf CloseAssetBacking.constructorProgram
+
+/-- **(c3b), stated.** The (e2) sentence for the backing path: on the ONE pair of
+byte strings an accepted materialization actually compares — the circuit's
+92-word token-funds preimage packed big-endian, and the Manager's 368-byte
+Solidity preimage of the same vector — equal reference Keccak-256 digests mean
+equal strings. No global injectivity, and the two strings are the same length
+(`BackingBridge.solidity_rows_pack_as_solidity_bytes` packs one into the other's
+shape), so no length-extension or padding ambiguity is involved. -/
+def BackingTokenFundsHashBinding
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ (world after : CloseFunding.World) (proof : CloseFunding.Bytes)
+    (events : List CloseFunding.Event) (w : CloseAssetBacking.Witness BalanceProof Path)
+    (registry : Fin 10 → SettlementVerifier.U32) (count : SettlementVerifier.U8)
+    (amounts : Fin 10 → SettlementVerifier.U256),
+    CloseFunding.materializeSignedHead m.funding world m.managerAddress proof
+        = .ok (after, events) →
+    SnapshotVector m registry count amounts →
+    Keccak256.keccak256 (SettlementCloseBridge.wordBytes
+        (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows)) =
+      Keccak256.keccak256 (SettlementVerifier.tokenFundsPreimage registry count amounts) →
+    SettlementCloseBridge.wordBytes (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows) =
+      SettlementVerifier.tokenFundsPreimage registry count amounts
+
+/-- **(c4), stated — THE RESIDUE.** For any witness satisfying the backing
+circuit's handwritten gate predicate whose extended-state commitment the canonical
+Rollup head finalizes, every ACTIVE row's amount is within the channel's L2
+entitlement at that root. -/
+def FinalizedBalanceIsBacked {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore) : Prop :=
+  ∀ w : CloseAssetBacking.Witness BalanceProof Path,
+    CloseAssetBacking.CircuitConstraints m.backingEnv.merkle m.backingEnv.hash
+      m.backingEnv.recursive w →
+    m.head.finalizedRoot
+        (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment.value
+      = true →
+    ∀ row ∈ w.rows, row.active = true →
+      row.amount.value ≤ m.l2Entitlement
+        (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment
+        (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).channelId row.registry
+
 /-!
 ## The premises
 
@@ -762,19 +961,141 @@ structure TrustBoundary {BalanceProof AggregateProof Path Root ClaimPath ClaimCo
   Merkle verifies, the decryption core); (ii) digest pinning, stated as
   `PostClosePinnedDigestIsProgramDigest`. -/
   postClosePrimitiveLowering : PostClosePrimitiveLowering m
-  /-- **(c) Close-vector backing.** The materializer credits the Manager the whole
-  finalized close vector, and `CloseFunding` proves only that those amounts are
-  the Manager's own getter values. Nothing in the modeled contracts relates them
-  to the deposits and settled credits of that channel. This premise, stated over
-  the close statement's own fields, is the missing link. It would be discharged
-  by the Balance/validity circuit family (`BalanceCircuit`, `ChannelStateUpdate`,
-  `CloseAssetBacking`) proving that the close vector never exceeds what the
-  channel actually received. -/
-  closeVectorBacked :
-    ∀ (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes),
-      SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true →
-      ∀ i : Fin 10, i.val < f.tokenCount.val →
-        (f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val
+  /-- **(c0) The Materializer's Manager view is the Manager's storage.** Every
+  getter of `CloseFunding.Environment.manager` is a staticcall into a DIFFERENT
+  contract, `ChannelSettlementManager`, and `CloseFunding` models it as an opaque
+  oracle: nothing in that model, and nothing in `ManagerValue`, says the two agree.
+  This premise says they do, at materialization time, for the bound Manager — the
+  twelve components of the view are the corresponding components of
+  `m.managerSnapshot`, and the bound channel id is nonzero.
+
+  A CROSS-CONTRACT OBSERVATION PREMISE, kin to (f1) `finalizedRootObservation`
+  rather than to any circuit premise: it would be discharged by a cross-contract
+  storage-read refinement — an EVM semantics in which a `staticcall` to a known
+  address returns that contract's storage projection — which the models
+  deliberately do not assume. It is not a claim that the Manager's storage is
+  correct; it is only a claim that the Materializer reads it.
+
+  WHY A SNAPSHOT. `m.managerSnapshot` is fixed, exactly like `m.head`. The premise
+  therefore speaks about one materialization against one Manager state; it says
+  nothing about interleaving, and no theorem below reads it as durability. -/
+  materializerViewIsManagerState : MaterializerViewIsManagerState m
+  /-- **(c0b) The Manager's stored token-funds digest is the reference keccak of
+  its finalized vector.** `ChannelSettlementManager.sol:1685-1686`, at the end of
+  `_finalizeClose`, sets `finalizedTokenFundsDigest = verifier.tokenFundsDigest(
+  pendingClose.tokenRegistry, tc, pendingClose.channelFundAmounts)`, and
+  `SettlementVerifier.tokenFundsDigest` is `keccak256(abi.encodePacked(...))` of
+  `SettlementVerifier.tokenFundsPreimage` — the 368-byte string `4` domain bytes,
+  ten `uint32` registry entries, the `uint32`-padded count and ten `uint256`
+  amounts. This premise says the digest sitting in storage really is the reference
+  Keccak-256 of that preimage, for the snapshot's own finalized vector.
+
+  Kin to (e1a) `solidityKeccakIsReference`, and borrowed for the same reason: it
+  is a claim about the EVM `KECCAK256` opcode and about which bytes `_finalizeClose`
+  fed it. It would be discharged by an extracted EVM semantics together with the
+  Manager write-path refinement; nothing inside this audit establishes either.
+  (The `ManagerValue` model reaches the same value through the opaque external
+  `FullExternal.fundsHash` callback at `finalizeCloseCore`, which is precisely why
+  the identification has to be a premise.) -/
+  managerFundsDigestIsReference : ManagerFundsDigestIsReference m
+  /-- **(c1) Backing-proof verifier soundness — the SAME accepted artifact as
+  (a0), at the backing adapter.** `CloseFunding.Environment.verifyCompact` is the
+  Materializer's call into the pinned `backingMleVerifier`
+  (`CloseFundingMaterializer.sol`, the immutable checked by
+  `requirePinnedVerifier`). This premise says a word vector it returns is the
+  public-input vector of a satisfiable plonky2 statement of the circuit
+  `m.backingCircuitDigest` identifies.
+
+  IT IS (a0) AGAIN, NOT A NEW ACCEPTANCE. The artifact is the same pinned
+  MLE/WHIR proof system of `contracts/lib/polygon-plonky2` that (a0) records the
+  operator's decision to accept, at a different deployed adapter. It is stated as
+  its own field rather than folded into (a0) because (a0) is scoped to the four
+  adapters `SettlementVerifier.Installed` pins, and the Materializer's verifier is
+  not one of them: the scope of the acceptance must stay visible, address by
+  address. Discharging it means discharging (a0), and no more. -/
+  backingVerifierSoundness :
+    ∀ (proof : CloseFunding.Bytes) (words : List Nat),
+      m.funding.verifyCompact proof = .ok words →
+      m.plonky2Satisfiable m.backingCircuitDigest words
+  /-- **(c2) Backing PER-PRIMITIVE lowering — lowering only; the artifact step is
+  (c1).** The (a)/(b1)/(b2) obligation for the fourth settlement circuit: a
+  satisfiable plonky2 statement of the backing adapter's pinned circuit digest,
+  carrying the 26 words the Materializer validated, yields an ASSIGNMENT of the
+  wires `CloseAssetBackingCircuit::new` allocates which satisfies every
+  `CloseAssetBacking.BuildOp.holds` case of `constructorProgram` and whose
+  registered public wires read back to exactly those words.
+
+  Nothing beyond that is assumed: `CloseAssetBacking.program_satisfied_implies_constraints`
+  turns such an assignment into a witness of `CloseAssetBacking.CircuitConstraints`
+  with no side hypothesis, and `program_satisfied_computes_public_inputs` proves
+  the 26 registered wires are that witness's own computed public inputs.
+
+  WHAT REMAINS OPAQUE, and nowhere else: (i) primitive-semantics faithfulness —
+  each `holds` case must be exactly the constraint plonky2's corresponding builder
+  call emits (`add_proof_target_and_verify_cyclic`, `hash_inputs`, `connect`,
+  `range_check`, `U256Target::new(_, true)`, `add_virtual_bool_target_safe`,
+  `sub`/`mul`/`add`, `not`, `is_equal`/`and`, `keccak256`,
+  `SparseMerkleProofTarget::conditional_verify`/`get_root`,
+  `PoseidonHashOutTarget::select`, `register_public_inputs`); and (ii) digest
+  pinning, stated separately as `BackingPinnedDigestIsProgramDigest` and factored
+  out by `backing_pinned_digest_and_program_lowering_give_primitive_lowering`.
+  Neither is modeled or proved in this project. -/
+  backingPrimitiveLowering : BackingPrimitiveLowering m
+  /-- **(c3a) The backing circuit's token-funds hash gadget IS Keccak-256.** The
+  `tokenFundsHash` callback of `m.backingEnv.hash` stands for the same external
+  `plonky2_keccak` gadget the close circuit uses — the crate pinned in
+  `Cargo.lock` at git rev `2507786148ae6323d0ea547bf88e1752f901434e` — invoked at
+  `close_asset_backing_circuit.rs:508-509` on the 92-word digest preimage. This
+  premise says that gadget computes the reference Keccak-256 of the
+  big-endian-packed u32 words, packed back into the circuit's 8-limb `Words8`.
+
+  It is (e1b) verbatim, adapted to `CloseAssetBacking.Words8`. NOT A PART OF (c2):
+  (c2)'s faithfulness obligation for the keccak `BuildOp` says only that the
+  circuit CONSTRAINS its output wire to the callback's value; which function the
+  callback is, is exactly this field and nothing else. Discharged by a correctness
+  proof of the pinned gadget at that revision. -/
+  backingKeccakIsReference :
+    ∀ words : List Nat,
+      m.backingEnv.hash.tokenFundsHash words =
+        BackingBridge.digest (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words))
+  /-- **(c3b) Keccak-256 collision resistance on ONE same-length pair, backing
+  path.** The (e2) sentence for the vector an accepted materialization actually
+  compares: the circuit's reconstructed `tokenFundsPreimage count rows` packed
+  big-endian, against the Manager's own 368-byte Solidity preimage. If the
+  reference digests agree, the byte strings agree.
+
+  THE ABI HALF IS PROVED, NOT BORROWED. `BackingBridge.solidity_rows_pack_as_solidity_bytes`
+  shows the Solidity layout is the byte packing of a circuit row list, and
+  `BackingBridge.word_bytes_token_vector_binding` shows that equal byte strings
+  force equal count, equal ten registry entries and equal ten amounts — no
+  encoding, width, domain-separation or field-ordering assumption survives. What
+  is left is solely the COMPUTATIONAL claim that Keccak-256 has no collision on
+  that one concrete pair, which cannot be discharged in this project. -/
+  backingTokenFundsHashBinding : BackingTokenFundsHashBinding m
+  /-- **(c4) Finalized Balance-certified amounts are backed — THE RESIDUE OF THE
+  WHOLE BACKING PATH.** For a witness satisfying `CloseAssetBacking.CircuitConstraints`
+  — a verified Balance proof at the pinned constant key, an opened private
+  commitment, the asset tree rebuilt from the rows, and the extended-state
+  commitment the Materializer found FINALIZED in `m.head` — every active row's
+  amount is within `m.l2Entitlement root channel token`, the channel's entitlement
+  on the L2 ledger at that root.
+
+  WHAT IT IS NOT. It is not a deposit bound: L2 transfers move entitlement between
+  channels, so "what this channel deposited" was never the right quantity, and the
+  map it is stated over is the L2 ledger's own accounting, named as a parameter.
+  It is not about the close statement either: acceptance of a close intent credits
+  nothing, and this premise is attached to the event that does move money.
+
+  WHAT WOULD DISCHARGE IT — THE NAMED NEXT PROJECT. Composing the Balance circuit
+  family: `BalanceCircuit` (that a Balance proof's private state really is the
+  channel's balance at its public state) → `SwitchBoard` (that the public state is
+  a state of the validity chain) → `ValidityChain` (that finalized roots are
+  reachable only through valid blocks) → `DepositChain` / `WithdrawalChain` (that
+  the ledger's per-channel entitlement is backed by escrow). Every one of those
+  models exists in this directory; none of them is composed into this statement
+  yet, and this field is exactly the gap that composition would close. It is NOT
+  discharged here, and no theorem below may treat it as established. -/
+  finalizedBalanceIsBacked : FinalizedBalanceIsBacked m
   /-- **(d0) Aggregate recursive-verifier soundness at the TOP key — NOT covered
   by (a0).** `CloseCircuit.CircuitGates.aggregateVerified` is an opaque predicate
   call standing for plonky2's in-circuit recursive verification of the Falcon
@@ -1763,6 +2084,249 @@ theorem reference_keccak_models_satisfy_hash_premises
   · intro words
     simp [circuit]
 
+/-! ## The close-vector backing: from seven premises to a credited-vector bound
+
+The theorem below is what replaces the old field (c). It is stated about the
+event that actually moves money — an accepted `materializeSignedHead` — and it
+composes, in one chain, the receipt of `Zkp.Implementation.BackingBridge` with the
+seven backing fields:
+
+1. the receipt gives the exact verifier return, the exact 26 parsed words, the
+   Manager getters that were compared, the finality guard, and the credited
+   vector's positions (`BackingBridge.signed_head_credits_are_the_registry_vector`);
+2. (c1) turns the verifier return into a satisfiable plonky2 statement;
+3. (c2) turns that into an assignment of the transcribed builder program;
+4. `program_satisfied_implies_constraints` and
+   `program_satisfied_computes_public_inputs` — both PROVED in
+   `CloseAssetBacking`, with no side hypothesis — turn the assignment into a
+   witness of `CircuitConstraints` whose computed public inputs are those 26
+   words;
+5. the two digests are then followed to the same byte string: the statement's
+   `tokenFundsDigest` is the Manager view's (receipt), which is the snapshot's
+   (c0), which is the reference keccak of the Solidity preimage (c0b); while the
+   circuit's is the hash callback of its own reconstructed preimage, which is the
+   reference keccak of the packed words (c3a);
+6. equal digests give equal byte strings by (c3b), and equal byte strings give
+   equal vectors by `BackingBridge.word_bytes_token_vector_binding` — PROVED, not
+   assumed: the ABI layout is injective;
+7. so every credited (token, amount) pair is an ACTIVE row of the backing
+   witness, and (c4) bounds it by the channel's L2 entitlement at the finalized
+   root.
+
+Every step except the seven named fields is a theorem. -/
+
+/-- **The credited vector is a finalized L2 balance — the replacement for premise
+(c).** From an accepted `materializeSignedHead` against the bound Manager: there
+is a witness satisfying the backing circuit's gate predicate whose extended-state
+commitment the canonical Rollup head finalizes and whose channel wire is the bound
+channel; every credit the Materializer paid out is an active row of that witness,
+token for token and amount for amount; and therefore every credited amount is
+within that channel's L2 entitlement at that finalized root.
+
+What this does NOT say: that the L2 entitlement is itself backed by escrow. That
+is (c4)'s own content as a premise, and discharging it is the validity-chain
+composition named in its docstring. -/
+theorem materialized_credits_are_finalized_l2_balances_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (world after : CloseFunding.World) (proof : CloseFunding.Bytes)
+    (events : List CloseFunding.Event)
+    (call : CloseFunding.materializeSignedHead m.funding world m.managerAddress proof =
+      .ok (after, events)) :
+    ∃ (w : CloseAssetBacking.Witness BalanceProof Path)
+      (plan : CloseFunding.MaterializationPlan),
+      CloseAssetBacking.CircuitConstraints m.backingEnv.merkle m.backingEnv.hash
+          m.backingEnv.recursive w ∧
+      m.head.finalizedRoot
+          (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment.value
+        = true ∧
+      (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).channelId = m.managerChannel ∧
+      (∀ c ∈ plan.credits, ∃ row ∈ w.rows, row.active = true ∧ row.registry = c.token ∧
+        row.amount.value = c.amount) ∧
+      (∀ c ∈ plan.credits, c.amount ≤ m.l2Entitlement
+        (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment
+        m.managerChannel c.token) := by
+  obtain ⟨viewChannelId, _channelPositive, _, _, _, _, _, viewFunds, viewCount, viewToken,
+    viewAmount, registryBound, countBound, capBound⟩ := tb.materializerViewIsManagerState
+  obtain ⟨pi, st, p, channel, plan, verified, finalized, viewChannel, fundsGetter, countGetter,
+    _parsed, words, channelValue, fundsValue, rootValue, _countNonzero, countLe, _creditsLength,
+    credits⟩ := BackingBridge.signed_head_credits_are_the_registry_vector call
+  have channelSame : channel = m.managerChannel :=
+    Except.ok.inj (viewChannel.symm.trans viewChannelId)
+  obtain ⟨w, constraints, computed⟩ :
+      ∃ w : CloseAssetBacking.Witness BalanceProof Path,
+        CloseAssetBacking.CircuitConstraints m.backingEnv.merkle m.backingEnv.hash
+          m.backingEnv.recursive w ∧
+        CloseAssetBacking.computedPublicInputs m.backingEnv.hash w = p := by
+    obtain ⟨a, satisfied, readsBack⟩ :=
+      tb.backingPrimitiveLowering pi (tb.backingVerifierSoundness proof pi verified)
+    refine ⟨CloseAssetBacking.readWitness a,
+      CloseAssetBacking.program_satisfied_implies_constraints m.backingEnv a satisfied, ?_⟩
+    have publicSame : CloseAssetBacking.readPublic a = p :=
+      CloseAssetBacking.public_input_encoding_injective (by rw [readsBack, words])
+    exact (CloseAssetBacking.program_satisfied_computes_public_inputs m.backingEnv a
+      satisfied).symm.trans publicSame
+  have rootFinal : m.head.finalizedRoot
+      (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).extendedStateCommitment.value
+      = true := by
+    rw [computed, rootValue]
+    exact tb.finalizedRootObservation st.backingRoot finalized
+  have channelOut :
+      (CloseAssetBacking.computedPublicInputs m.backingEnv.hash w).channelId = m.managerChannel := by
+    rw [computed, channelValue, channelSame]
+  -- the Manager's finalized vector at the Solidity ABI widths
+  have vector : SnapshotVector m (fun i => ⟨m.managerSnapshot.value.registry i, registryBound i⟩)
+      ⟨m.managerSnapshot.value.tokenCount, countBound⟩
+      (fun i => ⟨m.managerSnapshot.value.cap (m.managerSnapshot.value.registry i),
+        capBound (m.managerSnapshot.value.registry i)⟩) :=
+    ⟨fun _ => rfl, rfl, fun _ => rfl⟩
+  -- the circuit side of the digest
+  have circuitDigest : p.tokenFundsDigest =
+      BackingBridge.digest (Keccak256.digestU256 (SettlementCloseBridge.wordBytes
+        (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows))) := by
+    rw [← computed]
+    exact tb.backingKeccakIsReference (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows)
+  have snapshotDigest : st.tokenFundsDigest = m.managerSnapshot.tokenFundsDigest :=
+    Except.ok.inj (fundsGetter.symm.trans viewFunds)
+  have digestsAgree :
+      Keccak256.digestU256 (SettlementCloseBridge.wordBytes
+          (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows)) =
+        Keccak256.digestU256 (SettlementVerifier.tokenFundsPreimage
+          (fun i => ⟨m.managerSnapshot.value.registry i, registryBound i⟩)
+          ⟨m.managerSnapshot.value.tokenCount, countBound⟩
+          (fun i => ⟨m.managerSnapshot.value.cap (m.managerSnapshot.value.registry i),
+            capBound (m.managerSnapshot.value.registry i)⟩)) := by
+    apply Fin.ext
+    have left : p.tokenFundsDigest.value =
+        (Keccak256.digestU256 (SettlementCloseBridge.wordBytes
+          (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows))).val := by
+      rw [circuitDigest, BackingBridge.digest_value]
+    rw [← left, fundsValue, snapshotDigest,
+      tb.managerFundsDigestIsReference _ _ _ vector]
+  have bytesAgree :
+      Keccak256.keccak256 (SettlementCloseBridge.wordBytes
+          (CloseAssetBacking.tokenFundsPreimage w.tokenCount w.rows)) =
+        Keccak256.keccak256 (SettlementVerifier.tokenFundsPreimage
+          (fun i => ⟨m.managerSnapshot.value.registry i, registryBound i⟩)
+          ⟨m.managerSnapshot.value.tokenCount, countBound⟩
+          (fun i => ⟨m.managerSnapshot.value.cap (m.managerSnapshot.value.registry i),
+            capBound (m.managerSnapshot.value.registry i)⟩)) := by
+    have vals := congrArg Fin.val digestsAgree
+    rw [Keccak256.digest_u256_val, Keccak256.digest_u256_val] at vals
+    exact Keccak256.bytes_to_nat_injective _ _
+      (by rw [Keccak256.keccak256_length, Keccak256.keccak256_length])
+      (Keccak256.keccak256_bytes_canonical _) (Keccak256.keccak256_bytes_canonical _) vals
+  obtain ⟨countEq, registryEq, amountEq⟩ :=
+    BackingBridge.word_bytes_token_vector_binding constraints.vector.width
+      constraints.vector.countRange constraints.vector.ranges
+      (tb.backingTokenFundsHashBinding world after proof events w _ _ _ call vector bytesAgree)
+  have planCount : plan.tokenCount = m.managerSnapshot.value.tokenCount :=
+    Except.ok.inj (countGetter.symm.trans viewCount)
+  have activityShape := CloseAssetBacking.canonical_activity_vector constraints.vector
+  have matching : ∀ c ∈ plan.credits, ∃ row ∈ w.rows, row.active = true ∧
+      row.registry = c.token ∧ row.amount.value = c.amount := by
+    intro c hc
+    obtain ⟨⟨j, hj, tokenGetter⟩, amountGetter⟩ := credits c hc
+    have jBound : j < 10 := by
+      have : plan.tokenCount ≤ 10 := countLe
+      omega
+    have jCount : j < m.managerSnapshot.value.tokenCount := by rw [← planCount]; exact hj
+    have tokenIs : c.token = m.managerSnapshot.value.registry ⟨j, jBound⟩ :=
+      Except.ok.inj (tokenGetter.symm.trans (viewToken ⟨j, jBound⟩ jCount))
+    have amountIs : c.amount = m.managerSnapshot.value.cap c.token :=
+      Except.ok.inj (amountGetter.symm.trans (viewAmount c.token))
+    obtain ⟨row, atJ⟩ := BackingBridge.index_exists (l := w.rows) (j := j)
+      (by rw [constraints.vector.width]; exact jBound)
+    have registryAt : row.registry = m.managerSnapshot.value.registry ⟨j, jBound⟩ := by
+      have step : (w.rows.map CloseAssetBacking.Row.registry)[j]? = some row.registry := by
+        rw [List.getElem?_map, atJ]; rfl
+      rw [registryEq, BackingBridge.ten_list_get_lt _ jBound] at step
+      exact (Option.some.inj step).symm
+    have amountAt : row.amount.value = m.managerSnapshot.value.cap c.token := by
+      have step : (w.rows.map CloseAssetBacking.Row.amount)[j]? = some row.amount := by
+        rw [List.getElem?_map, atJ]; rfl
+      rw [amountEq, BackingBridge.ten_list_get_lt _ jBound] at step
+      rw [← Option.some.inj step, BackingBridge.digest_value, tokenIs]
+    have activeAt : row.active = true := by
+      have step : (w.rows.map CloseAssetBacking.Row.active)[j]? = some row.active := by
+        rw [List.getElem?_map, atJ]; rfl
+      rw [show w.rows.map CloseAssetBacking.Row.active = CloseAssetBacking.activity w.rows from rfl,
+        activityShape, BackingBridge.replicate_true_prefix_index _ j _ (by omega)] at step
+      exact (Option.some.inj step).symm
+    exact ⟨row, BackingBridge.mem_of_index atJ, activeAt, by rw [registryAt, tokenIs],
+      by rw [amountAt, amountIs]⟩
+  refine ⟨w, plan, constraints, rootFinal, channelOut, matching, fun c hc => ?_⟩
+  obtain ⟨row, mem, active, registryIs, amountIs⟩ := matching c hc
+  have bound := tb.finalizedBalanceIsBacked w constraints rootFinal row mem active
+  rw [channelOut, registryIs, amountIs] at bound
+  exact bound
+
+/-- **What is left of the close-vector gap, named.** Exactly these five sentences
+stand between "the Materializer paid this vector out of escrow" and "those amounts
+were the channel's own L2 balance at a finalized state":
+
+* (c4) the L2 LEDGER INVARIANT — Balance-certified amounts at a finalized root are
+  within the channel's entitlement. This is the residue proper, and the named next
+  project (BalanceCircuit → SwitchBoard → ValidityChain → DepositChain /
+  WithdrawalChain);
+* (c1) the ACCEPTED MLE/WHIR ARTIFACT at the Materializer's pinned backing
+  verifier — the same acceptance as (a0), no more;
+* (c2) PER-BUILDER-CALL LOWERING of `CloseAssetBacking.constructorProgram`, with
+  `BackingPinnedDigestIsProgramDigest` factored out;
+* (c3a) the circuit's keccak gadget is Keccak-256, and (c3b) Keccak-256 has no
+  collision on the ONE compared pair.
+
+WHAT IS NOW PROVED, and therefore absent from this list: that the assignment gives
+the gate predicate and the 26 registered wires
+(`CloseAssetBacking.program_satisfied_implies_constraints`,
+`...computes_public_inputs`); that the Solidity ABI layout and the circuit's word
+packing are the same injective encoding
+(`BackingBridge.word_bytes_token_vector_binding`); that the credited tokens are
+the Manager's own registry prefix
+(`BackingBridge.signed_head_credits_are_the_registry_vector`); and the whole
+composition, `materialized_credits_are_finalized_l2_balances_of_boundary`. -/
+theorem close_vector_backing_gap_is_now_l2_ledger
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf) :
+    FinalizedBalanceIsBacked m ∧
+      (∀ (proof : CloseFunding.Bytes) (words : List Nat),
+        m.funding.verifyCompact proof = .ok words →
+        m.plonky2Satisfiable m.backingCircuitDigest words) ∧
+      BackingPrimitiveLowering m ∧
+      (∀ words : List Nat,
+        m.backingEnv.hash.tokenFundsHash words =
+          BackingBridge.digest (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words))) ∧
+      BackingTokenFundsHashBinding m :=
+  ⟨tb.finalizedBalanceIsBacked, tb.backingVerifierSoundness, tb.backingPrimitiveLowering,
+    tb.backingKeccakIsReference, tb.backingTokenFundsHashBinding⟩
+
+/-- **What field (c2) still borrows, factored.** Digest pinning plus a lowering
+stated about the digest of `CloseAssetBacking.constructorProgram` — whose only
+remaining content is per-`holds` primitive faithfulness — give the official
+premise. Neither factor is proved here. The exact analogue of
+`close_digest_pinning_and_program_lowering_give_primitive_lowering`. -/
+theorem backing_pinned_digest_and_program_lowering_give_primitive_lowering
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (digestOf : List CloseAssetBacking.BuildOp → List Nat)
+    (pinned : BackingPinnedDigestIsProgramDigest m digestOf)
+    (perPrimitive : ∀ words : List Nat,
+      m.plonky2Satisfiable (digestOf CloseAssetBacking.constructorProgram) words →
+        ∃ a : CloseAssetBacking.Assignment m.backingEnv,
+          CloseAssetBacking.ProgramSatisfied CloseAssetBacking.constructorProgram a ∧
+            (CloseAssetBacking.readPublic a).words = words) :
+    BackingPrimitiveLowering m := by
+  intro words satisfiable
+  have identity : m.backingCircuitDigest = digestOf CloseAssetBacking.constructorProgram := pinned
+  rw [identity] at satisfiable
+  exact perPrimitive words satisfiable
+
 /-! ## The signature boundary: from four residues to per-primitive evidence
 
 The old field (d) `signatureValidity` concluded an opaque `signers message keys
@@ -2007,6 +2571,22 @@ theorem rejecting_environment_accepts_no_claim
     simp [SettlementVerifier.verifyWithdrawalClaim, SettlementVerifier.verifyPostCloseClaim,
       SettlementVerifier.verifyClaimEndpoint, rejects]
 
+/-- In an environment whose backing verifier always reverts, no materialization
+can succeed either: `prepareSignedHead` calls `verifyCompact` before anything
+else, so the acceptance-guarded backing premise (c3b) has no antecedent. -/
+theorem rejecting_environment_materializes_nothing
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (noBackingProof : ∀ (proof : CloseFunding.Bytes) (words : List Nat),
+      m.funding.verifyCompact proof ≠ .ok words)
+    (world after : CloseFunding.World) (manager : CloseFunding.Address)
+    (proof : CloseFunding.Bytes) (events : List CloseFunding.Event) :
+    CloseFunding.materializeSignedHead m.funding world manager proof ≠ .ok (after, events) := by
+  intro call
+  obtain ⟨p, prepared, _, _⟩ := CloseFunding.materialization_call_exact_accounting call
+  obtain ⟨pi, _, verified, _⟩ := BackingBridge.prepared_signed_head_provenance prepared
+  exact noBackingProof proof pi verified
+
 /-- The premise structure is inhabited, but only degenerately: nothing is
 accepted, no plonky2 statement of any circuit is satisfiable, no aggregate check
 passes, no recursive child verification succeeds at any level, the authorization
@@ -2057,6 +2637,14 @@ theorem rejecting_environment_satisfies_every_premise
     (noAggregate : ∀ proof st,
       ¬ m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st)
     (noChildVerified : ∀ k proof pis, ¬ m.aggEnv.verifyChild k proof pis)
+    (noBackingProof : ∀ (proof : CloseFunding.Bytes) (words : List Nat),
+      m.funding.verifyCompact proof ≠ .ok words)
+    (managerView : MaterializerViewIsManagerState m)
+    (managerFunds : ManagerFundsDigestIsReference m)
+    (backingReference : ∀ words : List Nat,
+      m.backingEnv.hash.tokenFundsHash words =
+        BackingBridge.digest (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words)))
+    (noFinalizedHead : ∀ root, m.head.finalizedRoot root ≠ true)
     (nttProduct : FalconGadgetProgram.NttComputesNegacyclicProduct)
     (authorizedTrivially : ∀ h d, m.authorized h d)
     (solidityReference : ∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
@@ -2076,8 +2664,18 @@ theorem rejecting_environment_satisfies_every_premise
     fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
   postClosePrimitiveLowering :=
     fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
-  closeVectorBacked f proof accepted :=
-    absurd accepted (rejecting_environment_accepts_no_close m rejects f proof)
+  materializerViewIsManagerState := managerView
+  managerFundsDigestIsReference := managerFunds
+  backingVerifierSoundness proof words returned :=
+    absurd returned (noBackingProof proof words)
+  backingPrimitiveLowering :=
+    fun _ satisfiable => absurd satisfiable (noSatisfiableStatements _ _)
+  backingKeccakIsReference := backingReference
+  backingTokenFundsHashBinding world after proof events _ _ _ _ call :=
+    absurd call (rejecting_environment_materializes_nothing m noBackingProof world after
+      m.managerAddress proof events)
+  finalizedBalanceIsBacked _ _ finalizedHere :=
+    absurd finalizedHere (noFinalizedHead _)
   aggregateRecursiveVerifierSoundness proof st verified :=
     absurd verified (noAggregate proof st)
   levelRecursionSoundness := fun k _ _ proof pis verified =>

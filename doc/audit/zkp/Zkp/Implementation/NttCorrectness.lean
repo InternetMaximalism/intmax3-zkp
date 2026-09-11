@@ -23,18 +23,22 @@ lowering, or of the vendored Falcon math.
 3. `ct_stage_low` / `ct_stage_high` / `ct_stage_fixed` — the exact pointwise action of one
    Cooley-Tukey stage (and `gs_stage_*` for Gentleman-Sande), proved from the `foldl`
    encoding of the source's two nested `for` loops.
-4. `ntt_forward_loop_spec` — the stage invariant: after the stage with `2^s` blocks the
-   array holds, blockwise, the residues of the input polynomial modulo `X^(2^h) - psi^e`.
-   Unwound at `s = 9` this is `ntt_forward_eval`: output index `j` carries the evaluation
-   of the input at `psi^(2*bitReverse9 j + 1)`, the negacyclic evaluation points.
+4. `Inv` / `inv_step` / `inv_chain_forward` — the stage invariant: after the stage that
+   leaves `2^s` blocks of width `2^h`, block `i` holds the coefficients of the residue of
+   the input polynomial modulo `X^(2^h) - psi^(blockExp h s i)`. Unwound at `s = 9` this is
+   `ntt_forward_eval`: output index `j` carries the evaluation of the input at
+   `psi^(2*bitReverse9 j + 1)`, the negacyclic evaluation points.
 5. `eval_negacyclic_product` — evaluation at those points is a ring homomorphism out of
    `Z_q[X]/(X^512+1)`, hence `pointwise_is_forward_of_product`.
 6. `ntt_inverse_forward` — the Gentleman-Sande loop inverts the Cooley-Tukey loop
-   butterfly by butterfly (each matched stage pair scales by 2; the nine stages contribute
-   the `512` that the final `n^-1` scaling of :500-508 cancels). Only
-   `FalconGadgetProgram.psi_inverse_pinned` and `FalconGadgetProgram.n_inv_pinned` are
-   used; primality of q is never assumed.
+   butterfly by butterfly (`gs_ct_inverse`; each matched stage pair scales by 2, so the
+   nine stages contribute the `512` that the final `n^-1` scaling of :500-508 cancels).
+   Only `FalconGadgetProgram.psi_inverse_pinned` and `FalconGadgetProgram.n_inv_pinned`
+   are used; primality of q is never assumed, and no inverse table is needed.
 7. `ntt_computes_negacyclic_product` — the target proposition, unchanged.
+
+Nothing below is `decide`d on a 512-element object: `rangeList` is kept irreducible and
+every `decide` is on a closed comparison of small numerals.
 -/
 
 namespace Zkp.Implementation.NttCorrectness
@@ -236,7 +240,7 @@ theorem pow_mod_q_aux_eq : ∀ fuel base exp acc : Nat, exp < 2 ^ fuel → base 
       show acc = acc * base ^ 0 % falconQ
       rw [Nat.pow_zero, Nat.mul_one, Nat.mod_eq_of_lt ha]
   | succ fuel ih =>
-      intro base exp acc hf hb ha
+      intro base exp acc hf _hb ha
       by_cases he : exp = 0
       · subst he
         have hz : powModQAux (fuel + 1) base 0 acc = acc := by simp [powModQAux]
@@ -288,7 +292,7 @@ def revOf (f x : Nat) : Nat := bitReverse9Aux f x 0
 theorem bit_reverse_aux_acc : ∀ f x r : Nat, bitReverse9Aux f x r = r * 2 ^ f + revOf f x := by
   intro f
   induction f with
-  | zero => intro x r; simp [bitReverse9Aux, revOf]
+  | zero => intro _x r; simp [bitReverse9Aux, revOf]
   | succ f ih =>
       intro x r
       have e1 : bitReverse9Aux (f + 1) x r = (r * 2 + x % 2) * 2 ^ f + revOf f (x / 2) := by
@@ -413,7 +417,7 @@ theorem wire_of_append (l l' : List Nat) : ∀ j, j < l.length → wireOf (l ++ 
 theorem wire_of_append_len (l : List Nat) (x : Nat) : wireOf (l ++ [x]) l.length = x := by
   induction l with
   | nil => rfl
-  | cons y ys ih => exact ih
+  | cons _y _ys ih => exact ih
 
 theorem wire_of_map_range (f : Nat → Nat) : ∀ n j : Nat, j < n →
     wireOf ((rangeList n).map f) j = f j := by
@@ -738,7 +742,7 @@ theorem two_mul_assoc (m L : Nat) : 2 * m * L = m * (2 * L) := by
 theorem psi_rev_eq (j : Nat) : psiRev j = powQ ntoPsi (revOf 9 j) := by
   have hb : revOf 9 j < 2 ^ 64 := by
     have h1 := rev_of_lt 9 j
-    have h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
+    have _h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
     omega
   show powModQ ntoPsi (bitReverse9 j) = _
   rw [bit_reverse_9_eq]
@@ -747,7 +751,7 @@ theorem psi_rev_eq (j : Nat) : psiRev j = powQ ntoPsi (revOf 9 j) := by
 theorem psi_inv_rev_eq (j : Nat) : psiInvRev j = powQ psiInv (revOf 9 j) := by
   have hb : revOf 9 j < 2 ^ 64 := by
     have h1 := rev_of_lt 9 j
-    have h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
+    have _h2 : (2 : Nat) ^ 9 ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by decide)
     omega
   show powModQ psiInv (bitReverse9 j) = _
   rw [bit_reverse_9_eq]
@@ -1171,7 +1175,7 @@ theorem gs_ct_inverse (m t : Nat) (ht : 0 < t) (b : Nat → Nat) (hb : ∀ y, b 
     (x : Nat) (hx : x < 2 * m * t) :
     gsStage m t (ctStage m t b) x = 2 * b x % falconQ := by
   obtain ⟨i, r, hi, hr, hcase⟩ := block_decomp m t x ht hx
-  have hct := ct_stage_canonical m t ht b hb
+  have _hct := ct_stage_canonical m t ht b hb
   rcases hcase with rfl | rfl
   · rw [gs_stage_low m t ht _ i r hi hr, ct_stage_low m t ht b i r hi hr,
       ct_stage_high m t ht b i r hi hr]
@@ -1443,7 +1447,7 @@ theorem emod_to_nat_sub (x y : Nat) :
   show (((x : Int) - (y : Int)) % (falconQ : Int)).toNat = _
   rw [← h1, ← hz, ← Int.ofNat_emod]
   generalize (x + (falconQ - 1) * y) % falconQ = z
-  omega
+  rfl
 
 theorem sum_to_ind (X c k0 n : Nat) :
     sumTo (fun k => (if k0 = k then X else 0) * c ^ k) n = if k0 < n then X * c ^ k0 else 0 := by
@@ -1508,6 +1512,14 @@ theorem eval_mul_expand (wa wb : Nat → Nat) (c : Nat) :
   rw [Nat.pow_add]
   simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
 
+theorem wrap_term_eq_q (c X e : Nat) (hc : EqQ (c ^ falconN) (falconQ - 1))
+    (hge : falconN ≤ e) :
+    EqQ (0 + (falconQ - 1) * (X * c ^ (e - falconN))) (X * c ^ e) := by
+  have e2 : X * c ^ e = X * c ^ (e - falconN) * c ^ falconN := by
+    rw [Nat.mul_assoc, ← Nat.pow_add, show e - falconN + falconN = e from by omega]
+  rw [Nat.zero_add, e2, Nat.mul_comm (falconQ - 1)]
+  exact eq_q_mul_left _ (eq_q_symm hc)
+
 theorem eval_conv (wa wb : Nat → Nat) (c : Nat) (hc : EqQ (c ^ falconN) (falconQ - 1)) :
     EqQ (sumTo (fun k => (convPos wa wb k + (falconQ - 1) * convNeg wa wb k) * c ^ k) falconN)
         (evalAt wa c * evalAt wb c) := by
@@ -1519,24 +1531,14 @@ theorem eval_conv (wa wb : Nat → Nat) (c : Nat) (hc : EqQ (c ^ falconN) (falco
     rw [Nat.right_distrib, Nat.mul_assoc]
   rw [hsplit, eval_conv_pos, eval_conv_neg, eval_mul_expand]
   rw [← sum_to_mul_left, ← sum_to_add]
-  refine sum_to_eq_q_congr (fun i hi => ?_)
+  refine sum_to_eq_q_congr (fun i _hi => ?_)
   rw [← sum_to_mul_left, ← sum_to_add]
-  refine sum_to_eq_q_congr (fun j hj => ?_)
+  refine sum_to_eq_q_congr (fun j _hj => ?_)
   by_cases hij : i + j < falconN
   · rw [if_pos hij, if_neg (by omega), Nat.mul_zero, Nat.add_zero]
     exact eq_q_refl _
-  · rw [if_neg hij, if_pos (by omega), Nat.zero_add]
-    have hpow : c ^ (i + j) = c ^ (i + j - falconN) * c ^ falconN := by
-      rw [← Nat.pow_add]
-      congr 1
-      omega
-    rw [hpow, ← Nat.mul_assoc]
-    have hstep : EqQ ((falconQ - 1) * (wa i * wb j * c ^ (i + j - falconN)))
-        (wa i * wb j * c ^ (i + j - falconN) * (falconQ - 1)) := by
-      rw [Nat.mul_comm]
-      exact eq_q_refl _
-    refine eq_q_trans hstep ?_
-    exact eq_q_mul_left _ (eq_q_symm hc)
+  · rw [if_neg hij, if_pos (by omega)]
+    exact wrap_term_eq_q c (wa i * wb j) (i + j) hc (by omega)
 
 theorem eval_point_pow (k : Nat) : EqQ ((powQ ntoPsi (1 + 2 * k)) ^ falconN) (falconQ - 1) := by
   have h1 : EqQ ((powQ ntoPsi (1 + 2 * k)) ^ falconN) ((ntoPsi ^ (1 + 2 * k)) ^ falconN) :=
@@ -1572,5 +1574,57 @@ theorem eval_negacyclic_product (a b : List Nat) (k : Nat) :
     rw [hcoef d hd]
     exact eq_q_mul (eq_q_mod _) (eq_q_refl _)
   exact eq_q_trans hstep (eval_conv _ _ _ (eval_point_pow k))
+
+/-! ## 13. The target theorem -/
+
+theorem negacyclic_product_length (a b : List Nat) :
+    (negacyclicProduct a b).length = falconN := by
+  show ((rangeList falconN).map
+    (fun k => ((negacyclicCoeff a b k).emod (falconQ : Int)).toNat)).length = falconN
+  simp only [List.length_map, range_list_length]
+
+theorem negacyclic_product_canonical (a b : List Nat) :
+    ∀ c ∈ negacyclicProduct a b, c < falconQ := by
+  intro c hc
+  rw [show negacyclicProduct a b = (rangeList falconN).map
+      (fun k => ((negacyclicCoeff a b k).emod (falconQ : Int)).toNat) from rfl] at hc
+  obtain ⟨k, _, hk⟩ := List.mem_map.1 hc
+  rw [← hk, negacyclic_coeff_split, emod_to_nat_sub]
+  exact mod_q_lt _
+
+/-- The evaluation points really are the odd powers of `psi` in bit-reversed order. -/
+theorem negacyclic_points_are_odd_powers (j : Nat) :
+    1 + 2 * revOf 9 j = 2 * bitReverse9 j + 1 := by
+  rw [bit_reverse_9_eq]
+  omega
+
+/-- Concrete non-vacuity: the first three evaluation points are `psi^1`, `psi^513`,
+`psi^257`. -/
+theorem evaluation_points_pinned :
+    1 + 2 * revOf 9 0 = 1 ∧ 1 + 2 * revOf 9 1 = 513 ∧ 1 + 2 * revOf 9 2 = 257 := by decide
+
+/-- The in-circuit pointwise product of the two spectra IS the spectrum of the negacyclic
+product: evaluation at `psi^(2k+1)` is a ring homomorphism out of `Z_q[X]/(X^512+1)`. -/
+theorem pointwise_is_forward_of_product (a b : List Nat) (hca : ∀ c ∈ a, c < falconQ)
+    (hcb : ∀ c ∈ b, c < falconQ) :
+    pointwise (nttForward a) (nttForward b) = nttForward (negacyclicProduct a b) := by
+  show (rangeList falconN).map
+      (fun i => wireOf (nttForward a) i * wireOf (nttForward b) i % falconQ)
+    = (rangeList falconN).map (nttForwardLoop 10 1 falconN (wireOf (negacyclicProduct a b)))
+  refine map_range_list_congr (fun j hj => ?_)
+  rw [ntt_forward_eval a hca j hj, ntt_forward_eval b hcb j hj,
+    ntt_forward_loop_eval (wireOf (negacyclicProduct a b))
+      (wire_of_lt_q _ (negacyclic_product_canonical a b)) j hj]
+  exact eq_q_trans (eq_q_mul (eq_q_mod _) (eq_q_mod _))
+    (eq_q_symm (eval_negacyclic_product a b (revOf 9 j)))
+
+/-- THE TARGET: the transcribed in-circuit NTT (`ntt_forward` / `pointwise_mul` /
+`ntt_inverse`, gadget.rs:434-539) computes exactly the schoolbook negacyclic product of
+`Z_q[X]/(X^512+1)` on canonical inputs. -/
+theorem ntt_computes_negacyclic_product : FalconGadgetProgram.NttComputesNegacyclicProduct := by
+  intro a b _ _ hca hcb
+  rw [circuit_product_mul, pointwise_is_forward_of_product a b hca hcb]
+  exact ntt_inverse_forward (negacyclicProduct a b) (negacyclic_product_length a b)
+    (negacyclic_product_canonical a b)
 
 end Zkp.Implementation.NttCorrectness
