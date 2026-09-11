@@ -296,22 +296,45 @@ correctly is (h).
 
 ## 3. The trust boundary — the assumption ledger
 
-`Zkp.Implementation.TrustBoundary` (`TrustBoundary.lean:646`) is one Lean `structure` whose
+`Zkp.Implementation.TrustBoundary` (`TrustBoundary.lean:893`) is one Lean `structure` whose
 fields are exactly the obligations the composition borrows. Nothing in it is an `axiom`; each
-field is a `Prop` typed against the existing models, and `Models` (`TrustBoundary.lean:203`)
-bundles the environment values (EVM view, installed adapters, keccak callback, the three circuit
-gate environments, the materializer environment, the canonical head, the deposit attribution, the
-Falcon hash environment, the per-level aggregate digests, the aggregation recursion environment,
-the authorization relation, the pinned circuit digests, and the opaque `plonky2Satisfiable`
-relation) so that no two fields can silently refer to different verifiers or different hashes.
+field is a `Prop` typed against the existing models, and `Models` (`TrustBoundary.lean:246`)
+bundles the environment values (EVM view, installed adapters, keccak callback, the three settlement
+circuit gate environments, the materializer environment, the canonical head, the backing circuit's
+pinned digest and opaque dependencies, the bound Manager's address, storage snapshot and channel
+id, the L2 entitlement map, the Falcon hash environment, the per-level aggregate digests, the
+aggregation recursion environment, the authorization relation, the pinned circuit digests, and the
+opaque `plonky2Satisfiable` relation) so that no two fields can silently refer to different
+verifiers or different hashes.
 
-There are **eighteen fields**. The structure is inhabited — `rejecting_environment_satisfies_every_premise`
-(`TrustBoundary.lean:2049`) — but only degenerately: in an environment where every adapter
-reverts, no statement is satisfiable, no recursive verification succeeds and `Unmodeled` is the
-empty relation. That is a well-formedness check on the statement, **not** evidence that any field
-holds of a real deployment; `rejecting_environment_accepts_no_close` (`TrustBoundary.lean:1987`)
-records that such an environment authorizes no fund movement at all. Three fields cannot be made
-vacuous and are supplied as hypotheses there instead: the two hash equations and (d2').
+The `deposits : ChannelDeposits` parameter of the previous revision **is gone**, together with the
+field that consumed it; `l2Entitlement : Words8 → Nat → Nat → Nat` — indexed by an extended-state
+root, a channel and a token — replaces it, and only (c4) mentions it (§3.5).
+
+There are **twenty-three fields**, in this order: (a0) `mleVerifierSoundness`, (a)
+`closePrimitiveLowering`, (b1) `withdrawalPrimitiveLowering`, (b2) `postClosePrimitiveLowering`,
+(c0) `materializerViewIsManagerState`, (c0b) `managerFundsDigestIsReference`, (c1)
+`backingVerifierSoundness`, (c2) `backingPrimitiveLowering`, (c3a) `backingKeccakIsReference`,
+(c3b) `backingTokenFundsHashBinding`, (c4) `finalizedBalanceIsBacked`, (d0)
+`aggregateRecursiveVerifierSoundness`, (d0') `levelRecursionSoundness`, (d1')
+`aggregatePrimitiveLowering`, (d3) `falconUnforgeability`, (e1a) `solidityKeccakIsReference`,
+(e1b) `circuitKeccakIsReference`, (e2) `tokenFundsHashBinding`, (f1) `finalizedRootObservation`,
+(f2) `finalizedHeightObservation`, (g1') `ledgerWritersAreInventoried`, (g2')
+`latchWritersAreInventoried`, (h) `sourceRefinement`.
+
+**(d2') is not among them.** It was a field in the previous revision and is now the theorem of §2.5.
+
+The structure is inhabited — `rejecting_environment_satisfies_every_premise`
+(`TrustBoundary.lean:2690`) — but only degenerately: in an environment where every adapter
+reverts, no statement is satisfiable, no recursive verification succeeds, the canonical head
+finalizes no root and `Unmodeled` is the empty relation. That is a well-formedness check on the
+statement, **not** evidence that any field holds of a real deployment;
+`rejecting_environment_accepts_no_close` (`TrustBoundary.lean:2601`) and
+`rejecting_environment_materializes_nothing` (`:2627`) record that such an environment authorizes
+no fund movement at all. **Five** fields cannot be made vacuous, because they are equations with no
+antecedent an environment could deny, and are supplied as hypotheses there instead: the two hash
+equations (e1a) and (e1b), the backing hash equation (c3a), and the two Manager-observation
+equations (c0) and (c0b). Supplying a field is not discharging it.
 
 ### 3.1 Group A — per-primitive faithfulness and digest pinning
 
@@ -323,6 +346,10 @@ and whose public wires read back to exactly that statement. Everything downstrea
 assignment is proved, not assumed: `program_satisfied_implies_gates` in each circuit module takes
 **no side hypothesis**.
 
+Four fields have this shape — (a), (b1), (b2) and, since this loop, (c2) `backingPrimitiveLowering`
+for the close-asset-backing circuit the materializer verifies (§3.5.4) — plus (d1') for the whole
+Falcon aggregation stack.
+
 What every field in this group still borrows is exactly two things, named rather than bundled:
 
 * **(i) primitive-semantics faithfulness** — each `BuildOp.holds` case must be precisely the
@@ -331,20 +358,26 @@ What every field in this group still borrows is exactly two things, named rather
   modeled here.
 * **(ii) digest pinning** — the pinned adapter's circuit digest must be the digest of the very
   program the model transcribes. Stated separately, outside the structure, as
-  `ClosePinnedDigestIsProgramDigest` (`TrustBoundary.lean:470`),
-  `WithdrawalPinnedDigestIsProgramDigest` (`:477`), `PostClosePinnedDigestIsProgramDigest`
-  (`:485`) and `AggregateLevelPinnedDigestIsProgramDigest` (`:507`); the
+  `ClosePinnedDigestIsProgramDigest` (`TrustBoundary.lean:550`),
+  `WithdrawalPinnedDigestIsProgramDigest` (`:557`), `PostClosePinnedDigestIsProgramDigest`
+  (`:565`), `AggregateLevelPinnedDigestIsProgramDigest` (`:587`) and
+  `BackingPinnedDigestIsProgramDigest` (`:835`); the
   `*_digest_pinning_and_program_lowering_give_primitive_lowering` theorems
-  (`TrustBoundary.lean:558`, `:578`, `:597`) show that (ii) plus a program-level lowering is what
-  each field amounts to.
+  (`TrustBoundary.lean:638`, `:658`, `:677`, and `:2335` for the backing endpoint) show that (ii)
+  plus a program-level lowering is what each field amounts to.
 
-#### 3.1.1 (a) `closePrimitiveLowering` — `TrustBoundary.lean:733`
+Since this loop, obligation (i) is no longer supported by human reading alone: a `#[cfg(test)]`-only
+Rust harness checks the **structural half** of every `holds` claim against the circuit plonky2
+actually built, and the resulting tables are checked in under `doc/audit/zkp/evidence/`. What it
+covers and what it does not is §5.7.
+
+#### 3.1.1 (a) `closePrimitiveLowering` — `TrustBoundary.lean:984`
 
 **Statement.** For every `SettlementVerifier.CloseFields`, if the close adapter's pinned circuit
 digest has a satisfiable plonky2 statement at the 103 bound close words, then there is a
 `CloseCircuit.Assignment` satisfying `CloseCircuit.ProgramSatisfied CloseCircuit.constructorProgram`
 whose `readPublic` is exactly that statement. Definition: `ClosePrimitiveLowering`
-(`TrustBoundary.lean:418`).
+(`TrustBoundary.lean:498`).
 
 **Evidence today.** `CloseCircuit` transcribes `ChannelCloseCircuit::new` as an ordered
 `constructorProgram` of 191 entries over a `BuildOp` type with **47 constructors** (one per kind of
@@ -354,7 +387,10 @@ the handwritten gate predicate from `ProgramSatisfied` alone, with zero residual
 `EnvironmentGates`. Each `holds` case quotes its source line in its docstring. The line map
 `line-map/close-circuit.json` links each span to a declaration of the module and is validated by
 `.github/ci/lean-line-coverage.py`. Fixture parity checks the 103-word layout against words the
-real prover emitted (`close_intent`, 22 comparable fields; §5.4).
+real prover emitted (`close_intent`, 22 comparable fields; §5.4). Mechanically, the faithfulness
+table `evidence/faithfulness-CloseCircuit.tsv` carries 79 rows: **59 `ok`** (checked against the
+built circuit's copy-constraint partition), 19 `not-static` and 1 `trivial`, with no `MISMATCH`
+(§5.7).
 
 **What would refute it.** A builder call whose plonky2 gate set does *not* imply the `holds` case
 attributed to it — for instance a `range_check` that is elided by a later optimisation, a
@@ -367,25 +403,26 @@ pinned digest is not the digest of this program refutes (ii) without touching (i
 verifier's `encodedConfiguration` circuit digest with a digest computed from the same builder
 sequence.
 
-#### 3.1.2 (b1) `withdrawalPrimitiveLowering` — `TrustBoundary.lean:748`
+#### 3.1.2 (b1) `withdrawalPrimitiveLowering` — `TrustBoundary.lean:999`
 
 **Statement.** The same reduction on the 50-word withdrawal-claim endpoint
-(`WithdrawalPrimitiveLowering`, `TrustBoundary.lean:433`).
+(`WithdrawalPrimitiveLowering`, `TrustBoundary.lean:513`).
 
 **Evidence today.** 32 `BuildOp` kinds, 10 of which emit no constraint, over a 41-entry
 `constructorProgram`;
 `WithdrawalClaimCircuit.program_satisfied_implies_gates` (`WithdrawalClaimCircuit.lean:985`);
 53 named theorems in the module; `line-map/withdrawal-claim-circuit.json`; fixture case
-`withdrawal_claim` with 12 compared fields.
+`withdrawal_claim` with 12 compared fields. Faithfulness table: 48 rows, **30 `ok`**,
+10 `not-static`, 8 `trivial`, no `MISMATCH`.
 
 **What would refute it / how to check.** As (a), for the range checks, the eleven-bit active sum,
 the ten equality flags, the select chains, the Regev decryption core and the inclusion gadget.
 
-#### 3.1.3 (b2) `postClosePrimitiveLowering` — `TrustBoundary.lean:764`
+#### 3.1.3 (b2) `postClosePrimitiveLowering` — `TrustBoundary.lean:1015`
 
 **Statement.** The same for the 57-word post-close-claim endpoint; the read-back condition is on
 `(readWitness a).p` because that circuit's model reads its registered public inputs out of the raw
-witness (`PostClosePrimitiveLowering`, `TrustBoundary.lean:447`).
+witness (`PostClosePrimitiveLowering`, `TrustBoundary.lean:527`).
 
 **Evidence today.** 8 `BuildOp` kinds over a 45-entry `constructorProgram`;
 `PostCloseClaimCircuit.program_satisfied_implies_gates`
@@ -394,12 +431,13 @@ fixture case `post_close_claim`, 10 compared fields, 2 explicitly not comparable
 this circuit surfaced one **missing builder call** in the earlier model (`add_virtual_target` at
 `post_close_claim_circuit.rs:372`), now added. It also showed that the module's `DecryptionHolds`
 is *stronger* than the recorded gates (8192-coefficient canonicality, `a ≠ 0`, `c1 ≠ 0`), i.e.
-the handwritten `ConstructorGates` was a **lower approximation** of the real circuit.
+the handwritten `ConstructorGates` was a **lower approximation** of the real circuit. Faithfulness
+table: 48 rows, **35 `ok`**, 12 `not-static`, 1 `trivial`, no `MISMATCH`.
 
 **What would refute it / how to check.** As (a), for the range and virtual-allocation widths, the
 hash preimage widths, the connects, the two Merkle verifies and the decryption core.
 
-#### 3.1.4 (d1') `aggregatePrimitiveLowering` — `TrustBoundary.lean:880`
+#### 3.1.4 (d1') `aggregatePrimitiveLowering` — `TrustBoundary.lean:1254`
 
 **Statement.** Per-builder-call lowering at every level of the Falcon aggregation stack, down to
 and including the signature gadget: `FalconAggProgram.GadgetLevelLowering` over
@@ -422,6 +460,13 @@ hypothesis. `FalconAggProgram` (78 theorems) then proves
 `satisfiable_top_level_gives_witness_list` (`:1409`). A concrete two-signer level-1 instance
 witnesses non-vacuity. Line maps `falcon-gadget.json`, `falcon-agg.json`.
 
+This is the one endpoint with **proving** evidence as well as static evidence. The faithfulness
+tables carry 29 rows for the gadget (17 `ok`, 5 `mutation`, 5 `not-static`, 2 `trivial`), 9 for the
+aggregation leaf (6 `ok`, 1 `not-static`, 2 `trivial`) and 21 for level 1 (10 `ok`, 3 `mutation`,
+4 `not-static`, 2 `not-injectable`, 2 `trivial`) — all eight `mutation` rows of the whole evidence
+set are here, each naming the proving test that violates exactly that claim and checks verification
+fails (§5.7).
+
 **What would refute it.** Any of the listed primitives (`add_proof_target_and_verify`,
 `add_proof_target_and_conditionally_verify`, `add_virtual_bool_target_safe`, `sub`, `mul`, `add`,
 `assert_zero`, `constant`, `range_check`, `register_public_input(s)`, the Poseidon sponge calls)
@@ -432,45 +477,18 @@ the level-`k` transcript, which refutes the separately stated
 **How to check.** Read `gadgetProgram`, `leafProgram` and `levelProgram k` against
 `src/falcon_sig/gadget.rs` and `src/falcon_sig/agg.rs` at the quoted lines.
 
-### 3.1a Arithmetic residue
+### 3.1a Arithmetic residue — none
 
-#### (d2') `nttComputesNegacyclicProduct` — `TrustBoundary.lean:916` <!-- PLANNER: update after loop 4 -->
-
-**Statement.** `FalconGadgetProgram.NttComputesNegacyclicProduct`
-(`FalconGadgetProgram.lean:348`): the concrete transcribed composition "forward-transform both
-operands, multiply pointwise, inverse-transform" — `FalconGadgetProgram.circuitProduct`
-(`:264`), which is what `gadget.rs:684-687` performs, with the twiddle tables, the butterflies and
-the mod-`q` reductions transcribed — equals `negacyclicProduct`, the schoolbook definition of the
-product in `Z_q[X]/(X^512+1)` transcribed from the Rust test oracle `schoolbook_negacyclic`
-(`gadget.rs:999-1022`), on canonical length-512 inputs.
-
-**Evidence today.** The Rust test suite exercises the equality on random inputs. Spot checks of
-ψ's order, `n⁻¹` and the twiddle tables are pinned by `decide` inside `FalconGadgetProgram`. There
-is no proof of the general statement.
-
-**What it is needed for, precisely.** *Not* for the signer-evidence chain:
-`signature_validity_of_boundary` does not consume it, because (d1') lowers into and (d3) is stated
-for the *same* concrete `circuitProduct`. It is needed only to read
-`FalconCore.CircuitSatisfied` as *Falcon's own* `verify` — i.e. to say the gate set checks
-`s1 = c - s2·h mod (q, X^512+1)` rather than an equation about some other bilinear map. Without
-it the audit's signature conclusion is "the transcribed gate set is satisfied and its solutions
-are unforgeable"; with it, that gate set is Falcon.
-
-**What would refute it.** A single canonical input pair on which the transcribed NTT and the
-schoolbook product disagree — a wrong twiddle, a wrong bit-reversal, a wrong `n⁻¹`, or a wrong
-sign in the negacyclic fold.
-
-**How to check.** This is the **only field of the eighteen that a determined prover could
-discharge inside Lean**, and it is the named next target: prove the 9-stage CT-DIT loop equals a
-recursive even/odd NTT, that the recursive NTT is evaluation at ψ^(2i+1), that pointwise
-multiplication of evaluations is evaluation of the negacyclic product (ψ^512 = q−1), and that the
-GS inverse with `nInv` inverts.
+The previous revision carried field (d2') `nttComputesNegacyclicProduct` here, and described it as
+the only field of the ledger a determined prover could discharge inside Lean. **It has been
+discharged.** It is now `NttCorrectness.ntt_computes_negacyclic_product` (§2.5), the field is gone
+from the structure, and this group is empty.
 
 ### 3.2 Group B — proof-system artifacts
 
-#### 3.2.1 (a0) `mleVerifierSoundness` — `TrustBoundary.lean:705`
+#### 3.2.1 (a0) `mleVerifierSoundness` — `TrustBoundary.lean:956`
 
-**Statement.** `MleAcceptedStatementsAreSatisfiable` (`TrustBoundary.lean:303`): for an adapter
+**Statement.** `MleAcceptedStatementsAreSatisfiable` (`TrustBoundary.lean:383`): for an adapter
 the settlement verifier actually pins, if the modeled EVM view's `verifyCompactPublicInputs`
 returns a word vector for a proof, then that vector is the public-input vector of a plonky2
 statement of the circuit the adapter's pinned digest identifies, and that statement has a
@@ -495,11 +513,17 @@ transcript, its compact-proof codec, and the agreement of its Rust and Solidity 
 inventoried files (33,974 lines) stay classified `untranslated` in the inventory and are **not**
 counted as verified.
 
+**Scope is per deployed adapter, and the scope is now visible address by address.** (a0) quantifies
+over the four adapters `SettlementVerifier.Installed` pins. The materializer's `backingMleVerifier`
+is **not** one of those four, so the same acceptance at that address is stated as its own field,
+(c1) `backingVerifierSoundness` (§3.5.3). Discharging (c1) means discharging (a0) and no more; it is
+written separately so that no reader can lose track of where the acceptance applies.
+
 **What it does not cover.** The circuit-to-gates lowering (that is (a), (b1), (b2)); the KZG
 attestation and Proof-DA availability path; plonky2's own recursive verifier, which ships in the
 same submodule but is (d0) and (d0'); and the correctness of the public inputs a caller passes in.
 
-**Evidence today.** The commit pin, verified on every guard run (1 submodule pin among 478
+**Evidence today.** The commit pin, verified on every guard run (1 submodule pin among 497
 reviewed-source hashes). No soundness evidence, by construction.
 
 **What would refute it.** A forged proof accepted by the pinned verifier whose public inputs
@@ -510,7 +534,7 @@ MLE/WHIR security-level work is outside this document's scope.)
 revision, and read the submodule's own soundness argument. Then read
 `mle_assumption_does_not_imply_fund_safety` (§2.4) to see what accepting it does *not* buy.
 
-#### 3.2.2 (d0) `aggregateRecursiveVerifierSoundness` — `TrustBoundary.lean:804`
+#### 3.2.2 (d0) `aggregateRecursiveVerifierSoundness` — `TrustBoundary.lean:1177`
 
 **Statement.** If the close circuit's in-circuit recursive verification of the Falcon aggregate
 proof passes at its constant verifier key `m.closeEnv.aggregateVerifier`, then the circuit
@@ -528,7 +552,7 @@ argument, and it is invoked in a different place: inside the close circuit, not 
 statement the top aggregation circuit cannot satisfy. Discharging it needs a soundness proof of
 plonky2's recursive verifier at that constant key.
 
-#### 3.2.3 (d0') `levelRecursionSoundness` — `TrustBoundary.lean:831`
+#### 3.2.3 (d0') `levelRecursionSoundness` — `TrustBoundary.lean:1204`
 
 **Statement.** `FalconAggProgram.RecursionSound` over the same satisfiability relation and
 `m.aggEnv`: each of the three `FalconAggLevelCircuit`s verifies its two children in-circuit at the
@@ -551,7 +575,7 @@ nothing else.
 
 These two cannot be discharged by any amount of translation work.
 
-#### 3.3.1 (d3) `falconUnforgeability` — `TrustBoundary.lean:926`
+#### 3.3.1 (d3) `falconUnforgeability` — `TrustBoundary.lean:1267`
 
 **Statement.** `CloseSignatureBridge.FalconUnforgeable m.falconHash FalconGadgetProgram.circuitProduct
 m.authorized`: a satisfied active gadget instance for public polynomial `h` and message digest `d`
@@ -570,7 +594,7 @@ norm gate that is trivially satisfiable when one unconstrained wire is 0; an acc
 that shows neither signer distinctness nor member-set membership) — those are *model-level*
 findings about the circuit, not about Falcon.
 
-#### 3.3.2 (e2) `tokenFundsHashBinding` — `TrustBoundary.lean:980`
+#### 3.3.2 (e2) `tokenFundsHashBinding` — `TrustBoundary.lean:1321`
 
 **Statement.** For an accepted close and any circuit-side private witness: if
 `Keccak256.keccak256` of the circuit's `wordBytes (tokenFundsPreimage w)` equals
@@ -584,7 +608,7 @@ premise **has been proved and removed**: `SettlementCloseBridge.token_funds_prei
 (registry, count, amounts), and `token_funds_compared_strings_same_length`
 (`SettlementCloseBridge.lean:484`) shows both compared strings are **368 bytes**, so no padding
 ambiguity, domain-separation slip or field-ordering slip can produce the collision.
-`TrustBoundary.token_funds_binding_is_same_length_collision` (`TrustBoundary.lean:1717`) packages
+`TrustBoundary.token_funds_binding_is_same_length_collision` (`TrustBoundary.lean:2058`) packages
 exactly this.
 
 **Evidence today.** The two length/injectivity theorems above; the reference Keccak-256
@@ -596,9 +620,15 @@ pinned layout.
 **How to check.** Read the two proved theorems, then judge the residual collision claim on its
 own cryptographic merits.
 
+**It has a sibling.** (c3b) `backingTokenFundsHashBinding` (§3.5.6) is the same sentence on the
+backing path — the circuit's 92-word token-funds preimage packed big-endian against the Manager's
+368-byte Solidity preimage of the same vector. Two same-length collision claims, on two concrete
+pairs, is the whole of this group's Keccak content; there is still no global-injectivity assumption
+anywhere.
+
 ### 3.4 Group D — environment semantics
 
-#### 3.4.1 (e1a) `solidityKeccakIsReference` — `TrustBoundary.lean:937`
+#### 3.4.1 (e1a) `solidityKeccakIsReference` — `TrustBoundary.lean:1278`
 
 **Statement.** For every canonical byte string (`∀ x ∈ b, x < 256`), the `Keccak` callback the
 settlement-verifier model calls — standing for the EVM `KECCAK256` opcode — equals
@@ -613,7 +643,7 @@ constants, rate 1088 bits, the **original Keccak** padding `0x01 … 0x80` (not 
 and `keccak256_two_block_vector` (`:463`, a 200-byte two-block message). All four were recomputed
 independently with the runtime's own `keccak-hash 0.8.0` crate and agree. The side condition is
 discharged for the concrete strings by `word_bytes_are_canonical_bytes`
-(`TrustBoundary.lean:1592`).
+(`TrustBoundary.lean:1933`).
 
 **What would refute it.** The opcode disagreeing with the reference on some canonical string —
 i.e. a bug in this transcription of Keccak, since the opcode is normative.
@@ -622,7 +652,7 @@ i.e. a bug in this transcription of Keccak, since the opcode is normative.
 Keccak-256. This is an EVM-semantics premise, kin to (h): it would be discharged by an extracted
 EVM semantics, and by nothing inside this audit.
 
-#### 3.4.2 (e1b) `circuitKeccakIsReference` — `TrustBoundary.lean:955`
+#### 3.4.2 (e1b) `circuitKeccakIsReference` — `TrustBoundary.lean:1296`
 
 **Statement.** The close circuit's `keccak` callback — standing for the external `plonky2_keccak`
 gadget, pinned in `Cargo.lock` at git rev `2507786148ae6323d0ea547bf88e1752f901434e`, branch
@@ -636,13 +666,13 @@ hash and a right hash left unconstrained are different failures.**
 
 **Evidence today.** The same reference specification; the crate revision is pinned and
 `Cargo.lock` is part of the manifest's tooling hashes, so a pin change is visible to the guard.
-`reference_keccak_models_satisfy_hash_premises` (`TrustBoundary.lean:1747`) shows (e1a) and (e1b)
+`reference_keccak_models_satisfy_hash_premises` (`TrustBoundary.lean:2088`) shows (e1a) and (e1b)
 are simultaneously satisfiable — they are not a vacuous pair.
 
 **What would refute it / how to check.** A gadget output differing from the reference on any word
 vector. Discharged by a correctness proof of the pinned gadget at that revision.
 
-#### 3.4.3 (f1) `finalizedRootObservation` — `TrustBoundary.lean:994`
+#### 3.4.3 (f1) `finalizedRootObservation` — `TrustBoundary.lean:1335`
 
 **Statement.** If `m.funding.isFinalizedRoot root = .ok true` then `m.head.finalizedRoot root =
 true`: the materializer's finality getter — an external call in the model, gating
@@ -658,14 +688,14 @@ the materializer read a different contract's notion of finality.
 **How to check.** Verify the deployed address binding and the getter's storage read against the
 Rollup's own finalized-root map.
 
-#### 3.4.4 (f2) `finalizedHeightObservation` — `TrustBoundary.lean:1002`
+#### 3.4.4 (f2) `finalizedHeightObservation` — `TrustBoundary.lean:1343`
 
 **Statement.** If `m.funding.latestFinalized = .ok n` then `m.head.chain.finalizedBlock = n` — the
 height getter guarding `ChannelExitHasUnfinalizedBlocks` reports the canonical head's height.
 
 **Evidence / refutation / checking.** As (f1).
 
-#### 3.4.5 (g1') `ledgerWritersAreInventoried` — `TrustBoundary.lean:1053`
+#### 3.4.5 (g1') `ledgerWritersAreInventoried` — `TrustBoundary.lean:1394`
 
 **Statement.** For every transition `Unmodeled s t` that changes the Manager's flagged storage —
 the used-nullifier set, the `received` or `paid` counters, or the per-token funding cap — there is
@@ -675,7 +705,7 @@ already covered by a `SystemSafety.Step` constructor.
 
 **What it replaces.** The old (g1) `durableNullifierLedger` asserted the *consequence* directly.
 This field asserts only the inventory; the consequence is now the theorem
-`durable_nullifier_ledger_of_boundary` (`TrustBoundary.lean:1924`). The borrowed part shrinks from
+`durable_nullifier_ledger_of_boundary` (`TrustBoundary.lean:2538`). The borrowed part shrinks from
 "the ledger is durable" to "these are the only writers."
 
 **Evidence today.** `LedgerWriters.flaggedWriteSites` (`LedgerWriters.lean:113`) pins the
@@ -711,7 +741,7 @@ can reach that storage.
 
 **How to check.** Run `python3 -B .github/ci/check-ledger-writers.py`; read the five source lines.
 
-#### 3.4.6 (g2') `latchWritersAreInventoried` — `TrustBoundary.lean:1086`
+#### 3.4.6 (g2') `latchWritersAreInventoried` — `TrustBoundary.lean:1427`
 
 **Statement.** For every `Unmodeled s t` that changes the materializer's storage at all, there is
 an entrypoint in `LedgerWriters.MaterializerEntrypoint` whose `run` relates the two worlds.
@@ -721,12 +751,12 @@ an entrypoint in `LedgerWriters.MaterializerEntrypoint` whose `run` relates the 
 `materializeSignedHead` and guarded by the `== 0` read at `:434`; the other six modeled
 entrypoints do not name the variable at all.
 `LedgerWriters.materializer_entrypoints_keep_the_latch` (`LedgerWriters.lean:826`) then gives the
-old consequence as `durable_materialization_latch_of_boundary` (`TrustBoundary.lean:1965`), with
+old consequence as `durable_materialization_latch_of_boundary` (`TrustBoundary.lean:2579`), with
 its statement unchanged.
 
 **What remains borrowed / what would refute it / how to check.** As (g1').
 
-#### 3.4.7 (h) `sourceRefinement` — `TrustBoundary.lean:1096`
+#### 3.4.7 (h) `sourceRefinement` — `TrustBoundary.lean:1437`
 
 **Statement.** `∀ s t, Deployed s t → Modeled s t`: every transition of the deployed artifacts on
 the represented storage is among the transitions the composition admits.
@@ -739,7 +769,7 @@ here is a handwritten reading of source text.
 (169 of them) tie every physical source line of the mapped files to a status and, for `translated`
 spans, to a named declaration of the mapped Lean module, checked by a compiler probe. The fixture
 parity suite (§5.4) checks that the models' decoders agree with what the real prover emitted, on
-18 fixtures. The `translated` classification covers 31,095 of 117,391 inventoried physical lines.
+18 fixtures. The `translated` classification covers 31,095 of 119,449 inventoried physical lines.
 **None of that is refinement**: agreement on the fixtures the prover happened to emit is one point
 of a relation, not the relation.
 
@@ -749,52 +779,210 @@ already happened once, at the model level: see §6.4.
 **How to check.** Read `line-map/*.json` and the modules they point at, and treat the refinement
 claim as unproved wherever a span is labelled `dependency-boundary` or `untranslated`.
 
-### 3.5 Group E — the design gap
+### 3.5 Group E — the backing path, and the one design gap left in it
 
-#### (c) `closeVectorBacked` — `TrustBoundary.lean:773` <!-- PLANNER: update after loop 4 -->
+#### 3.5.0 Why the old field (c) was retired
 
-**Statement, as the file has it today.**
+The previous revision carried a single field (c) `closeVectorBacked`:
 
 > For every `SettlementVerifier.CloseFields` and proof, if
 > `SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true`, then for
 > every live token slot `i < f.tokenCount`,
 > `(f.channelFundAmounts i).val ≤ m.deposits f.channelId.val (f.tokenRegistry i).val`.
 
-`m.deposits : ChannelDeposits = Nat → Nat → Nat` (`TrustBoundary.lean:198`, field at `:221`) is an **opaque
-per-channel deposit attribution**: `deposits channel token` is the number of raw units of `token`
-that entered the Rollup escrow on behalf of `channel`. **No modeled contract maintains this map.**
-It is named as the accounting the Balance/validity circuit family is supposed to enforce.
+**Three things were wrong with it, and all three are structural, not cosmetic.**
 
-**Why this gap exists.** The materializer credits the Manager the whole finalized close vector.
-`CloseFunding` proves only that those amounts are the Manager's own getter values
-(`materialization_credits_are_the_managers_own_vector`, §2.2). Escrow is **pooled**, so a
-per-Manager conservation identity cannot by itself show that no other channel's funds were
-consumed. `SystemSafety.close_vector_backing_is_exactly_premise_c` (`SystemSafety.lean:781`)
-states the missing implication in full so it cannot be quietly absorbed elsewhere.
+1. **It was attached to the wrong event.** The antecedent is acceptance of a *close intent*.
+   Accepting a close intent credits nothing and moves no value. The event that moves money is
+   `CloseFundingMaterializer.materializeSignedHead`, and the premise said nothing about it.
+2. **Its quantity was not the invariant the system enforces.** `m.deposits channel token` was an
+   opaque per-channel deposit attribution — "what this channel put in". **No modeled contract
+   maintains such a map**, and with L2 transfers it is not even the right quantity: entitlement
+   moves between channels on L2, so a deposit bound is both unenforced and wrong.
+3. **It ignored what the contracts actually demand.** Before any credit leaves escrow the
+   Materializer requires a **backing proof**: `CloseAssetBacking` recursively verifies a Balance
+   proof at a constant verifier key, opens its private commitment, rebuilds the asset tree from the
+   very token vector whose keccak digest the Manager's finalized close statement carries, and
+   exposes an extended-state commitment the Materializer checks against `isFinalizedRoot`. A
+   premise that names none of that cannot be the honest statement of the residue.
 
-**Evidence today.** None. This is the field with the least supporting evidence in the ledger, and
-it is also the one the counterexample of §2.4 uses to refute a `TrustBoundary` instance.
+The field and the `deposits` parameter are both gone, and so is
+`SystemSafety.close_vector_backing_is_exactly_premise_c`, which stated it. Seven fields follow the
+path the contracts actually take, each naming exactly one artifact or one step, and **everything
+between them is proved**.
 
-**What would refute it.** A close statement accepted by the settlement verifier whose amounts
-exceed the channel's actual entitlement. `mle_assumption_does_not_imply_fund_safety` exhibits
-exactly that shape, on a genuine acceptance, with a credited amount of 1 and a deposit of 0.
+#### 3.5.1 What is now proved — the derived chain
 
-**How to check.** Read `close_vector_backing_is_exactly_premise_c` and the `Models.deposits`
-docstring; then read what the deployed contracts actually require before credit leaves escrow —
-`CloseFundingMaterializer.materializeSignedHead` runs a **backing proof**
-(`CloseAssetBacking`) that recursively verifies a Balance proof, opens its private commitment,
-binds the Balance public state to an extended state whose commitment must be a finalized Rollup
-state root, and reconstructs the asset tree from the very token vector whose keccak digest the
-Manager's close statement carries.
+`TrustBoundary.materialized_credits_are_finalized_l2_balances_of_boundary`
+(`TrustBoundary.lean:2149`), lifted to the composed state as
+`SystemSafety.materialized_credits_are_backed_by_l2_entitlement` (`SystemSafety.lean:802`):
 
-**A structural caveat the reader should carry.** The field as stated above is attached to
-*close-intent acceptance*. Close-intent acceptance credits nothing; **materialization** does. The
-statement is therefore, at minimum, attached to the wrong event, and with L2 transfers an opaque
-per-channel deposit map is not even the right invariant — the right one is the channel's L2
-entitlement at a finalized root. A restatement at the materialization level, with the residue
-narrowed to an L2-ledger invariant (Balance-certified balances at finalized roots are backed by
-escrow, which lives in the validity chain), is planned and not yet landed. Until it does, **(c) as
-written is the honest record of the gap, and the gap is real.**
+> From `CloseFunding.materializeSignedHead m.funding world m.managerAddress proof = .ok (after,
+> events)` there exist a backing witness `w` and the materialization plan such that
+>
+> * `CloseAssetBacking.CircuitConstraints m.backingEnv.merkle m.backingEnv.hash
+>   m.backingEnv.recursive w` — `w` satisfies the circuit's handwritten gate predicate;
+> * `m.head.finalizedRoot (computedPublicInputs …).extendedStateCommitment.value = true` — at a
+>   root the **canonical Rollup head finalizes**;
+> * `(computedPublicInputs …).channelId = m.managerChannel` — for the **bound** channel;
+> * every credit the Materializer paid out is an **active row** of `w`, token for token and amount
+>   for amount;
+> * and therefore every credited amount is `≤ m.l2Entitlement root m.managerChannel token`.
+
+The intermediate steps are theorems, not prose.
+`BackingBridge.signed_head_credits_are_the_registry_vector` (`BackingBridge.lean:969`)
+follows an accepted call back to the compact-verifier return, the Solidity-side `BackingStatement`
+it validated and the 26-word circuit public-input record those same words decode to — with the two
+independent big-endian limb readings (`CloseFunding.limbsToBytes32` and
+`CloseAssetBacking.Words8.value`) **proved equal** on range-checked limbs
+(`BackingBridge.limbs_to_bytes32_is_words8_value`, `BackingBridge.lean:101`).
+`CloseAssetBacking.program_satisfied_implies_constraints` (`CloseAssetBacking.lean:1848`) derives
+every field of `CircuitConstraints` from `ProgramSatisfied constructorProgram` alone — no side
+hypothesis, no residual — and `program_satisfied_computes_public_inputs` (`:2030`) derives the 26
+registered public wires the same way. `BackingBridge.word_bytes_token_vector_binding` (`:746`)
+proves the Solidity ABI layout and the circuit's word packing are the same injective encoding.
+
+`TrustBoundary.close_vector_backing_gap_is_now_l2_ledger` (`TrustBoundary.lean:2312`) then states,
+as a theorem, exactly which five sentences remain between "the Materializer paid this vector out of
+escrow" and "those amounts were the channel's own L2 balance at a finalized state": (c4), (c1),
+(c2), (c3a) and (c3b). Nothing else.
+
+#### 3.5.2 (c0) `materializerViewIsManagerState` — `TrustBoundary.lean:1034`
+
+**Statement** (`MaterializerViewIsManagerState`, `:771`). Every component of the Materializer's
+`ManagerView` — twelve separate staticcalls into `ChannelSettlementManager` — returns the
+corresponding component of the Manager's storage snapshot, with the channel id nonzero: channel id,
+lifecycle status (through `managerStatus`, `:759`), generation, close digest, state root, settled
+chain, token-funds digest, token count, the registry entries below the count, and the per-token
+caps. Its last three conjuncts are the **ABI width facts** at that boundary (`uint32` registry
+entries, a `uint8` count, `uint256` caps); they are listed because the Solidity-side preimage of
+(c0b) is typed by those widths and nothing else in this project supplies them.
+
+**Why it exists.** `BackingBridge` derives what the call's own executable checks force, and those
+checks read the Manager through getters. Nothing in this project ties a cross-contract getter view
+to the callee's storage, so the tie is named rather than assumed silently.
+
+**Evidence today.** None inside this project; it is a cross-contract storage-read refinement of the
+same family as (f1)/(f2). It is one of the five fields that cannot be made vacuous (§3), because it
+is an equation with no antecedent.
+
+**What would refute it / how to check.** An address mis-binding, a proxy whose getter reads
+different storage, or a re-entrant call that changes Manager storage between two of the twelve
+staticcalls. Verify the deployed address binding and read the twelve getters against the storage
+layout.
+
+#### 3.5.3 (c1) `backingVerifierSoundness` — `TrustBoundary.lean:1068`
+
+**Statement.** If the Materializer's call into its pinned `backingMleVerifier` returns a word
+vector, that vector is the public-input vector of a satisfiable plonky2 statement of the circuit
+`m.backingCircuitDigest` identifies.
+
+**It is (a0) again, not a new acceptance.** Same pinned MLE/WHIR artifact of
+`contracts/lib/polygon-plonky2`, at a different deployed adapter. It is a separate field only
+because (a0) is scoped to the four adapters `SettlementVerifier.Installed` pins and the
+Materializer's verifier is not one of them — **the scope of an acceptance must stay visible,
+address by address**. Discharging it means discharging (a0), and no more.
+
+**Evidence / refutation / checking.** As (a0) (§3.2.1), at one more address; plus the
+`requirePinnedVerifier` immutable check in `CloseFundingMaterializer.sol`.
+
+#### 3.5.4 (c2) `backingPrimitiveLowering` — `TrustBoundary.lean:1095`
+
+**Statement** (`BackingPrimitiveLowering`, `:824`). A satisfiable plonky2 statement of the backing
+adapter's pinned digest yields an **assignment** of every wire `CloseAssetBackingCircuit::new`
+allocates that satisfies every `CloseAssetBacking.BuildOp.holds` case of `constructorProgram`, and
+whose 26 registered public wires are exactly those words. The same shape as (a), (b1), (b2).
+
+**Evidence today.** `CloseAssetBacking` (110 named theorems) transcribes the constructor as a
+**468-op** `constructorProgram` over a `BuildOp` type with 46 constructors; **25 of the 468 ops are
+`True`** because that source call emits no constraint at all (the config choice, the `from_pis`
+re-slicing of the verified proof, the deliberately unchecked `PrivateStateTarget::new`, the raw
+`token_count` and registry allocations, the ten asset-path allocations, and `build`).
+`program_satisfied_implies_constraints` (`CloseAssetBacking.lean:1848`) takes **no side
+hypothesis**; `example_program_satisfiable` and `example_program_reads_back` (`:2399`) keep the
+468-op list non-vacuous. Line map `line-map/close-asset-backing.json`; fixture case
+`close_asset_backing` (raw 26 words, 7 compared fields). Faithfulness table: 41 rows, **20 `ok`**,
+20 `not-static`, 1 `trivial`, no `MISMATCH` (§5.7).
+
+Digest pinning is factored out exactly as elsewhere: `BackingPinnedDigestIsProgramDigest` (`:835`)
+plus `backing_pinned_digest_and_program_lowering_give_primitive_lowering` (`:2335`).
+
+**What would refute it / how to check.** As (a): a builder call whose plonky2 gate set does not
+imply the `holds` case attributed to it, or an adapter whose pinned digest is not this program's.
+
+#### 3.5.5 (c3a) `backingKeccakIsReference` — `TrustBoundary.lean:1109`
+
+**Statement.** The backing circuit's `tokenFundsHash` callback — the `plonky2_keccak` gadget the
+circuit uses to hash its reconstructed token vector — computes the reference Keccak-256 of the
+big-endian-packed words, repacked into the circuit's 8-limb `Words8`. The (e1b) sentence, for the
+fourth circuit.
+
+**Evidence / refutation / checking.** As (e1b) (§3.4.2): the same reference specification, the same
+pinned crate revision. It is the third of the five fields supplied as a hypothesis in the
+degenerate inhabitation, for the same reason — it is an equation with no antecedent to deny.
+
+#### 3.5.6 (c3b) `backingTokenFundsHashBinding` — `TrustBoundary.lean:1126`
+
+**Statement** (`BackingTokenFundsHashBinding`, `:848`). For an accepted materialization: if the
+reference Keccak-256 of the circuit's 92-word token-funds preimage packed big-endian equals the
+reference Keccak-256 of the Manager's 368-byte Solidity preimage of its own finalized vector, the
+two byte strings are equal.
+
+**A same-length collision claim on one concrete pair, and nothing more** — the (e2) sentence on the
+backing path. `BackingBridge.solidity_rows_pack_as_solidity_bytes` (`:677`) packs one string into
+the other's shape, so the two are the same length and no padding ambiguity, domain-separation slip
+or field-ordering slip can produce the collision.
+
+**Evidence / refutation / checking.** As (e2) (§3.3.2).
+
+#### 3.5.7 (c4) `finalizedBalanceIsBacked` — `TrustBoundary.lean:1150` — **THE RESIDUE**
+
+**Statement** (`FinalizedBalanceIsBacked`, `:868`).
+
+> For every witness `w` satisfying `CloseAssetBacking.CircuitConstraints m.backingEnv.merkle
+> m.backingEnv.hash m.backingEnv.recursive` — a verified Balance proof at the pinned constant key,
+> an opened private commitment, the asset tree rebuilt from the rows — whose extended-state
+> commitment the canonical head finalizes
+> (`m.head.finalizedRoot (computedPublicInputs …).extendedStateCommitment.value = true`), every
+> **active** row's amount is `≤ m.l2Entitlement root channelId row.registry`.
+
+`m.l2Entitlement : Words8 → Nat → Nat → Nat` (`Models`, `TrustBoundary.lean:293`) is an **explicit
+parameter**: `l2Entitlement root channel token` is the number of raw units of `token` the L2 ledger
+accounts to `channel` at the finalized extended-state root `root`, as the validity chain computes
+it. **Nothing in this project derives it, constrains it, or relates it to escrow.** Only (c4)
+mentions it. Naming the ledger as a parameter is what makes the residue a single sentence instead of
+a mood.
+
+**What it is not.** It is not a deposit bound — L2 transfers move entitlement between channels, so
+"what this channel deposited" was never the right quantity. It is not about the close statement —
+close-intent acceptance credits nothing, and this premise is attached to the event that does move
+money.
+
+**What discharging it would take — the named next project.** Composing the Balance circuit family,
+each member of which already exists as a model in this directory, none of which is composed into
+this statement yet:
+
+| step | what it would have to give |
+| --- | --- |
+| `BalanceCircuit` | that a Balance proof's private state really is the channel's balance at its public state |
+| `SwitchBoard` | that the public state is a state of the validity chain |
+| `ValidityChain` | that finalized roots are reachable only through valid blocks |
+| `DepositChain` / `WithdrawalChain` | that the ledger's per-channel entitlement is backed by escrow |
+
+That composition is the work item, and it is proof work, not review work.
+
+**Evidence today.** None. This is the field with the least supporting evidence in the ledger, and it
+is the one the counterexample of §2.4 uses to refute a `TrustBoundary` instance — with a *genuine*
+satisfying assignment of the whole 468-op program, an active row of amount 22 at a finalized root,
+and an entitlement of 0.
+
+**What would refute it.** A constraint-satisfying backing witness at a head-finalized extended-state
+root carrying an active amount above the channel's L2 entitlement at that root.
+
+**How to check.** Read the `Models.l2Entitlement` and `finalizedBalanceIsBacked` docstrings, then
+`close_vector_backing_gap_is_now_l2_ledger` (`:2312`) to see that these five sentences are the whole
+of what is left, then `materialized_credits_are_finalized_l2_balances_of_boundary` (`:2149`) to see
+what is no longer assumed.
 
 ---
 
@@ -805,25 +993,33 @@ is now a theorem about a boundary instance, with the same statement and the same
 
 | former coarse premise | now derived by | from which fields |
 | --- | --- | --- |
-| close statement lowering (whole circuit) | `close_statement_lowering_of_boundary` (`TrustBoundary.lean:1316`) | (a) |
-| withdrawal statement lowering | `withdrawal_statement_lowering_of_boundary` (`:1326`) | (b1) |
-| post-close statement lowering | `post_close_statement_lowering_of_boundary` (`:1336`) | (b2) |
-| "acceptance implies a satisfying close witness" | `close_proof_soundness_of_boundary` (`:1349`) | (a0) + (a) |
-| "acceptance implies a satisfying withdrawal witness" | `withdrawal_proof_soundness_of_boundary` (`:1366`) | (a0) + (b1) |
-| "acceptance implies a satisfying post-close witness" | `post_close_proof_soundness_of_boundary` (`:1384`) | (a0) + (b2) |
-| (e1) "the circuit hash and the Solidity hash are the same function" | `circuit_keccak_is_solidity_keccak_of_boundary` (`:1640`) | (e1a) + (e1b) |
-| (e2) in its opaque-callback form | `token_funds_hash_binding_of_boundary` (`:1661`) | (e2) + (e1a) |
-| (d) "a passing aggregate check means signatures exist" | `signature_validity_of_boundary` (`:1808`) | (d0) + (d0') + (d1') + (d3) — **not** (d2') |
-| (g1) "the replay ledger is durable" | `durable_nullifier_ledger_of_boundary` (`:1924`) | (g1') + the `LedgerWriters` frame theorems — **with a correction, see §6.4** |
-| (g2) "a latched channel exit is never rewritten outside the model" | `durable_materialization_latch_of_boundary` (`:1965`) | (g2') |
+| close statement lowering (whole circuit) | `close_statement_lowering_of_boundary` (`TrustBoundary.lean:1657`) | (a) |
+| withdrawal statement lowering | `withdrawal_statement_lowering_of_boundary` (`:1667`) | (b1) |
+| post-close statement lowering | `post_close_statement_lowering_of_boundary` (`:1677`) | (b2) |
+| "acceptance implies a satisfying close witness" | `close_proof_soundness_of_boundary` (`:1690`) | (a0) + (a) |
+| "acceptance implies a satisfying withdrawal witness" | `withdrawal_proof_soundness_of_boundary` (`:1707`) | (a0) + (b1) |
+| "acceptance implies a satisfying post-close witness" | `post_close_proof_soundness_of_boundary` (`:1725`) | (a0) + (b2) |
+| (e1) "the circuit hash and the Solidity hash are the same function" | `circuit_keccak_is_solidity_keccak_of_boundary` (`:1981`) | (e1a) + (e1b) |
+| (e2) in its opaque-callback form | `token_funds_hash_binding_of_boundary` (`:2002`) | (e2) + (e1a) |
+| (c) "the credited vector is backed" | `materialized_credits_are_finalized_l2_balances_of_boundary` (`:2149`) | (c0) + (c0b) + (c1) + (c2) + (c3a) + (c3b) + (c4) + (f1) — **at materialization, not at close-intent acceptance** |
+| (d) "a passing aggregate check means signatures exist" | `signature_validity_of_boundary` (`:2394`) | (d0) + (d0') + (d1') + (d3) |
+| (d2') "the in-circuit NTT is the negacyclic product" | `ntt_computes_negacyclic_product_of_boundary` (`:2507`) | **no field at all** — see §2.5 |
+| (g1) "the replay ledger is durable" | `durable_nullifier_ledger_of_boundary` (`:2538`) | (g1') + the `LedgerWriters` frame theorems — **with a correction, see §6.4** |
+| (g2) "a latched channel exit is never rewritten outside the model" | `durable_materialization_latch_of_boundary` (`:2579`) | (g2') |
 
-Three "what is left" theorems name the residues explicitly rather than in prose:
-`close_gap_is_now_per_primitive` (`TrustBoundary.lean:1522`), with its withdrawal (`:1542`) and
-post-close (`:1561`) siblings, say that under (a0) plus a per-primitive field an accepted proof
+Four "what is left" theorems name the residues explicitly rather than in prose:
+`close_gap_is_now_per_primitive` (`TrustBoundary.lean:1863`), with its withdrawal (`:1883`) and
+post-close (`:1902`) siblings, say that under (a0) plus a per-primitive field an accepted proof
 yields **both** a satisfying assignment of the transcribed builder program **and** the handwritten
 gate predicate — so no whole-circuit black box remains in the premise;
-`signature_gap_is_now_per_primitive` (`:1878`) names exactly (d0), (d0'), (d1'), (d3) as the four
-residues of the signature path, and lists what is now proved and therefore absent from it.
+`signature_gap_is_now_per_primitive` (`:2465`) names exactly (d0), (d0'), (d1'), (d3) as the four
+residues of the signature path; and `close_vector_backing_gap_is_now_l2_ledger` (`:2312`) names
+exactly (c4), (c1), (c2), (c3a) and (c3b) as the residues of the backing path. Each lists what is
+now proved and therefore absent from it.
+
+**(d2') is the one row of that table with no field on its right.** It is listed because a reader of
+the previous revision will look for it; the entry records that the obligation became a theorem
+rather than being dropped or absorbed.
 
 `signature_validity_of_boundary` concludes `CloseSignatureBridge.SignerEvidence`: between one and
 eight witnesses, whose count is the exposed `signerCount`, whose key digests are the exposed key
@@ -836,7 +1032,7 @@ One direction is deliberately **not** asserted. The full converse (proof soundne
 for all field records) is not provable: `plonky2Satisfiable` is opaque, so for records no proof was
 ever accepted for, it may hold while no gate witness exists. That asymmetry is the point — the
 lowering is a strictly separate obligation, not a repackaging of acceptance
-(`close_gap_is_exactly_statement_lowering`, `TrustBoundary.lean:1419`).
+(`close_gap_is_exactly_statement_lowering`, `TrustBoundary.lean:1760`).
 
 ---
 
@@ -858,12 +1054,18 @@ bash .github/ci/lean-safety-guard.sh
 Expected at this revision:
 
 ```
-[lean-guard] 478 reviewed source hashes and 1 submodule pins verified
-[lean-guard] 130 Lean modules covered; no explicit admissions; current imports isolated
+[lean-guard] 497 reviewed source hashes and 1 submodule pins verified
+[lean-guard] 132 Lean modules covered; no explicit admissions; current imports isolated
 … one line per theorem: "<name>: [<its transitive axioms>]" …
 [lean-guard] PASS: complete model builds, reviewed-source pins, and current theorem axiom allowlist
 [lean-guard] NOT proved: implementation refinement or cryptographic/environment hypotheses
 ```
+
+**A reviewed source edited after its hash was pinned stops the guard, and that is the intended
+behaviour.** The stop reads `FAIL: reviewed source changed: <path>; review model correspondence
+before refreshing manifest`, and clearing it means re-reading the model correspondence and then
+accepting the change through `register2.py` — never editing the hash by hand. The same stop is what
+caught the runtime defect of §6.3.
 
 The guard builds every current module, rejects any occurrence of `sorry`, `admit`, `axiom` or
 `native_decide` in the sources, verifies the SHA-256 of every reviewed source file and the pinned
@@ -876,28 +1078,37 @@ KERNEL_AXIOMS = frozenset({"propext", "Classical.choice", "Quot.sound"})   # lea
 ```
 
 These are Lean's own kernel axioms. **No project-specific axiom is permitted**, and no manifest
-field can relax the allowlist. At this revision, 5,043 theorems are probed; the observed
-distribution is 1,815 depending on **no axiom at all**, 3,225 using `propext`, 1,627 using
-`Quot.sound`, 334 using `Classical.choice`, and nothing outside the allowlist.
+field can relax the allowlist. At this revision, 5,311 theorems are probed, and nothing outside the
+allowlist is observed. The per-axiom distribution across those theorems is
+<!-- TODO: number --> (the previous revision's figures no longer apply and the run that would
+refresh them did not reach its summary line).
 
 ### 5.2 Counts at this revision
 
 | quantity | value |
 | --- | --- |
-| Lean modules covered by the guard | 130 |
-| current modules with a theorem inventory | 77 |
-| reviewed-source SHA-256 hashes pinned | 478 |
+| Lean modules covered by the guard | 132 |
+| current modules with a theorem inventory | 79 |
+| reviewed-source SHA-256 hashes pinned | 497 |
 | pinned submodules | 1 (`contracts/lib/polygon-plonky2` @ `6cefc6ac`) |
-| named theorems in the inventory | 5,043 |
-| …of which in `Zkp.Implementation.*` | 4,824, across 72 modules |
+| named theorems in the inventory | 5,311 |
+| …of which in `Zkp.Implementation.*` | 5,092, across 74 modules |
 | line maps | 169 |
-| inventoried source files / physical lines | 237 / 117,391 |
+| inventoried source files / physical lines | 237 / 119,449 |
+| mechanical faithfulness tables / rows | 7 / 275 |
+
+Two modules were added this loop — `Zkp.Implementation.BackingBridge` (52 theorems) and
+`Zkp.Implementation.NttCorrectness` (157) — and six runtime sources grew by the `#[cfg(test)]`-only
+faithfulness probes (§5.7), which is the whole of the 2,058-line increase in the inventory: every
+one of those lines is classified `test-only`.
 
 Per-module theorem counts for the modules this document leans on:
-`SystemSafety` 56, `TrustBoundary` 46, `CloseCircuit` 92, `WithdrawalClaimCircuit` 53,
-`PostCloseClaimCircuit` 54, `FalconGadgetProgram` 47, `FalconAggProgram` 78,
+`SystemSafety` 56, `TrustBoundary` 51, `CloseCircuit` 92, `WithdrawalClaimCircuit` 53,
+`PostCloseClaimCircuit` 54, `CloseAssetBacking` 110, `BackingBridge` 52, `NttCorrectness` 157,
+`FalconGadgetProgram` 47, `FalconAggProgram` 78,
 `CloseSignatureBridge` 21, `Keccak256` 45, `LedgerWriters` 57, `SettlementCloseBridge` 42,
-`CloseFunding` 53, `ManagerValue` 63, `RollupValue` 73, `FundFlow` 23, `CloseAssetBacking` 56.
+`SettlementVerifier` 56, `ClaimSettlementBridge` 17,
+`CloseFunding` 53, `ManagerValue` 63, `RollupValue` 73, `FundFlow` 23.
 
 ### 5.3 The line-coverage guard, and why `--require-complete` must exit 1
 
@@ -909,10 +1120,10 @@ python3 -B .github/ci/lean-line-coverage.py --require-complete   # exit 1 is the
 Expected at this revision:
 
 ```
-[lean-lines] checked source inventory: {"core": {"files": 71, "lines": 45178},
-                                        "dependency": {"files": 166, "lines": 72213}}
+[lean-lines] checked source inventory: {"core": {"files": 71, "lines": 46588},
+                                        "dependency": {"files": 166, "lines": 72861}}
 [lean-lines] physical-line classifications: {"dependency-boundary": 10850, "non-executable": 9828,
-                                             "test-only": 23834, "translated": 31095,
+                                             "test-only": 25892, "translated": 31095,
                                              "untranslated": 41784}
 [lean-lines] 169 source maps have compiler-checked declaration links
 [lean-lines] INCOMPLETE: untranslated sources, dependency obligations and source/EVM refinement remain
@@ -922,7 +1133,8 @@ Expected at this revision:
 `--require-complete` asks "is every inventoried line translated and every dependency obligation
 discharged?" **It exits 1, and it is supposed to.** The exit code is the machine-readable form of
 this document's central caveat: the formalization is incomplete, 41,784 physical lines are
-`untranslated`, 10,850 are `dependency-boundary`, and the eighteen premises of §3 are undischarged.
+`untranslated`, 10,850 are `dependency-boundary`, and the twenty-three premises of §3 are
+undischarged.
 A future change that makes it exit 0 without discharging those premises would be a regression in
 honesty, not progress. **Never reclassify a span to `translated` in order to make this command
 pass.**
@@ -995,29 +1207,138 @@ CI runs the chunks that fit a 16 GB runner (`common:: utils:: ethereum_types:: r
 tests); `wallet_core::`, `circuits::` and `falcon_sig::` are left to the existing dedicated
 `--test` steps, with the measured figures recorded in the workflow comments.
 
-### 5.7 What does not exist yet
+### 5.7 Mechanical faithfulness evidence
 
-The mechanical faithfulness evidence for the transcribed builder programs — a static check of each
-`connect`/equality claim against plonky2's `representative_map` and of each
-`register_public_input` claim against the public-input target order, plus sampled mutation testing
-that a witness violating exactly one `holds` claim fails verification — is **planned and not
-implemented**. Until it exists, obligation (i) of §3.1 is supported by human reading of the
-transcripts against the source lines quoted in their docstrings, and by nothing mechanical.
+This is the evidence the previous revision listed as *planned and not implemented*. It now exists,
+it covers part of obligation (i) of §3.1, and the part it does not cover is stated exactly.
+
+```sh
+export PATH=$HOME/.cargo/bin:$PATH
+cargo test --release --locked --lib -- --test-threads=1 faithfulness
+```
+
+**The lib suite must run single-threaded.** At any parallelism it is OOM-killed, and the `SIGKILL`
+reads as a test failure (§5.6). The run executes the **18 `faithfulness*` test functions** — one
+self-check in `src/faithfulness.rs`, one static-table test per transcribed program, and the
+mutation tests — and rewrites `doc/audit/zkp/evidence/faithfulness-<program>.tsv`, diffing each
+against the checked-in expectation `faithfulness-<program>.ops`. Re-blessing an `.ops` file after a
+deliberate change requires `INTMAX_FAITHFULNESS_BLESS=1`, so a silent drift cannot pass. The wall
+time and peak memory of the run are <!-- TODO: number --> — `evidence/README.md` records the
+single-threaded requirement and the OOM caveat, but no measured figures.
+
+#### What `src/faithfulness.rs` checks
+
+The harness is `#[cfg(test)]`-only and does **no proving** for the static half. After
+`CircuitBuilder::build` it reads `CircuitData.prover_only.representative_map` — the path-compressed
+union-find over every wire and virtual target, indexed by `Target::index` — and answers four kinds
+of question about the circuit plonky2 actually built:
+
+| check | how it is decided |
+| --- | --- |
+| **representative-map equality** | two targets the Lean op claims equal must share a representative. This is `connect` and everything built on it: `connect_array`, `Bytes32Target::connect`, `assert_zero`, `assert_one` |
+| **constant pins** | a target the Lean op claims is wired to a constant must share a representative with an `extra_constant_wire` slot (`ConstantGate`, `RandomAccessGate`) whose gate constant is that value. An unused slot still pins its own wire, so including it cannot make an unconstrained target read as pinned |
+| **range-check widths** | `range_check(x, n)` is `split_le`, which adds one `BaseSumGate<2>` row, connects `x` to its sum wire and asserts the limbs above `n` to zero. The checked width is recovered as the highest limb **not** wired to zero, plus one — so a *missing* range check and a *wrong-width* one are both visible, and so is the deliberate absence of one where a Lean op constrains nothing |
+| **public-input order** | which wires are registered, and in what order, against the built circuit's public-input target list |
+
+`faithfulness_repview_self_check` pins all three primitives on a purpose-built toy circuit, so the
+reader is not asked to trust the reader of the partition either.
+
+The **mutation tests** are the proving half, on the two cheap circuits. For a range or arithmetic
+claim they construct a witness violating exactly that claim and assert that verification fails —
+e.g. the gadget's complement-based 14-bit coefficient canonicality, the `hash_to_point` sponge
+semantics, the mod-`q` quotient pin, the level-1 gated message equality, and the level-1 signer
+count. For the settlement circuits, proving is too expensive and the tables say so rather than
+claiming coverage.
+
+#### Per-program coverage
+
+Computed from the seven checked-in `.tsv` tables:
+
+| program | rows | `ok` | `mutation` | `not-injectable` | `not-static` | `trivial` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `CloseCircuit` | 79 | 59 | 0 | 0 | 19 | 1 |
+| `WithdrawalClaimCircuit` | 48 | 30 | 0 | 0 | 10 | 8 |
+| `PostCloseClaimCircuit` | 48 | 35 | 0 | 0 | 12 | 1 |
+| `CloseAssetBacking` | 41 | 20 | 0 | 0 | 20 | 1 |
+| `FalconGadgetProgram` | 29 | 17 | 5 | 0 | 5 | 2 |
+| `FalconAggProgram-leaf` | 9 | 6 | 0 | 0 | 1 | 2 |
+| `FalconAggProgram-level1` | 21 | 10 | 3 | 2 | 4 | 2 |
+| **total** | **275** | **177** | **8** | **2** | **71** | **17** |
+
+By `kind`, the 275 rows are 76 `range`, 42 `gadget`, 39 `arith`, 34 `connect`, 21 `constant`,
+18 `public-inputs`, 17 `no-gate`, 16 `width`, 6 `aliasing`, 4 `config` and 2 `preimage`.
+
+**No disagreement was found.** A row whose Lean `holds` claim does not hold in the built circuit is
+recorded as `MISMATCH`, the generating test fails on any such row, and **there is no `MISMATCH` row
+in any of the seven tables**. That is the whole of the positive result: 177 structural claims about
+five circuits and two aggregation levels were checked against the circuit plonky2 built, and all 177
+held.
+
+**What is honestly not covered.** The 71 `not-static` rows are arithmetic and gadget semantics —
+invisible to the copy-constraint partition, because the partition records *which wires are equal*,
+not *what a gate computes*. **They stay in the per-primitive premise**, in (a), (b1), (b2), (c2) and
+(d1'), exactly as before. The 2 `not-injectable` rows are claims whose violation cannot be expressed
+through the circuit's public witness API at all (a `set_bool_target` that only accepts a genuine
+bool; a level-1 count gap the leaf's verifier already forces to a constant). The 17 `trivial` rows
+are ops whose Lean `holds` is `True` — config choices, struct literals, profiling reads — so there
+is nothing to check. **Checking 177 of 275 rows is not discharging obligation (i); it is bounding
+where a transcription error could still hide.**
+
+#### The line-number caveat
+
+Running the generator requires probe structs and capture statements **inside the constructors**,
+because the returned `*Target` structs do not keep the internal wires the Lean ops talk about. They
+are `#[cfg(test)]`-only, so the production constraint system is byte-identical and the installing
+diff **contains no deletions at all** — but while they are applied, the working-tree line numbers
+are shifted downward, by +27 to +41 entering each constructor and +45 to +72 leaving it.
+
+The six line maps were therefore **renumbered onto the probed tree** by
+`doc/audit/zkp/agent-tools/shift-linemap.py`, and every inserted line is carried there as a span
+with `"status": "test-only"`, labelled `faithfulness probe`: 10 spans in `close-circuit.json`,
+10 in `withdrawal-claim-circuit.json`, and 8 each in `post-close-claim-circuit.json`,
+`close-asset-backing.json` and `falcon-agg.json`, 6 in `falcon-gadget.json`. Every map's
+`source_sha256` and `source_lines` match the file on disk.
+
+**The Lean docstrings still cite the pre-insertion numbering**, and so does the `source` column of
+the tables — deliberately, because those are the numbers of the unmodified runtime files. **Read a
+`source` cell through the line map, not by adding an offset by hand**; `evidence/README.md`
+tabulates the per-file shift at the start and end of each constructor for orientation only.
+
+One secondary result comes free. `shift-linemap.py` aborts unless the change is **insert-only** — no
+line deleted, none modified. That it ran to completion on all six files is an independent mechanical
+confirmation of the property this whole layer depends on: the probes add lines and change none, so
+the runtime constraint system outside `#[cfg(test)]` is unchanged.
 
 ---
 
 ## 6. Known gaps, in plain words
 
-### 6.1 The close-vector backing residue (c)
+### 6.1 The L2 ledger residue (c4)
 
 Escrow is pooled. A per-Manager conservation identity does not show that the value credited to a
-channel belonged to it. The deployed contracts do require a backing proof before credit leaves
-escrow (§3.5), but nothing in the Lean composition relates the credited vector to the channel's
-own entitlement, and the premise as written is attached to close-intent acceptance rather than to
-materialization. The remaining true residue is an **L2 ledger invariant** — that balances
-certified by the Balance circuit at finalized Rollup roots are backed by escrow — which lives in
-the validity chain (BalanceCircuit → SwitchBoard → ValidityChain → DepositChain / WithdrawalChain)
-and is **named, not proved, here**. This is the largest open item.
+channel belonged to it.
+
+What the Lean composition now shows is the step the deployed contracts actually take: every amount
+an accepted `materializeSignedHead` credits is an active row of a witness satisfying the
+close-asset-backing circuit's gate predicate, at an extended-state root the canonical Rollup head
+finalizes, for the bound channel
+(`TrustBoundary.materialized_credits_are_finalized_l2_balances_of_boundary`, §3.5.1). The credited
+vector is therefore, by construction, that channel's **L2 balance at a finalized L2 state**, as
+certified by the Balance circuit family.
+
+The remaining residue is one sentence: the **L2 ledger invariant** (c4) — that a balance the Balance
+circuit certifies at a finalized root is backed by escrow. It lives in the validity chain
+(BalanceCircuit → SwitchBoard → ValidityChain → DepositChain / WithdrawalChain), every member of
+which exists as a model in this directory, none of which is composed into the statement yet. It is
+**named, not proved, here**, and `close_vector_backing_gap_is_now_l2_ledger` fixes the naming as a
+theorem so it cannot drift back into prose.
+
+**This is still the largest open item**, and it is the one place in the ledger where more proof
+work, not more review, is what is needed. The scope of the change this loop is worth stating
+plainly: the residue did not shrink because a hard thing was proved about escrow — it shrank because
+the premise was moved off the wrong event (close-intent acceptance, which credits nothing) and off
+the wrong quantity (an opaque per-channel deposit map no contract maintains), onto the event and the
+quantity the system actually enforces.
 
 ### 6.2 (h) source refinement
 
@@ -1156,12 +1477,16 @@ exploit**; each is a place where a reader should not assume more than the code p
 
 ### 6.7 Untranslated lines
 
-Of 117,391 inventoried physical lines, **41,784 are `untranslated`**. Of those, 33,974 lines in 68
+Of 119,449 inventoried physical lines, **41,784 are `untranslated`**. Of those, 33,974 lines in 68
 files are the accepted MLE/WHIR submodule (§3.2.1) — accepted, therefore deliberately not
 translated and **not counted as verified**. The remaining ≈7,810 lines are the Falcon vendor f64
 FFT and the parts each module's own line map explicitly marks as untranslated. A further 10,850
 lines are `dependency-boundary`: code whose semantics comes from an imported crate, gadget, hash or
 compiler that the model treats as an opaque callback or premise.
+
+The inventory grew by 2,058 lines this loop and **every one of them is `test-only`**: the
+`#[cfg(test)]` faithfulness probes of §5.7. No `translated`, `untranslated`,
+`dependency-boundary` or `non-executable` total moved.
 
 ### 6.8 What "somewhat loose" means here
 
@@ -1170,9 +1495,11 @@ acceptable. It is worth saying precisely which steps are loose, because the loos
 uniform.
 
 **Machine-checked, end to end:** every theorem cited in §2 and §4; the derivations
-`program_satisfied_implies_gates` in the three settlement circuits and
+`program_satisfied_implies_gates` in the three settlement circuits,
+`CloseAssetBacking.program_satisfied_implies_constraints` in the backing circuit and
 `gadget_program_satisfied_implies_circuit_satisfied` in the Falcon gadget; the aggregation
-induction `satisfiable_top_level_gives_witness_list`; the four Keccak-256 test vectors; the
+induction `satisfiable_top_level_gives_witness_list`; the NTT correctness theorem of §2.5; the
+materialization-to-backing chain of §3.5.1; the four Keccak-256 test vectors; the
 `LedgerWriters` frame theorems; the `SettlementCloseBridge` layout injectivity and length results.
 All of these are checked by the Lean kernel against the allowlist of §5.1.
 
@@ -1183,14 +1510,18 @@ All of these are checked by the Lean kernel against the allowlist of §5.1.
    names a declaration, checked to exist by a compiler probe) but the semantic equivalence itself
    is asserted by a human reader. This is premise (h).
 2. **`BuildOp.holds` → plonky2 gate set.** That each transcribed builder call's local proposition
-   is exactly what plonky2 emits for that call. Human reading against the quoted source line, one
-   call at a time. The obligation is per `BuildOp` *kind*: 47 kinds for the close circuit, 32 for
-   withdrawal claim, 8 for post-close claim, 23 for the Falcon gadget, plus the leaf and level ops
-   of the aggregation stack. The ordered programs those kinds are instantiated in are longer —
-   `CloseCircuit.constructorProgram` has 191 entries, withdrawal claim 41, post-close claim 45, the
-   Falcon gadget 23, the aggregation leaf 8, and `levelProgram k` 23 + 8·2^(k−1) (31, 39, 55). This
-   is obligation (i) of §3.1, and the mechanical checks that would reduce it are **not yet
-   implemented** (§5.7).
+   is exactly what plonky2 emits for that call. The obligation is per `BuildOp` *kind*: 47 kinds for
+   the close circuit, 32 for withdrawal claim, 8 for post-close claim, 46 for the close-asset-backing
+   circuit, 23 for the Falcon gadget, plus the leaf and level ops of the aggregation stack. The
+   ordered programs those kinds are instantiated in are longer —
+   `CloseCircuit.constructorProgram` has 191 entries, withdrawal claim 41, post-close claim 45,
+   close-asset-backing 468, the Falcon gadget 23, the aggregation leaf 8, and `levelProgram k`
+   23 + 8·2^(k−1) (31, 39, 55). This is obligation (i) of §3.1.
+
+   **The structural half is now machine-checked** against the circuit plonky2 built, and 177 of 275
+   table rows came back `ok` with no `MISMATCH` (§5.7). **The arithmetic and gadget half is not**:
+   71 rows are `not-static`, 8 are covered only by sampled mutation proving on the two cheap
+   circuits, and human reading against the quoted source line remains the only support for the rest.
 3. **Digest pinning.** That the pinned adapter digests and the per-level aggregate digests are the
    digests of the transcribed programs. Nothing in this project computes a digest from a circuit.
    This is obligation (ii).
@@ -1200,7 +1531,8 @@ All of these are checked by the Lean kernel against the allowlist of §5.1.
    sites from the reviewed text; the step to the deployed bytecode is (g1')/(g2')'s residue.
 
 Readers evaluating the system should treat (1)–(3) as the places where a careful adversarial review
-has the most leverage, and §3.5 (c) as the place where more proof work, not more review, is needed.
+has the most leverage, and §3.5.7 (c4) as the place where more proof work, not more review, is
+needed.
 
 ---
 
@@ -1209,13 +1541,19 @@ has the most leverage, and §3.5 (c) as the place where more proof work, not mor
 ### 7.1 Where to start
 
 1. `doc/audit/zkp/Zkp/Implementation/SystemSafety.lean` — read the module header, then `Step`
-   (`:367`), then the four theorems of §2.2.
-2. `doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean` — read the module header, then the
-   `structure` at `:646` field by field. Every field's docstring states what it covers, what it
+   (`:368`), then the four theorems of §2.2, then
+   `materialized_credits_are_backed_by_l2_entitlement` (`:802`).
+2. `doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean` — read the module header (it is the
+   narrative of how each premise reached its current shape), then `Models` (`:246`), then the
+   `structure` at `:893` field by field. Every field's docstring states what it covers, what it
    does **not** cover, and what would discharge it.
-3. `doc/audit/zkp/implementation-linewise-progress.md` (Japanese) — the dated work record,
+3. `doc/audit/zkp/evidence/README.md` and the seven `faithfulness-*.tsv` tables — what the
+   mechanical checks decide, row by row, and the line-number caveat (§5.7).
+4. `doc/audit/zkp/implementation-linewise-progress.md` (Japanese) — the dated work record,
    including each loop's before/after premise table.
-4. `doc/audit/zkp/fixture-parity.md` — the per-field fixture tables and their explicit
+5. `doc/audit/zkp/tasks/loop-2026-09-11-backing-and-evidence-plan.md` — the plan this loop was
+   executed against, including why premise (c) was restated rather than discharged.
+6. `doc/audit/zkp/fixture-parity.md` — the per-field fixture tables and their explicit
    non-claims.
 
 ### 7.2 Module map
