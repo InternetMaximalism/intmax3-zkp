@@ -1334,6 +1334,272 @@ theorem post_close_gap_is_now_per_primitive
     (post_close_primitive_lowering_implies_statement_lowering m lowering) f proof accepted
   exact ⟨lowering f composed.2.1, composed.2.2⟩
 
+/-! ## The hash boundary: the old single premise, recovered
+
+Field (e1) used to say "the circuit's keccak callback and the Solidity keccak
+boundary are the same function", with no statement of WHICH function either is.
+That is two different artifacts — the EVM opcode and the pinned `plonky2_keccak`
+gadget — sharing one unnamed value, so a single wrong implementation on either
+side would have been indistinguishable from agreement. The pair (e1a)/(e1b) names
+the function, `Zkp.Implementation.Keccak256`, and says each artifact computes it;
+the old field is then the theorem below and nothing is lost. -/
+
+/-- The bytes `SettlementCloseBridge.wordBytes` produces are canonical: every one
+is a real byte. Needed to apply (e1a), which is stated only on canonical strings
+because `SettlementVerifier.Bytes` is `List Nat` and the EVM opcode's semantics is
+undefined on anything else. -/
+theorem word_bytes_are_canonical_bytes (ws : List Nat) :
+    ∀ b ∈ SettlementCloseBridge.wordBytes ws, b < 256 := by
+  induction ws with
+  | nil =>
+    intro b hb
+    simp [SettlementCloseBridge.wordBytes] at hb
+  | cons w ws ih =>
+    intro b hb
+    simp only [SettlementCloseBridge.wordBytes, List.mem_append] at hb
+    rcases hb with head | tail
+    · exact SettlementVerifier.beBytes_canonical 4 w b head
+    · exact ih b tail
+
+/-- The Solidity-side token-funds preimage is canonical too: it is a concatenation
+of fixed-width big-endian encodings, and `SettlementVerifier.beBytes_canonical`
+covers each one. -/
+theorem token_funds_preimage_bytes_are_canonical
+    (registry : Fin 10 → SettlementVerifier.U32) (count : SettlementVerifier.U8)
+    (amounts : Fin 10 → SettlementVerifier.U256) :
+    ∀ b ∈ SettlementVerifier.tokenFundsPreimage registry count amounts, b < 256 := by
+  have append : ∀ xs ys : List Nat, (∀ x ∈ xs, x < 256) → (∀ x ∈ ys, x < 256) →
+      ∀ x ∈ xs ++ ys, x < 256 := by
+    intro xs ys hx hy x hmem
+    rcases List.mem_append.mp hmem with head | tail
+    · exact hx x head
+    · exact hy x tail
+  have joined : ∀ (n : Nat) (g : Fin 10 → Nat),
+      ∀ x ∈ (SettlementVerifier.tenList fun i => SettlementVerifier.beBytes n (g i)).join,
+        x < 256 := by
+    intro n g x hx
+    obtain ⟨s, hs, hxs⟩ := List.mem_join.mp hx
+    simp only [SettlementVerifier.tenList, List.mem_cons, List.not_mem_nil, or_false] at hs
+    rcases hs with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
+      exact SettlementVerifier.beBytes_canonical _ _ _ hxs
+  intro b hb
+  simp only [SettlementVerifier.tokenFundsPreimage] at hb
+  refine append _ _ (append _ _ (append _ _ ?_ ?_) ?_) ?_ b hb
+  · exact fun x hx => SettlementVerifier.beBytes_canonical _ _ _ hx
+  · exact joined 4 (fun i => (registry i).val)
+  · exact fun x hx => SettlementVerifier.beBytes_canonical _ _ _ hx
+  · exact joined 32 (fun i => (amounts i).val)
+
+/-- **The old field (e1), now a theorem.** (e1a) says the Solidity boundary hash is
+the reference Keccak-256 and (e1b) says the circuit gadget is; together they say
+the two agree, which is exactly what `circuitKeccakIsSolidityKeccak` used to
+assert as a FIELD. The byte-range side condition of (e1a) is discharged by
+`word_bytes_are_canonical_bytes`, so the theorem has no hypothesis the old field
+did not have. -/
+theorem circuit_keccak_is_solidity_keccak_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (words : List Nat) :
+    m.closeEnv.keccak words = SettlementCloseBridge.circuitHash m.keccak words := by
+  have solidity := tb.solidityKeccakIsReference (SettlementCloseBridge.wordBytes words)
+    (word_bytes_are_canonical_bytes words)
+  have circuit := tb.circuitKeccakIsReference words
+  unfold SettlementCloseBridge.circuitHash
+  rw [circuit, solidity]
+
+/-- **The old field (e2), now a theorem.** The premise is stated about the
+reference `Keccak256.keccak256`; a consumer holding a collision of the OPAQUE
+boundary callback `m.keccak` gets there through (e1a): the callback's value is the
+32 reference output bytes read big-endian, and that reading is injective on
+32-byte canonical strings (`Keccak256.bytes_to_nat_injective`), so a collision of
+the callback on these two canonical preimages IS a collision of the reference
+digests. Statement and argument list are those the old field had. -/
+theorem token_funds_hash_binding_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (w : CloseCircuit.PrivateWitness)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true)
+    (collision :
+      m.keccak (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
+        m.keccak (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+          f.channelFundAmounts)) :
+    SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w) =
+      SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount f.channelFundAmounts := by
+  have witnessSide := tb.solidityKeccakIsReference
+    (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w))
+    (word_bytes_are_canonical_bytes (CloseCircuit.tokenFundsPreimage w))
+  have fieldsSide := tb.solidityKeccakIsReference
+    (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount f.channelFundAmounts)
+    (token_funds_preimage_bytes_are_canonical f.tokenRegistry f.tokenCount f.channelFundAmounts)
+  have digests :
+      Keccak256.digestU256
+          (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
+        Keccak256.digestU256
+          (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+            f.channelFundAmounts) := by
+    rw [← witnessSide, ← fieldsSide]
+    exact collision
+  have packed :
+      Keccak256.bytesToNat (Keccak256.keccak256
+          (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w))) =
+        Keccak256.bytesToNat (Keccak256.keccak256
+          (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+            f.channelFundAmounts)) := by
+    have vals := congrArg Fin.val digests
+    rwa [Keccak256.digest_u256_val, Keccak256.digest_u256_val] at vals
+  have bytes :
+      Keccak256.keccak256
+          (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
+        Keccak256.keccak256
+          (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+            f.channelFundAmounts) :=
+    Keccak256.bytes_to_nat_injective _ _
+      (by rw [Keccak256.keccak256_length, Keccak256.keccak256_length])
+      (Keccak256.keccak256_bytes_canonical _) (Keccak256.keccak256_bytes_canonical _) packed
+  exact tb.tokenFundsHashBinding f proof w accepted bytes
+
+/-- **What (e2) actually asks for, spelled out.** For a witness of the shape the
+close circuit's own constructor produces, the two compared byte strings are BOTH
+368 bytes long, and the premise is exactly the implication "equal Keccak-256
+digests on that pair ⇒ equal strings". So (e2) is a same-length collision claim on
+one fixed, injective ABI layout — not hash injectivity, not a length-extension
+assumption, not an encoding assumption. The injectivity of the layout itself is
+`SettlementCloseBridge.token_funds_preimage_injective`, proved there; what is left
+here is only the collision claim. -/
+theorem token_funds_binding_is_same_length_collision
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (f : SettlementVerifier.CloseFields) (proof : SettlementVerifier.Bytes)
+    (w : CloseCircuit.PrivateWitness) (shape : w.Shape)
+    (accepted : SettlementVerifier.verifyCloseIntent m.evm m.installed m.keccak f proof = .ok true) :
+    (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)).length = 368 ∧
+      (SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+        f.channelFundAmounts).length = 368 ∧
+      (Keccak256.keccak256
+            (SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w)) =
+          Keccak256.keccak256 (SettlementVerifier.tokenFundsPreimage f.tokenRegistry
+            f.tokenCount f.channelFundAmounts) →
+        SettlementCloseBridge.wordBytes (CloseCircuit.tokenFundsPreimage w) =
+          SettlementVerifier.tokenFundsPreimage f.tokenRegistry f.tokenCount
+            f.channelFundAmounts) :=
+  ⟨SettlementCloseBridge.witness_token_preimage_length w shape,
+    SettlementCloseBridge.token_funds_preimage_length f.tokenRegistry f.tokenCount
+      f.channelFundAmounts,
+    tb.tokenFundsHashBinding f proof w accepted⟩
+
+/-- **NON-VACUITY of the hash pair.** A model whose Solidity boundary hash is the
+reference digest and whose circuit hash gadget is the reference digest of the
+big-endian-packed words satisfies (e1a) and (e1b) — by definitional unfolding, no
+cryptographic content whatsoever. This is what rules out the reading that the two
+new fields are unsatisfiable together: they are simultaneously true of exactly the
+environments in which both artifacts really do compute Keccak-256. -/
+theorem reference_keccak_models_satisfy_hash_premises
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore : Type}
+    (m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore)
+    (solidity : m.keccak = fun b => Keccak256.digestU256 b)
+    (circuit : m.closeEnv.keccak = fun words =>
+      SettlementCloseBridge.digest
+        (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words))) :
+    (∀ b : SettlementVerifier.Bytes, (∀ x ∈ b, x < 256) →
+        m.keccak b = Keccak256.digestU256 b) ∧
+      (∀ words : List Nat,
+        m.closeEnv.keccak words =
+          SettlementCloseBridge.digest
+            (Keccak256.digestU256 (SettlementCloseBridge.wordBytes words))) := by
+  constructor
+  · intro b _
+    simp [solidity]
+  · intro words
+    simp [circuit]
+
+/-! ## The signature boundary: from four residues to per-signature evidence
+
+The old field (d) `signatureValidity` concluded an opaque `signers message keys
+count` relation — a relation this module had to introduce precisely because
+nothing was proved about what an accepted aggregate MEANS. It is gone. The four
+fields (d0), (d1), (d2), (d3) are each a separate artifact's obligation, and
+`CloseSignatureBridge` PROVES the aggregation bookkeeping that used to sit
+unnamed between them: the signer count, the left-packed key digests with an
+exactly-zero suffix, and the single shared message. The composition below is
+therefore strictly stronger than the old field, with strictly smaller borrowed
+parts. -/
+
+/-- **The old field (d), replaced and strengthened.** An accepted aggregate check
+yields `CloseSignatureBridge.SignerEvidence`: between one and eight witnesses,
+whose count is the exposed `signerCount`, whose key digests are the exposed key
+list left-packed with an exactly-zero suffix, each of which ran against the ONE
+exposed message and each of whose key holders authorized that message. The old
+field asserted a weaker, opaque conclusion outright; this derives a concrete one
+from (d0) recursion soundness, (d1) coarse lowering, (d2) gadget faithfulness and
+(d3) unforgeability. Poseidon stays opaque throughout, so the conclusion speaks of
+key DIGESTS, never of public polynomials. -/
+theorem signature_validity_of_boundary
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf)
+    (proof : AggregateProof) (st : CloseCircuit.AggregateStatement)
+    (verified : m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st) :
+    CloseSignatureBridge.SignerEvidence m.sigEnv m.authorized st.message st.keys
+      st.signerCount := by
+  have satisfiable := tb.aggregateRecursiveVerifierSoundness proof st verified
+  obtain ⟨t, width, evaluates⟩ := tb.aggregateStatementLowering st satisfiable
+  exact CloseSignatureBridge.accepted_aggregate_tree_gives_signer_evidence m.sigEnv
+    m.falconHash m.falconMul m.authorized tb.falconPredicateIsGadget tb.falconUnforgeability
+    st t width evaluates
+
+/-- **What is left of the signature gap, named.** Exactly these four Props, and
+nothing else, stand between "the close circuit's aggregate check passed" and
+"each listed key digest belongs to a holder who authorized this message":
+
+* (d0) plonky2's RECURSIVE VERIFIER is sound at the constant aggregate key — an
+  artifact obligation, and explicitly not part of the accepted premise (a0) even
+  though that verifier ships in the same pinned submodule;
+* (d1) the aggregation circuit's satisfiable statement really is an aggregation
+  TREE of `FalconAggregate` evaluating to the exposed statement — the one
+  remaining whole-circuit premise in this structure, coarse because
+  `FalconAggregate` has no `BuildOp` program yet, and carrying the digest pinning
+  for `aggregateCircuitDigest` implicitly;
+* (d2) the aggregation model's opaque accept callback IS the `gadget.rs` gate set
+  — a per-gate reading obligation;
+* (d3) FALCON UNFORGEABILITY — a computational lattice assumption, the only one of
+  the four that no amount of translation work could ever discharge.
+
+Everything else the old premise (d) bundled — the count bounds, the left packing,
+the zero suffix, the single shared message, the per-slot evaluation — is now
+PROVED in `CloseSignatureBridge`. The residue is per-SIGNATURE (and per-artifact),
+not per-aggregate. -/
+theorem signature_gap_is_now_per_signature
+    {BalanceProof AggregateProof Path Root ClaimPath ClaimCore σ : Type}
+    {m : Models BalanceProof AggregateProof Path Root ClaimPath ClaimCore}
+    {Deployed Modeled Unmodeled : σ → σ → Prop}
+    {managerOf : σ → ManagerValue.State} {fundingOf : σ → CloseFunding.State}
+    (tb : TrustBoundary m Deployed Modeled Unmodeled managerOf fundingOf) :
+    (∀ (proof : AggregateProof) (st : CloseCircuit.AggregateStatement),
+        m.closeEnv.verifyAggregate m.closeEnv.aggregateVerifier proof st →
+        m.plonky2Satisfiable m.aggregateCircuitDigest st.words) ∧
+      (∀ st : CloseCircuit.AggregateStatement,
+        m.plonky2Satisfiable m.aggregateCircuitDigest st.words →
+        ∃ t : FalconAggregate.AggTree,
+          (∀ w ∈ FalconAggregate.activeWitnesses t, w.messageDigest.length = 8) ∧
+            FalconAggregate.evalTree m.sigEnv t FalconAggregate.aggLevels =
+              .ok (CloseSignatureBridge.toAggStatement st)) ∧
+      CloseSignatureBridge.FalconPredicateIsGadget m.sigEnv m.falconHash m.falconMul ∧
+      CloseSignatureBridge.FalconUnforgeable m.falconHash m.falconMul m.authorized :=
+  ⟨tb.aggregateRecursiveVerifierSoundness, tb.aggregateStatementLowering,
+    tb.falconPredicateIsGadget, tb.falconUnforgeability⟩
+
 /-! ## Well-formedness witness -/
 
 /-- In an environment whose adapters always revert, `verifyCloseIntent` cannot

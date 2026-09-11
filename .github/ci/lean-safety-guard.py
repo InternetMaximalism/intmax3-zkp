@@ -91,6 +91,8 @@ CURRENT = {
         "Zkp.Implementation.RegevCore",
         "Zkp.Implementation.RegevProofs",
         "Zkp.Implementation.TreeInstances",
+        "Zkp.Implementation.CloseSignatureBridge",
+        "Zkp.Implementation.Keccak256",
     ),
 }
 ARCH_ROOTS = frozenset({
