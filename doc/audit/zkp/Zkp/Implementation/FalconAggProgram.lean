@@ -587,6 +587,23 @@ theorem statement_public_inputs_of_decode (k : Nat) (pis : List Nat)
         pis.drop FalconAggregate.falconAggPkListOffset) = pis
   rw [← hdrop8, List.take_append_drop]
 
+/-- `pis[0..8]` of a canonical encoding is its message. -/
+theorem decode_message_of_statement (s : FalconAggregate.AggStatement)
+    (hm : s.message.length = FalconAggregate.bytes32Len) :
+    FalconAggregate.decodeMessage (FalconAggregate.statementPublicInputs s) = s.message := by
+  show (FalconAggregate.statementPublicInputs s).take FalconAggregate.bytes32Len = s.message
+  simp only [FalconAggregate.statementPublicInputs, List.append_assoc]
+  exact List.take_left' hm
+
+/-- `pis[8]` of a canonical encoding is its signer count. -/
+theorem decode_count_of_statement (s : FalconAggregate.AggStatement)
+    (hm : s.message.length = FalconAggregate.bytes32Len) :
+    FalconAggregate.decodeCount (FalconAggregate.statementPublicInputs s) = s.count := by
+  simp only [FalconAggregate.decodeCount, FalconAggregate.falconAggCountOffset,
+    FalconAggregate.statementPublicInputs, List.append_assoc]
+  rw [List.drop_left' hm]
+  simp
+
 /-- ... and conversely the decode of a canonical encoding is the statement itself. -/
 theorem decode_statement_at_public_inputs (k : Nat) (s : FalconAggregate.AggStatement)
     (hm : s.message.length = FalconAggregate.bytes32Len) (hlen : s.pks.length = 2 ^ k)
@@ -594,17 +611,8 @@ theorem decode_statement_at_public_inputs (k : Nat) (s : FalconAggregate.AggStat
     decodeStatementAt k (FalconAggregate.statementPublicInputs s) = s := by
   have hprefix : (s.message ++ [s.count]).length = FalconAggregate.falconAggPkListOffset := by
     simp [List.length_append, hm, FalconAggregate.falconAggPkListOffset]
-  have hmsg : FalconAggregate.decodeMessage (FalconAggregate.statementPublicInputs s)
-      = s.message := by
-    show (FalconAggregate.statementPublicInputs s).take FalconAggregate.bytes32Len = s.message
-    simp only [FalconAggregate.statementPublicInputs, List.append_assoc]
-    exact List.take_left' hm
-  have hcount : FalconAggregate.decodeCount (FalconAggregate.statementPublicInputs s)
-      = s.count := by
-    simp only [FalconAggregate.decodeCount, FalconAggregate.falconAggCountOffset,
-      FalconAggregate.statementPublicInputs, List.append_assoc]
-    rw [List.drop_left' hm]
-    simp
+  have hmsg := decode_message_of_statement s hm
+  have hcount := decode_count_of_statement s hm
   have hslots : decodeSlots k (FalconAggregate.statementPublicInputs s) = s.pks := by
     simp only [decodeSlots, FalconAggregate.statementPublicInputs]
     rw [List.drop_left' hprefix]
@@ -1071,8 +1079,8 @@ theorem level_program_satisfied_implies_compose {ProofTy : Type}
         readLevelPublic k a = FalconAggregate.statementPublicInputs s := by
   obtain ⟨hleft, hbool, hright, hmsgeq, hgcr, hadd, hhalf, hgap, hggap, hzgap, _hregm,
     hregc, _hregl, hregpk, _hwidth⟩ := level_program_holds h
-  simp only [LevelOp.holds] at hleft hbool hright hmsgeq hgcr hadd hhalf hgap hggap hzgap
-    hregc hregpk
+  simp only [LevelOp.holds] at hleft hbool hright hmsgeq hgcr hadd
+  simp only [LevelOp.holds] at hhalf hgap hggap hzgap hregc hregpk
   have hrlen : a.rightPis.length = FalconAggregate.falconAggPublicInputsLenAt (k - 1) :=
     hright.1
   obtain ⟨_hrmlen, hrpklen0, hrpkwf0⟩ := decode_statement_at_shape (k := k - 1) hrlen
@@ -1487,9 +1495,9 @@ theorem witness_list_gives_signer_evidence (e : FalconCore.HashEnvironment)
         (FalconAggregate.statementPublicInputs (CloseSignatureBridge.toAggStatement st))
         = st.message.words := by
       show (FalconAggregate.statementPublicInputs
-        (CloseSignatureBridge.toAggStatement st)).take FalconAggregate.bytes32Len = _
-      simp only [FalconAggregate.statementPublicInputs, List.append_assoc]
-      exact List.take_left' hstmsg
+        (CloseSignatureBridge.toAggStatement st)).take FalconAggregate.bytes32Len
+        = (CloseSignatureBridge.toAggStatement st).message
+      exact decode_message_of_statement _ hstmsg
     have hr := FalconAggregate.agg_expected_decode_message (level := FalconAggregate.aggLevels)
       hmlen hactivewf hn
     rw [← hl, hwords, hr]
@@ -1497,11 +1505,8 @@ theorem witness_list_gives_signer_evidence (e : FalconCore.HashEnvironment)
   have hcount : st.signerCount = cws.length := by
     have hl : FalconAggregate.decodeCount
         (FalconAggregate.statementPublicInputs (CloseSignatureBridge.toAggStatement st))
-        = st.signerCount := by
-      simp only [FalconAggregate.decodeCount, FalconAggregate.falconAggCountOffset,
-        FalconAggregate.statementPublicInputs, List.append_assoc]
-      rw [List.drop_left' hstmsg]
-      simp [CloseSignatureBridge.toAggStatement]
+        = st.signerCount :=
+      decode_count_of_statement _ hstmsg
     have hr := FalconAggregate.agg_expected_decode_count (level := FalconAggregate.aggLevels)
       hmlen hactivewf hn
     rw [← hl, hwords, hr, hactivelen]
@@ -1523,31 +1528,29 @@ theorem witness_list_gives_signer_evidence (e : FalconCore.HashEnvironment)
           (active ++ List.replicate (2 ^ FalconAggregate.aggLevels - active.length)
             FalconAggregate.zeroSlot).join :=
       FalconAggregate.agg_expected_normal_form hmlen hactivewf hn
-    have hprefix : (st.message.words ++ [st.signerCount]).length
+    have hprefix : ((CloseSignatureBridge.toAggStatement st).message ++
+        [(CloseSignatureBridge.toAggStatement st).count]).length
         = FalconAggregate.falconAggPkListOffset := by
-      simp [List.length_append, FalconAggregate.falconAggPkListOffset,
-        FalconAggregate.bytes32Len]
+      rw [List.length_append, hstmsg]
+      rfl
     have hprefix' : (message ++ [active.length]).length
         = FalconAggregate.falconAggPkListOffset := by
-      simp [List.length_append, hmlen, FalconAggregate.falconAggPkListOffset,
-        FalconAggregate.bytes32Len]
+      rw [List.length_append, hmlen]
+      rfl
     have heq := hwords
     rw [hright] at heq
-    have := congrArg (fun l => l.drop FalconAggregate.falconAggPkListOffset) heq
-    simp only [FalconAggregate.statementPublicInputs, CloseSignatureBridge.toAggStatement]
-      at this
-    rw [List.drop_left' (by rw [← hprefix]; simp [CloseSignatureBridge.toAggStatement]),
-      List.drop_left' hprefix'] at this
-    exact this
+    have hdrop := congrArg (fun l => l.drop FalconAggregate.falconAggPkListOffset) heq
+    simp only [FalconAggregate.statementPublicInputs] at hdrop
+    rw [List.drop_left' hprefix, List.drop_left' hprefix'] at hdrop
+    exact hdrop
   have hkeyslen : (CloseSignatureBridge.toAggStatement st).pks.length
       = 2 ^ FalconAggregate.aggLevels := by
     have h1 := FalconAggregate.join_length_of_well_formed _ hstwf
     have h2 := FalconAggregate.join_length_of_well_formed _ hpadwf
     rw [hjoin, h2, hpadlen] at h1
     have h3 : (2:Nat) ^ FalconAggregate.aggLevels * FalconAggregate.bytes32Len
-        = (CloseSignatureBridge.toAggStatement st).pks.length * FalconAggregate.bytes32Len :=
-      h1.symm
-    simp only [FalconAggregate.bytes32Len] at h3
+        = (CloseSignatureBridge.toAggStatement st).pks.length * FalconAggregate.bytes32Len := h1
+    rw [bytes32_len_unfold] at h3
     omega
   have hkeys : (CloseSignatureBridge.toAggStatement st).pks
       = active ++ List.replicate (2 ^ FalconAggregate.aggLevels - active.length)
@@ -1583,6 +1586,26 @@ theorem witness_list_gives_signer_evidence (e : FalconCore.HashEnvironment)
     rw [← hwe]
     exact ⟨by rw [hmsg]; rfl, by rw [hmsg]; exact hauth⟩
 
+/-- The two halves composed, in the shape layer T consumes: a satisfiable TOP-level instance at
+the close circuit's OWN 73-word aggregate vector (`CloseCircuit.AggregateStatement.words`, the
+same list by `CloseSignatureBridge.to_agg_statement_public_inputs`), plus (d3), gives the signer
+evidence with no mention of `CircuitSatisfied` or of any aggregate-side accept callback. -/
+theorem top_level_satisfiable_gives_signer_evidence {ProofTy : Type}
+    (env : LevelEnvironment ProofTy) (Sat : Nat → List Nat → Prop)
+    (e : FalconCore.HashEnvironment) (p : FalconCore.PolynomialProduct)
+    (authorized : List Nat → List Nat → Prop)
+    (hrec : RecursionSound Sat env) (hlow : LevelLowering Sat env e p)
+    (unforgeable : CloseSignatureBridge.FalconUnforgeable e p authorized)
+    (st : CloseCircuit.AggregateStatement)
+    (hsat : Sat FalconAggregate.aggLevels st.words) :
+    CloseSignatureBridge.SignerEvidence (sigEnvOf e) authorized st.message st.keys
+      st.signerCount := by
+  obtain ⟨message, cws, hmlen, _, hwords, hge, hle, hcws⟩ :=
+    satisfiable_top_level_gives_witness_list env Sat e p hrec hlow st.words hsat
+  refine witness_list_gives_signer_evidence e p authorized unforgeable st message cws hmlen ?_
+    hge hle hcws
+  rw [CloseSignatureBridge.to_agg_statement_public_inputs st, hwords]
+
 /-! ## 7. Non-vacuity
 
 A concrete leaf assignment and a concrete level-1 assignment with TWO present leaves, both
@@ -1596,6 +1619,8 @@ def exampleMessageLimbs : FalconAggregate.Limbs := [0, 0, 0, 0, 0, 0, 0, 0]
 theorem example_message_digest : CloseSignatureBridge.digestOfLimbs exampleMessageLimbs = 0 := by
   decide
 
+theorem example_message_canonical : ∀ x ∈ exampleMessageLimbs, x < limbBase := by decide
+
 /-- The `FalconSigGadgetWitness::padding` shape (gadget.rs:847-856) as a leaf assignment: the
 one slot shape for which `FalconCore` exhibits a satisfying gate assignment. -/
 def exampleLeafAssignment : LeafAssignment where
@@ -1608,19 +1633,8 @@ theorem example_leaf_program_satisfied :
     LeafProgramSatisfied FalconCore.zeroEnvironment FalconCore.zeroProduct
       exampleLeafAssignment := by
   refine leaf_program_satisfied_of _ _ _ ?_ ?_ ?_ ?_ ?_ ?_
-  · refine ⟨FalconCore.zero_witness_satisfied 0 1 (by decide), rfl, ?_, ?_, ?_, ?_⟩
-    · exact example_message_digest.symm
-    · exact example_message_digest.symm
-    · intro x hx
-      have : x = 0 := by
-        simp only [exampleMessageLimbs, List.mem_cons, List.not_mem_nil, or_false] at hx
-        rcases hx with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> rfl
-      rw [this]; decide
-    · intro x hx
-      have : x = 0 := by
-        simp only [exampleMessageLimbs, List.mem_cons, List.not_mem_nil, or_false] at hx
-        rcases hx with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> rfl
-      rw [this]; decide
+  · exact ⟨FalconCore.zero_witness_satisfied 0 1 (by decide), rfl, example_message_digest.symm,
+      example_message_digest.symm, example_message_canonical, example_message_canonical⟩
   · rfl
   · rfl
   · rfl
@@ -1657,19 +1671,24 @@ def exampleLevelAssignment : LevelAssignment Unit where
 
 theorem example_level_program_satisfied :
     LevelProgramSatisfied exampleLevelEnv 1 exampleLevelAssignment := by
-  refine level_program_satisfied_of _ _ _ ⟨rfl, trivial, by decide⟩ (Or.inr rfl)
-    ⟨by decide, fun _ => trivial⟩ (fun i _ => ⟨?_, ?_, ?_⟩) ?_ ⟨by decide, ?_⟩ ?_ ?_ ?_ ?_
-    (by decide) (by decide) (by decide) (fun i _ => ⟨by decide, ?_⟩) (by decide)
-  · show (0 + (FalconAggregate.decodeMessage exampleLeafPis).getD i 0) % fieldModulus
-      = (FalconAggregate.decodeMessage exampleLeafPis).getD i 0 % fieldModulus
-    rw [Nat.zero_add]
-  · show (0 : Nat) % fieldModulus = (1 * 0) % fieldModulus
+  refine level_program_satisfied_of _ _ _ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+  · exact ⟨rfl, trivial, by decide⟩
+  · exact Or.inr rfl
+  · exact ⟨by decide, fun _ => trivial⟩
+  · intro i _
+    refine ⟨?_, ?_, ?_⟩
+    · show (0 + List.getD (FalconAggregate.decodeMessage exampleLeafPis) i 0) % fieldModulus
+        = List.getD (FalconAggregate.decodeMessage exampleLeafPis) i 0 % fieldModulus
+      rw [Nat.zero_add]
+    · show (0 : Nat) % fieldModulus = (1 * 0) % fieldModulus
+      decide
+    · show (0 : Nat) % fieldModulus = 0
+      decide
+  · show (1 : Nat) % fieldModulus
+      = (1 * FalconAggregate.decodeCount exampleLeafPis) % fieldModulus
     decide
-  · decide
-  · show (1 : Nat) % fieldModulus = (1 * FalconAggregate.decodeCount exampleLeafPis)
-      % fieldModulus
-    decide
-  · show (2 : Nat) % fieldModulus
+  · refine ⟨by decide, ?_⟩
+    show (2 : Nat) % fieldModulus
       = (FalconAggregate.decodeCount exampleLeafPis + 1) % fieldModulus
     decide
   · show (1 : Nat) % fieldModulus = 2 ^ (1 - 1) % fieldModulus
@@ -1678,14 +1697,25 @@ theorem example_level_program_satisfied :
     decide
   · show (0 : Nat) % fieldModulus = (1 * 0) % fieldModulus
     decide
-  · decide
-  · show (0 : Nat) % fieldModulus
-      = (1 * (rightPkLimbs 1 exampleLevelAssignment).getD i 0) % fieldModulus
-    have : (rightPkLimbs 1 exampleLevelAssignment).getD i 0 = 0 := by
-      have hb : ∀ x ∈ rightPkLimbs 1 exampleLevelAssignment, x < 1 := by decide
-      have := get_default_lt _ 1 (by decide) hb i
-      omega
-    rw [this]
+  · show (0 : Nat) % fieldModulus = 0
+    decide
+  · show (FalconAggregate.decodeMessage exampleLeafPis).length = FalconAggregate.bytes32Len
+    decide
+  · show FalconAggregate.decodeCount (readLevelPublic 1 exampleLevelAssignment) = 2
+    decide
+  · show (leftPkLimbs 1 exampleLevelAssignment).length = childSlotLimbs 1
+    decide
+  · intro i _
+    refine ⟨?_, ?_⟩
+    · show (0 : Nat) < fieldModulus
+      decide
+    · show (0 : Nat) % fieldModulus
+        = (1 * List.getD (rightPkLimbs 1 exampleLevelAssignment) i 0) % fieldModulus
+      have hzeros : rightPkLimbs 1 exampleLevelAssignment = List.replicate 8 0 := by decide
+      rw [hzeros, replicate_zero_get_default]
+  · show (readLevelPublic 1 exampleLevelAssignment).length
+      = FalconAggregate.falconAggPublicInputsLenAt 1
+    decide
 
 /-- The exposed level-1 statement: two signers, their (equal, all-zero) key digests in slots 0
 and 1, at the `falcon_agg_public_inputs_len(1) = 25` width. -/

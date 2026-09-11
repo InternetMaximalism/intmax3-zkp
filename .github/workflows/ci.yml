@@ -90,6 +90,7 @@ jobs:
         run: |
           python3 .github/ci/test-lean-safety-guard.py
           python3 .github/ci/test-lean-line-coverage.py
+          python3 -B .github/ci/test-check-ledger-writers.py
       - name: Build every Lean root and audit current-proof dependencies and source pins
         # This is model/build/assumption and reviewed-source drift protection, NOT a
         # machine-checked refinement of Rust/Solidity bytecode into the Lean models.
@@ -98,6 +99,11 @@ jobs:
         # A pass records honest partial coverage. It must NOT be treated as an
         # all-line/source-refinement/whole-system solvency certificate.
         run: python3 .github/ci/lean-line-coverage.py
+      - name: Re-derive the Solidity ledger write-site inventory pinned by LedgerWriters
+        # Model-level frame theorems about `used`/`cap`/`received`/`paid` and the exit latch
+        # only bind if the reviewed Solidity has exactly the write sites `flaggedWriteSites`
+        # claims. This is a source text scan, NOT a bytecode or storage-layout proof.
+        run: python3 -B .github/ci/check-ledger-writers.py
       - name: Assert Lean verification did not modify tracked sources
         run: git diff --exit-code
   # ════════════════════════════════════════════════════════════════════════════════════════════════

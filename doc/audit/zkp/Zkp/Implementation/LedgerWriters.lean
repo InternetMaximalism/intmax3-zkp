@@ -26,7 +26,7 @@ models in `ManagerValue` and `CloseFunding`:
 
 **What this module does NOT establish.** Nothing here says the deployed bytecode has no
 other writer. The step from "these are the write sites in the reviewed Solidity text" to
-"these are the only transitions the deployed contracts admit" is the source-refinement
+"these are the only transitions the deployed contracts accept" is the source-refinement
 premise (h) of `TrustBoundary`, strengthened to the inventory premise (g1'). This module
 supplies the model half of (g1)/(g2); the EVM half stays a named premise. The CI check is
 a text scan of the reviewed sources, not a bytecode analysis: it cannot see an inline
@@ -604,7 +604,7 @@ theorem manager_entrypoints_are_classified (call : ManagerEntrypoint)
       fun covered => absurd covered (by simp [ManagerEntrypoint.stepCovered]), fun _ => ?_⟩
     · rw [effects]; exact claim_effects_keep_used s.value claim n hn
     · rw [effects]; exact Nat.le_refl _
-    · rw [effects]
+    · rw [effects]; rfl
   | pullChannelFunds b ext =>
     obtain ⟨amount, call⟩ := option_of_pair_some _ t h
     have framed := pull_channel_funds_frames b ext s t amount call
@@ -671,5 +671,220 @@ theorem finalize_close_only_raises_cap (ext : ManagerValue.FullExternal)
   ManagerValue.finalize_full_token_vector ext b now s t
     (finalize_close_core_of_guarded ext b now expectedDigest expectedGeneration s t
       (option_of_result_some _ t h)) token
+
+/-! ## 5. The `CloseFunding` entrypoint enumeration and the exit latch
+
+`materializedChannelExit` is written in exactly one place (`_materialize` :461, guarded by
+the `== 0` read at :434). The five other state-mutating entrypoints of the materializer do
+not touch it at all, and `_materialize` itself can only write a channel whose latch is
+still zero — so a latched channel exit is never rewritten. -/
+
+theorem bind_manager_frames_latch (e : CloseFunding.Environment) (s : CloseFunding.State)
+    (caller manager : CloseFunding.Address) (u : CloseFunding.Update)
+    (h : CloseFunding.bindManager e s caller manager = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.bindManager, CloseFunding.onlyRollup, CloseFunding.require,
+    bind_ok_iff, exists_unit, ite_ok_iff, throw_ok_iff_false, error_ok_iff_false,
+    false_and, and_false, true_and, and_true, ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+theorem freeze_from_manager_frames_latch (e : CloseFunding.Environment) (s : CloseFunding.State)
+    (caller : CloseFunding.Address) (channel generation : Nat) (u : CloseFunding.Update)
+    (h : CloseFunding.freezeFromManager e s caller channel generation = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.freezeFromManager, CloseFunding.require, bind_ok_iff, exists_unit,
+    ite_ok_iff, throw_ok_iff_false, error_ok_iff_false, false_and, and_false, true_and,
+    and_true, ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+theorem unfreeze_from_manager_frames_latch (s : CloseFunding.State)
+    (caller : CloseFunding.Address) (channel generation : Nat) (u : CloseFunding.Update)
+    (h : CloseFunding.unfreezeFromManager s caller channel generation = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.unfreezeFromManager, CloseFunding.require, bind_ok_iff, exists_unit,
+    ite_ok_iff, throw_ok_iff_false, error_ok_iff_false, false_and, and_false, true_and,
+    and_true, ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+theorem record_post_frames_latch (e : CloseFunding.Environment) (s : CloseFunding.State)
+    (caller : CloseFunding.Address) (channel block : Nat) (u : CloseFunding.Update)
+    (h : CloseFunding.recordPost e s caller channel block = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.recordPost, CloseFunding.onlyRollup, CloseFunding.require,
+    bind_ok_iff, exists_unit, ite_ok_iff, throw_ok_iff_false, error_ok_iff_false,
+    false_and, and_false, true_and, and_true, ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+theorem rollback_post_frames_latch (e : CloseFunding.Environment) (s : CloseFunding.State)
+    (caller : CloseFunding.Address) (block : Nat) (u : CloseFunding.Update)
+    (h : CloseFunding.rollbackPost e s caller block = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.rollbackPost, CloseFunding.onlyRollup, CloseFunding.require,
+    bind_ok_iff, exists_unit, ite_ok_iff, throw_ok_iff_false, error_ok_iff_false,
+    false_and, and_false, true_and, and_true, ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+theorem attest_frames_latch (e : CloseFunding.Environment) (s : CloseFunding.State)
+    (manager : CloseFunding.Address) (proof : CloseFunding.Bytes) (u : CloseFunding.Update)
+    (h : CloseFunding.attestSignedHeadBacking e s manager proof = .ok u) :
+    u.1.materializedChannelExit = s.materializedChannelExit := by
+  simp only [CloseFunding.attestSignedHeadBacking, bind_ok_iff, exists_unit, ite_ok_iff,
+    throw_ok_iff_false, error_ok_iff_false, false_and, and_false, true_and, and_true,
+    ite_false_left, pure_ok_iff] at h
+  repeat' (first | obtain ⟨_, h⟩ := (h : _ ∧ _) | obtain ⟨_, h⟩ := (h : ∃ _, _) | split at h)
+  all_goals (subst h; rfl)
+
+/-- The one-shot property of the single latch writer: `_materialize` can only latch a
+channel whose `materializedChannelExit` is still zero (:434), so an already-latched channel
+keeps its digest. This is the model half of (g2). -/
+theorem materialize_frames_live_latches (e : CloseFunding.Environment)
+    (before after : CloseFunding.World) (manager : CloseFunding.Address)
+    (proof : CloseFunding.Bytes) (events : List CloseFunding.Event)
+    (h : CloseFunding.materializeSignedHead e before manager proof = .ok (after, events))
+    (c : CloseFunding.Channel) (live : before.storage.materializedChannelExit c ≠ 0) :
+    after.storage.materializedChannelExit c = before.storage.materializedChannelExit c := by
+  obtain ⟨p, prepared, latched, _⟩ := CloseFunding.materialization_call_exact_accounting h
+  obtain ⟨_, anchor, checks⟩ :=
+    CloseFunding.prepared_signed_head_requires_receipt_and_local_checks prepared
+  have zero := (CloseFunding.prepared_materialization_guards checks).2.2.2.2.1
+  have distinct : ¬ c = p.channel := by
+    intro same
+    rw [same] at live
+    exact live zero
+  rw [latched]
+  simp only [CloseFunding.latchState, CloseFunding.put, if_neg distinct]
+
+inductive MaterializerEntrypoint where
+  | bindManager (e : CloseFunding.Environment) (caller manager : CloseFunding.Address)
+  | freezeFromManager (e : CloseFunding.Environment) (caller : CloseFunding.Address)
+      (channel generation : Nat)
+  | unfreezeFromManager (caller : CloseFunding.Address) (channel generation : Nat)
+  | recordPost (e : CloseFunding.Environment) (caller : CloseFunding.Address)
+      (channel block : Nat)
+  | rollbackPost (e : CloseFunding.Environment) (caller : CloseFunding.Address) (block : Nat)
+  | attestSignedHeadBacking (e : CloseFunding.Environment) (manager : CloseFunding.Address)
+      (proof : CloseFunding.Bytes)
+  /-- The single `materializedChannelExit` writer: `_materialize` :461. -/
+  | materializeSignedHead (e : CloseFunding.Environment) (manager : CloseFunding.Address)
+      (proof : CloseFunding.Bytes)
+
+def optionOfUpdate (w : CloseFunding.World) (r : CloseFunding.Result CloseFunding.Update) :
+    Option CloseFunding.World :=
+  match r with
+  | .ok u => some ⟨u.1, w.ledger⟩
+  | .error _ => none
+
+def optionOfWorld (r : CloseFunding.Result (CloseFunding.World × List CloseFunding.Event)) :
+    Option CloseFunding.World :=
+  match r with
+  | .ok u => some u.1
+  | .error _ => none
+
+theorem option_of_update_some (w v : CloseFunding.World)
+    (r : CloseFunding.Result CloseFunding.Update) (h : optionOfUpdate w r = some v) :
+    ∃ u, r = .ok u ∧ v.storage = u.1 := by
+  cases r with
+  | error e => simp only [optionOfUpdate] at h
+  | ok u =>
+    simp only [optionOfUpdate, Option.some.injEq] at h
+    exact ⟨u, rfl, by rw [← h]⟩
+
+theorem option_of_world_some (r : CloseFunding.Result (CloseFunding.World × List CloseFunding.Event))
+    (v : CloseFunding.World) (h : optionOfWorld r = some v) : ∃ events, r = .ok (v, events) := by
+  cases r with
+  | error e => simp only [optionOfWorld] at h
+  | ok u =>
+    simp only [optionOfWorld, Option.some.injEq] at h
+    exact ⟨u.2, by rw [← h]⟩
+
+/-- The world projection of one modeled materializer call. The five journalling
+entrypoints do not touch the Rollup ledger, so they carry it through unchanged. -/
+def MaterializerEntrypoint.run :
+    MaterializerEntrypoint → CloseFunding.World → Option CloseFunding.World
+  | .bindManager e caller manager, w =>
+      optionOfUpdate w (CloseFunding.bindManager e w.storage caller manager)
+  | .freezeFromManager e caller channel generation, w =>
+      optionOfUpdate w (CloseFunding.freezeFromManager e w.storage caller channel generation)
+  | .unfreezeFromManager caller channel generation, w =>
+      optionOfUpdate w (CloseFunding.unfreezeFromManager w.storage caller channel generation)
+  | .recordPost e caller channel block, w =>
+      optionOfUpdate w (CloseFunding.recordPost e w.storage caller channel block)
+  | .rollbackPost e caller block, w =>
+      optionOfUpdate w (CloseFunding.rollbackPost e w.storage caller block)
+  | .attestSignedHeadBacking e manager proof, w =>
+      optionOfUpdate w (CloseFunding.attestSignedHeadBacking e w.storage manager proof)
+  | .materializeSignedHead e manager proof, w =>
+      optionOfWorld (CloseFunding.materializeSignedHead e w manager proof)
+
+/-- **(g2), model half.** No modeled materializer entrypoint clears or rewrites a channel
+exit that has already been latched. -/
+theorem materializer_entrypoints_keep_the_latch (call : MaterializerEntrypoint)
+    (w v : CloseFunding.World) (h : call.run w = some v) (c : CloseFunding.Channel)
+    (live : w.storage.materializedChannelExit c ≠ 0) :
+    v.storage.materializedChannelExit c = w.storage.materializedChannelExit c := by
+  cases call with
+  | bindManager e caller manager =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun (bind_manager_frames_latch e w.storage caller manager u accepted) c
+  | freezeFromManager e caller channel generation =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun
+      (freeze_from_manager_frames_latch e w.storage caller channel generation u accepted) c
+  | unfreezeFromManager caller channel generation =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun
+      (unfreeze_from_manager_frames_latch w.storage caller channel generation u accepted) c
+  | recordPost e caller channel block =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun (record_post_frames_latch e w.storage caller channel block u accepted) c
+  | rollbackPost e caller block =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun (rollback_post_frames_latch e w.storage caller block u accepted) c
+  | attestSignedHeadBacking e manager proof =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨u, accepted, storage⟩ := option_of_update_some w v _ h
+    rw [storage]
+    exact congrFun (attest_frames_latch e w.storage manager proof u accepted) c
+  | materializeSignedHead e manager proof =>
+    simp only [MaterializerEntrypoint.run] at h
+    obtain ⟨events, accepted⟩ := option_of_world_some _ v h
+    exact materialize_frames_live_latches e w v manager proof events accepted c live
+
+/-! ## 6. Non-vacuity
+
+Both enumerations contain entrypoints that actually run: the frame theorems above are not
+vacuously true for lack of a successful call. -/
+
+def sampleLedger : CloseFunding.Ledger := ⟨fun _ => 0, fun _ _ => 0⟩
+
+/-- Channel 7 bound to manager 9 at block 12, then frozen at generation 5. -/
+def sampleFundingWorld : CloseFunding.World :=
+  ⟨CloseFunding.freezeState (CloseFunding.bindState CloseFunding.empty 7 9 12) 7 5, sampleLedger⟩
+
+theorem sample_materializer_entrypoint_runs :
+    ((MaterializerEntrypoint.unfreezeFromManager 9 7 5).run sampleFundingWorld).map
+      (fun v => v.storage.frozenGeneration 7) = some 0 := by rfl
+
+theorem sample_manager_entrypoint_runs :
+    (match ManagerValue.normalFullSetup with
+      | .error _ => none
+      | .ok (b, s) =>
+        ((ManagerEntrypoint.requestClose ManagerValue.normalFullExternal b 23 0 0 0).run s).map
+          (fun t => t.value.lifecycle)) = some ManagerValue.Lifecycle.pending := by rfl
 
 end Zkp.Implementation.LedgerWriters
