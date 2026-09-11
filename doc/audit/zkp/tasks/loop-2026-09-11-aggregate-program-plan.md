@@ -139,3 +139,46 @@ precisely in the header that the NTT ops are folded into the opaque product, and
 `register2.py --compose=Zkp.Implementation.FalconAggProgram:doc/audit/zkp/line-map/falcon-agg.json,src/falcon_sig/agg.rs --compose=Zkp.Implementation.FalconGadgetProgram:doc/audit/zkp/line-map/falcon-gadget.json,src/falcon_sig/gadget.rs`;
 then link the new theorems into the `falcon-agg.json` / `falcon-gadget.json` spans they cover
 (`validate-linemap.py`), progress/handoff docs, commit.
+
+## Layer I — `Zkp.Implementation.LedgerWriters` (new module; premises g1/g2)
+
+Finding from the read-only entrypoint inventory (2026-09-11): the storage behind (g1)/(g2) has
+exactly one Solidity write site per variable — `usedWithdrawalNullifiers` :2231
+(`submitWithdrawalClaim`, set-only), `receivedChannelFunds` :2364 (`pullChannelFunds` /
+`pullChannelTokenFunds`), `totalCreditedOut` :2398 (`claimWithdrawalCredit`),
+`finalizedChannelFundAmount` :1681 (`finalizeCloseGuarded`, `+=` only), and
+`CloseFundingMaterializer.materializedChannelExit` :461 (`materializeSignedHead`, guarded by
+`== 0` at :434). No proxy, `delegatecall`, `selfdestruct`, initializer or assembly `sstore`
+touches either contract; the Rollup cannot write Manager storage. BUT `finalizeCloseGuarded`
+is modeled (`ManagerValue.finalizeCloseCore`) and is NOT a `SystemSafety.Step` constructor,
+so (g1)'s clause `cap t = cap s` for unmodeled transitions is refuted by the deployed
+contract. (g1) is therefore corrected to `cap s ≤ cap t` (`SystemSafety` never consumes (g1)
+or (g2), so nothing downstream changes), and both premises are reduced to an inventory
+statement plus source refinement:
+
+1. Inventory data: `structure WriteSite` (contract, variable, solidity line, entrypoint,
+   modeling Lean def name, `Step` constructor name or none) and the pinned list
+   `flaggedWriteSites` (the five sites above); `decide`d pins (`each flagged variable has
+   exactly one site`, the `Step` coverage of `used`/`received`/`paid`/latch writers, and that
+   the only flagged writer outside `Step` is the `cap` site).
+2. Model-level frame theorems, one per modeled entrypoint of `ManagerValue` and
+   `CloseFunding` (enumerate them as `inductive ManagerEntrypoint` / `inductive
+   MaterializerEntrypoint` with a `run` wrapper so the statement is ONE theorem per contract):
+   `manager_entrypoints_keep_the_ledger : ∀ call s t, run call s = .ok t → LedgerMonotone s t`
+   where `LedgerMonotone s t := (∀ n, s.used n = true → t.used n = true) ∧ s.cap ≤ t.cap
+   (pointwise) ∧ (call ∉ Step-covered → t.received = s.received ∧ t.paid = s.paid) ∧ …`, and
+   `materializer_entrypoints_keep_the_latch : ∀ call s t, run call s = .ok t → ∀ c,
+   s.materializedChannelExit c ≠ 0 → t.materializedChannelExit c = s.materializedChannelExit c`.
+   Reuse `SystemSafety.request_close_frames_value`-style proofs (but do not import
+   SystemSafety — it will import this module through TrustBoundary) and
+   `CloseFunding.materialization_call_one_shot`.
+3. CI check `.github/ci/check-ledger-writers.py`: greps the two `.sol` files for every
+   assignment/`delete`/`sstore` of the five variables and asserts the (line, entrypoint) set
+   equals the Lean inventory (parse the Lean list textually); wire it into the lean job of
+   `.github/workflows/ci.yml` next to the other guards, and into `test-*`-style self-test if
+   cheap.
+
+Layer T2 then replaces (g1)/(g2) by: (g1') `flaggedWritersAreInventoried` — every deployed
+transition that changes one of the five variables is a run of an inventoried entrypoint
+(source refinement, kin to (h)); the old (g1) (with `cap` monotone) and (g2) become theorems
+from (g1') + the frame theorems.
