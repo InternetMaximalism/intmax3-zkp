@@ -603,6 +603,42 @@ pub struct FalconSigVerifyTarget {
     pub h: Vec<Target>,
     /// Witness: signature polynomial coefficients, canonical residues `< q`.
     pub s2: Vec<Target>,
+    /// TEST-ONLY handles on the gadget's INTERNAL wires, for the Layer-M mechanical
+    /// faithfulness check (`src/faithfulness.rs`). Compiled out of every non-test build, so
+    /// the production constraint system is byte-identical.
+    #[cfg(test)]
+    pub(crate) probe: FalconGadgetProbe,
+}
+
+/// TEST-ONLY: the internal wires of [`FalconSigVerifyTarget::build`] that the Lean model
+/// `Zkp/Implementation/FalconGadgetProgram.lean` names in its `GadgetAssignment` but that the
+/// returned struct does not expose. Captured so the static faithfulness test can compare
+/// `GadgetOp.holds` claims against the built circuit.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct FalconGadgetProbe {
+    /// `pk_digest_circuit(builder, &h)` output, gadget.rs:675 (`a.pkComputed`).
+    pub pk_computed: Bytes32Target,
+    /// `h2p_circuit(builder, &salt, &message_digest)` output, gadget.rs:679 (`a.c`).
+    pub c: Vec<Target>,
+    /// `ntt_forward` outputs, gadget.rs:684-685 (`a.hNtt`, `a.s2Ntt`).
+    pub h_ntt: Vec<Target>,
+    pub s2_ntt: Vec<Target>,
+    /// `pointwise_mul` / `ntt_inverse` outputs, gadget.rs:686-687 (`a.prodNtt`, `a.prod`).
+    pub prod_ntt: Vec<Target>,
+    pub prod: Vec<Target>,
+    /// the `reduce_mod_q` outputs of the `s1` loop, gadget.rs:689-698 (`a.s1`).
+    pub s1: Vec<Target>,
+    /// `add_many(&squares)`, gadget.rs:707 (`a.norm`).
+    pub norm: Target,
+    /// `builder.constant(FALCON_SIG_L2_BOUND)`, gadget.rs:716-718.
+    pub beta_sq: Target,
+    /// `builder.sub(beta_sq, norm)`, gadget.rs:719 (`a.slack`).
+    pub slack: Target,
+    /// `select(verify, slack, zero)` or `slack`, gadget.rs:720-726 (`a.checkedSlack`).
+    pub checked_slack: Target,
+    /// the `verify` gate wire of `new_conditional`, or `None` for the unconditional gadget.
+    pub verify: Option<Target>,
 }
 
 impl FalconSigVerifyTarget {
@@ -726,12 +762,30 @@ impl FalconSigVerifyTarget {
         };
         builder.range_check(checked_slack, 26);
 
+        #[cfg(test)]
+        let probe = FalconGadgetProbe {
+            pk_computed,
+            c: c.clone(),
+            h_ntt: h_ntt.clone(),
+            s2_ntt: s2_ntt.clone(),
+            prod_ntt: prod_ntt.clone(),
+            prod: prod.clone(),
+            s1: s1.clone(),
+            norm,
+            beta_sq,
+            slack,
+            checked_slack,
+            verify: verify.map(|b| b.target),
+        };
+
         Self {
             pk_g,
             message_digest,
             salt,
             h,
             s2,
+            #[cfg(test)]
+            probe,
         }
     }
 
@@ -1762,5 +1816,238 @@ mod tests {
         for row in rows {
             println!("{row}");
         }
+    }
+
+    // LAYER M: MECHANICAL FAITHFULNESS EVIDENCE
+    // ---------------------------------------------------------------------------------------
+    //
+    // Model: `doc/audit/zkp/Zkp/Implementation/FalconGadgetProgram.lean`, `GadgetOp` /
+    // `gadgetProgram` / `OpHolds` (23 ops, one per builder call of
+    // `FalconSigVerifyTarget::build`). The static test below checks every `OpHolds` conjunct
+    // that is a COPY CONSTRAINT, a CONSTANT wiring, a RANGE CHECK width or a wire-vector
+    // LENGTH against the circuit plonky2 really built (see `crate::faithfulness` for how the
+    // representative map is read). The `faithfulness_falcon_gadget_mutation_*` tests below
+    // cover the arithmetic/gadget conjuncts by proving a witness that violates exactly one
+    // claim and asserting rejection.
+
+    use crate::faithfulness::{EvidenceTable, MUTATION, NOT_INJECTABLE, NOT_STATIC, RepView,
+        TRIVIAL};
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_static_table() {
+        let circuit: &FalconSigCircuit<F, C, D> = &N1_CIRCUIT;
+        let view = RepView::new(&circuit.data);
+        let t = &circuit.targets[0];
+        let p = &t.probe;
+        let pk = t.pk_g.to_vec();
+        let msg = t.message_digest.to_vec();
+        let mut table = EvidenceTable::new("FalconGadgetProgram");
+
+        table.note(
+            "twiddleTables", "gadget.rs:655", "no-gate", TRIVIAL,
+            "build-time table assertions only; Lean holds = True",
+        );
+        table.check(
+            "allocPkG", "gadget.rs:659", "range",
+            pk.len() == 8 && view.all_range_checked(&pk, 32),
+            "Bytes32Target::new(_, true): 8 limbs, range_check(limb, 32) each",
+        );
+        table.check(
+            "allocMessageDigest", "gadget.rs:660", "range",
+            msg.len() == 8 && view.all_range_checked(&msg, 32),
+            "Bytes32Target::new(_, true): 8 limbs, range_check(limb, 32) each",
+        );
+        table.check(
+            "witnessSalt", "gadget.rs:663", "width", t.salt.len() == 8,
+            "[Target; 8] fixes the salt vector length",
+        );
+        table.check(
+            "witnessH", "gadget.rs:664", "width", t.h.len() == N,
+            "(0..N).map(add_virtual_target) fixes |h| = 512",
+        );
+        table.check(
+            "witnessS2", "gadget.rs:665", "width", t.s2.len() == N,
+            "(0..N).map(add_virtual_target) fixes |s2| = 512",
+        );
+        // canonicalCoeffGates v = (v < 2^14) AND (fieldSub (q-1) v < 2^14): the first conjunct
+        // is `range_check(v, 14)`, the second the complement's own 14-bit check
+        // (`assert_canonical_coeff`, gadget.rs:290-298). The complement wire is an internal
+        // `sub` output that the gadget never returns, so only the first is structural.
+        let coeffs: Vec<Target> = t.h.iter().chain(t.s2.iter()).copied().collect();
+        table.check(
+            "canonicalCoeffs", "gadget.rs:670-672", "range",
+            view.all_range_checked(&coeffs, 14),
+            "assert_canonical_coeff: range_check(v, 14) on every h and s2 coefficient",
+        );
+        table.note(
+            "canonicalCoeffs", "gadget.rs:290-298", "arith", MUTATION,
+            "complement (q-1-v) 14-bit check: faithfulness_falcon_gadget_mutation_canonical_coeffs_*",
+        );
+        table.note(
+            "pkDigest", "gadget.rs:675", "gadget", NOT_STATIC,
+            "Poseidon sponge semantics (Environment.falconPkDigest), not a copy constraint",
+        );
+        table.check(
+            "connectPkG", "gadget.rs:676", "connect",
+            view.same_slices(&pk, &p.pk_computed.to_vec()),
+            "pk_g.connect(builder, pk_computed): all 8 limbs share a representative",
+        );
+        table.check(
+            "hashToPoint", "gadget.rs:679 / :360-362", "range",
+            view.all_range_checked(&t.salt, 40) && p.c.len() == N,
+            "h2p_circuit range_checks every salt element to 40 bits and returns 512 coefficients",
+        );
+        table.note(
+            "hashToPoint", "gadget.rs:679", "gadget", MUTATION,
+            "c = H2P(salt, digest) sponge semantics: faithfulness_falcon_gadget_mutation_hash_to_point",
+        );
+        table.check(
+            "nttFwdH", "gadget.rs:684", "width", p.h_ntt.len() == N,
+            "ntt_forward returns 512 wires",
+        );
+        table.check(
+            "nttFwdS2", "gadget.rs:685", "width", p.s2_ntt.len() == N,
+            "ntt_forward returns 512 wires",
+        );
+        table.note(
+            "nttFwdH", "gadget.rs:434-472", "arith", NOT_STATIC,
+            "4608 reduce_mod_q butterflies with 14-bit quotients: arithmetic, not copy constraints",
+        );
+        table.note(
+            "nttFwdS2", "gadget.rs:434-472", "arith", NOT_STATIC,
+            "4608 reduce_mod_q butterflies with 14-bit quotients: arithmetic, not copy constraints",
+        );
+        table.check(
+            "pointwiseMul", "gadget.rs:686", "width", p.prod_ntt.len() == N,
+            "pointwise_mul returns 512 wires",
+        );
+        table.check(
+            "nttInv", "gadget.rs:687", "width", p.prod.len() == N,
+            "ntt_inverse returns 512 wires",
+        );
+        table.check(
+            "s1Reduce", "gadget.rs:689-698", "width", p.s1.len() == N,
+            "the s1 = reduce_mod_q(c + q - prod, 1) loop returns 512 wires",
+        );
+        table.note(
+            "s1Reduce", "gadget.rs:689-698", "arith", MUTATION,
+            "1-bit quotient pin: covered by mod_q_quotient_cheating_rejected in this file",
+        );
+        table.note(
+            "centeredSquaresS1", "gadget.rs:702-706", "arith", MUTATION,
+            "centering bit is an internal witness: centering_bit_lie_can_only_inflate_the_norm",
+        );
+        table.note(
+            "centeredSquaresS2", "gadget.rs:702-706", "arith", MUTATION,
+            "centering bit is an internal witness: centering_bit_lie_can_only_inflate_the_norm",
+        );
+        table.note(
+            "normSum", "gadget.rs:707", "arith", NOT_STATIC,
+            "add_many(&squares) is an arithmetic chain, not a copy constraint",
+        );
+        table.check(
+            "betaConstant", "gadget.rs:716-718", "constant",
+            view.is_const(p.beta_sq, FALCON_SIG_L2_BOUND),
+            "builder.constant(FALCON_SIG_L2_BOUND) is wired to that ConstantGate value",
+        );
+        table.note(
+            "slackSub", "gadget.rs:719", "arith", NOT_STATIC,
+            "builder.sub(beta_sq, norm) is an arithmetic gate output",
+        );
+        table.check(
+            "selectVerify", "gadget.rs:720-726", "connect",
+            p.verify.is_none() && view.same(p.checked_slack, p.slack),
+            "unconditional gadget: checked_slack IS slack (no select wire allocated)",
+        );
+        table.check(
+            "slackRange", "gadget.rs:727", "range",
+            view.range_bits(p.checked_slack).contains(&26),
+            "range_check(checked_slack, 26)",
+        );
+        table.note(
+            "buildTarget", "gadget.rs:729-735", "no-gate", TRIVIAL,
+            "struct literal emits no constraint; Lean holds = True",
+        );
+        // Not a `GadgetOp`: the measurement harness around the gadget. Recorded because the
+        // mutation tests below prove against THIS circuit's public-input contract.
+        let mut expected_pis = pk.clone();
+        expected_pis.extend(msg.iter().copied());
+        table.check(
+            "harnessRegisterPublicInputs", "gadget.rs:897-901", "public-inputs",
+            view.public_inputs_are(&expected_pis),
+            "FalconSigCircuit::new registers pk_g(8) then message_digest(8), in that order",
+        );
+
+        table.finish();
+    }
+
+    /// `GadgetOp.canonicalCoeffs` (FalconGadgetProgram.lean:541), s2 half: a coefficient equal
+    /// to `q` passes the 14-bit check but makes the complement `q-1-v` wrap.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_mutation_canonical_coeffs_s2() {
+        let t0 = std::time::Instant::now();
+        let mut w = honest_witness(0x51);
+        w.s2[7] = Q;
+        assert_rejected(&N1_CIRCUIT, w, "canonicalCoeffs must reject s2[7] = q");
+        println!("[faithfulness] canonicalCoeffs/s2 mutation: {:?}", t0.elapsed());
+    }
+
+    /// `GadgetOp.canonicalCoeffs` (FalconGadgetProgram.lean:541), h half.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_mutation_canonical_coeffs_h() {
+        let mut w = honest_witness(0x52);
+        w.h[11] = Q;
+        assert_rejected(&N1_CIRCUIT, w, "canonicalCoeffs must reject h[11] = q");
+    }
+
+    /// `GadgetOp.connectPkG` (FalconGadgetProgram.lean:543): `pk_g` is an INPUT wire connected
+    /// to the gadget-derived digest, so a mismatching input cannot be proved.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_mutation_connect_pk_g() {
+        let mut w = honest_witness(0x53);
+        let mut limbs = w.pk_g.to_u32_vec();
+        limbs[0] ^= 1;
+        w.pk_g = Bytes32::from_u32_slice(&limbs).unwrap();
+        assert_rejected(&N1_CIRCUIT, w, "connectPkG must reject a flipped pk_g limb");
+    }
+
+    /// `GadgetOp.hashToPoint` (FalconGadgetProgram.lean:544-552): `c` is a function of the
+    /// salt, so a tampered salt breaks the norm bound.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_mutation_hash_to_point() {
+        let mut w = honest_witness(0x54);
+        w.salt_elements[2] ^= 0xff;
+        assert_rejected(&N1_CIRCUIT, w, "hashToPoint must reject a tampered salt");
+    }
+
+    /// `GadgetOp.slackRange` (FalconGadgetProgram.lean:574): the UNGATED 26-bit range check on
+    /// `beta^2 - norm`. The canonical padding witness (h = s2 = 0, so s1 = c) satisfies every
+    /// other constraint of this gadget and is rejected by this one alone.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_gadget_mutation_slack_range() {
+        let w = FalconSigGadgetWitness::padding(sample_digest(0x55));
+        assert_rejected(
+            &N1_CIRCUIT,
+            w,
+            "slackRange must reject the zero-polynomial padding witness in the UNCONDITIONAL gadget",
+        );
+    }
+
+    /// `GadgetOp.selectVerify` (FalconGadgetProgram.lean:572-573) at `verify = 0` is not
+    /// reachable from this harness: `FalconSigCircuit` builds the UNCONDITIONAL gadget, which
+    /// allocates no `verify` wire at all (asserted structurally above).
+    #[test]
+    fn faithfulness_falcon_gadget_select_verify_is_absent_unconditionally() {
+        assert!(
+            N1_CIRCUIT.targets[0].probe.verify.is_none(),
+            "FalconSigVerifyTarget::new must not allocate a verify gate wire"
+        );
+        let _ = NOT_INJECTABLE;
     }
 }

@@ -1,0 +1,50 @@
+# ops of the Lean model of PostCloseClaimCircuit covered by the static faithfulness check
+# op	kind	verdict
+accumulator root is the PI root	aliasing	ok
+build standard_recursion_zk_config	config	ok
+build standard_recursion_zk_config	no-gate	trivial
+connect active<1025	constant	ok
+connect amount.hi,lo	connect	ok
+connect finalH1	connect	ok
+connect incomingTxHash	connect	ok
+connect receiverDeltaDigest	connect	ok
+connect receiverMemberIndex<active	constant	ok
+connect sharedNativeNullifier	connect	ok
+decryption true	gadget	not-static
+hash IMB2	gadget	not-static
+hash IMCK	gadget	not-static
+hash IMRC	gadget	not-static
+hash IMRP	gadget	not-static
+hash IMS2	gadget	not-static
+hash push(ids,mixed)	gadget	not-static
+hash push(txRoot,leaf)	gadget	not-static
+hash receiverWing	gadget	not-static
+hash senderWing	gadget	not-static
+hash txLeaf	gadget	not-static
+ids layout (TM-16)	connect	ok
+merkle incoming	gadget	not-static
+merkle incoming	width	ok
+merkle slot	width	ok
+range active sum	range	ok
+range amount.hi,lo	range	ok
+range closeIntent	range	ok
+range finalAccumulator	range	ok
+range finalH1	range	ok
+range incomingTxHash	range	ok
+range memberCount,delegateCount,tokenCount + registry	range	ok
+range nullifier	range	ok
+range receiverChannelId	range	ok
+range receiverPkG	range	ok
+range recipient	range	ok
+range settledChain	range	ok
+range slot ciphertext digests + pending adds	range	ok
+range sourceChannel	range	ok
+range sourcePk,senderDigest,receiverDigest,txRoot	range	ok
+range stateVersion	range	ok
+range tokenIndex	range	ok
+register 57	public-inputs	ok
+tx recompute chain wiring	aliasing	ok
+virtual a,b,c1,c2	width	ok
+virtual incomingTxIndex	range	ok
+virtual receiverMemberIndex	range	ok
+virtual slotRoot	range	ok

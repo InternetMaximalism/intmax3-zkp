@@ -1,0 +1,81 @@
+# ops of the Lean model of CloseCircuit covered by the static faithfulness check
+# op	kind	verdict
+addFreezeU64OneFinalCarryZero	arith	not-static
+addFreezeU64OneFinalCarryZero	range	ok
+allocateAggregateProofAndConstantKey	gadget	not-static
+allocateBalanceProofAndConstantKey	gadget	not-static
+allocateCheckedInsertionPath4[0..8)	width	ok
+build	no-gate	trivial
+checkedFundU256[0..10)	range	ok
+checkedPrivateField h2	range	ok
+checkedPrivateField previousDigest	range	ok
+checkedPrivateField sharedNullifierRoot	range	ok
+checkedPrivateField stateFreezeNonce	range	ok
+checkedPrivateField unallocatedIncoming	range	ok
+checkedPublicField accumulatorRoot	range	ok
+checkedPublicField burnHash	range	ok
+checkedPublicField channelId	range	ok
+checkedPublicField closeId	range	ok
+checkedPublicField closeNonce	range	ok
+checkedPublicField delegateCount	range	ok
+checkedPublicField finalEpoch	range	ok
+checkedPublicField finalSmallBlock	range	ok
+checkedPublicField freezeNonce	range	ok
+checkedPublicField fundRoot	range	ok
+checkedPublicField genesisFund	range	ok
+checkedPublicField h1	range	ok
+checkedPublicField memberCount	range	ok
+checkedPublicField memberSet	range	ok
+checkedPublicField settledChain	range	ok
+checkedPublicField snapshot	range	ok
+checkedPublicField stateDigest	range	ok
+checkedPublicField stateVersion	range	ok
+checkedPublicField tokenFundsDigest	range	ok
+checkedPublicField withdrawalDigest	range	ok
+checkedRegistry[0..10)	range	ok
+checkedTokenCount	range	ok
+computeMemberSetAndConnect	connect	ok
+computeMemberSetAndConnect	gadget	not-static
+conditionalIndexedInsert[0..8)	gadget	not-static
+connectAggregateCount	connect	ok
+connectAggregateMessage	connect	ok
+connectBalanceChannel	connect	ok
+connectBalanceEmbeddedCyclicKey	gadget	not-static
+connectBalanceSettledChain	connect	ok
+connectCloseNonceToFreeze	connect	ok
+connectFreezeSuccessor	connect	ok
+connectGenesisAmount	connect	ok
+connectMemberSum	connect	ok
+connectTokenSum	connect	ok
+constantEmptyDistinctRoot	constant	ok
+constantInsertionValueOne	constant	ok
+memberMonotone[0..7)	arith	not-static
+noDuplicateActiveToken[45 pairs]	arith	not-static
+rawSlotRoot4	range	ok
+recomputeH1AndConnect	connect	ok
+recomputeH1AndConnect	gadget	not-static
+recomputeImchAndConnect	connect	ok
+recomputeImchAndConnect	gadget	not-static
+recomputeImclAndConnect	connect	ok
+recomputeImclAndConnect	gadget	not-static
+recomputeImcsAndConnect	connect	ok
+recomputeImcsAndConnect	gadget	not-static
+recomputeTokenFundsAndConnect	connect	ok
+recomputeTokenFundsAndConnect	gadget	not-static
+registerPublicInputs103	public-inputs	ok
+requireAggregateWidth73	public-inputs	ok
+requireMemberFlag 0	constant	ok
+requireMemberFlag 1	constant	ok
+requireTokenFlag0	constant	ok
+safeMemberBoolean[0..8)	arith	not-static
+safeTokenBoolean[0..10)	arith	not-static
+selectImcmKeyWords[0..8)	arith	not-static
+selectImcmKeyWords[0..8)	preimage	ok
+sliceAggregateKey[0..8)	aliasing	ok
+standardRecursionZkConfig	config	ok
+tokenMonotone[0..9)	arith	not-static
+verifyAggregateAtConstantKey	gadget	not-static
+verifyBalanceAtConstantKey	gadget	not-static
+zeroBurnHash8	constant	ok
+zeroSnapshot2	constant	ok
+zeroUnallocated8	constant	ok

@@ -1,0 +1,11 @@
+# ops of the Lean model of FalconAggProgram-leaf covered by the static faithfulness check
+# op	kind	verdict
+addConstGate	no-gate	trivial
+build	no-gate	trivial
+constantOne	constant	ok
+falconSigVerify	gadget	not-static
+falconSigVerify	range	ok
+registerMessageDigest8	public-inputs	ok
+registerPkG8	public-inputs	ok
+registerSignerCount	public-inputs	ok
+requireLeafWidth	public-inputs	ok

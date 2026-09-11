@@ -18,6 +18,10 @@ pub mod constants;
 )]
 pub mod deprecated;
 pub mod ethereum_types;
+/// TEST-ONLY: mechanical faithfulness evidence support (Layer M of the ZKP audit plan).
+/// Compiled out of every non-test build; adds no runtime code path.
+#[cfg(test)]
+pub mod faithfulness;
 pub mod falcon_sig;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod l1_finality;

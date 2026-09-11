@@ -1,0 +1,50 @@
+# ops of the Lean model of WithdrawalClaimCircuit covered by the static faithfulness check
+# op	kind	verdict
+activeSumAnd11Bits	arith	not-static
+activeSumAnd11Bits	range	ok
+allocateCheckedHeader	range	ok
+allocateCheckedPublic 0	range	ok
+allocateCheckedPublic 1	range	ok
+allocateCheckedPublic 2	range	ok
+allocateCheckedPublic 3	range	ok
+allocateCheckedPublic 4	range	ok
+allocateCheckedPublic 5	range	ok
+allocateCheckedPublic 6	range	ok
+allocateCheckedPublic 7	range	ok
+allocateCheckedPublic 8	range	ok
+allocateCheckedPublic 9	range	ok
+allocateFourPolynomials	width	ok
+allocateRawRootAndMemberIndex	range	ok
+allocateRawRootAndMemberIndex	range	ok
+allocateTenCheckedCiphertextsAndCounters	range	ok
+buildCircuit	no-gate	trivial
+compareActive1025	arith	not-static
+compareActive1025	constant	ok
+compareMemberActive	arith	not-static
+compareMemberActive	constant	ok
+compareTokenCount	constant	ok
+connectAmountHighThenLow	connect	ok
+connectCiphertext	connect	ok
+connectH1	connect	ok
+connectNullifier	connect	ok
+decryptExposeAmount	gadget	not-static
+deriveIMW2	gadget	not-static
+hashFullSlotLeaf	gadget	not-static
+hashPkAndCiphertext	gadget	not-static
+memberPkGIsInformational	aliasing	ok
+observeBeforePadding	no-gate	trivial
+observeDecryption	no-gate	trivial
+observeDigests	no-gate	trivial
+observeHeaderSelectors	no-gate	trivial
+observeInclusion	no-gate	trivial
+observeInputs	no-gate	trivial
+observeNullifier	no-gate	trivial
+recomputeH1	gadget	not-static
+registerPublic	public-inputs	ok
+selectBaseToken	connect	ok
+selectEightCiphertextLimbs	connect	ok
+tenEqualityFlagsAndSumOne	arith	not-static
+tenEqualityFlagsAndSumOne	constant	ok
+verifyInclusion	gadget	not-static
+verifyInclusion	width	ok
+zeroKnowledgeConfig	config	ok

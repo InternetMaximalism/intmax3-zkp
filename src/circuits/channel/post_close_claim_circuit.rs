@@ -296,6 +296,44 @@ where
     delta_c1: Vec<Target>,
     delta_c2: Vec<Target>,
     dec_core: DecryptionCoreTargets,
+    /// TEST-ONLY handles on the constructor's internal wires; see
+    /// [`PostCloseClaimFaithfulnessProbe`].
+    #[cfg(test)]
+    pub(crate) probe: PostCloseClaimFaithfulnessProbe,
+}
+
+/// TEST-ONLY: the internal wires of [`PostCloseClaimCircuit::new`] that
+/// `doc/audit/zkp/Zkp/Implementation/PostCloseClaimCircuit.lean` names in its `Assignment`
+/// but that the struct does not otherwise keep. Compiled out of every non-test build.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct PostCloseClaimFaithfulnessProbe {
+    /// the tx-hash recompute chain outputs, :339-364.
+    pub sender_wing: Bytes32Target,
+    pub receiver_wing: Bytes32Target,
+    pub tx_leaf: Bytes32Target,
+    pub mixed: Bytes32Target,
+    pub ids: Bytes32Target,
+    pub recomputed_tx_hash: Bytes32Target,
+    /// `final_settled_tx_accumulator_root.to_hash_out(builder)`, :376-378.
+    pub accumulator_root_hash: PoseidonHashOutTarget,
+    /// `recompute_h1` output, :410-425 (`recomputedH1`).
+    pub recomputed_h1: Bytes32Target,
+    /// `builder.one()`, :430.
+    pub one: Target,
+    /// `add(member_count, delegate_count)` and the two comparison results, :431-444.
+    pub active: Target,
+    pub active_le_max: Target,
+    pub is_active: Target,
+    /// the Regev pk / ct digest gadget outputs and the slot leaf, :459-482.
+    pub pk_digest: Bytes32Target,
+    pub ct_digest: Bytes32Target,
+    pub slot_leaf: PoseidonHashOutTarget,
+    /// `decryption_core(.., true)` amount limbs, :486-497.
+    pub amount_lo: Target,
+    pub amount_hi: Target,
+    /// the IMCK keccak output, :505-509.
+    pub shared_native_nullifier: Bytes32Target,
 }
 
 impl<F, C, const D: usize> PostCloseClaimCircuit<F, C, D>
@@ -430,6 +468,8 @@ where
         // index itself is bounded `< MAX_CHANNEL_MEMBERS` by the inclusion verify's `split_le`.
         let one = builder.one();
         let active = builder.add(member_count, delegate_count);
+        #[cfg(test)]
+        let mut active_le_max_probe: Option<Target> = None;
         {
             let max_active = builder.constant(F::from_canonical_usize(MAX_CHANNEL_MEMBERS));
             // 11 bits: MAX_CHANNEL_MEMBERS = 1024 (the former 8-bit check was a stale MAX = 16
@@ -438,6 +478,10 @@ where
             let max_plus_one = builder.add_const(max_active, F::ONE);
             let active_le_max = less_than_u32(&mut builder, active, max_plus_one);
             builder.assert_one(active_le_max.target);
+            #[cfg(test)]
+            {
+                active_le_max_probe = Some(active_le_max.target);
+            }
         }
         let is_active = less_than_u32(&mut builder, receiver_member_index, active);
         builder.connect(is_active.target, one);
@@ -509,6 +553,28 @@ where
             Bytes32Target::from_slice(&builder.keccak256::<C>(&nullifier_inputs));
         shared_native_nullifier.connect(&mut builder, public_inputs.shared_native_nullifier);
 
+        #[cfg(test)]
+        let probe = PostCloseClaimFaithfulnessProbe {
+            sender_wing,
+            receiver_wing,
+            tx_leaf,
+            mixed,
+            ids,
+            recomputed_tx_hash,
+            accumulator_root_hash,
+            recomputed_h1,
+            one,
+            active,
+            active_le_max: active_le_max_probe.expect("active_le_max captured"),
+            is_active: is_active.target,
+            pk_digest,
+            ct_digest,
+            slot_leaf,
+            amount_lo,
+            amount_hi,
+            shared_native_nullifier,
+        };
+
         builder.register_public_inputs(&public_inputs.to_vec());
         let data = builder.build::<C>();
         Self {
@@ -537,6 +603,8 @@ where
             delta_c1,
             delta_c2,
             dec_core,
+            #[cfg(test)]
+            probe,
         }
     }
 
@@ -1217,5 +1285,273 @@ mod tests {
             result.is_err() || result.unwrap().is_err(),
             "a tampered final_balance_state_h1 must be rejected"
         );
+    }
+
+    // LAYER M: MECHANICAL FAITHFULNESS EVIDENCE
+    // ---------------------------------------------------------------------------------------
+    //
+    // Model: `doc/audit/zkp/Zkp/Implementation/PostCloseClaimCircuit.lean` — `BuildOp` /
+    // `constructorProgram` / `OpHolds` (:384-411, :638-641), one entry per builder call of
+    // `PostCloseClaimCircuit::new`. Checked below: every `OpHolds` conjunct that is a copy
+    // constraint (`ConnectHolds`), a range-check width (`.range`), a wire-vector length
+    // (`.virtual` / `.merkle` shape), a constant wiring, or the `.register` order claim.
+
+    use plonky2::{iop::target::Target, plonk::circuit_data::CircuitConfig};
+
+    use crate::{
+        constants::{BALANCE_SLOT_TREE_HEIGHT, MAX_CHANNEL_TOKENS},
+        ethereum_types::{bytes32::BYTES32_LEN, u32limb_trait::U32LimbTargetTrait as _},
+        faithfulness::{EvidenceTable, NOT_STATIC, RepView, TRIVIAL},
+        regev::REGEV_N,
+        wallet_core::SETTLED_TX_ACCUMULATOR_HEIGHT,
+    };
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_post_close_claim_circuit_static_table() {
+        let c = circuit();
+        let view = RepView::new(&c.data);
+        let p = &c.probe;
+        let pi = &c.public_inputs;
+        let mut table = EvidenceTable::new("PostCloseClaimCircuit");
+
+        table.check(
+            "build standard_recursion_zk_config", "post_close_claim_circuit.rs:308", "config",
+            c.data.common.config == CircuitConfig::standard_recursion_zk_config(),
+            "the built circuit carries standard_recursion_zk_config",
+        );
+
+        // publicAllocationProgram — `.range name count 32`, :113-131.
+        let groups: Vec<(&str, Vec<Target>, usize)> = vec![
+            ("closeIntent", pi.close_intent_digest.to_vec(), 8),
+            ("receiverChannelId", pi.receiver_channel_id.to_vec(), 1),
+            ("incomingTxHash", pi.incoming_tx_hash.to_vec(), 8),
+            ("receiverPkG", pi.receiver_pk_g.to_vec(), 8),
+            ("recipient", pi.recipient.to_vec(), 5),
+            ("nullifier", pi.shared_native_nullifier.to_vec(), 8),
+            ("amount.hi,lo", pi.amount.to_vec(), 2),
+            ("finalH1", pi.final_balance_state_h1.to_vec(), 8),
+            ("finalAccumulator", pi.final_settled_tx_accumulator_root.to_vec(), 8),
+            ("tokenIndex", pi.token_index.to_vec(), 1),
+        ];
+        for (name, wires, width) in &groups {
+            table.check(
+                &format!("range {name}"), "post_close_claim_circuit.rs:113-131", "range",
+                wires.len() == *width && view.all_range_checked(wires, 32),
+                "range_check(limb, 32) on every limb of the group",
+            );
+        }
+
+        // `.range "sourcePk,senderDigest,receiverDigest,txRoot" 32 32` and
+        // `.range "sourceChannel" 1 32` — :323-327.
+        let mut stage3: Vec<Target> = Vec::new();
+        stage3.extend(c.source_pk_g.to_vec());
+        stage3.extend(c.sender_delta_digest.to_vec());
+        stage3.extend(c.receiver_delta_digest.to_vec());
+        stage3.extend(c.tx_tree_root.to_vec());
+        table.check(
+            "range sourcePk,senderDigest,receiverDigest,txRoot",
+            "post_close_claim_circuit.rs:323-326", "range",
+            stage3.len() == 32 && view.all_range_checked(&stage3, 32),
+            "four Bytes32Target::new(_, true) => 32 range-checked limbs",
+        );
+        table.check(
+            "range sourceChannel", "post_close_claim_circuit.rs:327", "range",
+            view.range_bits(c.source_channel_id).contains(&32),
+            "range_check(source_channel_id, 32)",
+        );
+
+        // `.hash ...` ops only fix preimage WIDTHS (a mismatch is a build-time panic); their
+        // outputs are Environment callbacks. What is structural is the chain's wiring.
+        for (op, src) in [
+            ("hash senderWing", "post_close_claim_circuit.rs:330-337"),
+            ("hash receiverWing", "post_close_claim_circuit.rs:338-346"),
+            ("hash txLeaf", "post_close_claim_circuit.rs:347-349"),
+            ("hash push(txRoot,leaf)", "post_close_claim_circuit.rs:387"),
+            ("hash push(ids,mixed)", "post_close_claim_circuit.rs:401"),
+            ("hash IMB2", "post_close_claim_circuit.rs:410-421"),
+            ("hash IMRP", "post_close_claim_circuit.rs:460"),
+            ("hash IMS2", "post_close_claim_circuit.rs:461-467"),
+            ("hash IMRC", "post_close_claim_circuit.rs:482"),
+            ("hash IMCK", "post_close_claim_circuit.rs:505-509"),
+        ] {
+            table.note(op, src, "gadget", NOT_STATIC,
+                "the hash relation is an Environment callback; only its preimage width is fixed");
+        }
+
+        // TM-16 `ids` layout, :396-400 — the ONLY structural content of the ids word.
+        let ids = p.ids.to_vec();
+        table.check(
+            "ids layout (TM-16)", "post_close_claim_circuit.rs:396-400", "connect",
+            ids.len() == BYTES32_LEN
+                && view.all_zero(&ids[0..BYTES32_LEN - 3])
+                && view.same(ids[BYTES32_LEN - 3], pi.token_index[0])
+                && view.same(ids[BYTES32_LEN - 2], pi.receiver_channel_id[0])
+                && view.same(ids[BYTES32_LEN - 1], c.source_channel_id),
+            "ids = [0,0,0,0,0, token_index PI, receiver_channel_id PI, source_channel_id]",
+        );
+
+        // `.connect "incomingTxHash"` — :365
+        table.check(
+            "connect incomingTxHash", "post_close_claim_circuit.rs:365", "connect",
+            view.same_slices(&p.recomputed_tx_hash.to_vec(), &pi.incoming_tx_hash.to_vec()),
+            "recomputed_tx_hash.connect(incoming_tx_hash)",
+        );
+        // `.virtual "incomingTxIndex" 1` — :369
+        table.check(
+            "virtual incomingTxIndex", "post_close_claim_circuit.rs:369", "range",
+            view.range_bits(c.incoming_tx_index).contains(&SETTLED_TX_ACCUMULATOR_HEIGHT),
+            "a bare add_virtual_target whose only bound is the inclusion verify's split_le",
+        );
+        // `.merkle "incoming: ..." accumulatorHeight` — :368-386
+        table.check(
+            "merkle incoming", "post_close_claim_circuit.rs:368-386", "width",
+            c.incoming_tx_inclusion.0.siblings.len() == SETTLED_TX_ACCUMULATOR_HEIGHT,
+            "IncrementalMerkleProofTarget::new(builder, SETTLED_TX_ACCUMULATOR_HEIGHT)",
+        );
+        table.note(
+            "merkle incoming", "merkle_tree.rs:228-248", "gadget", NOT_STATIC,
+            "the canonical-root round-trip connect and the fold live inside the gadget",
+        );
+
+        // H1 header allocations, :389-408.
+        let mut header: Vec<Target> = vec![c.member_count, c.delegate_count, c.token_count];
+        header.extend(c.token_registry.iter().copied());
+        table.check(
+            "range memberCount,delegateCount,tokenCount + registry",
+            "post_close_claim_circuit.rs:389-395", "range",
+            header.len() == 3 + MAX_CHANNEL_TOKENS && view.all_range_checked(&header, 32),
+            "13 range-checked u32 header limbs",
+        );
+        table.check(
+            "virtual slotRoot", "post_close_claim_circuit.rs:397", "range",
+            view.none_range_checked(&c.slot_tree_root.elements),
+            "PoseidonHashOutTarget::new allocates 4 RAW elements with no range check",
+        );
+        table.check(
+            "range settledChain", "post_close_claim_circuit.rs:398", "range",
+            view.all_range_checked(&c.settled_tx_chain.to_vec(), 32),
+            "Bytes32Target::new(_, true)",
+        );
+        table.check(
+            "range stateVersion", "post_close_claim_circuit.rs:399", "range",
+            view.all_range_checked(&c.state_version.to_vec(), 32),
+            "U64Target::new(_, true)",
+        );
+        table.check(
+            "virtual receiverMemberIndex", "post_close_claim_circuit.rs:403", "range",
+            view.range_bits(c.receiver_member_index).contains(&BALANCE_SLOT_TREE_HEIGHT),
+            "bare add_virtual_target; bounded only by the slot inclusion verify's split_le",
+        );
+        let mut slot_row: Vec<Target> =
+            c.slot_enc_balance_digests.iter().flat_map(|d| d.to_vec()).collect();
+        slot_row.extend(c.slot_pending_adds.iter().copied());
+        table.check(
+            "range slot ciphertext digests + pending adds",
+            "post_close_claim_circuit.rs:404-408", "range",
+            slot_row.len() == MAX_CHANNEL_TOKENS * 8 + MAX_CHANNEL_TOKENS
+                && view.all_range_checked(&slot_row, 32),
+            "80 enc-digest limbs + 10 counters, all 32-bit range-checked",
+        );
+
+        // `.connect "finalH1"` — :426
+        table.check(
+            "connect finalH1", "post_close_claim_circuit.rs:426", "connect",
+            view.same_slices(&p.recomputed_h1.to_vec(), &pi.final_balance_state_h1.to_vec()),
+            "recomputed_h1.connect(final_balance_state_h1)",
+        );
+        // `.range "active sum" 1 11` — :439
+        table.check(
+            "range active sum", "post_close_claim_circuit.rs:439", "range",
+            view.range_bits(p.active).contains(&11),
+            "range_check(active, 11)",
+        );
+        // `.connect "active<1025"` / `"receiverMemberIndex<active"` — :439-443
+        table.check(
+            "connect active<1025", "post_close_claim_circuit.rs:440", "constant",
+            view.is_one(p.active_le_max),
+            "assert_one(less_than_u32(active, MAX_CHANNEL_MEMBERS + 1))",
+        );
+        table.check(
+            "connect receiverMemberIndex<active", "post_close_claim_circuit.rs:442-443", "constant",
+            view.is_one(p.is_active) && view.same(p.is_active, p.one),
+            "connect(less_than_u32(receiver_member_index, active), one)",
+        );
+        // `.virtual "a,b,c1,c2" (4*regevN)` — :446-449
+        table.check(
+            "virtual a,b,c1,c2", "post_close_claim_circuit.rs:446-449", "width",
+            c.regev_a.len() == REGEV_N
+                && c.regev_b.len() == REGEV_N
+                && c.delta_c1.len() == REGEV_N
+                && c.delta_c2.len() == REGEV_N,
+            "4 * REGEV_N bare virtual targets",
+        );
+        // `.merkle "slot: Hash4 leaf identity" slotHeight` — :468-477
+        table.check(
+            "merkle slot", "post_close_claim_circuit.rs:468-477", "width",
+            c.slot_inclusion.0.siblings.len() == BALANCE_SLOT_TREE_HEIGHT,
+            "IncrementalMerkleProofTarget::new(builder, BALANCE_SLOT_TREE_HEIGHT)",
+        );
+        // `.connect "receiverDeltaDigest"` — :483
+        table.check(
+            "connect receiverDeltaDigest", "post_close_claim_circuit.rs:483", "connect",
+            view.same_slices(&p.ct_digest.to_vec(), &c.receiver_delta_digest.to_vec()),
+            "ct_digest.connect(receiver_delta_digest) — the SAME wire the tx_leaf wing hashes",
+        );
+        // `.decryption true` — :486-494
+        table.note(
+            "decryption true", "post_close_claim_circuit.rs:486-494", "gadget", NOT_STATIC,
+            "decryption_core pins the polynomial lengths, canonicity and non-degeneracy internally",
+        );
+        // `.connect "amount.hi,lo"` — :496-497
+        table.check(
+            "connect amount.hi,lo", "post_close_claim_circuit.rs:496-497", "connect",
+            view.same(pi.amount.to_vec()[0], p.amount_hi)
+                && view.same(pi.amount.to_vec()[1], p.amount_lo),
+            "amount PI to_vec is [hi, lo], each connected to the matching core output",
+        );
+        // `.connect "sharedNativeNullifier"` — :510
+        table.check(
+            "connect sharedNativeNullifier", "post_close_claim_circuit.rs:510", "connect",
+            view.same_slices(
+                &p.shared_native_nullifier.to_vec(),
+                &pi.shared_native_nullifier.to_vec(),
+            ),
+            "shared_native_nullifier.connect(shared_native_nullifier PI)",
+        );
+        // `.register 57` — :512
+        let expected_pi_order: Vec<Target> =
+            groups.iter().flat_map(|(_, w, _)| w.clone()).collect();
+        table.check(
+            "register 57", "post_close_claim_circuit.rs:512 / :137-153", "public-inputs",
+            expected_pi_order.len() == POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN
+                && POST_CLOSE_CLAIM_PUBLIC_INPUTS_LEN == 57
+                && view.public_inputs_are(&expected_pi_order)
+                && c.data.common.num_public_inputs == 57,
+            "the 57 registered wires are exactly the ten groups, in to_vec order",
+        );
+        table.note(
+            "build standard_recursion_zk_config", "post_close_claim_circuit.rs:513", "no-gate",
+            TRIVIAL, "builder.build emits no constraint; Lean holds = True",
+        );
+
+        // Documented chain wiring the Lean model reads through `hashPreimage`: each stage's
+        // output feeds the next stage's preimage as the SAME wires.
+        table.check(
+            "tx recompute chain wiring", "post_close_claim_circuit.rs:330-401", "aliasing",
+            p.sender_wing.to_vec().len() == BYTES32_LEN
+                && p.receiver_wing.to_vec().len() == BYTES32_LEN
+                && p.tx_leaf.to_vec().len() == BYTES32_LEN
+                && p.mixed.to_vec().len() == BYTES32_LEN,
+            "sender/receiver wing -> tx_leaf -> push(tx_tree_root, ·) -> push(ids, ·)",
+        );
+        table.check(
+            "accumulator root is the PI root", "post_close_claim_circuit.rs:414-418", "aliasing",
+            p.accumulator_root_hash.elements.len() == 4,
+            "the inclusion root is `final_settled_tx_accumulator_root.to_hash_out`, the SAME PI \
+             that rides in the recomputed H1",
+        );
+
+        table.finish();
     }
 }

@@ -155,7 +155,7 @@
     },
     {
       "path": ".github/ci/lean-safety-guard.py",
-      "sha256": "a09e4c4caaea617ba214162b85760a849cedf49fa1b4d298aa54cd13f94037de",
+      "sha256": "31c861a6c217e1e0b41afe713c1de6578b2094756b2204b23cb9276a70a9a977",
       "role": "tooling"
     },
     {
@@ -185,7 +185,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp.lean",
-      "sha256": "a64d0a30f17c352e4e1a9b24a251aaf33be2dcf455d8dc438f88e776060eb73a",
+      "sha256": "d9facea4241194d42d897d210686b3bf524a13997a3ffa0739d339d991b1b724",
       "role": "tooling"
     },
     {
@@ -320,7 +320,7 @@
     },
     {
       "path": "src/circuits/channel/close_asset_backing_circuit.rs",
-      "sha256": "bd4bb49f55c03e3f7c4b716d335febd031f6c3f07af0ae3c6d82b82a55eb5333",
+      "sha256": "1f59ca8d5ef2073326909c2c9dc447e80f30968546ea4afd987da74eb7ee7317",
       "role": "implementation"
     },
     {
@@ -380,7 +380,7 @@
     },
     {
       "path": "doc/audit/zkp/implementation-inventory.json",
-      "sha256": "83fee19229237d37bda3df29892e63865a0cca0e79aa55abd07866dc9356038e",
+      "sha256": "2813d0a9ae86addc7e926105be9457e74d9a5b2fbc366804e4346ec07d8bf903",
       "role": "spec"
     },
     {
@@ -400,12 +400,12 @@
     },
     {
       "path": "doc/audit/zkp/line-map/close-asset-backing.json",
-      "sha256": "2d00ef41d97cd9941bdd5aa675e52e2adf2bc6f14767b1afa506b821b0a2d0be",
+      "sha256": "0405358d816e8f8685089b7a6c3e88fb5855d5fcfed0fc28526fcee79b978fbc",
       "role": "spec"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/CloseAssetBacking.lean",
-      "sha256": "6fbe385466640de1f1c3229784c92eee510d15fa5aef7b9d32f948e032f4bb15",
+      "sha256": "b2e1616f8aec87bcadd51ad3d46cef488a2a9474bbb3bb60a40c19f16769a90e",
       "role": "model"
     },
     {
@@ -495,7 +495,7 @@
     },
     {
       "path": "doc/audit/zkp/line-map/close-circuit.json",
-      "sha256": "cd9a19726eab8161ded58c8fcca512bb3eaa74bcbfb825dfeacb2ff020d4af21",
+      "sha256": "670ff3f84819513680a126da4d55d9dfdd4c113e4be00c4f65a3b3f9fd592648",
       "role": "spec"
     },
     {
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/circuits/channel/close_circuit.rs",
-      "sha256": "6239cb91549a771f6f68bcffa8b151e63a6eda0a6fee1da7fac8325fc98625b7",
+      "sha256": "5ebefd113d408591ad2790373ddeee9d4969f447012a2cda4e059771afa74724",
       "role": "implementation"
     },
     {
@@ -600,12 +600,12 @@
     },
     {
       "path": "doc/audit/zkp/line-map/post-close-claim-circuit.json",
-      "sha256": "351208e262d5faa3fc1f33c86388a0118c81589a67c64cc1004bb2eb06e76054",
+      "sha256": "fa45ec04010ffba9e7095f404d1a1564eb42eb01617d13b46ce9fd9de5b05980",
       "role": "spec"
     },
     {
       "path": "src/circuits/channel/post_close_claim_circuit.rs",
-      "sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
+      "sha256": "12c48948536a9ca6b81052d0aef5a3a3cb4a22d2aeae70f6103b6f7056353faa",
       "role": "implementation"
     },
     {
@@ -630,12 +630,12 @@
     },
     {
       "path": "doc/audit/zkp/line-map/withdrawal-claim-circuit.json",
-      "sha256": "cc507a09cb494b6fa4f62e54c7bc6a5b748f40d5ea26e1d116808b9e44083922",
+      "sha256": "66d31272c398de2cb0cf09908fd6d138aa59ac349a192c48a156408d5a3e42d8",
       "role": "spec"
     },
     {
       "path": "src/circuits/channel/withdrawal_claim_circuit.rs",
-      "sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
+      "sha256": "c65ee9d3547f3a57597fb732d21e4e28dfa35c4f72eedc2d210ac3e8c2c50751",
       "role": "implementation"
     },
     {
@@ -1215,12 +1215,12 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/SystemSafety.lean",
-      "sha256": "0d89a33941750351d23059e88c8cdb1187607137723c2679feacf0ad774a0d92",
+      "sha256": "2f20799008fbaa2b6c1d89c1fafdc22a7be0afec3de3f11f2857331596a8a7ec",
       "role": "model"
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/TrustBoundary.lean",
-      "sha256": "acb09f10ed58ec0e1ce6f2ed3828322ee14233ab0fea9c1269040574632ea17b",
+      "sha256": "6bed037ebe80581a22485efa6d4de818e2f7d82ec9b7db56ac44fc24a0479c63",
       "role": "model"
     },
     {
@@ -1880,12 +1880,12 @@
     },
     {
       "path": "src/falcon_sig/agg.rs",
-      "sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
+      "sha256": "dbcd34e136c8e8127e7732099f4fd8ed83d3c673524869926a0e02eb0a071f15",
       "role": "implementation"
     },
     {
       "path": "doc/audit/zkp/line-map/falcon-agg.json",
-      "sha256": "e44813234c2e6e0ca36f3372e315de1cdadde3107ed13b177a2c9e259c8c0170",
+      "sha256": "6f9b1acb373463415dcd25d3fbd88ebf8cbaf77d17b166a899e97bc5040c290d",
       "role": "spec"
     },
     {
@@ -1925,12 +1925,12 @@
     },
     {
       "path": "src/falcon_sig/gadget.rs",
-      "sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
+      "sha256": "e380bf8c579ecd9caa65bd8ab375be6ba829dd312addcd3c5d13a11ff1011620",
       "role": "implementation"
     },
     {
       "path": "doc/audit/zkp/line-map/falcon-gadget.json",
-      "sha256": "3f8d31e1a7fedbd0c1a80269c032535c6de065a1f802f6ef18b3050e77b73195",
+      "sha256": "f377653db85d5109f2f706eb2dbfb6ea6da068b19e983692cfe8ec52fccaf4a0",
       "role": "spec"
     },
     {
@@ -2365,7 +2365,7 @@
     },
     {
       "path": "doc/audit/zkp/Zkp/Implementation/CloseSignatureBridge.lean",
-      "sha256": "2ab865aecd954608827d40fdc1e071886683e7b294adbc8fb0331bf3bcf2756e",
+      "sha256": "450e93d26772abf8efeeb49643ec028579017f3037c1376cf44c7889430dafdc",
       "role": "model"
     },
     {
@@ -2396,6 +2396,101 @@
     {
       "path": "doc/audit/zkp/Zkp/Implementation/LedgerWriters.lean",
       "sha256": "f37b9896036f5d7d61d93b2be50f35e652205e1c74d393176d5eb9a707f336f1",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/agent-tools/shift-linemap.py",
+      "sha256": "7d2d807df0101df5d02d3fad6d2e9d98c221de9883a98c0d5085f124f114043b",
+      "role": "tooling"
+    },
+    {
+      "path": "src/faithfulness.rs",
+      "sha256": "3c69f01b164a1c46db773257cf2a272aaceda26965a528ae53d8e2774c1e822c",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/README.md",
+      "sha256": "226b59ac19f54d4ddfdc9b141dff9e20b7f17d14090d27a13829e51d2e367700",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-CloseAssetBacking.ops",
+      "sha256": "045cdfa2609791273bbd62eaef03ab9690e0d50a920111a30ecd33fbc21e953a",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-CloseAssetBacking.tsv",
+      "sha256": "6f4f0aeb83026b33a2db824361ca4e667a6ac8144c8e5de77f2c8996b26c557f",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-CloseCircuit.ops",
+      "sha256": "3ddbbf95f3f9bce3962bd92c7ae2eaa9b9daa540e6520e85bb770e79eca70900",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-CloseCircuit.tsv",
+      "sha256": "527cb8b1ccd7ebdedab8c74b41787804e90d8bebe69292d141c71f2826aaaabc",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconAggProgram-leaf.ops",
+      "sha256": "1d931b61952b49d47275b56133aeda9cf376d88f9eff48b9f97beebc6734e518",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconAggProgram-leaf.tsv",
+      "sha256": "21e10ffea5f6c691578d205b4087e7120e1664ee99b292d2017ed851bbfb8879",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconAggProgram-level1.ops",
+      "sha256": "34c7442ddacd4dde42a49cd3c9004efac94b3bc0280c157451859be6c886d60f",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconAggProgram-level1.tsv",
+      "sha256": "54e39837b4e1fd8fb6adb9b6b17d105aee10c186c33984d7adbc241ebaa6ad61",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconGadgetProgram.ops",
+      "sha256": "dff6da34e178983fe83a9a94c51d6d2628e14843a3ea3fa45d2c6790cefc6e1e",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-FalconGadgetProgram.tsv",
+      "sha256": "57cf93f3e4744b7b81e2cca944176e54a7d23d90878657f1c7f47dd4ad5a94dd",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-PostCloseClaimCircuit.ops",
+      "sha256": "3d6ef0a1da2e2799b1d9fdd96573e7b8a9f2d6a578bb6593aa9a9fa203debbce",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-PostCloseClaimCircuit.tsv",
+      "sha256": "a7deaa789dc77e832159a60673ccd90c9b9df3f23e13863933e3d9d4b2882864",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-WithdrawalClaimCircuit.ops",
+      "sha256": "2b05fb934791a5c66819631185f5bf0a04aab3abf81be71d1a79b0fea8f64148",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/evidence/faithfulness-WithdrawalClaimCircuit.tsv",
+      "sha256": "1f00def5a63810d0bcadebea4d9e15debb92f756bdde9542b117b22e2c6eb008",
+      "role": "tooling"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/BackingBridge.lean",
+      "sha256": "0608b338dd11aa5953cc410affa2252464d81e676269b8c0ddd9fb886a317ce1",
+      "role": "model"
+    },
+    {
+      "path": "doc/audit/zkp/Zkp/Implementation/NttCorrectness.lean",
+      "sha256": "b53bfbcf6e3ecc1cbc6815d4c01a8e79e20918f6726b50b57eb00f284ff3cd8e",
       "role": "model"
     }
   ],
@@ -2992,7 +3087,61 @@
         "Zkp.Implementation.CloseAssetBacking.example_ten_positions_still_hash_92_words",
         "Zkp.Implementation.CloseAssetBacking.example_native_public_inputs_round_trip",
         "Zkp.Implementation.CloseAssetBacking.example_normal_prefix_determined_by_gates",
-        "Zkp.Implementation.CloseAssetBacking.example_normal_vector_satisfies_all_local_vector_gates"
+        "Zkp.Implementation.CloseAssetBacking.example_normal_vector_satisfies_all_local_vector_gates",
+        "Zkp.Implementation.CloseAssetBacking.indexed_wires_length",
+        "Zkp.Implementation.CloseAssetBacking.indexed_wires_head",
+        "Zkp.Implementation.CloseAssetBacking.mem_indexed_wires",
+        "Zkp.Implementation.CloseAssetBacking.map_indexed_wires",
+        "Zkp.Implementation.CloseAssetBacking.sum_wires_snoc",
+        "Zkp.Implementation.CloseAssetBacking.bit_of_boolean_wire",
+        "Zkp.Implementation.CloseAssetBacking.not_bit_of_boolean_wire",
+        "Zkp.Implementation.CloseAssetBacking.range_loop_append",
+        "Zkp.Implementation.CloseAssetBacking.range_succ_snoc",
+        "Zkp.Implementation.CloseAssetBacking.length_range_eq",
+        "Zkp.Implementation.CloseAssetBacking.mem_range_loop_iff",
+        "Zkp.Implementation.CloseAssetBacking.mem_range_iff_lt",
+        "Zkp.Implementation.CloseAssetBacking.mem_drop_range_iff",
+        "Zkp.Implementation.CloseAssetBacking.words8_zero_limb",
+        "Zkp.Implementation.CloseAssetBacking.words8_mem_is_a_limb",
+        "Zkp.Implementation.CloseAssetBacking.read_witness_rows",
+        "Zkp.Implementation.CloseAssetBacking.row_wire_active_iff",
+        "Zkp.Implementation.CloseAssetBacking.row_wire_if_active",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_append",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_append_of",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_nil",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_cons_of",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_map_range",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_map_range_of",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_bind_range",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_bind_range_of",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_ordered_pairs",
+        "Zkp.Implementation.CloseAssetBacking.satisfied_ordered_pairs_of",
+        "Zkp.Implementation.CloseAssetBacking.activity_assigned_rows",
+        "Zkp.Implementation.CloseAssetBacking.indexed_range_gates",
+        "Zkp.Implementation.CloseAssetBacking.indexed_no_rise",
+        "Zkp.Implementation.CloseAssetBacking.indexed_active_count",
+        "Zkp.Implementation.CloseAssetBacking.accumulator_is_prefix_sum",
+        "Zkp.Implementation.CloseAssetBacking.indexed_padding_gates",
+        "Zkp.Implementation.CloseAssetBacking.indexed_unique_gates",
+        "Zkp.Implementation.CloseAssetBacking.indexed_path_gates",
+        "Zkp.Implementation.CloseAssetBacking.indexed_path_fold",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_implies_constraints",
+        "Zkp.Implementation.CloseAssetBacking.program_satisfied_computes_public_inputs",
+        "Zkp.Implementation.CloseAssetBacking.example_extended_state_is_range_checked",
+        "Zkp.Implementation.CloseAssetBacking.example_registry_is_range_checked",
+        "Zkp.Implementation.CloseAssetBacking.example_amount_is_range_checked",
+        "Zkp.Implementation.CloseAssetBacking.example_activity_is_boolean",
+        "Zkp.Implementation.CloseAssetBacking.example_activity_never_rises",
+        "Zkp.Implementation.CloseAssetBacking.example_activity_sum_step",
+        "Zkp.Implementation.CloseAssetBacking.example_inactive_registry_is_zero",
+        "Zkp.Implementation.CloseAssetBacking.example_inactive_amount_is_zero",
+        "Zkp.Implementation.CloseAssetBacking.example_has_no_duplicate_active_registry",
+        "Zkp.Implementation.CloseAssetBacking.example_assignment_satisfies_program",
+        "Zkp.Implementation.CloseAssetBacking.example_program_satisfiable",
+        "Zkp.Implementation.CloseAssetBacking.example_program_reads_back",
+        "Zkp.Implementation.CloseAssetBacking.example_satisfying_assignment_gives_circuit_constraints",
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_implies_field_gate_lowering",
+        "Zkp.Implementation.CloseAssetBacking.primitive_lowering_gives_a_constrained_witness"
       ],
       "sources": [
         "src/circuits/channel/close_asset_backing_circuit.rs",
@@ -5467,7 +5616,7 @@
         "Zkp.Implementation.SystemSafety.step_preserves_materialization_latch",
         "Zkp.Implementation.SystemSafety.trace_channel_attribution",
         "Zkp.Implementation.SystemSafety.materialization_credits_are_the_managers_own_vector",
-        "Zkp.Implementation.SystemSafety.close_vector_backing_is_exactly_premise_c",
+        "Zkp.Implementation.SystemSafety.materialized_credits_are_backed_by_l2_entitlement",
         "Zkp.Implementation.SystemSafety.trace_nullifier_single_use",
         "Zkp.Implementation.SystemSafety.trace_paid_bounded",
         "Zkp.Implementation.SystemSafety.close_acceptance_binds_statement",
@@ -5546,13 +5695,18 @@
         "Zkp.Implementation.TrustBoundary.token_funds_hash_binding_of_boundary",
         "Zkp.Implementation.TrustBoundary.token_funds_binding_is_same_length_collision",
         "Zkp.Implementation.TrustBoundary.reference_keccak_models_satisfy_hash_premises",
+        "Zkp.Implementation.TrustBoundary.materialized_credits_are_finalized_l2_balances_of_boundary",
+        "Zkp.Implementation.TrustBoundary.close_vector_backing_gap_is_now_l2_ledger",
+        "Zkp.Implementation.TrustBoundary.backing_pinned_digest_and_program_lowering_give_primitive_lowering",
         "Zkp.Implementation.TrustBoundary.signature_validity_of_boundary",
         "Zkp.Implementation.TrustBoundary.level_lowering_of_boundary",
         "Zkp.Implementation.TrustBoundary.signature_gap_is_now_per_primitive",
+        "Zkp.Implementation.TrustBoundary.ntt_computes_negacyclic_product_of_boundary",
         "Zkp.Implementation.TrustBoundary.durable_nullifier_ledger_of_boundary",
         "Zkp.Implementation.TrustBoundary.durable_materialization_latch_of_boundary",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_close",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_accepts_no_claim",
+        "Zkp.Implementation.TrustBoundary.rejecting_environment_materializes_nothing",
         "Zkp.Implementation.TrustBoundary.rejecting_environment_satisfies_every_premise",
         "Zkp.Implementation.TrustBoundary.close_premise_statement_has_103_words",
         "Zkp.Implementation.TrustBoundary.close_premise_statement_is_the_adapter_receipt"
@@ -8510,6 +8664,237 @@
         "contracts/src/ChannelSettlementManager.sol",
         "doc/audit/zkp/line-map/close-funding.json",
         "contracts/src/CloseFundingMaterializer.sol"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.BackingBridge",
+      "theorems": [
+        "Zkp.Implementation.BackingBridge.bind_ok_iff",
+        "Zkp.Implementation.BackingBridge.exists_unit",
+        "Zkp.Implementation.BackingBridge.require_ok_iff",
+        "Zkp.Implementation.BackingBridge.pure_ok_iff",
+        "Zkp.Implementation.BackingBridge.backing_word_bound_pinned",
+        "Zkp.Implementation.BackingBridge.backing_block_bound_pinned",
+        "Zkp.Implementation.BackingBridge.backing_public_input_length_pinned",
+        "Zkp.Implementation.BackingBridge.shift_or_is_mul_add",
+        "Zkp.Implementation.BackingBridge.limb_step_bound",
+        "Zkp.Implementation.BackingBridge.limbs_loop_step",
+        "Zkp.Implementation.BackingBridge.limbs_loop_step_value",
+        "Zkp.Implementation.BackingBridge.limbs_to_bytes32_is_words8_value",
+        "Zkp.Implementation.BackingBridge.check_u32_limbs_bound",
+        "Zkp.Implementation.BackingBridge.validated_limb_below_bound",
+        "Zkp.Implementation.BackingBridge.checked_words_of_reads",
+        "Zkp.Implementation.BackingBridge.length_26_parses",
+        "Zkp.Implementation.BackingBridge.public_input_words_read",
+        "Zkp.Implementation.BackingBridge.verify_backing_ok",
+        "Zkp.Implementation.BackingBridge.verify_backing_ok_inverse",
+        "Zkp.Implementation.BackingBridge.validated_backing_facts",
+        "Zkp.Implementation.BackingBridge.prepared_signed_head_provenance",
+        "Zkp.Implementation.BackingBridge.validated_words_decode",
+        "Zkp.Implementation.BackingBridge.validated_words_parse_natively",
+        "Zkp.Implementation.BackingBridge.signed_head_materialization_receipt",
+        "Zkp.Implementation.BackingBridge.sample_public_inputs_are_exact_words",
+        "Zkp.Implementation.BackingBridge.sample_words_parse",
+        "Zkp.Implementation.BackingBridge.sample_words_parse_natively",
+        "Zkp.Implementation.BackingBridge.sample_limb_readings_agree",
+        "Zkp.Implementation.BackingBridge.sample_validation_succeeds",
+        "Zkp.Implementation.BackingBridge.sample_materialization_credits_a_nonzero_vector",
+        "Zkp.Implementation.BackingBridge.sample_materialization_succeeds",
+        "Zkp.Implementation.BackingBridge.sample_materialization_has_receipt",
+        "Zkp.Implementation.BackingBridge.digest_words_exact",
+        "Zkp.Implementation.BackingBridge.digest_is_checked",
+        "Zkp.Implementation.BackingBridge.digest_packs_as_solidity_bytes",
+        "Zkp.Implementation.BackingBridge.digest_value",
+        "Zkp.Implementation.BackingBridge.solidity_rows_length",
+        "Zkp.Implementation.BackingBridge.solidity_rows_registry",
+        "Zkp.Implementation.BackingBridge.solidity_rows_amount",
+        "Zkp.Implementation.BackingBridge.solidity_rows_ranges",
+        "Zkp.Implementation.BackingBridge.solidity_rows_pack_as_solidity_bytes",
+        "Zkp.Implementation.BackingBridge.token_funds_preimage_words_are_checked",
+        "Zkp.Implementation.BackingBridge.amount_words_injective",
+        "Zkp.Implementation.BackingBridge.word_bytes_token_vector_binding",
+        "Zkp.Implementation.BackingBridge.ten_list_get",
+        "Zkp.Implementation.BackingBridge.ten_list_get_lt",
+        "Zkp.Implementation.BackingBridge.mem_of_index",
+        "Zkp.Implementation.BackingBridge.index_exists",
+        "Zkp.Implementation.BackingBridge.replicate_true_prefix_index",
+        "Zkp.Implementation.BackingBridge.read_vector_tokens_are_indexed",
+        "Zkp.Implementation.BackingBridge.prepared_materialization_reads_the_registry_vector",
+        "Zkp.Implementation.BackingBridge.signed_head_credits_are_the_registry_vector"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/close-funding.json",
+        "contracts/src/CloseFundingMaterializer.sol",
+        "doc/audit/zkp/line-map/close-asset-backing.json",
+        "src/circuits/channel/close_asset_backing_circuit.rs"
+      ]
+    },
+    {
+      "project": "doc/audit/zkp",
+      "module": "Zkp.Implementation.NttCorrectness",
+      "theorems": [
+        "Zkp.Implementation.NttCorrectness.falcon_q_pos",
+        "Zkp.Implementation.NttCorrectness.mod_q_lt",
+        "Zkp.Implementation.NttCorrectness.mod_q_mod_q",
+        "Zkp.Implementation.NttCorrectness.eq_q_refl",
+        "Zkp.Implementation.NttCorrectness.eq_q_symm",
+        "Zkp.Implementation.NttCorrectness.eq_q_trans",
+        "Zkp.Implementation.NttCorrectness.eq_q_iff",
+        "Zkp.Implementation.NttCorrectness.eq_q_mod",
+        "Zkp.Implementation.NttCorrectness.eq_q_add",
+        "Zkp.Implementation.NttCorrectness.eq_q_mul",
+        "Zkp.Implementation.NttCorrectness.eq_q_mul_left",
+        "Zkp.Implementation.NttCorrectness.eq_q_pow",
+        "Zkp.Implementation.NttCorrectness.eq_q_cancel",
+        "Zkp.Implementation.NttCorrectness.sub_offset_mod",
+        "Zkp.Implementation.NttCorrectness.eq_q_sub_add",
+        "Zkp.Implementation.NttCorrectness.nat_mul_sub",
+        "Zkp.Implementation.NttCorrectness.sum_to_zero",
+        "Zkp.Implementation.NttCorrectness.sum_to_succ",
+        "Zkp.Implementation.NttCorrectness.sum_to_congr",
+        "Zkp.Implementation.NttCorrectness.sum_to_eq_q_congr",
+        "Zkp.Implementation.NttCorrectness.sum_to_zero_fun",
+        "Zkp.Implementation.NttCorrectness.sum_to_add",
+        "Zkp.Implementation.NttCorrectness.sum_to_mul_left",
+        "Zkp.Implementation.NttCorrectness.sum_to_mul_right",
+        "Zkp.Implementation.NttCorrectness.sum_to_split",
+        "Zkp.Implementation.NttCorrectness.sum_to_swap",
+        "Zkp.Implementation.NttCorrectness.sum_to_single",
+        "Zkp.Implementation.NttCorrectness.pow_q_lt",
+        "Zkp.Implementation.NttCorrectness.pow_q_eq_q",
+        "Zkp.Implementation.NttCorrectness.pow_q_zero",
+        "Zkp.Implementation.NttCorrectness.pow_mod_q_aux_eq",
+        "Zkp.Implementation.NttCorrectness.pow_mod_q_eq",
+        "Zkp.Implementation.NttCorrectness.bit_reverse_aux_acc",
+        "Zkp.Implementation.NttCorrectness.rev_of_succ",
+        "Zkp.Implementation.NttCorrectness.rev_of_zero_arg",
+        "Zkp.Implementation.NttCorrectness.rev_of_lt",
+        "Zkp.Implementation.NttCorrectness.bit_reverse_9_eq",
+        "Zkp.Implementation.NttCorrectness.rev_of_double",
+        "Zkp.Implementation.NttCorrectness.rev_of_double_succ",
+        "Zkp.Implementation.NttCorrectness.rev_of_pow_add",
+        "Zkp.Implementation.NttCorrectness.range_list_zero",
+        "Zkp.Implementation.NttCorrectness.range_list_succ",
+        "Zkp.Implementation.NttCorrectness.range_list_foldl_succ",
+        "Zkp.Implementation.NttCorrectness.mem_range_list",
+        "Zkp.Implementation.NttCorrectness.map_range_list_congr",
+        "Zkp.Implementation.NttCorrectness.wire_of_append",
+        "Zkp.Implementation.NttCorrectness.wire_of_append_len",
+        "Zkp.Implementation.NttCorrectness.wire_of_map_range",
+        "Zkp.Implementation.NttCorrectness.wire_of_lt_q",
+        "Zkp.Implementation.NttCorrectness.wire_of_length",
+        "Zkp.Implementation.NttCorrectness.inner_k_succ",
+        "Zkp.Implementation.NttCorrectness.stage_k_succ",
+        "Zkp.Implementation.NttCorrectness.inner_k_spec",
+        "Zkp.Implementation.NttCorrectness.two_block_mono",
+        "Zkp.Implementation.NttCorrectness.two_block_succ",
+        "Zkp.Implementation.NttCorrectness.stage_k_spec",
+        "Zkp.Implementation.NttCorrectness.ct_butterfly_fixed",
+        "Zkp.Implementation.NttCorrectness.ct_butterfly_dep",
+        "Zkp.Implementation.NttCorrectness.ct_butterfly_low",
+        "Zkp.Implementation.NttCorrectness.ct_butterfly_high",
+        "Zkp.Implementation.NttCorrectness.gs_butterfly_fixed",
+        "Zkp.Implementation.NttCorrectness.gs_butterfly_dep",
+        "Zkp.Implementation.NttCorrectness.gs_butterfly_low",
+        "Zkp.Implementation.NttCorrectness.gs_butterfly_high",
+        "Zkp.Implementation.NttCorrectness.ct_inner_spec",
+        "Zkp.Implementation.NttCorrectness.gs_inner_spec",
+        "Zkp.Implementation.NttCorrectness.ct_inner_dep",
+        "Zkp.Implementation.NttCorrectness.ct_stage_block",
+        "Zkp.Implementation.NttCorrectness.gs_stage_alt",
+        "Zkp.Implementation.NttCorrectness.gs_inner_dep",
+        "Zkp.Implementation.NttCorrectness.gs_stage_block",
+        "Zkp.Implementation.NttCorrectness.ct_stage_low",
+        "Zkp.Implementation.NttCorrectness.ct_stage_high",
+        "Zkp.Implementation.NttCorrectness.ct_stage_fixed",
+        "Zkp.Implementation.NttCorrectness.gs_stage_low",
+        "Zkp.Implementation.NttCorrectness.gs_stage_high",
+        "Zkp.Implementation.NttCorrectness.gs_stage_fixed",
+        "Zkp.Implementation.NttCorrectness.one_mod_q",
+        "Zkp.Implementation.NttCorrectness.q_sub_one_mod_q",
+        "Zkp.Implementation.NttCorrectness.two_mul_assoc",
+        "Zkp.Implementation.NttCorrectness.psi_rev_eq",
+        "Zkp.Implementation.NttCorrectness.psi_inv_rev_eq",
+        "Zkp.Implementation.NttCorrectness.psi_rev_lt",
+        "Zkp.Implementation.NttCorrectness.psi_inv_rev_lt",
+        "Zkp.Implementation.NttCorrectness.psi_rev_mul_inv",
+        "Zkp.Implementation.NttCorrectness.psi_pow_half",
+        "Zkp.Implementation.NttCorrectness.psi_pow_order",
+        "Zkp.Implementation.NttCorrectness.spec_sum_zero",
+        "Zkp.Implementation.NttCorrectness.spec_sum_eq_q_c",
+        "Zkp.Implementation.NttCorrectness.spec_sum_even_odd",
+        "Zkp.Implementation.NttCorrectness.block_c_lt",
+        "Zkp.Implementation.NttCorrectness.block_exp_expand",
+        "Zkp.Implementation.NttCorrectness.block_exp_even",
+        "Zkp.Implementation.NttCorrectness.block_exp_double",
+        "Zkp.Implementation.NttCorrectness.block_exp_odd",
+        "Zkp.Implementation.NttCorrectness.psi_rev_is_block_c",
+        "Zkp.Implementation.NttCorrectness.block_c_pow",
+        "Zkp.Implementation.NttCorrectness.block_c_even_sq",
+        "Zkp.Implementation.NttCorrectness.block_c_odd",
+        "Zkp.Implementation.NttCorrectness.block_c_odd_sq",
+        "Zkp.Implementation.NttCorrectness.two_pow_pos",
+        "Zkp.Implementation.NttCorrectness.two_pow_succ",
+        "Zkp.Implementation.NttCorrectness.nat_sub_mul",
+        "Zkp.Implementation.NttCorrectness.block_start_double",
+        "Zkp.Implementation.NttCorrectness.ct_low_residue",
+        "Zkp.Implementation.NttCorrectness.ct_high_residue",
+        "Zkp.Implementation.NttCorrectness.inv_step",
+        "Zkp.Implementation.NttCorrectness.ntt_forward_loop_unfold",
+        "Zkp.Implementation.NttCorrectness.inv_initial",
+        "Zkp.Implementation.NttCorrectness.inv_chain_forward",
+        "Zkp.Implementation.NttCorrectness.ntt_forward_loop_eval",
+        "Zkp.Implementation.NttCorrectness.ntt_forward_eval",
+        "Zkp.Implementation.NttCorrectness.two_pow_block",
+        "Zkp.Implementation.NttCorrectness.block_decomp",
+        "Zkp.Implementation.NttCorrectness.ct_stage_canonical",
+        "Zkp.Implementation.NttCorrectness.scale_add",
+        "Zkp.Implementation.NttCorrectness.scale_sub_mul",
+        "Zkp.Implementation.NttCorrectness.gs_stage_scale",
+        "Zkp.Implementation.NttCorrectness.ct_pair_sum",
+        "Zkp.Implementation.NttCorrectness.ct_pair_diff",
+        "Zkp.Implementation.NttCorrectness.gs_ct_inverse",
+        "Zkp.Implementation.NttCorrectness.inverse_chain_step",
+        "Zkp.Implementation.NttCorrectness.fwd_run_fixed",
+        "Zkp.Implementation.NttCorrectness.fwd_run_canonical",
+        "Zkp.Implementation.NttCorrectness.inv_run_fwd_run",
+        "Zkp.Implementation.NttCorrectness.ntt_inverse_loop_unfold",
+        "Zkp.Implementation.NttCorrectness.fwd_run_eq",
+        "Zkp.Implementation.NttCorrectness.inv_run_eq",
+        "Zkp.Implementation.NttCorrectness.ntt_inverse_loop_forward",
+        "Zkp.Implementation.NttCorrectness.wire_of_ext",
+        "Zkp.Implementation.NttCorrectness.map_range_wire_of",
+        "Zkp.Implementation.NttCorrectness.wire_of_vanishes",
+        "Zkp.Implementation.NttCorrectness.wire_of_ntt_forward",
+        "Zkp.Implementation.NttCorrectness.n_inv_cancel",
+        "Zkp.Implementation.NttCorrectness.ntt_inverse_forward",
+        "Zkp.Implementation.NttCorrectness.int_sum_append",
+        "Zkp.Implementation.NttCorrectness.int_sum_map_range",
+        "Zkp.Implementation.NttCorrectness.int_sum_to_sub",
+        "Zkp.Implementation.NttCorrectness.int_sum_to_congr",
+        "Zkp.Implementation.NttCorrectness.negacyclic_term_split",
+        "Zkp.Implementation.NttCorrectness.negacyclic_coeff_split",
+        "Zkp.Implementation.NttCorrectness.emod_to_nat_sub",
+        "Zkp.Implementation.NttCorrectness.sum_to_ind",
+        "Zkp.Implementation.NttCorrectness.sum_to_ind_shift",
+        "Zkp.Implementation.NttCorrectness.eval_conv_pos",
+        "Zkp.Implementation.NttCorrectness.eval_conv_neg",
+        "Zkp.Implementation.NttCorrectness.eval_mul_expand",
+        "Zkp.Implementation.NttCorrectness.wrap_term_eq_q",
+        "Zkp.Implementation.NttCorrectness.eval_conv",
+        "Zkp.Implementation.NttCorrectness.eval_point_pow",
+        "Zkp.Implementation.NttCorrectness.eval_negacyclic_product",
+        "Zkp.Implementation.NttCorrectness.negacyclic_product_length",
+        "Zkp.Implementation.NttCorrectness.negacyclic_product_canonical",
+        "Zkp.Implementation.NttCorrectness.negacyclic_points_are_odd_powers",
+        "Zkp.Implementation.NttCorrectness.evaluation_points_pinned",
+        "Zkp.Implementation.NttCorrectness.pointwise_is_forward_of_product",
+        "Zkp.Implementation.NttCorrectness.ntt_computes_negacyclic_product"
+      ],
+      "sources": [
+        "doc/audit/zkp/line-map/falcon-gadget.json",
+        "src/falcon_sig/gadget.rs"
       ]
     }
   ]

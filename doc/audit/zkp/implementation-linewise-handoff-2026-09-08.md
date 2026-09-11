@@ -42,9 +42,9 @@ python3 -B .github/ci/lean-fixture-parity.py       # 18 fixtures / 177 fields / 
 git diff --check
 ```
 
-期待値：main guard は **130 Lean modules / 現行 77 modules / 478 reviewed-source hashes / 1 submodule pin**（2026-09-11 第 3 ループ後）、
+期待値：main guard は **132 Lean modules / 現行 79 modules / 497 reviewed-source hashes / 1 submodule pin**（2026-09-11 第 4 ループ後）、
 line guard は **169 source maps**、行分類は
-`translated 31,085 / dependency-boundary 10,850 / non-executable 9,816 / test-only 23,834 / untranslated 41,783`。
+`translated 31,095 / dependency-boundary 10,850 / non-executable 9,828 / test-only 25,892 / untranslated 41,784`（第 4 ループの test-only probe 挿入後）。
 
 `lake build` を全体で回すと 10 分程度かかります。個別 module は
 `cd doc/audit/zkp && lake build Zkp.Implementation.<Name>` です。
@@ -94,15 +94,22 @@ submitClaim、claimCredit payout、close の request / cancel / finalize、rollb
 いずれも手書きモデル同士の照合ではなく、回路側の語列・byte 列が Solidity 実装モデルの計算と
 一致することを導出したものです。
 
-### 4.4 名前付き前提 18 個（`Zkp.Implementation.TrustBoundary`）
+### 4.4 名前付き前提 23 個（`Zkp.Implementation.TrustBoundary`）
 
 `mleVerifierSoundness` (a0) / `closePrimitiveLowering` (a) / `withdrawalPrimitiveLowering` (b1) /
-`postClosePrimitiveLowering` (b2) / `closeVectorBacked` (c) /
+`postClosePrimitiveLowering` (b2) /
+`materializerViewIsManagerState` (c0) / `managerFundsDigestIsReference` (c0b) / `backingVerifierSoundness` (c1) /
+`backingPrimitiveLowering` (c2) / `backingKeccakIsReference` (c3a) / `backingTokenFundsHashBinding` (c3b) /
+`finalizedBalanceIsBacked` (c4) /
 `aggregateRecursiveVerifierSoundness` (d0) / `levelRecursionSoundness` (d0') /
-`aggregatePrimitiveLowering` (d1') / `nttComputesNegacyclicProduct` (d2') / `falconUnforgeability` (d3) /
+`aggregatePrimitiveLowering` (d1') / `falconUnforgeability` (d3) /
 `solidityKeccakIsReference` (e1a) / `circuitKeccakIsReference` (e1b) / `tokenFundsHashBinding` (e2) /
 `finalizedRootObservation` (f1) / `finalizedHeightObservation` (f2) /
 `ledgerWritersAreInventoried` (g1') / `latchWritersAreInventoried` (g2') / `sourceRefinement` (h)。
+
+**2026-09-11 第 4 ループで (c) を 7 個に分解し、(d2') は定理になりました**（`NttCorrectness`）。
+残余は (c4) `finalizedBalanceIsBacked`（L2 ledger の不変量、validity chain の合成が次の project）。
+公開文書は `PRACTICAL-SAFETY-PROOF.md`、機械的な忠実性証拠は `evidence/` と `src/faithfulness.rs`。
 
 **2026-09-11 第 3 ループで (d1)(d2)(g1)(g2) を置換しました。** 集約スタック（agg.rs leaf/level、gadget.rs）は
 `FalconAggProgram`・`FalconGadgetProgram` の命令列になり、回路を丸ごと仮定する field は無くなりました。
@@ -146,7 +153,10 @@ Rollup escrow が pooled であるため、cap をチャネル自身の預入に
    （進捗文書の同日節）。~~(d1) の命令単位化と (d2) の gadget.rs 逐 gate 照合、(g1)(g2) の inventory 化~~
    も同日第 3 ループで完了。残る前提はすべて (i) 命令ごとの plonky2 忠実性と digest pinning、
    (ii) 計算量仮定 (d3)(e2)、(iii) 環境意味論 (e1a)(f)(g')(h)、(iv) 設計上の隙間 (c) のいずれかで、
-   (d2') NTT の正しさ（`NttComputesNegacyclicProduct`）だけが Lean 内で証明可能な未着手項目です。
+   ~~(d2') NTT の正しさ~~ は第 4 ループで証明済み。第 4 ループで (c) も materialization に付け替えて
+   7 個に分解し、残余 (c4) は L2 ledger 不変量（BalanceCircuit → SwitchBoard → ValidityChain →
+   DepositChain/WithdrawalChain の合成）です。次の project はその合成と、`not-static` に残る
+   算術・gadget 意味論の忠実性の機械照合（`evidence/README.md`）。
 5. **未翻訳 41,783 行**は MLE 33,974 行（受容済み）＋残り約 7,800 行（falcon vendor の f64 FFT、
    各 module が untranslated と明記した部分）。無理に translated へ付け替えないこと。
 

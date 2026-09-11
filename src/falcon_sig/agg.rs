@@ -357,6 +357,40 @@ where
     right_dummy: DummyProof<F, C, D>,
     /// Builder gate count before padding.
     pub num_gates_before_padding: usize,
+    /// TEST-ONLY handles on the internal wires the Lean model names; see [`AggLevelProbe`].
+    #[cfg(test)]
+    pub(crate) probe: AggLevelProbe,
+}
+
+/// TEST-ONLY: the internal wires of [`FalconAggLevelCircuit::new`] that
+/// `doc/audit/zkp/Zkp/Implementation/FalconAggProgram.lean` names in its `LevelAssignment`
+/// but that the returned struct does not expose. Compiled out of every non-test build.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct AggLevelProbe {
+    /// `child_pis(level, &left_proof.public_inputs)`, agg.rs:404 (`a.leftPis` projections).
+    pub msg_l: Vec<Target>,
+    pub count_l: Target,
+    pub pks_l: Vec<Target>,
+    /// `child_pis(level, &right_proof.public_inputs)`, agg.rs:405 (`a.rightPis` projections).
+    pub msg_r: Vec<Target>,
+    pub count_r: Target,
+    pub pks_r: Vec<Target>,
+    /// `mul(is_right_present, count_r)`, agg.rs:419 (`a.gatedCountRWire`).
+    pub gated_count_r: Target,
+    /// `add(count_l, gated_count_r)`, agg.rs:420 (`a.signerCountWire`).
+    pub signer_count: Target,
+    /// `constant(1 << (level - 1))`, agg.rs:434 (`a.halfFullWire`).
+    pub half_full: Target,
+    /// `sub(count_l, half_full)`, agg.rs:435 (`a.leftFullnessGapWire`).
+    pub left_fullness_gap: Target,
+    /// `mul(is_right_present, left_fullness_gap)`, agg.rs:436 (`a.gatedGapWire`).
+    pub gated_gap: Target,
+    /// `mul(is_right_present, t)` per right-half limb, agg.rs:445-448
+    /// (`a.gatedRightPkWire`).
+    pub gated_right_pks: Vec<Target>,
+    /// `is_right_present`, agg.rs:397 (`a.flag`).
+    pub flag: Target,
 }
 
 impl<F, C, const D: usize> FalconAggLevelCircuit<F, C, D>
@@ -442,8 +476,12 @@ where
         builder.register_public_inputs(&msg_l);
         builder.register_public_input(signer_count);
         builder.register_public_inputs(&pks_l);
+        #[cfg(test)]
+        let mut gated_right_pks: Vec<Target> = Vec::with_capacity(pks_r.len());
         for &t in &pks_r {
             let gated = builder.mul(is_right_present.target, t);
+            #[cfg(test)]
+            gated_right_pks.push(gated);
             builder.register_public_input(gated);
         }
 
@@ -465,6 +503,23 @@ where
         // `add_proof_target_and_conditionally_verify` (utils/dummy.rs).
         let right_dummy = DummyProof::new(&child_vd.common);
 
+        #[cfg(test)]
+        let probe = AggLevelProbe {
+            msg_l: msg_l.clone(),
+            count_l,
+            pks_l: pks_l.clone(),
+            msg_r: msg_r.clone(),
+            count_r,
+            pks_r: pks_r.clone(),
+            gated_count_r,
+            signer_count,
+            half_full,
+            left_fullness_gap,
+            gated_gap,
+            gated_right_pks,
+            flag: is_right_present.target,
+        };
+
         Self {
             level,
             data,
@@ -473,6 +528,8 @@ where
             is_right_present,
             right_dummy,
             num_gates_before_padding,
+            #[cfg(test)]
+            probe,
         }
     }
 
@@ -1197,5 +1254,309 @@ mod tests {
         let t_v = std::time::Instant::now();
         agg.data().verify(proof).expect("top verify");
         println!("[tree N=16] top verify={:?}", t_v.elapsed());
+    }
+
+    // LAYER M: MECHANICAL FAITHFULNESS EVIDENCE
+    // ---------------------------------------------------------------------------------------
+    //
+    // Model: `doc/audit/zkp/Zkp/Implementation/FalconAggProgram.lean` — `LeafOp` /
+    // `leafProgram` / `LeafOp.holds` (8 ops, agg.rs:268-305) and `LevelOp` / `levelProgram k` /
+    // `LevelOp.holds` (17 constructors, two of them indexed families, agg.rs:370-479). The
+    // static tests check every `holds` conjunct that is a copy constraint, a constant wiring,
+    // a range-check width or a public-input ORDER claim; the `..._mutation_*` tests prove a
+    // witness violating exactly one arithmetic claim and assert rejection.
+
+    use crate::faithfulness::{EvidenceTable, MUTATION, NOT_INJECTABLE, NOT_STATIC, RepView,
+        TRIVIAL};
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_leaf_static_table() {
+        let leaf = &AGG.leaf;
+        let view = RepView::new(&leaf.data);
+        let msg = leaf.sig.message_digest.to_vec();
+        let pk = leaf.sig.pk_g.to_vec();
+        let pis = view.public_inputs().to_vec();
+        let mut table = EvidenceTable::new("FalconAggProgram-leaf");
+
+        // LeafOp.falconSigVerify (FalconAggProgram.lean:407-419). The gadget's own semantics
+        // are FalconGadgetProgram's table; what is structural HERE is the limb reconciliation
+        // the Lean claim adds: every message/pk_g limb is a checked u32.
+        table.check(
+            "falconSigVerify", "agg.rs:270", "range",
+            view.all_range_checked(&msg, 32) && view.all_range_checked(&pk, 32),
+            "message_digest and pk_g limbs are range_check(_, 32) inside the gadget",
+        );
+        table.note(
+            "falconSigVerify", "agg.rs:270", "gadget", NOT_STATIC,
+            "CircuitSatisfied / verifyBit = 1: the UNCONDITIONAL gadget, see FalconGadgetProgram",
+        );
+        table.check(
+            "registerMessageDigest8", "agg.rs:274", "public-inputs",
+            view.same_slices(&pis[FALCON_AGG_MSG_OFFSET..FALCON_AGG_MSG_OFFSET + BYTES32_LEN], &msg),
+            "PI 0..8 are the gadget's own message_digest wires, in order",
+        );
+        table.check(
+            "constantOne", "agg.rs:276", "constant",
+            view.is_one(pis[FALCON_AGG_COUNT_OFFSET]),
+            "builder.one() is wired to the ConstantGate value 1",
+        );
+        table.check(
+            "registerSignerCount", "agg.rs:277", "public-inputs",
+            view.is_one(pis[FALCON_AGG_COUNT_OFFSET]),
+            "PI 8 IS that constant-one wire (decodeCount of the leaf statement)",
+        );
+        table.check(
+            "registerPkG8", "agg.rs:279", "public-inputs",
+            view.same_slices(
+                &pis[FALCON_AGG_PK_LIST_OFFSET..FALCON_AGG_PK_LIST_OFFSET + BYTES32_LEN],
+                &pk,
+            ),
+            "PI 9..17 are the gadget-derived pk_g wires, in order",
+        );
+        table.check(
+            "requireLeafWidth", "agg.rs:292-296", "public-inputs",
+            leaf.data.common.num_public_inputs == falcon_agg_public_inputs_len(0)
+                && pis.len() == 17,
+            "the built circuit exposes exactly falcon_agg_public_inputs_len(0) = 17 limbs",
+        );
+        table.note(
+            "addConstGate", "agg.rs:285", "no-gate", TRIVIAL,
+            "ConstantGate placement for the next level's dummy; Lean holds = True",
+        );
+        table.note(
+            "build", "agg.rs:288", "no-gate", TRIVIAL,
+            "builder.build emits no constraint; Lean holds = True",
+        );
+
+        table.finish();
+    }
+
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_level1_static_table() {
+        let level1 = &AGG.levels[0];
+        assert_eq!(level1.level, 1);
+        let view = RepView::new(&level1.data);
+        let p = &level1.probe;
+        let pis = view.public_inputs().to_vec();
+        let slot_limbs = BYTES32_LEN; // childSlotLimbs 1 = 2^0 * 8
+        let mut table = EvidenceTable::new("FalconAggProgram-level1");
+
+        table.check(
+            "verifyLeftChild", "agg.rs:394", "public-inputs",
+            level1.left_proof.public_inputs.len() == falcon_agg_public_inputs_len(0),
+            "the left child proof target carries exactly the level-0 arity (17)",
+        );
+        table.note(
+            "verifyLeftChild", "agg.rs:394", "gadget", NOT_STATIC,
+            "constant child verifier data + recursive verification are not copy constraints",
+        );
+        table.note(
+            "addVirtualBoolSafe", "agg.rs:397", "arith", NOT_INJECTABLE,
+            "mul_sub(b,b,b) == 0; set_bool_target only accepts a genuine bool, so no witness \
+             through the public API can break it",
+        );
+        table.check(
+            "conditionallyVerifyRightChild", "agg.rs:398-399", "public-inputs",
+            level1.right_proof.public_inputs.len() == falcon_agg_public_inputs_len(0),
+            "the right child proof target carries exactly the level-0 arity (17)",
+        );
+        table.note(
+            "conditionallyVerifyRightChild", "agg.rs:398-399", "gadget", MUTATION,
+            "gated verification: dummy_right_child_flagged_present_is_rejected in this file",
+        );
+        table.note(
+            "gatedMessageEquality[0..8)", "agg.rs:410-414", "arith", MUTATION,
+            "sub/mul/assert_zero chain: faithfulness_falcon_agg_level1_mutation_gated_message_equality",
+        );
+        table.check(
+            "gatedMessageEquality[0..8)", "agg.rs:410-414", "width",
+            p.msg_l.len() == BYTES32_LEN && p.msg_r.len() == BYTES32_LEN,
+            "the loop covers exactly the 8 message limbs of both children",
+        );
+        table.note(
+            "gatedCountR", "agg.rs:419", "arith", NOT_STATIC,
+            "mul(is_right_present, count_r) is an arithmetic gate output",
+        );
+        table.note(
+            "signerCountAdd", "agg.rs:420", "arith", MUTATION,
+            "add(count_l, gated_count_r): faithfulness_falcon_agg_level1_mutation_signer_count",
+        );
+        table.check(
+            "halfFullConstant", "agg.rs:434", "constant",
+            view.is_const(p.half_full, 1u64 << (level1.level - 1)),
+            "builder.constant(1 << (level - 1)) is wired to that ConstantGate value",
+        );
+        table.note(
+            "leftFullnessGap", "agg.rs:435", "arith", NOT_STATIC,
+            "sub(count_l, half_full) is an arithmetic gate output",
+        );
+        table.note(
+            "gatedGap", "agg.rs:436", "arith", NOT_STATIC,
+            "mul(is_right_present, left_fullness_gap) is an arithmetic gate output",
+        );
+        table.check(
+            "assertZeroGap", "agg.rs:437", "connect",
+            view.is_zero(p.gated_gap),
+            "assert_zero(gated_gap): the gated gap wire is wired to the constant 0",
+        );
+        table.note(
+            "assertZeroGap", "agg.rs:437", "arith", NOT_INJECTABLE,
+            "at level 1 count_l is the leaf's verifier-enforced constant 1 == half_full, so the \
+             gap is structurally 0; the violation needs level >= 2 \
+             (non_left_packed_aggregation_is_unprovable)",
+        );
+        table.check(
+            "registerMessage8", "agg.rs:442", "public-inputs",
+            view.same_slices(&pis[FALCON_AGG_MSG_OFFSET..FALCON_AGG_MSG_OFFSET + BYTES32_LEN], &p.msg_l),
+            "PI 0..8 are the LEFT child's message limbs verbatim",
+        );
+        table.check(
+            "registerSignerCount", "agg.rs:443", "public-inputs",
+            view.same(pis[FALCON_AGG_COUNT_OFFSET], p.signer_count),
+            "PI 8 is the add(count_l, gated_count_r) wire",
+        );
+        table.check(
+            "registerLeftPks", "agg.rs:444", "public-inputs",
+            view.same_slices(
+                &pis[FALCON_AGG_PK_LIST_OFFSET..FALCON_AGG_PK_LIST_OFFSET + slot_limbs],
+                &p.pks_l,
+            ),
+            "PI 9..17 are the LEFT child's pk slot limbs verbatim",
+        );
+        table.check(
+            "registerGatedRightPk[0..8)", "agg.rs:445-448", "public-inputs",
+            p.gated_right_pks.len() == slot_limbs
+                && view.same_slices(
+                    &pis[FALCON_AGG_PK_LIST_OFFSET + slot_limbs
+                        ..FALCON_AGG_PK_LIST_OFFSET + 2 * slot_limbs],
+                    &p.gated_right_pks,
+                ),
+            "PI 17..25 are the mul(is_right_present, right pk limb) wires, in child order",
+        );
+        table.check(
+            "requireLevelWidth", "agg.rs:456-462", "public-inputs",
+            level1.data.common.num_public_inputs == falcon_agg_public_inputs_len(1)
+                && pis.len() == 25,
+            "the built level-1 circuit exposes exactly falcon_agg_public_inputs_len(1) = 25 limbs",
+        );
+        table.note(
+            "addConstGate", "agg.rs:452", "no-gate", TRIVIAL,
+            "ConstantGate placement for the next level's dummy; Lean holds = True",
+        );
+        table.note(
+            "build", "agg.rs:455", "no-gate", TRIVIAL,
+            "builder.build emits no constraint; Lean holds = True",
+        );
+
+        table.finish();
+    }
+
+    /// `LevelOp.requireLevelWidth` at `level = AGG_LEVELS` IS the 73-element consumer contract
+    /// the close circuit slices (FalconAggProgram.lean:833-835).
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_top_level_width_is_the_consumer_contract() {
+        let top = AGG.top();
+        assert_eq!(top.level, AGG_LEVELS);
+        assert_eq!(
+            top.data.common.num_public_inputs,
+            FALCON_AGG_PUBLIC_INPUTS_LEN,
+            "top-level arity must be the 73-element close-circuit contract"
+        );
+        assert_eq!(
+            top.data.common.num_public_inputs,
+            falcon_agg_public_inputs_len(AGG_LEVELS)
+        );
+    }
+
+    /// `LeafOp.falconSigVerify` (FalconAggProgram.lean:408-413): the leaf gadget is
+    /// UNCONDITIONAL, so the zero-polynomial padding witness — which satisfies every gate of
+    /// the conditional variant at `verify = 0` — is unprovable here.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_leaf_mutation_falcon_sig_verify() {
+        let msg = digest(0x61);
+        let w = FalconSigGadgetWitness::padding(msg);
+        let result = catch_unwind(AssertUnwindSafe(|| AGG.leaf.prove(&w)));
+        let rejected = match result {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(proof)) => AGG.leaf.data.verify(proof).is_err(),
+        };
+        assert!(
+            rejected,
+            "LeafOp.falconSigVerify must reject a witness carrying no signature"
+        );
+    }
+
+    /// `LevelOp.gatedMessageEquality i` (FalconAggProgram.lean:809-813): with the right child
+    /// PRESENT, its message must equal the left child's, limb by limb.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_level1_mutation_gated_message_equality() {
+        let t0 = std::time::Instant::now();
+        let msg_l = digest(0x62);
+        let msg_r = digest(0x63);
+        let keys_l = FalconKeys::from_seed([41u8; 32]);
+        let keys_r = FalconKeys::from_seed([42u8; 32]);
+        let wl = FalconSigGadgetWitness::for_signature(
+            &keys_l.pk_coefficients(),
+            msg_l,
+            &keys_l.sign(msg_l),
+        );
+        let wr = FalconSigGadgetWitness::for_signature(
+            &keys_r.pk_coefficients(),
+            msg_r,
+            &keys_r.sign(msg_r),
+        );
+        let left = AGG.leaf.prove(&wl).expect("left leaf proves");
+        let right = AGG.leaf.prove(&wr).expect("right leaf proves");
+        let level1 = &AGG.levels[0];
+        let result = catch_unwind(AssertUnwindSafe(|| level1.prove(&left, Some(&right))));
+        let rejected = match result {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(proof)) => level1.data.verify(proof).is_err(),
+        };
+        assert!(
+            rejected,
+            "LevelOp.gatedMessageEquality must reject two children over different messages"
+        );
+        println!(
+            "[faithfulness] gatedMessageEquality mutation: {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// `LevelOp.gatedCountR` / `signerCountAdd` / `registerGatedRightPk`
+    /// (FalconAggProgram.lean:815-822, 837-840) at `flag = 0`: an ABSENT right child
+    /// contributes 0 to the count and exposes identically-zero right slots.
+    #[cfg_attr(debug_assertions, ignore = "run with --release")]
+    #[test]
+    fn faithfulness_falcon_agg_level1_mutation_signer_count() {
+        let msg = digest(0x64);
+        let keys = FalconKeys::from_seed([43u8; 32]);
+        let w = FalconSigGadgetWitness::for_signature(
+            &keys.pk_coefficients(),
+            msg,
+            &keys.sign(msg),
+        );
+        let leaf_proof = AGG.leaf.prove(&w).expect("leaf proves");
+        let level1 = &AGG.levels[0];
+        let proof = level1.prove(&leaf_proof, None).expect("absent right proves");
+        level1.data.verify(proof.clone()).expect("absent right verifies");
+        assert_eq!(
+            proof.public_inputs[FALCON_AGG_COUNT_OFFSET].to_canonical_u64(),
+            1,
+            "signer_count = count_l + 0 * count_r with the right child absent"
+        );
+        let right_half = &proof.public_inputs
+            [FALCON_AGG_PK_LIST_OFFSET + BYTES32_LEN..FALCON_AGG_PK_LIST_OFFSET + 2 * BYTES32_LEN];
+        assert!(
+            right_half.iter().all(|l| l.to_canonical_u64() == 0),
+            "registerGatedRightPk exposes identically zero limbs when the flag is 0"
+        );
     }
 }

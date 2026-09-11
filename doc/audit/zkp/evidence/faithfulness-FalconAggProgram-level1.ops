@@ -1,0 +1,23 @@
+# ops of the Lean model of FalconAggProgram-level1 covered by the static faithfulness check
+# op	kind	verdict
+addConstGate	no-gate	trivial
+addVirtualBoolSafe	arith	not-injectable
+assertZeroGap	arith	not-injectable
+assertZeroGap	connect	ok
+build	no-gate	trivial
+conditionallyVerifyRightChild	gadget	mutation
+conditionallyVerifyRightChild	public-inputs	ok
+gatedCountR	arith	not-static
+gatedGap	arith	not-static
+gatedMessageEquality[0..8)	arith	mutation
+gatedMessageEquality[0..8)	width	ok
+halfFullConstant	constant	ok
+leftFullnessGap	arith	not-static
+registerGatedRightPk[0..8)	public-inputs	ok
+registerLeftPks	public-inputs	ok
+registerMessage8	public-inputs	ok
+registerSignerCount	public-inputs	ok
+requireLevelWidth	public-inputs	ok
+signerCountAdd	arith	mutation
+verifyLeftChild	gadget	not-static
+verifyLeftChild	public-inputs	ok

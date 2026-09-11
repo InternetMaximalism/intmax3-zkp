@@ -664,15 +664,15 @@
     },
     {
       "path": "src/circuits/channel/close_asset_backing_circuit.rs",
-      "sha256": "bd4bb49f55c03e3f7c4b716d335febd031f6c3f07af0ae3c6d82b82a55eb5333",
-      "lines": 914,
+      "sha256": "1f59ca8d5ef2073326909c2c9dc447e80f30968546ea4afd987da74eb7ee7317",
+      "lines": 1196,
       "category": "core",
       "line_map": "doc/audit/zkp/line-map/close-asset-backing.json"
     },
     {
       "path": "src/circuits/channel/close_circuit.rs",
-      "sha256": "6239cb91549a771f6f68bcffa8b151e63a6eda0a6fee1da7fac8325fc98625b7",
-      "lines": 2402,
+      "sha256": "5ebefd113d408591ad2790373ddeee9d4969f447012a2cda4e059771afa74724",
+      "lines": 2868,
       "category": "core",
       "line_map": "doc/audit/zkp/line-map/close-circuit.json"
     },
@@ -713,8 +713,8 @@
     },
     {
       "path": "src/circuits/channel/post_close_claim_circuit.rs",
-      "sha256": "7769470666cea7af0167fe5d9a7aab4b214351a18372e5f9e1a19951b3ea564a",
-      "lines": 1221,
+      "sha256": "12c48948536a9ca6b81052d0aef5a3a3cb4a22d2aeae70f6103b6f7056353faa",
+      "lines": 1557,
       "category": "core",
       "line_map": "doc/audit/zkp/line-map/post-close-claim-circuit.json"
     },
@@ -734,8 +734,8 @@
     },
     {
       "path": "src/circuits/channel/withdrawal_claim_circuit.rs",
-      "sha256": "38bd9f4b972cdad94f465bdaff38d4dd29fe51cce8a3d1a0c90c3f3be347e39c",
-      "lines": 1427,
+      "sha256": "c65ee9d3547f3a57597fb732d21e4e28dfa35c4f72eedc2d210ac3e8c2c50751",
+      "lines": 1753,
       "category": "core",
       "line_map": "doc/audit/zkp/line-map/withdrawal-claim-circuit.json"
     },
@@ -1259,8 +1259,8 @@
     },
     {
       "path": "src/falcon_sig/agg.rs",
-      "sha256": "6b4c129594043f002171e74e5606fee70bc1cff081dd1a3ac39001bae8ca349e",
-      "lines": 1201,
+      "sha256": "dbcd34e136c8e8127e7732099f4fd8ed83d3c673524869926a0e02eb0a071f15",
+      "lines": 1562,
       "category": "dependency",
       "line_map": "doc/audit/zkp/line-map/falcon-agg.json"
     },
@@ -1287,8 +1287,8 @@
     },
     {
       "path": "src/falcon_sig/gadget.rs",
-      "sha256": "e5255171822d22f71c97521654cff678736fe70236a30e241d7b5fa75d9884ce",
-      "lines": 1766,
+      "sha256": "e380bf8c579ecd9caa65bd8ab375be6ba829dd312addcd3c5d13a11ff1011620",
+      "lines": 2053,
       "category": "dependency",
       "line_map": "doc/audit/zkp/line-map/falcon-gadget.json"
     },

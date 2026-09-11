@@ -1,0 +1,31 @@
+# ops of the Lean model of FalconGadgetProgram covered by the static faithfulness check
+# op	kind	verdict
+allocMessageDigest	range	ok
+allocPkG	range	ok
+betaConstant	constant	ok
+buildTarget	no-gate	trivial
+canonicalCoeffs	arith	mutation
+canonicalCoeffs	range	ok
+centeredSquaresS1	arith	mutation
+centeredSquaresS2	arith	mutation
+connectPkG	connect	ok
+harnessRegisterPublicInputs	public-inputs	ok
+hashToPoint	gadget	mutation
+hashToPoint	range	ok
+normSum	arith	not-static
+nttFwdH	arith	not-static
+nttFwdH	width	ok
+nttFwdS2	arith	not-static
+nttFwdS2	width	ok
+nttInv	width	ok
+pkDigest	gadget	not-static
+pointwiseMul	width	ok
+s1Reduce	arith	mutation
+s1Reduce	width	ok
+selectVerify	connect	ok
+slackRange	range	ok
+slackSub	arith	not-static
+twiddleTables	no-gate	trivial
+witnessH	width	ok
+witnessS2	width	ok
+witnessSalt	width	ok

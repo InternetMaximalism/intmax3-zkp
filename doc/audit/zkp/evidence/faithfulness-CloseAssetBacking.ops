@@ -1,0 +1,43 @@
+# ops of the Lean model of CloseAssetBacking covered by the static faithfulness check
+# op	kind	verdict
+addActivityToSum [0..10)	arith	not-static
+allocateCheckedU256 [0..10)	range	ok
+allocateCount / rangeCount32	range	ok
+allocateExtendedChecked	range	ok
+allocatePath [0..10)	width	ok
+allocatePrivateUnchecked	range	ok
+allocateProofAndVerifyPinnedCyclic	gadget	not-static
+allocateRegistry / rangeRegistry32 [0..10)	range	ok
+allocateSafeBoolean [0..10)	arith	not-static
+andEqualWithLaterActive [45 pairs]	arith	not-static
+assembleComputedPublicInputs	aliasing	ok
+assertBalancePiShape	public-inputs	ok
+assertFirstActive	constant	ok
+buildCircuit	no-gate	trivial
+computeExtendedPoseidonBytes	gadget	not-static
+computeInsertedRoot [0..10)	gadget	not-static
+computeKeccakTokenFunds	gadget	not-static
+computePrivatePoseidon	gadget	not-static
+conditionalVerifyZeroPath [0..10)	gadget	not-static
+connectDuplicateZero [45 pairs]	arith	not-static
+connectFinalAssetRoot	connect	ok
+connectInactiveAmountZero [0..10)x[0..8)	arith	not-static
+connectInactiveRegistryZero [0..10)	arith	not-static
+connectInnerPublicState	connect	ok
+connectNoRiseZero [0..9)	arith	not-static
+connectPrivateCommitment	connect	ok
+connectSumToCount	connect	ok
+constantEmptyRoot	constant	ok
+constantTokenFundsDomain / flattenAmountLimbs / concatenateDigestPreimage	preimage	ok
+constantZero / constantOne	constant	ok
+constantZeroLeaf	constant	ok
+decodeBalanceTargetPis	aliasing	ok
+equalRegistry [45 pairs]	arith	not-static
+multiplyInactiveAmount [0..10)x[0..8)	arith	not-static
+multiplyInactiveRegistry [0..10)	arith	not-static
+multiplyNextActivity [0..9)	arith	not-static
+notActivity [0..10)	arith	not-static
+registerPublicInputs 26	public-inputs	ok
+selectUpdatedRoot [0..10)	gadget	not-static
+startStandardRecursionZk	config	ok
+subtractActivityFromOne [0..9)	arith	not-static

@@ -1,7 +1,8 @@
 # A practical safety proof of the INTMAX3 settlement implementation, and the assumptions it rests on
 
 Status: **work in progress, not a release approval.** Revision of this document: 2026-09-11,
-against commit `24ebd7e2` on branch `codex/implementation-linewise-lean-20260906`.
+as of the commit that lands the fourth audit loop on branch
+`codex/implementation-linewise-lean-20260906` (see `git log`).
 Runtime baseline `05ec7ae94701f05d2aaf97ff796b7f800a6ce1f8`; MLE/WHIR submodule pinned at
 `6cefc6acee18d0d76b52f1c22c0113e3ae8fbf78`.
 
@@ -27,15 +28,29 @@ close or claim verification pins the *exact* public-input record the pinned veri
 (`close_acceptance_binds_statement`, `claim_acceptance_binds_statement`); only the "and some
 witness satisfies the circuit's gates" conjunct uses assumptions.
 
-Everything else the system needs is carried as **eighteen named, unproved fields** of one Lean
+One arithmetic property of the deployed circuits is also proved outright, with no environment and
+no premise: the in-circuit NTT of the Falcon signature gadget computes the negacyclic product of
+`Z_q[X]/(X^512+1)` (`NttCorrectness.ntt_computes_negacyclic_product`). It used to be an assumption;
+it is now a theorem, which is why the gate set the audit reads may be called *Falcon's* equation
+rather than some other bilinear map (§2.5).
+
+Everything else the system needs is carried as **twenty-three named, unproved fields** of one Lean
 structure, `Zkp.Implementation.TrustBoundary`. Each is a `Prop` — not an axiom — so every theorem
 names precisely which obligations it borrows and which it does not. The ledger is deliberately
-uncomfortable reading: it contains one accepted artifact (the pinned MLE/WHIR proof system), four
-instances of plonky2's recursive verifier, two computational assumptions (Falcon/NTRU
-unforgeability and one Keccak-256 same-length collision), a set of EVM- and source-refinement
-premises, and one genuine design gap — that a finalized close vector is backed by the channel's
-own entitlement. That last gap is stated as a theorem, `close_vector_backing_is_exactly_premise_c`,
-so it cannot be lost. A kernel-checked counterexample,
+uncomfortable reading: it contains one accepted artifact (the pinned MLE/WHIR proof system, at two
+deployed adapters), four instances of plonky2's recursive verifier, three computational assumptions
+(Falcon/NTRU unforgeability and two Keccak-256 same-length collisions), a set of EVM- and
+source-refinement premises, and one genuine design gap — **the L2 ledger invariant (c4)
+`finalizedBalanceIsBacked`**: that the balances the Balance circuit certifies at finalized Rollup
+roots are backed by escrow.
+
+What surrounds that gap is now proved rather than assumed. The event that moves money is
+`CloseFundingMaterializer.materializeSignedHead`, and
+`materialized_credits_are_finalized_l2_balances_of_boundary` derives, from an accepted
+materialization, that every credited amount is an active row of a witness satisfying the
+close-asset-backing circuit's gate predicate at a head-finalized extended-state root — hence within
+that channel's L2 entitlement. `close_vector_backing_gap_is_now_l2_ledger` names exactly what is
+left, so the residue cannot be lost. A kernel-checked counterexample,
 `mle_assumption_does_not_imply_fund_safety`, exhibits an environment in which the accepted
 proof-system assumption holds and fund safety fails anyway; accepting an artifact is recorded here
 as a scoping decision, never as evidence.
@@ -56,12 +71,27 @@ latch が保持されること（`trace_channel_attribution`）、消費済み n
 （`trace_paid_bounded`）。さらに close / claim の受理が返り値の公開入力記録を厳密に固定する点は
 無条件である（`close_acceptance_binds_statement`、`claim_acceptance_binds_statement`）。
 
-残りは Lean structure `Zkp.Implementation.TrustBoundary` の **18 個の名前付き未証明 field** として
+回路側の算術的性質も 1 件、環境も前提もなしに証明された。Falcon 署名 gadget の in-circuit NTT が
+`Z_q[X]/(X^512+1)` の negacyclic product を計算すること
+（`NttCorrectness.ntt_computes_negacyclic_product`）である。これは以前は仮定 (d2') であったが、
+いまや定理であり、監査対象の gate 集合を「Falcon の署名方程式そのもの」と読んでよい根拠となる
+（§2.5）。
+
+残りは Lean structure `Zkp.Implementation.TrustBoundary` の **23 個の名前付き未証明 field** として
 明示的に保持される。いずれも公理ではなく `Prop` であるため、どの定理がどの前提を借りているかが
-機械的に判別できる。内訳は、受容済み成果物 1 件（pinned MLE/WHIR 証明系）、plonky2 再帰検証器の
-4 インスタンス、計算量仮定 2 件（Falcon/NTRU 偽造困難性と Keccak-256 の同一長衝突）、EVM・source
-refinement 系の環境仮定、そして唯一の設計上の隙間 (c)（close vector の裏付け）である。(c) は
-`close_vector_backing_is_exactly_premise_c` として定理の形で固定されており、失われない。
+機械的に判別できる。内訳は、受容済み成果物 1 件（pinned MLE/WHIR 証明系。配備アダプタ 2 箇所で
+参照される）、plonky2 再帰検証器の 4 インスタンス、計算量仮定 3 件（Falcon/NTRU 偽造困難性と
+Keccak-256 の同一長衝突 2 件）、EVM・source refinement 系の環境仮定、そして唯一の設計上の隙間
+**(c4) `finalizedBalanceIsBacked`（L2 台帳不変量：Balance 回路が finalized root で証明する残高が
+escrow に裏付けられていること）** である。
+
+この隙間の周囲は、いまや仮定ではなく証明である。資金が動く事象は
+`CloseFundingMaterializer.materializeSignedHead` であり、
+`materialized_credits_are_finalized_l2_balances_of_boundary` は、受理された materialization から
+「支払われた各金額は、head が finalized と認める extended-state root において
+close-asset-backing 回路の gate 述語を満たす witness の active row であり、したがって当該
+チャネルの L2 entitlement 以下である」ことを導く。残余は
+`close_vector_backing_gap_is_now_l2_ledger` が明示的に名指しするため失われない。
 `mle_assumption_does_not_imply_fund_safety` は、受容済み仮定が成立しながら資金安全性が破れる環境を
 kernel 検証済みの反例として与える。**成果物の受容は監査の完了ではない。**
 
@@ -144,10 +174,14 @@ that every amount the materializer credits is exactly the Manager's own token-ve
 value, that the vector has no duplicate token, and that the channel is latched afterwards.
 
 *What it does not say:* that the cap itself is legitimate. The cap is the finalized close vector;
-nothing in `RollupValue`, `ManagerValue` or `CloseFunding` relates it to what that channel
-deposited, because escrow is pooled. That is exactly premise (c), and
-`SystemSafety.close_vector_backing_is_exactly_premise_c` (`SystemSafety.lean:781`) states the
-missing implication in full.
+nothing in `RollupValue`, `ManagerValue` or `CloseFunding` alone relates it to the channel's own
+entitlement, because escrow is pooled. That legitimacy is supplied, at the step that actually moves
+money, by `SystemSafety.materialized_credits_are_backed_by_l2_entitlement`
+(`SystemSafety.lean:802`): given a `TrustBoundary` instance, every amount an accepted
+`materializeSignedHead` credits is an active row of a witness satisfying
+`CloseAssetBacking.CircuitConstraints` at an extended-state root the canonical head finalizes, and
+is therefore within that channel's L2 entitlement at that root. The residue is premise (c4) alone
+(§3.5) — **not** an opaque deposit map, and **not** attached to close-intent acceptance.
 
 **(3) Nullifier single use** — `SystemSafety.trace_nullifier_single_use`
 (`SystemSafety.lean:802`).
@@ -188,20 +222,75 @@ the 50-word withdrawal-claim endpoint, under (a0) + (b1).
 
 ### 2.4 The non-implication results
 
-`SystemSafety.mle_assumption_does_not_imply_fund_safety` (`SystemSafety.lean:1292`) constructs an
-environment (`unbackedModels`, `SystemSafety.lean:1256`) in which the pinned adapter accepts every
-proof, every accepted word vector is declared to be a satisfiable plonky2 statement, and the
-channel deposited nothing. In that environment premise (a0) holds
-(`unbacked_environment_satisfies_the_mle_premise`), the close endpoint genuinely accepts
-(`unbacked_close_is_accepted`), and **no `TrustBoundary` instance exists at all**, because the
-channel is credited one raw unit it never deposited and (c) is refuted on a real acceptance.
+`SystemSafety.mle_assumption_does_not_imply_fund_safety` (`SystemSafety.lean:1349`) constructs an
+environment (`unbackedBackingModels`, `SystemSafety.lean:1307`, built on `unbackedModels`, `:1292`)
+in which the pinned adapter accepts every proof and every accepted word vector is declared to be a
+satisfiable plonky2 statement. It then specialises the backing side concretely: the backing
+circuit's opaque dependencies are `CloseAssetBacking.exampleEnvironment` — for which that module
+exhibits a satisfying assignment of its whole 468-op builder program — the canonical head finalizes
+every root, and the L2 ledger entitles the channel to **nothing**.
+
+In that environment premise (a0) holds, the close endpoint genuinely accepts
+(`unbacked_close_is_accepted`, `:1317`), and **no `TrustBoundary` instance exists at all** — because
+the satisfying witness carries an active row of amount 22 at a finalized root while the entitlement
+is 0, so (c4) `finalizedBalanceIsBacked` is refuted on a genuine satisfying witness. The refuted
+field changed this loop (it used to be the old (c) `closeVectorBacked`, refuted by a credit of a
+token the channel never deposited); the message did not.
 
 `SystemSafety.mle_assumption_alone_does_not_yield_close_gate_soundness`
-(`SystemSafety.lean:1322`) is the logical-independence witness for the lowering premise (a): with
+(`SystemSafety.lean:1386`) is the logical-independence witness for the lowering premise (a): with
 `BalanceProof = Empty` no gate witness can exist, while (a0) still holds.
 
 These are kernel-checked facts, not comments. They are the reason the accepted artifact in §3.2.1
 is written as a premise rather than as a result.
+
+### 2.5 The NTT correctness theorem
+
+`Zkp.Implementation.NttCorrectness.ntt_computes_negacyclic_product` (`NttCorrectness.lean:1624`)
+proves `FalconGadgetProgram.NttComputesNegacyclicProduct`: the concrete transcribed composition
+"forward-transform both operands, multiply pointwise, inverse-transform" —
+`FalconGadgetProgram.circuitProduct`, which is what `gadget.rs:684-687` performs with the twiddle
+tables, the butterflies and the mod-`q` reductions transcribed — **equals** the schoolbook
+negacyclic product of `Z_q[X]/(X^512+1)` (`FalconGadgetProgram.negacyclicProduct`, transcribed from
+the Rust test oracle `schoolbook_negacyclic`, `gadget.rs:999-1022`), for q = 12289 and ψ = 49.
+
+This was field (d2') of the premise structure in the previous revision. **It is no longer a field.**
+`TrustBoundary.ntt_computes_negacyclic_product_of_boundary` (`TrustBoundary.lean:2507`) re-exports
+it verbatim, and its signature is the point: no `Models`, no `TrustBoundary`, no hypothesis. The
+statement never mentioned an environment, which is exactly why it could be proved rather than
+borrowed.
+
+**The proof route** (module header, `NttCorrectness.lean:1-42`; 157 named theorems, no Mathlib):
+congruence mod q as a decidable equality of remainders with an `omega`-friendly form; the
+square-and-multiply `powModQ b e = b^e % q` and the 9-bit reversal `bitReverse9` in closed form; the
+exact pointwise action of one Cooley-Tukey stage (and of one Gentleman-Sande stage) recovered from
+the `foldl` encoding of the source's two nested `for` loops; a stage invariant saying that after the
+stage leaving `2^s` blocks of width `2^h`, block `i` holds the input polynomial's residue modulo
+`X^(2^h) − ψ^(blockExp h s i)`, which unwound at `s = 9` gives `ntt_forward_eval` — output index `j`
+carries the evaluation at `ψ^(2·bitReverse9 j + 1)`, the negacyclic evaluation points; that
+evaluation at those points is a ring homomorphism out of `Z_q[X]/(X^512+1)`, hence the pointwise
+product is the forward transform of the negacyclic product; and finally that the Gentleman-Sande
+loop inverts the Cooley-Tukey loop butterfly by butterfly, each matched stage pair scaling by 2, so
+that the nine stages contribute exactly the `512` the final `n⁻¹` scaling of `gadget.rs:500-508`
+cancels.
+
+**Two scoping notes, both of which matter.** Only `FalconGadgetProgram.psi_inverse_pinned` and
+`n_inv_pinned` are used: **primality of q is never assumed and no inverse table is supplied.**
+Nothing is `decide`d on a 512-element object — `rangeList` is kept irreducible and every `decide` is
+a closed comparison of small numerals.
+
+**What it buys, precisely.** *Not* the signer-evidence chain:
+`TrustBoundary.signature_validity_of_boundary` does not consume it, because (d1') lowers into and
+(d3) is stated for the *same* concrete `circuitProduct`. It buys the reading of
+`FalconCore.CircuitSatisfied` as *Falcon's own* `verify` — the gate set checks
+`s1 = c − s2·h mod (q, X^512+1)` rather than an equation about some other bilinear map. The audit's
+signature conclusion therefore now reads "that gate set is Falcon" instead of "the transcribed gate
+set is satisfied and its solutions are unforgeable".
+
+**What it is still a statement about.** The handwritten model in `FalconGadgetProgram`, not the Rust
+source, not plonky2's gate lowering, and not the vendored Falcon math. That each transcribed builder
+call means what the model says is obligation (i) of §3.1; that the transcription reads the source
+correctly is (h).
 
 ---
 

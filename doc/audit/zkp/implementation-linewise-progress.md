@@ -147,6 +147,60 @@ Merkle 前提の有限 trace への限定を改善しました。これは形式
 
 ## 再検証
 
+### 2026-09-11（第 4 ループ）：close vector の裏付け (c)、NTT 正当性 (d2')、機械的な忠実性証拠、公開文書
+
+運用者指示：「多少緩くてもいいので、安全性の実用的証明として外部に公開できるように、自律的に判断して
+間を埋める」（(a0)(d3) は対象外）。計画は `tasks/loop-2026-09-11-backing-and-evidence-plan.md`。
+
+**(c) の再定式化。** 旧 `closeVectorBacked` は「close intent 受理時の金額 ≤ 不透明な per-channel 預入 map」
+でした。これは (i) 何も credit しない事象に付いており（credit は materialization で起きる）、
+(ii) L2 transfer がある系では正しい不変量ではありません。配備契約が escrow から credit する前に要求
+するのは **backing proof**（`CloseAssetBacking`：Balance proof を再帰検証し、private commitment を開き、
+extended state の commitment が L1 で finalized な root であることを要求し、token vector から asset tree
+を再構成）です。そこで (c) を 7 つに分解しました：
+(c0) Materializer の staticcall view = Manager storage snapshot（(f1) 同種の cross-contract 前提；
+`SystemSafety.Step.materialize` の `fe` が Manager state に結ばれていなかった事実を B2 の調査で確認）、
+(c0b) Manager の `tokenFundsDigest` = 参照 Keccak（Sol :1685-1686）、(c1) backing verifier の健全性
+（(a0) と同一 artifact だが Materializer の adapter で）、(c2) `CloseAssetBacking` の命令単位 lowering、
+(c3a)(c3b) hash 参照一致と同長 pair の衝突耐性、**(c4) `finalizedBalanceIsBacked` — 残余**：
+`CircuitConstraints` を満たす witness の active row の金額が、head が finalize した root における
+`l2Entitlement root channel token`（validity chain が account する L2 の権利、パラメータ）以下。
+導出定理 `materialized_credits_are_finalized_l2_balances_of_boundary`：受理された materialization の
+各 credit は、head-finalized root における backing witness の active row の金額に等しく、L2 entitlement
+以下。`SystemSafety.mle_assumption_does_not_imply_fund_safety` は (c4) を具体 witness（active row 22、
+entitlement 0）で反証する形に付け替え。放電に必要なのは BalanceCircuit → SwitchBoard → ValidityChain →
+DepositChain/WithdrawalChain の合成で、これが次の project です。
+
+**B1：`CloseAssetBacking` の命令単位化（30 → 110 定理）。** 既存の `constructorProgram`（468 entry、
+45 constructor）に `holds` を与え、`program_satisfied_implies_constraints` を副仮定なしで証明
+（`True` は 25 entry：allocation、config、build）。`CircuitConstraints` は byte 一致。
+**B2：`BackingBridge`（新 module、52 定理）。** `materializeSignedHead` 受理からの receipt
+（30 conjunct：verifyCompact の語、`validateBackingPublicInputs`、root の finality、attestation、
+view getter との一致、26 語の decode）、`limbsToBytes32 = Words8.value`、token vector の byte 単射性
+（`word_bytes_token_vector_binding`）、credit が registry vector そのものであること。
+
+**N：NTT 正当性の証明（新 module `NttCorrectness`、157 定理）。**
+`ntt_computes_negacyclic_product : FalconGadgetProgram.NttComputesNegacyclicProduct` を無条件に証明。
+forward は stage 不変量で「ψ^(2·bitrev(j)+1) での評価」、pointwise は環準同型、inverse は GS が CT を
+butterfly 単位で反転する（各段で ×2、9 段で 512 を `n⁻¹` が打ち消す）。逆元表も q の素数性も不要。
+これで field (d2') は削除され定理になりました。
+
+**M：機械的な忠実性証拠（Rust、test-only）。** `src/faithfulness.rs` が build 済み `CircuitData` の
+`representative_map`・定数 wire・`range_check` 幅・public input 順序を読み、Lean の `holds` の
+構造的主張（connect / 定数 / 登録順 / range 幅）を照合。7 program・275 行、177 行 ok、8 行は
+mutation（証明失敗を確認）、`not-static`（算術・gadget 意味論）は前提に残る。**不一致ゼロ。**
+probe は `#[cfg(test)]` の挿入のみ（削除ゼロ；`shift-linemap.py` は insert-only でなければ失敗する）。
+6 本の line map を renumber し挿入部を `test-only` span に（Lean docstring の行引用は挿入前の番号のまま、
+`evidence/README.md` に対応表）。実行：18 test / 209 s / peak 26.6 GB。
+
+**P：公開文書 `PRACTICAL-SAFETY-PROOF.md`。** 英語本文＋日本語要旨。主定理、23 field の前提台帳
+（各前提の証拠・反証条件・確認方法）、合成定理、再現手順、既知の隙間。
+
+`TrustBoundary` は 18 → **23 field**（(c)→7 個、(d2') 削除）。検証：main guard PASS（132 modules /
+現行 79 / 497 hashes）、line guard PASS（169 maps；test-only 25,892 行に増加）、回帰 suite・
+ledger-writers・fixture parity green、`--require-complete` は exit 1。現行 named theorems **5,311**
+（implementation 74 module・5,092）。runtime の非 test 経路は無変更。
+
 ### 2026-09-11（第 3 ループ）：集約スタックの命令単位化と replay ledger の書込元 inventory
 
 計画は `tasks/loop-2026-09-11-aggregate-program-plan.md`。前ループで構造中に唯一残った回路丸ごとの前提
